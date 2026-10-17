@@ -43,23 +43,30 @@ async function loadResource(tx: Transaction, tenantId: string, resourceId: strin
     bufferBeforeMinutes: row.buffer_before_minutes, bufferAfterMinutes: row.buffer_after_minutes,
     minimumNoticeMinutes: row.minimum_notice_minutes, bookingHorizonMinutes: row.booking_horizon_minutes,
   });
-  // Stored configuration is checked by SQL constraints; a failure here is corrupt state.
-  if (!parsed.success) throw new Error(`Stored booking resource ${resourceId} is invalid: ${parsed.error.message}`);
+  // SQL constraints check stored configuration; a failure here is corrupt state, reported as a typed error.
+  if (!parsed.success) throw new ValidationFailed(`Stored booking resource ${resourceId} is invalid: ${parsed.error.message}`);
   return parsed.data;
 }
 
-/** Busy spans intersecting [from,to); bounds widen to whole milliseconds (B-13/B-15). */
+/**
+ * Busy spans intersecting [from,to) (B-13/B-15). Intersection uses the same half-open semantics as
+ * bookings_resource_occupied_excl, in SQL at full timestamptz precision, and every span is clipped to the
+ * whole-millisecond window first. Rounding a sub-millisecond bound to milliseconds therefore stays inside
+ * a window the row really overlaps, so an exact touch never becomes an overlap and an overlap never vanishes.
+ */
 async function loadBusy(tx: Transaction, tenantId: string, resourceId: string, from: number, to: number): Promise<Span[]> {
   const rows = (await tx.query<{ start_ms: string; end_ms: string }>(
-    `SELECT floor(extract(epoch FROM occupied_starts_at) * 1000)::bigint AS start_ms,
-            ceil(extract(epoch FROM occupied_ends_at) * 1000)::bigint AS end_ms
+    `SELECT floor(extract(epoch FROM greatest(occupied_starts_at, $3::timestamptz)) * 1000)::bigint AS start_ms,
+            ceil(extract(epoch FROM least(occupied_ends_at, $4::timestamptz)) * 1000)::bigint AS end_ms
        FROM bookings
       WHERE tenant_id=$1 AND resource_id=$2
         AND tstzrange(occupied_starts_at, occupied_ends_at, '[)') && tstzrange($3::timestamptz, $4::timestamptz, '[)')
      UNION ALL
-     SELECT floor(extract(epoch FROM starts_at) * 1000)::bigint, ceil(extract(epoch FROM ends_at) * 1000)::bigint
+     SELECT floor(extract(epoch FROM greatest(starts_at, $3::timestamptz)) * 1000)::bigint,
+            ceil(extract(epoch FROM least(ends_at, $4::timestamptz)) * 1000)::bigint
        FROM booking_external_blocks
-      WHERE tenant_id=$1 AND resource_id=$2 AND starts_at < $4::timestamptz AND ends_at > $3::timestamptz`,
+      WHERE tenant_id=$1 AND resource_id=$2
+        AND tstzrange(starts_at, ends_at, '[)') && tstzrange($3::timestamptz, $4::timestamptz, '[)')`,
     [tenantId, resourceId, new Date(from).toISOString(), new Date(to).toISOString()],
   )).rows;
   return rows.map((row) => ({ start: Number(row.start_ms), end: Number(row.end_ms) }));

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createBookingCommandSchema,
+  ValidationFailed,
   type ActionBinding,
   type BookingResource,
   type CreateBookingCommand,
@@ -279,6 +280,52 @@ describe("booking.create through the shared dispatcher (B-17..B-23)", () => {
       writer.release();
     }
     expect(await counts(fixture, a.tenantId)).toEqual({ bookings: 0, actions: 0, outbox: 0 });
+  });
+
+  it("reports a stored resource that fails schema parsing as a typed ValidationFailed", async () => {
+    // Passes the SQL shape check (a slash in the zone) but is not an IANA zone.
+    const { fixture, a } = await world({ timeZone: "Not/AZone" });
+    const error = await rejection(book(command(a.tenantId, a.id, "2026-10-19T10:00:00.000Z")));
+    expect(error).toBeInstanceOf(ValidationFailed);
+    expect(error).toMatchObject({ code: "ValidationFailed" });
+    expect(await counts(fixture, a.tenantId)).toEqual({ bookings: 0, actions: 0, outbox: 0 });
+  });
+
+  describe("sub-millisecond busy rows (B-13/B-15, half-open [start,end))", () => {
+    // Candidate 10:00-10:30 with 15 minute buffers occupies exactly [09:45:00.000, 10:45:00.000).
+    const START = "2026-10-19T10:00:00.000Z";
+    const addBooking = (fixture: TwoTenantFixture, r: BookingResource, from: string, to: string) => fixture.service((tx) => tx.query(
+      `INSERT INTO bookings (tenant_id,id,resource_id,starts_at,ends_at,occupied_starts_at,occupied_ends_at,
+         buffer_before_minutes,buffer_after_minutes,status,created_at)
+       VALUES ($1,$2,$3,$4,$5,$4,$5,0,0,'confirmed',$6)`, [r.tenantId, randomUUID(), r.id, from, to, MONDAY_8AM]));
+
+    it.each([
+      ["booking ending exactly at the occupied start, with microsecond start", "2026-10-19T09:00:00.000123Z", "2026-10-19T09:45:00.000000Z"],
+      ["booking ending a microsecond before the occupied start", "2026-10-19T09:00:00.000123Z", "2026-10-19T09:44:59.999999Z"],
+      ["booking starting exactly at the occupied end, with microsecond end", "2026-10-19T10:45:00.000000Z", "2026-10-19T11:00:00.000789Z"],
+      ["booking starting a microsecond after the occupied end", "2026-10-19T10:45:00.000001Z", "2026-10-19T11:00:00.000789Z"],
+    ])("accepts a %s", async (_name, from, to) => {
+      const { fixture, a } = await world();
+      await addBooking(fixture, a, from, to);
+      await expect(book(command(a.tenantId, a.id, START))).resolves.toBeDefined();
+    });
+
+    it("accepts external blocks that touch with microsecond precision", async () => {
+      const { fixture, a } = await world();
+      await addExternal(fixture, a, "2026-10-19T09:00:00.000123Z", "2026-10-19T09:45:00.000000Z");
+      await addExternal(fixture, a, "2026-10-19T10:45:00.000000Z", "2026-10-19T11:00:00.000789Z");
+      await expect(book(command(a.tenantId, a.id, START))).resolves.toBeDefined();
+    });
+
+    it.each([
+      ["booking ending a microsecond after the occupied start", "2026-10-19T09:00:00.000000Z", "2026-10-19T09:45:00.000001Z"],
+      ["booking starting a microsecond before the occupied end", "2026-10-19T10:44:59.999999Z", "2026-10-19T11:00:00.000000Z"],
+    ])("still rejects a %s", async (_name, from, to) => {
+      const { fixture, a } = await world();
+      await addBooking(fixture, a, from, to);
+      expect(await rejection(book(command(a.tenantId, a.id, START))))
+        .toMatchObject({ code: "Conflict", details: { reason: "slot_unavailable" } });
+    });
   });
 
   it("rejects an invalid command without dispatching and validates the returned envelope (B-18)", async () => {
