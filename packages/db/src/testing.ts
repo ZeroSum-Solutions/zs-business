@@ -13,6 +13,8 @@ export interface TestDatabase {
   name: string;
   url: string;
   pool: Pool;
+  runtimePool: Pool;
+  servicePool: Pool;
   db: ScopedDatabase;
   close(): Promise<void>;
 }
@@ -26,16 +28,23 @@ export function testAdminUrl(
   } catch {
     throw new Error("Invalid test database URL");
   }
+  const hostname = url.hostname.toLowerCase();
+  const loopback = hostname === "localhost" || hostname === "[::1]" || (
+    /^127(?:\.(?:\d{1,3})){3}$/.test(hostname) &&
+    hostname.split(".").every((part) => Number(part) <= 255)
+  );
   if (
     !["postgres:", "postgresql:"].includes(url.protocol) ||
-    url.hostname !== "127.0.0.1" ||
-    url.port !== "55432" ||
+    !loopback ||
+    !url.port ||
+    ["5432", "54322"].includes(url.port) ||
+    Number(url.port) < 1 || Number(url.port) > 65535 ||
     url.pathname !== "/postgres" ||
     url.search ||
     url.hash
   ) {
     throw new Error(
-      "Tests require the dedicated 127.0.0.1:55432/postgres cluster without URL options",
+      "Tests require a dedicated loopback /postgres cluster on a non-production port without URL options",
     );
   }
   return url;
@@ -50,13 +59,22 @@ export async function createTestDatabase(
   const databaseUrl = new URL(base);
   databaseUrl.pathname = `/${name}`;
   const pool = new Pool({ connectionString: databaseUrl.href, max: 5 });
+  const loginUrl = (username: string) => {
+    const url = new URL(databaseUrl);
+    url.username = username;
+    // Test LOGIN roles use the dedicated cluster's trust authentication.
+    url.password = "";
+    return url.href;
+  };
+  const runtimePool = new Pool({ connectionString: loginUrl("zs_runtime"), max: 5 });
+  const servicePool = new Pool({ connectionString: loginUrl("zs_service"), max: 5 });
   let created = false;
   let closed = false;
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
     try {
-      await pool.end();
+      await Promise.all([pool.end(), runtimePool.end(), servicePool.end()]);
     } finally {
       try {
         if (created) await admin.query(`DROP DATABASE "${name}" WITH (FORCE)`);
@@ -69,11 +87,35 @@ export async function createTestDatabase(
     await admin.query(`CREATE DATABASE "${name}"`);
     created = true;
     await migrate(pool);
+    // Serialize cluster-wide login setup in the shared admin database, across runs.
+    const client = await admin.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('zs-business:test-logins',0))");
+      for (const [login, membership] of [["zs_runtime", "authenticated"], ["zs_service", "service_role"]] as const) {
+        await client.query(`DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${login}') THEN
+            CREATE ROLE ${login} LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          END IF;
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${login}' AND
+            (NOT rolcanlogin OR NOT rolinherit OR rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication))
+            OR EXISTS (SELECT 1 FROM pg_auth_members WHERE member='${login}'::regrole AND roleid <> '${membership}'::regrole) THEN
+            RAISE EXCEPTION 'Unsafe test login role ${login}';
+          END IF;
+        END $$; GRANT ${membership} TO ${login};`);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
     return {
       name,
       url: databaseUrl.href,
       pool,
-      db: createScopedDatabase(pool),
+      runtimePool,
+      servicePool,
+      db: createScopedDatabase(runtimePool),
       close,
     };
   } catch (error) {
@@ -108,7 +150,7 @@ export async function createTwoTenantFixture(
 ): Promise<TwoTenantFixture> {
   const a = randomUUID();
   const b = randomUUID();
-  await asService(database.pool, (tx) =>
+  await asService(database.servicePool, (tx) =>
     tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,$2),($3,$4)", [
       a,
       "Tenant A",
@@ -123,6 +165,6 @@ export async function createTwoTenantFixture(
   return {
     a: tenant(a),
     b: tenant(b),
-    service: (work) => asService(database.pool, work),
+    service: (work) => asService(database.servicePool, work),
   };
 }

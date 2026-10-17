@@ -47,10 +47,12 @@ export const actionResultSchema = z.strictObject({
 });
 export type ActionResult = z.infer<typeof actionResultSchema>;
 
-class ActionError<Code extends string> extends Error {
+export type ActionErrorCode = "NotImplemented" | "IdempotencyConflict" | "BindingMismatch" | "TenantDenied" | "Conflict" | "ValidationFailed";
+export class ActionError<Code extends ActionErrorCode = ActionErrorCode> extends Error {
   constructor(
     readonly code: Code,
     message: string,
+    readonly details: Readonly<Record<string, import("./json.js").JsonValue>> = {},
   ) {
     super(message);
     this.name = code;
@@ -77,8 +79,8 @@ export class TenantDenied extends ActionError<"TenantDenied"> {
   }
 }
 export class Conflict extends ActionError<"Conflict"> {
-  constructor(message = "State conflict") {
-    super("Conflict", message);
+  constructor(message = "State conflict", details: Readonly<Record<string, import("./json.js").JsonValue>> = {}) {
+    super("Conflict", message, details);
   }
 }
 export class ValidationFailed extends ActionError<"ValidationFailed"> {

@@ -33,6 +33,17 @@ async function transaction<T>(
   let discard = false;
   try {
     await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+    if (role === "authenticated") {
+      const login = await client.query<{ safe: boolean }>(
+        `SELECT rolcanlogin AND NOT (rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication)
+          AND pg_has_role(oid, 'authenticated', 'MEMBER')
+          AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid AND m.roleid <> 'authenticated'::regrole)
+          AND NOT pg_has_role(oid, 'service_role', 'MEMBER') AS safe
+         FROM pg_roles r WHERE rolname=session_user`,
+      );
+      if (!login.rows[0]?.safe)
+        throw new Error("Runtime pool requires an unprivileged LOGIN member of authenticated only");
+    }
     await client.query(
       "SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
       [`${limits.lockTimeoutMs}ms`, `${limits.statementTimeoutMs}ms`],
@@ -60,7 +71,7 @@ async function transaction<T>(
   }
 }
 
-/** Supply a server-owned pool; never expose this handle or arbitrary SQL to clients. */
+/** Use separate unprivileged LOGIN credentials, never a superuser/service pool. */
 export function createScopedDatabase(
   pool: Pool,
   options: TransactionLimits = {},

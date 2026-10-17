@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   BindingMismatch,
+  ActionError,
   Conflict,
   IdempotencyConflict,
   TenantDenied,
@@ -21,12 +22,12 @@ import { createDispatcher, type DispatchContext } from "../src/index.js";
 
 let db: TestDatabase;
 let fixture: TwoTenantFixture;
-let ctx: DispatchContext;
+let ctx: DispatchContext<{ outboxEventType: string }>;
 let command: ActionCommand;
 let approved: ActionBinding;
 let fail = false;
 const instant = new Date("2026-10-17T12:00:00Z");
-const dispatch = createDispatcher({
+const dispatch = createDispatcher<{ outboxEventType: string }>({
   "noop.touch": {
     resolveTarget: async (tx, target) => {
       const row = (
@@ -48,9 +49,8 @@ const dispatch = createDispatcher({
       ).rows[0]!;
       if (fail) throw new Error("after state write");
       return {
-        touches: row.touches,
-        at: now.toISOString(),
-        eventType: config.outboxEventType,
+        result: { touches: row.touches, at: now.toISOString(), eventType: config.outboxEventType },
+        event: { type: config.outboxEventType, payload: { touches: row.touches } },
       };
     },
   },
@@ -61,6 +61,12 @@ beforeAll(async () => {
   await db.pool.query(
     `create table test_state (tenant_id uuid not null references tenants(tenant_id), id uuid not null, touches integer not null default 0, primary key(tenant_id,id)); alter table test_state enable row level security; alter table test_state force row level security; create policy tenant_scope on test_state to authenticated using (tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid) with check (tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid); grant select,insert,update on test_state to authenticated; grant all on test_state to service_role;`,
   );
+  await db.pool.query(`CREATE EXTENSION IF NOT EXISTS btree_gist;
+    CREATE TABLE test_constraints(tenant_id uuid NOT NULL, scope_id uuid NOT NULL, slot int4range NOT NULL,
+      CONSTRAINT test_overlap EXCLUDE USING gist(tenant_id WITH =,scope_id WITH =,slot WITH &&));
+    ALTER TABLE test_constraints ENABLE ROW LEVEL SECURITY; ALTER TABLE test_constraints FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_scope ON test_constraints TO authenticated USING(tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid);
+    GRANT SELECT,INSERT ON test_constraints TO authenticated,service_role;`);
 });
 afterAll(async () => {
   await db?.close();
@@ -86,6 +92,7 @@ beforeEach(async () => {
     actor: { id: randomUUID(), tenantId: fixture.a.tenantId },
     db: db.db,
     clock: { now: () => instant },
+    generateId: randomUUID,
     config: { outboxEventType: "test.action.completed" },
     resolveApproval: async () => approved,
   };
@@ -119,6 +126,107 @@ async function counts() {
   }));
 }
 describe("shared transactional action path", () => {
+  it("consumes an approval once, including concurrent commands with different keys", async () => {
+    const outcomes = await Promise.allSettled([
+      dispatch(ctx, command),
+      dispatch(ctx, { ...command, idempotencyKey: randomUUID() }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const failure = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(failure?.status === "rejected" && failure.reason).toBeInstanceOf(Conflict);
+    if (failure?.status === "rejected") expect(failure.reason.details).toMatchObject({ constraint: "actions_tenant_approval", postgresCode: "23505" });
+    expect((await counts()).state).toBe(1);
+    await expect(dispatch(ctx, { ...command, idempotencyKey: randomUUID() })).rejects.toMatchObject({ code: "Conflict", details: { constraint: "actions_tenant_approval" } });
+    expect((await counts()).state).toBe(1);
+  });
+  it("uses handler events, generic config, and injected IDs; defaults event type to the action type", async () => {
+    const actionId = randomUUID();
+    const eventId = randomUUID();
+    const ids = [actionId, eventId];
+    const custom = createDispatcher<{ label: string; revision: number }>({
+      "noop.touch": {
+        resolveTarget: async (_tx, target) => target,
+        handle: async ({ config }) => ({ result: { label: config.label, revision: config.revision } }),
+      },
+    });
+    expect(await custom({ ...ctx, config: { label: "CRM", revision: 7 }, generateId: () => ids.shift()! }, command)).toEqual({ actionId, result: { label: "CRM", revision: 7 } });
+    const event = (await counts()).outbox[0]!;
+    expect(event).toMatchObject({ id: eventId, event_type: "noop.touch", processed_at: null });
+    expect(BigInt(event.seq)).toBeGreaterThan(0n);
+    expect(event.payload).toMatchObject({ actionId, result: { label: "CRM", revision: 7 } });
+  });
+  it.each([
+    { code: "23P01", constraint: "test_overlap" },
+    { code: "23505", constraint: "test_state_pkey" },
+  ])("maps handler SQL $code to a typed conflict with constraint details", async ({ code, constraint }) => {
+    if (code === "23P01") {
+      await fixture.service((tx) => tx.query("insert into test_constraints(tenant_id,scope_id,slot) values($1,$2,'[1,3)')", [ctx.tenantId, command.target.id]));
+    }
+    const conflicting = createDispatcher({
+      "noop.touch": {
+        resolveTarget: async (_tx, target) => target,
+        handle: async ({ tx }) => {
+          await tx.query("update test_state set touches=touches+1 where id=$1", [command.target.id]);
+          if (code === "23505") await tx.query("insert into test_state(tenant_id,id) values($1,$2)", [ctx.tenantId, command.target.id]);
+          else await tx.query("insert into test_constraints(tenant_id,scope_id,slot) values($1,$2,'[2,4)')", [ctx.tenantId, command.target.id]);
+          return { result: {} };
+        },
+      },
+    });
+    await expect(conflicting(ctx, command)).rejects.toMatchObject({ code: "Conflict", details: { constraint, postgresCode: code } });
+    expect((await counts()).state).toBe(0);
+    expect((await counts()).actions).toHaveLength(0);
+  });
+  it("lets handlers map domain errors and exports the common error base", async () => {
+    const mapped = new Conflict("Stage revision changed", { revision: 2 });
+    expect(mapped).toBeInstanceOf(ActionError);
+    const custom = createDispatcher({
+      "noop.touch": {
+        resolveTarget: async (_tx, target) => target,
+        handle: async () => { throw new Error("domain failure"); },
+        mapError: () => mapped,
+      },
+    });
+    await expect(custom(ctx, command)).rejects.toBe(mapped);
+    expect((await counts()).actions).toHaveLength(0);
+  });
+  it("also maps target resolver errors and preserves already typed errors", async () => {
+    const mapped = new Conflict("Target changed", { revision: 3 });
+    const custom = createDispatcher({
+      "noop.touch": {
+        resolveTarget: async () => { throw new Error("resolver failure"); },
+        handle: async () => ({ result: {} }),
+        mapError: () => mapped,
+      },
+    });
+    await expect(custom(ctx, command)).rejects.toBe(mapped);
+    const typed = new BindingMismatch("Handler binding changed");
+    const preserved = createDispatcher({
+      "noop.touch": {
+        resolveTarget: async (_tx, target) => target,
+        handle: async () => { throw typed; },
+        mapError: () => mapped,
+      },
+    });
+    await expect(preserved(ctx, command)).rejects.toBe(typed);
+  });
+  it("scopes approval uniqueness to its tenant", async () => {
+    await dispatch(ctx, command);
+    const id = randomUUID();
+    await fixture.service((tx) => tx.query("insert into test_state(tenant_id,id) values($1,$2)", [fixture.b.tenantId, id]));
+    const other: ActionCommand = {
+      ...command,
+      target: { ...command.target, tenantId: fixture.b.tenantId, id },
+      approvalReference: { tenantId: fixture.b.tenantId, id: command.approvalReference.id },
+    };
+    const otherBinding: ActionBinding = { ...approved, tenantId: fixture.b.tenantId, target: other.target, approvalReference: other.approvalReference };
+    const otherContext = { ...ctx, tenantId: fixture.b.tenantId, actor: { ...ctx.actor, tenantId: fixture.b.tenantId }, resolveApproval: async () => otherBinding };
+    await expect(dispatch(otherContext, other)).resolves.toMatchObject({ result: { touches: 1 } });
+  });
+  it("rolls back invalid generated IDs", async () => {
+    await expect(dispatch({ ...ctx, generateId: () => "invalid" }, command)).rejects.toBeInstanceOf(ValidationFailed);
+    expect((await counts()).state).toBe(0);
+  });
   it("binds all fields, uses injected time/config, and retries without duplicating state or outbox", async () => {
     const first = await dispatch(ctx, command);
     const second = await dispatch(ctx, structuredClone(command));
@@ -145,6 +253,7 @@ describe("shared transactional action path", () => {
       action_id: first.actionId,
       event_type: "test.action.completed",
       created_at: instant,
+      payload: { touches: 1 },
     });
   });
   it("requires an approval reference before any state mutation", async () => {
@@ -176,7 +285,7 @@ describe("shared transactional action path", () => {
       const fallbackRelease = setTimeout(() => {
         void holder.query("rollback");
       }, 100);
-      const bounded = createScopedDatabase(db.pool, {
+      const bounded = createScopedDatabase(db.runtimePool, {
         lockTimeoutMs: 20,
         statementTimeoutMs: 1000,
       });
@@ -199,7 +308,7 @@ describe("shared transactional action path", () => {
         resolveTarget: async (_tx, target) => target,
         handle: async ({ tx }) => {
           await tx.query("select pg_sleep(0.1)");
-          return {};
+          return { result: {} };
         },
       },
     });
@@ -209,7 +318,7 @@ describe("shared transactional action path", () => {
       slow(
         {
           ...ctx,
-          db: createScopedDatabase(db.pool, { statementTimeoutMs: 20 }),
+          db: createScopedDatabase(db.runtimePool, { statementTimeoutMs: 20 }),
         },
         command,
       ),
@@ -261,7 +370,7 @@ describe("shared transactional action path", () => {
     const jsonDispatch = createDispatcher({
       "noop.json": {
         resolveTarget: async (_tx, target) => target,
-        handle: async () => ({ value: -0 }),
+        handle: async () => ({ result: { value: -0 } }),
       },
     });
     command.actionType = "noop.json";
@@ -359,6 +468,19 @@ describe("shared transactional action path", () => {
     expect((await counts()).state).toBe(1);
   });
   it("rolls back state and action when the final outbox write fails", async () => {
+    await db.pool.query(`CREATE FUNCTION public.reject_test_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='reject.test' THEN RAISE EXCEPTION 'outbox write failed'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_test_event BEFORE INSERT ON outbox FOR EACH ROW EXECUTE FUNCTION public.reject_test_event();`);
+    try {
+      await expect(dispatch({ ...ctx, config: { outboxEventType: "reject.test" } }, command)).rejects.toThrow("outbox write failed");
+    } finally {
+      await db.pool.query("DROP TRIGGER reject_test_event ON outbox; DROP FUNCTION public.reject_test_event()");
+    }
+    const saved = await counts();
+    expect(saved.state).toBe(0);
+    expect(saved.actions).toHaveLength(0);
+    expect(saved.outbox).toHaveLength(0);
+  });
+  it("rolls back an invalid handler event", async () => {
     await expect(
       dispatch({ ...ctx, config: { outboxEventType: "" } }, command),
     ).rejects.toThrow();

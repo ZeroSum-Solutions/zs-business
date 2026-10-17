@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
 import {
+  ActionError,
   actionBindingSchema,
   actionCommandSchema,
   targetSchema,
@@ -20,31 +20,51 @@ import {
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
 
-export interface DispatchConfig {
-  readonly outboxEventType: string;
-}
-export interface DispatchContext {
+export type DispatchConfig = Readonly<Record<string, unknown>>;
+export interface DispatchContext<Config = DispatchConfig> {
   readonly tenantId: string;
   readonly actor: { readonly id: string; readonly tenantId: string };
   readonly db: ScopedDatabase;
   readonly clock: { now(): Date };
-  readonly config: DispatchConfig;
-  /** Trusted server resolver: load the approved binding; may lock/consume in this transaction. */
+  readonly config: Config;
+  /** Mint IDs at the server edge; core has no ambient randomness. */
+  readonly generateId: () => string;
   readonly resolveApproval: (
     tx: Transaction,
     reference: ApprovalReference,
   ) => Promise<ActionBinding | null>;
 }
-export interface ActionHandler {
-  /** Resolve ownership from authoritative state using the same tenant transaction. */
+export interface HandlerResult {
+  result: JsonValue;
+  event?: { type: string; payload: JsonValue };
+}
+export interface ActionHandler<Config = DispatchConfig> {
+  /** Verify authoritative ownership, type, and id in this same transaction. */
   resolveTarget(tx: Transaction, target: Target): Promise<Target | null>;
   handle(input: {
     tx: Transaction;
     command: ActionCommand;
     binding: ActionBinding;
     now: Date;
-    config: DispatchConfig;
-  }): Promise<JsonValue>;
+    config: Config;
+    generateId: () => string;
+  }): Promise<HandlerResult>;
+  /** Return a typed domain error, or undefined to use the shared mapping. */
+  mapError?(error: unknown): ActionError | undefined;
+}
+
+function databaseError(error: unknown): unknown {
+  if (error instanceof ActionError) return error;
+  if (typeof error !== "object" || error === null || !("code" in error)) return error;
+  const code = String(error.code);
+  if (["23P01", "23505", "55P03", "57014", "40001", "40P01"].includes(code)) {
+    const constraint = "constraint" in error && typeof error.constraint === "string" ? error.constraint : undefined;
+    return new Conflict("Database transaction conflicted", {
+      postgresCode: code,
+      ...(constraint ? { constraint } : {}),
+    });
+  }
+  return error;
 }
 
 /** JSON object order is immaterial; array order and all scalar values are significant. */
@@ -57,12 +77,12 @@ function canonical(value: JsonValue): string {
     .join(",")}}`;
 }
 
-export function createDispatcher(
-  handlers: Readonly<Record<string, ActionHandler>>,
+export function createDispatcher<Config = DispatchConfig>(
+  handlers: Readonly<Record<string, ActionHandler<Config>>>,
 ) {
   const registry = new Map(Object.entries(handlers));
   return async function dispatch(
-    ctx: DispatchContext,
+    ctx: DispatchContext<Config>,
     input: unknown,
   ): Promise<ActionResult> {
     const parsed = actionCommandSchema.safeParse(input);
@@ -90,7 +110,19 @@ export function createDispatcher(
       throw new TenantDenied();
     const handler = registry.get(binding.actionType);
     if (!handler) throw new NotImplemented();
-    const config = { ...ctx.config };
+    const config = ctx.config;
+    const generateId = () => {
+      const id = uuidSchema.safeParse(ctx.generateId());
+      if (!id.success) throw new ValidationFailed("ID generator returned an invalid UUID");
+      return id.data;
+    };
+    const runHandler = async <T>(work: () => Promise<T>): Promise<T> => {
+      try { return await work(); }
+      catch (error) {
+        if (error instanceof ActionError) throw error;
+        throw handler.mapError?.(error) ?? databaseError(error);
+      }
+    };
     return ctx.db
       .tenant(binding.tenantId, async (tx) => {
         // Lock before lookup: concurrent same-key callers see the committed winner at READ COMMITTED.
@@ -115,7 +147,7 @@ export function createDispatcher(
           return { actionId: stored.id, result: stored.result };
         }
         const target = targetSchema.safeParse(
-          await handler.resolveTarget(tx, command.target),
+          await runHandler(() => handler.resolveTarget(tx, command.target)),
         );
         if (!target.success || target.data.tenantId !== binding.tenantId)
           throw new TenantDenied();
@@ -135,55 +167,33 @@ export function createDispatcher(
         const now = new Date(ctx.clock.now().getTime());
         if (!Number.isFinite(now.getTime()))
           throw new ValidationFailed("Clock returned an invalid instant");
-        const result = jsonValueSchema.parse(
-          await handler.handle({ tx, command, binding, now, config }),
+        const handled = await runHandler(() =>
+          handler.handle({ tx, command, binding, now, config, generateId }),
         );
-        const actionId = randomUUID();
+        const parsedResult = jsonValueSchema.safeParse(handled.result);
+        if (!parsedResult.success) throw new ValidationFailed(parsedResult.error.message);
+        const result = parsedResult.data;
+        const actionId = generateId();
+        const event = handled.event ?? {
+          type: binding.actionType,
+          payload: { actionId, actionType: binding.actionType, target: binding.target, result },
+        };
+        const eventType = actionCommandSchema.shape.actionType.safeParse(event.type);
+        const eventPayload = jsonValueSchema.safeParse(event.payload);
+        if (!eventType.success || !eventPayload.success)
+          throw new ValidationFailed("Invalid outbox event");
         const inserted = await tx.query<{ result: JsonValue }>(
-          `INSERT INTO actions (tenant_id,id,actor_id,action_type,target,payload,approval_reference,idempotency_key,result,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING result`,
+          `SELECT public.record_action_and_event($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) AS result`,
           [
-            binding.tenantId,
-            actionId,
-            binding.actorId,
-            binding.actionType,
-            JSON.stringify(binding.target),
-            JSON.stringify(binding.payload),
-            JSON.stringify(binding.approvalReference),
-            key,
-            JSON.stringify(result),
-            now,
+            binding.tenantId, actionId, binding.actorId, binding.actionType,
+            JSON.stringify(binding.target), JSON.stringify(binding.payload),
+            JSON.stringify(binding.approvalReference), key, JSON.stringify(result), now,
+            generateId(), eventType.data, JSON.stringify(eventPayload.data),
           ],
         );
         const persistedResult = inserted.rows[0]!.result;
-        await tx.query(
-          `INSERT INTO outbox (tenant_id,id,action_id,event_type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-          [
-            binding.tenantId,
-            randomUUID(),
-            actionId,
-            config.outboxEventType,
-            JSON.stringify({
-              actionId,
-              actionType: binding.actionType,
-              target: binding.target,
-              result: persistedResult,
-            }),
-            now,
-          ],
-        );
         return { actionId, result: persistedResult };
       })
-      .catch((error: unknown) => {
-        if (
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          ["55P03", "57014", "40001", "40P01"].includes(String(error.code))
-        )
-          throw new Conflict(
-            "Database transaction timed out or conflicted; retry the same command",
-          );
-        throw error;
-      });
+      .catch((error: unknown) => { throw databaseError(error); });
   };
 }

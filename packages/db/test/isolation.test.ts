@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { catalogTenantTables, seedTenantTables } from "./tenant-tables.js";
 import { migrate } from "../src/index.js";
 import {
   createTestDatabase,
@@ -15,159 +15,53 @@ let fixture: TwoTenantFixture;
 beforeAll(async () => {
   harness = await createTestDatabase();
   fixture = await createTwoTenantFixture(harness);
+  // Proves discovery and fixture generation also cover an unfamiliar future table.
+  await harness.pool.query(`CREATE TABLE public.test_catalog_discovery(tenant_id uuid NOT NULL REFERENCES tenants(tenant_id), id uuid DEFAULT gen_random_uuid(), name text NOT NULL);
+    ALTER TABLE test_catalog_discovery ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE test_catalog_discovery FORCE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_scope ON test_catalog_discovery TO authenticated USING(tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid) WITH CHECK(tenant_id=nullif(current_setting('app.tenant_id',true),'')::uuid);
+    GRANT SELECT,INSERT,UPDATE,DELETE ON test_catalog_discovery TO authenticated,service_role;`);
 });
 afterAll(async () => {
   await harness?.close();
 });
 
 describe("tenant isolation under actual runtime and privileged roles", () => {
-  it("forces RLS on every tenant table and keeps the runtime unprivileged", async () => {
-    const tables = await fixture.service(
-      async (tx) =>
-        (
-          await tx.query<{
-            relname: string;
-            relrowsecurity: boolean;
-            relforcerowsecurity: boolean;
-          }>(
-            "select relname, relrowsecurity, relforcerowsecurity from pg_class where relnamespace = 'public'::regnamespace and relkind = 'r' and relname <> 'schema_migrations' order by relname",
-          )
-        ).rows,
-    );
-    expect(tables.map((t) => t.relname)).toEqual([
-      "actions",
-      "outbox",
-      "tenants",
-    ]);
-    expect(tables.every((t) => t.relrowsecurity && t.relforcerowsecurity)).toBe(
-      true,
-    );
-    const role = await fixture.a.run(
-      async (tx) =>
-        (
-          await tx.query(
-            "select current_user, rolbypassrls, rolsuper from pg_roles where rolname = current_user",
-          )
-        ).rows[0],
-    );
-    expect(role).toMatchObject({
-      current_user: "authenticated",
-      rolbypassrls: false,
-      rolsuper: false,
+  it("checks every public tenant table from the catalog, including future migrations", async () => {
+    const tables = await fixture.service(catalogTenantTables);
+    expect(tables.length).toBeGreaterThan(0);
+    await fixture.service(async (tx) => {
+      await seedTenantTables(tx, fixture.a.tenantId, tables);
+      await seedTenantTables(tx, fixture.b.tenantId, tables);
     });
-    const serviceRole = await fixture.service(
-      async (tx) =>
-        (
-          await tx.query(
-            "select current_user, rolbypassrls, rolsuper from pg_roles where rolname=current_user",
-          )
-        ).rows[0],
-    );
-    expect(serviceRole).toMatchObject({
-      current_user: "service_role",
-      rolbypassrls: true,
-      rolsuper: false,
-    });
-  });
-  it.each(["tenants", "actions", "outbox"] as const)(
-    "denies B reading or modifying A in %s while service can read A",
-    async (table) => {
-      const seed = await fixture.service(async (tx) => {
-        const actionId = randomUUID();
-        await tx.query(
-          `insert into actions (tenant_id,id,actor_id,action_type,target,payload,approval_reference,idempotency_key,result,created_at) values ($1,$2,$3,'fixture','{}','{}',null,$4,'{}','2026-10-17T00:00:00Z')`,
-          [fixture.a.tenantId, actionId, randomUUID(), randomUUID()],
-        );
-        await tx.query(
-          `insert into outbox (tenant_id,id,action_id,event_type,payload,created_at) values ($1,$2,$3,'fixture','{}','2026-10-17T00:00:00Z')`,
-          [fixture.a.tenantId, randomUUID(), actionId],
-        );
-        return actionId;
-      });
-      expect(seed).toBeTruthy();
-      expect(
-        await fixture.b.run(
-          async (tx) =>
-            (
-              await tx.query(`select * from ${table} where tenant_id=$1`, [
-                fixture.a.tenantId,
-              ])
-            ).rowCount,
-        ),
-      ).toBe(0);
-      expect(
-        await fixture.service(
-          async (tx) =>
-            (
-              await tx.query(`select * from ${table} where tenant_id=$1`, [
-                fixture.a.tenantId,
-              ])
-            ).rowCount,
-        ),
-      ).toBeGreaterThan(0);
-      // Missing table grants must not masquerade as an RLS denial.
-      if (table === "tenants") {
-        expect(
-          await fixture.b.run(
-            async (tx) =>
-              (
-                await tx.query(
-                  "update tenants set name=$1 where tenant_id=$2",
-                  ["intrusion", fixture.a.tenantId],
-                )
-              ).rowCount,
-          ),
-        ).toBe(0);
-        await expect(
-          fixture.b.run((tx) =>
-            tx.query("update tenants set tenant_id=$1 where tenant_id=$2", [
-              fixture.a.tenantId,
-              fixture.b.tenantId,
-            ]),
-          ),
-        ).rejects.toThrow();
-      } else {
-        await expect(
-          fixture.b.run((tx) =>
-            table === "actions"
-              ? tx.query(
-                  `insert into actions (tenant_id,id,actor_id,action_type,target,payload,idempotency_key,result,created_at) values ($1,$2,$3,'intrusion','{}','{}',$4,'{}','2026-10-17T00:00:00Z')`,
-                  [
-                    fixture.a.tenantId,
-                    randomUUID(),
-                    randomUUID(),
-                    randomUUID(),
-                  ],
-                )
-              : tx.query(
-                  `insert into outbox (tenant_id,id,action_id,event_type,payload,created_at) values ($1,$2,$3,'intrusion','{}','2026-10-17T00:00:00Z')`,
-                  [fixture.a.tenantId, randomUUID(), seed],
-                ),
-          ),
-        ).rejects.toMatchObject({ code: "42501" });
+    for (const table of tables) {
+      expect(table.rls, table.name).toBe(true);
+      expect(table.forced, table.name).toBe(true);
+      expect(table.policy, table.name).toBe(true);
+      expect(table.public_grants, table.name).toBe(false);
+      const name = 'public."' + table.name.replaceAll('"', '""') + '"';
+      expect(await fixture.a.run(async (tx) => (await tx.query(`select * from ${name}`)).rowCount), table.name).toBeGreaterThan(0);
+      expect(await fixture.b.run(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBe(0);
+      expect(await fixture.service(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBeGreaterThan(0);
+      // Read denial must be RLS, while write denial may be RLS or deliberately absent grants.
+      for (const query of [
+        `update ${name} set tenant_id=tenant_id where tenant_id=$1`,
+        `delete from ${name} where tenant_id=$1`,
+      ]) {
+        try {
+          const count = await fixture.b.run(async (tx) => (await tx.query(query, [fixture.a.tenantId])).rowCount);
+          expect(count, table.name).toBe(0);
+        } catch (error) { expect(error, table.name).toMatchObject({ code: "42501" }); }
       }
-    },
-  );
-  it("allows own-tenant writes through the same runtime grants used in denial tests", async () => {
-    await fixture.b.run(async (tx) => {
-      const id = randomUUID();
-      expect(
-        (
-          await tx.query("update tenants set name=$1 where tenant_id=$2", [
-            "Tenant B updated",
-            fixture.b.tenantId,
-          ])
-        ).rowCount,
-      ).toBe(1);
-      await tx.query(
-        `insert into actions (tenant_id,id,actor_id,action_type,target,payload,idempotency_key,result,created_at) values ($1,$2,$3,'allowed','{}','{}',$4,'{}','2026-10-17T00:00:00Z')`,
-        [fixture.b.tenantId, id, randomUUID(), randomUUID()],
-      );
-      await tx.query(
-        `insert into outbox (tenant_id,id,action_id,event_type,payload,created_at) values ($1,$2,$3,'allowed','{}','2026-10-17T00:00:00Z')`,
-        [fixture.b.tenantId, randomUUID(), id],
-      );
-    });
+      try {
+        const count = await fixture.b.run(async (tx) => (await tx.query(`update ${name} set tenant_id=$1 where tenant_id=$2`, [fixture.a.tenantId, fixture.b.tenantId])).rowCount);
+        expect(count, table.name).toBe(0);
+      } catch (error) { expect(error, table.name).toMatchObject({ code: "42501" }); }
+    }
+  });
+  it("distinguishes the dedicated runtime and service logins", async () => {
+    expect(await fixture.a.run(async (tx) => (await tx.query("select current_user, session_user, rolbypassrls, rolsuper from pg_roles where rolname=current_user")).rows[0])).toMatchObject({ current_user: "authenticated", session_user: "zs_runtime", rolbypassrls: false, rolsuper: false });
+    expect(await fixture.service(async (tx) => (await tx.query("select current_user, session_user, rolbypassrls, rolsuper from pg_roles where rolname=current_user")).rows[0])).toMatchObject({ current_user: "service_role", session_user: "zs_service", rolbypassrls: true, rolsuper: false });
   });
   it("does not grant runtime mutation of action history or outbox events", async () => {
     for (const table of ["actions", "outbox"]) {
@@ -196,30 +90,15 @@ describe("tenant isolation under actual runtime and privileged roles", () => {
   ])("rejects unsafe test cluster URLs before any connection: %s", (url) => {
     expect(() => testAdminUrl(url)).toThrow("dedicated");
   });
-  it("strips inherited default grants and can migrate with existing roles as a non-superuser", async () => {
+  it("strips inherited default grants during administrative migrations", async () => {
     await withTestDatabase(async (db) => {
       await db.pool.query(
-        `drop schema public cascade; create schema public authorization service_role; drop schema zs_internal cascade; grant create on database "${db.name}" to service_role; alter default privileges for role service_role in schema public grant all on tables to authenticated;`,
+        `drop schema public cascade; create schema public; drop schema zs_internal cascade; alter default privileges in schema public grant all on tables to authenticated;`,
       );
-      const client = await db.pool.connect();
-      try {
-        await client.query("set role service_role");
-        client.release();
-        await migrate(db.pool);
-        expect(
-          await db.db.tenant(
-            fixture.a.tenantId,
-            async (tx) =>
-              (
-                await tx.query(
-                  "select has_table_privilege(current_user,'actions','TRUNCATE') as truncate, has_table_privilege(current_user,'actions','UPDATE') as update",
-                )
-              ).rows[0],
-          ),
-        ).toEqual({ truncate: false, update: false });
-      } finally {
-        await db.pool.query("reset role");
-      }
+      await migrate(db.pool);
+      expect(await db.db.tenant(fixture.a.tenantId, async (tx) => (await tx.query(
+        "select has_table_privilege(current_user,'actions','TRUNCATE') as truncate, has_table_privilege(current_user,'actions','UPDATE') as update, has_table_privilege(current_user,'actions','INSERT') as insert",
+      )).rows[0])).toEqual({ truncate: false, update: false, insert: false });
     });
   });
   it("does not leak tenant context through reused connections", async () => {
@@ -233,7 +112,7 @@ describe("tenant isolation under actual runtime and privileged roles", () => {
         { tenant_id: fixture.b.tenantId },
       ]),
     );
-    const connection = await harness.pool.connect();
+    const connection = await harness.runtimePool.connect();
     try {
       await connection.query("begin");
       await connection.query("set local role authenticated");
