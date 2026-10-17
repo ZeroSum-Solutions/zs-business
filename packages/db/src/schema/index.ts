@@ -90,3 +90,4 @@ export const outbox = pgTable(
     tenantPolicy(table.tenantId, true),
   ],
 ).enableRLS();
+export * from "./crm.js";
