@@ -161,12 +161,16 @@ composition roots supply handlers without changing the dispatcher or its types.
 `crm.contact.create-or-find`/`contact`, `crm.deal.create`/`deal`, and
 `crm.deal.move-stage`/`deal`. Target ID equals the payload contact/deal candidate ID
 or the existing deal ID. The unchanged `resolveTarget(tx,target)` has no payload.
-For create/find, it verifies the owned tenant creation scope for an unused candidate
-or loads/verifies an existing owned row. Payload-dependent identity checks belong
+For contact create/find, it verifies the owned tenant creation scope for an unused
+candidate or loads/verifies an existing owned contact. Payload-dependent identity checks belong
 in `handle`: an owned candidate already in use is allowed only when it is the
-identity match; otherwise C-5's `id_in_use` conflict applies. A create-deal handler
-rejects any existing owned deal ID with C-13's conflict. Returning null from the
-resolver means `TenantDenied`, not a domain conflict. An unused candidate can resolve
+identity match; otherwise C-5's `id_in_use` conflict applies. For pure deal creation,
+the resolver confirms the ID is unused before returning the target; finding an
+existing owned deal ID instead throws C-13's typed `Conflict` / `id_in_use` directly
+from the resolver. Never return an existing deal as a valid create target or return
+null for this domain conflict. A unique insert race after resolution still raises
+`Conflict` with SQL constraint details; the `id_in_use` reason is optional for that
+race. Returning null from any resolver means `TenantDenied`. An unused contact candidate can resolve
 to an existing different contact through C-6; the action retains its approved
 candidate target and stores the actual result. Verify contact/pipeline/stage
 parents in the same transaction. Echoing unverified input is not ownership proof.

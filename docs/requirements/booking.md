@@ -127,8 +127,9 @@ intervals for the resource. Each has the same tenant/resource IDs as the resourc
 reject a mismatch with `ValidationFailed`. Existing booking entries contain the
 appointment interval and that booking's saved before/after buffer values. Expand
 those once. External entries describe occupied time directly and get no extra
-buffer. Overlapping/duplicate busy entries have union semantics. S2's inspected
-service consumes busy data; this rule defines our smaller explicit input boundary.
+buffer. Overlapping/duplicate busy entries have union semantics. **Upstream does:**
+S2 consumes busy data through its broader availability service. We choose this
+smaller explicit input boundary to keep slot calculation pure and independently testable.
 
 **B-14. Desired, buffer policy.** For candidate `[s,e)`, reserve
 `[s-before*60000,e+after*60000)`. The appointment must fit availability; preparation
@@ -168,15 +169,20 @@ not register handlers. Implementers later supply handlers at the composition roo
 
 **B-19. Desired, authoritative recheck.** A shown slot is advisory. The existing
 `resolveTarget(tx,target)` receives no payload. It must verify the tenant creation
-scope for an unused target ID, or load and verify an existing owned target. It may
-not infer resource ownership from target input. In `handle`, which receives the
-command, reject an already used booking ID with `Conflict` and
-`details.reason="id_in_use"`, verify payload resource ownership, load current
+scope and confirm the booking target ID is unused before returning that target.
+If it finds an existing owned booking ID, it throws `Conflict` with
+`details.reason="id_in_use"` directly; it must not return a used create target or
+return null for that domain conflict. The unchanged dispatcher preserves this typed
+resolver error. It may not infer resource ownership from target input. In `handle`,
+which receives the command, verify payload resource ownership, load current
 schedule/configuration and busy periods, and re-evaluate the
 requested start using the dispatcher's injected transaction time. Reject a start
 that no longer qualifies with `Conflict`. Malformed input/configuration is
 `ValidationFailed`; unavailable or foreign resource/target access is `TenantDenied`.
 Derive the end and occupied interval from this authoritative resource state.
+Recheck target uniqueness under the resource lock. An insert that loses a target-ID
+race after resolution still raises `Conflict` through the unique constraint; that
+SQL race may carry constraint details without an `id_in_use` reason.
 
 **B-20. Desired (S3 comparison).** The database decides who owns occupied time.
 Require an immediate Postgres exclusion constraint on equal tenant/resource IDs
