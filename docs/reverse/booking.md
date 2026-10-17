@@ -59,7 +59,7 @@ and `integration.test.ts` are in `packages/core/test/booking/`.
 | B-20 | `bookings_resource_occupied_excl` (`migration:117-121`), immediate, no `WHERE`. The dispatcher maps `23P01` to `Conflict`. | `create.test.ts` "exactly one of two concurrent overlapping creates", "wider race", "two concurrent overlapping direct inserts" |
 | B-21 | Exact lock expression after the dispatcher's idempotency lock (`create.ts:83-86`); UUIDs cast through `::uuid::text` (lowercase). No UPDATE grant (`migration:165-166`). | `create.test.ts` "holds the B-21 resource lock…" (uppercase input, waits, then sees the block); "rejects an overlapping direct insert…" |
 | B-22 | Success comes only from the dispatcher commit; the row stores `confirmed`, dispatcher `now` and the buffers used (`create.ts:100-121`). | `create.test.ts` "commits state, action and outbox together", "keeps saved buffers…", "rolls back the booking row…" |
-| B-23 | Dispatcher replay and error semantics unchanged; the handler throws typed `ActionError`s only for domain failures; corrupt stored config throws a plain error (`create.ts:47`). | `create.test.ts` "returns the stored action for an identical retry…", "rolls back…" (`ValidationFailed`, `BindingMismatch`) |
+| B-23 | Dispatcher replay and error semantics unchanged; the handler throws typed `ActionError`s only for domain failures; corrupt stored config throws `ValidationFailed` (`create.ts`, `loadResource`). | `create.test.ts` "returns the stored action for an identical retry…", "rolls back…" (`ValidationFailed`, `BindingMismatch`) |
 | B-24 | Three tables, required columns, `timestamptz`, PKs, composite FKs, checks, exclusion (`migration:70-138`); Drizzle mirror in `packages/db/src/schema/booking.ts`. | `integration.test.ts`; `create.test.ts` stored-config cases |
 | B-25 | `tenant_id NOT NULL` + tenant FK, RLS enabled and forced with matching `USING`/`WITH CHECK` (`migration:140-154`); minimal grants (`migration:158-173`). | `packages/db/test/isolation.test.ts` (catalog-driven, picks the three tables up); `create.test.ts` "enables and forces RLS…", "rejects a cross-tenant insert…" |
 | B-26 | Public folders stay out of baseline `test`; booking tests are normal tests with no skips. | `pnpm -r test`, `pnpm --filter @zs/core test:booking` |
@@ -101,13 +101,15 @@ Other choices:
 ## 5. Known gaps
 
 - The SQL time-zone check is shape-only (`'UTC'` or contains `/`). An unknown name such
-  as `Foo/Bar` can be stored by service-role SQL. The create handler then raises a plain
-  error (corrupt configuration), not a typed one.
+  as `Foo/Bar` can be stored by service-role SQL. The create handler then raises a typed
+  `ValidationFailed` (corrupt stored configuration), not a plain error.
 - `offsetSegments` assumes at most one offset change per hour. Every tzdb zone meets this.
-- Busy bounds from SQL are widened to whole milliseconds (floor/ceil). A sub-millisecond
-  external block edge can reject a candidate that touches it exactly.
-- Years after 9999 cannot be represented by the frozen instant schema. The engine does
-  not guard against them beyond the schema.
+- Busy overlap is decided in SQL with the exclusion constraint's half-open `[start, end)` range
+  at full timestamp precision. Spans are clipped to the whole-millisecond candidate window before
+  rounding, so a sub-millisecond row that exactly touches a candidate is not an overlap.
+- Years after 9999 cannot be represented by the frozen instant schema. The create handler checks the
+  derived appointment and occupied bounds before the busy-interval query and raises `ValidationFailed`
+  when one leaves the supported range.
 - Resource provisioning, schedule edits and external-block sync have no write actions
   yet (B-1). When they land they must take the same B-21 lock through the dispatcher.
 - No second-model review ran inside this task's time box. Run `codex-senior-review` and

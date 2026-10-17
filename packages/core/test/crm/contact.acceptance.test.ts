@@ -218,6 +218,46 @@ describe("contact create/find on the runtime database", () => {
       expect(result).toMatchObject({ status: "rejected", reason: { code: "Conflict", details: { reason: "split_identity" } } });
   });
 
+  it("C-8: a competing insert after the lookup rolls back to the savepoint and returns the winner", async () => {
+    const a = h.fixture.a.tenantId;
+    const email = `savepoint-${randomUUID()}@example.test`;
+    const winnerId = randomUUID();
+    let raced = 0;
+    // Commit a competing contact on another connection after the handler's lookup and before its insert,
+    // so only the unique index (23505) can arbitrate. The advisory identity locks do not stop this writer.
+    const db: ScopedDatabase = {
+      tenant: (tenantId, work) => h.database.db.tenant(tenantId, (tx) => {
+        const run = tx.query.bind(tx) as (...args: unknown[]) => Promise<unknown>;
+        const query = async (...args: unknown[]) => {
+          if (typeof args[0] === "string" && /^\s*INSERT INTO crm_contacts/.test(args[0]) && raced++ === 0) {
+            await h.fixture.service((service) => service.query(
+              `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,e164_phone,created_at,updated_at)
+               VALUES ($1,$2,'Winner',$3,NULL,$4,$4)`, [a, winnerId, email, NOW]));
+          }
+          return run(...args);
+        };
+        return work({ query } as unknown as Transaction);
+      }),
+    };
+    const actionsBefore = await h.count("actions", a);
+    const outboxBefore = await h.count("outbox", a);
+    const command = contactCommand(a, { email, displayName: "Loser" });
+    const actorId = randomUUID();
+    const { idempotencyKey: _key, ...binding } = command;
+    const ctx: DispatchContext = {
+      tenantId: a, actor: { tenantId: a, id: actorId }, db, clock: { now: () => new Date(NOW) }, config: {},
+      generateId: randomUUID, resolveApproval: async () => ({ ...binding, tenantId: a, actorId }),
+    };
+    const out = await createOrFindContact(command, { dispatch: (c) => createDispatcher({ ...crmHandlers })(ctx, c) });
+    expect(raced).toBe(1);
+    expect(out.result.created).toBe(false);
+    expect(out.result.contact).toMatchObject({ id: winnerId, email, displayName: "Winner" });
+    expect(await h.count("actions", a)).toBe(actionsBefore + 1);
+    expect(await h.count("outbox", a)).toBe(outboxBefore + 1);
+    expect(await h.fixture.service(async (tx) => (await tx.query(
+      "SELECT 1 FROM crm_contacts WHERE tenant_id=$1 AND normalized_email=$2", [a, email])).rowCount)).toBe(1);
+  });
+
   it("C-16/C-19: an exact replay returns the stored result without a second action", async () => {
     const a = h.fixture.a.tenantId;
     const command = contactCommand(a, { email: "replay@example.test" });

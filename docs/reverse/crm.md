@@ -91,6 +91,5 @@ wording appears in code or docs. SeldonFrame source, bundles and scripts were no
   claims; it cannot merge them.
 - **Not covered:** contact merge, general contact edit, pipeline/stage provisioning
   actions, messaging. These are out of scope for F2 by the requirement.
-- **Booking composition** (`{ ...bookingHandlers, ...crmHandlers }`) was not tested here
-  beyond the public integration template, because booking handlers are not implemented in
-  this branch.
+- **Booking composition** (`{ ...bookingHandlers, ...crmHandlers }`) is covered by the public
+  integration templates in both features; the booking handlers are implemented in this branch.
