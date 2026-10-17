@@ -1,0 +1,83 @@
+{
+  "clock": "2026-10-19T08:00:00.000Z",
+  "state": {
+    "contacts": [
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "tenantId": "11111111-1111-4111-8111-111111111111",
+        "displayName": "Example Person",
+        "email": "person@example.test",
+        "phone": "+12025550123",
+        "consent": {
+          "email": {
+            "status": "granted",
+            "source": "public-opt-in",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          },
+          "sms": {
+            "status": "denied",
+            "source": "public-opt-out",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          }
+        },
+        "createdAt": "2026-10-01T08:00:00.000Z",
+        "updatedAt": "2026-10-01T08:00:00.000Z"
+      }
+    ]
+  },
+  "command": {
+    "actionType": "crm.contact.create-or-find",
+    "target": {
+      "tenantId": "11111111-1111-4111-8111-111111111111",
+      "type": "contact",
+      "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    },
+    "payload": {
+      "contactId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "displayName": "Example Person",
+      "email": "person@example.test",
+      "phone": "+12025550123",
+      "mode": "import",
+      "consent": {
+        "email": null,
+        "sms": {
+          "status": "granted",
+          "source": "public-import",
+          "recordedAt": "2026-10-19T08:00:00.000Z"
+        }
+      }
+    },
+    "approvalReference": {
+      "tenantId": "11111111-1111-4111-8111-111111111111",
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
+    "idempotencyKey": "public-contact-import"
+  },
+  "expected": {
+    "actionId": "99999999-9999-4999-8999-999999999999",
+    "result": {
+      "contact": {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "tenantId": "11111111-1111-4111-8111-111111111111",
+        "displayName": "Example Person",
+        "email": "person@example.test",
+        "phone": "+12025550123",
+        "consent": {
+          "email": {
+            "status": "granted",
+            "source": "public-opt-in",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          },
+          "sms": {
+            "status": "denied",
+            "source": "public-opt-out",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          }
+        },
+        "createdAt": "2026-10-01T08:00:00.000Z",
+        "updatedAt": "2026-10-01T08:00:00.000Z"
+      },
+      "created": false
+    }
+  }
+}

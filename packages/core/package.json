@@ -1,0 +1,19 @@
+{
+  "name": "@zs/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --exclude 'test/booking/**' --exclude 'test/crm/**'",
+    "test:booking": "vitest run test/booking",
+    "test:crm": "vitest run test/crm"
+  },
+  "dependencies": {
+    "@zs/contracts": "workspace:*",
+    "@zs/db": "workspace:*"
+  }
+}
