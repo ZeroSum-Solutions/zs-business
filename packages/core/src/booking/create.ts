@@ -1,6 +1,7 @@
 // F1 booking.create (B-17..B-23). Original code; the handler runs inside the shared
 // dispatcher transaction and never commits or announces anything itself.
 import {
+  bookingInstantSchema,
   bookingResourceSchema,
   Conflict,
   createBookingCommandSchema,
@@ -22,6 +23,11 @@ const currentTenant = async (tx: Transaction): Promise<string | undefined> =>
   (await tx.query<{ tenant_id: string }>(
     "SELECT tenant_id FROM tenants WHERE tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid",
   )).rows[0]?.tenant_id;
+
+const isSupportedInstant = (instant: number): boolean => {
+  const date = new Date(instant);
+  return Number.isFinite(date.getTime()) && bookingInstantSchema.safeParse(date.toISOString()).success;
+};
 
 async function assertBookingIdUnused(tx: Transaction, tenantId: string, bookingId: string): Promise<void> {
   const used = await tx.query("SELECT 1 FROM bookings WHERE tenant_id=$1 AND id=$2", [tenantId, bookingId]);
@@ -99,6 +105,9 @@ export const createBookingHandler: ActionHandler = {
     const end = start + rules.slotLengthMinutes * MINUTE_MS;
     const occupiedStart = start - rules.bufferBeforeMinutes * MINUTE_MS;
     const occupiedEnd = end + rules.bufferAfterMinutes * MINUTE_MS;
+    // The derived bounds must be valid instants too, or Postgres rejects them with a raw SQLSTATE.
+    for (const bound of [start, end, occupiedStart, occupiedEnd])
+      if (!isSupportedInstant(bound)) throw new ValidationFailed("Booking interval leaves the supported instant range");
     const busy = await loadBusy(tx, tenantId, resourceId, occupiedStart, occupiedEnd);
     // B-19: re-evaluate exactly this appointment; the query range is the appointment itself.
     if (!evaluateSlots(rules, start, end, busy, now.getTime()).includes(start))

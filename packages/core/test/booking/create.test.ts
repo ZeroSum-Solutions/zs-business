@@ -291,6 +291,21 @@ describe("booking.create through the shared dispatcher (B-17..B-23)", () => {
     expect(await counts(fixture, a.tenantId)).toEqual({ bookings: 0, actions: 0, outbox: 0 });
   });
 
+  it.each([
+    ["appointment end", { bufferBeforeMinutes: 0, bufferAfterMinutes: 0 }],
+    ["occupied end (after buffer)", { slotLengthMinutes: 15, bufferBeforeMinutes: 0, bufferAfterMinutes: 30 }],
+  ])("rejects a start whose derived %s leaves the supported instant range with ValidationFailed", async (_name, change) => {
+    const { fixture, a } = await world({
+      weekly: [{ weekday: 5, windows: [{ startMinute: 0, endMinute: 1440 }] }],
+      slotLengthMinutes: 60, minimumNoticeMinutes: 0, ...change,
+    });
+    // 9999-12-31 is a Friday; 23:30 plus the slot or buffer passes the end of year 9999.
+    const error = await rejection(book(command(a.tenantId, a.id, "9999-12-31T23:30:00.000Z"), "9999-12-31T00:00:00.000Z"));
+    expect(error).toBeInstanceOf(ValidationFailed);
+    expect(error).toMatchObject({ code: "ValidationFailed" });
+    expect(await counts(fixture, a.tenantId)).toEqual({ bookings: 0, actions: 0, outbox: 0 });
+  });
+
   describe("sub-millisecond busy rows (B-13/B-15, half-open [start,end))", () => {
     // Candidate 10:00-10:30 with 15 minute buffers occupies exactly [09:45:00.000, 10:45:00.000).
     const START = "2026-10-19T10:00:00.000Z";
