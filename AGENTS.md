@@ -1,6 +1,6 @@
 # zs-business — rules for agents
 
-Private repo, owner Devin (Zero Sum Solutions). Read `docs/licenses.md` before you read or
+Public repo, owner Devin (Zero Sum Solutions). Never commit `.t3-runs/`, hidden tests, client data, secrets or third-party text. Read `docs/licenses.md` before you read or
 copy any outside code.
 
 ## Stack (decided 2026-10-17)

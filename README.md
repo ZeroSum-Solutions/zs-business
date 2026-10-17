@@ -1,6 +1,6 @@
 # zs-business
 
-Private business service for the Zero Sum Business OS: CRM, booking, inbox, automations,
+Business service for the Zero Sum Business OS: CRM, booking, inbox, automations,
 approvals and the owner dashboard. Mish (public, Apache-2.0) stays the front door and site
 builder and calls this service over HTTP and MCP. No authoritative business records live in Mish.
 
