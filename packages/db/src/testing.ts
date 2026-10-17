@@ -70,6 +70,13 @@ export async function createTestDatabase(
   const servicePool = new Pool({ connectionString: loginUrl("zs_service"), max: 5 });
   let created = false;
   let closed = false;
+  // DROP DATABASE ... WITH (FORCE) can reach a backend whose idle client is still
+  // shutting down; pg-pool re-emits that 57P01 and an unhandled pool error crashes the run.
+  const onIdleError = (error: Error & { code?: string }) => {
+    if (closed && error.code === "57P01") return;
+    throw error;
+  };
+  for (const p of [pool, runtimePool, servicePool]) p.on("error", onIdleError);
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
@@ -77,7 +84,18 @@ export async function createTestDatabase(
       await Promise.all([pool.end(), runtimePool.end(), servicePool.end()]);
     } finally {
       try {
-        if (created) await admin.query(`DROP DATABASE "${name}" WITH (FORCE)`);
+        if (created) {
+          // Let ended clients' backends exit before forcing the drop.
+          for (let i = 0; i < 50; i += 1) {
+            const { rows } = await admin.query<{ n: number }>(
+              "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1",
+              [name],
+            );
+            if (rows[0]?.n === 0) break;
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+          await admin.query(`DROP DATABASE "${name}" WITH (FORCE)`);
+        }
       } finally {
         await admin.end();
       }
