@@ -1,0 +1,262 @@
+# F1: booking authority
+
+Status: frozen requirements and interfaces; feature logic is not implemented.
+Rules below describe the required implementation. Public examples cover a small part
+of this contract. They do not replace the separate acceptance suite.
+
+## Evidence and decisions
+
+All prose and schemas here are original. No implementation was ported.
+**Desired** identifies our required behavior. **Upstream does** describes only the
+specific inspected behavior, not a claim about an entire product.
+
+- S1: cal.diy, MIT, commit `54343aa685ae8f33159d2f485ec4a57bad5c574a`,
+  `packages/features/schedules/lib/slots.ts`: slot enumeration, rounding, notice,
+  range ordering and duplicate suppression.
+- S2: the same commit, `packages/trpc/server/routers/viewer/slots/util.ts`:
+  availability aggregation, configured duration/interval, restriction checks and
+  period filtering. This was a behavior reference only.
+- S3: our scheduler, commit `64b7fe7818b6d88f1d1061a00a65599027be1d43`,
+  read only at `/Users/zero-suminc./.cache/zs-sources/rise-scheduler-64b7fe78/backend/src/services/booking.ts`,
+  `claimSession`: a conditional state change arbitrates competing claims.
+- S4: the local HighLevel behavior notes dated 2026-10-17, including the saved
+  calendar guide `help.gohighlevel.com-2548190608.md`: recurring hours, date-specific
+  hours, duration, interval, preparation time and advance-booking settings.
+- S5: the product assembly plan dated 2026-10-17, sections 1, 2 and 6: tenant
+  ownership and one authority for booking confirmation. Its SeldonFrame table is void.
+- Browser observation on 2026-10-17: `http://localhost:3000` redirected to a sign-in
+  screen. No authenticated booking behavior was observed. No source, script body,
+  bundle, UI wording or asset from that app informed this contract.
+
+## Numbered rules
+
+**B-1. Desired, product scope (S4/S5).** Each tenant has at most one bookable
+resource. F1 supports its schedule, external busy periods, and confirmed bookings.
+Round robin, multiple hosts, reminders, payments, recurring bookings, cancellation
+and rescheduling APIs are outside this slice. Resource provisioning and connector
+sync will get separate write actions; they must obey B-21 before shipping.
+
+**B-2. Desired (S1/S2 comparison).** `getAvailableSlots(input, deps)` is synchronous
+and pure: no database, network, environment access, ambient clock or input mutation.
+Read `deps.clock.now()` once and validate that it is a finite instant. For identical
+validated input and clock value, return identical output. **Upstream does:** S1
+reads the current time and an environment-derived alignment fallback; S2 also reads
+time/configuration from its service environment. We inject these dependencies so
+replays and boundary tests have one definition of now.
+
+**B-3. Desired, data boundary.** Validate with the frozen schemas. IDs are UUIDs
+and normalize to lowercase. Instants use UTC `YYYY-MM-DDTHH:mm:ss.sssZ` with exactly
+three fractional digits. Reject invalid calendar dates, nonpositive intervals,
+unknown fields and invalid numbers with `ValidationFailed`; do not coerce them.
+Each feature function uses schema `safeParse` and maps parse failures to
+`ValidationFailed`. Calling an exported schema's `parse` directly still raises a
+zod error; that parser utility is not the feature function's error boundary.
+Query windows span at most 31 elapsed days. Slot length and step are integral
+1..1440 minutes, buffers 0..1440, and notice/horizon 0..525600. These explicit limits
+bound enumeration and configuration; horizon zero yields no slots.
+
+**B-4. Desired, time zones.** The resource stores an IANA zone accepted by the
+runtime time-zone database, such as `America/New_York` or `Asia/Kolkata`; `UTC` is
+also accepted. Reject unknown zones, numeric offsets and abbreviations rather than
+fall back to the machine zone. Only `UTC` may lack a slash. Output uses the input
+zone identifier, including runtime-recognized IANA aliases or case variants; we do
+not promise a canonical spelling. UTC instants drive database comparisons, so SQL
+does not reinterpret local labels using a second time-zone database. Clients may
+display another zone without changing the authority.
+
+**B-5. Desired, local schedule (S4).** Weekdays are ISO 1=Monday through 7=Sunday.
+Each weekday appears at most once. A missing weekday has no availability. A local
+window uses integral minutes from midnight, start 0..1439 and end 1..1440, with
+start < end. Split an overnight weekly window into two dates/weekdays. Merge
+overlapping or touching windows for evaluation; input order has no meaning.
+
+**B-6. Desired, overrides (S4).** At most one override may exist per local ISO
+date. If present, its windows replace that date's entire weekly schedule. An empty
+override closes the date. A missing override uses weekly rules. Reject duplicate
+weekday/override entries instead of making array order decide the schedule.
+
+**B-7. Desired, DST.** Interpret the effective schedule as membership in local
+wall-clock windows on each date: an instant is available when its local label falls
+inside a window. Map that membership to a union of intervals on the UTC timeline.
+A missing wall-clock minute in a spring gap produces no candidate. A repeated
+minute in a fall overlap produces both distinct UTC candidates if each passes the
+other rules. Never silently shift a nonexistent time or collapse repeated labels.
+This is our explicit policy; S1/S2 were not proof of their full DST behavior.
+
+**B-8. Desired (S1/S2 comparison).** Candidate starts lie on a resource-local grid:
+`minuteOfDay % slotStepMinutes == 0`, with zero seconds and milliseconds.
+Here `minuteOfDay = localHour * 60 + localMinute`, never elapsed UTC minutes since
+midnight. Reset that wall-label grid on every local date, including both occurrences
+in a DST overlap. For step 45, local 03:00 is aligned even on a spring-forward day.
+Evaluate alignment after conversion to the resource zone, so half-hour
+offsets work. **Upstream does:** S1 converts to its supplied zone before rounding,
+derives rounding intervals from frequency divisors and optionally optimizes starts;
+S2 supplies a slot interval or duration fallback. We retain local-zone alignment
+but require one explicit step and no optimization, offsets or hidden fallback.
+
+**B-9. Desired, durations.** Add `slotLengthMinutes` as elapsed UTC minutes to each
+candidate start. The appointment interval must lie entirely within the union in
+B-7. A slot may cross midnight or a clock transition only if its entire elapsed
+interval remains available. Wall-clock labels need not differ by the elapsed
+duration during DST. Return UTC instants to distinguish those cases.
+
+**B-10. Desired (S1/S2 comparison).** Every interval is half open `[start,end)`.
+The entire appointment must fit inside the query range, and equality of its end
+with the range or availability end is allowed. **Upstream does:** S1 subtracts one
+second during its end-boundary test; S2 separately checks full slot containment
+for restriction schedules. We use exact millisecond containment everywhere to
+avoid accepting a slot that extends beyond an end boundary.
+
+**B-11. Desired (S1/S2 comparison).** Accept a candidate start exactly at
+`now + minimumNoticeMinutes * 60000`; reject any earlier instant. Preserve the
+clock's seconds and milliseconds when computing this lower bound, then select
+the next grid candidate. Zero notice permits a start equal to now.
+**Upstream does:** S1 clears seconds/milliseconds after taking its notice bound;
+S2 has a helper whose zero notice falls back to one minute. We do neither, so a
+candidate never receives less notice than configured.
+
+**B-12. Desired (S2 comparison).** The horizon is an exclusive start bound:
+`start < now + bookingHorizonMinutes * 60000`. It measures elapsed time, not local
+calendar days. Only the start is horizon-limited; the full appointment must still
+fit the query and schedule. If notice meets/exceeds the horizon, return no slots.
+**Upstream does:** S2 delegates several period modes and calendar-day settings to
+period filtering. We choose one elapsed-time policy to make the edge unambiguous.
+
+**B-13. Desired, busy data (S2).** The caller supplies a complete snapshot of busy
+intervals for the resource. Each has the same tenant/resource IDs as the resource;
+reject a mismatch with `ValidationFailed`. Existing booking entries contain the
+appointment interval and that booking's saved before/after buffer values. Expand
+those once. External entries describe occupied time directly and get no extra
+buffer. Overlapping/duplicate busy entries have union semantics. S2's inspected
+service consumes busy data; this rule defines our smaller explicit input boundary.
+
+**B-14. Desired, buffer policy.** For candidate `[s,e)`, reserve
+`[s-before*60000,e+after*60000)`. The appointment must fit availability; preparation
+time may extend beyond working hours, the query window, or midnight. Any positive
+overlap between this occupied interval and a busy occupied interval rejects the
+candidate. Exact touching is allowed. Both bookings' buffers matter; never apply
+the resource's current buffers again to an already expanded existing booking.
+
+**B-15. Desired, midnight coverage.** Load busy periods by intersection with the
+possible occupied intervals, including dates outside the displayed query. A
+booking ending the previous day can still block a candidate through its after
+buffer. A next-day external block can conflict with a candidate's after buffer.
+Do not clip buffers at date, schedule, query, notice or horizon boundaries.
+
+**B-16. Desired (S1 comparison).** Return `{resourceId,timeZone,slots}` with slots
+sorted by UTC start, unique by start instant. Do not mutate or sort caller-owned
+arrays. Empty availability is a successful empty list. **Upstream does:** S1
+deduplicates starts but sorts its range array in place. We retain uniqueness and
+chronological order while preserving the purity promised in B-2.
+
+**B-17. Desired, command boundary.** `createBooking(command, ctx)` accepts action
+type `booking.create`, target type `booking`, and payload `{bookingId,resourceId,
+startsAt}`. Pre-mint `bookingId` at the server edge and use it as target ID. The
+command also carries the existing approval reference and idempotency key. The
+server binds approval to the exact parsed action, actor, tenant, target and payload.
+The client cannot submit duration, buffers, status or an occupied range.
+
+**B-18. Desired, dispatcher integration (S5).** `BookingWriteContext.dispatch`
+is a trusted server capability, constructed as
+`command => sharedDispatch(serverContext, command)`, where `sharedDispatch` comes
+from the unchanged `createDispatcher(handlers)`. That bound server context owns
+actor, tenant, database, clock, configuration, ID generation and approval resolution.
+Do not accept this context from HTTP/MCP input. The future feature wrapper validates
+its command, dispatches it exactly once, validates the stored result and returns
+`{actionId,result:BookingRecord}`. The public stub throws `NotImplemented`; it does
+not register handlers. Implementers later supply handlers at the composition root.
+
+**B-19. Desired, authoritative recheck.** A shown slot is advisory. The existing
+`resolveTarget(tx,target)` receives no payload. It must verify the tenant creation
+scope for an unused target ID, or load and verify an existing owned target. It may
+not infer resource ownership from target input. In `handle`, which receives the
+command, reject an already used booking ID with `Conflict` and
+`details.reason="id_in_use"`, verify payload resource ownership, load current
+schedule/configuration and busy periods, and re-evaluate the
+requested start using the dispatcher's injected transaction time. Reject a start
+that no longer qualifies with `Conflict`. Malformed input/configuration is
+`ValidationFailed`; unavailable or foreign resource/target access is `TenantDenied`.
+Derive the end and occupied interval from this authoritative resource state.
+
+**B-20. Desired (S3 comparison).** The database decides who owns occupied time.
+Require an immediate Postgres exclusion constraint on equal tenant/resource IDs
+and overlapping occupied ranges, including saved buffers. Two approved commands
+with different keys/IDs for conflicting time cannot both commit. Return one
+success and one typed `Conflict`, with no losing booking/action/outbox row.
+**Upstream does:** S3 conditionally updates one pre-existing available session,
+then reports whether the claim lost. We retain database arbitration but require
+range exclusion because independently created, overlapping intervals are not
+claims on one pre-existing session row.
+
+**B-21. Desired, other concurrent writes.** After the dispatcher's idempotency
+lock, acquire a transaction advisory lock on the namespaced key
+`booking-resource:<tenantId>:<resourceId>` before the authoritative recheck, and hold
+it until commit. Every future schedule or external block mutation for that resource
+must use the same key and lock order through the shared dispatcher. Do not require
+an UPDATE grant just to read-lock a resource row. Thus a create cannot race a
+schedule closure or new external block.
+The exclusion constraint remains mandatory even when this lock serializes creates.
+The integration suite must also prove the constraint rejects an overlapping direct
+insert under the runtime role; an application lock alone is not booking authority.
+
+**B-22. Desired (S3/S5 comparison).** Resolve success only after the dispatcher
+commits booking state, action history and its outbox event atomically. Persist
+`status=confirmed`, the dispatcher's time as `createdAt`, and the buffers used at
+creation. Later configuration changes do not rewrite existing occupied ranges.
+**Upstream does:** S3 writes a claim and an audit record using a supplied or default
+database context. We require the shared transaction and outbox for all callers,
+so no adapter can announce success before durable state exists.
+
+**B-23. Desired, retry/error contract.** Identical approved retries return the
+same stored action ID and result. Preserve the dispatcher's `IdempotencyConflict`,
+`BindingMismatch`, `TenantDenied`, `ValidationFailed` and `Conflict` semantics.
+SQL `23P01` must remain `Conflict` with `details.postgresCode` and constraint name
+when supplied. `NotImplemented` is the stub/unregistered-action signal. Unexpected
+infrastructure failures propagate as errors; never turn them into empty slots or
+success. TypeScript does not encode checked throws; exported error aliases describe
+the typed domain errors, not every possible transport/database outage.
+
+**B-24. Desired, storage ownership.** Add schema only in
+`packages/db/src/schema/booking.ts` and SQL in `supabase/migrations/*_booking.sql`.
+No migration or feature table ships in this scaffold. Required tables/columns:
+
+| Table | Required columns and constraints |
+| --- | --- |
+| `booking_resources` | `tenant_id`, `id`, `time_zone`, `weekly` JSONB, `overrides` JSONB, `slot_length_minutes`, `slot_step_minutes`, `buffer_before_minutes`, `buffer_after_minutes`, `minimum_notice_minutes`, `booking_horizon_minutes`; PK `(tenant_id,id)`, unique `tenant_id`, FK to tenant, schema-equivalent config validation |
+| `bookings` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `occupied_starts_at`, `occupied_ends_at`, `buffer_before_minutes`, `buffer_after_minutes`, `status`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive appointment range, saved buffer bounds and exact occupied-bound checks, confirmed status only |
+| `booking_external_blocks` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `source`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive range, nonempty source |
+
+Use `timestamptz` for instants. Define `bookings_resource_occupied_excl` using
+`btree_gist`: equal `tenant_id`, equal `resource_id`, and
+`tstzrange(occupied_starts_at,occupied_ends_at,'[)') WITH &&`. Never constrain only
+appointment starts or unbuffered ranges. Resource config must retain empty date
+overrides distinctly from absent overrides.
+
+**B-25. Desired, tenant enforcement (S5).** Every table has `tenant_id NOT NULL`,
+tenant FK, enabled and forced RLS, plus matching `USING` and `WITH CHECK` predicates
+on the transaction's tenant. Parent/child FKs include `tenant_id`; grant the runtime
+role only needed operations. Add two-tenant read/write denial tests using actual
+`zs_runtime` credentials. Service-role-only tests cannot establish isolation.
+
+**B-26. Desired, verification boundary.** Keep baseline `test` green by excluding
+the public feature folders; feature scripts run normal tests, without skips,
+`todo`, expected-failure flags or no-test success. Public slot fixtures assert exact
+outputs for alignment/notice, buffers/overrides, and both DST transitions. The write
+example checks the bound-dispatcher boundary using a scripted dispatcher response.
+It does not prove persistence. The implementer's real Postgres acceptance must
+also cover cross-tenant denial, invalid zones, midnight buffers, exact horizon and
+notice edges, stale availability, exclusion races, retries and rollback. Hidden
+tests will check requirements beyond the public examples.
+
+## Frozen API and public examples
+
+`packages/contracts/src/booking.ts` exports zod schemas and inferred types for
+resource configuration, windows, intervals, busy entries, slot input/output,
+create input/command/output and booking records. It also exports `GetAvailableSlots`,
+`CreateBooking`, their dependencies/context, and error-code schemas/error types.
+The root contracts/core indexes export the feature surface.
+
+Fixtures in `packages/core/fixtures/public/booking/`:
+`alignment-notice.json`, `buffers-override.json`, `dst-gap.json`, `dst-overlap.json`,
+and `create-booking.json`. They contain synthetic IDs and data only. Five public
+tests consume these examples; all currently fail with `NotImplemented`.

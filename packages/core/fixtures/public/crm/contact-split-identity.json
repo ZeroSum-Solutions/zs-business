@@ -1,0 +1,81 @@
+{
+  "clock": "2026-10-19T08:00:00.000Z",
+  "state": {
+    "contacts": [
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "tenantId": "11111111-1111-4111-8111-111111111111",
+        "displayName": "Example Person",
+        "email": "person@example.test",
+        "phone": "+12025550123",
+        "consent": {
+          "email": {
+            "status": "granted",
+            "source": "public-opt-in",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          },
+          "sms": {
+            "status": "denied",
+            "source": "public-opt-out",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          }
+        },
+        "createdAt": "2026-10-01T08:00:00.000Z",
+        "updatedAt": "2026-10-01T08:00:00.000Z"
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "tenantId": "11111111-1111-4111-8111-111111111111",
+        "displayName": "Example Person",
+        "email": "other@example.test",
+        "phone": "+12025550124",
+        "consent": {
+          "email": {
+            "status": "granted",
+            "source": "public-opt-in",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          },
+          "sms": {
+            "status": "denied",
+            "source": "public-opt-out",
+            "recordedAt": "2026-10-01T08:00:00.000Z"
+          }
+        },
+        "createdAt": "2026-10-01T08:00:00.000Z",
+        "updatedAt": "2026-10-01T08:00:00.000Z"
+      }
+    ]
+  },
+  "command": {
+    "actionType": "crm.contact.create-or-find",
+    "target": {
+      "tenantId": "11111111-1111-4111-8111-111111111111",
+      "type": "contact",
+      "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    },
+    "payload": {
+      "contactId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "displayName": "Example Person",
+      "email": "person@example.test",
+      "phone": "+12025550124",
+      "mode": "interactive",
+      "consent": {
+        "email": null,
+        "sms": null
+      }
+    },
+    "approvalReference": {
+      "tenantId": "11111111-1111-4111-8111-111111111111",
+      "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
+    "idempotencyKey": "public-contact-split"
+  },
+  "expected": {
+    "error": {
+      "code": "Conflict",
+      "details": {
+        "reason": "split_identity"
+      }
+    }
+  }
+}

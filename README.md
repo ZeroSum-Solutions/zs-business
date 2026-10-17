@@ -4,7 +4,10 @@ Business service for the Zero Sum Business OS: CRM, booking, inbox, automations,
 approvals and the owner dashboard. Mish (public, Apache-2.0) stays the front door and site
 builder and calls this service over HTTP and MCP. No authoritative business records live in Mish.
 
-Status: empty. First work is a booking authority and a CRM transaction slice.
+Status: the shared action path is implemented. Booking and CRM have frozen
+requirements, contracts, public fixtures and `NotImplemented` stubs; feature logic
+and feature migrations are still pending. Requirements live in
+`docs/requirements/booking.md` and `docs/requirements/crm.md`.
 Plan: `/Users/zero-suminc./Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
 
 ## Development
@@ -22,7 +25,10 @@ mise exec -- pnpm --filter @zs/core test:crm
 `@zs/contracts` owns zod action types and stable error codes. `@zs/db` owns the
 Drizzle schema, SQL migration runner (`migrate(pool)`), and transaction-scoped tenant
 access. `@zs/core` exports `createDispatcher(handlers)`; only tests register a handler.
-Booking and CRM tests currently pass with no tests.
+Baseline `test` excludes the booking and CRM folders. `test:booking` and `test:crm`
+run ordinary public examples and currently fail with `NotImplemented`. Slot examples
+check exact output; write examples check the bound-dispatcher interface with scripted
+responses. They do not establish database persistence or concurrency behavior.
 
 Tests default to the dedicated local Postgres at
 `postgres://postgres@127.0.0.1:55432/postgres`. `ZS_TEST_DATABASE_URL` accepts a

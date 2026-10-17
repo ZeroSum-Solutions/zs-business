@@ -8,9 +8,9 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:booking": "vitest run test/booking --passWithNoTests",
-    "test:crm": "vitest run test/crm --passWithNoTests"
+    "test": "vitest run --exclude 'test/booking/**' --exclude 'test/crm/**'",
+    "test:booking": "vitest run test/booking",
+    "test:crm": "vitest run test/crm"
   },
   "dependencies": {
     "@zs/contracts": "workspace:*",
