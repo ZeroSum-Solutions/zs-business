@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
 import { bookingResourceSchema, createBookingCommandSchema } from "@zs/contracts";
 import { createTwoTenantFixture, withTestDatabase } from "@zs/db/testing";
-import { bookingHandlers, createBooking, createDispatcher, type DispatchContext } from "../../src/index.js";
+import { bookingHandlers, createBooking, createDispatcher, crmHandlers, type DispatchContext } from "../../src/index.js";
 
 it("B-27/B-28: creates a booking through the registered handler and runtime database", async () => {
   await withTestDatabase(async (database) => {
@@ -23,7 +23,7 @@ it("B-27/B-28: creates a booking through the registered handler and runtime data
       approvalReference: { tenantId, id: randomUUID() },
       idempotencyKey: randomUUID(),
     });
-    const dispatch = createDispatcher(bookingHandlers);
+    const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers });
     const ctx: DispatchContext = {
       tenantId, actor: { tenantId, id: randomUUID() }, db: database.db,
       clock: { now: () => new Date("2026-10-19T08:00:00.000Z") },
@@ -36,6 +36,7 @@ it("B-27/B-28: creates a booking through the registered handler and runtime data
     const actual = await createBooking(command, {
       dispatch: async (parsed) => {
         // Defer setup until the wrapper dispatches: this scaffold has no feature tables yet.
+        // Real tests seed before dispatch; this deferral exists only for the stub.
         await fixture.service((tx) => tx.query(
           `INSERT INTO booking_resources
             (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,

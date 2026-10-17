@@ -258,7 +258,9 @@ exercise cases beyond these public examples. Never replace failures with skips,
 `ActionHandler` uses the default `DispatchConfig`; handlers require no config keys
 because all feature settings live in tables. The scaffold exports `{}` without
 registering handlers, so direct dispatch of an unregistered action raises the
-shared dispatcher's `NotImplemented`. Export `crmHandlers` through
+shared dispatcher's `NotImplemented`. When implemented, the map contains exactly
+those three keys and no other key, so it is disjoint from `bookingHandlers`.
+Export `crmHandlers` through
 `packages/core/src/index.ts` as well. A server composes both features with
 `const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers })`.
 It supplies a trusted `DispatchContext` named `ctx`, with `db` set to the runtime
@@ -292,7 +294,11 @@ C-20 columns listed above; grant that access. The same service-role seed/read
 access applies to pipelines and stages. Consent remains in C-20's separate
 `crm_contact_consent` table; no extra contact column is part of this inspection
 contract. Inspection does not establish RLS: tenant-denial tests still run under
-`zs_runtime` (C-21).
+`zs_runtime` (C-21). For those tests, inside `fixture.a.run`, `zs_runtime` may
+INSERT a `crm_contacts` row that supplies exactly the listed contact columns; grant
+that INSERT. It succeeds for the current tenant and fails only through RLS
+`WITH CHECK` (SQLSTATE `42501`) when `tenant_id` is another tenant's. node-pg
+returns `bigint` as a string, so tests read `revision::integer` when comparing.
 
 ## Frozen API and examples
 

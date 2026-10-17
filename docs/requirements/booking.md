@@ -289,7 +289,9 @@ tests will check requirements beyond the public examples.
 type `booking.create`. `ActionHandler` uses the default `DispatchConfig`; handlers
 require no config keys because all feature settings live in tables. The scaffold
 exports `{}` without registering a handler, so direct dispatch of an unregistered
-action raises the shared dispatcher's `NotImplemented`. Export `bookingHandlers`
+action raises the shared dispatcher's `NotImplemented`. When implemented, the map
+contains exactly the key `booking.create` and no other key, so it is disjoint from
+`crmHandlers`. Export `bookingHandlers`
 through `packages/core/src/index.ts` as well. A server composes both features with
 `const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers })`.
 It supplies a trusted `DispatchContext` named `ctx`, with `db` set to the runtime
@@ -313,7 +315,7 @@ Postgres types; all listed columns are NOT NULL:
 
 `weekly` and `overrides` hold exactly the JSON arrays of the frozen
 `bookingResourceSchema` fields with those names. For example, `weekly` may be
-`[{"weekday":1,"windows":[{"startMinute":540,"endMinute":1020}]}]` and `overrides`
+`[{"weekday":1,"windows":[{"startMinute":540,"endMinute":1020}]}]` (ISO weekday, 1 = Monday, B-5) and `overrides`
 may be `[]` or `[{"date":"2026-10-19","windows":[]}]`. Do not wrap those arrays,
 rename their keys or require another configuration table. Every extra column an
 implementer adds must be nullable or have a default. No extra NOT NULL table or
@@ -323,6 +325,14 @@ as `service_role` using any subset of exactly its B-24 columns listed above;
 grant that access. The same service-role seed/read access applies to the two
 configuration tables. Inspection does not establish RLS: tenant-denial and direct
 exclusion-constraint tests still run under `zs_runtime` (B-21/B-25).
+For those tests, inside `fixture.a.run`, `zs_runtime` may INSERT a `bookings` row
+that supplies exactly the eleven B-24 columns above, with `status='confirmed'` and
+occupied bounds equal to the appointment bounds widened by the saved buffers; grant
+that INSERT. A non-overlapping row commits. An overlapping row fails with SQLSTATE
+`23P01` and constraint `bookings_resource_occupied_excl`; no trigger, rule or
+earlier check may pre-empt it with another error. The extra-column rule above
+applies to `bookings` too. The same INSERT for another tenant's `tenant_id` fails
+only through RLS `WITH CHECK` (SQLSTATE `42501`).
 
 ## Frozen API and public examples
 
