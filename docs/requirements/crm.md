@@ -26,8 +26,11 @@ claimed. The policies below give implementers one explicit answer to those gaps.
 
 **C-1. Desired, tenant scope.** Match identities only inside the authenticated
 tenant. Identical email/phone values in different tenants represent independent
-contacts. Every parent lookup and mutation uses that same tenant. A foreign or
-unavailable parent/target is `TenantDenied` without revealing another tenant's IDs.
+contacts. Every parent lookup and mutation uses that same tenant. IDs are
+tenant-scoped: a create-target ID that exists only in another tenant is unused and
+the create succeeds if the other rules pass. `TenantDenied` applies to foreign or
+absent existing targets and parents without revealing another tenant's IDs; an
+absent create-target ID is expected.
 
 **C-2. Desired, email normalization.** Trim leading/trailing ECMAScript whitespace,
 then require ASCII and at most 254 characters before lowercasing without a locale.
@@ -41,25 +44,33 @@ requires a future interface change.
 
 **C-3. Desired, phone normalization.** Accept only canonical E.164 syntax:
 `+`, a nonzero first digit, then digits, with 2..15 digits total. Equality uses the
-entire string. Do not guess a country, strip punctuation, accept extensions or
-pretend to validate whether a number is assigned. `null` means absent. Require at
-least one of email or phone for every contact input and stored contact.
+entire string. Phone is not trimmed: leading whitespace such as `" +14155550123"`
+raises `ValidationFailed`. Do not guess a country, strip punctuation, accept
+extensions or pretend to validate whether a number is assigned. `null` means absent.
+Require at least one of email or phone for every contact input and stored contact.
 
 **C-4. Desired, boundary/approval order.** Inputs and commands are strict zod
 objects with inferred output types. Parse/normalize before requesting approval,
 then bind the approval to the exact parsed payload and pre-minted target. An
 unparsed raw email and its normalized form are not interchangeable approval
 bindings. IDs normalize to lowercase UUIDs. Instants are UTC with exactly three
-fractional digits. Labels/sources have 1..200 valid Postgres text units. Reject
-unknown fields, malformed dates and out-of-range revisions with `ValidationFailed`.
+fractional digits. Labels/sources have 1..200 UTF-16 code units (`String.length`)
+passing `isPostgresText`. Whitespace-only names, titles and sources are accepted;
+these fields are not trimmed. Reject unknown fields, malformed dates and
+out-of-range revisions with `ValidationFailed`.
 Feature functions map schema failures to `ValidationFailed` through `safeParse`;
 standalone exported schema parsers retain zod's normal error behavior.
+For contact create/find, apply this error order: schema failure (`ValidationFailed`),
+future-dated supplied evidence (`ValidationFailed`), `split_identity`,
+`identity_mismatch`, `id_in_use`, then consent merge. The dispatcher still performs
+its shared tenant, target, approval and replay checks; this order governs the
+contact-specific checks on a fresh valid dispatch.
 
 **C-5. Desired, no identity match.** `createOrFindContact` accepts a candidate
 `contactId`, display name or null, identities, mode and per-channel consent. With
 no matching email or phone, insert a contact using that ID and return
 `{contact,created:true}` inside the action envelope. Do not replace an unrelated
-row when the candidate ID already exists; raise `Conflict` with
+row when the candidate ID already exists in this tenant; raise `Conflict` with
 `details.reason="id_in_use"` and roll back instead.
 
 **C-6. Desired, one identity match.** If either supplied identity resolves to one
@@ -82,10 +93,13 @@ through a separate future approved workflow.
 tenant/phone unique indexes for non-null keys. Serialize/retry relevant identity
 lookups and inserts inside the transaction so concurrent separately approved,
 different-key commands with identical normalized identity sets and compatible
-payloads find one contact: one reports created, the other found. Apply C-6/C-7 if other supplied identities
-conflict. Re-read after a uniqueness race using a savepoint or whole-transaction
-retry; do not continue a failed Postgres transaction. A race that resolves to split
-identities raises `Conflict`. Same-key retries use the dispatcher's stored result.
+payloads find one contact: one reports created, the other found. Apply C-4's error
+order if other supplied identities conflict. Protect the racing write with a
+`SAVEPOINT`; after a uniqueness race, use `ROLLBACK TO SAVEPOINT` and re-read within
+that savepoint in the handler's existing READ COMMITTED transaction. Never continue
+an aborted transaction or retry the whole transaction. The wrapper never re-dispatches. A race
+that resolves to split identities raises `Conflict`. Same-key retries use the
+dispatcher's stored result.
 
 **C-9. Desired, stored consent.** Store email and SMS independently. Each channel
 contains either null (no recorded evidence) or `{status,source,recordedAt}` with
@@ -105,8 +119,9 @@ the channel unchanged. Fill a missing channel; otherwise accept later recorded
 evidence, ignore older evidence, and on equal timestamps let denial take precedence.
 If timestamp/status are identical, retain existing provenance. Only later explicit
 interactive grant evidence may replace a denial. Validate all supplied evidence,
-including entries an import would preserve over; future-dated evidence fails the
-whole command. Apply consent only after identity conflicts have been ruled out.
+including entries an import would preserve over; future-dated evidence raises
+`ValidationFailed` before identity conflicts, as ordered in C-4. Apply consent only
+after all those checks pass.
 
 **C-12. Desired, contact timestamps.** Use the dispatcher's injected now for new
 `createdAt` and `updatedAt`. Preserve `createdAt` on find. Bump `updatedAt` to now
@@ -118,10 +133,12 @@ stored result and outbox event. This is an action audit, not evidence of consent
 existing tenant-owned `contactId`, `pipelineId`, `stageId`, and nonempty title.
 The stage must belong to that pipeline in that tenant. Insert at revision 1 with
 `createdAt=updatedAt=now`. A contact may have several deals, including in the same
-pipeline. Do not auto-create a contact, pipeline or stage. An unavailable/foreign
-parent is `TenantDenied`; an owned stage from the wrong pipeline is
-`ValidationFailed`. Reusing an existing deal ID with another key is `Conflict`
-with `details.reason="id_in_use"`.
+pipeline. Do not auto-create a contact, pipeline or stage. Check all parent ownership
+first, then validate the stage's pipeline membership. An absent or foreign parent
+raises `TenantDenied` before wrong-pipeline `ValidationFailed`, even when both apply.
+An owned stage from the wrong pipeline is `ValidationFailed`. Reusing an existing
+deal ID in this tenant with another key is `Conflict` with
+`details.reason="id_in_use"`; an ID used only in another tenant is unused (C-1).
 
 **C-14. Desired, compare-and-set stage move.** `moveDealStage` takes `dealId`,
 `pipelineId`, destination `stageId`, and integral `expectedRevision` >= 1.
@@ -133,7 +150,8 @@ foreign row must not be exposed. Check ownership first, then validate the suppli
 pipeline and destination membership, then compare revision. A wrong pipeline and
 stale revision together yield `ValidationFailed`; absent/foreign parents take
 precedence as `TenantDenied`. Once validation succeeds, a zero-row conditional
-update caused by a racing revision change is `Conflict`.
+update also raises `Conflict` with `details.reason="stale_revision"` and
+`details.currentRevision` re-read from owned state.
 
 **C-15. Desired, successful move.** The destination belongs to the deal's current
 pipeline; moving deals between pipelines is outside scope. A different supplied
@@ -145,17 +163,23 @@ integer boundary defined in the schema.
 
 **C-16. Desired, concurrent stage changes.** Two distinct approved moves starting
 from the same revision cannot both commit. One returns the next revision and one
-raises `Conflict`. An exact idempotent replay returns its original saved revision,
-even if later actions have moved the deal again. Approval reuse with a different
+raises `Conflict` with C-14's `stale_revision` reason and owned `currentRevision`.
+An exact idempotent replay returns its original saved revision, even if later
+actions have moved the deal again. Approval reuse with a different
 key remains a shared-dispatcher conflict.
 
 **C-17. Desired, one write path.** All three functions use `CrmWriteContext.dispatch`,
 a server-only closure `command => sharedDispatch(serverContext, command)` built
 from the existing `createDispatcher(handlers)`. The trusted server context owns
 actor, tenant, database, clock, config, IDs and approval resolution. HTTP/MCP callers
-cannot supply this capability. Validate the command, dispatch exactly once and
-validate the returned stored result. Feature stubs register no handler; future
-composition roots supply handlers without changing the dispatcher or its types.
+cannot supply this capability. The wrapper uses the matching command schema's
+`safeParse(command)` and forwards its `data` to dispatch exactly once. Invalid input
+raises `ValidationFailed` without reaching dispatch. Validate the returned envelope
+with the matching output schema's `safeParse`; a parse failure raises
+`ValidationFailed`. Return the parsed envelope on success. A non-finite dispatcher
+clock also raises `ValidationFailed`. The wrapper never re-dispatches; C-8's race
+recovery stays inside the handler transaction. Feature stubs register no handler;
+future composition roots supply handlers without changing the dispatcher or its types.
 
 **C-18. Desired, target verification.** Action/target pairs are
 `crm.contact.create-or-find`/`contact`, `crm.deal.create`/`deal`, and

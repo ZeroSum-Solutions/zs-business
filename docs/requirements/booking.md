@@ -38,10 +38,10 @@ sync will get separate write actions; they must obey B-21 before shipping.
 
 **B-2. Desired (S1/S2 comparison).** `getAvailableSlots(input, deps)` is synchronous
 and pure: no database, network, environment access, ambient clock or input mutation.
-Read `deps.clock.now()` once and validate that it is a finite instant. For identical
-validated input and clock value, return identical output. **Upstream does:** S1
-reads the current time and an environment-derived alignment fallback; S2 also reads
-time/configuration from its service environment. We inject these dependencies so
+Read `deps.clock.now()` once; a non-finite instant raises `ValidationFailed`. For
+identical validated input and clock value, return identical output. **Upstream does:**
+S1 reads the current time and an environment-derived alignment fallback; S2 also
+reads time/configuration from its service environment. We inject these dependencies so
 replays and boundary tests have one definition of now.
 
 **B-3. Desired, data boundary.** Validate with the frozen schemas. IDs are UUIDs
@@ -55,20 +55,23 @@ Query windows span at most 31 elapsed days. Slot length and step are integral
 1..1440 minutes, buffers 0..1440, and notice/horizon 0..525600. These explicit limits
 bound enumeration and configuration; horizon zero yields no slots.
 
-**B-4. Desired, time zones.** The resource stores an IANA zone accepted by the
-runtime time-zone database, such as `America/New_York` or `Asia/Kolkata`; `UTC` is
-also accepted. Reject unknown zones, numeric offsets and abbreviations rather than
-fall back to the machine zone. Only `UTC` may lack a slash. Output uses the input
-zone identifier, including runtime-recognized IANA aliases or case variants; we do
-not promise a canonical spelling. UTC instants drive database comparisons, so SQL
-does not reinterpret local labels using a second time-zone database. Clients may
-display another zone without changing the authority.
+**B-4. Desired, time zones.** Accepted means the frozen schema accepts it: any
+name with a slash that the runtime knows, including `Etc/GMT±N`, plus exactly
+`UTC`. Examples include `America/New_York`, `america/new_york`, `Asia/Kolkata`
+and `Etc/GMT+5`. Any other spelling without a slash, including `utc`, `GMT` and
+`EST5EDT`, is rejected with `ValidationFailed`. Unknown zones and numeric offsets
+are also rejected; never fall back to the machine zone. Output uses the accepted
+input identifier; we do not promise a canonical spelling. UTC instants drive
+database comparisons, so SQL does not reinterpret local labels using a second
+time-zone database. Clients may display another zone without changing the authority.
 
 **B-5. Desired, local schedule (S4).** Weekdays are ISO 1=Monday through 7=Sunday.
 Each weekday appears at most once. A missing weekday has no availability. A local
 window uses integral minutes from midnight, start 0..1439 and end 1..1440, with
-start < end. Split an overnight weekly window into two dates/weekdays. Merge
-overlapping or touching windows for evaluation; input order has no meaning.
+start < end. Overnight hours are two windows on adjacent weekdays, ending at 1440
+and starting at 0. Touching windows across midnight form one continuous interval
+(B-9). Merge overlapping or touching windows for evaluation; input order has no
+meaning.
 
 **B-6. Desired, overrides (S4).** At most one override may exist per local ISO
 date. If present, its windows replace that date's entire weekly schedule. An empty
@@ -162,10 +165,14 @@ is a trusted server capability, constructed as
 `command => sharedDispatch(serverContext, command)`, where `sharedDispatch` comes
 from the unchanged `createDispatcher(handlers)`. That bound server context owns
 actor, tenant, database, clock, configuration, ID generation and approval resolution.
-Do not accept this context from HTTP/MCP input. The future feature wrapper validates
-its command, dispatches it exactly once, validates the stored result and returns
-`{actionId,result:BookingRecord}`. The public stub throws `NotImplemented`; it does
-not register handlers. Implementers later supply handlers at the composition root.
+Do not accept this context from HTTP/MCP input. The future feature wrapper uses
+`createBookingCommandSchema.safeParse(command)` and forwards its `data` to dispatch
+exactly once. Invalid input raises `ValidationFailed` without reaching dispatch.
+Validate the returned envelope with `createBookingOutputSchema.safeParse`; a parse
+failure raises `ValidationFailed`. Return the parsed `{actionId,result:BookingRecord}`
+on success. A non-finite dispatcher clock also raises `ValidationFailed`. The public
+stub throws `NotImplemented`; it does not register handlers. Implementers later
+supply handlers at the composition root.
 
 **B-19. Desired, authoritative recheck.** A shown slot is advisory. The existing
 `resolveTarget(tx,target)` receives no payload. It must verify the tenant creation
@@ -176,31 +183,42 @@ return null for that domain conflict. The unchanged dispatcher preserves this ty
 resolver error. It may not infer resource ownership from target input. In `handle`,
 which receives the command, verify payload resource ownership, load current
 schedule/configuration and busy periods, and re-evaluate the
-requested start using the dispatcher's injected transaction time. Reject a start
-that no longer qualifies with `Conflict`. Malformed input/configuration is
-`ValidationFailed`; unavailable or foreign resource/target access is `TenantDenied`.
+requested start using the dispatcher's injected transaction time. A well-formed
+start that fails B-7 through B-15 (including misalignment, out-of-hours time, notice
+or horizon bounds, and busy overlaps) raises `Conflict` with
+`details.reason="slot_unavailable"`, including a start that no longer qualifies.
+For this availability recheck, only schema failures raise `ValidationFailed`.
+IDs are tenant-scoped: a create-target ID that exists only in another tenant is
+unused and the create succeeds if the other rules pass. `TenantDenied` applies to
+foreign or absent existing targets and
+parents, including the resource; an absent create-target ID is expected.
 Derive the end and occupied interval from this authoritative resource state.
 Recheck target uniqueness under the resource lock. An insert that loses a target-ID
 race after resolution still raises `Conflict` through the unique constraint; that
 SQL race may carry constraint details without an `id_in_use` reason.
 
-**B-20. Desired (S3 comparison).** The database decides who owns occupied time.
+**B-20. Desired (S3 comparison).** The database arbitrates overlapping bookings.
 Require an immediate Postgres exclusion constraint on equal tenant/resource IDs
 and overlapping occupied ranges, including saved buffers. Two approved commands
 with different keys/IDs for conflicting time cannot both commit. Return one
 success and one typed `Conflict`, with no losing booking/action/outbox row.
+Race tests assert only `code === "Conflict"`: the loser may report
+`details.reason="slot_unavailable"` or `details.postgresCode="23P01"`. The
+constraint has no `WHERE` clause because only `confirmed` exists in this slice;
+adding cancellation later requires `WHERE status='confirmed'`.
 **Upstream does:** S3 conditionally updates one pre-existing available session,
 then reports whether the claim lost. We retain database arbitration but require
 range exclusion because independently created, overlapping intervals are not
 claims on one pre-existing session row.
 
 **B-21. Desired, other concurrent writes.** After the dispatcher's idempotency
-lock, acquire a transaction advisory lock on the namespaced key
-`booking-resource:<tenantId>:<resourceId>` before the authoritative recheck, and hold
-it until commit. Every future schedule or external block mutation for that resource
-must use the same key and lock order through the shared dispatcher. Do not require
-an UPDATE grant just to read-lock a resource row. Thus a create cannot race a
-schedule closure or new external block.
+lock, acquire
+`pg_advisory_xact_lock(hashtextextended('booking-resource:' || tenant_id || ':' || resource_id, 0))`
+before the authoritative recheck, with both UUIDs expressed as lowercase text, and
+hold it until commit. Every future schedule or external block mutation for that
+resource must use this exact expression and lock order through the shared
+dispatcher. Do not require an UPDATE grant just to read-lock a resource row.
+Thus a create cannot race a schedule closure or new external block.
 The exclusion constraint remains mandatory even when this lock serializes creates.
 The integration suite must also prove the constraint rejects an overlapping direct
 insert under the runtime role; an application lock alone is not booking authority.
@@ -237,6 +255,9 @@ Use `timestamptz` for instants. Define `bookings_resource_occupied_excl` using
 `tstzrange(occupied_starts_at,occupied_ends_at,'[)') WITH &&`. Never constrain only
 appointment starts or unbuffered ranges. Resource config must retain empty date
 overrides distinctly from absent overrides.
+This constraint arbitrates booking rows only. External blocks are guarded by the
+B-21 advisory lock and authoritative recheck; they are not covered by the exclusion
+constraint.
 
 **B-25. Desired, tenant enforcement (S5).** Every table has `tenant_id NOT NULL`,
 tenant FK, enabled and forced RLS, plus matching `USING` and `WITH CHECK` predicates
