@@ -1,3 +1,3 @@
 export * from "./actions/dispatch.js";
-export * from "./booking/index.js";
-export * from "./crm/index.js";
+export { bookingHandlers, createBooking, getAvailableSlots } from "./booking/index.js";
+export { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "./crm/index.js";

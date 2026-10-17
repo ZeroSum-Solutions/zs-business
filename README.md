@@ -24,11 +24,18 @@ mise exec -- pnpm --filter @zs/core test:crm
 
 `@zs/contracts` owns zod action types and stable error codes. `@zs/db` owns the
 Drizzle schema, SQL migration runner (`migrate(pool)`), and transaction-scoped tenant
-access. `@zs/core` exports `createDispatcher(handlers)`; only tests register a handler.
+access. `@zs/core` exports `createDispatcher(handlers)`, `bookingHandlers` and
+`crmHandlers`. Both feature handler maps are empty until implementation; a server
+will compose them with `createDispatcher({ ...bookingHandlers, ...crmHandlers })`.
 Baseline `test` excludes the booking and CRM folders. `test:booking` and `test:crm`
 run ordinary public examples and currently fail with `NotImplemented`. Slot examples
 check exact output; write examples check the bound-dispatcher interface with scripted
-responses. They do not establish database persistence or concurrency behavior.
+responses. One integration template per feature binds the exported handler map to
+the real runtime database and seeds configuration with service-role SQL. Setup
+runs inside its dispatch callback so today's wrapper stub raises `NotImplemented`
+before accessing absent feature tables. These templates do not cover concurrency
+or establish persistence until the features are implemented. The SQL seed/read
+contracts are B-28 and C-24 in the requirements.
 
 Tests default to the dedicated local Postgres at
 `postgres://postgres@127.0.0.1:55432/postgres`. `ZS_TEST_DATABASE_URL` accepts a

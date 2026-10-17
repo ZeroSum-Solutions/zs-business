@@ -273,10 +273,56 @@ the public feature folders; feature scripts run normal tests, without skips,
 `todo`, expected-failure flags or no-test success. Public slot fixtures assert exact
 outputs for alignment/notice, buffers/overrides, and both DST transitions. The write
 example checks the bound-dispatcher boundary using a scripted dispatcher response.
-It does not prove persistence. The implementer's real Postgres acceptance must
+A sixth test in `packages/core/test/booking/integration.test.ts` uses the B-27/B-28
+seam with the real `@zs/db/testing` database, two-tenant fixture and `zs_runtime`
+scoped database. It seeds a resource with service-role SQL and checks the committed
+booking. Setup runs inside the bound dispatch callback so the current wrapper stub
+fails with `NotImplemented` before accessing the absent feature tables. This is a
+template, not the acceptance set. The implementer's real Postgres acceptance must
 also cover cross-tenant denial, invalid zones, midnight buffers, exact horizon and
 notice edges, stale availability, exclusion races, retries and rollback. Hidden
 tests will check requirements beyond the public examples.
+
+**B-27. Desired, handler export and composition.**
+`packages/core/src/booking/index.ts` exports
+`bookingHandlers: Readonly<Record<string, ActionHandler>>`, keyed by the action
+type `booking.create`. `ActionHandler` uses the default `DispatchConfig`; handlers
+require no config keys because all feature settings live in tables. The scaffold
+exports `{}` without registering a handler, so direct dispatch of an unregistered
+action raises the shared dispatcher's `NotImplemented`. Export `bookingHandlers`
+through `packages/core/src/index.ts` as well. A server composes both features with
+`const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers })`.
+It supplies a trusted `DispatchContext` named `ctx`, with `db` set to the runtime
+scoped database (in tests, `TestDatabase.db`, backed by `zs_runtime`), `config: {}`,
+the injected clock/ID generator, actor/tenant and caller-supplied `resolveApproval`.
+Bind `BookingWriteContext.dispatch = command => dispatch(ctx, command)` at that
+server boundary. No dispatcher or shared action-type changes are required.
+
+**B-28. Desired, SQL fixture and inspection contract.** Tests use
+`withTestDatabase` and `createTwoTenantFixture` from `@zs/db/testing`. After the
+fixture provisions tenants, tests seed `booking_resources` and
+`booking_external_blocks` as `service_role` using plain SQL through
+`fixture.service`. INSERTs supply only the B-24 required columns with these exact
+Postgres types; all listed columns are NOT NULL:
+
+| Table | Column types |
+| --- | --- |
+| `booking_resources` | `tenant_id uuid`, `id uuid`, `time_zone text`, `weekly jsonb`, `overrides jsonb`, `slot_length_minutes integer`, `slot_step_minutes integer`, `buffer_before_minutes integer`, `buffer_after_minutes integer`, `minimum_notice_minutes integer`, `booking_horizon_minutes integer` |
+| `booking_external_blocks` | `tenant_id uuid`, `id uuid`, `resource_id uuid`, `starts_at timestamptz`, `ends_at timestamptz`, `source text`, `created_at timestamptz` |
+| `bookings` | `tenant_id uuid`, `id uuid`, `resource_id uuid`, `starts_at timestamptz`, `ends_at timestamptz`, `occupied_starts_at timestamptz`, `occupied_ends_at timestamptz`, `buffer_before_minutes integer`, `buffer_after_minutes integer`, `status text`, `created_at timestamptz` |
+
+`weekly` and `overrides` hold exactly the JSON arrays of the frozen
+`bookingResourceSchema` fields with those names. For example, `weekly` may be
+`[{"weekday":1,"windows":[{"startMinute":540,"endMinute":1020}]}]` and `overrides`
+may be `[]` or `[{"date":"2026-10-19","windows":[]}]`. Do not wrap those arrays,
+rename their keys or require another configuration table. Every extra column an
+implementer adds must be nullable or have a default. No extra NOT NULL table or
+mandatory related row may be required for these INSERTs; only the tenant and
+resource parents listed in B-24 may be prerequisites. Tests may SELECT `bookings`
+as `service_role` using any subset of exactly its B-24 columns listed above;
+grant that access. The same service-role seed/read access applies to the two
+configuration tables. Inspection does not establish RLS: tenant-denial and direct
+exclusion-constraint tests still run under `zs_runtime` (B-21/B-25).
 
 ## Frozen API and public examples
 
@@ -289,4 +335,5 @@ The root contracts/core indexes export the feature surface.
 Fixtures in `packages/core/fixtures/public/booking/`:
 `alignment-notice.json`, `buffers-override.json`, `dst-gap.json`, `dst-overlap.json`,
 and `create-booking.json`. They contain synthetic IDs and data only. Five public
-tests consume these examples; all currently fail with `NotImplemented`.
+tests consume these examples; a sixth is the SQL integration template. All
+currently fail with `NotImplemented`.

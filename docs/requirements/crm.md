@@ -234,16 +234,64 @@ RLS or write action/outbox history directly. Add two-tenant read/write denial te
 under `zs_runtime`; a service-role test is insufficient. Use local Postgres or a
 Supabase branch for future integration tests and clean up their data.
 
-**C-22. Desired, public test scope.** Run six ordinary feature tests, separate from
+**C-22. Desired, public test scope.** Run seven ordinary feature tests, separate from
 baseline `test`. Public JSON examples show creation with normalized email, import
 preservation, split identity conflict, deal creation, a revision bump and a stale
 move. Write tests use a scripted bound dispatcher to check command/result/error
 forwarding; they are boundary examples and do not prove handler algorithms or
-database persistence. All six currently fail with `NotImplemented`. Later real
+database persistence. A seventh test in `packages/core/test/crm/integration.test.ts`
+uses the C-23/C-24 seam with the real `@zs/db/testing` database, two-tenant fixture
+and `zs_runtime` scoped database. It seeds a pipeline and stages with service-role
+SQL, calls `createOrFindContact`, and checks the committed contact. Setup runs
+inside the bound dispatch callback so the current wrapper stub fails with
+`NotImplemented` before accessing the absent feature tables. This is a template,
+not the acceptance set. All seven currently fail with `NotImplemented`. Later real
 Postgres acceptance must prove C-1, C-6 through C-16 and C-19 through C-21, including
 uniqueness races, RLS, concurrent moves, idempotency and rollback. Hidden tests
 exercise cases beyond these public examples. Never replace failures with skips,
 `todo`, expected-failure flags or assertions that a stub throws.
+
+**C-23. Desired, handler export and composition.**
+`packages/core/src/crm/index.ts` exports
+`crmHandlers: Readonly<Record<string, ActionHandler>>`, keyed by action types
+`crm.contact.create-or-find`, `crm.deal.create` and `crm.deal.move-stage`.
+`ActionHandler` uses the default `DispatchConfig`; handlers require no config keys
+because all feature settings live in tables. The scaffold exports `{}` without
+registering handlers, so direct dispatch of an unregistered action raises the
+shared dispatcher's `NotImplemented`. Export `crmHandlers` through
+`packages/core/src/index.ts` as well. A server composes both features with
+`const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers })`.
+It supplies a trusted `DispatchContext` named `ctx`, with `db` set to the runtime
+scoped database (in tests, `TestDatabase.db`, backed by `zs_runtime`), `config: {}`,
+the injected clock/ID generator, actor/tenant and caller-supplied `resolveApproval`.
+Bind `CrmWriteContext.dispatch = command => dispatch(ctx, command)`; booking uses
+`BookingWriteContext.dispatch = command => dispatch(ctx, command)` at the same
+server boundary. No dispatcher or shared action-type changes are required.
+
+**C-24. Desired, SQL fixture and inspection contract.** Tests use
+`withTestDatabase` and `createTwoTenantFixture` from `@zs/db/testing`. After the
+fixture provisions tenants, tests seed `crm_pipelines` and then `crm_stages` as
+`service_role` using plain SQL through `fixture.service`. INSERTs supply only the
+C-20 required columns with these exact Postgres types:
+
+| Table | Column types |
+| --- | --- |
+| `crm_pipelines` | `tenant_id uuid`, `id uuid`, `name text` |
+| `crm_stages` | `tenant_id uuid`, `id uuid`, `pipeline_id uuid`, `name text`, `position integer` |
+| `crm_contacts` | `tenant_id uuid`, `id uuid`, `display_name text NULL`, `normalized_email text NULL`, `e164_phone text NULL`, `created_at timestamptz`, `updated_at timestamptz` |
+| `crm_deals` | `tenant_id uuid`, `id uuid`, `contact_id uuid`, `pipeline_id uuid`, `stage_id uuid`, `title text`, `revision bigint`, `created_at timestamptz`, `updated_at timestamptz` |
+
+All listed columns are NOT NULL except those marked NULL. `revision` retains
+C-20's safe-integer range and numeric API serialization. Every extra column an
+implementer adds must be nullable or have a default. No extra NOT NULL table or
+mandatory related row may be required for these INSERTs; only the tenant and
+pipeline parents listed in C-20 may be prerequisites. Tests may SELECT
+`crm_contacts` and `crm_deals` as `service_role` using any subset of exactly their
+C-20 columns listed above; grant that access. The same service-role seed/read
+access applies to pipelines and stages. Consent remains in C-20's separate
+`crm_contact_consent` table; no extra contact column is part of this inspection
+contract. Inspection does not establish RLS: tenant-denial tests still run under
+`zs_runtime` (C-21).
 
 ## Frozen API and examples
 
