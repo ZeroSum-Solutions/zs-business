@@ -311,17 +311,25 @@ describe("booking tables under the runtime role (B-21/B-25/B-28)", () => {
   it("arbitrates two concurrent overlapping direct inserts without any application lock", async () => {
     const { fixture, a } = await world();
     let release!: () => void;
+    let inserted!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
+    const firstInserted = new Promise<void>((resolve) => { inserted = resolve; });
     const first = fixture.a.run(async (tx) => {
       await tx.query(insert, row(a.tenantId, a.id, "2026-10-21T09:00:00Z", "2026-10-21T10:00:00Z"));
+      inserted();
       await held; // keep the first insert uncommitted while the second one arrives
     });
-    const second = fixture.a.run((tx) => tx.query(insert, row(a.tenantId, a.id, "2026-10-21T09:30:00Z", "2026-10-21T10:30:00Z")));
+    await firstInserted;
+    let secondSettled = false;
+    const second = fixture.a.run((tx) => tx.query(insert, row(a.tenantId, a.id, "2026-10-21T09:30:00Z", "2026-10-21T10:30:00Z")))
+      .finally(() => { secondSettled = true; });
+    const results = Promise.allSettled([first, second]);
     await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(secondSettled).toBe(false); // waits on the uncommitted conflicting row
     release();
-    const results = await Promise.allSettled([first, second]);
-    expect(results[0].status).toBe("fulfilled");
-    expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "23P01", constraint: "bookings_resource_occupied_excl" } });
+    const [won, lost] = await results;
+    expect(won.status).toBe("fulfilled");
+    expect(lost).toMatchObject({ status: "rejected", reason: { code: "23P01", constraint: "bookings_resource_occupied_excl" } });
     expect(await counts(fixture, a.tenantId)).toMatchObject({ bookings: 1 });
   });
 
