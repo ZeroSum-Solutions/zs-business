@@ -20,7 +20,12 @@ export interface TestDatabase {
 export function testAdminUrl(
   value = process.env.ZS_TEST_DATABASE_URL ?? defaultUrl,
 ): URL {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Invalid test database URL");
+  }
   if (
     !["postgres:", "postgresql:"].includes(url.protocol) ||
     url.hostname !== "127.0.0.1" ||

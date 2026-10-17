@@ -196,6 +196,32 @@ describe("tenant isolation under actual runtime and privileged roles", () => {
   ])("rejects unsafe test cluster URLs before any connection: %s", (url) => {
     expect(() => testAdminUrl(url)).toThrow("dedicated");
   });
+  it("strips inherited default grants and can migrate with existing roles as a non-superuser", async () => {
+    await withTestDatabase(async (db) => {
+      await db.pool.query(
+        `drop schema public cascade; create schema public authorization service_role; drop schema zs_internal cascade; grant create on database "${db.name}" to service_role; alter default privileges for role service_role in schema public grant all on tables to authenticated;`,
+      );
+      const client = await db.pool.connect();
+      try {
+        await client.query("set role service_role");
+        client.release();
+        await migrate(db.pool);
+        expect(
+          await db.db.tenant(
+            fixture.a.tenantId,
+            async (tx) =>
+              (
+                await tx.query(
+                  "select has_table_privilege(current_user,'actions','TRUNCATE') as truncate, has_table_privilege(current_user,'actions','UPDATE') as update",
+                )
+              ).rows[0],
+          ),
+        ).toEqual({ truncate: false, update: false });
+      } finally {
+        await db.pool.query("reset role");
+      }
+    });
+  });
   it("does not leak tenant context through reused connections", async () => {
     await fixture.a.run(async (tx) =>
       expect((await tx.query("select tenant_id from tenants")).rows).toEqual([

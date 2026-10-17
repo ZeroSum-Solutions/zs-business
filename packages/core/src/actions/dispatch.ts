@@ -5,6 +5,7 @@ import {
   targetSchema,
   uuidSchema,
   BindingMismatch,
+  Conflict,
   IdempotencyConflict,
   jsonValueSchema,
   NotImplemented,
@@ -28,7 +29,7 @@ export interface DispatchContext {
   readonly db: ScopedDatabase;
   readonly clock: { now(): Date };
   readonly config: DispatchConfig;
-  /** Trusted server resolver: load the approved binding, never echo the caller's claim. */
+  /** Trusted server resolver: load the approved binding; may lock/consume in this transaction. */
   readonly resolveApproval: (
     tx: Transaction,
     reference: ApprovalReference,
@@ -90,36 +91,36 @@ export function createDispatcher(
     const handler = registry.get(binding.actionType);
     if (!handler) throw new NotImplemented();
     const config = { ...ctx.config };
-    return ctx.db.tenant(binding.tenantId, async (tx) => {
-      // Lock before lookup: concurrent same-key callers see the committed winner at READ COMMITTED.
-      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
-        `${binding.tenantId}:${key}`,
-      ]);
-      const stored = (
-        await tx.query<{
-          id: string;
-          binding: ActionBinding;
-          result: JsonValue;
-        }>(
-          `SELECT id, jsonb_build_object('tenantId',tenant_id,'actorId',actor_id,'actionType',action_type,'target',target,'payload',payload,'approvalReference',approval_reference) AS binding, result FROM actions WHERE tenant_id=$1 AND idempotency_key=$2`,
-          [binding.tenantId, key],
-        )
-      ).rows[0];
-      if (stored) {
-        if (canonical(stored.binding.payload) !== canonical(binding.payload))
-          throw new IdempotencyConflict();
-        if (canonical(stored.binding) !== canonical(binding))
+    return ctx.db
+      .tenant(binding.tenantId, async (tx) => {
+        // Lock before lookup: concurrent same-key callers see the committed winner at READ COMMITTED.
+        await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
+          `${binding.tenantId}:${key}`,
+        ]);
+        const stored = (
+          await tx.query<{
+            id: string;
+            binding: ActionBinding;
+            result: JsonValue;
+          }>(
+            `SELECT id, jsonb_build_object('tenantId',tenant_id,'actorId',actor_id,'actionType',action_type,'target',target,'payload',payload,'approvalReference',approval_reference) AS binding, result FROM actions WHERE tenant_id=$1 AND idempotency_key=$2`,
+            [binding.tenantId, key],
+          )
+        ).rows[0];
+        if (stored) {
+          if (canonical(stored.binding.payload) !== canonical(binding.payload))
+            throw new IdempotencyConflict();
+          if (canonical(stored.binding) !== canonical(binding))
+            throw new BindingMismatch();
+          return { actionId: stored.id, result: stored.result };
+        }
+        const target = targetSchema.safeParse(
+          await handler.resolveTarget(tx, command.target),
+        );
+        if (!target.success || target.data.tenantId !== binding.tenantId)
+          throw new TenantDenied();
+        if (canonical(target.data) !== canonical(binding.target))
           throw new BindingMismatch();
-        return { actionId: stored.id, result: stored.result };
-      }
-      const target = targetSchema.safeParse(
-        await handler.resolveTarget(tx, command.target),
-      );
-      if (!target.success || target.data.tenantId !== binding.tenantId)
-        throw new TenantDenied();
-      if (canonical(target.data) !== canonical(binding.target))
-        throw new BindingMismatch();
-      if (command.approvalReference) {
         const approved = await ctx.resolveApproval(
           tx,
           command.approvalReference,
@@ -131,49 +132,58 @@ export function createDispatcher(
           throw new TenantDenied();
         if (canonical(approvedBinding.data) !== canonical(binding))
           throw new BindingMismatch();
-      }
-      const now = new Date(ctx.clock.now().getTime());
-      if (!Number.isFinite(now.getTime()))
-        throw new ValidationFailed("Clock returned an invalid instant");
-      const result = jsonValueSchema.parse(
-        await handler.handle({ tx, command, binding, now, config }),
-      );
-      const actionId = randomUUID();
-      const inserted = await tx.query<{ result: JsonValue }>(
-        `INSERT INTO actions (tenant_id,id,actor_id,action_type,target,payload,approval_reference,idempotency_key,result,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING result`,
-        [
-          binding.tenantId,
-          actionId,
-          binding.actorId,
-          binding.actionType,
-          JSON.stringify(binding.target),
-          JSON.stringify(binding.payload),
-          binding.approvalReference
-            ? JSON.stringify(binding.approvalReference)
-            : null,
-          key,
-          JSON.stringify(result),
-          now,
-        ],
-      );
-      const persistedResult = inserted.rows[0]!.result;
-      await tx.query(
-        `INSERT INTO outbox (tenant_id,id,action_id,event_type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-        [
-          binding.tenantId,
-          randomUUID(),
-          actionId,
-          config.outboxEventType,
-          JSON.stringify({
+        const now = new Date(ctx.clock.now().getTime());
+        if (!Number.isFinite(now.getTime()))
+          throw new ValidationFailed("Clock returned an invalid instant");
+        const result = jsonValueSchema.parse(
+          await handler.handle({ tx, command, binding, now, config }),
+        );
+        const actionId = randomUUID();
+        const inserted = await tx.query<{ result: JsonValue }>(
+          `INSERT INTO actions (tenant_id,id,actor_id,action_type,target,payload,approval_reference,idempotency_key,result,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING result`,
+          [
+            binding.tenantId,
             actionId,
-            actionType: binding.actionType,
-            target: binding.target,
-            result: persistedResult,
-          }),
-          now,
-        ],
-      );
-      return { actionId, result: persistedResult };
-    });
+            binding.actorId,
+            binding.actionType,
+            JSON.stringify(binding.target),
+            JSON.stringify(binding.payload),
+            JSON.stringify(binding.approvalReference),
+            key,
+            JSON.stringify(result),
+            now,
+          ],
+        );
+        const persistedResult = inserted.rows[0]!.result;
+        await tx.query(
+          `INSERT INTO outbox (tenant_id,id,action_id,event_type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [
+            binding.tenantId,
+            randomUUID(),
+            actionId,
+            config.outboxEventType,
+            JSON.stringify({
+              actionId,
+              actionType: binding.actionType,
+              target: binding.target,
+              result: persistedResult,
+            }),
+            now,
+          ],
+        );
+        return { actionId, result: persistedResult };
+      })
+      .catch((error: unknown) => {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          ["55P03", "57014", "40001", "40P01"].includes(String(error.code))
+        )
+          throw new Conflict(
+            "Database transaction timed out or conflicted; retry the same command",
+          );
+        throw error;
+      });
   };
 }

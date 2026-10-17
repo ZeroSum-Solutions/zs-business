@@ -7,8 +7,11 @@ export async function migrate(
   directory = new URL("../../../supabase/migrations/", import.meta.url),
 ): Promise<void> {
   const client = await pool.connect();
+  let discard = false;
   try {
     await client.query("BEGIN");
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await client.query("SET LOCAL statement_timeout = '15s'");
     await client.query(
       "SELECT pg_advisory_xact_lock(hashtextextended('zs-business:migrations', 0))",
     );
@@ -41,9 +44,13 @@ export async function migrate(
     }
     await client.query("COMMIT");
   } catch (error) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      discard = true;
+    }
     throw error;
   } finally {
-    client.release();
+    client.release(discard);
   }
 }

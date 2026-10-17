@@ -1,11 +1,15 @@
 import { z } from "zod";
 
 export const uuidSchema = z.uuid().toLowerCase();
-export const jsonValueSchema = z.json();
-export type JsonValue = z.infer<typeof jsonValueSchema>;
+import { isPostgresText, jsonValueSchema } from "./json.js";
+export { jsonValueSchema, type JsonValue } from "./json.js";
 export const targetSchema = z.strictObject({
   tenantId: uuidSchema,
-  type: z.string().min(1).max(100),
+  type: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine(isPostgresText, "Text is not valid in Postgres"),
   id: uuidSchema,
 });
 export const approvalReferenceSchema = z.strictObject({
@@ -15,15 +19,23 @@ export const approvalReferenceSchema = z.strictObject({
 export const actionBindingSchema = z.strictObject({
   tenantId: uuidSchema,
   actorId: uuidSchema,
-  actionType: z.string().min(1).max(100),
+  actionType: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine(isPostgresText, "Text is not valid in Postgres"),
   target: targetSchema,
   payload: jsonValueSchema,
-  approvalReference: approvalReferenceSchema.nullable(),
+  approvalReference: approvalReferenceSchema,
 });
 export const actionCommandSchema = actionBindingSchema
   .omit({ tenantId: true, actorId: true })
   .extend({
-    idempotencyKey: z.string().min(1).max(200),
+    idempotencyKey: z
+      .string()
+      .min(1)
+      .max(200)
+      .refine(isPostgresText, "Text is not valid in Postgres"),
   });
 export type Target = z.infer<typeof targetSchema>;
 export type ApprovalReference = z.infer<typeof approvalReferenceSchema>;

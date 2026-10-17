@@ -1,4 +1,5 @@
 import { readFile, readdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 
@@ -23,6 +24,6 @@ it("keeps ambient clocks and environment access out of all core source", async (
       }
     }
   }
-  await visitDirectory(new URL("../src", import.meta.url).pathname);
+  await visitDirectory(fileURLToPath(new URL("../src", import.meta.url)));
   expect(violations).toEqual([]);
 });

@@ -1,7 +1,9 @@
+import { createScopedDatabase } from "@zs/db";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   BindingMismatch,
+  Conflict,
   IdempotencyConflict,
   TenantDenied,
   NotImplemented,
@@ -144,6 +146,77 @@ describe("shared transactional action path", () => {
       event_type: "test.action.completed",
       created_at: instant,
     });
+  });
+  it("requires an approval reference before any state mutation", async () => {
+    await expect(
+      dispatch(ctx, { ...command, approvalReference: null }),
+    ).rejects.toBeInstanceOf(ValidationFailed);
+    expect((await counts()).state).toBe(0);
+  });
+  it.each(["\u0000", "\ud800"])(
+    "rejects invalid command text before running the handler: %j",
+    async (invalid) => {
+      await expect(
+        dispatch(ctx, { ...command, idempotencyKey: invalid }),
+      ).rejects.toBeInstanceOf(ValidationFailed);
+      await expect(
+        dispatch(ctx, { ...command, payload: { note: invalid } }),
+      ).rejects.toBeInstanceOf(ValidationFailed);
+      expect((await counts()).state).toBe(0);
+    },
+  );
+  it("bounds advisory lock waits and returns a typed conflict without writes", async () => {
+    const holder = await db.pool.connect();
+    try {
+      await holder.query("begin");
+      await holder.query(
+        "select pg_advisory_xact_lock(hashtextextended($1,0))",
+        [`${ctx.tenantId}:${command.idempotencyKey}`],
+      );
+      const fallbackRelease = setTimeout(() => {
+        void holder.query("rollback");
+      }, 100);
+      const bounded = createScopedDatabase(db.pool, {
+        lockTimeoutMs: 20,
+        statementTimeoutMs: 1000,
+      });
+      try {
+        await expect(
+          dispatch({ ...ctx, db: bounded }, command),
+        ).rejects.toBeInstanceOf(Conflict);
+      } finally {
+        clearTimeout(fallbackRelease);
+      }
+    } finally {
+      await holder.query("rollback");
+      holder.release();
+    }
+    expect((await counts()).state).toBe(0);
+  });
+  it("bounds SQL execution and returns a typed conflict", async () => {
+    const slow = createDispatcher({
+      "noop.slow": {
+        resolveTarget: async (_tx, target) => target,
+        handle: async ({ tx }) => {
+          await tx.query("select pg_sleep(0.1)");
+          return {};
+        },
+      },
+    });
+    command.actionType = "noop.slow";
+    approved = { ...approved, actionType: "noop.slow" };
+    await expect(
+      slow(
+        {
+          ...ctx,
+          db: createScopedDatabase(db.pool, { statementTimeoutMs: 20 }),
+        },
+        command,
+      ),
+    ).rejects.toBeInstanceOf(Conflict);
+    const saved = await counts();
+    expect(saved.actions).toHaveLength(0);
+    expect(saved.outbox).toHaveLength(0);
   });
   it("rejects reused keys with different payloads", async () => {
     await dispatch(ctx, command);

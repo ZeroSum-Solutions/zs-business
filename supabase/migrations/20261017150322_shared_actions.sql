@@ -3,11 +3,15 @@
 DO $$
 BEGIN
   BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
     CREATE ROLE authenticated NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+    END IF;
   EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
   END;
   BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='service_role') THEN
     CREATE ROLE service_role NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION BYPASSRLS;
+    END IF;
   EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
   END;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated' AND (rolbypassrls OR rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication)) THEN
@@ -69,7 +73,12 @@ CREATE POLICY tenant_scope ON public.outbox TO authenticated
 
 -- Runtime cannot delete/modify history or provision tenants. Provisioning and
 -- outbox processing use the explicitly privileged service entry point.
-REVOKE ALL ON public.tenants, public.actions, public.outbox FROM PUBLIC;
+REVOKE ALL ON public.tenants, public.actions, public.outbox FROM PUBLIC, authenticated, service_role;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+    REVOKE ALL ON public.tenants, public.actions, public.outbox FROM anon;
+  END IF;
+END $$;
 GRANT SELECT, UPDATE (name) ON public.tenants TO authenticated;
 GRANT SELECT, INSERT ON public.actions, public.outbox TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.tenants, public.actions, public.outbox TO service_role;

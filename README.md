@@ -35,15 +35,18 @@ handles for A/B and a separate privileged service handle.
 The dispatcher takes a trusted server context: actor, tenant, clock, config, database,
 and approval resolver. Handlers resolve target ownership from authoritative state
 inside the tenant transaction. Approval references resolve to the entire approved
-binding; use `null` for actions that need no approval. Authentication and approval
-issuance belong to later server adapters; caller-supplied context is not trusted.
+binding. Every command requires a reference. The trusted resolver may lock or consume
+an approval in this transaction; issuance and consumption policy belong to later
+server adapters. Caller-supplied context is not trusted.
 Handlers must write state through their supplied transaction and keep external side
 effects in outbox consumers.
 
 Idempotency lives in `actions`, with a unique `(tenant_id, idempotency_key)` and a
 stored JSON result. Transaction locks serialize retries; JSON object key order does
 not change payload identity. Actor, action type, target, and approval must also match
-on replay. State, action, and one outbox event commit together. Runtime grants allow
+on replay. Scoped transactions default to a 5-second lock timeout and 15-second
+statement timeout, configurable through `createScopedDatabase(pool, limits)`.
+State, action, and one outbox event commit together. Runtime grants allow
 history inserts and reads; privileged workers manage outbox delivery. SQL migrations
 force RLS on every tenant table. Cluster roles are created idempotently and existing
 unsafe role attributes fail migration instead of being changed.
