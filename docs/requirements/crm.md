@@ -284,8 +284,9 @@ C-20 required columns with these exact Postgres types:
 All listed columns are NOT NULL except those marked NULL. `revision` retains
 C-20's safe-integer range and numeric API serialization. Every extra column an
 implementer adds must be nullable or have a default. No extra NOT NULL table or
-mandatory related row may be required for these INSERTs; only the tenant and
-pipeline parents listed in C-20 may be prerequisites. Tests may SELECT
+mandatory related row may be required for the pipeline/stage seed INSERTs; only
+their tenant and pipeline parents listed in C-20 may be prerequisites. This seed
+limit preserves C-20's contact, pipeline and stage FKs on `crm_deals`. Tests may SELECT
 `crm_contacts` and `crm_deals` as `service_role` using any subset of exactly their
 C-20 columns listed above; grant that access. The same service-role seed/read
 access applies to pipelines and stages. Consent remains in C-20's separate
