@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Conflict, ValidationFailed, type ContactConsent } from "@zs/contracts";
-import { createOrFindContact } from "../../src/index.js";
+import type { ScopedDatabase, Transaction } from "@zs/db";
+import { createDispatcher, createOrFindContact, crmHandlers, type DispatchContext } from "../../src/index.js";
 import { shouldWriteConsent } from "../../src/crm/contact.js";
 import { contactCommand, createHarness, NOW, rejection, type Harness } from "./helpers.js";
 
@@ -161,6 +162,62 @@ describe("contact create/find on the runtime database", () => {
     expect(new Set(results.map((r) => r.result.contact.id)).size).toBe(1);
   });
 
+  it("C-7/C-8: opposite-order split identities fail with split_identity and never deadlock", async () => {
+    const a = h.fixture.a.tenantId;
+    const tag = randomUUID().slice(0, 8);
+    const [emailP, phoneP, emailQ, phoneQ] = [`p-${tag}@example.test`, "+14155550201", `q-${tag}@example.test`, "+14155550202"];
+    await createOrFindContact(contactCommand(a, { email: emailP, phone: phoneP }), h.ctx(a));
+    await createOrFindContact(contactCommand(a, { email: emailQ, phone: phoneQ }), h.ctx(a));
+    // First command: email matches P, phone matches Q. Second: email matches Q, phone matches P.
+    const commands = [
+      contactCommand(a, { email: emailP, phone: phoneQ }),
+      contactCommand(a, { email: emailQ, phone: phoneP }),
+    ];
+    // Hold each command after its first contact-row lock query until its peer either has run its own first
+    // lock query or is blocked on a lock. With per-identity row locks in opposite orders this deadlocks every
+    // time; with one ordered lock query the peer blocks, which releases the barrier.
+    const peers = [{ pid: undefined as number | undefined, arrived: false }, { pid: undefined as number | undefined, arrived: false }];
+    const peerArrivedOrBlocked = async (peer: (typeof peers)[number]) => {
+      for (;;) {
+        if (peer.arrived) return;
+        if (peer.pid !== undefined && (await h.database.pool.query(
+          "SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [peer.pid])).rowCount) return;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    const dbFor = (me: number): ScopedDatabase => ({
+      tenant: (tenantId, work) => h.database.db.tenant(tenantId, (tx) => {
+        const run = tx.query.bind(tx) as (...args: unknown[]) => Promise<unknown>;
+        let held = false;
+        const query = async (...args: unknown[]) => {
+          const text = String(typeof args[0] === "string" ? args[0] : (args[0] as { text?: string })?.text);
+          if (held || !/crm_contacts/.test(text) || !/FOR UPDATE/.test(text)) return run(...args);
+          held = true;
+          peers[me]!.pid = ((await run("SELECT pg_backend_pid() AS pid")) as { rows: { pid: number }[] }).rows[0]!.pid;
+          const result = await run(...args);
+          peers[me]!.arrived = true;
+          await peerArrivedOrBlocked(peers[1 - me]!);
+          return result;
+        };
+        return work({ query } as unknown as Transaction);
+      }),
+    });
+    const dispatch = createDispatcher({ ...crmHandlers });
+    const actorId = randomUUID();
+    const run = (me: number) => {
+      const { idempotencyKey: _key, ...binding } = commands[me]!;
+      const ctx: DispatchContext = {
+        tenantId: a, actor: { tenantId: a, id: actorId }, db: dbFor(me),
+        clock: { now: () => new Date(NOW) }, config: {}, generateId: randomUUID,
+        resolveApproval: async () => ({ ...binding, tenantId: a, actorId }),
+      };
+      return createOrFindContact(commands[me]!, { dispatch: (command) => dispatch(ctx, command) });
+    };
+    const results = await Promise.allSettled([run(0), run(1)]);
+    for (const result of results)
+      expect(result).toMatchObject({ status: "rejected", reason: { code: "Conflict", details: { reason: "split_identity" } } });
+  });
+
   it("C-16/C-19: an exact replay returns the stored result without a second action", async () => {
     const a = h.fixture.a.tenantId;
     const command = contactCommand(a, { email: "replay@example.test" });
@@ -169,6 +226,20 @@ describe("contact create/find on the runtime database", () => {
     const actions = await h.count("actions", a);
     expect(await createOrFindContact(command, ctx)).toEqual(first);
     expect(await h.count("actions", a)).toBe(actions);
+  });
+
+  it.each([
+    ["normalized_email", (n: string) => ({ email: `${n}@example.test`, phone: null })],
+    ["e164_phone", (n: string) => ({ email: null, phone: `+1415555${n.slice(0, 4)}` })],
+  ])("C-3: the unique index on %s rejects a duplicate in one tenant but allows it in another", async (_column, identity) => {
+    const { a, b } = h.fixture;
+    const value = identity(String(Math.floor(1000 + Math.random() * 9000)));
+    const insert = (tenantId: string) => h.fixture.service((tx) => tx.query(
+      `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,e164_phone,created_at,updated_at)
+       VALUES ($1,$2,NULL,$3,$4,$5,$5)`, [tenantId, randomUUID(), value.email, value.phone, NOW]));
+    await insert(a.tenantId);
+    await expect(insert(a.tenantId)).rejects.toMatchObject({ code: "23505" });
+    await expect(insert(b.tenantId)).resolves.toBeDefined();
   });
 
   it("C-21/C-24: runtime may insert only its own tenant's contact rows", async () => {

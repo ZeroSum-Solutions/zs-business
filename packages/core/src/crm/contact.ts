@@ -54,11 +54,16 @@ async function lockIdentities(tx: Transaction, tenantId: string, input: CreateOr
   for (const key of keys) await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [key]);
 }
 
-async function findBy(tx: Transaction, tenantId: string, column: "id" | "normalized_email" | "e164_phone", value: string) {
+/**
+ * Lock every row that matches the candidate ID, email or phone in one statement, in id order, so two commands
+ * that match the same rows through different identities cannot take those row locks in opposite orders.
+ */
+async function lockMatches(tx: Transaction, tenantId: string, input: CreateOrFindContactInput): Promise<ContactRow[]> {
   return (await tx.query<ContactRow>(
-    `SELECT ${contactColumns} FROM crm_contacts WHERE tenant_id=$1 AND ${column}=$2 FOR UPDATE`,
-    [tenantId, value],
-  )).rows[0];
+    `SELECT ${contactColumns} FROM crm_contacts
+      WHERE tenant_id=$1 AND (id=$2 OR normalized_email=$3 OR e164_phone=$4) ORDER BY id FOR UPDATE`,
+    [tenantId, input.contactId, input.email, input.phone],
+  )).rows;
 }
 
 async function attempt(
@@ -67,8 +72,10 @@ async function attempt(
   input: CreateOrFindContactInput,
   now: Date,
 ): Promise<CreateOrFindContactResult> {
-  const byEmail = input.email === null ? undefined : await findBy(tx, tenantId, "normalized_email", input.email);
-  const byPhone = input.phone === null ? undefined : await findBy(tx, tenantId, "e164_phone", input.phone);
+  const locked = await lockMatches(tx, tenantId, input);
+  const byEmail = input.email === null ? undefined : locked.find((row) => row.normalized_email === input.email);
+  const byPhone = input.phone === null ? undefined : locked.find((row) => row.e164_phone === input.phone);
+  const byId = locked.find((row) => row.id === input.contactId);
   if (byEmail && byPhone && byEmail.id !== byPhone.id)
     throw new Conflict("Email and phone belong to different contacts", { reason: "split_identity" });
   const match = byEmail ?? byPhone;
@@ -77,9 +84,7 @@ async function attempt(
       || (input.phone !== null && match.e164_phone !== null && match.e164_phone !== input.phone))
       throw new Conflict("Supplied identity differs from the matched contact", { reason: "identity_mismatch" });
   }
-  if (!match || match.id !== input.contactId) {
-    if (await findBy(tx, tenantId, "id", input.contactId)) throw idInUse("contact");
-  }
+  if (byId && (!match || match.id !== byId.id)) throw idInUse("contact");
 
   let row: ContactRow;
   let created = false;
