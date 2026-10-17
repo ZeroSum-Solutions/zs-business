@@ -38,7 +38,8 @@ sync will get separate write actions; they must obey B-21 before shipping.
 
 **B-2. Desired (S1/S2 comparison).** `getAvailableSlots(input, deps)` is synchronous
 and pure: no database, network, environment access, ambient clock or input mutation.
-Read `deps.clock.now()` once; a non-finite instant raises `ValidationFailed`. For
+On valid input, call `deps.clock.now()` exactly once; whether it is called for
+invalid input is unspecified. A non-finite instant raises `ValidationFailed`. For
 identical validated input and clock value, return identical output. **Upstream does:**
 S1 reads the current time and an environment-derived alignment fallback; S2 also
 reads time/configuration from its service environment. We inject these dependencies so
@@ -170,7 +171,8 @@ Do not accept this context from HTTP/MCP input. The future feature wrapper uses
 exactly once. Invalid input raises `ValidationFailed` without reaching dispatch.
 Validate the returned envelope with `createBookingOutputSchema.safeParse`; a parse
 failure raises `ValidationFailed`. Return the parsed `{actionId,result:BookingRecord}`
-on success. A non-finite dispatcher clock also raises `ValidationFailed`. The public
+on success. The shared dispatcher raises `ValidationFailed` for a non-finite clock;
+the wrapper propagates every dispatcher error unchanged. The public
 stub throws `NotImplemented`; it does not register handlers. Implementers later
 supply handlers at the composition root.
 
@@ -184,8 +186,9 @@ resolver error. It may not infer resource ownership from target input. In `handl
 which receives the command, verify payload resource ownership, load current
 schedule/configuration and busy periods, and re-evaluate the
 requested start using the dispatcher's injected transaction time. A well-formed
-start that fails B-7 through B-15 (including misalignment, out-of-hours time, notice
-or horizon bounds, and busy overlaps) raises `Conflict` with
+start that fails B-7–B-9, B-11, B-12, B-14 or B-15 (B-10's query range and B-13's
+input checks do not apply to create), including misalignment, out-of-hours time, notice
+or horizon bounds, and busy overlaps, raises `Conflict` with
 `details.reason="slot_unavailable"`, including a start that no longer qualifies.
 For this availability recheck, only schema failures raise `ValidationFailed`.
 IDs are tenant-scoped: a create-target ID that exists only in another tenant is

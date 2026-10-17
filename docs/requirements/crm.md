@@ -77,7 +77,8 @@ row when the candidate ID already exists in this tenant; raise `Conflict` with
 contact, or both resolve to that same contact, return its actual ID with
 `created:false`. The pre-minted candidate may differ from the returned contact ID;
 do not insert a spare candidate row. Fill an absent stored identity from a supplied
-unclaimed identity, and fill an absent display name. Preserve existing non-null
+unclaimed identity, and fill an absent display name. If the candidate ID is an existing contact other than
+the match, raise C-5's `id_in_use` (C-18). Preserve existing non-null
 identity/name values. If a supplied non-null identity differs from an already
 non-null identity on the matched row, raise `Conflict` with
 `details.reason="identity_mismatch"`, rather than silently ignore or replace it.
@@ -176,8 +177,8 @@ cannot supply this capability. The wrapper uses the matching command schema's
 `safeParse(command)` and forwards its `data` to dispatch exactly once. Invalid input
 raises `ValidationFailed` without reaching dispatch. Validate the returned envelope
 with the matching output schema's `safeParse`; a parse failure raises
-`ValidationFailed`. Return the parsed envelope on success. A non-finite dispatcher
-clock also raises `ValidationFailed`. The wrapper never re-dispatches; C-8's race
+`ValidationFailed`. Return the parsed envelope on success. The shared dispatcher raises
+`ValidationFailed` for a non-finite clock; the wrapper propagates every dispatcher error unchanged. The wrapper never re-dispatches; C-8's race
 recovery stays inside the handler transaction. Feature stubs register no handler;
 future composition roots supply handlers without changing the dispatcher or its types.
 
@@ -218,6 +219,9 @@ This scaffold adds neither. Use `timestamptz` for times and require these tables
 | `crm_pipelines` | `tenant_id`, `id`, `name`; PK `(tenant_id,id)`, tenant FK, nonempty name |
 | `crm_stages` | `tenant_id`, `id`, `pipeline_id`, `name`, `position`; PK `(tenant_id,id)`, composite pipeline FK, unique `(tenant_id,pipeline_id,id)`, nonnegative integral position and unique position per pipeline |
 | `crm_deals` | `tenant_id`, `id`, `contact_id`, `pipeline_id`, `stage_id`, `title`, `revision`, `created_at`, `updated_at`; PK `(tenant_id,id)`, composite contact and pipeline FKs, triple FK `(tenant_id,pipeline_id,stage_id)` to stages, nonempty title, revision integer >=1 and <=9007199254740991 (use bigint storage, safe numeric serialization) |
+
+Every "nonempty" text check above is exactly `char_length(col) BETWEEN 1 AND 200` with no
+trimming; whitespace-only values are valid (C-4).
 
 Pipeline/stage provisioning gets separate future dispatcher actions. It is fixture
 setup, not an implicit side effect of these functions. Consent storage must preserve
