@@ -3,6 +3,7 @@
 import { CheckCircle, Clock, WarningCircle } from "@phosphor-icons/react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DisabledReason } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import type { ConnectionStatus } from "@/lib/api";
 import { useConnections } from "@/lib/queries";
@@ -18,7 +19,7 @@ export function ConnectionsView() {
   const connections = useConnections();
   return (
     <>
-      <PageHeader title="Connections" description="Accounts this business uses. Fix anything marked here and it shows as done on Home." />
+      <PageHeader title="Connections" description="Accounts this business uses. Fix anything marked here and it shows as done on Home." sample />
       {connections.isPending ? <LoadingRows rows={6} /> : connections.isError ? <ErrorNote error={connections.error} retry={() => connections.refetch()} /> : (
         <ul className="divide-y divide-border-soft overflow-hidden rounded-md bg-surface shadow-ring">
           {connections.data.map((connection) => {
@@ -33,7 +34,12 @@ export function ConnectionsView() {
                   <p className="text-sm text-muted">{connection.purpose}</p>
                   <p className="text-xs text-meta">{connection.detail}</p>
                 </div>
-                {status.action ? <Button variant="secondary" disabled title="Available when connections go live">{status.action}</Button> : null}
+                {status.action ? (
+                  <div className="flex flex-col items-start gap-1 sm:items-end">
+                    <Button variant="secondary" disabled aria-describedby={`why-${connection.id}`}>{status.action}</Button>
+                    <DisabledReason id={`why-${connection.id}`}>Available when connections go live.</DisabledReason>
+                  </div>
+                ) : null}
               </li>
             );
           })}

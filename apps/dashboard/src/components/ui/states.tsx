@@ -2,6 +2,7 @@ import { WarningCircle } from "@phosphor-icons/react/ssr";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { isApiError } from "@/lib/api";
+import { SampleBadge } from "./sample";
 
 export function Skeleton({ className }: { className?: string }) {
   return <div aria-hidden className={cn("skeleton h-4", className)} />;
@@ -44,7 +45,7 @@ export function IncompleteNote({ list }: { list: { incomplete: boolean; loaded: 
   return (
     <p role="status" data-testid="list-incomplete" className="mb-3 flex items-start gap-2 rounded-md bg-warn/10 p-3 text-sm text-fg-2">
       <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-warn" />
-      <span>List incomplete — showing first {list.loaded}.</span>
+      <span>List incomplete — showing first {list.loaded.toLocaleString("en-US")}.</span>
     </p>
   );
 }
@@ -59,11 +60,15 @@ export function EmptyState({ title, children, action }: { title: string; childre
   );
 }
 
-export function PageHeader({ title, description, actions }: { title: string; description?: ReactNode; actions?: ReactNode }) {
+/** `sample` marks a page whose content is the built-in sample workspace in live mode. */
+export function PageHeader({ title, description, actions, sample = false }: { title: string; description?: ReactNode; actions?: ReactNode; sample?: boolean }) {
   return (
     <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
-        <h1 className="text-xl tracking-display lg:text-2xl">{title}</h1>
+        <div className="flex flex-wrap items-center gap-2">
+          <h1 className="text-xl tracking-display lg:text-2xl">{title}</h1>
+          {sample ? <SampleBadge /> : null}
+        </div>
         {description ? <p className="mt-1 text-sm text-muted">{description}</p> : null}
       </div>
       {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}

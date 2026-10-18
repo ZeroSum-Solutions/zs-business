@@ -20,12 +20,12 @@ export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
-        aria-label="Account menu"
         className={cn(
           "flex items-center gap-3 rounded-sm text-left transition-quick hover:bg-surface-warm data-[state=open]:bg-surface-warm",
           variant === "sidebar" ? "min-h-12 w-full px-2" : "size-11 justify-center",
         )}
       >
+        <span className="sr-only">Account menu</span>
         <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-pill bg-accent/12 text-xs font-semibold text-accent">
           {OWNER.initials}
         </span>
@@ -51,7 +51,7 @@ export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
             <DropdownMenu.Item key={item.href} asChild>
               <Link
                 href={item.href}
-                className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-sm text-fg outline-none data-[highlighted]:bg-surface-warm"
+                className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-sm text-fg data-[highlighted]:bg-surface-warm"
               >
                 <item.icon size={20} aria-hidden className="text-muted" />
                 {item.label}
@@ -61,7 +61,7 @@ export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
           <DropdownMenu.Separator className="my-1 h-px bg-border-soft" />
           <DropdownMenu.Item
             onSelect={() => signOut("signed_out")}
-            className="flex min-h-11 cursor-default items-center gap-3 rounded-sm px-3 text-sm text-fg outline-none data-[highlighted]:bg-surface-warm"
+            className="flex min-h-11 cursor-default items-center gap-3 rounded-sm px-3 text-sm text-fg data-[highlighted]:bg-surface-warm"
           >
             <SignOut size={20} aria-hidden className="text-muted" />
             Sign out

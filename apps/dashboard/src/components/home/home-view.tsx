@@ -6,6 +6,7 @@ import { useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SampleBadge, useSampleOnly } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows, PageHeader, Skeleton } from "@/components/ui/states";
 import type { WeekCompare } from "@/lib/api";
 import { useBookings, useChecklist, useResources, useResults, useUsage } from "@/lib/queries";
@@ -40,6 +41,7 @@ function StatTile({ label, value, compare }: { label: string; value: string; com
 
 function ResultsSection() {
   const results = useResults();
+  const sampleOnly = useSampleOnly();
   if (results.isPending) return <div className="grid grid-cols-2 gap-3 lg:col-span-12"><Skeleton className="h-32" /><Skeleton className="h-32" /></div>;
   if (results.isError) return <div className="lg:col-span-12"><ErrorNote error={results.error} retry={() => results.refetch()} /></div>;
   const data = results.data;
@@ -47,13 +49,14 @@ function ResultsSection() {
   return (
     <>
       <div className="grid grid-cols-2 gap-3 lg:col-span-5 lg:grid-cols-1 xl:grid-cols-2 lg:content-start">
+        {sampleOnly ? <p className="col-span-2 flex items-center gap-2 text-xs text-muted lg:col-span-1 xl:col-span-2"><SampleBadge />Results tiles show sample numbers.</p> : null}
         <StatTile label="New leads" value={formatNumber(data.leads.thisWeek)} compare={data.leads} />
         <StatTile label="Bookings" value={formatNumber(data.bookings.thisWeek)} compare={data.bookings} />
       </div>
       <Card className="lg:col-span-7 lg:row-span-2" aria-labelledby="revenue-title">
         <CardHeader>
           <div>
-            <CardTitle id="revenue-title">Revenue this week</CardTitle>
+            <div className="flex flex-wrap items-center gap-2"><CardTitle id="revenue-title">Revenue this week</CardTitle><SampleBadge /></div>
             <p className="tabular mt-2 text-3xl font-semibold tracking-display text-fg">{formatMoney(data.revenue.thisWeek, data.currency)}</p>
             <div className="mt-1"><Change value={data.revenue} /></div>
           </div>
@@ -89,7 +92,7 @@ function UsageCard() {
     <Card className="lg:col-span-5" aria-labelledby="usage-title">
       <CardHeader>
         <div>
-          <CardTitle id="usage-title">Wallet and usage</CardTitle>
+          <div className="flex flex-wrap items-center gap-2"><CardTitle id="usage-title">Wallet and usage</CardTitle><SampleBadge /></div>
           <CardDescription>Prepaid. Sending pauses at $0, so there are no surprise bills.</CardDescription>
         </div>
       </CardHeader>
@@ -137,7 +140,7 @@ function ChecklistCard() {
     <Card className="lg:col-span-5" aria-labelledby="checklist-title">
       <CardHeader>
         <div>
-          <CardTitle id="checklist-title">Connections</CardTitle>
+          <div className="flex flex-wrap items-center gap-2"><CardTitle id="checklist-title">Connections</CardTitle><SampleBadge /></div>
           <CardDescription>{open > 0 ? `${open} need${open === 1 ? "s" : ""} you` : "Everything is connected"}</CardDescription>
         </div>
       </CardHeader>

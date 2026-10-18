@@ -11,7 +11,7 @@ import { isDealChanged, type DealRecord, type ListResult, type PipelineSummary }
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { useKeys, useContacts, useDeals, usePipeline } from "@/lib/queries";
-import { cn, relativeTime } from "@/lib/utils";
+import { cn, relativeTime, revealOnFocus } from "@/lib/utils";
 
 type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
 
@@ -109,7 +109,7 @@ export function PipelineBoard() {
       {refreshError ? <div className="mb-4"><ErrorNote error={refreshError} retry={() => deals.refetch()} /></div> : null}
       <IncompleteNote list={deals.data} />
 
-      <div role="group" aria-label="Stage" className="-mx-4 mb-4 flex gap-2 overflow-x-auto px-4 lg:hidden">
+      <div role="group" aria-label="Stage" className="-mx-4 mb-3 flex scroll-px-4 gap-2 overflow-x-auto px-4 py-1 lg:hidden">
         {stages.map((stage) => {
           const count = deals.data.items.filter((deal) => deal.stageId === stage.id).length;
           const active = stage.id === activeStage;
@@ -119,6 +119,7 @@ export function PipelineBoard() {
               type="button"
               aria-pressed={active}
               onClick={() => setStageFilter(stage.id)}
+              onFocus={revealOnFocus}
               className={cn(
                 "flex min-h-11 shrink-0 items-center gap-2 rounded-pill px-4 text-sm font-medium transition-quick",
                 active ? "bg-fg text-bg" : "bg-surface text-fg-2 shadow-ring hover:bg-surface-warm",

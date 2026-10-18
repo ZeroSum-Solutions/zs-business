@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { DisabledReason, NOT_AVAILABLE, useSampleOnly } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
@@ -22,22 +23,26 @@ export function AgentsView() {
   const agents = useAgents();
   const approvals = useApprovals();
   const toast = useToast();
-  // UI-only for now: the kill switch does not reach a server yet.
+  const sampleOnly = useSampleOnly();
+  // UI-only for now: the kill switch does not reach a server yet, so live mode turns it off.
   const [allPaused, setAllPaused] = useState(false);
   const [decided, setDecided] = useState<Record<string, "approved" | "rejected">>({});
   const pending = approvals.data?.filter((item) => !decided[item.id]) ?? [];
 
   return (
     <>
-      <PageHeader title="Agents" description="Helpers that work for you. Anything that speaks for the business waits for your approval." />
+      <PageHeader title="Agents" description="Helpers that work for you. Anything that speaks for the business waits for your approval." sample />
+      {sampleOnly ? <div className="mb-4"><DisabledReason id="agents-unavailable">{NOT_AVAILABLE}</DisabledReason></div> : null}
 
       <Card className={cn("mb-4 flex items-center gap-4", allPaused && "shadow-[inset_0_0_0_1px_var(--danger)]")}>
         <div className="min-w-0 flex-1">
           <h2 id="kill-label" className="text-base font-semibold">Pause all agents</h2>
-          <p className="text-sm text-muted">{allPaused ? "All agents are paused. Nothing is sent until you turn this off." : "Stops every agent at once. Turn it off to resume."}</p>
+          <p id="kill-state" className="text-sm text-muted">{allPaused ? "All agents are paused. Nothing is sent until you turn this off." : "Stops every agent at once. Turn it off to resume."}</p>
         </div>
         <Switch
           aria-labelledby="kill-label"
+          aria-describedby={sampleOnly ? "agents-unavailable" : undefined}
+          disabled={sampleOnly}
           checked={allPaused}
           onCheckedChange={(checked) => {
             setAllPaused(checked);
@@ -88,12 +93,13 @@ export function AgentsView() {
                   <p className="mt-2 text-xs text-meta">Drafted {relativeTime(item.createdAt)}</p>
                   <div className="mt-3 flex gap-2">
                     <Button
-                      disabled={allPaused}
+                      disabled={allPaused || sampleOnly}
+                      aria-describedby={sampleOnly ? "agents-unavailable" : allPaused ? "kill-state" : undefined}
                       onClick={() => { setDecided({ ...decided, [item.id]: "approved" }); toast("Approved. It will send shortly."); }}
                     >
                       Approve and send
                     </Button>
-                    <Button variant="ghost" onClick={() => { setDecided({ ...decided, [item.id]: "rejected" }); toast("Draft discarded.", "info"); }}>
+                    <Button variant="ghost" disabled={sampleOnly} aria-describedby={sampleOnly ? "agents-unavailable" : undefined} onClick={() => { setDecided({ ...decided, [item.id]: "rejected" }); toast("Draft discarded.", "info"); }}>
                       Discard
                     </Button>
                   </div>

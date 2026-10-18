@@ -40,3 +40,11 @@ export function formatPhone(phone: string | null): string | null {
   const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(phone);
   return match ? `+1 ${match[1]} ${match[2]} ${match[3]}` : phone;
 }
+
+/**
+ * Focus handler for chips in a horizontal scroller. Chrome leaves a half-visible chip where it
+ * is on focus, which cuts off its focus ring; this brings it fully in, honouring scroll-padding.
+ */
+export function revealOnFocus(event: { currentTarget: HTMLElement }) {
+  event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" });
+}

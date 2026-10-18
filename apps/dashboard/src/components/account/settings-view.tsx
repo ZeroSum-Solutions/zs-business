@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
+import { DisabledReason, NOT_AVAILABLE, useSampleOnly } from "@/components/ui/sample";
 import { PageHeader } from "@/components/ui/states";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
@@ -17,14 +18,15 @@ const NOTIFY = [
 
 export function SettingsView() {
   const toast = useToast();
+  const sampleOnly = useSampleOnly();
   const [notify, setNotify] = useState<Record<string, boolean>>({ booking: true, approval: true, digest: false });
   return (
     <>
-      <PageHeader title="Settings" description="Business details and how we reach you." />
+      <PageHeader title="Settings" description="Business details and how we reach you." sample />
       <div className="grid max-w-3xl gap-4">
         <Card aria-labelledby="business-title">
           <CardHeader><CardTitle id="business-title">Business</CardTitle></CardHeader>
-          <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); toast("Settings saved."); }}>
+          <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); if (!sampleOnly) toast("Settings saved."); }}>
             <div>
               <Label htmlFor="biz-name">Business name</Label>
               <Input id="biz-name" defaultValue={OWNER.legalName} />
@@ -44,11 +46,15 @@ export function SettingsView() {
                 </Select>
               </div>
             </div>
-            <Button type="submit">Save changes</Button>
+            <div className="space-y-2">
+              <Button type="submit" disabled={sampleOnly} aria-describedby={sampleOnly ? "settings-unavailable" : undefined}>Save changes</Button>
+              {sampleOnly ? <DisabledReason id="settings-unavailable">{NOT_AVAILABLE}</DisabledReason> : null}
+            </div>
           </form>
         </Card>
         <Card aria-labelledby="notify-title">
           <CardHeader><CardTitle id="notify-title">Notifications</CardTitle></CardHeader>
+          {sampleOnly ? <DisabledReason id="notify-unavailable">{NOT_AVAILABLE}</DisabledReason> : null}
           <ul className="divide-y divide-border-soft">
             {NOTIFY.map((item) => (
               <li key={item.id} className="flex items-center gap-4 py-2">
@@ -56,7 +62,7 @@ export function SettingsView() {
                   <p id={`n-${item.id}`} className="text-sm font-medium text-fg">{item.label}</p>
                   <p className="text-sm text-muted">{item.hint}</p>
                 </div>
-                <Switch aria-labelledby={`n-${item.id}`} checked={notify[item.id] ?? false} onCheckedChange={(checked) => setNotify({ ...notify, [item.id]: checked })} />
+                <Switch aria-labelledby={`n-${item.id}`} disabled={sampleOnly} aria-describedby={sampleOnly ? "notify-unavailable" : undefined} checked={notify[item.id] ?? false} onCheckedChange={(checked) => setNotify({ ...notify, [item.id]: checked })} />
               </li>
             ))}
           </ul>

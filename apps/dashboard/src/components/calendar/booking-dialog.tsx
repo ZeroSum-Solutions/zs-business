@@ -13,7 +13,7 @@ import { useApi } from "@/lib/api/react";
 import { useKeys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
 import { useIntentKey } from "@/lib/intent-key";
-import { cn } from "@/lib/utils";
+import { cn, revealOnFocus } from "@/lib/utils";
 import { SlotsError } from "./slots-error";
 
 const CONFLICT_MESSAGE = "That time was just taken. Pick another slot.";
@@ -101,7 +101,7 @@ export function BookingDialog({
       <DialogContent title="Book an appointment" description={resource.name ?? "Calendar"} data-resource-id={resource.id}>
         <fieldset>
           <legend className="mb-2 text-sm font-medium text-fg-2">Day</legend>
-          <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap">
+          <div className="-m-1 flex scroll-px-2 gap-2 overflow-x-auto p-1 sm:flex-wrap">
             {days.map((day) => {
               const active = day === dateKey;
               const [weekday, rest] = formatDateKey(day).split(", ");
@@ -111,6 +111,7 @@ export function BookingDialog({
                   type="button"
                   aria-pressed={active}
                   onClick={() => { setDateKey(day); setSelected(null); setConflict(false); }}
+                  onFocus={revealOnFocus}
                   className={cn(
                     "flex min-h-14 min-w-16 shrink-0 flex-col items-center justify-center rounded-sm px-2 text-xs transition-quick",
                     active ? "bg-accent text-accent-on" : "bg-surface text-fg-2 shadow-[inset_0_0_0_1px_var(--border)] hover:bg-surface-warm",

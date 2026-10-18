@@ -40,7 +40,7 @@ export function ContactList() {
         <ul className="divide-y divide-border-soft overflow-hidden rounded-md bg-surface shadow-ring" aria-busy={contacts.isFetching}>
           {contacts.data.items.map((contact) => (
             <li key={contact.id}>
-              <Link href={`/customers/${contact.id}`} className="flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-surface-warm">
+              <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-surface-warm">
                 <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-warm text-sm font-semibold text-fg-2">
                   {initials(contact.displayName ?? contact.email)}
                 </span>

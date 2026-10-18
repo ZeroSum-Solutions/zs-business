@@ -2,6 +2,7 @@
 
 import { ArrowLeft, ChatCircleText, EnvelopeSimple, Globe, InstagramLogo } from "@phosphor-icons/react";
 import Link from "next/link";
+import { useEffect, useRef } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/input";
@@ -33,7 +34,7 @@ function ThreadList({ selectedId }: { selectedId: string | null }) {
             <Link
               href={`/inbox/${thread.id}`}
               aria-current={active ? "true" : undefined}
-              className={cn("flex gap-3 px-4 py-3 transition-quick hover:bg-surface-warm", active && "bg-surface-warm shadow-[inset_2px_0_0_var(--accent)]")}
+              className={cn("focus-inset flex gap-3 px-4 py-3 transition-quick hover:bg-surface-warm", active && "bg-surface-warm shadow-[inset_2px_0_0_var(--accent)]")}
             >
               <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-warm text-sm font-semibold text-fg-2">
                 {initials(thread.contactName)}
@@ -60,6 +61,12 @@ function ThreadList({ selectedId }: { selectedId: string | null }) {
 
 function ThreadPane({ id }: { id: string }) {
   const thread = useThread(id);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const loaded = thread.isSuccess;
+  // Opening a conversation moves focus to it, so keyboard and screen reader users land there.
+  useEffect(() => {
+    if (loaded) heading.current?.focus();
+  }, [id, loaded]);
   if (thread.isPending) return <LoadingRows rows={4} label="Loading conversation" />;
   if (thread.isError) return <ErrorNote error={thread.error} retry={() => thread.refetch()} />;
   const channel = CHANNELS[thread.data.channel];
@@ -67,7 +74,7 @@ function ThreadPane({ id }: { id: string }) {
     <article aria-labelledby="thread-title" className="flex flex-col rounded-md bg-surface shadow-ring">
       <header className="flex items-center justify-between gap-3 border-b border-border-soft px-4 py-3">
         <div>
-          <h2 id="thread-title" className="text-base font-semibold">{thread.data.contactName}</h2>
+          <h2 id="thread-title" ref={heading} tabIndex={-1} className="text-base font-semibold break-words">{thread.data.contactName}</h2>
           <p className="flex items-center gap-1.5 text-xs text-meta"><channel.icon size={14} aria-hidden />{channel.label}</p>
         </div>
       </header>
@@ -76,7 +83,7 @@ function ThreadPane({ id }: { id: string }) {
           const mine = message.from !== "customer";
           return (
             <li key={message.id} className={cn("flex flex-col", mine ? "items-end" : "items-start")}>
-              <div className={cn("max-w-[85%] rounded-lg px-3.5 py-2.5 text-sm", mine ? "bg-accent/10 text-fg" : "bg-surface-warm text-fg")}>
+              <div className={cn("max-w-[85%] rounded-lg px-3.5 py-2.5 text-sm break-words whitespace-pre-wrap", mine ? "bg-accent/10 text-fg" : "bg-surface-warm text-fg")}>
                 {message.body}
               </div>
               <p className="mt-1 text-xs text-meta">
@@ -90,8 +97,8 @@ function ThreadPane({ id }: { id: string }) {
         <label htmlFor="reply" className="sr-only">Reply to {thread.data.contactName}</label>
         <Textarea id="reply" rows={2} placeholder={`Reply by ${channel.label.toLowerCase()}`} className="min-h-16" />
         <div className="mt-2 flex items-center justify-between gap-3">
-          <p className="text-xs text-meta">Replies send in the next release.</p>
-          <Button type="submit" disabled>Send</Button>
+          <p id="reply-why" className="text-xs text-meta">Replies send in the next release.</p>
+          <Button type="submit" disabled aria-describedby="reply-why">Send</Button>
         </div>
       </form>
     </article>
@@ -101,9 +108,8 @@ function ThreadPane({ id }: { id: string }) {
 export function InboxView({ selectedId }: { selectedId: string | null }) {
   return (
     <>
-      <div className={cn(selectedId && "hidden lg:block")}>
-        <PageHeader title="Inbox" description="Texts, email, Instagram and web chat in one list." />
-      </div>
+      {/* One visible h1 at every width, also with a conversation open on a phone. */}
+      <PageHeader title="Inbox" description="Texts, email, Instagram and web chat in one list." sample />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
         <div className={cn(selectedId && "hidden lg:block")}><ThreadList selectedId={selectedId} /></div>
         <div className={cn(!selectedId && "hidden lg:block")}>

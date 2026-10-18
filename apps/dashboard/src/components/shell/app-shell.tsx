@@ -13,11 +13,11 @@ import { SessionGate } from "./session-gate";
 
 function Brand() {
   return (
-    <Link href="/" className="flex min-h-11 items-center gap-3 rounded-sm" aria-label={`${OWNER.business}, home`}>
+    <Link href="/" className="flex min-h-11 items-center gap-3 rounded-sm">
       <span aria-hidden className="flex size-8 items-center justify-center rounded-sm bg-fg text-[13px] font-semibold tracking-tight text-bg">
         H&amp;R
       </span>
-      <span className="text-[15px] font-semibold text-fg">{OWNER.business}</span>
+      <span className="text-[15px] font-semibold text-fg">{OWNER.business}<span className="sr-only">, home</span></span>
     </Link>
   );
 }
@@ -36,7 +36,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="relative min-h-dvh lg:pl-[var(--sidebar-width)]">
-      <a href="#main" className="sr-only z-[70] rounded-sm bg-surface px-4 py-2 focus:not-sr-only focus:fixed focus:top-2 focus:left-2">
+      <a href="#main" className="sr-only z-[70] rounded-sm bg-surface focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:inline-flex focus:min-h-11 focus:items-center focus:px-4">
         Skip to content
       </a>
 

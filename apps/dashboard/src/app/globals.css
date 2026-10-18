@@ -34,12 +34,20 @@
     font-weight: 600;
     color: var(--fg);
   }
+  /* An outline, not a box-shadow: it survives forced-colors mode. Rows inside clipped lists
+     use focus-inset so overflow never cuts the ring off. */
   :focus-visible {
-    outline: none;
-    box-shadow: var(--focus-ring);
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   ::selection {
     background: color-mix(in oklab, var(--accent), transparent 75%);
+  }
+}
+
+@utility focus-inset {
+  &:focus-visible {
+    outline-offset: -2px;
   }
 }
 

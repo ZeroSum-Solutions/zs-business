@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
+import { DisabledReason, NOT_AVAILABLE, useSampleOnly } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { useApi } from "@/lib/api/react";
 import { useKeys, usePlan } from "@/lib/queries";
@@ -17,6 +18,7 @@ export function PlanView() {
   const queryClient = useQueryClient();
   const { keys } = useKeys();
   const plan = usePlan();
+  const sampleOnly = useSampleOnly();
   const [confirming, setConfirming] = useState(false);
   // The step's button replaces the one just pressed, so focus follows it; focusing also
   // scrolls it clear of the phone tab bar (see scroll-padding in globals.css).
@@ -42,7 +44,7 @@ export function PlanView() {
 
   return (
     <>
-      <PageHeader title="Plan" description="One price, clear limits, and you can leave any time." />
+      <PageHeader title="Plan" description="One price, clear limits, and you can leave any time." sample />
       {plan.isPending ? <LoadingRows rows={4} /> : plan.isError ? <ErrorNote error={plan.error} retry={() => plan.refetch()} /> : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
           <Card aria-labelledby="plan-title">
@@ -103,7 +105,16 @@ export function PlanView() {
             ) : (
               <div className="space-y-3">
                 <p className="text-sm text-muted">No calls, no forms. Two taps and you are done.</p>
-                <Button ref={cancelRef} variant="danger-outline" onClick={() => goToStep(true)}>Cancel plan</Button>
+                <Button
+                  ref={cancelRef}
+                  variant="danger-outline"
+                  disabled={sampleOnly}
+                  aria-describedby={sampleOnly ? "cancel-unavailable" : undefined}
+                  onClick={() => goToStep(true)}
+                >
+                  Cancel plan
+                </Button>
+                {sampleOnly ? <DisabledReason id="cancel-unavailable">{NOT_AVAILABLE}</DisabledReason> : null}
               </div>
             )}
           </Card>
