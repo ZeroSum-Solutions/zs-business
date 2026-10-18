@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { Pool } from "pg";
+import { bookingPageSnippets, signBookingKey } from "@zs/core";
 import { migrate } from "@zs/db";
 import { assertLocalDatabaseUrl, jwtSecretSchema } from "../config.js";
 import { signDevToken } from "../dev-token.js";
@@ -26,6 +27,16 @@ try {
   const summary = await seedDemo({ service: admin, runtime, clock, generateId: randomUUID });
   const token = await signDevToken(jwtSecret, summary.principal, clock);
   console.log(formatSeedReport(summary, runtimeTarget));
+  // The booking key is signed with the API's secret, so print it only when that secret is set.
+  const keySecret = process.env.PUBLIC_BOOKING_KEY_SECRET;
+  if (keySecret && keySecret.length >= 32) {
+    const key = signBookingKey(keySecret, { tenantId: summary.principal.tenantId, pageId: summary.bookingPageId });
+    const base = process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? "8787"}`;
+    const snippets = bookingPageSnippets(base, key);
+    console.log(`\nBooking page: ${snippets.bookingUrl}\nWidget snippet:\n${snippets.embedScript}`);
+  } else {
+    console.log("\nSet PUBLIC_BOOKING_KEY_SECRET to print the demo booking page URL.");
+  }
   console.log(`\nDev JWT (7 days, tenant ${summary.principal.tenantId}; the API accepts it only with JWT_MAX_TTL_SECONDS=604800):\n${token}`);
 } finally {
   await Promise.all([admin.end(), runtime.end()]);

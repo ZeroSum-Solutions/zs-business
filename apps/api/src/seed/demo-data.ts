@@ -52,3 +52,11 @@ export const DEMO_DEALS: readonly { contact: number; title: string; stage: DemoS
   { contact: 8, title: "Signet ring with family crest", stage: "Design" },
   { contact: 10, title: "Diamond stud upgrade", stage: "Inquiry" },
 ];
+
+/** The demo business's public booking page; fake text only. */
+export const DEMO_BOOKING_PAGE = {
+  title: "Book a Halden & Rowe appointment",
+  description: "Showroom visits and repair drop-offs at our Bath workshop.",
+  disclosureVersion: "2026-10",
+  disclosureText: "Halden & Rowe may email or text you about your order and occasional collection news. Untick to opt out; you can stop at any time.",
+} as const;

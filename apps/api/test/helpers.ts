@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createDealOutputSchema, createOrFindContactOutputSchema } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { createApp, createHs256Verifier, type App } from "../src/app.js";
+import { signBookingKey } from "@zs/core";
+import { createApp, createHs256Verifier, type App, type PublicIntakeConfig } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
 /** Synthetic HS256 key, built at runtime so secret scanners do not flag a literal. */
@@ -10,6 +11,10 @@ export const SECRET = ["test", "secret", "x".repeat(32)].join("-");
 export const NOW = "2026-10-19T08:00:00.000Z";
 export const ORIGIN = "http://localhost:3000";
 export const clock = { now: () => new Date(NOW) };
+/** Synthetic booking key secrets, built at runtime like SECRET. */
+export const KEY_SECRET = ["test", "booking", "k".repeat(32)].join("-");
+export const PREVIOUS_KEY_SECRET = ["test", "booking", "p".repeat(32)].join("-");
+export const PUBLIC_BASE_URL = "http://book.test";
 
 export interface TenantSetup {
   tenantId: string;
@@ -50,15 +55,25 @@ async function provision(fixture: TwoTenantFixture, tenantId: string): Promise<T
   return { tenantId, actorId, token, resourceId, pipelineId, stages };
 }
 
-export async function createApiHarness(): Promise<ApiHarness> {
+export interface HarnessOptions {
+  /** Turns the public booking routes on; secrets and base URL default to the test values. */
+  publicIntake?: Partial<PublicIntakeConfig>;
+  clock?: { now(): Date };
+}
+
+export async function createApiHarness(options: HarnessOptions = {}): Promise<ApiHarness> {
   const database = await createTestDatabase();
   const fixture = await createTwoTenantFixture(database);
+  const appClock = options.clock ?? clock;
   const app = createApp({
-    verifier: createHs256Verifier(SECRET, { clock }),
-    clock,
+    verifier: createHs256Verifier(SECRET, { clock: appClock }),
+    clock: appClock,
     db: database.db,
     generateId: randomUUID,
     config: { allowedOrigins: [ORIGIN] },
+    ...(options.publicIntake
+      ? { publicIntake: { keySecrets: { current: KEY_SECRET }, publicBaseUrl: PUBLIC_BASE_URL, ...options.publicIntake } }
+      : {}),
   });
   return {
     database,
@@ -100,4 +115,30 @@ export async function contactAndDeal(harness: ApiHarness, tenant: TenantSetup, e
     body: { contactId: contact.result.contact.id, pipelineId: tenant.pipelineId, stageId: tenant.stages[0], title: "Ring" },
   })).body);
   return { contactId: contact.result.contact.id, dealId: deal.result.id };
+}
+
+export interface PageSetup {
+  pageId: string;
+  key: string;
+}
+/** Provision a booking page as the service role would; the key is signed like the owner list. */
+export async function provisionPage(
+  harness: ApiHarness,
+  tenant: TenantSetup,
+  options: { published?: boolean; resourceIds?: string[]; disclosureVersion?: string } = {},
+): Promise<PageSetup> {
+  const pageId = randomUUID();
+  await harness.fixture.service(async (tx) => {
+    await tx.query(
+      `INSERT INTO booking_pages (tenant_id,id,title,published,disclosure_version,created_at)
+       VALUES ($1,$2,'Book a fitting',$3,$4,$5)`,
+      [tenant.tenantId, pageId, options.published ?? true, options.disclosureVersion ?? "v1", NOW],
+    );
+    for (const [position, resourceId] of (options.resourceIds ?? [tenant.resourceId]).entries())
+      await tx.query(
+        "INSERT INTO booking_page_resources (tenant_id,page_id,resource_id,position) VALUES ($1,$2,$3,$4)",
+        [tenant.tenantId, pageId, resourceId, position],
+      );
+  });
+  return { pageId, key: signBookingKey(KEY_SECRET, { tenantId: tenant.tenantId, pageId }) };
 }

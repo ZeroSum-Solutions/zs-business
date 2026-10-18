@@ -4,7 +4,7 @@ import process from "node:process";
 import { serve } from "@hono/node-server";
 import { Pool } from "pg";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
-import { createApp } from "./app.js";
+import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits } from "./app.js";
 import { createHs256Verifier } from "./auth.js";
 import { parseServerEnv } from "./config.js";
 
@@ -16,6 +16,13 @@ await assertRuntimeLogin(pool).catch(async (error: unknown) => {
   await pool.end();
   throw error;
 });
+const publicIntake: PublicIntakeConfig | undefined = env.publicIntake === null ? undefined : {
+  keySecrets: env.publicIntake.keySecrets,
+  publicBaseUrl: env.publicIntake.publicBaseUrl,
+  trustProxy: env.publicIntake.trustProxy,
+  limits: Object.fromEntries(Object.entries(env.publicIntake.limitOverrides).map(([name, limit]) =>
+    [name, { ...DEFAULT_RATE_LIMITS[name as keyof RateLimits], limit }])),
+};
 const app = createApp({
   verifier: createHs256Verifier(env.jwtSecret, {
     clock,
@@ -27,11 +34,13 @@ const app = createApp({
   db: createScopedDatabase(pool),
   generateId: randomUUID,
   config: { allowedOrigins: env.allowedOrigins },
+  ...(publicIntake === undefined ? {} : { publicIntake }),
   onError: (error) => console.error("Unhandled API error", error),
 });
 
 const server = serve({ fetch: app.fetch, port: env.port }, (info) => {
   console.log(`zs-business API listening on http://localhost:${info.port}`);
+  if (publicIntake === undefined) console.log("Public booking routes are off: PUBLIC_BOOKING_KEY_SECRET is not set");
 });
 const shutdown = () => {
   server.close();

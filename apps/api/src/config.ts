@@ -67,6 +67,13 @@ export const jwtSecretSchema = z.string()
   .min(32, "JWT_SECRET must be at least 32 characters")
   .refine((value) => value !== PLACEHOLDER_JWT_SECRET, "JWT_SECRET is still the .env.example placeholder");
 
+/** The .env.example value for the booking key secret; a server that still uses it must not start. */
+export const PLACEHOLDER_BOOKING_KEY_SECRET = "replace-with-a-booking-key-secret-of-32-or-more-chars";
+const bookingKeySecretSchema = z.string()
+  .min(32, "booking key secrets must be at least 32 characters")
+  .refine((value) => value !== PLACEHOLDER_BOOKING_KEY_SECRET, "booking key secret is still the .env.example placeholder");
+const rateLimit = z.coerce.number().int().min(1).max(1_000_000).optional();
+
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: jwtSecretSchema,
@@ -77,6 +84,17 @@ const envSchema = z.object({
   JWT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(60),
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
+  // public-intake.md P-2: signs booking page keys. Unset turns the public booking routes off.
+  PUBLIC_BOOKING_KEY_SECRET: bookingKeySecretSchema.optional(),
+  // The previous secret keeps verifying during a rotation; keys are re-signed with the current one.
+  PUBLIC_BOOKING_KEY_PREVIOUS_SECRET: bookingKeySecretSchema.optional(),
+  // Origin of the hosted booking page and embed script; defaults to http://localhost:<PORT>.
+  PUBLIC_BASE_URL: z.url({ protocol: /^https?$/ }).optional(),
+  // "1" only behind a proxy that sets X-Forwarded-For (P-10).
+  TRUST_PROXY: z.enum(["0", "1"]).default("0"),
+  PUBLIC_RATE_ADDRESS_WRITES: rateLimit,
+  PUBLIC_RATE_ADDRESS_READS: rateLimit,
+  PUBLIC_RATE_TENANT_WRITES: rateLimit,
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
@@ -86,6 +104,14 @@ export interface ServerEnv {
   readonly jwtClockSkewSeconds: number;
   readonly allowedOrigins: string[];
   readonly port: number;
+  readonly publicIntake: PublicIntakeEnv | null;
+}
+export interface PublicIntakeEnv {
+  readonly keySecrets: { readonly current: string; readonly previous?: string };
+  readonly publicBaseUrl: string;
+  readonly trustProxy: boolean;
+  /** Per-window counts that override the P-10 defaults; windows stay fixed. */
+  readonly limitOverrides: { readonly addressWrites?: number; readonly addressReads?: number; readonly tenantWrites?: number };
 }
 
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
@@ -101,5 +127,28 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     jwtClockSkewSeconds: parsed.data.JWT_CLOCK_SKEW_SECONDS,
     allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
     port: parsed.data.PORT,
+    publicIntake: parsePublicIntake(parsed.data),
+  };
+}
+
+function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | null {
+  if (data.PUBLIC_BOOKING_KEY_SECRET === undefined) {
+    if (data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET !== undefined)
+      throw new Error("Invalid environment: PUBLIC_BOOKING_KEY_PREVIOUS_SECRET needs PUBLIC_BOOKING_KEY_SECRET");
+    return null;
+  }
+  const limitOverrides = Object.fromEntries(Object.entries({
+    addressWrites: data.PUBLIC_RATE_ADDRESS_WRITES,
+    addressReads: data.PUBLIC_RATE_ADDRESS_READS,
+    tenantWrites: data.PUBLIC_RATE_TENANT_WRITES,
+  }).filter(([, value]) => value !== undefined));
+  return {
+    keySecrets: {
+      current: data.PUBLIC_BOOKING_KEY_SECRET,
+      ...(data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET === undefined ? {} : { previous: data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET }),
+    },
+    publicBaseUrl: (data.PUBLIC_BASE_URL ?? `http://localhost:${data.PORT}`).replace(/\/+$/, ""),
+    trustProxy: data.TRUST_PROXY === "1",
+    limitOverrides,
   };
 }

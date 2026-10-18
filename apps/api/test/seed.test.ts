@@ -28,6 +28,12 @@ describe("demo seed", () => {
     )).rows[0];
     // 12 contacts + 8 deals + 6 stage moves + 6 bookings, each recorded once.
     expect(counts).toEqual({ actions: 32, deals: 8, moved: 6 });
+    const page = (await database.pool.query<{ published: boolean; resources: number }>(
+      `SELECT p.published, (SELECT count(*)::int FROM booking_page_resources r WHERE r.tenant_id=p.tenant_id AND r.page_id=p.id) AS resources
+         FROM booking_pages p WHERE p.tenant_id=$1 AND p.id=$2`,
+      [first.principal.tenantId, first.bookingPageId],
+    )).rows;
+    expect(page).toEqual([{ published: true, resources: 2 }]);
   });
 
   it("refuses remote or unchecked pools before any query", async () => {

@@ -3,6 +3,7 @@ import { createSession, derivedId, type Principal } from "@zs/core";
 import { asService, createScopedDatabase } from "@zs/db";
 import { assertLocalPool } from "../config.js";
 import {
+  DEMO_BOOKING_PAGE,
   DEMO_CONTACTS,
   DEMO_DEALS,
   DEMO_RESOURCES,
@@ -23,6 +24,8 @@ export interface SeedSummary {
   readonly principal: Principal;
   readonly resources: readonly { id: string; name: string }[];
   readonly pipelineId: string;
+  /** Published booking page linking every demo resource (public-intake.md P-4). */
+  readonly bookingPageId: string;
   readonly contacts: number;
   readonly deals: number;
   readonly bookings: number;
@@ -43,6 +46,7 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
   const pipelineId = id("pipeline");
   const stageIds = new Map(DEMO_STAGES.map((stage) => [stage, id("stage", stage)]));
   const resources = DEMO_RESOURCES.map((resource) => ({ ...resource, id: id("resource", resource.key) }));
+  const bookingPageId = id("booking-page");
 
   await asService(deps.service, async (tx) => {
     await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", [tenantId, DEMO_TENANT_NAME]);
@@ -61,6 +65,19 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
       await tx.query(
         "INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
         [tenantId, stageIds.get(stage), pipelineId, stage, position],
+      );
+    // Pages have no write action yet (M3a), so the service role provisions the demo page.
+    await tx.query(
+      `INSERT INTO booking_pages (tenant_id,id,title,description,published,disclosure_version,disclosure_text,created_at)
+       VALUES ($1,$2,$3,$4,true,$5,$6,$7) ON CONFLICT DO NOTHING`,
+      [tenantId, bookingPageId, DEMO_BOOKING_PAGE.title, DEMO_BOOKING_PAGE.description,
+        DEMO_BOOKING_PAGE.disclosureVersion, DEMO_BOOKING_PAGE.disclosureText, deps.clock.now()],
+    );
+    for (const [position, resource] of resources.entries())
+      await tx.query(
+        `INSERT INTO booking_page_resources (tenant_id,page_id,resource_id,position) VALUES ($1,$2,$3,$4)
+         ON CONFLICT DO NOTHING`,
+        [tenantId, bookingPageId, resource.id, position],
       );
   });
 
@@ -115,6 +132,7 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
     principal,
     resources: resources.map((resource) => ({ id: resource.id, name: resource.name })),
     pipelineId,
+    bookingPageId,
     contacts: contactIds.length,
     deals: DEMO_DEALS.length,
     bookings: bookings.items.length,
