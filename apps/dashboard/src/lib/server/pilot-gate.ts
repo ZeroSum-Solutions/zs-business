@@ -25,7 +25,7 @@ export interface PilotGateConfig {
   accessCode: string;
   sessionSecret: string;
   ttlSeconds: number;
-  /** DASHBOARD_TRUST_PROXY=1: a reverse proxy in front sets X-Forwarded-Host, -Proto and -For. */
+  /** DASHBOARD_TRUST_PROXY=1: a reverse proxy in front sets X-Forwarded-Host and -Proto, and appends to -For. */
   trustProxy: boolean;
 }
 
@@ -133,9 +133,9 @@ export function accessCodeMatches(given: string, config: PilotGateConfig): boole
 
 export interface AttemptLimits {
   windowMs: number;
-  /** Failed attempts one address may make in a window. */
+  /** Attempts one address may make in a window. */
   perAddress: number;
-  /** Failed attempts everyone together may make in a window. */
+  /** Attempts everyone together may make in a window. */
   global: number;
 }
 
@@ -144,13 +144,13 @@ const MAX_TRACKED_ADDRESSES = 1000;
 export const DEFAULT_ATTEMPT_LIMITS: AttemptLimits = { windowMs: 15 * 60 * 1000, perAddress: 5, global: 30 };
 
 /**
- * Failed sign-ins, kept in memory: enough for one pilot server. The per-address limit keys
- * on the client address (see clientAddress); without a trusted proxy that header can be
- * forged, so the global limit is what bounds guessing. A full limit also refuses the right
- * code until the window passes.
+ * Sign-in attempts, kept in memory: enough for one pilot server. Every attempt is reserved
+ * before its body is read and counts against its address (see clientAddress) and against
+ * everyone; only a successful sign-in gives its reservation back. A full limit also refuses
+ * the right code until the window passes.
  */
 export class AttemptLimiter {
-  private readonly failures = new Map<string, number[]>();
+  private readonly attempts = new Map<string, number[]>();
   private all: number[] = [];
 
   constructor(private readonly limits: AttemptLimits = DEFAULT_ATTEMPT_LIMITS) {}
@@ -159,9 +159,9 @@ export class AttemptLimiter {
   retryAfter(address: string, now: number = Date.now()): number {
     const since = now - this.limits.windowMs;
     this.all = this.all.filter((time) => time > since);
-    const mine = (this.failures.get(address) ?? []).filter((time) => time > since);
-    if (mine.length > 0) this.failures.set(address, mine);
-    else this.failures.delete(address);
+    const mine = (this.attempts.get(address) ?? []).filter((time) => time > since);
+    if (mine.length > 0) this.attempts.set(address, mine);
+    else this.attempts.delete(address);
     const blockedUntil = Math.max(
       mine.length >= this.limits.perAddress ? mine[mine.length - this.limits.perAddress]! + this.limits.windowMs : 0,
       this.all.length >= this.limits.global ? this.all[this.all.length - this.limits.global]! + this.limits.windowMs : 0,
@@ -169,29 +169,51 @@ export class AttemptLimiter {
     return blockedUntil > now ? Math.ceil((blockedUntil - now) / 1000) : 0;
   }
 
-  fail(address: string, now: number = Date.now()) {
+  /**
+   * Takes one attempt for this address and for everyone, or returns the seconds to wait and
+   * takes nothing. Synchronous on purpose: call it before awaiting anything, so concurrent
+   * requests each see the attempts the ones before them took.
+   */
+  reserve(address: string, now: number = Date.now()): number {
+    const wait = this.retryAfter(address, now);
+    if (wait > 0) return wait;
     this.all.push(now);
-    this.failures.set(address, [...(this.failures.get(address) ?? []), now]);
-    // Forged addresses that never come back must not pile up.
-    if (this.failures.size > MAX_TRACKED_ADDRESSES) {
+    this.attempts.set(address, [...(this.attempts.get(address) ?? []), now]);
+    // Addresses that never come back must not pile up.
+    if (this.attempts.size > MAX_TRACKED_ADDRESSES) {
       const since = now - this.limits.windowMs;
-      for (const [key, times] of this.failures) {
-        if (times[times.length - 1]! <= since) this.failures.delete(key);
+      for (const [key, times] of this.attempts) {
+        if (times[times.length - 1]! <= since) this.attempts.delete(key);
       }
     }
+    return 0;
   }
 
-  succeed(address: string) {
-    this.failures.delete(address);
+  /** Gives back the attempt reserve() took at `time`: the sign-in succeeded. */
+  refund(address: string, time: number) {
+    const drop = (times: number[]) => {
+      const index = times.lastIndexOf(time);
+      return index === -1 ? times : [...times.slice(0, index), ...times.slice(index + 1)];
+    };
+    this.all = drop(this.all);
+    const mine = drop(this.attempts.get(address) ?? []);
+    if (mine.length > 0) this.attempts.set(address, mine);
+    else this.attempts.delete(address);
   }
 }
 
+/** The limiter key for every caller when no trusted proxy says who they are. */
+export const DIRECT_ADDRESS = "direct";
+
 /**
- * The caller's address for rate limiting. `next start` sets X-Forwarded-For to the socket
- * address unless the request already carries one; a trusted proxy appends the address it
- * saw, so the last entry is the one to use.
+ * The caller's address for rate limiting. X-Forwarded-For counts only behind a trusted
+ * proxy (DASHBOARD_TRUST_PROXY=1), which appends the address it saw, so the right-most
+ * entry is the one to use. Without one, anyone can write that header (and `next start`
+ * passes a sent one through), so every caller shares one "direct" key: the per-address
+ * limit then bounds everyone together, next to the global one.
  */
-export function clientAddress(request: Request): string {
+export function clientAddress(request: Request, trustProxy: boolean): string {
+  if (!trustProxy) return DIRECT_ADDRESS;
   const entries = request.headers.get("x-forwarded-for")?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
-  return entries.at(-1) ?? "unknown";
+  return entries.at(-1) ?? DIRECT_ADDRESS;
 }

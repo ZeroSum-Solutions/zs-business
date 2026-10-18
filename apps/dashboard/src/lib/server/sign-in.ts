@@ -1,8 +1,9 @@
 /**
  * POST /api/sign-in and /api/sign-out for the pilot gate (see pilot-gate.ts). Sign-in takes
  * `{ code }` as JSON from this origin only, compares it in constant time, and on a match
- * sets the signed session cookie. Failed attempts count against the caller's address and
- * against everyone, and a full limit answers 429 before the code is even compared.
+ * sets the signed session cookie. Every attempt is reserved against the caller's address and
+ * against everyone before its body is read, so a burst of parallel requests cannot outrun
+ * the limit; a full limit answers 429, and only a successful sign-in gives its attempt back.
  */
 import { z } from "zod";
 import { isSameOrigin } from "./origin";
@@ -38,8 +39,10 @@ export async function signIn(request: Request, setup: PilotGateSetup | null, lim
   if (!isSameOrigin(request, config.trustProxy)) return answer(403, "forbidden");
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return answer(415, "unsupported_media_type");
 
-  const address = clientAddress(request);
-  const wait = limiter.retryAfter(address, now.getTime());
+  // Reserve before the first await: requests in flight together must all count.
+  const address = clientAddress(request, config.trustProxy);
+  const reservedAt = now.getTime();
+  const wait = limiter.reserve(address, reservedAt);
   if (wait > 0) return answer(429, "rate_limited", { "Retry-After": String(wait) });
 
   const raw = await request.arrayBuffer();
@@ -53,11 +56,8 @@ export async function signIn(request: Request, setup: PilotGateSetup | null, lim
   }
   if (!parsed) return answer(400, "invalid_body");
 
-  if (!accessCodeMatches(parsed.code.trim(), config)) {
-    limiter.fail(address, now.getTime());
-    return answer(401, "wrong_code");
-  }
-  limiter.succeed(address);
+  if (!accessCodeMatches(parsed.code.trim(), config)) return answer(401, "wrong_code");
+  limiter.refund(address, reservedAt);
   const session = issueSessionValue(config, now);
   return new Response(null, {
     status: 204,
