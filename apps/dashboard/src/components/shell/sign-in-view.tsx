@@ -5,6 +5,7 @@ import { useState, type FormEvent } from "react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { useApiRuntime } from "@/lib/api/react";
+import { safeNextUrl } from "@/lib/safe-next";
 import { cn } from "@/lib/utils";
 import { OWNER } from "./account-menu";
 
@@ -17,21 +18,6 @@ const MESSAGES: Record<Problem["kind"], (problem: Problem) => string> = {
   offline: () => "You look offline. Check your connection and try again.",
   failed: () => "We could not sign you in. Try again in a moment.",
 };
-
-/**
- * Only a page on this site. The value is resolved as the browser would resolve it, so
- * "//other.example", "/\\other.example" and "/\t/other.example" all fall back to home.
- */
-function nextPath(): string {
-  const next = new URLSearchParams(window.location.search).get("next");
-  if (!next?.startsWith("/")) return "/";
-  try {
-    const url = new URL(next, window.location.origin);
-    return url.origin === window.location.origin ? `${url.pathname}${url.search}${url.hash}` : "/";
-  } catch {
-    return "/";
-  }
-}
 
 /**
  * Pilot sign-in: the shared access code buys an httpOnly session cookie (pilot-gate.ts).
@@ -57,7 +43,7 @@ export function SignInView() {
       });
       if (response.ok) {
         // A full load, so the session and every query start fresh.
-        window.location.assign(nextPath());
+        window.location.assign(safeNextUrl(new URLSearchParams(window.location.search).get("next"), window.location.origin));
         return;
       }
       if (response.status === 401) setProblem({ kind: "wrong" });

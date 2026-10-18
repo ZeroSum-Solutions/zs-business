@@ -171,6 +171,27 @@ test("signs an anonymous visitor in through /sign-in, and out again", async ({ a
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
 });
 
+test("never follows next off the site, even when it resolves to a path of two slashes", async ({ anonymousPage: page }) => {
+  // A mocked sign-in: this checks only where the page goes next, and spends no attempts.
+  await page.route("**/api/sign-in", (route) => route.fulfill({ status: 204, headers: { "Cache-Control": "no-store" } }));
+  const offSite: string[] = [];
+  await page.context().route((url) => url.origin !== LIVE.webUrl, (route) => {
+    offSite.push(route.request().url());
+    return route.abort();
+  });
+  for (const next of ["/.//evil.example/", "/foo/..//evil.example/", "/%2e//evil.example/"]) {
+    // Raw, not encoded: the query string carries the value exactly as an attacker would link it.
+    await page.goto(`/sign-in?next=${next}`);
+    await page.getByLabel("Access code").fill("any-code-the-mock-accepts");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.waitForURL((url) => !url.pathname.startsWith("/sign-in"));
+    const landed = new URL(page.url());
+    expect(landed.origin, next).toBe(LIVE.webUrl);
+    expect(landed.pathname, next).not.toMatch(/^[/\\]{2}/);
+  }
+  expect(offSite).toEqual([]);
+});
+
 test("books a slot, then shows the conflict when another person took the time", async ({ page, request }, info) => {
   await page.goto("/calendar");
   const booking = await openBookingOnFirstOpenDay(page);
