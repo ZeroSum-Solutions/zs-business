@@ -283,8 +283,19 @@ describe("booking.create through the shared dispatcher (B-17..B-23)", () => {
   });
 
   it("reports a stored resource that fails schema parsing as a typed ValidationFailed", async () => {
-    // Passes the SQL shape check (a slash in the zone) but is not an IANA zone.
-    const { fixture, a } = await world({ timeZone: "Not/AZone" });
+    // SQL now rejects unknown zones, so model a row stored before that check (or under an
+    // older tzdata): bypass the trigger as the superuser owner.
+    const { fixture, a } = await world();
+    const owner = await database.pool.connect();
+    try {
+      await owner.query("BEGIN");
+      await owner.query("SET LOCAL session_replication_role = replica");
+      await owner.query("UPDATE booking_resources SET time_zone='Not/AZone' WHERE tenant_id=$1", [a.tenantId]);
+      await owner.query("COMMIT");
+    } catch (error) {
+      await owner.query("ROLLBACK");
+      throw error;
+    } finally { owner.release(); }
     const error = await rejection(book(command(a.tenantId, a.id, "2026-10-19T10:00:00.000Z")));
     expect(error).toBeInstanceOf(ValidationFailed);
     expect(error).toMatchObject({ code: "ValidationFailed" });

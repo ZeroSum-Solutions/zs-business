@@ -42,7 +42,7 @@ it("runs the narrow write function as a non-owner without BYPASSRLS and rejects 
     r.oid<>c.relowner AS not_table_owner,
     EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl WHERE grantee=0) AS public_execute
     FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
-    JOIN pg_class c ON c.oid='actions'::regclass WHERE p.proname='record_action_and_event'`)).rows[0])).toMatchObject({ rolbypassrls: false, rolsuper: false, prosecdef: true, proconfig: ["search_path=pg_catalog"], not_table_owner: true, public_execute: false });
+    JOIN pg_class c ON c.oid='actions'::regclass WHERE p.proname='record_action_and_event'`)).rows[0])).toMatchObject({ rolbypassrls: false, rolsuper: false, prosecdef: true, proconfig: ["search_path=pg_catalog, pg_temp"], not_table_owner: true, public_execute: false });
   await expect(fixture.a.run((tx) => tx.query(
     "select public.record_action_and_event($1,$2,$3,'forged',$4,'{}',$5,$6,'{}','2026-10-17',$7,'forged','{}')",
     [fixture.b.tenantId, randomUUID(), randomUUID(), JSON.stringify({ tenantId: fixture.b.tenantId }), JSON.stringify({ tenantId: fixture.b.tenantId, id: randomUUID() }), randomUUID(), randomUUID()],
