@@ -20,6 +20,7 @@ const app = createApp({
   verifier: createHs256Verifier(env.jwtSecret, {
     clock,
     maxLifetimeSeconds: env.jwtMaxLifetimeSeconds,
+    clockSkewSeconds: env.jwtClockSkewSeconds,
     ...(env.jwtIssuer === undefined ? {} : { issuer: env.jwtIssuer }),
   }),
   clock,

@@ -9,8 +9,16 @@ describe("parseServerEnv", () => {
     expect(() => parseServerEnv({ ...base, JWT_SECRET: PLACEHOLDER_JWT_SECRET })).toThrow(/placeholder/);
   });
 
-  it("defaults to a one-hour token lifetime and no issuer", () => {
-    expect(parseServerEnv(base)).toMatchObject({ jwtMaxLifetimeSeconds: 3600, jwtIssuer: undefined, port: 8787 });
+  it("defaults to a one-hour token lifetime, a one-minute clock skew and no issuer", () => {
+    expect(parseServerEnv(base)).toMatchObject({
+      jwtMaxLifetimeSeconds: 3600, jwtClockSkewSeconds: 60, jwtIssuer: undefined, port: 8787,
+    });
+  });
+
+  it("reads JWT_CLOCK_SKEW_SECONDS and refuses values outside 0 to 300", () => {
+    expect(parseServerEnv({ ...base, JWT_CLOCK_SKEW_SECONDS: "0" })).toMatchObject({ jwtClockSkewSeconds: 0 });
+    for (const value of ["-1", "301", "abc"])
+      expect(() => parseServerEnv({ ...base, JWT_CLOCK_SKEW_SECONDS: value })).toThrow(/JWT_CLOCK_SKEW_SECONDS/);
   });
 
   it("lets local dev raise the lifetime and set an issuer", () => {

@@ -44,6 +44,7 @@ describe("authentication", () => {
   it("rejects a valid signature without a tenant claim", async () => {
     const token = await new SignJWT({ role: "authenticated" })
       .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated")
+      .setIssuedAt(Math.floor(Date.parse(NOW) / 1000))
       .setExpirationTime(Math.floor(Date.parse("2026-10-19T09:00:00.000Z") / 1000))
       .sign(new TextEncoder().encode(SECRET));
     expect401(await call(h.app, "GET", "/v1/crm/contacts", { token }));
@@ -80,14 +81,37 @@ describe("token claims", () => {
     await expect(verifier.verify(await token({}))).rejects.toThrow("Invalid or missing");
   });
 
-  it("refuses a lifetime above the default hour, measured from iat or from now", async () => {
-    expect((await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { exp: nowSeconds + 3600 }) })).status).toBe(200);
-    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { exp: nowSeconds + 3601 }) }));
-    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { iat: nowSeconds - 3000, exp: nowSeconds + 700 }) }));
-    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { iat: null, exp: nowSeconds + 7200 }) }));
-    // A future iat cannot stretch the window past the limit.
-    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { iat: nowSeconds + 7200, exp: nowSeconds + 7300 }) }));
+  // The accepted cases: iat is required, may lie up to the skew (default 60 s) ahead of the
+  // clock, and exp - iat may be at most the maximum lifetime (default one hour).
+  const status = async (times: { iat?: number | null; exp?: number }) =>
+    (await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, times) })).status;
+
+  it("accepts a full-lifetime token whose iat is a second ahead of the clock", async () => {
+    expect(await status({ iat: nowSeconds + 1, exp: nowSeconds + 1 + 3600 })).toBe(200);
+    expect(await status({ iat: nowSeconds + 60, exp: nowSeconds + 60 + 3600 })).toBe(200);
+  });
+
+  it("refuses an iat beyond the skew", async () => {
+    expect(await status({ iat: nowSeconds + 61, exp: nowSeconds + 61 + 600 })).toBe(401);
+    expect(await status({ iat: nowSeconds + 120, exp: nowSeconds + 120 + 600 })).toBe(401);
+  });
+
+  it("refuses a token without iat", async () => {
+    expect(await status({ iat: null, exp: nowSeconds + 600 })).toBe(401);
+  });
+
+  it("refuses a lifetime exp - iat above the maximum", async () => {
+    expect(await status({ exp: nowSeconds + 3600 })).toBe(200);
+    expect(await status({ exp: nowSeconds + 3601 })).toBe(401);
+    expect(await status({ iat: nowSeconds - 3000, exp: nowSeconds + 601 })).toBe(401);
     expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await signDevToken(SECRET, h.a, clock) }));
+  });
+
+  it("applies a configured skew", async () => {
+    const strict = createHs256Verifier(SECRET, { clock, clockSkewSeconds: 0 });
+    await expect(strict.verify(await token({}, { iat: nowSeconds }))).resolves.toMatchObject({ tenantId: h.a.tenantId });
+    await expect(strict.verify(await token({}, { iat: nowSeconds + 1, exp: nowSeconds + 600 }))).rejects.toThrow(/future/);
+    expect(() => createHs256Verifier(SECRET, { clock, clockSkewSeconds: -1 })).toThrow(/skew/);
   });
 
   it("accepts the 7-day dev token when local config raises the limit", async () => {
