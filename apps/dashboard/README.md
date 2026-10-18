@@ -103,11 +103,18 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   `Secure` over https, valid for `DASHBOARD_SESSION_TTL_SECONDS` (default 12 hours). The
   value is an expiry and a nonce, HMAC-signed with a key made from the session secret and
   the access code, so changing either signs everyone out. Without a valid cookie the proxy
-  and `/api/session` answer 401 and never attach the token. Wrong codes are rate limited in
-  memory: 5 per address and 30 in total per 15 minutes, then 429 with `Retry-After`, even
-  for the right code. Without a trusted proxy the per-address key can be forged, so the
-  total limit is the real bound. "Sign out" posts `/api/sign-out`, which clears the cookie;
-  the signed-out screen links to `/sign-in?next=<page>`. Demo mode has no gate.
+  and `/api/session` answer 401 and never attach the token. Sign-in attempts are rate
+  limited in memory: 5 per address and 30 in total per 15 minutes, then 429 with
+  `Retry-After`, even for the right code. Each attempt is reserved before its body is read,
+  so parallel requests cannot outrun the limit, and only a successful sign-in gives its
+  attempt back. The address comes from the right-most `X-Forwarded-For` entry only with
+  `DASHBOARD_TRUST_PROXY=1` (the trusted proxy appends it). Without that, anyone can forge
+  the header, so every caller shares one "direct" key: 5 attempts per 15 minutes for
+  everyone together, inside the total of 30. "Sign out" posts `/api/sign-out`, which clears
+  the cookie in that browser; a copied cookie stays valid until it expires or until the
+  access code or session secret is rotated, and rotating either one is the way to revoke
+  every session. The signed-out screen links to `/sign-in?next=<page>`; after sign-in,
+  `next` leads only to a page on this site (`src/lib/safe-next.ts`). Demo mode has no gate.
   `build` runs `scripts/bundle-secrets.ts`, which fails if `.next/static` or a prerendered
   page holds a JWT or the value of `ZS_API_TOKEN`, `JWT_SECRET`, `DASHBOARD_ACCESS_CODE` or
   `DASHBOARD_SESSION_SECRET`. See `.env.example`;
