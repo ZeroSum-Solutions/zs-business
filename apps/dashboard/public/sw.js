@@ -1,9 +1,9 @@
 /*
- * App-shell service worker. It caches pages and the hashed scripts, styles, fonts and
- * icons they load, so the app opens offline, styled and working. It never caches data:
- * any request to another origin, to /api/ or /v1/, that is not a GET, that carries an
- * Authorization header, or whose response says no-store or private goes to the network
- * only.
+ * App-shell service worker. It caches pages and the hashed scripts and styles they load,
+ * so the app opens offline, styled and working. It never caches data: any request to
+ * another origin, to /api/ or /v1/, that is not a GET or that carries an Authorization
+ * header goes to the network only. A response is stored only when it is same-origin
+ * ("basic"), OK, HTML, JavaScript or CSS, and not marked no-store or private.
  *
  * The page registers /sw.js?v=<build id>. Each build gets a new worker and a new cache,
  * and the old caches are deleted on activate.
@@ -14,9 +14,10 @@ const PAGES = [
   "/", "/inbox", "/calendar", "/customers", "/site", "/agents",
   "/account/settings", "/account/connections", "/account/plan",
 ];
-const FILES = ["/manifest.webmanifest", "/icons/icon-192.png"];
-/** Build assets a page or stylesheet refers to, written with or without the /_next/ prefix. */
-const ASSET = /(?:\/_next\/)?static\/[A-Za-z0-9_\-./~%@]+?\.(?:js|css|woff2?|ttf|otf|png|jpe?g|svg|webp|avif|ico)/g;
+/** Build scripts and styles a page refers to, written with or without the /_next/ prefix. */
+const ASSET = /(?:\/_next\/)?static\/[A-Za-z0-9_\-./~%@]+?\.(?:js|css)(?![A-Za-z0-9])/g;
+/** The only content types worth keeping offline. Fonts fall back; data is never kept. */
+const SHELL_TYPE = /^(?:text\/html|text\/css|(?:text|application)\/javascript)(?:;|$)/;
 
 function isPrivateRequest(request, url) {
   if (request.method !== "GET") return true;
@@ -28,6 +29,7 @@ function isPrivateRequest(request, url) {
 
 function isStorable(response) {
   if (!response.ok || response.type !== "basic") return false;
+  if (!SHELL_TYPE.test((response.headers.get("content-type") || "").toLowerCase().trim())) return false;
   const control = (response.headers.get("cache-control") || "").toLowerCase();
   return !control.includes("no-store") && !control.includes("private");
 }
@@ -47,10 +49,9 @@ async function put(cache, url) {
   return response;
 }
 
-/** Cache the pages, then every script, style and font they reference, then what the styles reference. */
+/** Cache the pages, then every script and style they reference, then what the styles import. */
 async function precache() {
   const cache = await caches.open(VERSION);
-  await Promise.all(FILES.map((url) => put(cache, url).catch(() => null)));
   const pages = await Promise.all(PAGES.map((url) => put(cache, url).catch(() => null)));
   if (!pages[0]) throw new Error("The home page could not be cached");
   const html = await Promise.all(pages.filter(Boolean).map((response) => response.text()));
@@ -87,7 +88,7 @@ self.addEventListener("fetch", (event) => {
   if (isPrivateRequest(request, url)) return;
 
   // Hashed build assets never change within a build: cache first.
-  if (url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/icons/")) {
+  if (url.pathname.startsWith("/_next/static/")) {
     event.respondWith(
       caches.open(VERSION)
         .then((cache) => cache.match(request))
