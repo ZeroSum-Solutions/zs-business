@@ -139,6 +139,8 @@ export interface AttemptLimits {
   global: number;
 }
 
+const MAX_TRACKED_ADDRESSES = 1000;
+
 export const DEFAULT_ATTEMPT_LIMITS: AttemptLimits = { windowMs: 15 * 60 * 1000, perAddress: 5, global: 30 };
 
 /**
@@ -170,6 +172,13 @@ export class AttemptLimiter {
   fail(address: string, now: number = Date.now()) {
     this.all.push(now);
     this.failures.set(address, [...(this.failures.get(address) ?? []), now]);
+    // Forged addresses that never come back must not pile up.
+    if (this.failures.size > MAX_TRACKED_ADDRESSES) {
+      const since = now - this.limits.windowMs;
+      for (const [key, times] of this.failures) {
+        if (times[times.length - 1]! <= since) this.failures.delete(key);
+      }
+    }
   }
 
   succeed(address: string) {

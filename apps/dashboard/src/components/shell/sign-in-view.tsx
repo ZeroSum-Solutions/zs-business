@@ -18,10 +18,19 @@ const MESSAGES: Record<Problem["kind"], (problem: Problem) => string> = {
   failed: () => "We could not sign you in. Try again in a moment.",
 };
 
-/** Only a path on this site: never "//other.example" or an absolute URL. */
+/**
+ * Only a page on this site. The value is resolved as the browser would resolve it, so
+ * "//other.example", "/\\other.example" and "/\t/other.example" all fall back to home.
+ */
 function nextPath(): string {
   const next = new URLSearchParams(window.location.search).get("next");
-  return next && /^\/(?![/\\])/.test(next) ? next : "/";
+  if (!next?.startsWith("/")) return "/";
+  try {
+    const url = new URL(next, window.location.origin);
+    return url.origin === window.location.origin ? `${url.pathname}${url.search}${url.hash}` : "/";
+  } catch {
+    return "/";
+  }
 }
 
 /**

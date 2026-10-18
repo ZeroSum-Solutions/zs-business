@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import AxeBuilder from "@axe-core/playwright";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { CALENDAR_UNAVAILABLE, defaultMessage, demoErrorBody } from "../../src/lib/api/errors";
 import { MAX_PAGES } from "../../src/lib/api/http-client";
@@ -132,11 +133,16 @@ test("signs an anonymous visitor in through /sign-in, and out again", async ({ a
   await expect(page.getByRole("heading", { level: 1, name: "Sign in to Halden & Rowe" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Main" })).toHaveCount(0);
   await shot(page, "18-sign-in", info.project.name, PREFIX);
+  const serious = async () => (await new AxeBuilder({ page }).analyze()).violations
+    .filter((violation) => violation.impact === "serious" || violation.impact === "critical").map((violation) => violation.id);
+  expect(await serious()).toEqual([]);
 
   await page.getByLabel("Access code").fill("not-the-access-code");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("main").getByRole("alert")).toHaveText("That code is not right. Check it and try again.");
   await expect(page.getByLabel("Access code")).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByLabel("Access code")).toHaveAccessibleDescription("That code is not right. Check it and try again.");
+  expect(await serious()).toEqual([]);
 
   await page.getByLabel("Access code").fill(accessCode());
   await page.getByRole("button", { name: "Sign in" }).click();
@@ -156,6 +162,13 @@ test("signs an anonymous visitor in through /sign-in, and out again", async ({ a
   expect((await page.request.get("/api/v1/crm/contacts")).status()).toBe(401);
   await page.reload();
   await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
+
+  // `next` only ever leads to a page on this site: a tab would turn "/\t/x" into "//x".
+  await page.goto(`/sign-in?next=${encodeURIComponent("/\t/evil.example/")}`);
+  await page.getByLabel("Access code").fill(accessCode());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForURL(`${LIVE.webUrl}/`);
+  await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
 });
 
 test("books a slot, then shows the conflict when another person took the time", async ({ page, request }, info) => {
