@@ -146,13 +146,17 @@ describe("bookings across several resources", () => {
 
 describe("GET /v1/booking/slots", () => {
   it("lists free slots with local labels and hides booked ones", async () => {
+    // Book here, so the test does not depend on another test's booking.
+    expect((await book("2026-10-19T14:30:00.000Z")).status).toBe(201);
     const query = `resourceId=${h.a.resourceId}&from=2026-10-19T09:00:00.000Z&to=2026-10-19T17:00:00.000Z&zone=America/New_York`;
     const response = await call(h.app, "GET", `/v1/booking/slots?${query}`, { token: h.a.token });
     expect(response.status).toBe(200);
     const body = slotsResponseSchema.parse(response.body);
     expect(body.zone).toBe("America/New_York");
     const starts = body.slots.map((slot) => slot.startsAt);
-    expect(starts).not.toContain("2026-10-19T12:00:00.000Z");
+    // One-hour slots on a half-hour grid: 14:00 and 15:00 overlap the 14:30 booking too.
+    for (const taken of ["2026-10-19T14:00:00.000Z", "2026-10-19T14:30:00.000Z", "2026-10-19T15:00:00.000Z"])
+      expect(starts).not.toContain(taken);
     expect(starts).toContain("2026-10-19T09:00:00.000Z");
     expect(body.slots.find((slot) => slot.startsAt === "2026-10-19T09:00:00.000Z")?.localStart).toBe("2026-10-19T05:00:00");
   });
