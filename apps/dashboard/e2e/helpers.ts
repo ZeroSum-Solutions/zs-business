@@ -7,7 +7,8 @@ export async function shot(page: Page, name: string, project: string, prefix = "
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
   // No sideways scrolling: on phones an overflow widens the layout viewport past the device.
   const widths = await page.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
-  expect(widths[0], `${name} overflows horizontally`).toBeLessThanOrEqual(page.viewportSize()!.width);
+  // 1px of slop: fractional layout can round scrollWidth up by one.
+  expect(widths[0], `${name} overflows horizontally`).toBeLessThanOrEqual(page.viewportSize()!.width + 1);
   expect(widths[1]).toBe(page.viewportSize()!.width);
   // Pin the fixed side nav and tab bar to the page so full-page captures show them once, in place.
   await page.screenshot({
@@ -32,8 +33,9 @@ export async function expectDialogInset(page: Page) {
     return { scrollLeft: body.scrollLeft, overflow: body.scrollWidth - body.clientWidth, minLeft: Math.min(...lefts) };
   });
   expect(metrics.scrollLeft).toBe(0);
-  expect(metrics.overflow).toBeLessThanOrEqual(0);
-  expect(metrics.minLeft).toBeGreaterThanOrEqual(16);
+  // 1px of slop for subpixel rounding.
+  expect(metrics.overflow).toBeLessThanOrEqual(1);
+  expect(metrics.minLeft).toBeGreaterThanOrEqual(15);
 }
 
 export function mainNav(page: Page) {

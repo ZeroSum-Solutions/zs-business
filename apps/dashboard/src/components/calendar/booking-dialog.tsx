@@ -2,7 +2,7 @@
 
 import { WarningCircle } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
@@ -10,13 +10,15 @@ import { useToast } from "@/components/ui/toast";
 import type { CreateBookingRequest } from "@zs/contracts";
 import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
-import { keys, useSlots } from "@/lib/queries";
+import { useKeys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
 import { useIntentKey } from "@/lib/intent-key";
 import { cn } from "@/lib/utils";
 import { SlotsError } from "./slots-error";
 
 const CONFLICT_MESSAGE = "That time was just taken. Pick another slot.";
+
+type Attempt = { request: CreateBookingRequest; generation: number };
 
 export function BookingDialog({
   open,
@@ -33,6 +35,7 @@ export function BookingDialog({
 }) {
   const api = useApi();
   const queryClient = useQueryClient();
+  const { keys } = useKeys();
   const toast = useToast();
   const zone = resource.timeZone;
   const [dateKey, setDateKey] = useState(initialDate);
@@ -41,17 +44,28 @@ export function BookingDialog({
   // One key per request body (the server derives the booking ID from it), so a retry after a
   // lost answer cannot double-book, and another calendar at the same time is a new booking.
   const intents = useIntentKey();
+  // Bumped when the dialog opens, closes or switches calendar. An answer from an earlier
+  // generation still refreshes the lists, but must not close, toast or flag the newer one.
+  const generation = useRef(0);
+  const isOpen = useRef(open);
+  useEffect(() => {
+    generation.current += 1;
+    isOpen.current = open;
+  }, [open, resource.id]);
 
   const book = useMutation({
-    mutationFn: (request: CreateBookingRequest) => api.createBooking(request, { idempotencyKey: intents.keyFor(request) }),
-    onSettled: (_record, error, request) => intents.settle(request, error),
-    onSuccess: (record) => {
+    mutationFn: ({ request }: Attempt) => api.createBooking(request, { idempotencyKey: intents.keyFor(request) }),
+    onSettled: (_record, error, attempt) => intents.settle(attempt.request, error),
+    onSuccess: (record, attempt) => {
       void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
       void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
-      toast(`Booked ${formatDay(record.startsAt, zone)} at ${formatTime(record.startsAt, zone)}.`);
-      onOpenChange(false);
+      const current = attempt.generation === generation.current;
+      // A late answer for a dialog that is now closed can still confirm the booking it made.
+      if (current || !isOpen.current) toast(`Booked ${formatDay(record.startsAt, zone)} at ${formatTime(record.startsAt, zone)}.`);
+      if (current) onOpenChange(false);
     },
-    onError: (error) => {
+    onError: (error, attempt) => {
+      if (attempt.generation !== generation.current) return;
       if (isSlotTaken(error)) {
         setConflict(true);
         setSelected(null);
@@ -158,7 +172,7 @@ export function BookingDialog({
           <Button
             disabled={!selected || book.isPending}
             aria-busy={book.isPending}
-            onClick={() => selected && book.mutate({ resourceId: resource.id, startsAt: selected })}
+            onClick={() => selected && book.mutate({ request: { resourceId: resource.id, startsAt: selected }, generation: generation.current })}
           >
             {selected ? `Book ${formatTime(selected, zone)}` : "Pick a time"}
           </Button>

@@ -91,6 +91,25 @@ test.describe("idempotent retries", () => {
     expect(bookings[1]!.idempotencyKey).toBe(bookings[0]!.idempotencyKey);
   });
 
+  test("a late answer from an earlier booking attempt cannot close or toast the reopened dialog", async ({ page }) => {
+    await page.goto("/calendar");
+    const { dialog, slots } = await openBookingOnFirstOpenDay(page);
+    await slots.first().click();
+    await page.evaluate(() => window.__zsDemo!.delayNextWrite(1_500));
+    await dialog.getByRole("button", { name: /^Book / }).click();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    // Reopen while the first attempt is still in flight; its answer lands in this dialog's lifetime.
+    await page.getByRole("button", { name: "Book appointment" }).click();
+    await expect(dialog).toBeVisible();
+    await expect.poll(async () => (await writeLog(page)).filter((write) => write.operation === "booking.create").length, { timeout: 5_000 }).toBe(1);
+    await page.waitForTimeout(300);
+    await expect(dialog).toBeVisible();
+    await expect(page.getByRole("status").getByText(/^Booked /)).toHaveCount(0);
+    await expect(dialog.getByRole("alert")).toHaveCount(0);
+  });
+
   test("retries a new customer after a lost response without a second record", async ({ page }) => {
     await page.goto("/customers");
     await page.getByRole("button", { name: "Add customer" }).click();

@@ -11,12 +11,13 @@ import { useToast } from "@/components/ui/toast";
 import { isApiError, type NewContact } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { keys } from "@/lib/queries";
+import { useKeys } from "@/lib/queries";
 
 export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const api = useApi();
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { keys } = useKeys();
   const toast = useToast();
   const [form, setForm] = useState({ name: "", email: "", phone: "" });
   const intents = useIntentKey();

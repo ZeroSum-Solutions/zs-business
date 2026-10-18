@@ -17,12 +17,18 @@ export function LoadingRows({ rows = 3, label = "Loading" }: { rows?: number; la
 
 export function ErrorNote({ error, retry, message: override }: { error: unknown; retry?: () => void; message?: string }) {
   const message = override ?? (isApiError(error) ? error.message : "Something went wrong. Try again.");
+  // Retrying cannot fix an ended session; offer the way back in instead.
+  const signedOut = isApiError(error) && error.kind === "unauthorized";
   return (
     <div role="alert" className="flex items-start gap-3 rounded-md bg-danger/8 p-4 text-sm text-fg-2">
       <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-danger" />
       <div className="flex-1">
         <p>{message}</p>
-        {retry ? (
+        {signedOut ? (
+          <button type="button" onClick={() => window.location.assign("/")} className="mt-2 min-h-11 font-medium text-accent underline-offset-4 hover:underline">
+            Sign in again
+          </button>
+        ) : retry ? (
           <button type="button" onClick={retry} className="mt-2 min-h-11 font-medium text-accent underline-offset-4 hover:underline">
             Try again
           </button>

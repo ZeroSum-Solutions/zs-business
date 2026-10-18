@@ -109,7 +109,7 @@ test("adds a customer, then finds the existing record for a duplicate email", as
   await dialog.getByLabel("Email").fill("Marguerite.Okafor@example.com");
   await dialog.getByRole("button", { name: "Save customer" }).click();
   await expect(page).toHaveURL(/existing=1/);
-  await expect(page.getByText("Already a customer.")).toBeVisible();
+  await expect(page.getByText("Already a customer. This is their existing record")).toBeVisible();
   await expect(page.getByRole("heading", { level: 1, name: "Marguerite Okafor" })).toBeVisible();
   await shot(page, "14-duplicate-contact", info.project.name);
 });

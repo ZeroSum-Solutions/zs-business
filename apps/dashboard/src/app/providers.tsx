@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { ToastProvider } from "@/components/ui/toast";
 import { isApiError } from "@/lib/api";
 import { ApiProvider } from "@/lib/api/react";
+import { SessionProvider } from "@/lib/session";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -32,7 +33,9 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <ApiProvider>
       <QueryClientProvider client={queryClient}>
-        <ToastProvider>{children}</ToastProvider>
+        <SessionProvider>
+          <ToastProvider>{children}</ToastProvider>
+        </SessionProvider>
       </QueryClientProvider>
     </ApiProvider>
   );

@@ -45,6 +45,10 @@ export interface DemoControls {
   setOffline(offline: boolean): void;
   /** Every write that reached the adapter, oldest first, with the key it carried. */
   writeLog(): DemoWrite[];
+  /** From now on every call fails as a 401, like an API token that ran out. */
+  expireSession(): void;
+  /** The next write waits this long before it runs, to test answers that arrive late. */
+  delayNextWrite(ms: number): void;
 }
 
 export interface DemoWrite {
@@ -69,11 +73,14 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   const writes: DemoWrite[] = [];
   let offline = false;
   let loseNext: { goOffline: boolean } | null = null;
+  let expired = false;
+  let delayNext = 0;
 
   const networkError = () => new ApiError("network", defaultMessage("network"));
   const wait = async () => {
     if (latency > 0) await new Promise((resolve) => setTimeout(resolve, latency));
     if (offline) throw networkError();
+    if (expired) throw demoError("Unauthorized");
   };
   const nowIso = () => clock.now().toISOString();
 
@@ -82,6 +89,11 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     const key = options?.idempotencyKey;
     if (!key) throw new TypeError(`${operation} needs an Idempotency-Key from the caller`);
     await wait();
+    if (delayNext > 0) {
+      const ms = delayNext;
+      delayNext = 0;
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    }
     const log = (outcome: DemoWrite["outcome"]) => writes.push({ operation, idempotencyKey: key, outcome });
     // Like a dropped connection after the server committed: the write stands, the answer is lost.
     const answer = (result: T): T => {
@@ -328,6 +340,14 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
     writeLog() {
       return clone(writes);
+    },
+
+    expireSession() {
+      expired = true;
+    },
+
+    delayNextWrite(ms) {
+      delayNext = ms;
     },
   };
 }

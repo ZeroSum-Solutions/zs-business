@@ -8,13 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { useApi } from "@/lib/api/react";
-import { keys, usePlan } from "@/lib/queries";
+import { useKeys, usePlan } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatMoney } from "@/lib/utils";
 
 export function PlanView() {
   const api = useApi();
   const queryClient = useQueryClient();
+  const { keys } = useKeys();
   const plan = usePlan();
   const [confirming, setConfirming] = useState(false);
   // The step's button replaces the one just pressed, so focus follows it; focusing also

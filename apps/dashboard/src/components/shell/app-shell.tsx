@@ -5,9 +5,11 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useApiRuntime } from "@/lib/api/react";
 import { useThreads } from "@/lib/queries";
+import { useTenantId } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { AccountMenu, OWNER } from "./account-menu";
 import { isActive, NAV_ITEMS } from "./nav";
+import { SessionGate } from "./session-gate";
 
 function Brand() {
   return (
@@ -22,6 +24,8 @@ function Brand() {
 
 function useInboxCount(): number {
   const threads = useThreads();
+  // Signed out, the cache is empty and the count must not linger.
+  if (useTenantId() === null) return 0;
   return threads.data?.filter((thread) => thread.unread).length ?? 0;
 }
 
@@ -64,7 +68,9 @@ export function AppShell({ children }: { children: ReactNode }) {
             })}
           </ul>
         </nav>
-        {mode === "demo" ? <p className="px-3 pb-3 text-xs text-meta">Sample data. Changes reset on reload.</p> : null}
+        <p className="px-3 pb-3 text-xs text-meta" data-testid="sample-note">
+          {mode === "demo" ? "Sample data. Changes reset on reload." : "Some areas show sample data until their API ships."}
+        </p>
         <div className="border-t border-border pt-3"><AccountMenu variant="sidebar" /></div>
       </aside>
 
@@ -75,7 +81,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </header>
 
       <main id="main" className="mx-auto w-full max-w-content px-4 pt-5 pb-[calc(var(--tabbar-height)+env(safe-area-inset-bottom)+32px)] sm:px-6 lg:px-8 lg:pt-8 lg:pb-12">
-        {children}
+        <SessionGate>{children}</SessionGate>
       </main>
 
       {/* Phone bottom tabs */}

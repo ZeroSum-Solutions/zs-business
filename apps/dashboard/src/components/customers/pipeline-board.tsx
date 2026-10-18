@@ -10,7 +10,7 @@ import { useToast } from "@/components/ui/toast";
 import { isDealChanged, type DealRecord, type ListResult, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { keys, useContacts, useDeals, usePipeline } from "@/lib/queries";
+import { useKeys, useContacts, useDeals, usePipeline } from "@/lib/queries";
 import { cn, relativeTime } from "@/lib/utils";
 
 type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
@@ -45,6 +45,7 @@ function DealCard({ deal, pipeline, contactName, onMove, moving }: {
 export function PipelineBoard() {
   const api = useApi();
   const queryClient = useQueryClient();
+  const { keys } = useKeys();
   const toast = useToast();
   const pipeline = usePipeline();
   const deals = useDeals();

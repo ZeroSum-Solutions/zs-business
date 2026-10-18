@@ -1,8 +1,9 @@
 "use client";
 
-import { CaretUpDown, CreditCard, GearSix, PlugsConnected } from "@phosphor-icons/react";
+import { CaretUpDown, CreditCard, GearSix, PlugsConnected, SignOut } from "@phosphor-icons/react";
 import Link from "next/link";
 import { DropdownMenu } from "radix-ui";
+import { useSession } from "@/lib/session";
 import { cn } from "@/lib/utils";
 
 // TODO(api): owner and business profile come from the session once auth is wired.
@@ -15,6 +16,7 @@ const ITEMS = [
 ];
 
 export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
+  const { signOut } = useSession();
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
@@ -56,6 +58,14 @@ export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
               </Link>
             </DropdownMenu.Item>
           ))}
+          <DropdownMenu.Separator className="my-1 h-px bg-border-soft" />
+          <DropdownMenu.Item
+            onSelect={() => signOut("signed_out")}
+            className="flex min-h-11 cursor-default items-center gap-3 rounded-sm px-3 text-sm text-fg outline-none data-[highlighted]:bg-surface-warm"
+          >
+            <SignOut size={20} aria-hidden className="text-muted" />
+            Sign out
+          </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
