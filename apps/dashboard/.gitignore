@@ -1,4 +1,5 @@
 /next-env.d.ts
+/.next-live/
 /e2e/__screenshots__/
 /test-results/
 /playwright-report/

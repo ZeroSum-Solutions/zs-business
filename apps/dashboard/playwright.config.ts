@@ -4,6 +4,8 @@ const PORT = 3217;
 
 export default defineConfig({
   testDir: "./e2e",
+  // The live journeys run from playwright.live.config.ts against the real API.
+  testIgnore: "live/**",
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,

@@ -9,6 +9,8 @@ const config: NextConfig = {
   // `pnpm typecheck` runs tsc (TypeScript 7) separately; the build does not re-check types.
   typescript: { ignoreBuildErrors: true },
   poweredByHeader: false,
+  // e2e:live builds into its own folder so it can run next to the demo build.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
 };
 
 export default config;
