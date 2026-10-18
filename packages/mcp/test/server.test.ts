@@ -148,11 +148,41 @@ describe("MCP tools over an in-memory transport", () => {
     expect(apiErrorBodySchema.parse(denied.value).error.code).toBe("Forbidden");
   });
 
-  it("rejects tenant or actor fields in tool input", async () => {
+  it("rejects tenant or actor fields in tool input with the shared error body", async () => {
     const response = await callTool(client, "upsert_contact", {
       idempotencyKey: "t-1", email: "x@example.com", tenantId: fixture.b.tenantId,
-    }).catch((error: unknown) => ({ isError: true, value: String(error), raw: null }));
+    });
     expect(response.isError).toBe(true);
+    const body = apiErrorBodySchema.parse(response.raw.structuredContent);
+    expect(body).toEqual(response.value);
+    expect(body.error.code).toBe("ValidationFailed");
+    expect(JSON.stringify(body.error.details)).toContain("tenantId");
     expect(contactPageSchema.parse((await callTool(other, "list_contacts")).value).items).toEqual([]);
+  });
+
+  it.each([
+    ["upsert_contact", { idempotencyKey: "v-1", email: "bad" }, "email"],
+    ["upsert_contact", { email: "x@example.com" }, "idempotencyKey"],
+    ["create_booking", { idempotencyKey: "v-2", resourceId: "not-a-uuid", start: "soon" }, "resourceId"],
+    ["list_contacts", { limit: "many" }, "limit"],
+    ["list_pipelines", { extra: true }, "extra"],
+  ])("normalizes malformed %s arguments into ValidationFailed", async (name, args, field) => {
+    const response = await callTool(client, name, args);
+    expect(response.isError).toBe(true);
+    const body = apiErrorBodySchema.parse(response.raw.structuredContent);
+    expect(body).toEqual(response.value);
+    expect(body.error.code).toBe("ValidationFailed");
+    expect(JSON.stringify(body.error.details)).toContain(field);
+  });
+
+  it("still advertises each tool's real input schema", async () => {
+    const tool = (await client.listTools()).tools.find((candidate) => candidate.name === "upsert_contact");
+    expect(tool?.inputSchema.required).toContain("idempotencyKey");
+    expect(tool?.inputSchema.properties).toHaveProperty("email");
+    expect(tool?.inputSchema).toMatchObject({ additionalProperties: false });
+  });
+
+  it("reports an unknown tool as a protocol error", async () => {
+    await expect(client.callTool({ name: "drop_tables", arguments: {} })).rejects.toThrow(/-32602.*drop_tables not found/);
   });
 });
