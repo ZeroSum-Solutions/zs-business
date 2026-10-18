@@ -7,6 +7,7 @@ import type {
   PipelineSummary,
   ResourceSummary,
   SlotsResponse,
+  UpsertContactRequest,
 } from "@zs/contracts";
 import type { WorkspaceApi } from "./workspace-types";
 
@@ -87,6 +88,17 @@ export type ZsApi = BookingApi & CrmApi & WorkspaceApi;
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {
   return phone.replace(/[\s().-]/g, "");
+}
+
+/** The POST /v1/crm/contacts body; the demo adapter parses the same body the HTTP client sends. */
+export function toUpsertContactRequest(input: NewContact): UpsertContactRequest {
+  return {
+    displayName: input.displayName,
+    email: input.email,
+    phone: input.phone === null ? null : normalizePhone(input.phone),
+    mode: "interactive",
+    consent: { email: null, sms: null },
+  };
 }
 
 /** Shared by both adapters so search and sort behave the same in demo and live mode. */

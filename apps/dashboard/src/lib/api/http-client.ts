@@ -11,14 +11,13 @@ import {
   slotsResponseSchema,
   type CreateBookingRequest,
   type MoveDealStageRequest,
-  type UpsertContactRequest,
 } from "@zs/contracts";
 import { newId as defaultNewId } from "../id";
-import { ApiError, defaultMessage, errorFromBody } from "./errors";
+import { ApiError, contactNotFound, defaultMessage, errorFromBody } from "./errors";
 import {
   byContactName,
   matchesSearch,
-  normalizePhone,
+  toUpsertContactRequest,
   type BookingApi,
   type CrmApi,
   type WriteOptions,
@@ -156,19 +155,12 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
     async getContact(id) {
       // There is no single-contact route; the list is small and already cached per page.
       const contact = (await listAll("/v1/crm/contacts", contactPageSchema)).find((item) => item.id === id);
-      if (!contact) throw new ApiError("not_found", "We could not find that customer.", 404, "NotFound");
+      if (!contact) throw contactNotFound();
       return contact;
     },
 
     async createOrFindContact(input, options = {}) {
-      const body: UpsertContactRequest = {
-        displayName: input.displayName,
-        email: input.email,
-        phone: input.phone === null ? null : normalizePhone(input.phone),
-        mode: "interactive",
-        consent: { email: null, sms: null },
-      };
-      return (await write("/v1/crm/contacts", body, createOrFindContactOutputSchema, options)).result;
+      return (await write("/v1/crm/contacts", toUpsertContactRequest(input), createOrFindContactOutputSchema, options)).result;
     },
 
     async listDeals(query = {}) {

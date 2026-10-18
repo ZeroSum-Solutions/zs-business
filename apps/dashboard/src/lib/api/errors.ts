@@ -1,4 +1,4 @@
-import { apiErrorBodySchema, type ApiErrorBody } from "@zs/contracts";
+import { apiErrorBodySchema, type ApiErrorBody, type ApiErrorCode } from "@zs/contracts";
 
 export type ApiErrorKind =
   | "validation"
@@ -28,6 +28,16 @@ export class ApiError extends Error {
   /** `details.reason` on a 409, such as "overlap", "slot_unavailable" or "stale_revision". */
   get reason(): string | null {
     return typeof this.details.reason === "string" ? this.details.reason : null;
+  }
+
+  /** Messages of the validation issues the server sent, in order. */
+  get issueMessages(): string[] {
+    const issues = this.details.issues;
+    if (!Array.isArray(issues)) return [];
+    return issues.flatMap((issue) => {
+      const message = (issue as { message?: unknown } | null)?.message;
+      return typeof message === "string" ? [message] : [];
+    });
   }
 
   /** First request field a validation error points at ("email", "phone", ...). */
@@ -66,6 +76,11 @@ export function defaultMessage(kind: ApiErrorKind): string {
   return DEFAULT_MESSAGES[kind];
 }
 
+/** Issue messages from @zs/contracts refinements that have no field path. */
+const ISSUE_MESSAGES: Record<string, string> = {
+  "At least one identity is required": "Add an email or a phone number.",
+};
+
 const FIELD_MESSAGES: Record<string, string> = {
   email: "Enter an email address like name@example.com.",
   phone: "Enter a phone number with country code, like +1 212 555 0142.",
@@ -79,6 +94,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   split_identity: "That email and phone belong to two different customers.",
   identity_mismatch: "That email or phone is already on another customer record.",
   idempotency_key_reused: "This request was already used for a different change.",
+  concurrent_update: "Someone saved a change at the same moment. Try again.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -97,6 +113,12 @@ export function isStaleRevision(error: unknown): error is ApiError {
 }
 
 /**
+ * Slots and bookings answer 403 for a calendar this account cannot use, foreign or unknown
+ * alike, so the API never reveals whether another business's calendar exists.
+ */
+export const CALENDAR_UNAVAILABLE = "This calendar is not available to your account.";
+
+/**
  * Turn a non-2xx response body into an ApiError. The body must match `apiErrorBodySchema`;
  * anything else (a proxy page, an empty body) still maps by status. Server messages are for
  * developers, so the shown message comes from the status, reason and field.
@@ -107,13 +129,42 @@ export function errorFromBody(status: number, body: unknown): ApiError {
   const error: ApiErrorBody["error"] | null = parsed.success ? parsed.data.error : null;
   const result = new ApiError(kind, defaultMessage(kind), status, error?.code ?? null, error?.details ?? {});
   const friendly = kind === "validation"
-    ? FIELD_MESSAGES[result.field ?? ""]
+    ? FIELD_MESSAGES[result.field ?? ""] ?? result.issueMessages.map((message) => ISSUE_MESSAGES[message]).find(Boolean)
     : kind === "conflict" ? CONFLICT_MESSAGES[result.reason ?? ""] : undefined;
   return friendly ? new ApiError(kind, friendly, status, result.code, result.details) : result;
 }
 
-/** Build the same error a live server would send, for the demo adapter. */
-export function demoError(status: number, code: string, details: Record<string, unknown> = {}, message?: string): ApiError {
-  const base = errorFromBody(status, { error: { code, message: "", details } });
-  return message ? new ApiError(base.kind, message, status, base.code, base.details) : base;
+/**
+ * The API's one fixed message per code (`MESSAGES` in packages/core/src/edge/errors.ts) and
+ * the status each code travels with. test/error-parity.test.ts checks both against core.
+ */
+export const API_ERRORS: Readonly<Record<ApiErrorCode, { status: number; message: string }>> = {
+  ValidationFailed: { status: 400, message: "Invalid request" },
+  Unauthorized: { status: 401, message: "Invalid or missing access token" },
+  Forbidden: { status: 403, message: "Forbidden" },
+  NotFound: { status: 404, message: "Not found" },
+  Conflict: { status: 409, message: "Request conflicts with the current state" },
+  Internal: { status: 500, message: "Internal error" },
+};
+
+/** The exact body the API sends for `code`, for the demo adapter. */
+export function demoErrorBody(code: ApiErrorCode, details: Record<string, unknown> = {}): ApiErrorBody {
+  return { error: { code, message: API_ERRORS[code].message, details: details as ApiErrorBody["error"]["details"] } };
+}
+
+/** The error the HTTP client would throw had the API answered with `demoErrorBody(code, details)`. */
+export function demoError(code: ApiErrorCode, details: Record<string, unknown> = {}): ApiError {
+  return errorFromBody(API_ERRORS[code].status, demoErrorBody(code, details));
+}
+
+/** `ValidationFailed` with issue paths and messages formatted as core's `validationError` does. */
+export function demoValidationError(issues: readonly { path: readonly PropertyKey[]; message: string }[]): ApiError {
+  return demoError("ValidationFailed", {
+    issues: issues.map((issue) => ({ path: issue.path.map(String).join("."), message: issue.message })),
+  });
+}
+
+/** There is no single-contact route, so both clients raise this after a list lookup. */
+export function contactNotFound(): ApiError {
+  return new ApiError("not_found", "We could not find that customer.", 404, "NotFound");
 }

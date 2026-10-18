@@ -15,8 +15,8 @@ export function LoadingRows({ rows = 3, label = "Loading" }: { rows?: number; la
   );
 }
 
-export function ErrorNote({ error, retry }: { error: unknown; retry?: () => void }) {
-  const message = isApiError(error) ? error.message : "Something went wrong. Try again.";
+export function ErrorNote({ error, retry, message: override }: { error: unknown; retry?: () => void; message?: string }) {
+  const message = override ?? (isApiError(error) ? error.message : "Something went wrong. Try again.");
   return (
     <div role="alert" className="flex items-start gap-3 rounded-md bg-danger/8 p-4 text-sm text-fg-2">
       <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-danger" />

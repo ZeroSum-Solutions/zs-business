@@ -11,6 +11,7 @@ import { useBookings, useResources, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatTime, startOfZonedDay, weekdayOf, zonedDateKey } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { BookingDialog } from "./booking-dialog";
+import { SlotsError } from "./slots-error";
 
 type View = "day" | "week";
 
@@ -80,7 +81,7 @@ function DayView({ resource, dateKey, onPickSlot }: { resource: ResourceSummary;
       </section>
       <section aria-labelledby="day-open">
         <h2 id="day-open" className="mb-3 text-sm font-medium text-fg-2">Open times</h2>
-        {slots.isError ? <ErrorNote error={slots.error} retry={() => slots.refetch()} /> : open.length === 0 ? (
+        {slots.isError ? <SlotsError error={slots.error} retry={() => slots.refetch()} /> : open.length === 0 ? (
           <p className="rounded-md bg-surface-warm p-4 text-sm text-muted">No open times this day.</p>
         ) : (
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-3">

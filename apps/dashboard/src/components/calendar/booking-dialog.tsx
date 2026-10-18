@@ -7,12 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isSlotTaken, type ResourceSummary } from "@/lib/api";
+import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { keys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
 import { newId } from "@/lib/id";
 import { cn } from "@/lib/utils";
+import { SlotsError } from "./slots-error";
 
 const CONFLICT_MESSAGE = "That time was just taken. Pick another slot.";
 
@@ -122,7 +123,7 @@ export function BookingDialog({
         <fieldset className="mt-5">
           <legend className="mb-2 text-sm font-medium text-fg-2">Open times on {formatDateKey(dateKey, "long")}</legend>
           {slots.isPending ? <LoadingRows rows={2} label="Loading open times" /> : slots.isError ? (
-            <ErrorNote error={slots.error} retry={() => slots.refetch()} />
+            <SlotsError error={slots.error} retry={() => slots.refetch()} />
           ) : slots.data.slots.length === 0 ? (
             <p className="rounded-md bg-surface-warm p-4 text-sm text-muted">No open times this day. Try another day.</p>
           ) : (
@@ -149,7 +150,11 @@ export function BookingDialog({
           )}
         </fieldset>
 
-        {otherError ? <div className="mt-4"><ErrorNote error={otherError} /></div> : null}
+        {otherError ? (
+          <div className="mt-4">
+            <ErrorNote error={otherError} {...(isApiError(otherError, "forbidden") ? { message: CALENDAR_UNAVAILABLE } : {})} />
+          </div>
+        ) : null}
 
         <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Close</Button>
