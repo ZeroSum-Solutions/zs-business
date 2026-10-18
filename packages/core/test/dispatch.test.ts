@@ -18,7 +18,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createDispatcher, type DispatchContext } from "../src/index.js";
+import { createDispatcher, type ActionHandler, type DispatchContext } from "../src/index.js";
 
 let db: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -27,34 +27,34 @@ let command: ActionCommand;
 let approved: ActionBinding;
 let fail = false;
 const instant = new Date("2026-10-17T12:00:00Z");
-const dispatch = createDispatcher<{ outboxEventType: string }>({
-  "noop.touch": {
-    resolveTarget: async (tx, target) => {
-      const row = (
-        await tx.query<{ tenant_id: string; id: string }>(
-          "select tenant_id,id from test_state where id=$1",
-          [target.id],
-        )
-      ).rows[0];
-      return row
-        ? { tenantId: row.tenant_id, id: row.id, type: "test_state" }
-        : null;
-    },
-    handle: async ({ tx, command, config, now }) => {
-      const row = (
-        await tx.query<{ touches: number }>(
-          "update test_state set touches=touches+1 where id=$1 returning touches",
-          [command.target.id],
-        )
-      ).rows[0]!;
-      if (fail) throw new Error("after state write");
-      return {
-        result: { touches: row.touches, at: now.toISOString(), eventType: config.outboxEventType },
-        event: { type: config.outboxEventType, payload: { touches: row.touches } },
-      };
-    },
+const touch: ActionHandler<{ outboxEventType: string }> = {
+  resolveTarget: async (tx, target) => {
+    const row = (
+      await tx.query<{ tenant_id: string; id: string }>(
+        "select tenant_id,id from test_state where id=$1",
+        [target.id],
+      )
+    ).rows[0];
+    return row
+      ? { tenantId: row.tenant_id, id: row.id, type: "test_state" }
+      : null;
   },
-});
+  handle: async ({ tx, command, config, now }) => {
+    const row = (
+      await tx.query<{ touches: number }>(
+        "update test_state set touches=touches+1 where id=$1 returning touches",
+        [command.target.id],
+      )
+    ).rows[0]!;
+    if (fail) throw new Error("after state write");
+    return {
+      result: { touches: row.touches, at: now.toISOString(), eventType: config.outboxEventType },
+      event: { type: config.outboxEventType, payload: { touches: row.touches } },
+    };
+  },
+};
+// Two action types that accept the same payload, to prove a key binds to one action type.
+const dispatch = createDispatcher<{ outboxEventType: string }>({ "noop.touch": touch, "noop.retouch": touch });
 beforeAll(async () => {
   db = await createTestDatabase();
   fixture = await createTwoTenantFixture(db);
@@ -331,6 +331,13 @@ describe("shared transactional action path", () => {
     await dispatch(ctx, command);
     await expect(
       dispatch(ctx, { ...command, payload: { value: 2 } }),
+    ).rejects.toBeInstanceOf(IdempotencyConflict);
+    expect((await counts()).state).toBe(1);
+  });
+  it("rejects a key reused for another action type with the same payload", async () => {
+    await dispatch(ctx, command);
+    await expect(
+      dispatch(ctx, { ...command, actionType: "noop.retouch" }),
     ).rejects.toBeInstanceOf(IdempotencyConflict);
     expect((await counts()).state).toBe(1);
   });

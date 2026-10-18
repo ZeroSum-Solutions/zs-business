@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { apiErrorBodySchema, bookingPageSchema, createBookingOutputSchema, slotsResponseSchema } from "@zs/contracts";
-import { call, createApiHarness, type ApiHarness } from "./helpers.js";
+import {
+  apiErrorBodySchema,
+  bookingPageSchema,
+  contactPageSchema,
+  createBookingOutputSchema,
+  dealPageSchema,
+  slotsResponseSchema,
+} from "@zs/contracts";
+import { call, contactAndDeal, createApiHarness, type ApiHarness } from "./helpers.js";
 
 let h: ApiHarness;
 beforeAll(async () => { h = await createApiHarness(); });
@@ -36,6 +43,32 @@ describe("POST /v1/booking/bookings", () => {
     const reused = await book("2026-10-19T14:00:00.000Z", key);
     expect(reused.status).toBe(409);
     expect(apiErrorBodySchema.parse(reused.body).error.details).toEqual({ reason: "idempotency_key_reused" });
+  });
+
+  it("rejects a booking key reused on the contact and deal endpoints without writing", async () => {
+    const key = randomUUID();
+    expect((await book("2026-10-19T16:00:00.000Z", key)).status).toBe(201);
+    const { contactId } = await contactAndDeal(h, h.a, "reuse@example.com");
+    const [contactsBefore, dealsBefore] = await Promise.all([
+      call(h.app, "GET", "/v1/crm/contacts?limit=100", { token: h.a.token }),
+      call(h.app, "GET", "/v1/crm/deals?limit=100", { token: h.a.token }),
+    ]);
+    const contact = await call(h.app, "POST", "/v1/crm/contacts", {
+      token: h.a.token, key, body: { displayName: "Reuse", email: "reuse-key@example.com" },
+    });
+    const deal = await call(h.app, "POST", "/v1/crm/deals", {
+      token: h.a.token, key, body: { contactId, pipelineId: h.a.pipelineId, stageId: h.a.stages[0], title: "Reuse" },
+    });
+    for (const response of [contact, deal]) {
+      expect(response.status).toBe(409);
+      expect(apiErrorBodySchema.parse(response.body).error).toMatchObject({
+        code: "Conflict", details: { reason: "idempotency_key_reused" },
+      });
+    }
+    const contacts = contactPageSchema.parse((await call(h.app, "GET", "/v1/crm/contacts?limit=100", { token: h.a.token })).body);
+    const deals = dealPageSchema.parse((await call(h.app, "GET", "/v1/crm/deals?limit=100", { token: h.a.token })).body);
+    expect(contacts).toEqual(contactPageSchema.parse(contactsBefore.body));
+    expect(deals).toEqual(dealPageSchema.parse(dealsBefore.body));
   });
 
   it("returns 400 with the error shape for a bad body", async () => {
