@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { expect, test, type APIRequestContext } from "@playwright/test";
-import { CALENDAR_UNAVAILABLE, demoErrorBody } from "../../src/lib/api/errors";
+import type { APIRequestContext, Page } from "@playwright/test";
+import { CALENDAR_UNAVAILABLE, defaultMessage, demoErrorBody } from "../../src/lib/api/errors";
+import { MAX_PAGES } from "../../src/lib/api/http-client";
 import { expectDialogInset, mainNav, openBookingOnFirstOpenDay, shot, viewportShot } from "../helpers";
 import { LIVE } from "./env";
+import { expect, test } from "./fixtures";
 
 const PREFIX = "live-";
 
@@ -34,6 +36,13 @@ function someoneElse(request: APIRequestContext) {
     },
   };
 }
+
+/** The next GET of the deal list through the proxy, i.e. the refetch a move triggers. */
+function waitForDealsRead(page: Page) {
+  return page.waitForResponse((response) => response.request().method() === "GET" && response.url().startsWith(`${LIVE.webUrl}/api/v1/crm/deals`));
+}
+
+const apiError = (code: string, details: Record<string, unknown> = {}) => ({ error: { code, message: "x", details } });
 
 test("renders all six areas from the live API", async ({ page }, info) => {
   // The browser only ever talks to the dashboard's origin, and never holds a token.
@@ -156,14 +165,17 @@ test("moves a deal, and reloads when someone else changed it", async ({ page, re
 
   await page.goto("/customers?view=pipeline");
   if (phoneProject) await page.getByRole("button", { name: new RegExp(`^${moving.from}`) }).click();
+  await expect(card(moving.title)).toBeVisible();
+  await expect(page.locator("[data-fetching]")).toHaveCount(0);
+  // The refetch after the move must land before the outside edit, or it could pick that up.
+  const refetched = waitForDealsRead(page);
   await card(moving.title).getByRole("combobox").selectOption({ label: "Deposit" });
   await expect(page.getByRole("status").getByText("Moved to Deposit.")).toBeVisible();
+  await refetched;
 
   if (phoneProject) await page.getByRole("button", { name: new RegExp(`^${stale.from}`) }).click();
   const target = card(stale.title);
   await expect(target).toBeVisible();
-  // Let the refetch after the first move land, or it could pick up the outside edit first.
-  await expect(page.locator("[data-fetching]")).toHaveCount(0);
   await someoneElse(request).touchDeal(stale.title);
   await target.getByRole("combobox").selectOption({ label: "Delivered" });
   await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
@@ -252,4 +264,120 @@ test("retries a booking whose answer was lost with the same key, and the API rep
   expect(keys).toHaveLength(2);
   expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
   expect(keys[1]).toBe(keys[0]);
+});
+
+test("labels sample areas and turns off writes that would not reach the API", async ({ page }, info) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
+  // Results, usage and the connections checklist still read the sample workspace.
+  for (const card of ["Revenue this week", "Wallet and usage", "Connections"]) {
+    await expect(page.getByRole("region", { name: card }).getByTestId("sample-badge")).toBeVisible();
+  }
+  await expect(page.getByRole("region", { name: "Next appointments" }).getByTestId("sample-badge")).toHaveCount(0);
+  if (info.project.name === "desktop") await expect(page.getByTestId("sample-note")).toHaveText("Some areas show sample data until their API ships.");
+
+  // Bookings and customers are live: no sample marker.
+  for (const path of ["/calendar", "/customers"]) {
+    await page.goto(path);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await expect(page.getByRole("main").getByTestId("sample-badge")).toHaveCount(0);
+  }
+
+  const header = (name: string) => page.getByRole("main").locator("header").filter({ has: page.getByRole("heading", { level: 1, name }) });
+  for (const [path, name] of [["/inbox", "Inbox"], ["/site", "Site"], ["/agents", "Agents"], ["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
+    await page.goto(path);
+    await expect(header(name).getByTestId("sample-badge"), name).toBeVisible();
+  }
+
+  // Plan: no cancel that only changes the sample, and the reason is on screen.
+  const cancel = page.getByRole("button", { name: "Cancel plan" });
+  await expect(cancel).toBeDisabled();
+  await expect(cancel).toHaveAccessibleDescription(/Not available yet/);
+  await expect(page.getByText(/^Not available yet/)).toBeVisible();
+
+  await page.goto("/agents");
+  await expect(page.getByRole("switch", { name: "Pause all agents" })).toBeDisabled();
+  for (const button of await page.getByRole("button", { name: /^(Approve and send|Discard)$/ }).all()) {
+    await expect(button).toBeDisabled();
+    await expect(button).toHaveAccessibleDescription(/Not available yet/);
+  }
+
+  await page.goto("/account/settings");
+  await expect(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  for (const toggle of await page.getByRole("switch").all()) await expect(toggle).toBeDisabled();
+
+  await page.goto("/site");
+  await page.getByRole("button", { name: /^Edit .* on phone$/ }).first().click();
+  const editor = page.getByRole("dialog");
+  await expect(editor.getByRole("button", { name: "Save draft" })).toBeDisabled();
+  await expect(editor.getByText(/^Not available yet/)).toBeVisible();
+  await editor.getByRole("textbox").first().press("Enter");
+  // Nothing claims a save that never left the browser.
+  await expect(page.getByRole("status").getByText(/saved/i)).toHaveCount(0);
+});
+
+test("reloads and allows a retry when the API reports a concurrent update", async ({ page }, info) => {
+  const title = info.project.name === "phone" ? "Engagement ring, oval sapphire halo" : "Signet ring with family crest";
+  await page.route(`${LIVE.webUrl}/api/v1/crm/deals/*/stage`, (route) =>
+    route.fulfill({ status: 409, json: apiError("Conflict", { reason: "concurrent_update" }) }));
+  await page.goto("/customers?view=pipeline");
+  if (info.project.name === "phone") await page.getByRole("button", { name: /^Design/ }).click();
+  const card = page.locator("[data-deal-id]").filter({ hasText: title });
+  await expect(card).toBeVisible();
+  await expect(page.locator("[data-fetching]")).toHaveCount(0);
+
+  const reloaded = waitForDealsRead(page);
+  await card.getByRole("combobox").selectOption({ label: "Deposit" });
+  await reloaded;
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
+  await expect(card.locator("option:checked")).toHaveText("Design");
+  await expect(card.getByRole("combobox")).toBeEnabled();
+
+  // The retry goes through once the API stops refusing it.
+  await page.unroute(`${LIVE.webUrl}/api/v1/crm/deals/*/stage`);
+  await card.getByRole("combobox").selectOption({ label: "Deposit" });
+  await expect(page.getByRole("status").getByText("Moved to Deposit.")).toBeVisible();
+});
+
+test("does not retry a 429 and asks the owner to wait", async ({ page }) => {
+  let calls = 0;
+  await page.route(`${LIVE.webUrl}/api/v1/crm/contacts?*`, (route) => {
+    calls += 1;
+    return route.fulfill({ status: 429, json: apiError("Internal") });
+  });
+  await page.goto("/customers");
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(defaultMessage("rate_limited"));
+  await page.waitForTimeout(1_500);
+  expect(calls).toBe(1);
+});
+
+test("shows a signed-out screen, not Try again, when the API answers 401", async ({ page }) => {
+  await page.route(`${LIVE.webUrl}/api/v1/**`, (route) => route.fulfill({ status: 401, json: apiError("Unauthorized") }));
+  await page.goto("/customers");
+  await expect(page.getByRole("heading", { level: 1, name: "Your session ended" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toHaveCount(0);
+});
+
+test("says the list is incomplete at the page cap, and cannot claim a customer is missing", async ({ page }) => {
+  const tenantId = "7a1c2b3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+  const fake = (index: number) => ({
+    id: `5e0c1a2b-7d3f-4c8a-9b1e-${String(index).padStart(12, "0")}`, tenantId,
+    displayName: `Customer ${String(index).padStart(4, "0")}`, email: null, phone: "+16465550100",
+    consent: { email: null, sms: null }, createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
+  });
+  // Every page says there is more, so the dashboard stops at its cap.
+  await page.route(`${LIVE.webUrl}/api/v1/crm/contacts?*`, (route) => {
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    const limit = Number(url.searchParams.get("limit") ?? 100);
+    const items = Array.from({ length: limit }, (_, index) => fake(offset + index + 1));
+    return route.fulfill({ json: { items, limit, offset, nextOffset: offset + limit } });
+  });
+  await page.goto("/customers");
+  await expect(page.getByTestId("list-incomplete")).toHaveText(`List incomplete — showing first ${(MAX_PAGES * 100).toLocaleString("en-US")}.`);
+
+  await page.goto(`/customers/${randomUUID()}`);
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(`first ${(MAX_PAGES * 100).toLocaleString("en-US")} customers`);
+  await expect(page.getByText("not found", { exact: false })).toHaveCount(0);
 });

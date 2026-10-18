@@ -10,10 +10,14 @@
  *
  * Children never inherit the shell's environment (see child-env.ts): each gets an allowlist
  * plus what is set here, and every database URL must name this run's zs_e2e_* database.
+ *
+ * Logs go through redactingLog, so no JWT is ever written to disk. Teardown deletes the
+ * live build (.next-live) and test-results/live; set ZS_LIVE_KEEP_LOGS=1 to keep the logs.
+ * After setup the seeded rows are snapshotted, and fixtures.ts puts them back before each test.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { createWriteStream, mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +26,8 @@ import pg from "pg";
 import { findBundleLeaks } from "../../scripts/bundle-secrets";
 import { assertThrowawayDatabaseEnv, childEnv, type Env } from "./child-env";
 import { LIVE } from "./env";
+import { redactingLog } from "./redact";
+import { SNAPSHOT_SQL } from "./reset";
 
 /** Required `iss` for this run; the API checks it because JWT_ISSUER is set. */
 const ISSUER = "https://zs-e2e-live.local/auth/v1";
@@ -57,7 +63,7 @@ function run(name: string, command: string, args: string[], options: { cwd: stri
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: options.cwd, env: options.env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
-    const log = createWriteStream(path.join(logDir, `${name}.log`));
+    const log = redactingLog(path.join(logDir, `${name}.log`));
     child.stdout.on("data", (chunk: Buffer) => { output += chunk; log.write(chunk); });
     child.stderr.on("data", (chunk: Buffer) => log.write(chunk));
     child.once("error", reject);
@@ -71,7 +77,7 @@ function run(name: string, command: string, args: string[], options: { cwd: stri
 
 /** Long-running server in its own process group, so teardown stops pnpm and its children. */
 function start(name: string, command: string, args: string[], options: { cwd: string; env: Env }): ChildProcess {
-  const log = createWriteStream(path.join(logDir, `${name}.log`));
+  const log = redactingLog(path.join(logDir, `${name}.log`));
   const child = spawn(command, args, { cwd: options.cwd, env: options.env as NodeJS.ProcessEnv, detached: true, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout!.pipe(log);
   child.stderr!.pipe(log);
@@ -134,9 +140,12 @@ export default async function globalSetup() {
     }
   };
 
-  const teardown = async () => {
+  /** Stop everything, drop the database and delete the build; logs stay only on request. */
+  const teardown = async (keepLogs = process.env.ZS_LIVE_KEEP_LOGS === "1") => {
     for (const child of children.reverse()) await stop(child);
     await adminClient((client) => client.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`));
+    rmSync(path.join(dashboardDir, ".next-live"), { recursive: true, force: true });
+    if (!keepLogs) rmSync(logDir, { recursive: true, force: true });
   };
 
   await adminClient((client) => client.query(`CREATE DATABASE "${database}"`));
@@ -155,6 +164,15 @@ export default async function globalSetup() {
     });
     const token = /Dev JWT[^\n]*:\n(\S+)/.exec(seedOutput)?.[1];
     if (!token) throw new Error("seed:demo did not print a dev JWT; see test-results/live/seed.log");
+
+    // Snapshot the seeded rows, so each test can start from them (see fixtures.ts).
+    const runClient = new pg.Client({ connectionString: databaseUrl.href });
+    await runClient.connect();
+    try {
+      await runClient.query(SNAPSHOT_SQL);
+    } finally {
+      await runClient.end();
+    }
 
     const seedClaims = decodeJwt(token) as { sub?: string; app_metadata?: { tenant_id?: string } };
     const tenantId = seedClaims.app_metadata?.tenant_id;
@@ -210,7 +228,7 @@ export default async function globalSetup() {
     if (leaks.length > 0) {
       throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);
     }
-    const web = start("web", "pnpm", ["exec", "next", "start", "--port", String(LIVE.webPort)], { cwd: dashboardDir, env: webEnv });
+    const web = start("web", "pnpm", ["exec", "next", "start", "--hostname", "127.0.0.1", "--port", String(LIVE.webPort)], { cwd: dashboardDir, env: webEnv });
     children.push(web);
     await waitFor(LIVE.webUrl, web, "web", 60_000);
 
@@ -218,8 +236,11 @@ export default async function globalSetup() {
     process.env.ZS_LIVE_TOKEN = ownerToken;
     process.env.ZS_LIVE_OTHER_TOKEN = otherToken;
     process.env.ZS_LIVE_REFUSED_TOKENS = JSON.stringify(refusedTokens);
+    // Superuser URL for this run's database only; reset.ts checks the name before using it.
+    process.env.ZS_LIVE_RESET_DB_URL = databaseUrl.href;
   } catch (error) {
-    await teardown();
+    // Keep the (redacted) logs the error message points at.
+    await teardown(true);
     throw error;
   }
   return teardown;

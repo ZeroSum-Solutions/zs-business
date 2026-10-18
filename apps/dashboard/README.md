@@ -14,13 +14,19 @@ mise exec -- pnpm --filter @zs/dashboard e2e     # Playwright on the demo adapte
 mise exec -- pnpm --filter @zs/dashboard e2e:live  # the same journeys against the real API and Postgres
 ```
 
-`e2e` builds the app and serves it on port 3217. Screenshots of every area go to
+`e2e` builds the app and serves it on `127.0.0.1:3217`; it always starts its own server
+(`reuseExistingServer: false`), so a stale build on that port cannot answer. Screenshots of every area go to
 `e2e/__screenshots__/` (gitignored). First run: `pnpm exec playwright install chromium`.
 `e2e/retries.spec.ts` covers retries after a lost response (the demo adapter's
 `loseNextResponse`, `setOffline` and `writeLog`). `e2e/layout.spec.ts` covers focus
 return after Escape on every sheet and controls clear of the phone tab bar.
 `e2e/offline.spec.ts` runs with service workers allowed: install, go offline, reload,
-still styled and working; `/api` responses are never stored.
+still styled and working; `/api` responses are never stored. `e2e/session.spec.ts` covers
+the signed-out state after a 401 and sign-out, and that no cached query outlives either.
+`e2e/a11y.spec.ts` runs axe (default rules, no serious or critical issues) on every area at
+both viewports and checks 44px targets, `label[for]` targets, visible reasons on disabled
+buttons, focus rings no overflow clips, one visible h1 in an open conversation, and toasts
+that stay 10 seconds and can be dismissed from the keyboard.
 
 `e2e:live` needs the local test cluster at `127.0.0.1:55432` (or `ZS_TEST_DATABASE_URL`,
 loopback only). Its global setup (`e2e/live/global-setup.ts`):
@@ -29,12 +35,18 @@ loopback only). Its global setup (`e2e/live/global-setup.ts`):
 2. runs `@zs/api seed:demo` with a random `JWT_SECRET` (migrations, the `zs_runtime` login,
    the Halden & Rowe seed and a 7-day dev JWT). It takes the owner from that JWT and signs
    one-hour tokens (`role` authenticated, a run-specific `iss`, always an `iat`) for the
-   owner and for another person in the same business;
+   owner and for a "second person" in the same business. The second token is only a
+   signed claim: that user id has no membership row. The API trusts the token's tenant
+   claim, which is all the conflict tests need; it is not a second real account;
 3. starts `@zs/api` on port 8798 as `zs_runtime` with `JWT_ISSUER` set,
    `JWT_MAX_TTL_SECONDS=3600` and `JWT_CLOCK_SKEW_SECONDS=60`, the production defaults;
 4. builds the dashboard into `.next-live/` with `ZS_API_URL` and the owner token as
    `ZS_API_TOKEN` (server-only), fails if the build output holds any token or the JWT
-   secret, and serves it on port 3218.
+   secret, and serves it on `127.0.0.1:3218`;
+5. snapshots the seeded bookings, contacts and deals into a `zs_e2e` schema. Before each
+   test the `seededRows` fixture (`e2e/live/fixtures.ts`, `e2e/live/reset.ts`) deletes
+   rows added since and restores every deal's stage and revision, so tests do not depend
+   on order. It refuses any database that is not a loopback `zs_e2e_*` one.
 
 No child process inherits the shell's environment (`e2e/live/child-env.ts`): each gets
 `PATH`, `HOME`, locale and terminal variables plus what setup sets. Before each start,
@@ -50,9 +62,12 @@ same body the demo adapter sends, and that a booking whose answer was dropped is
 with the same `Idempotency-Key` and replayed by the API.
 
 The tests make the conflicting writes (a booking for the chosen time, a re-save of a deal)
-through the API with the second token. Teardown stops both servers and drops the
-database, also when setup fails. Server logs go to `test-results/live/`. Screenshots are
-prefixed `live-`. Phone and desktop share one database, so they run one after the other
+through the API with the second token. Teardown stops both servers, drops the
+database and deletes `.next-live/` and `test-results/live/`, also when setup fails.
+Server logs go to `test-results/live/` with every JWT replaced by `[redacted-jwt]`
+(`e2e/live/redact.ts`); set `ZS_LIVE_KEEP_LOGS=1` to keep them. Setup also keeps them when
+it fails. Playwright traces are off, since a trace would record the page's requests.
+Screenshots are prefixed `live-`. Phone and desktop share one database, so they run one after the other
 on separate seeded deals. It is not in CI: the CI e2e job has no Postgres service, and a
 second production build plus the live run would push that job past about four minutes.
 
@@ -79,6 +94,10 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   "Halden & Rowe Fine Jewelry", including the booking and deal conflicts. Changes reset
   on reload. In demo mode `window.__zsDemo` exposes `bookAsSomeoneElse` and
   `editDealElsewhere` so tests can trigger the conflicts.
+- Live mode labels every area that still reads the demo workspace with a "Sample data"
+  badge, and disables its writes (cancel plan, agent switches and approvals, settings,
+  connections, site edits) with the reason shown as visible text
+  (`src/components/ui/sample.tsx`). Nothing pretends to save.
 - Errors: the demo adapter parses requests with the same `@zs/contracts` schemas and throws
   the error the HTTP client would build from the API's body: the fixed message per code,
   allowlisted conflict reasons, and 403 (never 404) for an unknown calendar, deal or stage.
@@ -89,18 +108,30 @@ Errors: every non-2xx body is read with `apiErrorBodySchema`. The client maps th
 to an `ApiError` kind and shows plain copy, not the server message. A 409 with
 `details.reason` `overlap` or `slot_unavailable` is a taken slot (`isSlotTaken`) and
 `stale_revision` is a changed deal (`isStaleRevision`). A 400 points at the first field in
-`details.issues`. The demo adapter throws the same errors.
+`details.issues`. The demo adapter throws the same errors. A 409 `stale_revision` or
+`concurrent_update` is a changed deal (`isDealChanged`): the board reloads it. A 429 is
+`rate_limited` and is never retried. A 401 is `unauthorized`: the session ends.
 
-Writes: every write path (booking, contact, deal move) gets its `Idempotency-Key` from
+Session: `GET /api/session` returns the server's `{ tenantId, userId }` (401 when signed
+out). Every query key starts with that `tenantId`, and queries wait for it
+(`useKeys()` in `src/lib/queries.ts`, `src/lib/session.tsx`). Any 401 or "Sign out"
+clears the query cache and shows the signed-out screen. API reads use `cache: "no-store"`.
+
+Writes: the client never makes up an `Idempotency-Key`; every write method requires one
+and throws without it. Every write path (booking, contact, deal move) gets it from
 `useIntentKey()` (`src/lib/intent-key.ts`). The key belongs to the full request body (for
 a deal move: deal, expected revision, target stage), so a retry of the same write reuses
 it and the API replays the first attempt, while any other body (another calendar at the
 same instant) gets a new key. The key is dropped once the attempt gets a definitive
 answer (2xx or 4xx); after a network error, a 5xx or an unreadable body it is kept. There
-is no deal-create screen yet; when one is added it uses the same hook.
+is no deal-create screen yet; when one is added it uses the same hook. The booking
+dialog counts its openings: an answer that arrives after the dialog closed or changed
+calendar never closes or changes the current one.
 
 The list routes take paging only (at most 100 rows a page). The client walks `nextOffset`
 and runs contact search, the deal contact filter and the booking date range itself.
+It reads at most 20 pages (2,000 rows); past that, lists say "List incomplete — showing
+first N" and a contact beyond the cap shows its own error instead of "not found".
 There is no single-contact route, so a contact page reads the list. API bookings carry no
 customer or title, so live mode shows them as "Appointment".
 
@@ -113,14 +144,20 @@ Live mode still reads them from the demo workspace.
   NodeNext `.js` import specifiers to `.ts` sources.
 - `next build` type-checks (`ignoreBuildErrors: false`); `typecheck` runs `tsc --noEmit` (TypeScript 7) on its own.
 - Every response, pages and `/api` alike, carries `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` (`next.config.ts`). There is no `script-src`: Next hydrates with inline scripts.
-- The service worker (`public/sw.js`) caches the app shell and static assets only. On
-  install it caches each shell page, then every `/_next/static` script, style and font
-  those pages and their styles reference, so the app opens offline styled and working.
-  Assets are cache-first; pages are network-first with the cached copy as fallback. It
-  is registered as `/sw.js?v=<build id>`, so each build gets its own cache and the old
-  one is deleted. It never caches `/v1/` or `/api/` requests, non-GETs, requests with an
-  `Authorization` header or responses marked `no-store` or `private`. It registers in
-  production builds only.
+- The service worker (`public/sw.js`) caches the app shell only. On install it caches
+  each shell page, then every `/_next/static` script and style those pages and their
+  styles reference, so the app opens offline styled and working. `/_next/static` is
+  cache-first; pages are network-first with the cached copy as fallback. It is
+  registered as `/sw.js?v=<build id>`, so each build gets its own `zs-shell-<build id>`
+  cache and older ones are deleted. It stores only same-origin (`basic`), OK responses
+  whose type is HTML, JavaScript or CSS and that are not marked `no-store` or `private`.
+  It never caches `/v1/` or `/api/` requests, non-GETs or requests with an
+  `Authorization` header. It registers in production builds only.
+  `test/service-worker.test.ts` runs it against fake caches and network.
+- Focus shows as a 2px outline (`:focus-visible` in `globals.css`); inside scrolling
+  lists it sits inset (`focus-inset`), and scrolling chip rows reveal a focused chip.
+  Toasts stay 10 seconds, pause on hover or focus, close with Escape or "Dismiss", and
+  errors stay until dismissed.
 - Sheets return focus to the control that opened them (`DialogContent` in
   `src/components/ui/dialog.tsx`). On phones `html` has scroll padding for the top bar
   and tab bar, so scrolled-to and focused controls are never under them.

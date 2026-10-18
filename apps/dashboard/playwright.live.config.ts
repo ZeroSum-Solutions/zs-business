@@ -17,7 +17,8 @@ export default defineConfig({
   timeout: 60_000,
   use: {
     baseURL: LIVE.webUrl,
-    trace: "retain-on-failure",
+    // Off: a live trace records the proxy's requests and could hold a token.
+    trace: "off",
     serviceWorkers: "block",
   },
   projects: [

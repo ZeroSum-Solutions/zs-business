@@ -5,6 +5,7 @@ const webPort = 3218;
 export const LIVE = {
   apiPort,
   webPort,
-  apiUrl: `http://localhost:${apiPort}`,
-  webUrl: `http://localhost:${webPort}`,
+  // Loopback by address: "localhost" may resolve to ::1 or, through a hosts entry, elsewhere.
+  apiUrl: `http://127.0.0.1:${apiPort}`,
+  webUrl: `http://127.0.0.1:${webPort}`,
 };
