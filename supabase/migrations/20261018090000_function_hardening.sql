@@ -20,12 +20,18 @@ END $$;
 CREATE TRIGGER booking_resources_time_zone_known
   BEFORE INSERT OR UPDATE OF time_zone ON public.booking_resources
   FOR EACH ROW EXECUTE FUNCTION public.booking_resources_time_zone_known();
+-- One-time scan of stored rows. Under FORCE ROW LEVEL SECURITY a migrator that is not a
+-- superuser (postgres on hosted Supabase) sees no rows, and the scan would pass vacuously.
+-- The table owner lifts FORCE for the scan only; ALTER TABLE holds an ACCESS EXCLUSIVE
+-- lock until commit, so no other session sees the table without it.
+ALTER TABLE public.booking_resources NO FORCE ROW LEVEL SECURITY;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM public.booking_resources r
     WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names z WHERE lower(z.name) = lower(r.time_zone))) THEN
     RAISE EXCEPTION 'booking_resources holds unknown time zones; fix them before this migration';
   END IF;
 END $$;
+ALTER TABLE public.booking_resources FORCE ROW LEVEL SECURITY;
 
 -- pg_temp listed last: unlisted, it is searched first for tables and types, so a session
 -- could shadow a type such as uuid inside a function (PostgreSQL "Writing SECURITY DEFINER
@@ -39,11 +45,13 @@ ALTER FUNCTION public.booking_overrides_valid(jsonb) SET search_path = pg_catalo
 -- Invoker functions get one explicit owner that exists in every environment, instead of
 -- whichever role ran the migration (a superuser locally, postgres on Supabase). It is
 -- NOLOGIN and standalone, so no runtime login can assume it. The SECURITY DEFINER
--- function stays with zs_dispatcher (20261017160000).
+-- function stays with zs_dispatcher (20261017160000). CREATE ROLE names NOLOGIN only, as
+-- there: supautils refuses SUPERUSER, REPLICATION or BYPASSRLS even as NO*; the check
+-- below asserts every attribute.
 DO $$ BEGIN
   BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zs_function_owner') THEN
-      CREATE ROLE zs_function_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+      CREATE ROLE zs_function_owner NOLOGIN;
     END IF;
   EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
   END;

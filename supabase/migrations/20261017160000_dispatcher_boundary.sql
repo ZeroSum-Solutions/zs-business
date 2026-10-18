@@ -1,8 +1,11 @@
 -- Function owner is neither a table owner nor a role that can bypass forced RLS.
+-- CREATE ROLE names NOLOGIN only: hosted Supabase (supautils) refuses a non-superuser
+-- CREATE ROLE that names SUPERUSER, REPLICATION or BYPASSRLS, even as NO*. The defaults
+-- are already off; the check below asserts them.
 DO $$ BEGIN
   BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zs_dispatcher') THEN
-      CREATE ROLE zs_dispatcher NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+      CREATE ROLE zs_dispatcher NOLOGIN;
     END IF;
   EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
   END;
