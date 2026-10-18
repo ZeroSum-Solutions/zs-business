@@ -85,3 +85,13 @@ it("rejects time-zone names Postgres does not know, on insert and update", async
     "SELECT time_zone FROM booking_resources WHERE tenant_id=$1", [fixture.a.tenantId],
   ))).rows).toEqual([{ time_zone: "America/New_York" }]);
 });
+
+it("accepts a lowercase IANA name on insert and update and keeps its spelling (B-4)", async () => {
+  await insertResource(fixture.b.tenantId, "america/new_york");
+  await fixture.service((tx) => tx.query(
+    "UPDATE booking_resources SET time_zone='europe/london' WHERE tenant_id=$1", [fixture.b.tenantId],
+  ));
+  expect((await fixture.service((tx) => tx.query(
+    "SELECT time_zone FROM booking_resources WHERE tenant_id=$1", [fixture.b.tenantId],
+  ))).rows).toEqual([{ time_zone: "europe/london" }]);
+});

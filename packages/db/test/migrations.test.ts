@@ -1,5 +1,14 @@
+import { randomUUID } from "node:crypto";
+import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { expect, it } from "vitest";
+import { migrate } from "../src/migrate.js";
+import { asService } from "../src/scoped.js";
 import { withTestDatabase } from "../src/testing.js";
+
+const migrations = new URL("../../../supabase/migrations/", import.meta.url);
 
 it("the full chain applies as a non-superuser CREATEROLE migrator and hands functions to their owner roles", async () => {
   await withTestDatabase(async (database) => {
@@ -17,4 +26,30 @@ it("the full chain applies as a non-superuser CREATEROLE migrator and hands func
     );
     expect(tables.rows).toEqual([{ owner: database.migrator }]);
   }, undefined, { nonSuperuserMigrator: true });
+});
+
+it("migrates over an existing booking resource whose zone is a lowercase IANA name", async () => {
+  const partial = await mkdtemp(join(tmpdir(), "zs-migrations-"));
+  try {
+    for (const name of await readdir(migrations)) {
+      if (name.endsWith(".sql") && name < "20261018090000") {
+        await copyFile(new URL(name, migrations), join(partial, name));
+      }
+    }
+    await withTestDatabase(async (database) => {
+      const tenantId = randomUUID();
+      await asService(database.servicePool, async (tx) => {
+        await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Tenant')", [tenantId]);
+        await tx.query(
+          `INSERT INTO booking_resources (tenant_id,id,time_zone,slot_length_minutes,slot_step_minutes,
+             buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+           VALUES ($1,$2,'america/new_york',30,30,0,0,0,60)`, [tenantId, randomUUID()]);
+      });
+      await migrate(database.pool);
+      expect((await database.pool.query("SELECT time_zone FROM booking_resources")).rows)
+        .toEqual([{ time_zone: "america/new_york" }]);
+    }, undefined, { migrations: pathToFileURL(`${partial}/`) });
+  } finally {
+    await rm(partial, { recursive: true, force: true });
+  }
 });

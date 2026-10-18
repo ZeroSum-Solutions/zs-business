@@ -5,11 +5,12 @@
 -- subquery, and an IMMUTABLE wrapper over pg_timezone_names would be false. The zone list
 -- changes with tzdata, CHECKs are re-run when pg_dump output loads data, so a restore could
 -- fail on a row whose zone a newer tzdata dropped. The trigger checks each write against
--- the live list and is created after the data on restore.
+-- the live list and is created after the data on restore. Names compare case-insensitively,
+-- as PostgreSQL and Intl resolve them: B-4 accepts america/new_york and the row keeps it.
 CREATE FUNCTION public.booking_resources_time_zone_known() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = NEW.time_zone) THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE lower(name) = lower(NEW.time_zone)) THEN
     RAISE EXCEPTION 'Unknown time zone: %', NEW.time_zone USING ERRCODE = 'check_violation',
       SCHEMA = 'public', TABLE = 'booking_resources', COLUMN = 'time_zone',
       CONSTRAINT = 'booking_resources_time_zone_known';
@@ -21,7 +22,7 @@ CREATE TRIGGER booking_resources_time_zone_known
   FOR EACH ROW EXECUTE FUNCTION public.booking_resources_time_zone_known();
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM public.booking_resources r
-    WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names z WHERE z.name = r.time_zone)) THEN
+    WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names z WHERE lower(z.name) = lower(r.time_zone))) THEN
     RAISE EXCEPTION 'booking_resources holds unknown time zones; fix them before this migration';
   END IF;
 END $$;
