@@ -53,6 +53,14 @@ BEGIN
     VALUES(p_tenant,p_event_id,p_id,p_event_type,p_event_payload,p_created_at);
   RETURN saved_result;
 END $$;
+-- ALTER ... OWNER needs SET ROLE on the new owner. On PostgreSQL 16+ a non-superuser
+-- CREATEROLE migrator (postgres on hosted Supabase) can be a member with SET and INHERIT
+-- off, so membership alone is not enough. INHERIT lets it act as owner for the grants below.
+DO $$ BEGIN
+  IF NOT (pg_has_role(current_user, 'zs_dispatcher', 'SET') AND pg_has_role(current_user, 'zs_dispatcher', 'USAGE')) THEN
+    EXECUTE format('GRANT zs_dispatcher TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+  END IF;
+END $$;
 -- Ownership transfer requires CREATE briefly; the role cannot create replacements afterward.
 GRANT CREATE ON SCHEMA public TO zs_dispatcher;
 ALTER FUNCTION public.record_action_and_event(uuid,uuid,uuid,text,jsonb,jsonb,jsonb,text,jsonb,timestamptz,uuid,text,jsonb) OWNER TO zs_dispatcher;

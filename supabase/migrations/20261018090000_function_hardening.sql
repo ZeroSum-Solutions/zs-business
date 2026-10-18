@@ -51,9 +51,10 @@ DO $$ BEGIN
     OR EXISTS (SELECT 1 FROM pg_auth_members WHERE member='zs_function_owner'::regrole) THEN
     RAISE EXCEPTION 'zs_function_owner must be an unprivileged standalone NOLOGIN role';
   END IF;
-  -- A non-superuser migration role (Supabase postgres) must be a member to give ownership away.
-  IF NOT pg_has_role(current_user, 'zs_function_owner', 'MEMBER') THEN
-    EXECUTE format('GRANT zs_function_owner TO %I', current_user);
+  -- ALTER ... OWNER needs SET ROLE on the new owner; a non-superuser migrator (Supabase
+  -- postgres) can be a member without it (see 20261017160000).
+  IF NOT (pg_has_role(current_user, 'zs_function_owner', 'SET') AND pg_has_role(current_user, 'zs_function_owner', 'USAGE')) THEN
+    EXECUTE format('GRANT zs_function_owner TO %I WITH INHERIT TRUE, SET TRUE', current_user);
   END IF;
 END $$;
 

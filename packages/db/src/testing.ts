@@ -16,7 +16,19 @@ export interface TestDatabase {
   runtimePool: Pool;
   servicePool: Pool;
   db: ScopedDatabase;
+  /** The NOSUPERUSER CREATEROLE login that ran the migrations, when one was requested. */
+  migrator?: string;
   close(): Promise<void>;
+}
+export interface TestDatabaseOptions {
+  /** Migration directory; defaults to supabase/migrations. */
+  migrations?: URL;
+  /**
+   * Migrate as a fresh login modelled on hosted Supabase's postgres: not superuser,
+   * CREATEROLE, owner of the database. Like a PostgreSQL 16 role creator, it holds ADMIN
+   * on the shared owner roles with SET and INHERIT off. Dropped on close.
+   */
+  nonSuperuserMigrator?: boolean;
 }
 /** Hard boundary: this harness cannot connect outside the dedicated test cluster. */
 export function testAdminUrl(
@@ -52,10 +64,13 @@ export function testAdminUrl(
 
 export async function createTestDatabase(
   adminUrl?: string,
+  options: TestDatabaseOptions = {},
 ): Promise<TestDatabase> {
   const base = testAdminUrl(adminUrl);
   const admin = new Pool({ connectionString: base.href, max: 1 });
-  const name = `zs_test_${randomUUID().replaceAll("-", "")}`;
+  const suffix = randomUUID().replaceAll("-", "");
+  const name = `zs_test_${suffix}`;
+  const migrator = options.nonSuperuserMigrator ? `zs_test_migrator_${suffix}` : undefined;
   const databaseUrl = new URL(base);
   databaseUrl.pathname = `/${name}`;
   const pool = new Pool({ connectionString: databaseUrl.href, max: 5 });
@@ -69,6 +84,7 @@ export async function createTestDatabase(
   const runtimePool = new Pool({ connectionString: loginUrl("zs_runtime"), max: 5 });
   const servicePool = new Pool({ connectionString: loginUrl("zs_service"), max: 5 });
   let created = false;
+  let migratorCreated = false;
   let closed = false;
   // DROP DATABASE ... WITH (FORCE) can reach a backend whose idle client is still
   // shutting down; pg-pool re-emits that 57P01 and an unhandled pool error crashes the run.
@@ -96,15 +112,38 @@ export async function createTestDatabase(
           }
           await admin.query(`DROP DATABASE "${name}" WITH (FORCE)`);
         }
+        if (migratorCreated) await admin.query(`DROP ROLE "${migrator}"`);
       } finally {
         await admin.end();
       }
     }
   }
   try {
-    await admin.query(`CREATE DATABASE "${name}"`);
+    if (migrator) {
+      await admin.query(
+        `CREATE ROLE "${migrator}" LOGIN INHERIT NOSUPERUSER CREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS`,
+      );
+      migratorCreated = true;
+      for (const role of ["zs_dispatcher", "zs_function_owner"]) {
+        await admin.query(`DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}') THEN
+            GRANT ${role} TO "${migrator}" WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+          END IF;
+        END $$`);
+      }
+    }
+    await admin.query(`CREATE DATABASE "${name}"${migrator ? ` OWNER "${migrator}"` : ""}`);
     created = true;
-    await migrate(pool);
+    if (migrator) {
+      const migratorPool = new Pool({ connectionString: loginUrl(migrator), max: 1 });
+      try {
+        await migrate(migratorPool, options.migrations);
+      } finally {
+        await migratorPool.end();
+      }
+    } else {
+      await migrate(pool, options.migrations);
+    }
     // Serialize cluster-wide login setup in the shared admin database, across runs.
     const client = await admin.connect();
     try {
@@ -134,6 +173,7 @@ export async function createTestDatabase(
       runtimePool,
       servicePool,
       db: createScopedDatabase(runtimePool),
+      ...(migrator ? { migrator } : {}),
       close,
     };
   } catch (error) {
@@ -146,8 +186,9 @@ export async function createTestDatabase(
 export async function withTestDatabase<T>(
   work: (database: TestDatabase) => Promise<T>,
   adminUrl?: string,
+  options?: TestDatabaseOptions,
 ): Promise<T> {
-  const database = await createTestDatabase(adminUrl);
+  const database = await createTestDatabase(adminUrl, options);
   try {
     return await work(database);
   } finally {
