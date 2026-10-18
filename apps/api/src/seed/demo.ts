@@ -5,6 +5,7 @@ import { assertLocalPool } from "../config.js";
 import {
   DEMO_CONTACTS,
   DEMO_DEALS,
+  DEMO_OWNER_EMAIL,
   DEMO_RESOURCES,
   DEMO_STAGES,
   DEMO_TENANT_NAME,
@@ -21,6 +22,8 @@ export interface SeedDependencies {
 }
 export interface SeedSummary {
   readonly principal: Principal;
+  /** The owner's membership; its user id is the principal's actorId. */
+  readonly owner: { readonly memberId: string; readonly email: string };
   readonly resources: readonly { id: string; name: string }[];
   readonly pipelineId: string;
   readonly contacts: number;
@@ -41,6 +44,7 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
   const principal: Principal = { tenantId: id("tenant"), actorId: id("owner") };
   const { tenantId } = principal;
   const pipelineId = id("pipeline");
+  const owner = { memberId: id("member", "owner"), email: DEMO_OWNER_EMAIL };
   const stageIds = new Map(DEMO_STAGES.map((stage) => [stage, id("stage", stage)]));
   const resources = DEMO_RESOURCES.map((resource) => ({ ...resource, id: id("resource", resource.key) }));
 
@@ -55,6 +59,13 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
           resource.slotStepMinutes, resource.bufferBeforeMinutes, resource.bufferAfterMinutes,
           resource.minimumNoticeMinutes, resource.bookingHorizonMinutes],
       );
+    // The owner's membership has no action of its own: a tenant's first owner is provisioned.
+    const joinedAt = deps.clock.now().toISOString();
+    await tx.query(
+      `INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,'owner',$5,$5) ON CONFLICT DO NOTHING`,
+      [tenantId, owner.memberId, owner.email, principal.actorId, joinedAt],
+    );
     await tx.query("INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
       [tenantId, pipelineId, "Custom & bridal"]);
     for (const [position, stage] of DEMO_STAGES.entries())
@@ -113,6 +124,7 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
   const bookings = await session.listBookings({ limit: "100" });
   return {
     principal,
+    owner,
     resources: resources.map((resource) => ({ id: resource.id, name: resource.name })),
     pipelineId,
     contacts: contactIds.length,

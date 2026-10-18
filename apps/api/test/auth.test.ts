@@ -31,18 +31,27 @@ describe("authentication", () => {
 
   it("rejects an expired token", async () => {
     const past = { now: () => new Date("2026-10-18T06:00:00.000Z") };
-    const token = await signDevToken(SECRET, { tenantId: h.a.tenantId, actorId: h.a.actorId }, past, 3600);
+    const token = await signDevToken(SECRET, h.a, past, 3600);
     expect401(await call(h.app, "GET", "/v1/crm/contacts", { token }));
   });
 
   it("rejects a token signed with another secret", async () => {
-    const token = await signDevToken("another-secret-that-is-32-chars-long!!", { tenantId: h.a.tenantId, actorId: h.a.actorId },
+    const token = await signDevToken("another-secret-that-is-32-chars-long!!", h.a,
       { now: () => new Date("2026-10-19T07:59:00.000Z") });
     expect401(await call(h.app, "GET", "/v1/crm/contacts", { token }));
   });
 
   it("rejects a valid signature without a tenant claim", async () => {
-    const token = await new SignJWT({ role: "authenticated" })
+    const token = await new SignJWT({ role: "authenticated", session_id: h.a.sessionId })
+      .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated")
+      .setIssuedAt(Math.floor(Date.parse(NOW) / 1000))
+      .setExpirationTime(Math.floor(Date.parse("2026-10-19T09:00:00.000Z") / 1000))
+      .sign(new TextEncoder().encode(SECRET));
+    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token }));
+  });
+
+  it("rejects a valid signature without a session_id claim", async () => {
+    const token = await new SignJWT({ role: "authenticated", app_metadata: { tenant_id: h.a.tenantId } })
       .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated")
       .setIssuedAt(Math.floor(Date.parse(NOW) / 1000))
       .setExpirationTime(Math.floor(Date.parse("2026-10-19T09:00:00.000Z") / 1000))
@@ -60,7 +69,7 @@ describe("authentication", () => {
 const nowSeconds = Math.floor(Date.parse(NOW) / 1000);
 /** A correctly signed token for tenant A; each test overrides one claim. */
 function token(claims: Record<string, unknown>, { iat = nowSeconds as number | null, exp = nowSeconds + 600 } = {}) {
-  const jwt = new SignJWT({ role: "authenticated", app_metadata: { tenant_id: h.a.tenantId }, ...claims })
+  const jwt = new SignJWT({ role: "authenticated", session_id: h.a.sessionId, app_metadata: { tenant_id: h.a.tenantId }, ...claims })
     .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated").setExpirationTime(exp);
   if (iat !== null) jwt.setIssuedAt(iat);
   return jwt.sign(new TextEncoder().encode(SECRET));
@@ -116,7 +125,8 @@ describe("token claims", () => {
 
   it("accepts the 7-day dev token when local config raises the limit", async () => {
     const verifier = createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 7 * 24 * 3600 });
-    await expect(verifier.verify(await signDevToken(SECRET, h.a, clock))).resolves.toEqual({ tenantId: h.a.tenantId, actorId: h.a.actorId });
+    await expect(verifier.verify(await signDevToken(SECRET, h.a, clock)))
+      .resolves.toEqual({ tenantId: h.a.tenantId, actorId: h.a.actorId, sessionId: h.a.sessionId });
     expect(() => createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 0 })).toThrow(/positive/);
   });
 });

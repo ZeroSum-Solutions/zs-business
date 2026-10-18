@@ -2,9 +2,15 @@ import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { accessTokenClaimsSchema } from "@zs/contracts";
 import type { Principal } from "@zs/core";
 
+/** A verified token: the principal plus the Supabase session it belongs to. */
+export interface VerifiedToken extends Principal {
+  /** The token's `session_id`; the API checks it against live sessions on every request. */
+  readonly sessionId: string;
+}
+
 /** Verifies a bearer token and returns the principal, or throws Unauthenticated. */
 export interface TokenVerifier {
-  verify(token: string): Promise<Principal>;
+  verify(token: string): Promise<VerifiedToken>;
 }
 
 export class Unauthenticated extends Error {
@@ -35,7 +41,9 @@ type Key = Uint8Array | JWTVerifyGetKey;
  * Verify like a Supabase Auth access token: signature, exp/nbf against the injected clock,
  * audience, issuer when configured, `role = authenticated`, an `iat` no later than now plus
  * the allowed skew and a lifetime `exp - iat` within the maximum, then map
- * `sub` to the actor and `app_metadata.tenant_id` to the tenant.
+ * `sub` to the actor, `app_metadata.tenant_id` to the tenant and `session_id` to the session.
+ * The signature proves none of these are still allowed: the app checks the session is live and
+ * the user is a member of the tenant on every request.
  * The key is either an HS256 secret or a JWKS resolver (`createRemoteJWKSet`) for ES256/RS256.
  */
 function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOptions): TokenVerifier {
@@ -53,7 +61,7 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
           algorithms,
           audience: options.audience ?? "authenticated",
           currentDate: options.clock.now(),
-          requiredClaims: ["exp", "iat", "sub"],
+          requiredClaims: ["exp", "iat", "sub", "session_id"],
           ...(options.issuer === undefined ? {} : { issuer: options.issuer }),
         };
         payload = (typeof key === "function"
@@ -69,8 +77,8 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
       if (payload.iat! > now + skew) throw new Unauthenticated("Access token was issued in the future");
       if (payload.exp! - payload.iat! > maxLifetime) throw new Unauthenticated("Access token lifetime is too long");
       const claims = accessTokenClaimsSchema.safeParse(payload);
-      if (!claims.success) throw new Unauthenticated("Access token lacks a user or tenant claim");
-      return { actorId: claims.data.sub, tenantId: claims.data.app_metadata.tenant_id };
+      if (!claims.success) throw new Unauthenticated("Access token lacks a user, session or tenant claim");
+      return { actorId: claims.data.sub, tenantId: claims.data.app_metadata.tenant_id, sessionId: claims.data.session_id };
     },
   };
 }
