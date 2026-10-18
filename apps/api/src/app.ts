@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
+import type { ApiErrorCode } from "@zs/contracts";
 import { apiErrorBody, createSession, mapError, type Session } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
@@ -25,6 +26,11 @@ export interface AppDependencies {
 export interface AppEnv {
   Variables: { session: Session };
 }
+
+/** Client errors raised by Hono middleware keep their status; the code follows it. */
+const HTTP_ERROR_CODES: Partial<Record<number, ApiErrorCode>> = {
+  401: "Unauthorized", 403: "Forbidden", 404: "NotFound", 409: "Conflict",
+};
 
 export function createApp(deps: AppDependencies) {
   const app = new Hono<AppEnv>();
@@ -57,8 +63,11 @@ export function createApp(deps: AppDependencies) {
   app.onError((error, c) => {
     if (error instanceof Unauthenticated)
       return c.json(apiErrorBody("Unauthorized", error.message), 401, { "WWW-Authenticate": "Bearer" });
-    if (error instanceof HTTPException && error.status < 500)
-      return c.json(apiErrorBody(error.status === 404 ? "NotFound" : "ValidationFailed", error.message), error.status === 404 ? 404 : 400);
+    if (error instanceof HTTPException && error.status < 500) {
+      const code = HTTP_ERROR_CODES[error.status] ?? "ValidationFailed";
+      const headers: Record<string, string> = error.status === 401 ? { "WWW-Authenticate": "Bearer" } : {};
+      return c.json(apiErrorBody(code, error.message || code), error.status, headers);
+    }
     const mapped = mapError(error);
     if (mapped.status === 500) deps.onError?.(error);
     return c.json(mapped.body, mapped.status);
