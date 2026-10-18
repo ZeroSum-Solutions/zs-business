@@ -487,6 +487,66 @@ describe("shared transactional action path", () => {
     expect(saved.actions).toHaveLength(0);
     expect(saved.outbox).toHaveLength(0);
   });
+  it.each([
+    // PostgreSQL never resolves an unqualified function in pg_temp, even listed first.
+    ["a pg_temp function", "pg_temp", async () => {}],
+    // A schema on the handler's path that holds its own current_setting.
+    ["a schema function", "zs_shadow", async () => {
+      await db.pool.query(`CREATE SCHEMA zs_shadow; GRANT USAGE ON SCHEMA zs_shadow TO authenticated;
+        CREATE FUNCTION zs_shadow.current_setting(text, boolean) RETURNS text LANGUAGE sql
+          AS $$ SELECT '${fixture.a.tenantId}' $$;`);
+    }],
+  ])("rolls back with TenantDenied when a handler spoofs current_setting with %s", async (_name, schema, setup) => {
+    await setup();
+    try {
+      const spoofing = createDispatcher({
+        "noop.touch": {
+          resolveTarget: async (_tx, target) => target,
+          handle: async ({ tx }) => {
+            await tx.query("select set_config('app.tenant_id',$1,true)", [fixture.b.tenantId]);
+            await tx.query(`select set_config('search_path','${schema}, pg_catalog',true)`);
+            if (schema === "pg_temp")
+              await tx.query(`create function pg_temp.current_setting(text, boolean) returns text
+                language sql as $$ select '${fixture.a.tenantId}' $$`);
+            expect((await tx.query("select current_setting('app.tenant_id',true) as t")).rows[0].t)
+              .toBe(schema === "pg_temp" ? fixture.b.tenantId : fixture.a.tenantId);
+            return { result: {} };
+          },
+        },
+      });
+      await expect(spoofing(ctx, command)).rejects.toBeInstanceOf(TenantDenied);
+      const saved = await counts();
+      expect(saved).toMatchObject({ state: 0, actions: [], outbox: [] });
+    } finally {
+      await db.pool.query("DROP SCHEMA IF EXISTS zs_shadow CASCADE");
+    }
+  });
+  it("a session-scoped tenant switch does not reach the next borrower of the connection", async () => {
+    let handlerPid = 0;
+    const leaking = createDispatcher({
+      "noop.touch": {
+        resolveTarget: async (_tx, target) => target,
+        handle: async ({ tx, binding }) => {
+          // Session scope, to the bound tenant: the check passes and the commit keeps it.
+          await tx.query("select set_config('app.tenant_id',$1,false)", [binding.tenantId]);
+          await tx.query("create temp table zs_leak_probe (x int)");
+          handlerPid = (await tx.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+          return { result: {} };
+        },
+      },
+    });
+    await leaking(ctx, command);
+    // pg-pool hands out the most recently released idle client first.
+    const next = await db.runtimePool.connect();
+    try {
+      const { rows } = await next.query<{ pid: number; tenant: string | null; probe: string | null }>(
+        "select pg_backend_pid() as pid, current_setting('app.tenant_id',true) as tenant, to_regclass('pg_temp.zs_leak_probe')::text as probe",
+      );
+      expect(rows[0]).toEqual({ pid: handlerPid, tenant: "", probe: null });
+    } finally {
+      next.release();
+    }
+  });
   it("rolls back state and action when the final outbox write fails", async () => {
     await db.pool.query(`CREATE FUNCTION public.reject_test_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='reject.test' THEN RAISE EXCEPTION 'outbox write failed'; END IF; RETURN NEW; END $$;
       CREATE TRIGGER reject_test_event BEFORE INSERT ON outbox FOR EACH ROW EXECUTE FUNCTION public.reject_test_event();`);
