@@ -53,9 +53,13 @@ DO $$ BEGIN
     RAISE EXCEPTION 'zs_function_owner must be an unprivileged standalone NOLOGIN role';
   END IF;
   -- ALTER ... OWNER needs SET ROLE on the new owner; a non-superuser migrator (Supabase
-  -- postgres) can be a member without it (see 20261017160000).
-  IF NOT (pg_has_role(current_user, 'zs_function_owner', 'SET') AND pg_has_role(current_user, 'zs_function_owner', 'USAGE')) THEN
-    EXECUTE format('GRANT zs_function_owner TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+  -- postgres) can be a member without it. PostgreSQL 15 has no SET privilege (see 20261017160000).
+  IF current_setting('server_version_num')::int >= 160000 THEN
+    IF NOT (pg_has_role(current_user, 'zs_function_owner', 'SET') AND pg_has_role(current_user, 'zs_function_owner', 'USAGE')) THEN
+      EXECUTE format('GRANT zs_function_owner TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+    END IF;
+  ELSIF NOT pg_has_role(current_user, 'zs_function_owner', 'MEMBER') THEN
+    EXECUTE format('GRANT zs_function_owner TO %I', current_user);
   END IF;
 END $$;
 

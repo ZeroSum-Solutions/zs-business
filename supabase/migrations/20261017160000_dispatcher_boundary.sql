@@ -56,9 +56,16 @@ END $$;
 -- ALTER ... OWNER needs SET ROLE on the new owner. On PostgreSQL 16+ a non-superuser
 -- CREATEROLE migrator (postgres on hosted Supabase) can be a member with SET and INHERIT
 -- off, so membership alone is not enough. INHERIT lets it act as owner for the grants below.
+-- PostgreSQL 15 has neither the SET privilege nor the grant options: membership allows
+-- SET ROLE there and inherits per the member's rolinherit. Dynamic SQL keeps 15 from
+-- parsing the 16-only GRANT syntax.
 DO $$ BEGIN
-  IF NOT (pg_has_role(current_user, 'zs_dispatcher', 'SET') AND pg_has_role(current_user, 'zs_dispatcher', 'USAGE')) THEN
-    EXECUTE format('GRANT zs_dispatcher TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+  IF current_setting('server_version_num')::int >= 160000 THEN
+    IF NOT (pg_has_role(current_user, 'zs_dispatcher', 'SET') AND pg_has_role(current_user, 'zs_dispatcher', 'USAGE')) THEN
+      EXECUTE format('GRANT zs_dispatcher TO %I WITH INHERIT TRUE, SET TRUE', current_user);
+    END IF;
+  ELSIF NOT pg_has_role(current_user, 'zs_dispatcher', 'MEMBER') THEN
+    EXECUTE format('GRANT zs_dispatcher TO %I', current_user);
   END IF;
 END $$;
 -- Ownership transfer requires CREATE briefly; the role cannot create replacements afterward.

@@ -25,8 +25,9 @@ export interface TestDatabaseOptions {
   migrations?: URL;
   /**
    * Migrate as a fresh login modelled on hosted Supabase's postgres: not superuser,
-   * CREATEROLE, owner of the database. Like a PostgreSQL 16 role creator, it holds ADMIN
-   * on the shared owner roles with SET and INHERIT off. Dropped on close.
+   * CREATEROLE, owner of the database. On PostgreSQL 16+, like a role creator, it holds
+   * ADMIN on the shared owner roles with SET and INHERIT off. On 15 it holds no membership:
+   * CREATEROLE there may grant itself any non-superuser role. Dropped on close.
    */
   nonSuperuserMigrator?: boolean;
 }
@@ -120,14 +121,32 @@ export async function createTestDatabase(
   }
   try {
     if (migrator) {
+      // Hosted Supabase ships these platform roles; a CREATEROLE login cannot create
+      // service_role itself, since BYPASSRLS needs a superuser (or, on 16+, a BYPASSRLS creator).
+      await admin.query(`DO $$ BEGIN
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticated') THEN
+            CREATE ROLE authenticated NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          END IF;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+        END;
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='service_role') THEN
+            CREATE ROLE service_role NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION BYPASSRLS;
+          END IF;
+        EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+        END;
+      END $$`);
       await admin.query(
         `CREATE ROLE "${migrator}" LOGIN INHERIT NOSUPERUSER CREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS`,
       );
       migratorCreated = true;
+      // Dynamic SQL: PostgreSQL 15 cannot parse the 16-only INHERIT and SET grant options.
       for (const role of ["zs_dispatcher", "zs_function_owner"]) {
         await admin.query(`DO $$ BEGIN
-          IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}') THEN
-            GRANT ${role} TO "${migrator}" WITH ADMIN TRUE, INHERIT FALSE, SET FALSE;
+          IF current_setting('server_version_num')::int >= 160000
+            AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}') THEN
+            EXECUTE 'GRANT ${role} TO "${migrator}" WITH ADMIN TRUE, INHERIT FALSE, SET FALSE';
           END IF;
         END $$`);
       }
