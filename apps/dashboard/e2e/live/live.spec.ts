@@ -36,6 +36,17 @@ function someoneElse(request: APIRequestContext) {
 }
 
 test("renders all six areas from the live API", async ({ page }, info) => {
+  // The browser only ever talks to the dashboard's origin, and never holds a token.
+  const apiCalls: string[] = [];
+  const withAuth: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().startsWith(LIVE.apiUrl)) apiCalls.push(request.url());
+    if (request.headers().authorization) withAuth.push(request.url());
+  });
+  let proxied = 0;
+  page.on("response", (response) => {
+    if (response.url().startsWith(`${LIVE.webUrl}/api/v1/`) && response.ok()) proxied += 1;
+  });
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Next appointments" })).toBeVisible();
@@ -71,6 +82,12 @@ test("renders all six areas from the live API", async ({ page }, info) => {
     await expect(page.getByRole("region", { name: "Pipeline" }).getByText(stage, { exact: true }).first()).toBeAttached();
   }
   await shot(page, "08-pipeline", info.project.name, PREFIX);
+
+  expect(proxied, "reads went through the same-origin proxy").toBeGreaterThan(0);
+  expect(apiCalls, "direct calls to the API").toEqual([]);
+  expect(withAuth, "browser requests with an Authorization header").toEqual([]);
+  const html = await page.content();
+  expect(html).not.toContain(process.env.ZS_LIVE_TOKEN!);
 });
 
 test("books a slot, then shows the conflict when another person took the time", async ({ page, request }, info) => {
@@ -162,7 +179,7 @@ test("moves a deal, and reloads when someone else changed it", async ({ page, re
 test("refuses tokens with the wrong role, no issuer or too long a lifetime", async ({ request }, info) => {
   test.skip(info.project.name !== "desktop", "API-only check; one project is enough");
   const refused = JSON.parse(process.env.ZS_LIVE_REFUSED_TOKENS ?? "{}") as Record<string, string>;
-  expect(Object.keys(refused).sort()).toEqual(["anonRole", "noIssuer", "seedSevenDay", "tooLong"]);
+  expect(Object.keys(refused).sort()).toEqual(["anonRole", "noIssuedAt", "noIssuer", "seedSevenDay", "tooLong"]);
   const resources = (token: string) =>
     request.get(`${LIVE.apiUrl}/v1/booking/resources`, { headers: { Authorization: `Bearer ${token}` } });
   for (const [name, token] of Object.entries(refused)) {
@@ -171,6 +188,15 @@ test("refuses tokens with the wrong role, no issuer or too long a lifetime", asy
     expect(((await response.json()) as { error: { code: string } }).error.code, name).toBe("Unauthorized");
   }
   expect((await resources(process.env.ZS_LIVE_TOKEN!)).status()).toBe(200);
+
+  // The dashboard's proxy holds the owner token, so it must refuse other sites.
+  const crossSite = await request.post(`${LIVE.webUrl}/api/v1/crm/contacts`, {
+    headers: { Origin: "https://evil.example", "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
+    data: { email: "evil@example.com" },
+  });
+  expect(crossSite.status()).toBe(403);
+  const sameOrigin = await request.get(`${LIVE.webUrl}/api/v1/booking/resources`);
+  expect(sameOrigin.status()).toBe(200);
 });
 
 test("answers slots for an unknown calendar with 403 and says so in the booking sheet", async ({ page, request }, info) => {
@@ -184,7 +210,7 @@ test("answers slots for an unknown calendar with 403 and says so in the booking 
   expect(await response.json()).toEqual(demoErrorBody("Forbidden"));
 
   // Point the sheet's slot reads at a calendar this business does not own.
-  await page.route(`${LIVE.apiUrl}/v1/booking/slots?*`, (route) => {
+  await page.route(`${LIVE.webUrl}/api/v1/booking/slots?*`, (route) => {
     const url = new URL(route.request().url());
     url.searchParams.set("resourceId", unknown);
     return route.continue({ url: url.toString() });
@@ -201,4 +227,29 @@ test("answers slots for an unknown calendar with 403 and says so in the booking 
   // Let the sheet finish opening, so the capture does not show the page through it.
   await dialog.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished)));
   await viewportShot(page, "17-calendar-unavailable", info.project.name, PREFIX);
+});
+
+test("retries a booking whose answer was lost with the same key, and the API replays it", async ({ page }) => {
+  const keys: string[] = [];
+  let dropped = false;
+  // The first booking request reaches the API, which commits it; its answer never arrives.
+  await page.route(`${LIVE.webUrl}/api/v1/booking/bookings`, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    keys.push(route.request().headers()["idempotency-key"] ?? "");
+    if (dropped) return route.continue();
+    dropped = true;
+    const response = await route.fetch();
+    expect(response.status()).toBe(201);
+    return route.abort("connectionreset");
+  });
+  await page.goto("/calendar");
+  const { dialog, slots } = await openBookingOnFirstOpenDay(page);
+  await slots.first().click();
+  await dialog.getByRole("button", { name: /^Book / }).click();
+  await expect(dialog.getByText("You look offline. Check your connection and try again.")).toBeVisible();
+  await dialog.getByRole("button", { name: /^Book / }).click();
+  await expect(page.getByRole("status").getByText(/^Booked /)).toBeVisible();
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+  expect(keys[1]).toBe(keys[0]);
 });

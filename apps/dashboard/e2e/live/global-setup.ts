@@ -3,9 +3,13 @@
  * API (as the unprivileged runtime role) and a production build of the dashboard pointed at
  * it. Everything started here is stopped, and the database dropped, in the returned teardown.
  *
- * Auth runs as in production: a random per-run secret, a required issuer and the default
- * one-hour lifetime cap. The seed's 7-day token is only a source of the demo principal; the
- * dashboard gets a one-hour token for that principal, which the API accepts.
+ * Auth runs as in production: a random per-run secret, a required issuer, a required `iat`
+ * and the default one-hour lifetime cap. The seed's 7-day token is only a source of the demo
+ * principal; the dashboard server gets a one-hour token for that principal as ZS_API_TOKEN
+ * and adds it in its /api proxy. The browser never sees a token: the build is scanned for one.
+ *
+ * Children never inherit the shell's environment (see child-env.ts): each gets an allowlist
+ * plus what is set here, and every database URL must name this run's zs_e2e_* database.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -15,12 +19,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SignJWT, decodeJwt } from "jose";
 import pg from "pg";
+import { findBundleLeaks } from "../../scripts/bundle-secrets";
+import { assertThrowawayDatabaseEnv, childEnv, type Env } from "./child-env";
 import { LIVE } from "./env";
 
 /** Required `iss` for this run; the API checks it because JWT_ISSUER is set. */
 const ISSUER = "https://zs-e2e-live.local/auth/v1";
 /** The API default, set explicitly so the harness never inherits a longer local-dev cap. */
 const MAX_TTL_SECONDS = 3600;
+/** The API default for how far `iat` may lie ahead, also set explicitly. */
+const CLOCK_SKEW_SECONDS = 60;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dashboardDir = path.resolve(here, "../..");
@@ -45,9 +53,9 @@ async function assertPortFree(port: number) {
   });
 }
 
-function run(name: string, command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): Promise<string> {
+function run(name: string, command: string, args: string[], options: { cwd: string; env: Env }): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd: options.cwd, env: options.env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const log = createWriteStream(path.join(logDir, `${name}.log`));
     child.stdout.on("data", (chunk: Buffer) => { output += chunk; log.write(chunk); });
@@ -62,9 +70,9 @@ function run(name: string, command: string, args: string[], options: { cwd: stri
 }
 
 /** Long-running server in its own process group, so teardown stops pnpm and its children. */
-function start(name: string, command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }): ChildProcess {
+function start(name: string, command: string, args: string[], options: { cwd: string; env: Env }): ChildProcess {
   const log = createWriteStream(path.join(logDir, `${name}.log`));
-  const child = spawn(command, args, { ...options, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(command, args, { cwd: options.cwd, env: options.env as NodeJS.ProcessEnv, detached: true, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout!.pipe(log);
   child.stderr!.pipe(log);
   return child;
@@ -133,11 +141,17 @@ export default async function globalSetup() {
 
   await adminClient((client) => client.query(`CREATE DATABASE "${database}"`));
   try {
-    const base = { ...process.env, FORCE_COLOR: "0" };
+    /** A clean env for one child; refuses to start it unless every database URL is this run's. */
+    const envFor = (set: Record<string, string>) => {
+      const env = childEnv(set);
+      assertThrowawayDatabaseEnv(env, database);
+      return env;
+    };
 
     // seed:demo applies the migrations, makes sure zs_runtime exists, seeds Halden & Rowe and prints a JWT.
     const seedOutput = await run("seed", "pnpm", ["run", "seed:demo"], {
-      cwd: apiDir, env: { ...base, DATABASE_URL: databaseUrl.href, JWT_SECRET: jwtSecret },
+      cwd: apiDir,
+      env: envFor({ DATABASE_URL: databaseUrl.href, RUNTIME_DATABASE_URL: runtimeUrl.href, JWT_SECRET: jwtSecret }),
     });
     const token = /Dev JWT[^\n]*:\n(\S+)/.exec(seedOutput)?.[1];
     if (!token) throw new Error("seed:demo did not print a dev JWT; see test-results/live/seed.log");
@@ -146,50 +160,56 @@ export default async function globalSetup() {
     const tenantId = seedClaims.app_metadata?.tenant_id;
     if (!seedClaims.sub || !tenantId) throw new Error("Dev JWT has no user or tenant");
     const now = Math.floor(Date.now() / 1000);
-    const sign = (sub: string, claims: { role: string; iss?: string }, ttlSeconds = MAX_TTL_SECONDS) => {
+    // Every token carries iat: the API requires it and checks exp - iat against the cap.
+    const sign = (sub: string, claims: { role: string; iss?: string }, ttlSeconds = MAX_TTL_SECONDS, withIat = true) => {
       const { iss, ...rest } = claims;
-      const jwt = new SignJWT({ ...rest, app_metadata: { tenant_id: tenantId } })
+      let jwt = new SignJWT({ ...rest, app_metadata: { tenant_id: tenantId } })
         .setProtectedHeader({ alg: "HS256", typ: "JWT" })
         .setSubject(sub)
         .setAudience("authenticated")
-        .setIssuedAt(now)
         .setExpirationTime(now + ttlSeconds);
+      if (withIat) jwt = jwt.setIssuedAt(now);
       return (iss ? jwt.setIssuer(iss) : jwt).sign(new TextEncoder().encode(jwtSecret));
     };
     const ownerToken = await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER });
     // A second person in the same business, for the conflicting writes.
     const otherToken = await sign(randomUUID(), { role: "authenticated", iss: ISSUER });
-    // Tokens the API must refuse: wrong role, missing issuer, and one second over the cap.
+    // Tokens the API must refuse: wrong role, missing issuer, missing iat, one second over the cap.
     const refusedTokens = {
       anonRole: await sign(seedClaims.sub, { role: "anon", iss: ISSUER }),
       noIssuer: await sign(seedClaims.sub, { role: "authenticated" }),
+      noIssuedAt: await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER }, MAX_TTL_SECONDS, false),
       tooLong: await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER }, MAX_TTL_SECONDS + 1),
       seedSevenDay: token,
     };
 
     const api = start("api", "pnpm", ["run", "start"], {
       cwd: apiDir,
-      env: {
-        ...base,
+      // No ALLOWED_ORIGINS: the browser only talks to the dashboard, never to the API.
+      env: envFor({
         DATABASE_URL: runtimeUrl.href,
         JWT_SECRET: jwtSecret,
         JWT_ISSUER: ISSUER,
         JWT_MAX_TTL_SECONDS: String(MAX_TTL_SECONDS),
-        ALLOWED_ORIGINS: `${LIVE.webUrl},http://127.0.0.1:${LIVE.webPort}`,
+        JWT_CLOCK_SKEW_SECONDS: String(CLOCK_SKEW_SECONDS),
         PORT: String(LIVE.apiPort),
-      },
+      }),
     });
     children.push(api);
     await waitFor(`${LIVE.apiUrl}/healthz`, api, "api", 30_000);
 
-    const webEnv = {
-      ...base,
+    // ZS_API_URL and ZS_API_TOKEN are server-only: the dashboard's /api proxy reads them.
+    const webEnv = envFor({
       NEXT_DIST_DIR: ".next-live",
-      NEXT_PUBLIC_API_URL: LIVE.apiUrl,
-      NEXT_PUBLIC_API_TOKEN: ownerToken,
+      ZS_API_URL: LIVE.apiUrl,
+      ZS_API_TOKEN: ownerToken,
       NEXT_TELEMETRY_DISABLED: "1",
-    };
+    });
     await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: webEnv });
+    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, token, jwtSecret]);
+    if (leaks.length > 0) {
+      throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);
+    }
     const web = start("web", "pnpm", ["exec", "next", "start", "--port", String(LIVE.webPort)], { cwd: dashboardDir, env: webEnv });
     children.push(web);
     await waitFor(LIVE.webUrl, web, "web", 60_000);
