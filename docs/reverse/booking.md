@@ -37,7 +37,7 @@ and `integration.test.ts` are in `packages/core/test/booking/`.
 
 | Rule | How the code meets it | Proof |
 | --- | --- | --- |
-| B-1 | One resource per tenant: `booking_resources_one_per_tenant` (`supabase/migrations/20261017170000_booking.sql:84`). Only `booking.create` is registered (`packages/core/src/booking/create.ts:125`). | `integration.test.ts`; `create.test.ts` "commits state, action and outbox" |
+| B-1 | One resource per tenant in F1 (`booking_resources_one_per_tenant`); dropped in M1 by `supabase/migrations/20261018120000_booking_multi_resource.sql`. Only `booking.create` is registered (`packages/core/src/booking/create.ts:125`). | `integration.test.ts`; `create.test.ts` "commits state, action and outbox" |
 | B-2 | `getAvailableSlots` is synchronous, parses first, calls `clock.now()` once (`slots.ts:135-138`); `readClock` rejects non-finite (`slots.ts:128`). No DB or env access; the ambient scan covers `src/`. | `slots.test.ts` "reads the clock exactly once…"; `test/ambient.test.ts` |
 | B-3 | Frozen schemas through `safeParse`, failures become `ValidationFailed` (`slots.ts:136`, `create.ts:78,130`). | `slots.test.ts` "rejects … with ValidationFailed" (8 cases); "accepts exactly 31 days" |
 | B-4 | Zones are checked by the frozen schema. The engine uses `Intl` only (`time-zone.ts:9-21`) and echoes the input identifier (`slots.ts:151`). SQL compares UTC `timestamptz` only. | `slots.test.ts` "rejects zone …" (6), "accepts a lowercase IANA name", "supports Etc/GMT+5" |

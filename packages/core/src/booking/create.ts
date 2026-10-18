@@ -34,7 +34,7 @@ async function assertBookingIdUnused(tx: Transaction, tenantId: string, bookingI
   if (used.rowCount) throw new Conflict("Booking ID is already in use", { reason: "id_in_use" });
 }
 
-async function loadResource(tx: Transaction, tenantId: string, resourceId: string) {
+export async function loadResource(tx: Transaction, tenantId: string, resourceId: string) {
   const row = (await tx.query(
     `SELECT tenant_id, id, time_zone, weekly, overrides, slot_length_minutes, slot_step_minutes,
        buffer_before_minutes, buffer_after_minutes, minimum_notice_minutes, booking_horizon_minutes
@@ -60,7 +60,7 @@ async function loadResource(tx: Transaction, tenantId: string, resourceId: strin
  * whole-millisecond window first. Rounding a sub-millisecond bound to milliseconds therefore stays inside
  * a window the row really overlaps, so an exact touch never becomes an overlap and an overlap never vanishes.
  */
-async function loadBusy(tx: Transaction, tenantId: string, resourceId: string, from: number, to: number): Promise<Span[]> {
+export async function loadBusy(tx: Transaction, tenantId: string, resourceId: string, from: number, to: number): Promise<Span[]> {
   const rows = (await tx.query<{ start_ms: string; end_ms: string }>(
     `SELECT floor(extract(epoch FROM greatest(occupied_starts_at, $3::timestamptz)) * 1000)::bigint AS start_ms,
             ceil(extract(epoch FROM least(occupied_ends_at, $4::timestamptz)) * 1000)::bigint AS end_ms

@@ -1,0 +1,2 @@
+# Synthetic HS256 test key in an earlier commit of apps/api/test/helpers.ts; the file now builds it at runtime.
+c180a8ea6832d99f9583ee8e33d58e5a777b2760:apps/api/test/helpers.ts:generic-api-key:7
