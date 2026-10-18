@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { EmptyState, ErrorNote, LoadingRows } from "@/components/ui/states";
+import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import type { ConsentEvidence } from "@/lib/api";
 import { useContact, useDeals, usePipeline } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
@@ -57,20 +57,23 @@ export function ContactDetail({ id }: { id: string }) {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
             <Card aria-labelledby="deals-title">
               <CardHeader><CardTitle id="deals-title">Commissions</CardTitle></CardHeader>
-              {deals.isPending ? <LoadingRows rows={2} /> : deals.isError ? <ErrorNote error={deals.error} retry={() => deals.refetch()} /> : deals.data.length === 0 ? (
+              {deals.isPending ? <LoadingRows rows={2} /> : deals.isError ? <ErrorNote error={deals.error} retry={() => deals.refetch()} /> : deals.data.items.length === 0 ? (
                 <EmptyState title="No commissions yet">Deals for this customer show here.</EmptyState>
               ) : (
+                <>
+                <IncompleteNote list={deals.data} />
                 <ul className="divide-y divide-border-soft">
-                  {deals.data.map((deal) => (
+                  {deals.data.items.map((deal) => (
                     <li key={deal.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-fg">{deal.title}</p>
+                        <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
                         <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt)}</p>
                       </div>
                       <Badge tone="accent">{pipeline.data?.stages.find((stage) => stage.id === deal.stageId)?.name ?? "Stage"}</Badge>
                     </li>
                   ))}
                 </ul>
+                </>
               )}
             </Card>
             <div className="space-y-4">

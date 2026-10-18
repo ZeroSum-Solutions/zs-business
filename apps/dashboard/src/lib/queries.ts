@@ -2,7 +2,8 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useApi } from "./api/react";
-import { ApiError, type BookingListQuery, type SlotQuery } from "./api";
+import { ApiError, type BookingListQuery, type DealRecord, type ListResult, type SlotQuery } from "./api";
+import { preferNewerDeals } from "./deal-merge";
 
 export const keys = {
   resources: ["booking", "resources"] as const,
@@ -73,7 +74,11 @@ export function useContact(id: string) {
 
 export function useDeals(contactId?: string) {
   const api = useApi();
-  return useQuery({ queryKey: keys.deals(contactId), queryFn: () => api.listDeals(contactId ? { contactId } : {}) });
+  return useQuery({
+    queryKey: keys.deals(contactId),
+    queryFn: () => api.listDeals(contactId ? { contactId } : {}),
+    structuralSharing: (previous, next) => preferNewerDeals(previous as ListResult<DealRecord> | undefined, next as ListResult<DealRecord>),
+  });
 }
 
 export function useResults() {

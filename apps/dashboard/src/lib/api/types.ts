@@ -13,9 +13,26 @@ import type { WorkspaceApi } from "./workspace-types";
 
 export type { BookingRecord, ConsentEvidence, ContactRecord, DealRecord, PipelineSummary, ResourceSummary, SlotsResponse };
 
-/** Options every write accepts. Reuse the same key to retry the same write safely. */
+/**
+ * Options every write needs. The caller owns the Idempotency-Key (see `useIntentKey`):
+ * reuse it to retry the same write safely. No client ever makes one up.
+ */
 export interface WriteOptions {
-  idempotencyKey?: string;
+  idempotencyKey: string;
+}
+
+/**
+ * A list read page by page. The client stops after a fixed number of pages; when the list
+ * went on past that, `incomplete` is true and `loaded` is how many rows were read.
+ */
+export interface ListResult<T> {
+  items: T[];
+  incomplete: boolean;
+  loaded: number;
+}
+
+export function completeList<T>(items: T[]): ListResult<T> {
+  return { items, incomplete: false, loaded: items.length };
 }
 
 /**
@@ -66,21 +83,22 @@ export interface StageMove {
 export interface BookingApi {
   listResources(): Promise<ResourceSummary[]>;
   getSlots(query: SlotQuery): Promise<SlotsResponse>;
-  listBookings(query?: BookingListQuery): Promise<BookingView[]>;
+  listBookings(query?: BookingListQuery): Promise<ListResult<BookingView>>;
   /** Throws an ApiError where `isSlotTaken(error)` holds when the time was taken first. */
-  createBooking(input: NewBooking, options?: WriteOptions): Promise<BookingRecord>;
+  createBooking(input: NewBooking, options: WriteOptions): Promise<BookingRecord>;
 }
 
 export interface CrmApi {
   /** Pipelines with stages sorted by position. */
   listPipelines(): Promise<PipelineSummary[]>;
-  listContacts(query?: { search?: string }): Promise<ContactRecord[]>;
+  listContacts(query?: { search?: string }): Promise<ListResult<ContactRecord>>;
+  /** Throws `not_found`, or `incomplete` when the list cap was hit before a match. */
   getContact(id: string): Promise<ContactRecord>;
   /** Returns `created: false` with the existing contact when the email or phone is known. */
-  createOrFindContact(input: NewContact, options?: WriteOptions): Promise<ContactWriteResult>;
-  listDeals(query?: { contactId?: string }): Promise<DealRecord[]>;
-  /** Throws an ApiError where `isStaleRevision(error)` holds when the deal changed since `expectedRevision`. */
-  moveDealStage(input: StageMove, options?: WriteOptions): Promise<DealRecord>;
+  createOrFindContact(input: NewContact, options: WriteOptions): Promise<ContactWriteResult>;
+  listDeals(query?: { contactId?: string }): Promise<ListResult<DealRecord>>;
+  /** Throws an ApiError where `isDealChanged(error)` holds when the deal changed since `expectedRevision`. */
+  moveDealStage(input: StageMove, options: WriteOptions): Promise<DealRecord>;
 }
 
 export type ZsApi = BookingApi & CrmApi & WorkspaceApi;

@@ -4,7 +4,7 @@ import { CaretLeft, CaretRight, Plus } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
+import { EmptyState, ErrorNote, IncompleteNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import type { BookingView, ResourceSummary } from "@/lib/api";
 import { resourceLabel } from "@/lib/resources";
 import { useBookings, useResources, useSlots } from "@/lib/queries";
@@ -73,10 +73,11 @@ function DayView({ resource, dateKey, onPickSlot }: { resource: ResourceSummary;
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
       <section aria-labelledby="day-booked">
         <h2 id="day-booked" className="mb-3 text-sm font-medium text-fg-2">Booked</h2>
-        {bookings.data.length === 0 ? (
+        <IncompleteNote list={bookings.data} />
+        {bookings.data.items.length === 0 ? (
           <EmptyState title="Nothing booked yet">Pick an open time to book one.</EmptyState>
         ) : (
-          <ul className="space-y-2">{bookings.data.map((booking) => <BookingRow key={booking.id} booking={booking} zone={zone} />)}</ul>
+          <ul className="space-y-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} zone={zone} />)}</ul>
         )}
       </section>
       <section aria-labelledby="day-open">
@@ -120,9 +121,11 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
   if (bookings.isError) return <ErrorNote error={bookings.error} retry={() => bookings.refetch()} />;
 
   return (
+    <>
+    <IncompleteNote list={bookings.data} />
     <ol className="grid grid-cols-1 gap-2 lg:grid-cols-7">
       {days.map((day) => {
-        const items = bookings.data.filter((booking) => zonedDateKey(booking.startsAt, zone) === day);
+        const items = bookings.data.items.filter((booking) => zonedDateKey(booking.startsAt, zone) === day);
         const [weekday, rest] = formatDateKey(day).split(", ");
         return (
           <li key={day} className={cn("rounded-md bg-surface p-3 shadow-ring lg:min-h-48", day === today && "shadow-[inset_0_0_0_2px_var(--accent)]")}>
@@ -144,6 +147,7 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
         );
       })}
     </ol>
+    </>
   );
 }
 

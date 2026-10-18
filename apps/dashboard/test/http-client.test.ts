@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ApiError, isSlotTaken, isStaleRevision } from "../src/lib/api/errors";
-import { createHttpClient } from "../src/lib/api/http-client";
+import { ApiError, isDealChanged, isSlotTaken, isStaleRevision } from "../src/lib/api/errors";
+import { createHttpClient, MAX_PAGES } from "../src/lib/api/http-client";
 
 const TENANT = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70";
 const RESOURCE = "0b7e5c1a-9d2f-4a3b-8c6d-1e2f3a4b5c61";
@@ -12,11 +12,9 @@ interface Call { url: string; init: RequestInit }
 function client(responses: (Response | Error)[], token: string | null = "dev-token") {
   const calls: Call[] = [];
   const queue = [...responses];
-  let ids = 0;
   const api = createHttpClient({
     baseUrl: "https://api.example.test/",
     getToken: () => token,
-    newId: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
     fetch: async (input, init) => {
       calls.push({ url: String(input), init: init ?? {} });
       const next = queue.shift();
@@ -38,12 +36,16 @@ const bookingRecord = {
   bufferBeforeMinutes: 0, bufferAfterMinutes: 15, status: "confirmed", createdAt: "2026-10-18T12:00:00.000Z",
 };
 
+let keys = 0;
+/** A caller-owned key, as `useIntentKey` hands out. */
+const key = () => ({ idempotencyKey: `00000000-0000-4000-8000-${String(++keys).padStart(12, "0")}` });
+
 const headers = (call: Call | undefined) => (call?.init.headers ?? {}) as Record<string, string>;
 
 describe("http client", () => {
-  it("sends bearer auth and a generated Idempotency-Key on writes", async () => {
+  it("sends bearer auth and the caller's Idempotency-Key on writes", async () => {
     const { api, calls } = client([json(201, { actionId: ACTION, result: bookingRecord })]);
-    const record = await api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt });
+    const record = await api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt }, key());
     expect(record.id).toBe(BOOKING);
     expect(calls[0]?.url).toBe("https://api.example.test/v1/booking/bookings");
     expect(calls[0]?.init.method).toBe("POST");
@@ -51,6 +53,25 @@ describe("http client", () => {
     expect(headers(calls[0])["Idempotency-Key"]).toMatch(/^00000000-0000-4000-8000-/);
     // createBookingRequestSchema is strict: the server derives the booking ID from the key.
     expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt });
+  });
+
+  it("refuses a write without a caller-owned Idempotency-Key instead of making one up", async () => {
+    const { api, calls } = client([json(201, { actionId: ACTION, result: bookingRecord })]);
+    const input = { resourceId: RESOURCE, startsAt: bookingRecord.startsAt };
+    // @ts-expect-error: the key is required; this is the call a forgetful caller would make.
+    await expect(api.createBooking(input)).rejects.toBeInstanceOf(TypeError);
+    await expect(api.createBooking(input, { idempotencyKey: "" })).rejects.toBeInstanceOf(TypeError);
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps every request out of the HTTP cache", async () => {
+    const { api, calls } = client([
+      json(200, { items: [] }),
+      json(201, { actionId: ACTION, result: bookingRecord }),
+    ]);
+    await api.listResources();
+    await api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt }, key());
+    expect(calls.map((call) => call.init.cache)).toEqual(["no-store", "no-store"]);
   });
 
   it("reuses a caller-supplied Idempotency-Key so retries are safe", async () => {
@@ -84,6 +105,7 @@ describe("http client", () => {
     [403, "forbidden"],
     [404, "not_found"],
     [409, "conflict"],
+    [429, "rate_limited"],
     [500, "server"],
   ] as const)("maps HTTP %i to ApiError kind %s from the shared error body", async (status, kind) => {
     const { api } = client([json(status, { error: { code: "Conflict", message: "Server says no", details: { a: 1 } } })]);
@@ -105,7 +127,7 @@ describe("http client", () => {
 
   it.each(["overlap", "slot_unavailable"])("treats a booking 409 with reason %s as a taken slot", async (reason) => {
     const { api } = client([json(409, { error: { code: "Conflict", message: "Requested slot is unavailable", details: { reason } } })]);
-    const error = await api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt }).catch((caught: unknown) => caught);
+    const error = await api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt }, key()).catch((caught: unknown) => caught);
     expect(isSlotTaken(error)).toBe(true);
     expect(isStaleRevision(error)).toBe(false);
     expect((error as ApiError).message).toBe("That time was just taken.");
@@ -113,14 +135,14 @@ describe("http client", () => {
 
   it("does not treat a reused idempotency key as a taken slot", async () => {
     const { api } = client([json(409, { error: { code: "Conflict", message: "x", details: { reason: "idempotency_key_reused" } } })]);
-    const error = await api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt }).catch((caught: unknown) => caught);
+    const error = await api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt }, key()).catch((caught: unknown) => caught);
     expect(isSlotTaken(error)).toBe(false);
     expect((error as ApiError).reason).toBe("idempotency_key_reused");
   });
 
   it("points a 400 at the first field in details.issues", async () => {
     const { api } = client([json(400, { error: { code: "ValidationFailed", message: "Invalid request", details: { issues: [{ path: "phone", message: "Expected E.164 phone" }] } } })]);
-    const error = await api.createOrFindContact({ displayName: null, email: null, phone: "12" }).catch((caught: unknown) => caught) as ApiError;
+    const error = await api.createOrFindContact({ displayName: null, email: null, phone: "12" }, key()).catch((caught: unknown) => caught) as ApiError;
     expect(error).toMatchObject({ kind: "validation", field: "phone", code: "ValidationFailed" });
     expect(error.message).toBe("Enter a phone number with country code, like +1 212 555 0142.");
   });
@@ -138,7 +160,7 @@ describe("http client", () => {
     const error = await api.moveDealStage({
       dealId: "d3a17b5c-2e4f-4a6b-8c9d-000000000001", pipelineId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01",
       stageId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e03", expectedRevision: 2,
-    }).catch((caught: unknown) => caught) as ApiError;
+    }, key()).catch((caught: unknown) => caught) as ApiError;
     expect(calls[0]?.url).toBe("https://api.example.test/v1/crm/deals/d3a17b5c-2e4f-4a6b-8c9d-000000000001/stage");
     expect(headers(calls[0])["Idempotency-Key"]).toBeDefined();
     // moveDealStageRequestSchema is strict: the deal ID travels in the path only.
@@ -148,7 +170,25 @@ describe("http client", () => {
     expect(error.kind).toBe("conflict");
     expect(error.code).toBe("Conflict");
     expect(isStaleRevision(error)).toBe(true);
+    expect(isDealChanged(error)).toBe(true);
     expect(error.details.currentRevision).toBe(3);
+  });
+
+  it("treats a concurrent_update 409 like a stale revision: reload, then retry", async () => {
+    const { api } = client([json(409, { error: { code: "Conflict", message: "x", details: { reason: "concurrent_update" } } })]);
+    const error = await api.moveDealStage({
+      dealId: "d3a17b5c-2e4f-4a6b-8c9d-000000000001", pipelineId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01",
+      stageId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e03", expectedRevision: 2,
+    }, key()).catch((caught: unknown) => caught);
+    expect(isDealChanged(error)).toBe(true);
+    expect(isSlotTaken(error)).toBe(false);
+  });
+
+  it("maps 429 to its own kind with a wait message", async () => {
+    const { api } = client([json(429, { error: { code: "Internal", message: "slow down", details: {} } })]);
+    const error = await api.listResources().catch((caught: unknown) => caught) as ApiError;
+    expect(error.kind).toBe("rate_limited");
+    expect(error.message).toBe("Too many requests. Wait a minute, then try again.");
   });
 
   it("maps a thrown fetch to a network error", async () => {
@@ -158,7 +198,7 @@ describe("http client", () => {
 
   it("rejects a response that does not match the contract", async () => {
     const { api } = client([json(201, { actionId: ACTION, result: { ...bookingRecord, status: "pending" } })]);
-    await expect(api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt })).rejects.toMatchObject({ kind: "invalid_response" });
+    await expect(api.createBooking({ resourceId: RESOURCE, startsAt: bookingRecord.startsAt }, key())).rejects.toMatchObject({ kind: "invalid_response" });
   });
 
   it("sends contact writes in the contract shape and returns the dedupe flag", async () => {
@@ -168,7 +208,7 @@ describe("http client", () => {
       createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
     };
     const { api, calls } = client([json(200, { actionId: ACTION, result: { contact, created: false } })]);
-    const result = await api.createOrFindContact({ displayName: "M. Okafor", email: "Marguerite.Okafor@example.com", phone: null });
+    const result = await api.createOrFindContact({ displayName: "M. Okafor", email: "Marguerite.Okafor@example.com", phone: null }, key());
     expect(result.created).toBe(false);
     expect(result.contact.id).toBe(contact.id);
     const body = JSON.parse(String(calls[0]?.init.body));
@@ -184,7 +224,7 @@ describe("http client", () => {
       consent: { email: null, sms: null }, createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
     };
     const { api, calls } = client([json(201, { actionId: ACTION, result: { contact, created: true } })]);
-    await api.createOrFindContact({ displayName: null, email: null, phone: "+1 (646) 555-0177" });
+    await api.createOrFindContact({ displayName: null, email: null, phone: "+1 (646) 555-0177" }, key());
     expect(JSON.parse(String(calls[0]?.init.body)).phone).toBe("+16465550177");
   });
 
@@ -199,8 +239,38 @@ describe("http client", () => {
       json(200, { items: [contact(3, "Ashby")], limit: 100, offset: 100, nextOffset: null }),
     ]);
     const found = await api.listContacts({ search: "ash" });
-    expect(found.map((item) => item.displayName)).toEqual(["Ash", "Ashby"]);
+    expect(found.items.map((item) => item.displayName)).toEqual(["Ash", "Ashby"]);
+    expect(found).toMatchObject({ incomplete: false, loaded: 3 });
     expect(calls.map((call) => new URL(call.url).search)).toEqual(["?limit=100&offset=0", "?limit=100&offset=100"]);
+  });
+
+  it(`marks a list incomplete when it runs past ${MAX_PAGES} pages, and stops there`, async () => {
+    const page = (offset: number) => json(200, {
+      items: [{
+        id: `5e0c1a2b-7d3f-4c8a-9b1e-${String(offset + 1).padStart(12, "0")}`, tenantId: TENANT, displayName: `Customer ${offset}`,
+        email: null, phone: "+16465550100", consent: { email: null, sms: null },
+        createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
+      }],
+      limit: 100, offset, nextOffset: offset + 100,
+    });
+    const pages = () => Array.from({ length: MAX_PAGES }, (_, index) => page(index * 100));
+    const { api, calls } = client([...pages(), ...pages(), ...pages()]);
+    const list = await api.listContacts();
+    expect(calls).toHaveLength(MAX_PAGES);
+    expect(list).toMatchObject({ incomplete: true, loaded: MAX_PAGES });
+
+    // A contact past the cap may exist, so the lookup says that instead of "not found".
+    const missing = await api.getContact("5e0c1a2b-7d3f-4c8a-9b1e-999999999999").catch((caught: unknown) => caught) as ApiError;
+    expect(missing.kind).toBe("incomplete");
+    expect(missing.code).toBe("ListIncomplete");
+    expect(missing.message).toContain(`first ${MAX_PAGES}`);
+    // Within the cap it is found as before.
+    expect((await api.getContact("5e0c1a2b-7d3f-4c8a-9b1e-000000000101")).displayName).toBe("Customer 100");
+  });
+
+  it("says not found for a contact missing from a complete list", async () => {
+    const { api } = client([json(200, { items: [], limit: 100, offset: 0, nextOffset: null })]);
+    await expect(api.getContact("5e0c1a2b-7d3f-4c8a-9b1e-999999999999")).rejects.toMatchObject({ kind: "not_found", code: "NotFound" });
   });
 
   it("reads resources and pipelines from the API, stages in position order", async () => {

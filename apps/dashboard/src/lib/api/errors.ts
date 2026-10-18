@@ -6,9 +6,12 @@ export type ApiErrorKind =
   | "forbidden"
   | "not_found"
   | "conflict"
+  | "rate_limited"
   | "server"
   | "network"
-  | "invalid_response";
+  | "invalid_response"
+  /** A lookup ran past the list cap, so "not found" cannot be claimed. */
+  | "incomplete";
 
 /** The one error type every API implementation (HTTP or demo) throws. `message` is safe to show. */
 export class ApiError extends Error {
@@ -58,6 +61,7 @@ export function kindForStatus(status: number): ApiErrorKind {
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
   if (status === 409) return "conflict";
+  if (status === 429) return "rate_limited";
   return "server";
 }
 
@@ -67,9 +71,11 @@ const DEFAULT_MESSAGES: Record<ApiErrorKind, string> = {
   forbidden: "You do not have access to this.",
   not_found: "We could not find that.",
   conflict: "Something changed while you were working.",
+  rate_limited: "Too many requests. Wait a minute, then try again.",
   server: "Something went wrong on our side. Try again.",
   network: "You look offline. Check your connection and try again.",
   invalid_response: "We got an answer we did not expect. Try again.",
+  incomplete: "That is past the part of the list we can read, so we could not check it.",
 };
 
 export function defaultMessage(kind: ApiErrorKind): string {
@@ -110,6 +116,16 @@ export function isSlotTaken(error: unknown): error is ApiError {
 
 export function isStaleRevision(error: unknown): error is ApiError {
   return isApiError(error, "conflict") && error.reason === "stale_revision";
+}
+
+/**
+ * The deal moved on under this write: a stale revision, or another save in the same
+ * instant (`concurrent_update`). Either way, reload the deal and let the owner try again.
+ */
+export const DEAL_CHANGED_REASONS: ReadonlySet<string> = new Set(["stale_revision", "concurrent_update"]);
+
+export function isDealChanged(error: unknown): error is ApiError {
+  return isApiError(error, "conflict") && error.reason !== null && DEAL_CHANGED_REASONS.has(error.reason);
 }
 
 /**
@@ -167,4 +183,15 @@ export function demoValidationError(issues: readonly { path: readonly PropertyKe
 /** There is no single-contact route, so both clients raise this after a list lookup. */
 export function contactNotFound(): ApiError {
   return new ApiError("not_found", "We could not find that customer.", 404, "NotFound");
+}
+
+/** The contact list stopped at the page cap without a match: the customer may still exist. */
+export function contactBeyondList(loaded: number): ApiError {
+  return new ApiError(
+    "incomplete",
+    `We could not open this customer. The dashboard reads the first ${loaded.toLocaleString("en-US")} customers, and they are not among them.`,
+    null,
+    "ListIncomplete",
+    { loaded },
+  );
 }

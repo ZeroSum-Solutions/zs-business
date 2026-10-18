@@ -18,7 +18,7 @@ import {
 import { addDays, localIso, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
 import { newId as defaultNewId } from "../../id";
 import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError } from "../errors";
-import { byContactName, matchesSearch, toUpsertContactRequest, type BookingApi, type BookingView, type ContactWriteResult, type CrmApi, type WriteOptions } from "../types";
+import { byContactName, completeList, matchesSearch, toUpsertContactRequest, type BookingApi, type BookingView, type ContactWriteResult, type CrmApi, type WriteOptions } from "../types";
 import { buildSeed, DEMO_PIPELINE, DEMO_RESOURCES, DEMO_TENANT_ID, type DemoResource } from "./seed";
 
 export interface DemoClock {
@@ -49,7 +49,7 @@ export interface DemoControls {
 
 export interface DemoWrite {
   operation: string;
-  idempotencyKey: string | null;
+  idempotencyKey: string;
   outcome: "applied" | "replayed" | "rejected";
 }
 
@@ -78,9 +78,11 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   const nowIso = () => clock.now().toISOString();
 
   async function idempotent<T>(operation: string, payload: unknown, options: WriteOptions, run: () => T): Promise<T> {
+    // Same rule as the HTTP client: the caller owns the key, none is made up here.
+    const key = options?.idempotencyKey;
+    if (!key) throw new TypeError(`${operation} needs an Idempotency-Key from the caller`);
     await wait();
-    const key = options.idempotencyKey ?? newId();
-    const log = (outcome: DemoWrite["outcome"]) => writes.push({ operation, idempotencyKey: options.idempotencyKey ?? null, outcome });
+    const log = (outcome: DemoWrite["outcome"]) => writes.push({ operation, idempotencyKey: key, outcome });
     // Like a dropped connection after the server committed: the write stands, the answer is lost.
     const answer = (result: T): T => {
       if (loseNext) {
@@ -216,10 +218,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
         .filter((item) => (!query.resourceId || item.resourceId === query.resourceId) &&
           Date.parse(item.endsAt) > fromMs && Date.parse(item.startsAt) < toMs)
         .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
-      return clone(rows);
+      return completeList(clone(rows));
     },
 
-    createBooking(input, options = {}) {
+    createBooking(input, options) {
       return idempotent("booking.create", input, options, () => {
         const request = parse(createBookingRequestSchema, input);
         const resource = resourceOrThrow(request.resourceId);
@@ -241,7 +243,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     async listContacts(query = {}) {
       await wait();
       const rows = [...contacts.values()].filter((item) => matchesSearch(item, query.search)).sort(byContactName);
-      return clone(rows);
+      return completeList(clone(rows));
     },
 
     async getContact(id) {
@@ -251,7 +253,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       return clone(contact);
     },
 
-    createOrFindContact(input, options = {}) {
+    createOrFindContact(input, options) {
       return idempotent("crm.contact.create-or-find", input, options, (): ContactWriteResult => {
         const { email, phone, displayName } = parse(upsertContactRequestSchema, toUpsertContactRequest(input));
         const all = [...contacts.values()];
@@ -283,10 +285,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       const rows = [...deals.values()]
         .filter((item) => !query.contactId || item.contactId === query.contactId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      return clone(rows);
+      return completeList(clone(rows));
     },
 
-    moveDealStage(input, options = {}) {
+    moveDealStage(input, options) {
       return idempotent("crm.deal.move-stage", input, options, () => {
         const { dealId, ...body } = input;
         const move = parse(moveDealStageRequestSchema, body);

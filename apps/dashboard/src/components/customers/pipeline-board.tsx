@@ -5,9 +5,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { Select } from "@/components/ui/input";
-import { ErrorNote, LoadingRows } from "@/components/ui/states";
+import { ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isStaleRevision, type DealRecord, type PipelineSummary } from "@/lib/api";
+import { isDealChanged, type DealRecord, type ListResult, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { keys, useContacts, useDeals, usePipeline } from "@/lib/queries";
@@ -27,8 +27,8 @@ function DealCard({ deal, pipeline, contactName, onMove, moving }: {
   const selectId = `stage-${deal.id}`;
   return (
     <li className="rounded-md bg-surface p-3 shadow-ring" data-deal-id={deal.id} aria-busy={moving}>
-      <p className="text-sm font-medium text-fg">{deal.title}</p>
-      <Link href={`/customers/${deal.contactId}`} className="mt-0.5 inline-flex min-h-8 items-center text-sm text-accent underline-offset-4 hover:underline">
+      <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
+      <Link href={`/customers/${deal.contactId}`} className="mt-0.5 inline-flex min-h-11 max-w-full items-center text-sm break-words text-accent underline-offset-4 hover:underline">
         {contactName}
       </Link>
       <div className="mt-2 flex items-center justify-between gap-2">
@@ -52,7 +52,7 @@ export function PipelineBoard() {
   const [stageFilter, setStageFilter] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
 
-  const names = useMemo(() => new Map(contacts.data?.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
+  const names = useMemo(() => new Map(contacts.data?.items.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
 
   // The intent is (deal, expected revision, target stage): retrying it after a lost answer
   // replays the first attempt instead of failing on the revision that attempt moved on.
@@ -61,17 +61,23 @@ export function PipelineBoard() {
   const move = useMutation({
     mutationFn: (request: DealMove) => api.moveDealStage(request, { idempotencyKey: intents.keyFor(request) }),
     onSettled: (_updated, error, request) => intents.settle(request, error),
-    onSuccess: (updated) => {
+    onSuccess: async (updated) => {
       setStale(false);
-      queryClient.setQueryData<DealRecord[]>(keys.deals(), (current) => current?.map((item) => (item.id === updated.id ? updated : item)));
-      void queryClient.invalidateQueries({ queryKey: keys.dealsAll });
+      queryClient.setQueryData<ListResult<DealRecord>>(keys.deals(), (current) => current && {
+        ...current, items: current.items.map((item) => (item.id === updated.id ? updated : item)),
+      });
+      // Settle on the server's list before saying "Moved", so the next move reads its revision.
+      // A refetch that started before this move cannot roll it back: useDeals keeps the
+      // higher revision of each deal.
+      await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
       const stage = pipeline.data?.stages.find((item) => item.id === updated.stageId)?.name ?? "the new stage";
       toast(`Moved to ${stage}.`);
     },
     onError: async (error) => {
       // Say "Reloaded" only once the fresh revision is on screen, so a retry uses it.
       await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
-      if (isStaleRevision(error)) {
+      // A concurrent_update is the same story as a stale revision: reload, then retry.
+      if (isDealChanged(error)) {
         setStale(true);
         toast(STALE_DEAL_MESSAGE, "info");
       }
@@ -84,7 +90,7 @@ export function PipelineBoard() {
 
   const stages = pipeline.data.stages;
   const activeStage = stageFilter ?? stages[0]!.id;
-  const moveError = move.isError && !isStaleRevision(move.error) ? move.error : null;
+  const moveError = move.isError && !isDealChanged(move.error) ? move.error : null;
   // A failed refresh keeps the last board on screen, with the note above it.
   const refreshError = deals.isError && !moveError ? deals.error : null;
 
@@ -100,10 +106,11 @@ export function PipelineBoard() {
       ) : null}
       {moveError ? <div className="mb-4"><ErrorNote error={moveError} /></div> : null}
       {refreshError ? <div className="mb-4"><ErrorNote error={refreshError} retry={() => deals.refetch()} /></div> : null}
+      <IncompleteNote list={deals.data} />
 
       <div role="group" aria-label="Stage" className="-mx-4 mb-4 flex gap-2 overflow-x-auto px-4 lg:hidden">
         {stages.map((stage) => {
-          const count = deals.data.filter((deal) => deal.stageId === stage.id).length;
+          const count = deals.data.items.filter((deal) => deal.stageId === stage.id).length;
           const active = stage.id === activeStage;
           return (
             <button
@@ -125,7 +132,7 @@ export function PipelineBoard() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         {stages.map((stage) => {
-          const items = deals.data.filter((deal) => deal.stageId === stage.id);
+          const items = deals.data.items.filter((deal) => deal.stageId === stage.id);
           return (
             <div key={stage.id} className={cn(stage.id === activeStage ? "block" : "hidden", "lg:block")} data-stage={stage.name}>
               <h3 className="mb-2 hidden items-baseline justify-between text-sm font-medium text-fg-2 lg:flex">

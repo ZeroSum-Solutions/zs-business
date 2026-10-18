@@ -28,6 +28,9 @@ function demo() {
   return createDemoAdapter({ clock: { now: () => NOW }, newId: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}` });
 }
 
+let keys = 0;
+const key = () => ({ idempotencyKey: `parity-key-${++keys}` });
+
 /** The error the HTTP client throws when the API answers with core's mapping of `thrown`. */
 async function liveError(thrown: unknown): Promise<ApiError> {
   const { status, body } = mapError(thrown);
@@ -67,13 +70,13 @@ describe("error bodies match the API", () => {
   });
 
   it("answers a booking on an unknown calendar with 403", async () => {
-    await expectSame(demo().createBooking({ resourceId: UNKNOWN, startsAt: "2026-10-20T14:00:00.000Z" }), new TenantDenied());
+    await expectSame(demo().createBooking({ resourceId: UNKNOWN, startsAt: "2026-10-20T14:00:00.000Z" }, key()), new TenantDenied());
   });
 
   it("answers a stage move on an unknown deal with 403", async () => {
     await expectSame(demo().moveDealStage({
       dealId: UNKNOWN, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[1]!.id, expectedRevision: 1,
-    }), new TenantDenied());
+    }, key()), new TenantDenied());
   });
 
   it("refuses an inverted slot range with the contract's issues", async () => {
@@ -88,11 +91,11 @@ describe("error bodies match the API", () => {
     ["a bad phone", { displayName: null, email: null, phone: "555" }],
   ])("refuses a contact with %s with the contract's issues", async (_label, input) => {
     const issues = upsertContactRequestSchema.safeParse(toUpsertContactRequest(input)).error!.issues;
-    await expectSame(demo().createOrFindContact(input), validationError("Invalid body", issues));
+    await expectSame(demo().createOrFindContact(input, key()), validationError("Invalid body", issues));
   });
 
   it("shows a plain message when a contact has no email or phone", async () => {
-    const error = await demo().createOrFindContact({ displayName: "No details", email: null, phone: null }).catch((caught: unknown) => caught);
+    const error = await demo().createOrFindContact({ displayName: "No details", email: null, phone: null }, key()).catch((caught: unknown) => caught);
     expect((error as ApiError).message).toBe("Add an email or a phone number.");
   });
 
@@ -100,7 +103,7 @@ describe("error bodies match the API", () => {
     const api = demo();
     const { slots } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
     api.bookAsSomeoneElse(SHOWROOM_ID, slots[0]!.startsAt);
-    await expectSame(api.createBooking({ resourceId: SHOWROOM_ID, startsAt: slots[0]!.startsAt }),
+    await expectSame(api.createBooking({ resourceId: SHOWROOM_ID, startsAt: slots[0]!.startsAt }, key()),
       new Conflict("conflicting key value violates exclusion constraint", { postgresCode: "23P01", constraint: "bookings_no_overlap" }));
   });
 
@@ -113,11 +116,11 @@ describe("error bodies match the API", () => {
 
   it("maps a stale revision the same way", async () => {
     const api = demo();
-    const [deal] = await api.listDeals();
+    const [deal] = (await api.listDeals()).items;
     const current = api.editDealElsewhere(deal!.id);
     await expectSame(api.moveDealStage({
       dealId: deal!.id, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[1]!.id, expectedRevision: deal!.revision,
-    }), new Conflict("The deal revision changed", { reason: "stale_revision", currentRevision: current.revision }));
+    }, key()), new Conflict("The deal revision changed", { reason: "stale_revision", currentRevision: current.revision }));
   });
 
   it("maps a conflict reason outside the API's allowlist to the generic conflict copy", async () => {

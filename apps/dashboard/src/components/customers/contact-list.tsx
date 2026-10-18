@@ -4,7 +4,7 @@ import { CaretRight, MagnifyingGlass } from "@phosphor-icons/react";
 import Link from "next/link";
 import { useDeferredValue, useState } from "react";
 import { Input } from "@/components/ui/input";
-import { EmptyState, ErrorNote, LoadingRows } from "@/components/ui/states";
+import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { useContacts } from "@/lib/queries";
 import { formatPhone, initials } from "@/lib/utils";
 
@@ -30,13 +30,15 @@ export function ContactList() {
       </div>
       {contacts.isPending ? <LoadingRows rows={6} label="Loading customers" /> : contacts.isError ? (
         <ErrorNote error={contacts.error} retry={() => contacts.refetch()} />
-      ) : contacts.data.length === 0 ? (
+      ) : contacts.data.items.length === 0 ? (
         <EmptyState title={search ? "No customers match" : "No customers yet"}>
           {search ? "Check the spelling, or add them as a new customer." : "Add your first customer to start a record."}
         </EmptyState>
       ) : (
+        <>
+        <IncompleteNote list={contacts.data} />
         <ul className="divide-y divide-border-soft overflow-hidden rounded-md bg-surface shadow-ring" aria-busy={contacts.isFetching}>
-          {contacts.data.map((contact) => (
+          {contacts.data.items.map((contact) => (
             <li key={contact.id}>
               <Link href={`/customers/${contact.id}`} className="flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-surface-warm">
                 <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-warm text-sm font-semibold text-fg-2">
@@ -51,6 +53,7 @@ export function ContactList() {
             </li>
           ))}
         </ul>
+        </>
       )}
     </section>
   );

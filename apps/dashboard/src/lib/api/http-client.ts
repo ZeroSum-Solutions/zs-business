@@ -12,14 +12,14 @@ import {
   type CreateBookingRequest,
   type MoveDealStageRequest,
 } from "@zs/contracts";
-import { newId as defaultNewId } from "../id";
-import { ApiError, contactNotFound, defaultMessage, errorFromBody } from "./errors";
+import { ApiError, contactBeyondList, contactNotFound, defaultMessage, errorFromBody } from "./errors";
 import {
   byContactName,
   matchesSearch,
   toUpsertContactRequest,
   type BookingApi,
   type CrmApi,
+  type ListResult,
   type WriteOptions,
 } from "./types";
 
@@ -29,7 +29,6 @@ export interface HttpClientConfig {
   /** Returns a bearer JWT to send. The dashboard leaves it out: its proxy adds the token. */
   getToken?: () => string | null;
   fetch?: typeof fetch;
-  newId?: () => string;
 }
 
 type Method = "GET" | "POST";
@@ -39,7 +38,7 @@ interface RequestSpec<T extends z.ZodType> {
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
-  idempotencyKey?: string | undefined;
+  idempotencyKey?: string;
   schema: T;
 }
 
@@ -49,11 +48,10 @@ const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
 /** Stop after this many pages; the pilot has well under 2,000 rows per list. */
-const MAX_PAGES = 20;
+export const MAX_PAGES = 20;
 
 export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
-  const newId = config.newId ?? defaultNewId;
   const base = config.baseUrl.replace(/\/+$/, "");
 
   async function request<T extends z.ZodType>(spec: RequestSpec<T>): Promise<z.infer<T>> {
@@ -66,13 +64,20 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
     const token = config.getToken?.() ?? null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (spec.body !== undefined) headers["Content-Type"] = "application/json";
-    if (spec.method !== "GET") headers["Idempotency-Key"] = spec.idempotencyKey ?? newId();
+    if (spec.method !== "GET") {
+      // The caller owns the key, so a retry can reuse it. A made-up key would turn a retry
+      // after a lost answer into a second write.
+      if (!spec.idempotencyKey) throw new TypeError(`${spec.method} ${spec.path} needs an Idempotency-Key from the caller`);
+      headers["Idempotency-Key"] = spec.idempotencyKey;
+    }
 
     let response: Response;
     try {
       response = await doFetch(url, {
         method: spec.method,
         headers,
+        // Business data never goes to the HTTP cache, in the browser or in Next's fetch cache.
+        cache: "no-store",
         ...(spec.body !== undefined ? { body: JSON.stringify(spec.body) } : {}),
       });
     } catch {
@@ -97,10 +102,13 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
     return parsed.data;
   }
 
-  /** Walk `nextOffset` until the list ends. Filters the routes do not offer run on the result. */
-  async function listAll<T extends z.ZodType<{ items: unknown[]; nextOffset: number | null }>>(
+  /**
+   * Walk `nextOffset` until the list ends or MAX_PAGES pages are read; in the second case
+   * the result is marked incomplete. Filters the routes do not offer run on the result.
+   */
+  async function listAll<Item, T extends z.ZodType<{ items: Item[]; nextOffset: number | null }>>(
     path: string, schema: T, query: Record<string, string | undefined> = {},
-  ): Promise<z.infer<T>["items"]> {
+  ): Promise<ListResult<z.infer<T>["items"][number]>> {
     const items: z.infer<T>["items"] = [];
     let offset: number | null = 0;
     for (let page = 0; offset !== null && page < MAX_PAGES; page += 1) {
@@ -110,11 +118,11 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
       items.push(...result.items);
       offset = result.nextOffset;
     }
-    return items;
+    return { items, incomplete: offset !== null, loaded: items.length };
   }
 
   const write = <T extends z.ZodType>(path: string, body: unknown, schema: T, options: WriteOptions) =>
-    request({ method: "POST", path, body, idempotencyKey: options.idempotencyKey, schema });
+    request({ method: "POST", path, body, idempotencyKey: options?.idempotencyKey, schema });
 
   return {
     async listResources() {
@@ -131,15 +139,16 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
     },
 
     async listBookings(query = {}) {
-      const rows = await listAll("/v1/booking/bookings", bookingPageSchema, { resourceId: query.resourceId });
+      const list = await listAll("/v1/booking/bookings", bookingPageSchema, { resourceId: query.resourceId });
       const fromMs = query.from ? Date.parse(query.from) : -Infinity;
       const toMs = query.to ? Date.parse(query.to) : Infinity;
-      return rows
+      const items = list.items
         .filter((row) => Date.parse(row.endsAt) > fromMs && Date.parse(row.startsAt) < toMs)
         .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+      return { ...list, items };
     },
 
-    async createBooking(input, options = {}) {
+    async createBooking(input, options) {
       const body: CreateBookingRequest = { resourceId: input.resourceId, startsAt: input.startsAt };
       return (await write("/v1/booking/bookings", body, createBookingOutputSchema, options)).result;
     },
@@ -150,29 +159,32 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
     },
 
     async listContacts(query = {}) {
-      const rows = await listAll("/v1/crm/contacts", contactPageSchema);
-      return rows.filter((row) => matchesSearch(row, query.search)).sort(byContactName);
+      const list = await listAll("/v1/crm/contacts", contactPageSchema);
+      return { ...list, items: list.items.filter((row) => matchesSearch(row, query.search)).sort(byContactName) };
     },
 
     async getContact(id) {
       // There is no single-contact route; the list is small and already cached per page.
-      const contact = (await listAll("/v1/crm/contacts", contactPageSchema)).find((item) => item.id === id);
-      if (!contact) throw contactNotFound();
-      return contact;
+      const list = await listAll("/v1/crm/contacts", contactPageSchema);
+      const contact = list.items.find((item) => item.id === id);
+      if (contact) return contact;
+      // Past the cap the customer may exist after all: say so instead of "not found".
+      throw list.incomplete ? contactBeyondList(list.loaded) : contactNotFound();
     },
 
-    async createOrFindContact(input, options = {}) {
+    async createOrFindContact(input, options) {
       return (await write("/v1/crm/contacts", toUpsertContactRequest(input), createOrFindContactOutputSchema, options)).result;
     },
 
     async listDeals(query = {}) {
-      const rows = await listAll("/v1/crm/deals", dealPageSchema);
-      return rows
+      const list = await listAll("/v1/crm/deals", dealPageSchema);
+      const items = list.items
         .filter((row) => !query.contactId || row.contactId === query.contactId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      return { ...list, items };
     },
 
-    async moveDealStage(input, options = {}) {
+    async moveDealStage(input, options) {
       const body: MoveDealStageRequest = {
         pipelineId: input.pipelineId,
         stageId: input.stageId,
