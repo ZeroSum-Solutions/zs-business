@@ -9,6 +9,11 @@
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
   }
+  /* Fieldsets default to min-inline-size: min-content, so a sideways-scrolling row inside
+     one (the booking Day chips) widened the sheet body and shifted it off its padding. */
+  fieldset {
+    min-width: 0;
+  }
   body {
     min-height: 100dvh;
     font-size: var(--text-base);

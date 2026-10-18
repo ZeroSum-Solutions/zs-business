@@ -38,7 +38,8 @@ export function DialogContent({
             <X size={20} aria-hidden />
           </DialogPrimitive.Close>
         </div>
-        <div className="overflow-x-hidden overflow-y-auto px-4 py-4 sm:px-6 sm:pb-6">{children}</div>
+        {/* Same horizontal inset as the header; e2e checks nothing scrolls it sideways. */}
+        <div data-slot="dialog-body" className="min-w-0 overflow-x-hidden overflow-y-auto px-4 py-4 sm:px-6 sm:pb-6">{children}</div>
       </DialogPrimitive.Content>
     </DialogPrimitive.Portal>
   );

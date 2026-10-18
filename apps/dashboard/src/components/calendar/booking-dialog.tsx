@@ -89,7 +89,7 @@ export function BookingDialog({
       <DialogContent title="Book an appointment" description={resource.name ?? "Calendar"} data-resource-id={resource.id}>
         <fieldset>
           <legend className="mb-2 text-sm font-medium text-fg-2">Day</legend>
-          <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">
+          <div className="flex gap-2 overflow-x-auto pb-1 sm:flex-wrap">
             {days.map((day) => {
               const active = day === dateKey;
               const [weekday, rest] = formatDateKey(day).split(", ");
