@@ -19,10 +19,15 @@ const migrations = new URL("../../../supabase/migrations/", import.meta.url);
  */
 const shipped: Record<string, string> = {
   "20261017150322_shared_actions.sql": "365f66a76d36be9b93b77a5fee56cc059709d9092ecbc399f26439cb9bac576b",
+  "20261017155900_dispatcher_owner_role.sql": "65962246bd4270269b28441cbb414f4e53c6c2bd8030538fd212b8e3fd8faf55",
   "20261017160000_dispatcher_boundary.sql": "e41a17d1a0d0af604d92d4f983e25e38280e2c10234d25a07cd2fecba1a708ed",
   "20261017170000_booking.sql": "a58d0d558bb560fbccc61a15726ad628132caefa77781a1414b9e142cd62d093",
   "20261017170100_crm.sql": "4b90ad716bce286e447d56c84edbb11b2d33dbbc8ff1b69c494219086e583ec9",
+  "20261018090000_function_hardening.sql": "104a8c4f9dd25a76eadd4500e92f524535967d153a6b4863ff623e7a6466dca2",
 };
+/** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
+const beforeHardening = Object.keys(shipped).filter((name) =>
+  !["20261017155900_dispatcher_owner_role.sql", "20261018090000_function_hardening.sql"].includes(name));
 const checksum = async (name: string) =>
   createHash("sha256").update(await readFile(new URL(name, migrations), "utf8")).digest("hex");
 
@@ -60,10 +65,13 @@ async function schemaState(pool: Pool) {
   return state;
 }
 
-it("upgrades a database migrated at main to the same schema as a fresh install", async () => {
+it.each([
+  ["main", Object.keys(shipped)],
+  ["main before the hardening follow-ups", beforeHardening],
+])("upgrades a database migrated at %s to the same schema as a fresh install", async (_, baseline) => {
   const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-main-"));
   try {
-    for (const name of Object.keys(shipped)) {
+    for (const name of baseline) {
       // Fail here, not with a misleading pass, if a shipped file was edited.
       expect(await checksum(name), name).toBe(shipped[name]);
       await copyFile(new URL(name, migrations), join(atMain, name));
