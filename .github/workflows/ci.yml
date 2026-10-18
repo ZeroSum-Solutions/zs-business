@@ -38,3 +38,21 @@ jobs:
       - run: pnpm -r test
       - run: pnpm --filter @zs/core test:booking
       - run: pnpm --filter @zs/core test:crm
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @zs/dashboard exec playwright install --with-deps chromium
+      - run: pnpm --filter @zs/dashboard e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-e2e-results
+          path: apps/dashboard/test-results/
+          retention-days: 7
