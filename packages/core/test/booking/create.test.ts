@@ -11,7 +11,7 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import { bookingHandlers, createBooking, createDispatcher, crmHandlers, getAvailableSlots, type DispatchContext } from "../../src/index.js";
 
 let database: TestDatabase;
-beforeAll(async () => { database = await createTestDatabase(); });
+beforeAll(async () => { database = await createTestDatabase(undefined, { nonSuperuserMigrator: true }); });
 afterAll(async () => { await database?.close(); });
 
 const MONDAY_8AM = "2026-10-19T08:00:00.000Z";
@@ -283,8 +283,26 @@ describe("booking.create through the shared dispatcher (B-17..B-23)", () => {
   });
 
   it("reports a stored resource that fails schema parsing as a typed ValidationFailed", async () => {
-    // Passes the SQL shape check (a slash in the zone) but is not an IANA zone.
-    const { fixture, a } = await world({ timeZone: "Not/AZone" });
+    // SQL now rejects unknown zones, so model a row stored before that check (or under an
+    // older tzdata): the table owner disables only that trigger, in one transaction.
+    const { fixture, a } = await world();
+    const owner = await database.pool.connect();
+    try {
+      await owner.query("BEGIN");
+      // Act as the non-superuser owner, as hosted Supabase's postgres would. Forced RLS
+      // hides every row from the owner too, so lift it with the trigger.
+      await owner.query(`SET LOCAL ROLE "${database.migrator!}"`);
+      await owner.query(`ALTER TABLE booking_resources NO FORCE ROW LEVEL SECURITY,
+        DISABLE TRIGGER booking_resources_time_zone_known`);
+      const planted = await owner.query("UPDATE booking_resources SET time_zone='Not/AZone' WHERE tenant_id=$1", [a.tenantId]);
+      expect(planted.rowCount).toBe(1);
+      await owner.query(`ALTER TABLE booking_resources FORCE ROW LEVEL SECURITY,
+        ENABLE TRIGGER booking_resources_time_zone_known`);
+      await owner.query("COMMIT");
+    } catch (error) {
+      await owner.query("ROLLBACK");
+      throw error;
+    } finally { owner.release(); }
     const error = await rejection(book(command(a.tenantId, a.id, "2026-10-19T10:00:00.000Z")));
     expect(error).toBeInstanceOf(ValidationFailed);
     expect(error).toMatchObject({ code: "ValidationFailed" });

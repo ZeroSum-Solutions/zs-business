@@ -44,7 +44,8 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | `DATABASE_URL` | API: the runtime LOGIN role (`zs_runtime`); the API refuses to start as a superuser or BYPASSRLS role. Scripts: the local admin URL. |
 | `JWT_SECRET` | HS256 secret for Supabase-style access tokens (32+ characters). The `.env.example` placeholder is refused. |
 | `JWT_ISSUER` | Optional. When set, tokens must carry this `iss`. |
-| `JWT_MAX_TTL_SECONDS` | Longest accepted token lifetime, default 3600. Local dev sets 604800 so the 7-day seed token works for seed and dashboard e2e; production keeps the default. |
+| `JWT_MAX_TTL_SECONDS` | Longest accepted token lifetime (`exp` minus `iat`), default 3600. Local dev sets 604800 so the 7-day seed token works for seed and dashboard e2e; production keeps the default. |
+| `JWT_CLOCK_SKEW_SECONDS` | How far a token's `iat` may lie ahead of the API's clock, 0 to 300, default 60. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
@@ -55,8 +56,10 @@ clock. Everything else gets them through `createApp(deps)`.
 ## Auth
 
 `Authorization: Bearer <JWT>`, verified like a Supabase Auth access token: signature, `exp`,
-`aud = authenticated`, `role = authenticated`, `iss` when `JWT_ISSUER` is set, and a lifetime
-(`exp` minus `iat`, or minus now when `iat` is absent or later) of at most `JWT_MAX_TTL_SECONDS`.
+`aud = authenticated`, `role = authenticated`, `iss` when `JWT_ISSUER` is set, and a required
+`iat`. A token whose `iat` is more than `JWT_CLOCK_SKEW_SECONDS` ahead of the clock is refused,
+and its lifetime (`exp` minus `iat`) must be at most `JWT_MAX_TTL_SECONDS`. Within the skew, a
+full-lifetime token from an issuer whose clock runs slightly ahead is still accepted.
 `sub` is the actor and `app_metadata.tenant_id` is the tenant. HS256
 uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing keys pass
 `createJwksVerifier(createRemoteJWKSet(new URL(".../auth/v1/.well-known/jwks.json")), { clock })`.

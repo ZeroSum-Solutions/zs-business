@@ -73,6 +73,8 @@ const envSchema = z.object({
   JWT_ISSUER: z.string().min(1).optional(),
   // Default one hour, like Supabase Auth. Local dev raises it to accept the 7-day seed token.
   JWT_MAX_TTL_SECONDS: z.coerce.number().int().min(60).max(30 * 24 * 3600).default(3600),
+  // How far a token's iat may lie ahead of this server's clock. Default one minute.
+  JWT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(60),
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
 });
@@ -81,6 +83,7 @@ export interface ServerEnv {
   readonly jwtSecret: string;
   readonly jwtIssuer: string | undefined;
   readonly jwtMaxLifetimeSeconds: number;
+  readonly jwtClockSkewSeconds: number;
   readonly allowedOrigins: string[];
   readonly port: number;
 }
@@ -95,6 +98,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     jwtSecret: parsed.data.JWT_SECRET,
     jwtIssuer: parsed.data.JWT_ISSUER,
     jwtMaxLifetimeSeconds: parsed.data.JWT_MAX_TTL_SECONDS,
+    jwtClockSkewSeconds: parsed.data.JWT_CLOCK_SKEW_SECONDS,
     allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
     port: parsed.data.PORT,
   };

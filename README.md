@@ -43,6 +43,11 @@ loopback host (`localhost`, `127.x.x.x`, or `::1`), an explicit port other than
 options. Run this task's tests on the default cluster only. The harness creates a
 unique `zs_test_<uuid>` database and drops it after success or failure.
 
+Migrations support PostgreSQL 15 and 16+ (some hosted Supabase projects still run 15).
+CI also runs `pnpm -r test` against `postgres:15` on port 55433. Locally:
+`docker run -d --rm --name zs-pg15 -p 127.0.0.1:55433:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:15`,
+then `ZS_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres pnpm -r test`.
+
 `@zs/db/testing` exports `createTwoTenantFixture` and `withTestDatabase`. The harness
 provisions `zs_runtime` (LOGIN, member of `authenticated` only) and `zs_service`
 (LOGIN, member of `service_role`) idempotently. Both use the test cluster's trust

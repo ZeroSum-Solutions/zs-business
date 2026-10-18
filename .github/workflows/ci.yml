@@ -14,11 +14,17 @@ concurrency:
 
 jobs:
   test:
+    name: test (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Some hosted Supabase projects still run PostgreSQL 15; the migrations gate on version.
+        postgres: ["16", "15"]
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:

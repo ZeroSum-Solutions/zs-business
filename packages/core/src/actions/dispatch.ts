@@ -172,6 +172,16 @@ export function createDispatcher<Config = DispatchConfig>(
         const handled = await runHandler(() =>
           handler.handle({ tx, command, binding, now, config, generateId }),
         );
+        // Handlers are trusted server code we write. This check catches a handler that leaves
+        // the transaction scoped to another tenant; throwing rolls back. It sees only the final
+        // value: RLS follows the mutable app.tenant_id, so a handler that switches tenant,
+        // writes, and switches back passes. Schema-qualified so a handler's search_path cannot
+        // shadow the read. The pool resets session state on release (@zs/db scoped.ts).
+        const scope = await tx.query<{ tenant: string | null }>(
+          "SELECT pg_catalog.current_setting('app.tenant_id', true) AS tenant",
+        );
+        if ((scope.rows[0]?.tenant ?? "").toLowerCase() !== binding.tenantId.toLowerCase())
+          throw new TenantDenied();
         const parsedResult = jsonValueSchema.safeParse(handled.result);
         if (!parsedResult.success) throw new ValidationFailed(parsedResult.error.message);
         const result = parsedResult.data;

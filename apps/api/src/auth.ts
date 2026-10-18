@@ -20,17 +20,21 @@ export interface SupabaseTokenOptions {
   readonly audience?: string;
   /** When set, the token's `iss` must equal it. */
   readonly issuer?: string;
-  /** Longest accepted token lifetime, `exp` minus `iat` (or now, if earlier or absent). Default 1 hour. */
+  /** Longest accepted token lifetime, `exp` minus `iat`. Default 1 hour. */
   readonly maxLifetimeSeconds?: number;
+  /** How far `iat` may lie ahead of the clock, for skew between issuer and API. Default 60 seconds. */
+  readonly clockSkewSeconds?: number;
 }
 
 export const DEFAULT_MAX_TOKEN_LIFETIME_SECONDS = 3600;
+export const DEFAULT_CLOCK_SKEW_SECONDS = 60;
 
 type Key = Uint8Array | JWTVerifyGetKey;
 
 /**
  * Verify like a Supabase Auth access token: signature, exp/nbf against the injected clock,
- * audience, issuer when configured, `role = authenticated` and a bounded lifetime, then map
+ * audience, issuer when configured, `role = authenticated`, an `iat` no later than now plus
+ * the allowed skew and a lifetime `exp - iat` within the maximum, then map
  * `sub` to the actor and `app_metadata.tenant_id` to the tenant.
  * The key is either an HS256 secret or a JWKS resolver (`createRemoteJWKSet`) for ES256/RS256.
  */
@@ -38,6 +42,9 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
   const maxLifetime = options.maxLifetimeSeconds ?? DEFAULT_MAX_TOKEN_LIFETIME_SECONDS;
   if (!Number.isSafeInteger(maxLifetime) || maxLifetime <= 0)
     throw new Error("Maximum token lifetime must be a positive whole number of seconds");
+  const skew = options.clockSkewSeconds ?? DEFAULT_CLOCK_SKEW_SECONDS;
+  if (!Number.isSafeInteger(skew) || skew < 0)
+    throw new Error("Clock skew must be a non-negative whole number of seconds");
   return {
     async verify(token) {
       let payload: JWTPayload;
@@ -46,7 +53,7 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
           algorithms,
           audience: options.audience ?? "authenticated",
           currentDate: options.clock.now(),
-          requiredClaims: ["exp", "sub"],
+          requiredClaims: ["exp", "iat", "sub"],
           ...(options.issuer === undefined ? {} : { issuer: options.issuer }),
         };
         payload = (typeof key === "function"
@@ -56,10 +63,11 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
         throw new Unauthenticated();
       }
       if (payload.role !== "authenticated") throw new Unauthenticated("Access token role must be authenticated");
-      // A future iat must not stretch the window, so measure from the earlier of iat and now.
+      // jose has checked that exp and iat are numbers. An iat beyond the skew is refused, so it
+      // cannot shift the window into the future; within it, the full lifetime is accepted.
       const now = Math.floor(options.clock.now().getTime() / 1000);
-      const start = typeof payload.iat === "number" ? Math.min(payload.iat, now) : now;
-      if (payload.exp! - start > maxLifetime) throw new Unauthenticated("Access token lifetime is too long");
+      if (payload.iat! > now + skew) throw new Unauthenticated("Access token was issued in the future");
+      if (payload.exp! - payload.iat! > maxLifetime) throw new Unauthenticated("Access token lifetime is too long");
       const claims = accessTokenClaimsSchema.safeParse(payload);
       if (!claims.success) throw new Unauthenticated("Access token lacks a user or tenant claim");
       return { actorId: claims.data.sub, tenantId: claims.data.app_metadata.tenant_id };
