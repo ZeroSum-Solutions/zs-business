@@ -104,6 +104,46 @@ describe("POST /v1/booking/bookings", () => {
   });
 });
 
+/** Another Monday 09:00-17:00 UTC calendar for tenant A: one-hour slots, no buffers. */
+async function addResource(stepMinutes = 60): Promise<string> {
+  const id = randomUUID();
+  await h.fixture.service((tx) => tx.query(
+    `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+       buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+     VALUES ($1,$2,'UTC',$3::jsonb,'[]'::jsonb,60,$4,0,0,0,20160)`,
+    [h.a.tenantId, id, JSON.stringify([{ weekday: 1, windows: [{ startMinute: 540, endMinute: 1020 }] }]), stepMinutes],
+  ));
+  return id;
+}
+
+describe("bookings across several resources", () => {
+  it("books two resources at the same instant", async () => {
+    const [first, second] = [await addResource(), await addResource()];
+    const responses = await Promise.all([first, second].map((resourceId) =>
+      book("2026-10-19T09:00:00.000Z", randomUUID(), h.a, resourceId)));
+    expect(responses.map((response) => response.status)).toEqual([201, 201]);
+    expect(responses.map((response) => createBookingOutputSchema.parse(response.body).result.resourceId)).toEqual([first, second]);
+  });
+
+  it("refuses an overlapping booking on the same resource", async () => {
+    // Half-hour steps make 10:30 a real slot, so only the 10:00 booking can block it.
+    const [resourceId, control] = [await addResource(30), await addResource(30)];
+    expect((await book("2026-10-19T10:00:00.000Z", randomUUID(), h.a, resourceId)).status).toBe(201);
+    const overlap = await book("2026-10-19T10:30:00.000Z", randomUUID(), h.a, resourceId);
+    expect(overlap.status).toBe(409);
+    expect(apiErrorBodySchema.parse(overlap.body).error).toMatchObject({ code: "Conflict", details: { reason: "slot_unavailable" } });
+    expect((await book("2026-10-19T10:30:00.000Z", randomUUID(), h.a, control)).status).toBe(201);
+  });
+
+  it("books abutting slots on the same resource", async () => {
+    const resourceId = await addResource();
+    const first = await book("2026-10-19T10:00:00.000Z", randomUUID(), h.a, resourceId);
+    const next = await book("2026-10-19T11:00:00.000Z", randomUUID(), h.a, resourceId);
+    expect([first.status, next.status]).toEqual([201, 201]);
+    expect(createBookingOutputSchema.parse(first.body).result.endsAt).toBe("2026-10-19T11:00:00.000Z");
+  });
+});
+
 describe("GET /v1/booking/slots", () => {
   it("lists free slots with local labels and hides booked ones", async () => {
     const query = `resourceId=${h.a.resourceId}&from=2026-10-19T09:00:00.000Z&to=2026-10-19T17:00:00.000Z&zone=America/New_York`;
