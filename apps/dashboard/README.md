@@ -22,10 +22,16 @@ loopback only). Its global setup (`e2e/live/global-setup.ts`):
 
 1. creates a throwaway `zs_e2e_*` database;
 2. runs `@zs/api seed:demo` with a random `JWT_SECRET` (migrations, the `zs_runtime` login,
-   the Halden & Rowe seed and a dev JWT), and signs a second token for another person in
-   the same business;
-3. starts `@zs/api` on port 8798 as `zs_runtime`, then builds the dashboard into
-   `.next-live/` with `NEXT_PUBLIC_API_URL` and the dev token and serves it on port 3218.
+   the Halden & Rowe seed and a 7-day dev JWT). It takes the owner from that JWT and signs
+   one-hour tokens (`role` authenticated, a run-specific `iss`) for the owner and for
+   another person in the same business;
+3. starts `@zs/api` on port 8798 as `zs_runtime` with `JWT_ISSUER` set and
+   `JWT_MAX_TTL_SECONDS=3600`, the production default, then builds the dashboard into
+   `.next-live/` with `NEXT_PUBLIC_API_URL` and the owner token and serves it on port 3218.
+
+The live run also checks that the API refuses the 7-day seed token and tokens with the
+wrong role, no issuer or a lifetime one second over the cap. It checks that slots for an
+unknown calendar answer 403 with the same body the demo adapter sends.
 
 The tests make the conflicting writes (a booking for the chosen time, a re-save of a deal)
 through the API with the second token. Teardown stops both servers and drops the
@@ -48,6 +54,11 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   "Halden & Rowe Fine Jewelry", including the booking and deal conflicts. Changes reset
   on reload. In demo mode `window.__zsDemo` exposes `bookAsSomeoneElse` and
   `editDealElsewhere` so tests can trigger the conflicts.
+- Errors: the demo adapter parses requests with the same `@zs/contracts` schemas and throws
+  the error the HTTP client would build from the API's body: the fixed message per code,
+  allowlisted conflict reasons, and 403 (never 404) for an unknown calendar, deal or stage.
+  `test/error-parity.test.ts` compares both against `mapError` from `@zs/core`. Shown
+  copy comes from the status, `reason` and field, never from the server message.
 
 Errors: every non-2xx body is read with `apiErrorBodySchema`. The client maps the status
 to an `ApiError` kind and shows plain copy, not the server message. A 409 with

@@ -2,6 +2,10 @@
  * e2e:live stack: a throwaway database on the local test cluster, the demo seed, the real
  * API (as the unprivileged runtime role) and a production build of the dashboard pointed at
  * it. Everything started here is stopped, and the database dropped, in the returned teardown.
+ *
+ * Auth runs as in production: a random per-run secret, a required issuer and the default
+ * one-hour lifetime cap. The seed's 7-day token is only a source of the demo principal; the
+ * dashboard gets a one-hour token for that principal, which the API accepts.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -12,6 +16,11 @@ import { fileURLToPath } from "node:url";
 import { SignJWT, decodeJwt } from "jose";
 import pg from "pg";
 import { LIVE } from "./env";
+
+/** Required `iss` for this run; the API checks it because JWT_ISSUER is set. */
+const ISSUER = "https://zs-e2e-live.local/auth/v1";
+/** The API default, set explicitly so the harness never inherits a longer local-dev cap. */
+const MAX_TTL_SECONDS = 3600;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dashboardDir = path.resolve(here, "../..");
@@ -133,18 +142,30 @@ export default async function globalSetup() {
     const token = /Dev JWT[^\n]*:\n(\S+)/.exec(seedOutput)?.[1];
     if (!token) throw new Error("seed:demo did not print a dev JWT; see test-results/live/seed.log");
 
-    // A second person in the same business, for the conflicting writes.
-    const claims = decodeJwt(token) as { app_metadata?: { tenant_id?: string } };
-    const tenantId = claims.app_metadata?.tenant_id;
-    if (!tenantId) throw new Error("Dev JWT has no tenant");
+    const seedClaims = decodeJwt(token) as { sub?: string; app_metadata?: { tenant_id?: string } };
+    const tenantId = seedClaims.app_metadata?.tenant_id;
+    if (!seedClaims.sub || !tenantId) throw new Error("Dev JWT has no user or tenant");
     const now = Math.floor(Date.now() / 1000);
-    const otherToken = await new SignJWT({ role: "authenticated", app_metadata: { tenant_id: tenantId } })
-      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-      .setSubject(randomUUID())
-      .setAudience("authenticated")
-      .setIssuedAt(now)
-      .setExpirationTime(now + 3600)
-      .sign(new TextEncoder().encode(jwtSecret));
+    const sign = (sub: string, claims: { role: string; iss?: string }, ttlSeconds = MAX_TTL_SECONDS) => {
+      const { iss, ...rest } = claims;
+      const jwt = new SignJWT({ ...rest, app_metadata: { tenant_id: tenantId } })
+        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+        .setSubject(sub)
+        .setAudience("authenticated")
+        .setIssuedAt(now)
+        .setExpirationTime(now + ttlSeconds);
+      return (iss ? jwt.setIssuer(iss) : jwt).sign(new TextEncoder().encode(jwtSecret));
+    };
+    const ownerToken = await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER });
+    // A second person in the same business, for the conflicting writes.
+    const otherToken = await sign(randomUUID(), { role: "authenticated", iss: ISSUER });
+    // Tokens the API must refuse: wrong role, missing issuer, and one second over the cap.
+    const refusedTokens = {
+      anonRole: await sign(seedClaims.sub, { role: "anon", iss: ISSUER }),
+      noIssuer: await sign(seedClaims.sub, { role: "authenticated" }),
+      tooLong: await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER }, MAX_TTL_SECONDS + 1),
+      seedSevenDay: token,
+    };
 
     const api = start("api", "pnpm", ["run", "start"], {
       cwd: apiDir,
@@ -152,6 +173,8 @@ export default async function globalSetup() {
         ...base,
         DATABASE_URL: runtimeUrl.href,
         JWT_SECRET: jwtSecret,
+        JWT_ISSUER: ISSUER,
+        JWT_MAX_TTL_SECONDS: String(MAX_TTL_SECONDS),
         ALLOWED_ORIGINS: `${LIVE.webUrl},http://127.0.0.1:${LIVE.webPort}`,
         PORT: String(LIVE.apiPort),
       },
@@ -163,7 +186,7 @@ export default async function globalSetup() {
       ...base,
       NEXT_DIST_DIR: ".next-live",
       NEXT_PUBLIC_API_URL: LIVE.apiUrl,
-      NEXT_PUBLIC_API_TOKEN: token,
+      NEXT_PUBLIC_API_TOKEN: ownerToken,
       NEXT_TELEMETRY_DISABLED: "1",
     };
     await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: webEnv });
@@ -172,8 +195,9 @@ export default async function globalSetup() {
     await waitFor(LIVE.webUrl, web, "web", 60_000);
 
     // Workers inherit these.
-    process.env.ZS_LIVE_TOKEN = token;
+    process.env.ZS_LIVE_TOKEN = ownerToken;
     process.env.ZS_LIVE_OTHER_TOKEN = otherToken;
+    process.env.ZS_LIVE_REFUSED_TOKENS = JSON.stringify(refusedTokens);
   } catch (error) {
     await teardown();
     throw error;

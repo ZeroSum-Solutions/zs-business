@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type APIRequestContext } from "@playwright/test";
+import { CALENDAR_UNAVAILABLE, demoErrorBody } from "../../src/lib/api/errors";
 import { expectDialogInset, mainNav, openBookingOnFirstOpenDay, shot, viewportShot } from "../helpers";
 import { LIVE } from "./env";
 
@@ -156,4 +157,48 @@ test("moves a deal, and reloads when someone else changed it", async ({ page, re
   await expect(page.locator("[data-fetching]")).toHaveCount(0);
   await target.getByRole("combobox").selectOption({ label: "Delivered" });
   await expect(page.getByRole("status").getByText("Moved to Delivered.")).toBeVisible();
+});
+
+test("refuses tokens with the wrong role, no issuer or too long a lifetime", async ({ request }, info) => {
+  test.skip(info.project.name !== "desktop", "API-only check; one project is enough");
+  const refused = JSON.parse(process.env.ZS_LIVE_REFUSED_TOKENS ?? "{}") as Record<string, string>;
+  expect(Object.keys(refused).sort()).toEqual(["anonRole", "noIssuer", "seedSevenDay", "tooLong"]);
+  const resources = (token: string) =>
+    request.get(`${LIVE.apiUrl}/v1/booking/resources`, { headers: { Authorization: `Bearer ${token}` } });
+  for (const [name, token] of Object.entries(refused)) {
+    const response = await resources(token);
+    expect(response.status(), name).toBe(401);
+    expect(((await response.json()) as { error: { code: string } }).error.code, name).toBe("Unauthorized");
+  }
+  expect((await resources(process.env.ZS_LIVE_TOKEN!)).status()).toBe(200);
+});
+
+test("answers slots for an unknown calendar with 403 and says so in the booking sheet", async ({ page, request }, info) => {
+  const unknown = randomUUID();
+  const response = await request.get(`${LIVE.apiUrl}/v1/booking/slots`, {
+    headers: { Authorization: `Bearer ${process.env.ZS_LIVE_TOKEN}` },
+    params: { resourceId: unknown, from: "2026-10-20T00:00:00.000Z", to: "2026-10-21T00:00:00.000Z" },
+  });
+  expect(response.status()).toBe(403);
+  // The demo adapter sends this exact body for the same request.
+  expect(await response.json()).toEqual(demoErrorBody("Forbidden"));
+
+  // Point the sheet's slot reads at a calendar this business does not own.
+  await page.route(`${LIVE.apiUrl}/v1/booking/slots?*`, (route) => {
+    const url = new URL(route.request().url());
+    url.searchParams.set("resourceId", unknown);
+    return route.continue({ url: url.toString() });
+  });
+  await page.goto("/calendar");
+  // The page's own open-times panel and the booking sheet both read slots.
+  await expect(page.getByRole("main").getByRole("alert")).toHaveText(CALENDAR_UNAVAILABLE);
+  await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Book appointment" }).click();
+  const dialog = page.getByRole("dialog", { name: "Book an appointment" });
+  await expect(dialog.getByRole("alert")).toHaveText(CALENDAR_UNAVAILABLE);
+  await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await expectDialogInset(page);
+  // Let the sheet finish opening, so the capture does not show the page through it.
+  await dialog.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished)));
+  await viewportShot(page, "17-calendar-unavailable", info.project.name, PREFIX);
 });
