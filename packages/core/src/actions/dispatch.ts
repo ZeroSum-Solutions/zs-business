@@ -170,11 +170,11 @@ export function createDispatcher<Config = DispatchConfig>(
         const handled = await runHandler(() =>
           handler.handle({ tx, command, binding, now, config, generateId }),
         );
-        // A handler must not leave the transaction scoped to another tenant; throwing rolls back.
-        // Schema-qualified so a handler's search_path cannot shadow the read. This sees only
-        // the final value: a switch the handler restores before returning is invisible here,
-        // and RLS on every table is what bounds such writes. The pool resets session state
-        // on release (@zs/db scoped.ts), so a session-scoped set_config cannot leak onward.
+        // Handlers are trusted server code we write. This check catches a handler that leaves
+        // the transaction scoped to another tenant; throwing rolls back. It sees only the final
+        // value: RLS follows the mutable app.tenant_id, so a handler that switches tenant,
+        // writes, and switches back passes. Schema-qualified so a handler's search_path cannot
+        // shadow the read. The pool resets session state on release (@zs/db scoped.ts).
         const scope = await tx.query<{ tenant: string | null }>(
           "SELECT pg_catalog.current_setting('app.tenant_id', true) AS tenant",
         );
