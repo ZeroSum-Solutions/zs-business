@@ -1,0 +1,30 @@
+{
+  "name": "@zs/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/app.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "tsx src/main.ts",
+    "db:migrate": "tsx src/scripts/migrate.ts",
+    "seed:demo": "tsx src/scripts/seed-demo.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.5",
+    "@zs/contracts": "workspace:*",
+    "@zs/core": "workspace:*",
+    "@zs/db": "workspace:*",
+    "hono": "4.13.13",
+    "jose": "6.2.12",
+    "pg": "8.23.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1",
+    "tsx": "4.23.15"
+  }
+}
