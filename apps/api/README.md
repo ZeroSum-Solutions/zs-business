@@ -41,7 +41,7 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 
 | Variable | Meaning |
 |---|---|
-| `DATABASE_URL` | API: the runtime LOGIN role (`zs_runtime`), never a superuser. Scripts: the local admin URL. |
+| `DATABASE_URL` | API: the runtime LOGIN role (`zs_runtime`); the API refuses to start as a superuser or BYPASSRLS role. Scripts: the local admin URL. |
 | `JWT_SECRET` | HS256 secret for Supabase-style access tokens (32+ characters). The `.env.example` placeholder is refused. |
 | `JWT_ISSUER` | Optional. When set, tokens must carry this `iss`. |
 | `JWT_MAX_TTL_SECONDS` | Longest accepted token lifetime, default 3600. Local dev sets 604800 so the 7-day seed token works for seed and dashboard e2e; production keeps the default. |
@@ -78,11 +78,14 @@ uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing k
 | `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
 
 Every `POST` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
-the same key returns the stored result; reusing a key with a different body is 409
-`idempotency_key_reused`. Target IDs derive from the tenant and the key.
+the same key returns the stored result with the original status; reusing a key with a
+different body, or on another endpoint, is 409 `idempotency_key_reused`. Keys are per tenant.
+Target IDs derive from the tenant and the key.
 
 Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `{ "error": { "code", "message", "details" } }`. Codes and statuses: `ValidationFailed` 400,
-`Unauthorized` 401, `Forbidden` 403 (another tenant's row), `NotFound` 404, `Conflict` 409
-(`details.reason`: `slot_unavailable`, `overlap`, `stale_revision`, `id_in_use`,
-`idempotency_key_reused`, ...), `Internal` 500 with no internal detail.
+`Unauthorized` 401, `Forbidden` 403 (another tenant's row or an unknown ID, answered alike),
+`NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
+`stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
+`concurrent_update`, `split_identity`, `identity_mismatch`; anything else is `conflict`),
+`Internal` 500 with no internal detail. Each code has one fixed `message`.
