@@ -11,7 +11,6 @@ import {
   primaryKey,
   text,
   timestamp,
-  unique,
   uuid,
 } from "drizzle-orm/pg-core";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
@@ -45,10 +44,11 @@ export const bookingResources = pgTable(
     bufferAfterMinutes: integer("buffer_after_minutes").notNull(),
     minimumNoticeMinutes: integer("minimum_notice_minutes").notNull(),
     bookingHorizonMinutes: integer("booking_horizon_minutes").notNull(),
+    name: text("name"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
-    unique("booking_resources_one_per_tenant").on(table.tenantId),
+    check("booking_resources_name_length", sql`${table.name} IS NULL OR char_length(${table.name}) BETWEEN 1 AND 200`),
     check("booking_resources_time_zone_shape",
       sql`${table.timeZone} = 'UTC' OR (length(${table.timeZone}) BETWEEN 3 AND 100 AND position('/' IN ${table.timeZone}) > 0)`),
     check("booking_resources_weekly_valid", sql`public.booking_weekly_valid(${table.weekly})`),

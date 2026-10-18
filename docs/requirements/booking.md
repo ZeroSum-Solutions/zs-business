@@ -30,8 +30,10 @@ specific inspected behavior, not a claim about an entire product.
 
 ## Numbered rules
 
-**B-1. Desired, product scope (S4/S5).** Each tenant has at most one bookable
-resource. F1 supports its schedule, external busy periods, and confirmed bookings.
+**B-1. Desired, product scope (S4/S5).** F1 shipped with at most one bookable
+resource per tenant; M1 (migration `20261018120000_booking_multi_resource.sql`) lifts
+that limit so a tenant may own several resources, each locked and constrained on its
+own (B-20, B-21). F1 supports its schedule, external busy periods, and confirmed bookings.
 Round robin, multiple hosts, reminders, payments, recurring bookings, cancellation
 and rescheduling APIs are outside this slice. Resource provisioning and connector
 sync will get separate write actions; they must obey B-21 before shipping.

@@ -47,7 +47,7 @@ export const actionResultSchema = z.strictObject({
 });
 export type ActionResult = z.infer<typeof actionResultSchema>;
 
-export type ActionErrorCode = "NotImplemented" | "IdempotencyConflict" | "BindingMismatch" | "TenantDenied" | "Conflict" | "ValidationFailed";
+export type ActionErrorCode = "NotImplemented" | "IdempotencyConflict" | "BindingMismatch" | "TenantDenied" | "Conflict" | "ValidationFailed" | "NotFound";
 export class ActionError<Code extends ActionErrorCode = ActionErrorCode> extends Error {
   constructor(
     readonly code: Code,
@@ -88,5 +88,12 @@ export class ValidationFailed extends ActionError<"ValidationFailed"> {
     super("ValidationFailed", message);
   }
 }
+/** A tenant-scoped read found nothing; RLS makes another tenant's row look the same. */
+export class NotFound extends ActionError<"NotFound"> {
+  constructor(message = "Not found") {
+    super("NotFound", message);
+  }
+}
 export * from "./booking.js";
 export * from "./crm.js";
+export * from "./http.js";
