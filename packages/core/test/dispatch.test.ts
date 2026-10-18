@@ -467,6 +467,26 @@ describe("shared transactional action path", () => {
     await dispatch(ctx, command);
     expect((await counts()).state).toBe(1);
   });
+  it.each([
+    ["another tenant", () => fixture.b.tenantId],
+    ["no tenant", () => ""],
+  ])("rolls back with TenantDenied when a handler switches the tenant context to %s", async (_name, next) => {
+    const switching = createDispatcher({
+      "noop.touch": {
+        resolveTarget: async (_tx, target) => target,
+        handle: async ({ tx }) => {
+          await tx.query("update test_state set touches=touches+1 where id=$1", [command.target.id]);
+          await tx.query("select set_config('app.tenant_id',$1,true)", [next()]);
+          return { result: {} };
+        },
+      },
+    });
+    await expect(switching(ctx, command)).rejects.toBeInstanceOf(TenantDenied);
+    const saved = await counts();
+    expect(saved.state).toBe(0);
+    expect(saved.actions).toHaveLength(0);
+    expect(saved.outbox).toHaveLength(0);
+  });
   it("rolls back state and action when the final outbox write fails", async () => {
     await db.pool.query(`CREATE FUNCTION public.reject_test_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='reject.test' THEN RAISE EXCEPTION 'outbox write failed'; END IF; RETURN NEW; END $$;
       CREATE TRIGGER reject_test_event BEFORE INSERT ON outbox FOR EACH ROW EXECUTE FUNCTION public.reject_test_event();`);

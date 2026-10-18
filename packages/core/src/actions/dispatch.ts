@@ -170,6 +170,12 @@ export function createDispatcher<Config = DispatchConfig>(
         const handled = await runHandler(() =>
           handler.handle({ tx, command, binding, now, config, generateId }),
         );
+        // A handler must not leave the transaction scoped to another tenant; throwing rolls back.
+        const scope = await tx.query<{ tenant: string | null }>(
+          "SELECT nullif(current_setting('app.tenant_id',true),'') AS tenant",
+        );
+        if (scope.rows[0]?.tenant?.toLowerCase() !== binding.tenantId)
+          throw new TenantDenied();
         const parsedResult = jsonValueSchema.safeParse(handled.result);
         if (!parsedResult.success) throw new ValidationFailed(parsedResult.error.message);
         const result = parsedResult.data;
