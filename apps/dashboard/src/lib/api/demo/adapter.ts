@@ -11,10 +11,10 @@ import {
   type ContactRecord,
   type DealRecord,
 } from "@zs/contracts";
-import { addDays, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
+import { addDays, localIso, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
 import { newId as defaultNewId } from "../../id";
-import { ApiError } from "../errors";
-import type { BookingApi, BookingListItem, ContactWriteResult, CrmApi, WriteOptions } from "../types";
+import { demoError } from "../errors";
+import { byContactName, matchesSearch, normalizePhone, type BookingApi, type BookingView, type ContactWriteResult, type CrmApi, type WriteOptions } from "../types";
 import { buildSeed, DEMO_PIPELINE, DEMO_RESOURCES, DEMO_TENANT_ID, type DemoResource } from "./seed";
 
 export interface DemoClock {
@@ -59,7 +59,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     const previous = replays.get(key);
     if (previous) {
       if (previous.fingerprint !== fingerprint) {
-        throw new ApiError("conflict", "This request was already used for a different change.", 409, "IdempotencyConflict");
+        throw demoError(409, "Conflict", { reason: "idempotency_key_reused" });
       }
       return clone(previous.result as T);
     }
@@ -70,7 +70,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
   function resourceOrThrow(id: string): DemoResource {
     const resource = DEMO_RESOURCES.find((item) => item.id === id);
-    if (!resource) throw new ApiError("not_found", "That calendar does not exist.", 404);
+    if (!resource) throw demoError(404, "NotFound", {}, "That calendar does not exist.");
     return resource;
   }
 
@@ -107,7 +107,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   function insertBooking(resource: DemoResource, startsAt: string, id: string, title: string | null): StoredBooking {
     const slot = occupied(resource, Date.parse(startsAt));
     if (clashes(resource, slot.occStart, slot.occEnd)) {
-      throw new ApiError("conflict", "That time was just taken.", 409, "Conflict", { resourceId: resource.id, startsAt });
+      throw demoError(409, "Conflict", { reason: "overlap" });
     }
     const record: StoredBooking = {
       id,
@@ -130,21 +130,23 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
   const toRecord = ({ title: _title, contactName: _contactName, ...record }: StoredBooking): BookingRecord => record;
 
+  const invalid = (path: string, message: string) => demoError(400, "ValidationFailed", { issues: [{ path, message }] });
+
   function normalizeContact(input: { email: string | null; phone: string | null }) {
     let email: string | null = null;
     let phone: string | null = null;
     if (input.email !== null && input.email.trim() !== "") {
       const parsed = contactEmailInputSchema.safeParse(input.email);
-      if (!parsed.success) throw new ApiError("validation", "Enter an email address like name@example.com.", 400, "ValidationFailed", { field: "email" });
+      if (!parsed.success) throw invalid("email", "Invalid email address");
       email = parsed.data;
     }
     if (input.phone !== null && input.phone.trim() !== "") {
-      const parsed = contactPhoneSchema.safeParse(input.phone.replace(/[\s().-]/g, ""));
-      if (!parsed.success) throw new ApiError("validation", "Enter a phone number with country code, like +1 212 555 0142.", 400, "ValidationFailed", { field: "phone" });
+      const parsed = contactPhoneSchema.safeParse(normalizePhone(input.phone));
+      if (!parsed.success) throw invalid("phone", "Expected E.164 phone");
       phone = parsed.data;
     }
     if (email === null && phone === null) {
-      throw new ApiError("validation", "Add an email or a phone number.", 400, "ValidationFailed", { field: "email" });
+      throw demoError(400, "ValidationFailed", { issues: [{ path: "", message: "At least one identity is required" }] }, "Add an email or a phone number.");
     }
     return { email, phone };
   }
@@ -152,7 +154,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   return {
     async listResources() {
       await wait();
-      return DEMO_RESOURCES.map(({ id, name, kind, timeZone }) => ({ id, name, kind, timeZone }));
+      return DEMO_RESOURCES.map(({ id, name, timeZone, slotLengthMinutes }) => ({ id, name, timeZone, slotLengthMinutes }));
     },
 
     async getSlots({ resourceId, from, to, zone }) {
@@ -160,87 +162,80 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       const resource = resourceOrThrow(resourceId);
       const fromMs = Date.parse(from);
       const toMs = Date.parse(to);
-      if (!bookingTimeZoneSchema.safeParse(zone).success || Number.isNaN(fromMs) || Number.isNaN(toMs) || fromMs >= toMs || toMs - fromMs > MAX_RANGE_MS) {
-        throw new ApiError("validation", "That date range is not valid.", 400, "ValidationFailed");
+      const labelZone = zone ?? resource.timeZone;
+      if (!bookingTimeZoneSchema.safeParse(labelZone).success || Number.isNaN(fromMs) || Number.isNaN(toMs) || fromMs >= toMs || toMs - fromMs > MAX_RANGE_MS) {
+        throw demoError(400, "ValidationFailed", {}, "That date range is not valid.");
       }
       const earliest = clock.now().getTime() + resource.minimumNoticeMinutes * 60000;
-      const slots: { startsAt: string; endsAt: string }[] = [];
+      const slots: { startsAt: string; endsAt: string; localStart: string }[] = [];
       const lastDay = zonedDateKey(toMs, resource.timeZone);
       for (let day = zonedDateKey(fromMs, resource.timeZone); day <= lastDay; day = addDays(day, 1)) {
         for (const start of gridStarts(resource, day)) {
           const slot = occupied(resource, start);
           if (start < fromMs || slot.endsMs > toMs || start < earliest) continue;
           if (clashes(resource, slot.occStart, slot.occEnd)) continue;
-          slots.push({ startsAt: new Date(slot.startsMs).toISOString(), endsAt: new Date(slot.endsMs).toISOString() });
+          slots.push({ startsAt: new Date(slot.startsMs).toISOString(), endsAt: new Date(slot.endsMs).toISOString(), localStart: localIso(slot.startsMs, labelZone) });
         }
       }
-      return { resourceId: resource.id, timeZone: resource.timeZone, slots };
+      return { resourceId: resource.id, timeZone: resource.timeZone, zone: labelZone, slots };
     },
 
     async listBookings(query = {}) {
       await wait();
       const fromMs = query.from ? Date.parse(query.from) : -Infinity;
       const toMs = query.to ? Date.parse(query.to) : Infinity;
-      const rows: BookingListItem[] = [...bookings.values()]
+      const rows: BookingView[] = [...bookings.values()]
         .filter((item) => (!query.resourceId || item.resourceId === query.resourceId) &&
           Date.parse(item.endsAt) > fromMs && Date.parse(item.startsAt) < toMs)
-        .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
-        .map(({ id, resourceId, startsAt, endsAt, status, title, contactName }) => ({ id, resourceId, startsAt, endsAt, status, title, contactName }));
+        .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
       return clone(rows);
     },
 
     createBooking(input, options = {}) {
-      const bookingId = input.bookingId ?? newId();
-      return idempotent("booking.create", { ...input, bookingId }, options, () => {
+      return idempotent("booking.create", input, options, () => {
         const resource = resourceOrThrow(input.resourceId);
         const startsMs = Date.parse(input.startsAt);
         const onGrid = !Number.isNaN(startsMs) && gridStarts(resource, zonedDateKey(startsMs, resource.timeZone)).includes(startsMs);
-        if (!onGrid) throw new ApiError("validation", "That time is outside open hours.", 400, "ValidationFailed");
-        if (startsMs < clock.now().getTime() + resource.minimumNoticeMinutes * 60000) {
-          throw new ApiError("validation", "That time is too soon to book.", 400, "ValidationFailed");
+        // The API refuses a start that is off the grid or too soon as a conflict, not a 400.
+        if (!onGrid || startsMs < clock.now().getTime() + resource.minimumNoticeMinutes * 60000) {
+          throw demoError(409, "Conflict", { reason: "slot_unavailable" });
         }
-        return toRecord(insertBooking(resource, input.startsAt, bookingId, null));
+        return toRecord(insertBooking(resource, input.startsAt, newId(), null));
       });
     },
 
-    async getPipeline() {
+    async listPipelines() {
       await wait();
-      return clone(DEMO_PIPELINE);
+      return [clone(DEMO_PIPELINE)];
     },
 
     async listContacts(query = {}) {
       await wait();
-      const needle = query.search?.trim().toLowerCase() ?? "";
-      const rows = [...contacts.values()]
-        .filter((item) => !needle || [item.displayName, item.email, item.phone].some((field) => field?.toLowerCase().includes(needle)))
-        .sort((a, b) => (a.displayName ?? a.email ?? "").localeCompare(b.displayName ?? b.email ?? ""));
+      const rows = [...contacts.values()].filter((item) => matchesSearch(item, query.search)).sort(byContactName);
       return clone(rows);
     },
 
     async getContact(id) {
       await wait();
       const contact = contacts.get(id);
-      if (!contact) throw new ApiError("not_found", "We could not find that customer.", 404);
+      if (!contact) throw demoError(404, "NotFound", {}, "We could not find that customer.");
       return clone(contact);
     },
 
     createOrFindContact(input, options = {}) {
-      const contactId = input.contactId ?? newId();
-      return idempotent("crm.contact.create-or-find", { ...input, contactId }, options, (): ContactWriteResult => {
+      return idempotent("crm.contact.create-or-find", input, options, (): ContactWriteResult => {
         const { email, phone } = normalizeContact(input);
         const all = [...contacts.values()];
         const byEmail = email ? all.find((item) => item.email === email) : undefined;
         const byPhone = phone ? all.find((item) => item.phone === phone) : undefined;
         if (byEmail && byPhone && byEmail.id !== byPhone.id) {
-          throw new ApiError("conflict", "That email and phone belong to two different customers.", 409, "Conflict", {
-            emailContactId: byEmail.id, phoneContactId: byPhone.id,
-          });
+          throw demoError(409, "Conflict", { reason: "split_identity" });
         }
         const existing = byEmail ?? byPhone;
         if (existing) return { contact: existing, created: false };
         const name = input.displayName?.trim() || null;
         const contact: ContactRecord = {
-          id: contactId,
+          id: newId(),
           tenantId: DEMO_TENANT_ID,
           displayName: name,
           email,
@@ -265,12 +260,12 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     moveDealStage(input, options = {}) {
       return idempotent("crm.deal.move-stage", input, options, () => {
         const deal = deals.get(input.dealId);
-        if (!deal) throw new ApiError("not_found", "We could not find that deal.", 404);
+        if (!deal) throw demoError(404, "NotFound", {}, "We could not find that deal.");
         if (input.pipelineId !== deal.pipelineId || !DEMO_PIPELINE.stages.some((stage) => stage.id === input.stageId)) {
-          throw new ApiError("validation", "That stage is not part of this pipeline.", 400, "ValidationFailed");
+          throw demoError(400, "ValidationFailed", {}, "That stage is not part of this pipeline.");
         }
         if (input.expectedRevision !== deal.revision) {
-          throw new ApiError("conflict", "This deal changed since you loaded it.", 409, "Conflict", { currentRevision: deal.revision });
+          throw demoError(409, "Conflict", { reason: "stale_revision", currentRevision: deal.revision });
         }
         const updated: DealRecord = { ...deal, stageId: input.stageId, revision: deal.revision + 1, updatedAt: nowIso() };
         deals.set(updated.id, updated);
@@ -284,7 +279,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
     editDealElsewhere(dealId) {
       const deal = deals.get(dealId);
-      if (!deal) throw new ApiError("not_found", "We could not find that deal.", 404);
+      if (!deal) throw demoError(404, "NotFound", {}, "We could not find that deal.");
       const updated: DealRecord = { ...deal, revision: deal.revision + 1, updatedAt: nowIso() };
       deals.set(updated.id, updated);
       return clone(updated);

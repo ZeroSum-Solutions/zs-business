@@ -1,23 +1,26 @@
-import type { z } from "zod";
-import {
-  createBookingOutputSchema,
-  createOrFindContactOutputSchema,
-  getAvailableSlotsOutputSchema,
-  moveDealStageOutputSchema,
-  type CreateBookingInput,
-  type CreateOrFindContactInput,
-  type MoveDealStageInput,
-} from "@zs/contracts";
-import { newId as defaultNewId } from "../id";
-import { ApiError, defaultMessage, kindForStatus } from "./errors";
+import { z } from "zod";
 import {
   bookingPageSchema,
   contactPageSchema,
+  createBookingOutputSchema,
+  createOrFindContactOutputSchema,
   dealPageSchema,
+  moveDealStageOutputSchema,
+  pipelineSummarySchema,
+  resourceSummarySchema,
+  slotsResponseSchema,
+  type CreateBookingRequest,
+  type MoveDealStageRequest,
+  type UpsertContactRequest,
+} from "@zs/contracts";
+import { newId as defaultNewId } from "../id";
+import { ApiError, defaultMessage, errorFromBody } from "./errors";
+import {
+  byContactName,
+  matchesSearch,
+  normalizePhone,
   type BookingApi,
-  type BookingResourceSummary,
   type CrmApi,
-  type PipelineSummary,
   type WriteOptions,
 } from "./types";
 
@@ -27,9 +30,6 @@ export interface HttpClientConfig {
   getToken: () => string | null;
   fetch?: typeof fetch;
   newId?: () => string;
-  // TODO(contracts): replace with GET routes once the API exposes resources and pipelines.
-  resources: BookingResourceSummary[];
-  pipeline: PipelineSummary | null;
 }
 
 type Method = "GET" | "POST";
@@ -37,28 +37,19 @@ type Method = "GET" | "POST";
 interface RequestSpec<T extends z.ZodType> {
   method: Method;
   path: string;
-  query?: Record<string, string | undefined>;
+  query?: Record<string, string | number | undefined>;
   body?: unknown;
-  idempotencyKey?: string;
+  idempotencyKey?: string | undefined;
   schema: T;
 }
 
-/** Read the shared error body leniently: `{ error: { code, message, details } }` or flat. */
-async function readError(response: Response): Promise<ApiError> {
-  const kind = kindForStatus(response.status);
-  let body: unknown = null;
-  try {
-    body = await response.json();
-  } catch {
-    body = null;
-  }
-  const record = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-  const inner = (typeof record.error === "object" && record.error !== null ? record.error : record) as Record<string, unknown>;
-  const code = typeof inner.code === "string" ? inner.code : null;
-  const message = typeof inner.message === "string" && inner.message.length > 0 ? inner.message : defaultMessage(kind);
-  const details = typeof inner.details === "object" && inner.details !== null ? inner.details as Record<string, unknown> : {};
-  return new ApiError(kind, message, response.status, code, details);
-}
+const resourceListSchema = z.object({ items: z.array(resourceSummarySchema) });
+const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
+
+/** `pageQuerySchema` caps `limit` at 100. */
+const PAGE_LIMIT = 100;
+/** Stop after this many pages; the pilot has well under 2,000 rows per list. */
+const MAX_PAGES = 20;
 
 export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -68,7 +59,7 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
   async function request<T extends z.ZodType>(spec: RequestSpec<T>): Promise<z.infer<T>> {
     const url = new URL(base + spec.path);
     for (const [key, value] of Object.entries(spec.query ?? {})) {
-      if (value !== undefined && value !== "") url.searchParams.set(key, value);
+      if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
     }
     const headers: Record<string, string> = { Accept: "application/json" };
     const token = config.getToken();
@@ -86,29 +77,47 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
     } catch {
       throw new ApiError("network", defaultMessage("network"));
     }
-    if (!response.ok) throw await readError(response);
 
     let json: unknown;
     try {
       json = await response.json();
     } catch {
+      if (!response.ok) throw errorFromBody(response.status, null);
       throw new ApiError("invalid_response", defaultMessage("invalid_response"), response.status);
     }
+    if (!response.ok) throw errorFromBody(response.status, json);
+
     const parsed = spec.schema.safeParse(json);
     if (!parsed.success) {
       throw new ApiError("invalid_response", defaultMessage("invalid_response"), response.status, null, {
-        issues: parsed.error.issues.slice(0, 5).map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+        issues: parsed.error.issues.slice(0, 5).map((issue) => ({ path: issue.path.join("."), message: issue.message })),
       });
     }
     return parsed.data;
   }
 
-  // TODO(contracts): paging. One page of up to 200 rows covers the pilot.
-  const LIST_LIMIT = "200";
+  /** Walk `nextOffset` until the list ends. Filters the routes do not offer run on the result. */
+  async function listAll<T extends z.ZodType<{ items: unknown[]; nextOffset: number | null }>>(
+    path: string, schema: T, query: Record<string, string | undefined> = {},
+  ): Promise<z.infer<T>["items"]> {
+    const items: z.infer<T>["items"] = [];
+    let offset: number | null = 0;
+    for (let page = 0; offset !== null && page < MAX_PAGES; page += 1) {
+      const result: z.infer<T> = await request({
+        method: "GET", path, query: { ...query, limit: PAGE_LIMIT, offset }, schema,
+      });
+      items.push(...result.items);
+      offset = result.nextOffset;
+    }
+    return items;
+  }
+
+  const write = <T extends z.ZodType>(path: string, body: unknown, schema: T, options: WriteOptions) =>
+    request({ method: "POST", path, body, idempotencyKey: options.idempotencyKey, schema });
 
   return {
     async listResources() {
-      return config.resources;
+      return (await request({ method: "GET", path: "/v1/booking/resources", schema: resourceListSchema })).items;
     },
 
     getSlots(query) {
@@ -116,106 +125,67 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
         method: "GET",
         path: "/v1/booking/slots",
         query: { resourceId: query.resourceId, from: query.from, to: query.to, zone: query.zone },
-        schema: getAvailableSlotsOutputSchema,
+        schema: slotsResponseSchema,
       });
     },
 
     async listBookings(query = {}) {
-      const page = await request({
-        method: "GET",
-        path: "/v1/booking/bookings",
-        query: { resourceId: query.resourceId, from: query.from, to: query.to, limit: LIST_LIMIT },
-        schema: bookingPageSchema,
-      });
-      return page.items;
+      const rows = await listAll("/v1/booking/bookings", bookingPageSchema, { resourceId: query.resourceId });
+      const fromMs = query.from ? Date.parse(query.from) : -Infinity;
+      const toMs = query.to ? Date.parse(query.to) : Infinity;
+      return rows
+        .filter((row) => Date.parse(row.endsAt) > fromMs && Date.parse(row.startsAt) < toMs)
+        .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
     },
 
-    async createBooking(input, options: WriteOptions = {}) {
-      const body: CreateBookingInput = {
-        bookingId: input.bookingId ?? newId(),
-        resourceId: input.resourceId,
-        startsAt: input.startsAt,
-      };
-      const output = await request({
-        method: "POST",
-        path: "/v1/booking/bookings",
-        body,
-        ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-        schema: createBookingOutputSchema,
-      });
-      return output.result;
+    async createBooking(input, options = {}) {
+      const body: CreateBookingRequest = { resourceId: input.resourceId, startsAt: input.startsAt };
+      return (await write("/v1/booking/bookings", body, createBookingOutputSchema, options)).result;
     },
 
-    async getPipeline() {
-      if (!config.pipeline) {
-        throw new ApiError("not_found", "No pipeline is set up yet.", null);
-      }
-      return config.pipeline;
+    async listPipelines() {
+      const { items } = await request({ method: "GET", path: "/v1/crm/pipelines", schema: pipelineListSchema });
+      return items.map((pipeline) => ({ ...pipeline, stages: [...pipeline.stages].sort((a, b) => a.position - b.position) }));
     },
 
     async listContacts(query = {}) {
-      const page = await request({
-        method: "GET",
-        path: "/v1/crm/contacts",
-        // TODO(contracts): `q` search parameter is proposed, not yet agreed.
-        query: { q: query.search?.trim(), limit: LIST_LIMIT },
-        schema: contactPageSchema,
-      });
-      return page.items;
+      const rows = await listAll("/v1/crm/contacts", contactPageSchema);
+      return rows.filter((row) => matchesSearch(row, query.search)).sort(byContactName);
     },
 
     async getContact(id) {
-      // TODO(contracts): no single-contact route; read the list and pick one.
-      const page = await request({ method: "GET", path: "/v1/crm/contacts", query: { limit: LIST_LIMIT }, schema: contactPageSchema });
-      const contact = page.items.find((item) => item.id === id);
-      if (!contact) throw new ApiError("not_found", "We could not find that customer.", 404);
+      // There is no single-contact route; the list is small and already cached per page.
+      const contact = (await listAll("/v1/crm/contacts", contactPageSchema)).find((item) => item.id === id);
+      if (!contact) throw new ApiError("not_found", "We could not find that customer.", 404, "NotFound");
       return contact;
     },
 
-    async createOrFindContact(input, options: WriteOptions = {}) {
-      const body: CreateOrFindContactInput = {
-        contactId: input.contactId ?? newId(),
+    async createOrFindContact(input, options = {}) {
+      const body: UpsertContactRequest = {
         displayName: input.displayName,
         email: input.email,
-        phone: input.phone,
+        phone: input.phone === null ? null : normalizePhone(input.phone),
         mode: "interactive",
         consent: { email: null, sms: null },
       };
-      const output = await request({
-        method: "POST",
-        path: "/v1/crm/contacts",
-        body,
-        ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-        schema: createOrFindContactOutputSchema,
-      });
-      return output.result;
+      return (await write("/v1/crm/contacts", body, createOrFindContactOutputSchema, options)).result;
     },
 
     async listDeals(query = {}) {
-      const page = await request({
-        method: "GET",
-        path: "/v1/crm/deals",
-        query: { contactId: query.contactId, limit: LIST_LIMIT },
-        schema: dealPageSchema,
-      });
-      return page.items;
+      const rows = await listAll("/v1/crm/deals", dealPageSchema);
+      return rows
+        .filter((row) => !query.contactId || row.contactId === query.contactId)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     },
 
-    async moveDealStage(input, options: WriteOptions = {}) {
-      const body: MoveDealStageInput = {
-        dealId: input.dealId,
+    async moveDealStage(input, options = {}) {
+      const body: MoveDealStageRequest = {
         pipelineId: input.pipelineId,
         stageId: input.stageId,
         expectedRevision: input.expectedRevision,
       };
-      const output = await request({
-        method: "POST",
-        path: `/v1/crm/deals/${encodeURIComponent(input.dealId)}/stage`,
-        body,
-        ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-        schema: moveDealStageOutputSchema,
-      });
-      return output.result;
+      const path = `/v1/crm/deals/${encodeURIComponent(input.dealId)}/stage`;
+      return (await write(path, body, moveDealStageOutputSchema, options)).result;
     },
   };
 }

@@ -57,6 +57,11 @@ export function zonedTimeToUtc(year: number, month: number, day: number, minute:
   return new Date(second);
 }
 
+/** Wall-clock time of an instant in `zone`, ISO 8601 without an offset (the slots `localStart`). */
+export function localIso(instant: number, zone: string): string {
+  return new Date(instant + offsetMs(instant, zone)).toISOString().slice(0, 19);
+}
+
 /** Local calendar date (YYYY-MM-DD) of an instant in `zone`. */
 export function zonedDateKey(instant: Date | string | number, zone: string): string {
   const p = zonedParts(instant, zone);

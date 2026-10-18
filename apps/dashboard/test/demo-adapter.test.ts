@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiError } from "../src/lib/api/errors";
+import { ApiError, isSlotTaken, isStaleRevision } from "../src/lib/api/errors";
 import { createDemoAdapter } from "../src/lib/api/demo/adapter";
 import { DEMO_PIPELINE, REPAIR_ID, SHOWROOM_ID } from "../src/lib/api/demo/seed";
 
@@ -19,9 +19,12 @@ const week = { from: "2026-10-19T04:00:00.000Z", to: "2026-10-26T04:00:00.000Z",
 describe("demo adapter: booking", () => {
   it("lists open slots inside open hours and outside existing bookings", async () => {
     const api = adapter();
-    const { slots, timeZone } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
+    const { slots, timeZone, zone } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
     expect(timeZone).toBe("America/New_York");
+    expect(zone).toBe("America/New_York");
     expect(slots.length).toBeGreaterThan(10);
+    // Tuesday 10:00 local is 14:00 UTC in October (EDT).
+    expect(slots[0]).toMatchObject({ startsAt: "2026-10-20T14:00:00.000Z", localStart: "2026-10-20T10:00:00" });
     const booked = await api.listBookings({ resourceId: SHOWROOM_ID, from: week.from, to: week.to });
     for (const booking of booked) {
       expect(slots.some((slot) => slot.startsAt === booking.startsAt)).toBe(false);
@@ -46,7 +49,9 @@ describe("demo adapter: booking", () => {
     api.bookAsSomeoneElse(SHOWROOM_ID, slot.startsAt);
     const error = await api.createBooking({ resourceId: SHOWROOM_ID, startsAt: slot.startsAt }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ApiError);
-    expect(error).toMatchObject({ kind: "conflict", status: 409, code: "Conflict" });
+    expect(error).toMatchObject({ kind: "conflict", status: 409, code: "Conflict", reason: "overlap" });
+    expect(isSlotTaken(error)).toBe(true);
+    expect((error as ApiError).message).toBe("That time was just taken.");
   });
 
   it("only lets one of two concurrent creates for the same time win", async () => {
@@ -65,19 +70,19 @@ describe("demo adapter: booking", () => {
   it("replays the same result for the same idempotency key and rejects a reused key", async () => {
     const api = adapter();
     const { slots } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
-    const input = { resourceId: SHOWROOM_ID, startsAt: slots[1]!.startsAt, bookingId: "b8c2d4e6-1a3f-4b5c-9d7e-000000000777" };
+    const input = { resourceId: SHOWROOM_ID, startsAt: slots[1]!.startsAt };
     const first = await api.createBooking(input, { idempotencyKey: "k-1" });
     const replay = await api.createBooking(input, { idempotencyKey: "k-1" });
     expect(replay).toEqual(first);
     await expect(api.createBooking({ ...input, startsAt: slots[3]!.startsAt }, { idempotencyKey: "k-1" }))
-      .rejects.toMatchObject({ kind: "conflict", code: "IdempotencyConflict" });
+      .rejects.toMatchObject({ kind: "conflict", code: "Conflict", reason: "idempotency_key_reused" });
   });
 
-  it("rejects a time outside open hours as a validation error", async () => {
+  it("refuses a time outside open hours as an unavailable slot, like the API", async () => {
     const api = adapter();
     // Monday 03:00 in New York.
     await expect(api.createBooking({ resourceId: SHOWROOM_ID, startsAt: "2026-10-19T07:00:00.000Z" }))
-      .rejects.toMatchObject({ kind: "validation", status: 400 });
+      .rejects.toMatchObject({ kind: "conflict", status: 409, reason: "slot_unavailable" });
   });
 });
 
@@ -106,6 +111,12 @@ describe("demo adapter: CRM", () => {
       .rejects.toMatchObject({ kind: "validation" });
   });
 
+  it("points a bad email at the email field, as the API's issue paths do", async () => {
+    const api = adapter();
+    const error = await api.createOrFindContact({ displayName: null, email: "not-an-email", phone: null }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ kind: "validation", status: 400, code: "ValidationFailed", field: "email" });
+  });
+
   it("moves a deal and bumps its revision", async () => {
     const api = adapter();
     const [deal] = await api.listDeals();
@@ -123,6 +134,7 @@ describe("demo adapter: CRM", () => {
     const error = await api.moveDealStage({
       dealId: deal!.id, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[1]!.id, expectedRevision: deal!.revision,
     }).catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ kind: "conflict", status: 409, code: "Conflict", details: { currentRevision: deal!.revision + 1 } });
+    expect(error).toMatchObject({ kind: "conflict", status: 409, code: "Conflict", details: { reason: "stale_revision", currentRevision: deal!.revision + 1 } });
+    expect(isStaleRevision(error)).toBe(true);
   });
 });

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isApiError, type BookingResourceSummary } from "@/lib/api";
+import { isSlotTaken, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { keys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
@@ -25,7 +25,7 @@ export function BookingDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  resource: BookingResourceSummary;
+  resource: ResourceSummary;
   initialDate: string;
   initialSlot?: string | null;
 }) {
@@ -36,8 +36,9 @@ export function BookingDialog({
   const [dateKey, setDateKey] = useState(initialDate);
   const [selected, setSelected] = useState<string | null>(initialSlot ?? null);
   const [conflict, setConflict] = useState(false);
-  // One write attempt = one booking ID + idempotency key, so a retry cannot double-book.
-  const attempt = useRef<{ startsAt: string; bookingId: string; key: string } | null>(null);
+  // One write attempt = one idempotency key (the server derives the booking ID from it),
+  // so a retry cannot double-book.
+  const attempt = useRef<{ startsAt: string; key: string } | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -59,10 +60,9 @@ export function BookingDialog({
   const book = useMutation({
     mutationFn: (startsAt: string) => {
       if (attempt.current?.startsAt !== startsAt) {
-        attempt.current = { startsAt, bookingId: newId(), key: newId() };
+        attempt.current = { startsAt, key: newId() };
       }
-      const { bookingId, key } = attempt.current;
-      return api.createBooking({ resourceId: resource.id, startsAt, bookingId }, { idempotencyKey: key });
+      return api.createBooking({ resourceId: resource.id, startsAt }, { idempotencyKey: attempt.current.key });
     },
     onSuccess: (record) => {
       attempt.current = null;
@@ -72,7 +72,7 @@ export function BookingDialog({
       onOpenChange(false);
     },
     onError: (error) => {
-      if (isApiError(error, "conflict")) {
+      if (isSlotTaken(error)) {
         attempt.current = null;
         setConflict(true);
         setSelected(null);
@@ -82,11 +82,11 @@ export function BookingDialog({
     },
   });
 
-  const otherError = book.isError && !isApiError(book.error, "conflict") ? book.error : null;
+  const otherError = book.isError && !isSlotTaken(book.error) ? book.error : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Book an appointment" description={resource.name} data-resource-id={resource.id}>
+      <DialogContent title="Book an appointment" description={resource.name ?? "Calendar"} data-resource-id={resource.id}>
         <fieldset>
           <legend className="mb-2 text-sm font-medium text-fg-2">Day</legend>
           <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">

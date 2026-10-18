@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useApi } from "./api/react";
-import type { BookingListQuery, SlotQuery } from "./api";
+import { ApiError, type BookingListQuery, type SlotQuery } from "./api";
 
 export const keys = {
   resources: ["booking", "resources"] as const,
@@ -49,7 +49,16 @@ export function useBookings(query: BookingListQuery = {}) {
 
 export function usePipeline() {
   const api = useApi();
-  return useQuery({ queryKey: keys.pipeline, queryFn: () => api.getPipeline(), staleTime: Infinity });
+  return useQuery({
+    queryKey: keys.pipeline,
+    // M1 has one pipeline per business; the board shows the first.
+    queryFn: async () => {
+      const [first] = await api.listPipelines();
+      if (!first) throw new ApiError("not_found", "No pipeline is set up yet.", null, "NotFound");
+      return first;
+    },
+    staleTime: Infinity,
+  });
 }
 
 export function useContacts(search = "") {

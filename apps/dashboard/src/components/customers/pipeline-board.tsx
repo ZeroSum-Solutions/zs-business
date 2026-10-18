@@ -7,7 +7,7 @@ import { useMemo, useState } from "react";
 import { Select } from "@/components/ui/input";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isApiError, type DealRecord, type PipelineSummary } from "@/lib/api";
+import { isStaleRevision, type DealRecord, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { newId } from "@/lib/id";
 import { keys, useContacts, useDeals, usePipeline } from "@/lib/queries";
@@ -62,12 +62,13 @@ export function PipelineBoard() {
       const stage = pipeline.data?.stages.find((item) => item.id === updated.stageId)?.name ?? "the new stage";
       toast(`Moved to ${stage}.`);
     },
-    onError: (error) => {
-      if (isApiError(error, "conflict")) {
+    onError: async (error) => {
+      // Say "Reloaded" only once the fresh revision is on screen, so a retry uses it.
+      await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
+      if (isStaleRevision(error)) {
         setStale(true);
         toast(STALE_DEAL_MESSAGE, "info");
       }
-      void queryClient.invalidateQueries({ queryKey: keys.dealsAll });
     },
   });
 
@@ -77,10 +78,11 @@ export function PipelineBoard() {
 
   const stages = pipeline.data.stages;
   const activeStage = stageFilter ?? stages[0]!.id;
-  const moveError = move.isError && !isApiError(move.error, "conflict") ? move.error : null;
+  const moveError = move.isError && !isStaleRevision(move.error) ? move.error : null;
 
   return (
-    <section aria-labelledby="pipeline-title">
+    // data-fetching lets tests wait out a background refetch before acting as someone else.
+    <section aria-labelledby="pipeline-title" data-fetching={deals.isFetching || undefined}>
       <h2 id="pipeline-title" className="sr-only">Pipeline</h2>
       {stale ? (
         <div role="alert" className="mb-4 flex items-center gap-3 rounded-md bg-accent/8 p-3 text-sm text-fg">

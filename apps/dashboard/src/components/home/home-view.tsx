@@ -9,6 +9,7 @@ import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/ca
 import { EmptyState, ErrorNote, LoadingRows, PageHeader, Skeleton } from "@/components/ui/states";
 import type { WeekCompare } from "@/lib/api";
 import { useBookings, useChecklist, useResources, useResults, useUsage } from "@/lib/queries";
+import { resourceLabel } from "@/lib/resources";
 import { formatDay, formatTime } from "@/lib/time";
 import { cn, formatMoney, formatNumber, weekChange } from "@/lib/utils";
 
@@ -196,7 +197,7 @@ function NextAppointments() {
                   <p className="truncate text-sm font-medium text-fg">{booking.title ?? "Appointment"}</p>
                   <p className="truncate text-sm text-muted">{booking.contactName ?? "No customer linked"}</p>
                 </div>
-                {resource ? <Badge tone={resource.kind === "showroom" ? "accent" : "neutral"}>{resource.kind === "showroom" ? "Showroom" : "Repair"}</Badge> : null}
+                {resource ? <Badge tone={resource.id === resources.data?.[0]?.id ? "accent" : "neutral"}>{resourceLabel(resource)}</Badge> : null}
               </li>
             );
           })}

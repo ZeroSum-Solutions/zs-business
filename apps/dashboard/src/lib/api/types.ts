@@ -1,85 +1,53 @@
-import { z } from "zod";
-import {
-  bookingInstantSchema,
-  contactRecordSchema,
-  dealRecordSchema,
-  uuidSchema,
-  type BookingRecord,
-  type ConsentEvidence,
-  type ContactRecord,
-  type DealRecord,
-  type GetAvailableSlotsOutput,
+import type {
+  BookingRecord,
+  ConsentEvidence,
+  ContactRecord,
+  CreateBookingRequest,
+  DealRecord,
+  PipelineSummary,
+  ResourceSummary,
+  SlotsResponse,
 } from "@zs/contracts";
 import type { WorkspaceApi } from "./workspace-types";
 
-export type { BookingRecord, ConsentEvidence, ContactRecord, DealRecord, GetAvailableSlotsOutput };
+export type { BookingRecord, ConsentEvidence, ContactRecord, DealRecord, PipelineSummary, ResourceSummary, SlotsResponse };
 
 /** Options every write accepts. Reuse the same key to retry the same write safely. */
 export interface WriteOptions {
   idempotencyKey?: string;
 }
 
-// TODO(contracts): the list routes have no shared page shape yet. Proposed here.
-export const pageSchema = <T extends z.ZodType>(item: T) =>
-  z.object({ items: z.array(item), nextCursor: z.string().nullable().optional() });
-
-// TODO(contracts): booking list rows. BookingRecord fields plus an optional display label.
-export const bookingListItemSchema = z.object({
-  id: uuidSchema,
-  resourceId: uuidSchema,
-  startsAt: bookingInstantSchema,
-  endsAt: bookingInstantSchema,
-  status: z.literal("confirmed"),
-  title: z.string().nullish(),
-  contactName: z.string().nullish(),
-});
-export type BookingListItem = z.infer<typeof bookingListItemSchema>;
-
-export const contactPageSchema = pageSchema(contactRecordSchema);
-export const dealPageSchema = pageSchema(dealRecordSchema);
-export const bookingPageSchema = pageSchema(bookingListItemSchema);
-
-// TODO(contracts): there is no resource or pipeline read route yet. These shapes come
-// from config (HTTP) or the seed (demo) until one exists.
-export const bookingResourceSummarySchema = z.object({
-  id: uuidSchema,
-  name: z.string().min(1),
-  kind: z.enum(["showroom", "repair"]),
-  timeZone: z.string().min(1),
-});
-export type BookingResourceSummary = z.infer<typeof bookingResourceSummarySchema>;
-
-export const pipelineSummarySchema = z.object({
-  id: uuidSchema,
-  stages: z.array(z.object({ id: uuidSchema, name: z.string().min(1) })).min(1),
-});
-export type PipelineSummary = z.infer<typeof pipelineSummarySchema>;
+/**
+ * A booking as the calendar shows it. The API returns plain `BookingRecord`s; the demo
+ * adapter adds display labels for its seeded appointments.
+ */
+export type BookingView = BookingRecord & {
+  title?: string | null;
+  contactName?: string | null;
+};
 
 export interface SlotQuery {
   resourceId: string;
   from: string;
   to: string;
-  zone: string;
+  /** Zone for `localStart` labels; the API defaults to the resource's own zone. */
+  zone?: string;
 }
 
+/** Filters run in the client: the list routes take only paging (and resource/pipeline IDs). */
 export interface BookingListQuery {
   resourceId?: string;
   from?: string;
   to?: string;
 }
 
-export interface NewBooking {
-  resourceId: string;
-  startsAt: string;
-  /** Pre-minted ID. Pass the same one with the same idempotency key on retry. */
-  bookingId?: string;
-}
+export type NewBooking = CreateBookingRequest;
 
 export interface NewContact {
   displayName: string | null;
   email: string | null;
+  /** Spaces, dots, dashes and brackets are removed before sending (E.164 on the wire). */
   phone: string | null;
-  contactId?: string;
 }
 
 export interface ContactWriteResult {
@@ -95,22 +63,38 @@ export interface StageMove {
 }
 
 export interface BookingApi {
-  listResources(): Promise<BookingResourceSummary[]>;
-  getSlots(query: SlotQuery): Promise<GetAvailableSlotsOutput>;
-  listBookings(query?: BookingListQuery): Promise<BookingListItem[]>;
-  /** Throws ApiError kind "conflict" when the time was taken first. */
+  listResources(): Promise<ResourceSummary[]>;
+  getSlots(query: SlotQuery): Promise<SlotsResponse>;
+  listBookings(query?: BookingListQuery): Promise<BookingView[]>;
+  /** Throws an ApiError where `isSlotTaken(error)` holds when the time was taken first. */
   createBooking(input: NewBooking, options?: WriteOptions): Promise<BookingRecord>;
 }
 
 export interface CrmApi {
-  getPipeline(): Promise<PipelineSummary>;
+  /** Pipelines with stages sorted by position. */
+  listPipelines(): Promise<PipelineSummary[]>;
   listContacts(query?: { search?: string }): Promise<ContactRecord[]>;
   getContact(id: string): Promise<ContactRecord>;
   /** Returns `created: false` with the existing contact when the email or phone is known. */
   createOrFindContact(input: NewContact, options?: WriteOptions): Promise<ContactWriteResult>;
   listDeals(query?: { contactId?: string }): Promise<DealRecord[]>;
-  /** Throws ApiError kind "conflict" when the deal changed since `expectedRevision`. */
+  /** Throws an ApiError where `isStaleRevision(error)` holds when the deal changed since `expectedRevision`. */
   moveDealStage(input: StageMove, options?: WriteOptions): Promise<DealRecord>;
 }
 
 export type ZsApi = BookingApi & CrmApi & WorkspaceApi;
+
+/** Strip the formatting people type into phone fields; the API wants E.164. */
+export function normalizePhone(phone: string): string {
+  return phone.replace(/[\s().-]/g, "");
+}
+
+/** Shared by both adapters so search and sort behave the same in demo and live mode. */
+export function matchesSearch(contact: ContactRecord, search: string | undefined): boolean {
+  const needle = search?.trim().toLowerCase() ?? "";
+  if (!needle) return true;
+  return [contact.displayName, contact.email, contact.phone].some((field) => field?.toLowerCase().includes(needle));
+}
+
+export const byContactName = (a: ContactRecord, b: ContactRecord) =>
+  (a.displayName ?? a.email ?? a.phone ?? "").localeCompare(b.displayName ?? b.email ?? b.phone ?? "");

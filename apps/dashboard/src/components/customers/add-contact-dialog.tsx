@@ -19,14 +19,14 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
   const queryClient = useQueryClient();
   const toast = useToast();
   const [form, setForm] = useState({ name: "", email: "", phone: "" });
-  const attempt = useRef<{ fingerprint: string; contactId: string; key: string } | null>(null);
+  const attempt = useRef<{ fingerprint: string; key: string } | null>(null);
 
   const save = useMutation({
     mutationFn: () => {
       const input = { displayName: form.name.trim() || null, email: form.email.trim() || null, phone: form.phone.trim() || null };
       const fingerprint = JSON.stringify(input);
-      if (attempt.current?.fingerprint !== fingerprint) attempt.current = { fingerprint, contactId: newId(), key: newId() };
-      return api.createOrFindContact({ ...input, contactId: attempt.current.contactId }, { idempotencyKey: attempt.current.key });
+      if (attempt.current?.fingerprint !== fingerprint) attempt.current = { fingerprint, key: newId() };
+      return api.createOrFindContact(input, { idempotencyKey: attempt.current.key });
     },
     onSuccess: ({ contact, created }) => {
       attempt.current = null;
@@ -43,7 +43,7 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
     },
   });
 
-  const field = isApiError(save.error, "validation") ? String(save.error.details.field ?? "") : "";
+  const field = isApiError(save.error, "validation") ? save.error.field ?? "" : "";
   const submit = (event: FormEvent) => {
     event.preventDefault();
     save.mutate();

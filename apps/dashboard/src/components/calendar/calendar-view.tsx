@@ -5,7 +5,8 @@ import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
-import type { BookingListItem, BookingResourceSummary } from "@/lib/api";
+import type { BookingView, ResourceSummary } from "@/lib/api";
+import { resourceLabel } from "@/lib/resources";
 import { useBookings, useResources, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatTime, startOfZonedDay, weekdayOf, zonedDateKey } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -39,7 +40,7 @@ function Segmented<T extends string>({ label, value, options, onChange }: {
   );
 }
 
-function BookingRow({ booking, zone }: { booking: BookingListItem; zone: string }) {
+function BookingRow({ booking, zone }: { booking: BookingView; zone: string }) {
   return (
     <li className="flex gap-4 rounded-md bg-surface p-3 shadow-ring">
       <div className="w-20 shrink-0">
@@ -54,7 +55,7 @@ function BookingRow({ booking, zone }: { booking: BookingListItem; zone: string 
   );
 }
 
-function DayView({ resource, dateKey, onPickSlot }: { resource: BookingResourceSummary; dateKey: string; onPickSlot: (startsAt: string) => void }) {
+function DayView({ resource, dateKey, onPickSlot }: { resource: ResourceSummary; dateKey: string; onPickSlot: (startsAt: string) => void }) {
   const zone = resource.timeZone;
   const range = useMemo(() => ({
     from: startOfZonedDay(dateKey, zone).toISOString(),
@@ -102,7 +103,7 @@ function DayView({ resource, dateKey, onPickSlot }: { resource: BookingResourceS
 }
 
 function WeekView({ resource, weekStart, today, onOpenDay }: {
-  resource: BookingResourceSummary;
+  resource: ResourceSummary;
   weekStart: string;
   today: string;
   onOpenDay: (dateKey: string) => void;
@@ -173,7 +174,7 @@ export function CalendarView() {
         <Segmented
           label="Calendar"
           value={resource.id}
-          options={resources.data.map((item) => ({ value: item.id, label: item.kind === "showroom" ? "Showroom" : "Repair intake" }))}
+          options={resources.data.map((item) => ({ value: item.id, label: resourceLabel(item) }))}
           onChange={setResourceId}
         />
         <Segmented label="View" value={view} options={[{ value: "day", label: "Day" }, { value: "week", label: "Week" }]} onChange={setView} />

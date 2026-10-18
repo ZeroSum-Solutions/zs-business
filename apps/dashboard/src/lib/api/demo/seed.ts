@@ -2,18 +2,19 @@
  * Made-up demo data for "Halden & Rowe Fine Jewelry". No real people or businesses.
  * Emails use reserved example domains and phones use the fictional 555-01xx range.
  */
-import type { BookingRecord, ContactRecord, DealRecord } from "@zs/contracts";
+import type { BookingRecord, ContactRecord, DealRecord, PipelineSummary, ResourceSummary } from "@zs/contracts";
 import { addDays, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
-import type { BookingResourceSummary, PipelineSummary } from "../types";
 
 export const DEMO_TENANT_ID = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70";
 export const DEMO_ZONE = "America/New_York";
 export const DEMO_BUSINESS = "Halden & Rowe Fine Jewelry";
 
-export interface DemoResource extends BookingResourceSummary {
+export interface DemoResource extends ResourceSummary {
+  name: string;
+  /** Demo-only: which seeded calendar this is. */
+  kind: "showroom" | "repair";
   /** Open hours per ISO weekday, as [startMinute, endMinute] in local time. */
   hours: Partial<Record<number, [number, number]>>;
-  slotLengthMinutes: number;
   slotStepMinutes: number;
   bufferBeforeMinutes: number;
   bufferAfterMinutes: number;
@@ -60,12 +61,13 @@ export const STAGE_IDS = {
 
 export const DEMO_PIPELINE: PipelineSummary = {
   id: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01",
+  name: "Commissions",
   stages: [
-    { id: STAGE_IDS.inquiry, name: "Inquiry" },
-    { id: STAGE_IDS.consultation, name: "Consultation" },
-    { id: STAGE_IDS.design, name: "Design" },
-    { id: STAGE_IDS.deposit, name: "Deposit" },
-    { id: STAGE_IDS.delivered, name: "Delivered" },
+    { id: STAGE_IDS.inquiry, name: "Inquiry", position: 1 },
+    { id: STAGE_IDS.consultation, name: "Consultation", position: 2 },
+    { id: STAGE_IDS.design, name: "Design", position: 3 },
+    { id: STAGE_IDS.deposit, name: "Deposit", position: 4 },
+    { id: STAGE_IDS.delivered, name: "Delivered", position: 5 },
   ],
 };
 
