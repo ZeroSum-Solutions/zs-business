@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { createSession, derivedId, type Principal } from "@zs/core";
-import { asService, type ScopedDatabase } from "@zs/db";
+import { asService, createScopedDatabase } from "@zs/db";
+import { assertLocalPool } from "../config.js";
 import {
   DEMO_CONTACTS,
   DEMO_DEALS,
@@ -13,8 +14,8 @@ import {
 export interface SeedDependencies {
   /** Privileged pool for provisioning rows that have no write action yet (tenant, calendars, pipeline). */
   readonly service: Pool;
-  /** Runtime-role database; contacts, deals and bookings go through the one action path. */
-  readonly db: ScopedDatabase;
+  /** Runtime-role pool; contacts, deals and bookings go through the one action path. */
+  readonly runtime: Pool;
   readonly clock: { now(): Date };
   readonly generateId: () => string;
 }
@@ -30,8 +31,13 @@ export interface SeedSummary {
 const id = (...parts: string[]) => derivedId("zs-demo", ...parts);
 const CONSENT_RECORDED_AT = "2026-01-15T15:00:00.000Z";
 
-/** Idempotent: fixed IDs and idempotency keys make a rerun replay instead of duplicating. */
+/**
+ * Idempotent: fixed IDs and idempotency keys make a rerun replay instead of duplicating.
+ * Refuses, before any query, pools whose destination is not a checked loopback URL.
+ */
 export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
+  assertLocalPool(deps.service);
+  assertLocalPool(deps.runtime);
   const principal: Principal = { tenantId: id("tenant"), actorId: id("owner") };
   const { tenantId } = principal;
   const pipelineId = id("pipeline");
@@ -58,7 +64,7 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
       );
   });
 
-  const session = createSession(deps, principal);
+  const session = createSession({ db: createScopedDatabase(deps.runtime), clock: deps.clock, generateId: deps.generateId }, principal);
   const contactIds: string[] = [];
   for (const [index, contact] of DEMO_CONTACTS.entries()) {
     const output = await session.upsertContact({

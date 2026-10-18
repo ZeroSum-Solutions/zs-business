@@ -1,3 +1,4 @@
+import type { Pool } from "pg";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 
@@ -44,6 +45,15 @@ export function assertLocalDatabaseUrl(value: string): LocalDatabaseTarget {
     database: config.database ?? "",
     user: config.user ?? "",
   };
+}
+
+/** The pool's own destination must pass assertLocalDatabaseUrl: a connection string and no override fields. */
+export function assertLocalPool(pool: Pool): LocalDatabaseTarget {
+  const { connectionString, host, port, user, database } = pool.options;
+  if (typeof connectionString !== "string") refuse("database pool must be built from a checked connection string");
+  if ([host, port, user, database].some((value) => value !== undefined))
+    refuse("database pool must not override the connection string's host, port, user or database");
+  return assertLocalDatabaseUrl(connectionString);
 }
 
 /** Non-secret fields only, for logs: never the password or the raw URL. */

@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { Pool } from "pg";
-import { createScopedDatabase, migrate } from "@zs/db";
+import { migrate } from "@zs/db";
 import { assertLocalDatabaseUrl, jwtSecretSchema } from "../config.js";
 import { signDevToken } from "../dev-token.js";
 import { seedDemo } from "../seed/demo.js";
@@ -23,7 +23,7 @@ const runtime = new Pool({ connectionString: runtimeTarget.connectionString, max
 try {
   await migrate(admin);
   await ensureRuntimeLogin(admin, runtimeTarget.user);
-  const summary = await seedDemo({ service: admin, db: createScopedDatabase(runtime), clock, generateId: randomUUID });
+  const summary = await seedDemo({ service: admin, runtime, clock, generateId: randomUUID });
   const token = await signDevToken(jwtSecret, summary.principal, clock);
   console.log(formatSeedReport(summary, runtimeTarget));
   console.log(`\nDev JWT (7 days, tenant ${summary.principal.tenantId}; the API accepts it only with JWT_MAX_TTL_SECONDS=604800):\n${token}`);
