@@ -2,15 +2,15 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useRef, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input, Label } from "@/components/ui/input";
 import { ErrorNote } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isApiError } from "@/lib/api";
+import { isApiError, type NewContact } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
-import { newId } from "@/lib/id";
+import { useIntentKey } from "@/lib/intent-key";
 import { keys } from "@/lib/queries";
 
 export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -19,17 +19,12 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
   const queryClient = useQueryClient();
   const toast = useToast();
   const [form, setForm] = useState({ name: "", email: "", phone: "" });
-  const attempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const intents = useIntentKey();
 
   const save = useMutation({
-    mutationFn: () => {
-      const input = { displayName: form.name.trim() || null, email: form.email.trim() || null, phone: form.phone.trim() || null };
-      const fingerprint = JSON.stringify(input);
-      if (attempt.current?.fingerprint !== fingerprint) attempt.current = { fingerprint, key: newId() };
-      return api.createOrFindContact(input, { idempotencyKey: attempt.current.key });
-    },
+    mutationFn: (input: NewContact) => api.createOrFindContact(input, { idempotencyKey: intents.keyFor(input) }),
+    onSettled: (_result, error, input) => intents.settle(input, error),
     onSuccess: ({ contact, created }) => {
-      attempt.current = null;
       void queryClient.invalidateQueries({ queryKey: keys.contactsAll });
       onOpenChange(false);
       setForm({ name: "", email: "", phone: "" });
@@ -46,7 +41,7 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
   const field = isApiError(save.error, "validation") ? save.error.field ?? "" : "";
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    save.mutate();
+    save.mutate({ displayName: form.name.trim() || null, email: form.email.trim() || null, phone: form.phone.trim() || null });
   };
 
   return (

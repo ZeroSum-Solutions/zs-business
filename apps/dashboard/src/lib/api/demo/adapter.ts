@@ -17,7 +17,7 @@ import {
 } from "@zs/contracts";
 import { addDays, localIso, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
 import { newId as defaultNewId } from "../../id";
-import { contactNotFound, demoError, demoValidationError } from "../errors";
+import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError } from "../errors";
 import { byContactName, matchesSearch, toUpsertContactRequest, type BookingApi, type BookingView, type ContactWriteResult, type CrmApi, type WriteOptions } from "../types";
 import { buildSeed, DEMO_PIPELINE, DEMO_RESOURCES, DEMO_TENANT_ID, type DemoResource } from "./seed";
 
@@ -36,6 +36,21 @@ export interface DemoAdapterOptions {
 export interface DemoControls {
   bookAsSomeoneElse(resourceId: string, startsAt: string): BookingRecord;
   editDealElsewhere(dealId: string): DealRecord;
+  /**
+   * The next write is saved, but its response is lost: the caller sees a network error.
+   * With `goOffline` the connection stays down afterwards, until `setOffline(false)`.
+   */
+  loseNextResponse(options?: { goOffline?: boolean }): void;
+  /** While offline every call fails with a network error before it touches the data. */
+  setOffline(offline: boolean): void;
+  /** Every write that reached the adapter, oldest first, with the key it carried. */
+  writeLog(): DemoWrite[];
+}
+
+export interface DemoWrite {
+  operation: string;
+  idempotencyKey: string | null;
+  outcome: "applied" | "replayed" | "rejected";
 }
 
 type StoredBooking = BookingRecord & { title: string | null; contactName: string | null };
@@ -51,24 +66,50 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   const deals = new Map(seed.deals.map((item) => [item.id, item]));
   const bookings = new Map<string, StoredBooking>(seed.bookings.map((item) => [item.id, item]));
   const replays = new Map<string, { fingerprint: string; result: unknown }>();
+  const writes: DemoWrite[] = [];
+  let offline = false;
+  let loseNext: { goOffline: boolean } | null = null;
 
-  const wait = () => (latency > 0 ? new Promise((resolve) => setTimeout(resolve, latency)) : Promise.resolve());
+  const networkError = () => new ApiError("network", defaultMessage("network"));
+  const wait = async () => {
+    if (latency > 0) await new Promise((resolve) => setTimeout(resolve, latency));
+    if (offline) throw networkError();
+  };
   const nowIso = () => clock.now().toISOString();
 
   async function idempotent<T>(operation: string, payload: unknown, options: WriteOptions, run: () => T): Promise<T> {
     await wait();
     const key = options.idempotencyKey ?? newId();
+    const log = (outcome: DemoWrite["outcome"]) => writes.push({ operation, idempotencyKey: options.idempotencyKey ?? null, outcome });
+    // Like a dropped connection after the server committed: the write stands, the answer is lost.
+    const answer = (result: T): T => {
+      if (loseNext) {
+        offline = loseNext.goOffline;
+        loseNext = null;
+        throw networkError();
+      }
+      return clone(result);
+    };
     const fingerprint = JSON.stringify([operation, payload]);
     const previous = replays.get(key);
     if (previous) {
       if (previous.fingerprint !== fingerprint) {
+        log("rejected");
         throw demoError("Conflict", { reason: "idempotency_key_reused" });
       }
-      return clone(previous.result as T);
+      log("replayed");
+      return answer(previous.result as T);
     }
-    const result = run();
+    let result: T;
+    try {
+      result = run();
+    } catch (error) {
+      log("rejected");
+      throw error;
+    }
+    log("applied");
     replays.set(key, { fingerprint, result: clone(result) });
-    return clone(result);
+    return answer(result);
   }
 
   /** Like the API, a calendar this tenant does not own is 403 whether or not it exists. */
@@ -273,6 +314,18 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       const updated: DealRecord = { ...deal, revision: deal.revision + 1, updatedAt: nowIso() };
       deals.set(updated.id, updated);
       return clone(updated);
+    },
+
+    loseNextResponse(options = {}) {
+      loseNext = { goOffline: options.goOffline ?? false };
+    },
+
+    setOffline(value) {
+      offline = value;
+    },
+
+    writeLog() {
+      return clone(writes);
     },
   };
 }

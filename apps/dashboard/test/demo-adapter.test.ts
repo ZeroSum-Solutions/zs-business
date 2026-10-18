@@ -138,3 +138,33 @@ describe("demo adapter: CRM", () => {
     expect(isStaleRevision(error)).toBe(true);
   });
 });
+
+describe("demo adapter: lost responses", () => {
+  it("applies a write whose response is lost, and replays it for a retry with the same key", async () => {
+    const api = adapter();
+    const { slots } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
+    const startsAt = slots[0]!.startsAt;
+    api.loseNextResponse();
+    const lost = await api.createBooking({ resourceId: SHOWROOM_ID, startsAt }, { idempotencyKey: "k1" }).catch((caught: unknown) => caught);
+    expect(lost).toMatchObject({ kind: "network" });
+    const replay = await api.createBooking({ resourceId: SHOWROOM_ID, startsAt }, { idempotencyKey: "k1" });
+    expect(replay.startsAt).toBe(startsAt);
+    // A new key for the same time is a second booking, which overlaps the first.
+    const second = await api.createBooking({ resourceId: SHOWROOM_ID, startsAt }, { idempotencyKey: "k2" }).catch((caught: unknown) => caught);
+    expect(isSlotTaken(second)).toBe(true);
+    expect(api.writeLog()).toEqual([
+      { operation: "booking.create", idempotencyKey: "k1", outcome: "applied" },
+      { operation: "booking.create", idempotencyKey: "k1", outcome: "replayed" },
+      { operation: "booking.create", idempotencyKey: "k2", outcome: "rejected" },
+    ]);
+  });
+
+  it("fails every call while offline without touching the data", async () => {
+    const api = adapter();
+    api.setOffline(true);
+    await expect(api.listDeals()).rejects.toMatchObject({ kind: "network" });
+    await expect(api.createOrFindContact({ displayName: null, email: "a@example.com", phone: null })).rejects.toMatchObject({ kind: "network" });
+    api.setOffline(false);
+    expect(api.writeLog()).toEqual([]);
+  });
+});

@@ -2,16 +2,17 @@
 
 import { WarningCircle } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
+import type { CreateBookingRequest } from "@zs/contracts";
 import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { keys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
-import { newId } from "@/lib/id";
+import { useIntentKey } from "@/lib/intent-key";
 import { cn } from "@/lib/utils";
 import { SlotsError } from "./slots-error";
 
@@ -37,17 +38,38 @@ export function BookingDialog({
   const [dateKey, setDateKey] = useState(initialDate);
   const [selected, setSelected] = useState<string | null>(initialSlot ?? null);
   const [conflict, setConflict] = useState(false);
-  // One write attempt = one idempotency key (the server derives the booking ID from it),
-  // so a retry cannot double-book.
-  const attempt = useRef<{ startsAt: string; key: string } | null>(null);
+  // One key per request body (the server derives the booking ID from it), so a retry after a
+  // lost answer cannot double-book, and another calendar at the same time is a new booking.
+  const intents = useIntentKey();
+
+  const book = useMutation({
+    mutationFn: (request: CreateBookingRequest) => api.createBooking(request, { idempotencyKey: intents.keyFor(request) }),
+    onSettled: (_record, error, request) => intents.settle(request, error),
+    onSuccess: (record) => {
+      void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
+      void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
+      toast(`Booked ${formatDay(record.startsAt, zone)} at ${formatTime(record.startsAt, zone)}.`);
+      onOpenChange(false);
+    },
+    onError: (error) => {
+      if (isSlotTaken(error)) {
+        setConflict(true);
+        setSelected(null);
+        void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
+        void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
+      }
+    },
+  });
+  const { reset } = book;
 
   useEffect(() => {
     if (open) {
       setDateKey(initialDate);
       setSelected(initialSlot ?? null);
       setConflict(false);
+      reset();
     }
-  }, [open, initialDate, initialSlot]);
+  }, [open, initialDate, initialSlot, reset]);
 
   const days = useMemo(() => Array.from({ length: 14 }, (_, index) => addDays(initialDate, index)), [initialDate]);
   const query = useMemo(() => ({
@@ -57,31 +79,6 @@ export function BookingDialog({
     zone,
   }), [resource.id, dateKey, zone]);
   const slots = useSlots(open ? query : null);
-
-  const book = useMutation({
-    mutationFn: (startsAt: string) => {
-      if (attempt.current?.startsAt !== startsAt) {
-        attempt.current = { startsAt, key: newId() };
-      }
-      return api.createBooking({ resourceId: resource.id, startsAt }, { idempotencyKey: attempt.current.key });
-    },
-    onSuccess: (record) => {
-      attempt.current = null;
-      void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
-      void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
-      toast(`Booked ${formatDay(record.startsAt, zone)} at ${formatTime(record.startsAt, zone)}.`);
-      onOpenChange(false);
-    },
-    onError: (error) => {
-      if (isSlotTaken(error)) {
-        attempt.current = null;
-        setConflict(true);
-        setSelected(null);
-        void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
-        void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
-      }
-    },
-  });
 
   const otherError = book.isError && !isSlotTaken(book.error) ? book.error : null;
 
@@ -161,7 +158,7 @@ export function BookingDialog({
           <Button
             disabled={!selected || book.isPending}
             aria-busy={book.isPending}
-            onClick={() => selected && book.mutate(selected)}
+            onClick={() => selected && book.mutate({ resourceId: resource.id, startsAt: selected })}
           >
             {selected ? `Book ${formatTime(selected, zone)}` : "Pick a time"}
           </Button>

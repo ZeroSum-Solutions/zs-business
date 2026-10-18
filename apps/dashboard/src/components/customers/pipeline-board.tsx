@@ -9,9 +9,11 @@ import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { isStaleRevision, type DealRecord, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
-import { newId } from "@/lib/id";
+import { useIntentKey } from "@/lib/intent-key";
 import { keys, useContacts, useDeals, usePipeline } from "@/lib/queries";
 import { cn, relativeTime } from "@/lib/utils";
+
+type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
 
 export const STALE_DEAL_MESSAGE = "Someone changed this deal. Reloaded.";
 
@@ -52,9 +54,13 @@ export function PipelineBoard() {
 
   const names = useMemo(() => new Map(contacts.data?.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
 
+  // The intent is (deal, expected revision, target stage): retrying it after a lost answer
+  // replays the first attempt instead of failing on the revision that attempt moved on.
+  const intents = useIntentKey();
+
   const move = useMutation({
-    mutationFn: ({ deal, stageId }: { deal: DealRecord; stageId: string }) =>
-      api.moveDealStage({ dealId: deal.id, pipelineId: deal.pipelineId, stageId, expectedRevision: deal.revision }, { idempotencyKey: newId() }),
+    mutationFn: (request: DealMove) => api.moveDealStage(request, { idempotencyKey: intents.keyFor(request) }),
+    onSettled: (_updated, error, request) => intents.settle(request, error),
     onSuccess: (updated) => {
       setStale(false);
       queryClient.setQueryData<DealRecord[]>(keys.deals(), (current) => current?.map((item) => (item.id === updated.id ? updated : item)));
@@ -74,11 +80,13 @@ export function PipelineBoard() {
 
   if (pipeline.isPending || deals.isPending) return <LoadingRows rows={5} label="Loading pipeline" />;
   if (pipeline.isError) return <ErrorNote error={pipeline.error} retry={() => pipeline.refetch()} />;
-  if (deals.isError) return <ErrorNote error={deals.error} retry={() => deals.refetch()} />;
+  if (deals.isError && !deals.data) return <ErrorNote error={deals.error} retry={() => deals.refetch()} />;
 
   const stages = pipeline.data.stages;
   const activeStage = stageFilter ?? stages[0]!.id;
   const moveError = move.isError && !isStaleRevision(move.error) ? move.error : null;
+  // A failed refresh keeps the last board on screen, with the note above it.
+  const refreshError = deals.isError && !moveError ? deals.error : null;
 
   return (
     // data-fetching lets tests wait out a background refetch before acting as someone else.
@@ -91,6 +99,7 @@ export function PipelineBoard() {
         </div>
       ) : null}
       {moveError ? <div className="mb-4"><ErrorNote error={moveError} /></div> : null}
+      {refreshError ? <div className="mb-4"><ErrorNote error={refreshError} retry={() => deals.refetch()} /></div> : null}
 
       <div role="group" aria-label="Stage" className="-mx-4 mb-4 flex gap-2 overflow-x-auto px-4 lg:hidden">
         {stages.map((stage) => {
@@ -132,8 +141,8 @@ export function PipelineBoard() {
                       deal={deal}
                       pipeline={pipeline.data}
                       contactName={names.get(deal.contactId) ?? "Customer"}
-                      moving={move.isPending && move.variables?.deal.id === deal.id}
-                      onMove={(target, stageId) => move.mutate({ deal: target, stageId })}
+                      moving={move.isPending && move.variables?.dealId === deal.id}
+                      onMove={(target, stageId) => move.mutate({ dealId: target.id, pipelineId: target.pipelineId, stageId, expectedRevision: target.revision })}
                     />
                   ))}
                 </ul>
