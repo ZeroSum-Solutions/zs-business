@@ -1,7 +1,6 @@
 // M1 tenant-scoped booking reads. Every function runs inside ScopedDatabase.tenant, so RLS
 // limits rows to the caller's tenant; the explicit tenant_id filter is defence in depth.
 import {
-  NotFound,
   type BookingPage,
   type BookingRecord,
   type ListBookingsQuery,
@@ -69,10 +68,12 @@ export function localLabel(zone: string, instant: number): string {
   return new Date(instant + offsetAt(zone, instant)).toISOString().slice(0, 19);
 }
 
-/** Available slots for one owned resource, against committed bookings and external blocks. */
+/**
+ * Available slots for one owned resource, against committed bookings and external blocks.
+ * A foreign or unknown resource is TenantDenied (403), exactly as booking it is, so neither
+ * endpoint reveals whether another tenant's resource exists.
+ */
 export async function findSlots(tx: Transaction, tenantId: string, query: SlotsQuery, now: Date): Promise<SlotsResponse> {
-  const owned = await tx.query("SELECT 1 FROM booking_resources WHERE tenant_id=$1 AND id=$2", [tenantId, query.resourceId]);
-  if (!owned.rowCount) throw new NotFound("Booking resource not found");
   const rules = compileRules(await loadResource(tx, tenantId, query.resourceId));
   const from = Date.parse(query.from);
   const to = Date.parse(query.to);

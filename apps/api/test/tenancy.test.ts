@@ -41,16 +41,18 @@ describe("two-tenant denial over HTTP under the runtime role", () => {
     expect(deals.items[0]).toMatchObject({ id: aDeal.dealId, stageId: h.a.stages[0], revision: 1 });
   });
 
-  it("cannot book or read slots on another tenant's resource", async () => {
-    const booking = await call(h.app, "POST", "/v1/booking/bookings", {
-      token: h.b.token, key: randomUUID(), body: { resourceId: h.a.resourceId, startsAt: "2026-10-19T11:00:00.000Z" },
+  it("answers a foreign resource exactly like an unknown one on slots and bookings (403)", async () => {
+    const bookAs = (resourceId: string) => call(h.app, "POST", "/v1/booking/bookings", {
+      token: h.b.token, key: randomUUID(), body: { resourceId, startsAt: "2026-10-19T11:00:00.000Z" },
     });
-    expect(booking.status).toBe(403);
-    const slots = await call(h.app, "GET",
-      `/v1/booking/slots?resourceId=${h.a.resourceId}&from=2026-10-19T09:00:00.000Z&to=2026-10-19T17:00:00.000Z`,
+    const slotsAs = (resourceId: string) => call(h.app, "GET",
+      `/v1/booking/slots?resourceId=${resourceId}&from=2026-10-19T09:00:00.000Z&to=2026-10-19T17:00:00.000Z`,
       { token: h.b.token });
-    expect(slots.status).toBe(404);
-    apiErrorBodySchema.parse(slots.body);
+    for (const send of [bookAs, slotsAs]) {
+      const [foreign, unknown] = [await send(h.a.resourceId), await send(randomUUID())];
+      expect([foreign.status, unknown.status]).toEqual([403, 403]);
+      expect(apiErrorBodySchema.parse(foreign.body)).toEqual(apiErrorBodySchema.parse(unknown.body));
+    }
   });
 
   it("cannot attach a deal to another tenant's contact", async () => {
