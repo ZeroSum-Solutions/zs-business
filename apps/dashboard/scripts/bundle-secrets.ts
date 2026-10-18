@@ -44,7 +44,7 @@ export function publicBuildFiles(distDir: string): string[] {
 }
 
 export function secretValues(env: Record<string, string | undefined> = process.env): string[] {
-  const values = [env.ZS_API_TOKEN, env.JWT_SECRET, ...(env.ZS_BUNDLE_SECRETS ?? "").split("\n")];
+  const values = [env.ZS_API_TOKEN, env.JWT_SECRET, env.DASHBOARD_ACCESS_CODE, env.DASHBOARD_SESSION_SECRET, ...(env.ZS_BUNDLE_SECRETS ?? "").split("\n")];
   // Very short values would match by chance; real tokens and secrets are long.
   return values.map((value) => value?.trim() ?? "").filter((value) => value.length >= 16);
 }

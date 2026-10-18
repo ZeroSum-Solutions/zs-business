@@ -109,7 +109,8 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   total limit is the real bound. "Sign out" posts `/api/sign-out`, which clears the cookie;
   the signed-out screen links to `/sign-in?next=<page>`. Demo mode has no gate.
   `build` runs `scripts/bundle-secrets.ts`, which fails if `.next/static` or a prerendered
-  page holds a JWT or the value of `ZS_API_TOKEN` or `JWT_SECRET`. See `.env.example`;
+  page holds a JWT or the value of `ZS_API_TOKEN`, `JWT_SECRET`, `DASHBOARD_ACCESS_CODE` or
+  `DASHBOARD_SESSION_SECRET`. See `.env.example`;
   put real values in `.env.local`, which is never committed. Request, response, page and
   error shapes all come from `@zs/contracts` (`http.ts`); calendars and pipeline stages
   come from `GET /v1/booking/resources` and `GET /v1/crm/pipelines`.
