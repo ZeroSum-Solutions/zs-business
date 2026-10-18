@@ -49,6 +49,8 @@ export interface DemoControls {
   expireSession(): void;
   /** The next write waits this long before it runs, to test answers that arrive late. */
   delayNextWrite(ms: number): void;
+  /** While on, every read of the deal list fails with a network error; writes still work. */
+  failDealReads(failing: boolean): void;
 }
 
 export interface DemoWrite {
@@ -75,6 +77,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   let loseNext: { goOffline: boolean } | null = null;
   let expired = false;
   let delayNext = 0;
+  let dealReadsFail = false;
 
   const networkError = () => new ApiError("network", defaultMessage("network"));
   const wait = async () => {
@@ -294,6 +297,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
     async listDeals(query = {}) {
       await wait();
+      if (dealReadsFail) throw networkError();
       const rows = [...deals.values()]
         .filter((item) => !query.contactId || item.contactId === query.contactId)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -348,6 +352,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
     delayNextWrite(ms) {
       delayNext = ms;
+    },
+
+    failDealReads(failing) {
+      dealReadsFail = failing;
     },
   };
 }

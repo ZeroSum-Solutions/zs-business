@@ -3,7 +3,7 @@
 import { ArrowsClockwise } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Select } from "@/components/ui/input";
 import { ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
@@ -16,13 +16,16 @@ import { cn, relativeTime, revealOnFocus } from "@/lib/utils";
 type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
 
 export const STALE_DEAL_MESSAGE = "Someone changed this deal. Reloaded.";
+export const RELOAD_FAILED_MESSAGE = "Someone changed this deal, but the board could not reload. You can move it again once it has.";
 
-function DealCard({ deal, pipeline, contactName, onMove, moving }: {
+function DealCard({ deal, pipeline, contactName, onMove, moving, blockedBy }: {
   deal: DealRecord;
   pipeline: PipelineSummary;
   contactName: string;
   onMove: (deal: DealRecord, stageId: string) => void;
   moving: boolean;
+  /** Id of the note that says why this deal cannot move now. */
+  blockedBy: string | null;
 }) {
   const selectId = `stage-${deal.id}`;
   return (
@@ -33,7 +36,7 @@ function DealCard({ deal, pipeline, contactName, onMove, moving }: {
       </Link>
       <div className="mt-2 flex items-center justify-between gap-2">
         <label htmlFor={selectId} className="sr-only">Move {deal.title} to stage</label>
-        <Select id={selectId} value={deal.stageId} disabled={moving} onChange={(event) => onMove(deal, event.target.value)} className="flex-1">
+        <Select id={selectId} value={deal.stageId} disabled={moving || blockedBy !== null} aria-describedby={blockedBy ?? undefined} onChange={(event) => onMove(deal, event.target.value)} className="flex-1">
           {pipeline.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
         </Select>
       </div>
@@ -52,6 +55,9 @@ export function PipelineBoard() {
   const contacts = useContacts();
   const [stageFilter, setStageFilter] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
+  // A deal whose move hit a newer revision while the reload after it failed: its revision
+  // on screen is known to be old, so it stays unmovable until a later read succeeds.
+  const [reloadNeeded, setReloadNeeded] = useState<{ dealId: string; since: number } | null>(null);
 
   const names = useMemo(() => new Map(contacts.data?.items.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
 
@@ -74,16 +80,36 @@ export function PipelineBoard() {
       const stage = pipeline.data?.stages.find((item) => item.id === updated.stageId)?.name ?? "the new stage";
       toast(`Moved to ${stage}.`);
     },
-    onError: async (error) => {
-      // Say "Reloaded" only once the fresh revision is on screen, so a retry uses it.
-      await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
+    onError: async (error, request) => {
+      const since = Date.now();
+      let reloaded = true;
+      try {
+        await queryClient.invalidateQueries({ queryKey: keys.dealsAll }, { throwOnError: true });
+      } catch {
+        reloaded = false;
+      }
       // A concurrent_update is the same story as a stale revision: reload, then retry.
-      if (isDealChanged(error)) {
+      if (!isDealChanged(error)) return;
+      // Say "Reloaded" only once a read that started after the conflict has landed, so the
+      // fresh revision is on screen and a retry uses it.
+      const state = queryClient.getQueryState(keys.deals());
+      if (reloaded && state?.status === "success" && state.dataUpdatedAt >= since) {
         setStale(true);
         toast(STALE_DEAL_MESSAGE, "info");
+      } else {
+        setStale(false);
+        setReloadNeeded({ dealId: request.dealId, since });
       }
     },
   });
+
+  // Any later read that succeeds (the note's Try again, a background refetch) clears the block.
+  useEffect(() => {
+    if (!reloadNeeded || deals.isFetching || deals.status !== "success" || deals.dataUpdatedAt < reloadNeeded.since) return;
+    setReloadNeeded(null);
+    setStale(true);
+    toast(STALE_DEAL_MESSAGE, "info");
+  }, [reloadNeeded, deals.isFetching, deals.status, deals.dataUpdatedAt, toast]);
 
   if (pipeline.isPending || deals.isPending) return <LoadingRows rows={5} label="Loading pipeline" />;
   if (pipeline.isError) return <ErrorNote error={pipeline.error} retry={() => pipeline.refetch()} />;
@@ -93,7 +119,7 @@ export function PipelineBoard() {
   const activeStage = stageFilter ?? stages[0]!.id;
   const moveError = move.isError && !isDealChanged(move.error) ? move.error : null;
   // A failed refresh keeps the last board on screen, with the note above it.
-  const refreshError = deals.isError && !moveError ? deals.error : null;
+  const refreshError = deals.isError && !moveError && !reloadNeeded ? deals.error : null;
 
   return (
     // data-fetching lets tests wait out a background refetch before acting as someone else.
@@ -103,6 +129,12 @@ export function PipelineBoard() {
         <div role="alert" className="mb-4 flex items-center gap-3 rounded-md bg-accent/8 p-3 text-sm text-fg">
           <ArrowsClockwise size={20} aria-hidden className="shrink-0 text-accent" />
           <p>{STALE_DEAL_MESSAGE}</p>
+        </div>
+      ) : null}
+      {reloadNeeded ? (
+        <div id="deal-reload-needed" className="mb-4 space-y-2">
+          <p className="text-sm text-fg-2">{RELOAD_FAILED_MESSAGE}</p>
+          <ErrorNote error={deals.error} retry={() => deals.refetch()} />
         </div>
       ) : null}
       {moveError ? <div className="mb-4"><ErrorNote error={moveError} /></div> : null}
@@ -151,6 +183,7 @@ export function PipelineBoard() {
                       pipeline={pipeline.data}
                       contactName={names.get(deal.contactId) ?? "Customer"}
                       moving={move.isPending && move.variables?.dealId === deal.id}
+                      blockedBy={reloadNeeded?.dealId === deal.id ? "deal-reload-needed" : null}
                       onMove={(target, stageId) => move.mutate({ dealId: target.id, pipelineId: target.pipelineId, stageId, expectedRevision: target.revision })}
                     />
                   ))}

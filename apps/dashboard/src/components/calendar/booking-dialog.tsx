@@ -2,7 +2,7 @@
 
 import { WarningCircle } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
@@ -12,6 +12,7 @@ import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type ResourceSummary } f
 import { useApi } from "@/lib/api/react";
 import { useKeys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
+import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
 import { cn, revealOnFocus } from "@/lib/utils";
 import { SlotsError } from "./slots-error";
@@ -44,14 +45,9 @@ export function BookingDialog({
   // One key per request body (the server derives the booking ID from it), so a retry after a
   // lost answer cannot double-book, and another calendar at the same time is a new booking.
   const intents = useIntentKey();
-  // Bumped when the dialog opens, closes or switches calendar. An answer from an earlier
+  // Moves on when the dialog opens, closes or switches calendar. An answer from an earlier
   // generation still refreshes the lists, but must not close, toast or flag the newer one.
-  const generation = useRef(0);
-  const isOpen = useRef(open);
-  useEffect(() => {
-    generation.current += 1;
-    isOpen.current = open;
-  }, [open, resource.id]);
+  const generation = useDialogGeneration(open, resource.id);
 
   const book = useMutation({
     mutationFn: ({ request }: Attempt) => api.createBooking(request, { idempotencyKey: intents.keyFor(request) }),
@@ -59,13 +55,13 @@ export function BookingDialog({
     onSuccess: (record, attempt) => {
       void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
       void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
-      const current = attempt.generation === generation.current;
+      const current = generation.isCurrent(attempt.generation);
       // A late answer for a dialog that is now closed can still confirm the booking it made.
-      if (current || !isOpen.current) toast(`Booked ${formatDay(record.startsAt, zone)} at ${formatTime(record.startsAt, zone)}.`);
+      if (current || generation.isClosed()) toast(`Booked ${formatDay(record.startsAt, zone)} at ${formatTime(record.startsAt, zone)}.`);
       if (current) onOpenChange(false);
     },
     onError: (error, attempt) => {
-      if (attempt.generation !== generation.current) return;
+      if (!generation.isCurrent(attempt.generation)) return;
       if (isSlotTaken(error)) {
         setConflict(true);
         setSelected(null);
@@ -173,7 +169,7 @@ export function BookingDialog({
           <Button
             disabled={!selected || book.isPending}
             aria-busy={book.isPending}
-            onClick={() => selected && book.mutate({ request: { resourceId: resource.id, startsAt: selected }, generation: generation.current })}
+            onClick={() => selected && book.mutate({ request: { resourceId: resource.id, startsAt: selected }, generation: generation.current() })}
           >
             {selected ? `Book ${formatTime(selected, zone)}` : "Pick a time"}
           </Button>

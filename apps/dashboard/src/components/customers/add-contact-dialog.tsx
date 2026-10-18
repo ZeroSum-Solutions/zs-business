@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input, Label } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import { ErrorNote } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { isApiError, type NewContact } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
+import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
 import { useKeys } from "@/lib/queries";
 
@@ -21,16 +22,26 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
   const toast = useToast();
   const [form, setForm] = useState({ name: "", email: "", phone: "" });
   const intents = useIntentKey();
+  // Moves on whenever the dialog opens or closes. A save that answers after the dialog was
+  // closed (and maybe reopened with a new draft) still refreshes the list and may confirm
+  // itself, but never closes the dialog, clears the newer draft or navigates away.
+  const generation = useDialogGeneration(open);
 
   const save = useMutation({
-    mutationFn: (input: NewContact) => api.createOrFindContact(input, { idempotencyKey: intents.keyFor(input) }),
-    onSettled: (_result, error, input) => intents.settle(input, error),
-    onSuccess: ({ contact, created }) => {
+    mutationFn: ({ input }: { input: NewContact; generation: number }) => api.createOrFindContact(input, { idempotencyKey: intents.keyFor(input) }),
+    onSettled: (_result, error, attempt) => intents.settle(attempt.input, error),
+    onSuccess: ({ contact, created }, attempt) => {
       void queryClient.invalidateQueries({ queryKey: keys.contactsAll });
+      const name = contact.displayName ?? contact.email ?? "customer";
+      if (!generation.isCurrent(attempt.generation)) {
+        // The dialog is closed: say the save went through. Reopened: stay out of the new draft.
+        if (generation.isClosed()) toast(created ? `Added ${name}.` : `${contact.displayName ?? "This person"} is already a customer.`, created ? "success" : "info");
+        return;
+      }
       onOpenChange(false);
       setForm({ name: "", email: "", phone: "" });
       if (created) {
-        toast(`Added ${contact.displayName ?? contact.email ?? "customer"}.`);
+        toast(`Added ${name}.`);
         router.push(`/customers/${contact.id}`);
       } else {
         toast(`${contact.displayName ?? "This person"} is already a customer. Opened their record.`, "info");
@@ -38,11 +49,17 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
       }
     },
   });
+  const { reset } = save;
+  // A fresh opening shows no error or busy state left from an earlier one.
+  useEffect(() => {
+    if (open) reset();
+  }, [open, reset]);
 
   const field = isApiError(save.error, "validation") ? save.error.field ?? "" : "";
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    save.mutate({ displayName: form.name.trim() || null, email: form.email.trim() || null, phone: form.phone.trim() || null });
+    const input = { displayName: form.name.trim() || null, email: form.email.trim() || null, phone: form.phone.trim() || null };
+    save.mutate({ input, generation: generation.current() });
   };
 
   return (

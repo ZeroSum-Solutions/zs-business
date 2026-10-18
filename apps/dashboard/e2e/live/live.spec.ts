@@ -406,6 +406,36 @@ test("reloads and allows a retry when the API reports a concurrent update", asyn
   await expect(page.getByRole("status").getByText("Moved to Deposit.")).toBeVisible();
 });
 
+test("keeps a deal unmovable, and says so, when the reload after a conflict fails", async ({ page }, info) => {
+  const title = info.project.name === "phone" ? "Engagement ring, oval sapphire halo" : "Signet ring with family crest";
+  const stage = `${LIVE.webUrl}/api/v1/crm/deals/*/stage`;
+  await page.route(stage, (route) => route.fulfill({ status: 409, json: apiError("Conflict", { reason: "stale_revision" }) }));
+  await page.goto("/customers?view=pipeline");
+  if (info.project.name === "phone") await page.getByRole("button", { name: /^Design/ }).click();
+  const card = page.locator("[data-deal-id]").filter({ hasText: title });
+  await expect(card).toBeVisible();
+  await expect(page.locator("[data-fetching]")).toHaveCount(0);
+
+  // Every reload of the deal list is cut off.
+  let abort = true;
+  await page.route(`${LIVE.webUrl}/api/v1/crm/deals?*`, (route) => (abort ? route.abort("connectionreset") : route.continue()));
+  await card.getByRole("combobox").selectOption({ label: "Deposit" });
+  const note = page.locator("#deal-reload-needed");
+  await expect(note).toContainText("Someone changed this deal, but the board could not reload.", { timeout: 10_000 });
+  await expect(page.getByText("Someone changed this deal. Reloaded.")).toHaveCount(0);
+  await expect(card.getByRole("combobox")).toBeDisabled();
+  await expect(card.locator("option:checked")).toHaveText("Design");
+
+  abort = false;
+  await page.unroute(stage);
+  await note.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
+  await expect(card.getByRole("combobox")).toBeEnabled();
+  await expect(page.locator("[data-fetching]")).toHaveCount(0);
+  await card.getByRole("combobox").selectOption({ label: "Deposit" });
+  await expect(page.getByRole("status").getByText("Moved to Deposit.")).toBeVisible();
+});
+
 test("does not retry a 429 and asks the owner to wait", async ({ page }) => {
   let calls = 0;
   await page.route(`${LIVE.webUrl}/api/v1/crm/contacts?*`, (route) => {

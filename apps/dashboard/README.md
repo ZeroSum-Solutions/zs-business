@@ -20,6 +20,8 @@ mise exec -- pnpm --filter @zs/dashboard e2e:live  # the same journeys against t
 `e2e/retries.spec.ts` covers retries after a lost response (the demo adapter's
 `loseNextResponse`, `setOffline` and `writeLog`). `e2e/layout.spec.ts` covers focus
 return after Escape on every sheet and controls clear of the phone tab bar.
+`e2e/retries.spec.ts` also covers late answers: a customer save that lands after its dialog
+was reopened or closed, and a deal reload that fails after a conflict (`failDealReads`).
 `e2e/offline.spec.ts` runs with service workers allowed: install, go offline, reload,
 still styled and working; `/api` responses are never stored. `e2e/session.spec.ts` covers
 the signed-out state after a 401 and sign-out, and that no cached query outlives either.
@@ -63,8 +65,9 @@ browser makes no request to the API origin and sends no `Authorization` header, 
 anonymous caller, a forged cookie and a caller's own bearer token all get 401 from the proxy
 and `/api/session`, that a visitor signs in at `/sign-in` and out again (the cookie is
 httpOnly and `SameSite=Strict`, and the proxy refuses the browser after sign-out), that the
-proxy refuses a cross-site POST and a forged `X-Forwarded-Host`, that
-slots for an unknown calendar answer 403 with the same body the demo adapter sends, and that a booking whose answer was dropped is retried
+proxy refuses a cross-site POST and a forged `X-Forwarded-Host`, that a failed reload after
+a deal conflict keeps the move off, that slots for an unknown calendar answer 403 with the
+same body the demo adapter sends, and that a booking whose answer was dropped is retried
 with the same `Idempotency-Key` and replayed by the API.
 
 The tests make the conflicting writes (a booking for the chosen time, a re-save of a deal)
@@ -148,8 +151,13 @@ it and the API replays the first attempt, while any other body (another calendar
 same instant) gets a new key. The key is dropped once the attempt gets a definitive
 answer (2xx or 4xx); after a network error, a 5xx or an unreadable body it is kept. There
 is no deal-create screen yet; when one is added it uses the same hook. The booking
-dialog counts its openings: an answer that arrives after the dialog closed or changed
-calendar never closes or changes the current one.
+and add-customer dialogs count their openings (`useDialogGeneration`,
+`src/lib/dialog-generation.ts`): an answer that arrives after the dialog closed or changed
+calendar still refreshes the lists, and may confirm itself with a toast while the dialog is
+closed, but never closes, clears or navigates away from a newer opening. A deal move that
+hits a changed deal says "Reloaded" only once a read that started after the conflict has
+succeeded. If that reload fails, the board says so, shows the error with "Try again", and
+keeps that deal's move off until a read succeeds.
 
 The list routes take paging only (at most 100 rows a page). The client walks `nextOffset`
 and runs contact search, the deal contact filter and the booking date range itself.
