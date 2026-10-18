@@ -6,15 +6,30 @@ import type { NextConfig } from "next";
 process.env.ZS_BUILD_ID ||= randomBytes(6).toString("hex");
 const buildId = process.env.ZS_BUILD_ID;
 
+/**
+ * Sent on every dashboard response, pages and /api alike: no other site may frame the
+ * dashboard (clickjacking). There is no script-src: Next's hydration runs inline scripts,
+ * and a nonce would make every page dynamic.
+ */
+export const SECURITY_HEADERS = [
+  { key: "Content-Security-Policy", value: "frame-ancestors 'none'; base-uri 'self'; object-src 'none'" },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "Referrer-Policy", value: "same-origin" },
+];
+
 const config: NextConfig = {
   reactStrictMode: true,
   // @zs/contracts ships TypeScript source with NodeNext-style ".js" import specifiers.
   // Turbopack cannot map those to ".ts" files yet, so dev and build run on webpack.
   transpilePackages: ["@zs/contracts"],
   experimental: { extensionAlias: { ".js": [".ts", ".tsx", ".js"] } },
-  // `pnpm typecheck` runs tsc (TypeScript 7) separately; the build does not re-check types.
-  typescript: { ignoreBuildErrors: true },
+  // The build type-checks too, so a type error never ships.
+  typescript: { ignoreBuildErrors: false },
   poweredByHeader: false,
+  async headers() {
+    return [{ source: "/:path*", headers: SECURITY_HEADERS }];
+  },
   // e2e:live builds into its own folder so it can run next to the demo build.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   generateBuildId: () => buildId,

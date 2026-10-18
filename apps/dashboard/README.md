@@ -111,7 +111,8 @@ Live mode still reads them from the demo workspace.
 
 - Build and dev use webpack (`--webpack`). Turbopack does not map the contracts'
   NodeNext `.js` import specifiers to `.ts` sources.
-- `next build` skips its own type check; `typecheck` runs `tsc --noEmit` (TypeScript 7).
+- `next build` type-checks (`ignoreBuildErrors: false`); `typecheck` runs `tsc --noEmit` (TypeScript 7) on its own.
+- Every response, pages and `/api` alike, carries `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` (`next.config.ts`). There is no `script-src`: Next hydrates with inline scripts.
 - The service worker (`public/sw.js`) caches the app shell and static assets only. On
   install it caches each shell page, then every `/_next/static` script, style and font
   those pages and their styles reference, so the app opens offline styled and working.
