@@ -8,6 +8,7 @@ import {
   type CreateOrFindContactInput,
   type MoveDealStageInput,
 } from "@zs/contracts";
+import type { ScopedDatabase } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createDispatcher, crmHandlers, type DispatchContext } from "../../src/index.js";
 import type { CrmWriteContext } from "@zs/contracts";
@@ -19,7 +20,7 @@ export interface Harness {
   database: TestDatabase;
   fixture: TwoTenantFixture;
   /** Bound write context for a tenant; every command is approved exactly as dispatched. */
-  ctx(tenantId: string, now?: string): CrmWriteContext;
+  ctx(tenantId: string, now?: string, db?: ScopedDatabase): CrmWriteContext;
   seedPipeline(tenantId: string): Promise<{ pipelineId: string; stages: [string, string] }>;
   count(table: "actions" | "outbox" | "crm_contacts" | "crm_deals" | "crm_contact_consent", tenantId: string): Promise<number>;
   close(): Promise<void>;
@@ -32,11 +33,11 @@ export async function createHarness(): Promise<Harness> {
   return {
     database,
     fixture,
-    ctx(tenantId, now = NOW) {
+    ctx(tenantId, now = NOW, db = database.db) {
       const context: DispatchContext = {
         tenantId,
         actor: { tenantId, id: actorId },
-        db: database.db,
+        db,
         clock: { now: () => new Date(now) },
         config: {},
         generateId: randomUUID,
