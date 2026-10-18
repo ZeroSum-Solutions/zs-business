@@ -24,7 +24,8 @@ export function Providers({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      // A new build ID is a new worker script, so each deploy refreshes the offline copy.
+      navigator.serviceWorker.register(`/sw.js?v=${encodeURIComponent(process.env.NEXT_PUBLIC_BUILD_ID ?? "dev")}`).catch(() => undefined);
     }
   }, []);
 
