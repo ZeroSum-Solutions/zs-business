@@ -49,9 +49,13 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
+| `DATABASE_CA_CERT` | Optional PEM. When set, the pool verifies the server against it (`rejectUnauthorized`), and `DATABASE_URL` must carry no query string, because pg lets URL ssl options override the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
+| `DATABASE_POOL_MAX` | Pool size per process, 1 to 50, default 10. Vercel sets 3: each serverless instance has its own pool. |
 
-Only `src/main.ts` and the `src/scripts/*` entry points read the environment or the system
-clock. Everything else gets them through `createApp(deps)`.
+Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
+environment or the system clock. Everything else gets them through `createApp(deps)`.
+Both servers build the app with `createServer(env, clock)` (`src/server.ts`), which checks
+the runtime login before it serves.
 
 ## Auth
 
@@ -92,3 +96,77 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`; anything else is `conflict`),
 `Internal` 500 with no internal detail. Each code has one fixed `message`.
+
+## Hosted deploy
+
+Projects, URLs and refs are listed in the root `README.md`, "Hosting". Every step is
+owner-run from the repo root. Credentials reach the scripts only through the environment,
+for example `zsvault run --env NAME=<vault id> -- <command>`, never argv or a file in the repo.
+Hosted URLs use the Supavisor pooler `aws-0-us-east-1.pooler.supabase.com`, user
+`<role>.<ref>`, database `postgres`, and no query string:
+port 5432 (session mode) for roles, migrations, seed and backups; port 6543 (transaction
+mode) for the API. The scripts check the host, role and ref (`src/hosted.ts`) and verify TLS
+against the pinned Supabase Root 2021 CA.
+
+1. **Roles, once per project.** As the project's `postgres` login, with
+   `ZS_MIGRATOR_PASSWORD` and `ZS_RUNTIME_PASSWORD` (32+ characters) in the environment:
+   `psql "host=… port=5432 user=postgres.<ref> dbname=postgres sslmode=require" -X -f supabase/hosted/bootstrap-roles.sql`.
+   It creates `zs_migrator` (LOGIN CREATEROLE; owns every table it creates) and `zs_runtime`
+   (LOGIN, member of `authenticated` only), creates `btree_gist`, and asserts that neither
+   role is superuser, BYPASSRLS or REPLICATION. A rerun rotates both passwords.
+2. **Back up, dry-run, apply.** Take a `pg_dump -Fc` of `public`, `zs_internal` and
+   `extensions` into `~/Backups/zs-business/`, then, with `ZS_TARGET_REF` and
+   `MIGRATOR_DATABASE_URL` (zs_migrator, port 5432):
+   ```sh
+   mise exec -- pnpm --filter @zs/api db:hosted-migrate --dry-run
+   mise exec -- pnpm --filter @zs/api db:hosted-migrate --apply --backup <dump> --receipt <file.json>
+   ```
+   `--apply` dry-runs first, refuses an empty backup, and fails if the applied set differs
+   from the dry run. The receipt holds migration names, checksums, the login's attributes and
+   the backup's size and sha256, never credentials. `--migrations <dir>` points at another
+   directory, for rehearsing an upgrade from a partial set. Receipts go outside the repo.
+3. **Seed (fake data only).** `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432)
+   and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
+   migrate and prints ids and counts only.
+4. **Tokens.** Until M2a auth lands, the dashboard calls the API with one static owner token
+   (`ZS_API_TOKEN`), HS256, issuer `https://api.zerosumsolutions.com/pilot`, at most 30 days
+   (the API's `JWT_MAX_TTL_SECONDS=2592000`). Mint it straight into the vault; the script
+   refuses to print to a terminal:
+   `JWT_SECRET=… JWT_ISSUER=… ZS_TOKEN_TENANT_ID=… ZS_TOKEN_SUBJECT=… ZS_TOKEN_TTL_SECONDS=2592000 pnpm --filter @zs/api token:mint | zsvault add <id>`.
+   To rotate, mint a new token, set it as the dashboard's `ZS_API_TOKEN` for that target, and
+   redeploy the dashboard. Rotating `JWT_SECRET` invalidates every token at once.
+5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
+   upload), with `VERCEL_TOKEN` in the environment:
+   ```sh
+   VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ \
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # API
+   VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_uTGH5yuyXfr6w9lAihGj1HcDxSdp \
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # dashboard
+   ```
+   The API builds with `pnpm build:vercel` (`scripts/build-vercel.mjs`): esbuild bundles
+   `src/vercel.ts` into one Node 24 function under `.vercel/output` (Build Output API).
+   API env per target: `DATABASE_URL` (zs_runtime, port 6543), `DATABASE_CA_CERT`,
+   `DATABASE_POOL_MAX=3`, `JWT_SECRET`, `JWT_ISSUER`, `JWT_MAX_TTL_SECONDS=2592000`.
+   Dashboard env per target: `ZS_API_URL`, `ZS_API_TOKEN`, `DASHBOARD_ACCESS_CODE`,
+   `DASHBOARD_SESSION_SECRET`, `DASHBOARD_TRUST_PROXY=1`. Both set
+   `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel uses the pinned pnpm.
+6. **Check.** `pnpm --filter @zs/api check:hosted` runs the negative checks against one
+   project and its deploys and exits 1 on any failure: unprivileged runtime login, migrator
+   refused at runtime, every SET ROLE / SET SESSION AUTHORIZATION escape refused, forced RLS
+   and owner on every tenant table, two-tenant denial in SQL, over HTTP and through the
+   dashboard proxy, 200 concurrent pooled transactions and 120 concurrent HTTP requests with
+   no crossover, bad tokens 401, and the Data API reading nothing. Its header lists the
+   environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication on preview.
+
+Hosted settings that the scripts do not manage:
+- The Data API (PostgREST) exposes only `graphql_public`; tenant tables are not reachable
+  through it even before RLS.
+- Supabase Auth: signups disabled, custom SMTP through Resend (`smtp.resend.com:465`, a
+  sending-only key for `mail.zerosumsolutions.com`), site URL and redirect allow list set to
+  the dashboard origin. GoTrue cannot set Reply-To, so the email text names
+  devin@zerosumsolutions.com.
+- The API project has no Vercel Authentication (its callers are the dashboard and MCP
+  clients, which present a bearer token). Dashboard previews are protected; pass the
+  `x-vercel-protection-bypass` header for automated checks.
+- The dashboard's sign-in attempt limiter is in memory, so on Vercel each serverless
+  instance counts on its own; the pilot access code must stay long and random.
