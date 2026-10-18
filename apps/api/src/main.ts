@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { serve } from "@hono/node-server";
 import { Pool } from "pg";
-import { createScopedDatabase } from "@zs/db";
+import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { createApp } from "./app.js";
 import { createHs256Verifier } from "./auth.js";
 import { parseServerEnv } from "./config.js";
@@ -12,6 +12,10 @@ const env = parseServerEnv(process.env);
 const clock = { now: () => new Date() };
 // DATABASE_URL must log in as the unprivileged runtime role (for example zs_runtime).
 const pool = new Pool({ connectionString: env.databaseUrl, max: 10 });
+await assertRuntimeLogin(pool).catch(async (error: unknown) => {
+  await pool.end();
+  throw error;
+});
 const app = createApp({
   verifier: createHs256Verifier(env.jwtSecret, { clock }),
   clock,

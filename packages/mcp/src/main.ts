@@ -6,7 +6,7 @@ import process from "node:process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Pool } from "pg";
 import { z } from "zod";
-import { createScopedDatabase } from "@zs/db";
+import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { createMcpServer } from "./server.js";
 
 const env = z.object({
@@ -15,6 +15,10 @@ const env = z.object({
   ZS_ACTOR_ID: z.uuid(),
 }).parse(process.env);
 const pool = new Pool({ connectionString: env.DATABASE_URL, max: 4 });
+await assertRuntimeLogin(pool).catch(async (error: unknown) => {
+  await pool.end();
+  throw error;
+});
 const server = createMcpServer({
   db: createScopedDatabase(pool),
   clock: { now: () => new Date() },
