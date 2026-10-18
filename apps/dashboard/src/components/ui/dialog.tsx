@@ -2,21 +2,28 @@
 
 import { X } from "@phosphor-icons/react";
 import { Dialog as DialogPrimitive } from "radix-ui";
-import type { ComponentProps, ReactNode } from "react";
+import { useRef, type ComponentProps, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
 export const DialogClose = DialogPrimitive.Close;
 
-/** Bottom sheet on phones, centered panel from 640px up. */
+/**
+ * Bottom sheet on phones, centered panel from 640px up. Our sheets open from state, not a
+ * Radix Trigger, so Radix has nothing to refocus on close: the sheet remembers the control
+ * that had focus when it opened and returns focus there.
+ */
 export function DialogContent({
   className,
   children,
   title,
   description,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
   ...props
 }: ComponentProps<typeof DialogPrimitive.Content> & { title: string; description?: ReactNode }) {
+  const opener = useRef<HTMLElement | null>(null);
   return (
     <DialogPrimitive.Portal>
       <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-fg/30 data-[state=open]:animate-enter" />
@@ -28,6 +35,20 @@ export function DialogContent({
         )}
         {...(description ? {} : { "aria-describedby": undefined })}
         {...props}
+        onOpenAutoFocus={(event) => {
+          // Runs before focus moves into the sheet, so this is still the opener.
+          const active = document.activeElement;
+          opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+          onOpenAutoFocus?.(event);
+        }}
+        onCloseAutoFocus={(event) => {
+          onCloseAutoFocus?.(event);
+          const target = opener.current;
+          opener.current = null;
+          if (event.defaultPrevented || !target?.isConnected) return;
+          event.preventDefault();
+          target.focus({ preventScroll: true });
+        }}
       >
         <div className="flex items-start justify-between gap-4 border-b border-border-soft px-4 pt-4 pb-3 sm:px-6">
           <div>

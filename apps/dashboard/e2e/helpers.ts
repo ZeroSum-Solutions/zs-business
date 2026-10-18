@@ -62,3 +62,14 @@ export async function openBookingOnFirstOpenDay(page: Page): Promise<{ dialog: L
   await expect(slots.first()).toBeVisible();
   return { dialog, slots };
 }
+
+/** The element is on screen and nothing (the bottom tabs, the top bar) covers its center. */
+export async function expectUnobscured(target: Locator, label = "element") {
+  await expect(target).toBeInViewport();
+  const hit = await target.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return { ok: top !== null && (top === element || element.contains(top)), covering: top?.outerHTML.slice(0, 120) ?? null };
+  });
+  expect(hit.ok, `${label} is covered by ${hit.covering}`).toBe(true);
+}

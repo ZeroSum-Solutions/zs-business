@@ -3,11 +3,21 @@
 
 @layer base {
   html {
+    /* Keep scrolled-to and focused content clear of the phone's sticky top bar and fixed
+       tab bar; from lg up there is neither. */
+    scroll-padding-top: calc(var(--topbar-height) + 8px);
+    scroll-padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom) + 8px);
     background: var(--bg);
     color: var(--fg);
     font-family: var(--font-body);
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
+  }
+  @media (min-width: 64rem) {
+    html {
+      scroll-padding-top: 0;
+      scroll-padding-bottom: 0;
+    }
   }
   /* Fieldsets default to min-inline-size: min-content, so a sideways-scrolling row inside
      one (the booking Day chips) widened the sheet body and shifted it off its padding. */

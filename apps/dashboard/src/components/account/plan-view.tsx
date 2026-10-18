@@ -2,7 +2,7 @@
 
 import { Check, CheckCircle } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,6 +17,20 @@ export function PlanView() {
   const queryClient = useQueryClient();
   const plan = usePlan();
   const [confirming, setConfirming] = useState(false);
+  // The step's button replaces the one just pressed, so focus follows it; focusing also
+  // scrolls it clear of the phone tab bar (see scroll-padding in globals.css).
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const stepChanged = useRef(false);
+  useEffect(() => {
+    if (!stepChanged.current) return;
+    stepChanged.current = false;
+    (confirming ? confirmRef : cancelRef).current?.focus();
+  }, [confirming]);
+  const goToStep = (next: boolean) => {
+    stepChanged.current = true;
+    setConfirming(next);
+  };
   const cancel = useMutation({
     mutationFn: () => api.cancelPlan(),
     onSuccess: (updated) => {
@@ -81,14 +95,14 @@ export function PlanView() {
                 </p>
                 {cancel.isError ? <ErrorNote error={cancel.error} /> : null}
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  <Button variant="danger" onClick={() => cancel.mutate()} disabled={cancel.isPending} aria-busy={cancel.isPending}>Confirm cancel</Button>
-                  <Button variant="ghost" onClick={() => setConfirming(false)}>Keep my plan</Button>
+                  <Button ref={confirmRef} variant="danger" onClick={() => cancel.mutate()} disabled={cancel.isPending} aria-busy={cancel.isPending}>Confirm cancel</Button>
+                  <Button variant="ghost" onClick={() => goToStep(false)}>Keep my plan</Button>
                 </div>
               </div>
             ) : (
               <div className="space-y-3">
                 <p className="text-sm text-muted">No calls, no forms. Two taps and you are done.</p>
-                <Button variant="danger-outline" onClick={() => setConfirming(true)}>Cancel plan</Button>
+                <Button ref={cancelRef} variant="danger-outline" onClick={() => goToStep(true)}>Cancel plan</Button>
               </div>
             )}
           </Card>
