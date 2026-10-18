@@ -1,0 +1,185 @@
+/*
+ * Theme: the one place design tokens live.
+ * Values come from Mish "Neutral Product" (design-systems/neutral-product/tokens.css,
+ * Apache-2.0, ours). Components use the Tailwind names in @theme below, never raw hex.
+ */
+:root {
+  /* Surface */
+  --bg: #f8f8f7;
+  --surface: #ffffff;
+  --surface-warm: #f0f0ee;
+  /* Foreground */
+  --fg: #16171a;
+  --fg-2: #3a3c41;
+  --muted: #55585f;
+  --meta: #65686f;
+  /* Border */
+  --border: #dedfdb;
+  --border-soft: #ebebe8;
+  --border-strong: #878a90;
+  /* Accent */
+  --accent: #1e5a78;
+  --accent-on: #ffffff;
+  --accent-hover: #194c66;
+  --accent-active: #153f55;
+  /* Semantic */
+  --success: #1d7348;
+  --warn: #8a5300;
+  --danger: #b3261e;
+  /* Typography: fonts */
+  --font-display: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* Typography: scale */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 36px;
+  --text-4xl: 48px;
+  /* Typography: leading and tracking */
+  --leading-body: 1.55;
+  --leading-tight: 1.2;
+  --tracking-display: -0.015em;
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  /* Section rhythm */
+  --section-y-desktop: 96px;
+  --section-y-tablet: 72px;
+  --section-y-phone: 48px;
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 9999px;
+  /* Elevation */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: 0 1px 2px rgba(22, 23, 26, 0.06), 0 4px 12px rgba(22, 23, 26, 0.06);
+  /* Focus: inner gap in the surface color, outer ring in the accent */
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+  /* Motion */
+  --motion-fast: 140ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.23, 1, 0.32, 1);
+  /* Layout */
+  --container-max: 1200px;
+  --container-gutter-desktop: 32px;
+  --container-gutter-tablet: 24px;
+  --container-gutter-phone: 16px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111214;
+  --surface: #191a1d;
+  --surface-warm: #212226;
+  --fg: #ededeb;
+  --fg-2: #cfd0cd;
+  --muted: #a9abb0;
+  --meta: #979a9f;
+  --border: #2d2f33;
+  --border-soft: #242629;
+  --border-strong: #6f727a;
+  --accent: #6cb4d9;
+  --accent-on: #0b1820;
+  --accent-hover: #86c2e2;
+  --accent-active: #9dcee8;
+  --success: #5cc995;
+  --warn: #e2ab4a;
+  --danger: #f0857a;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111214;
+    --surface: #191a1d;
+    --surface-warm: #212226;
+    --fg: #ededeb;
+    --fg-2: #cfd0cd;
+    --muted: #a9abb0;
+    --meta: #979a9f;
+    --border: #2d2f33;
+    --border-soft: #242629;
+    --border-strong: #6f727a;
+    --accent: #6cb4d9;
+    --accent-on: #0b1820;
+    --accent-hover: #86c2e2;
+    --accent-active: #9dcee8;
+    --success: #5cc995;
+    --warn: #e2ab4a;
+    --danger: #f0857a;
+    --elev-ring: 0 0 0 1px var(--border);
+    --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
+    --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+  }
+}
+
+/* Dashboard additions on top of the Mish tokens. */
+:root {
+  --tabbar-height: 64px;
+  --topbar-height: 56px;
+  --sidebar-width: 248px;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-warm: var(--surface-warm);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-meta: var(--meta);
+  --color-border: var(--border);
+  --color-border-soft: var(--border-soft);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-on: var(--accent-on);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
+  --color-success: var(--success);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-body);
+  --font-display: var(--font-display);
+  --font-mono: var(--font-mono);
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+  --text-3xl: var(--text-3xl);
+  --leading-body: var(--leading-body);
+  --leading-tight: var(--leading-tight);
+  --tracking-display: var(--tracking-display);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-pill: var(--radius-pill);
+  --shadow-ring: var(--elev-ring);
+  --shadow-raised: var(--elev-raised);
+  --shadow-focus: var(--focus-ring);
+  --ease-standard: var(--ease-standard);
+  --container-content: var(--container-max);
+}

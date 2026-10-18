@@ -1,0 +1,8 @@
+/next-env.d.ts
+/.next-live/
+/e2e/__screenshots__/
+/test-results/
+/playwright-report/
+
+# The root "Icon?" rule (macOS Icon\r files) also matches icons/ on case-insensitive disks.
+!/public/icons/

@@ -1,0 +1,42 @@
+"use client";
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect, useState, type ReactNode } from "react";
+import { ToastProvider } from "@/components/ui/toast";
+import { isApiError } from "@/lib/api";
+import { ApiProvider } from "@/lib/api/react";
+import { SessionProvider } from "@/lib/session";
+
+export function Providers({ children }: { children: ReactNode }) {
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 30_000,
+            refetchOnWindowFocus: false,
+            // Conflicts, auth and validation errors will not fix themselves on retry.
+            retry: (count, error) => count < 2 && (!isApiError(error) || error.kind === "network" || error.kind === "server"),
+          },
+          mutations: { retry: false },
+        },
+      }),
+  );
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) {
+      // A new build ID is a new worker script, so each deploy refreshes the offline copy.
+      navigator.serviceWorker.register(`/sw.js?v=${encodeURIComponent(process.env.NEXT_PUBLIC_BUILD_ID ?? "dev")}`).catch(() => undefined);
+    }
+  }, []);
+
+  return (
+    <ApiProvider>
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider>
+          <ToastProvider>{children}</ToastProvider>
+        </SessionProvider>
+      </QueryClientProvider>
+    </ApiProvider>
+  );
+}
