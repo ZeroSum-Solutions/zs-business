@@ -1,17 +1,24 @@
 /**
  * Same-origin proxy from the dashboard to apps/api. The browser calls /api/v1/...; this
  * server adds the bearer token from a server-only env var, so the token never ships in
- * page JS. Only the booking and CRM routes pass, only GET and POST, and only from this
- * origin: the token is ambient here, so a cross-site page must not be able to spend it.
+ * page JS. Only a caller with a valid pilot session cookie (pilot-gate.ts) gets through,
+ * only to the booking and CRM routes, only with GET and POST, and only from this origin:
+ * the token is ambient here, so neither an anonymous caller nor a cross-site page may spend it.
  */
 import type { ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
+import { isSameOrigin } from "./origin";
+import { checkSession, pilotGateFromEnv, reportGateProblem, type PilotGateSetup } from "./pilot-gate";
+
+export { isSameOrigin } from "./origin";
 
 export interface ApiProxyConfig {
   /** apps/api base URL, e.g. http://localhost:8787. */
   apiUrl: string;
   /** Bearer JWT the server sends for the owner. */
   token: string;
+  /** The pilot gate; live mode refuses every request when it is not set up. */
+  gate: PilotGateSetup;
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
@@ -25,43 +32,29 @@ function reply(status: number, code: ApiErrorCode): Response {
   return Response.json(demoErrorBody(code), { status, headers: { "Cache-Control": "no-store" } });
 }
 
-/**
- * True unless the browser says the request came from another site or origin. The Origin is
- * compared with the host the browser asked for, not with request.url: Next builds that URL
- * from its own bind address (http://localhost:<port>), which differs from the browser's
- * host behind a reverse proxy or on 127.0.0.1. A cross-site page cannot set Host, and a
- * custom X-Forwarded-Host would need a CORS preflight this route never grants.
- */
-export function isSameOrigin(request: Request): boolean {
-  const site = request.headers.get("sec-fetch-site");
-  if (site !== null && site !== "same-origin") return false;
-  const origin = request.headers.get("origin");
-  if (origin === null) return true;
-  const forwarded = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
-  const host = forwarded || request.headers.get("host") || new URL(request.url).host;
-  try {
-    return new URL(origin).host === host.toLowerCase();
-  } catch {
-    return false;
-  }
-}
-
 /** Read the proxy settings from server env; null when the dashboard runs on demo data. */
 export function proxyConfigFromEnv(env: Record<string, string | undefined> = process.env): ApiProxyConfig | null {
   const apiUrl = env.ZS_API_URL?.trim();
   const token = env.ZS_API_TOKEN?.trim();
   if (!apiUrl || !token) return null;
-  return { apiUrl, token };
+  return { apiUrl, token, gate: pilotGateFromEnv(env) };
 }
 
 export async function proxyApiRequest(request: Request, path: readonly string[], config: ApiProxyConfig | null): Promise<Response> {
   if (!config) return reply(503, "Internal");
+  if (!config.gate.ok) {
+    reportGateProblem(config.gate.problem);
+    return reply(503, "Internal");
+  }
+  const gate = config.gate.config;
+  // Checked before anything else, so no anonymous request ever reaches the token.
+  if (checkSession(request, gate) !== "valid") return reply(401, "Unauthorized");
   if (request.method !== "GET" && request.method !== "POST") return reply(404, "NotFound");
   const [version, area, ...rest] = path;
   if (version !== "v1" || !area || !AREAS.has(area) || rest.length === 0 || !path.every((segment) => SEGMENT.test(segment))) {
     return reply(404, "NotFound");
   }
-  if (!isSameOrigin(request)) return reply(403, "Forbidden");
+  if (!isSameOrigin(request, gate.trustProxy)) return reply(403, "Forbidden");
 
   const headers = new Headers({ Authorization: `Bearer ${config.token}` });
   for (const name of REQUEST_HEADERS) {

@@ -41,7 +41,7 @@ test.describe("session and cache", () => {
     // Whatever registers while signed out is under no tenant.
     for (const key of await allKeys(page)) expect(key[0]).toBe("signed-out");
 
-    await page.getByRole("button", { name: "Sign in again" }).click();
+    await page.getByRole("link", { name: "Sign in", exact: true }).click();
     await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
     await expect(page.getByTestId("signed-out")).toHaveCount(0);
   });
@@ -54,7 +54,7 @@ test.describe("session and cache", () => {
     await page.getByRole("navigation", { name: "Main" }).filter({ visible: true }).getByRole("link", { name: "Customers" }).click();
     await expect(page.getByRole("heading", { level: 1, name: "Your session ended" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Sign in again" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Sign in again" })).toBeVisible();
     await expect.poll(() => cachedKeys(page)).toEqual([]);
   });
 });

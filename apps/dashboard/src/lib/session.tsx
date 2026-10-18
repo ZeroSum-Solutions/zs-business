@@ -16,7 +16,8 @@ export type Session =
   | { status: "loading" }
   | { status: "signed_in"; tenantId: string; userId: string }
   | { status: "signed_out"; reason: "expired" | "signed_out" }
-  | { status: "unavailable" };
+  /** `misconfigured`: live mode without the pilot gate's settings; the server refuses to serve. */
+  | { status: "unavailable"; misconfigured?: boolean };
 
 interface SessionValue {
   session: Session;
@@ -40,7 +41,15 @@ declare global {
 async function fetchSession(): Promise<Session> {
   try {
     const response = await fetch("/api/session", { cache: "no-store", credentials: "same-origin" });
-    if (response.status === 401) return { status: "signed_out", reason: "expired" };
+    if (response.status === 401) {
+      // No session cookie at all is "signed out"; a stale or forged one is an ended session.
+      const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
+      return { status: "signed_out", reason: body?.error === "signed_out" ? "signed_out" : "expired" };
+    }
+    if (response.status === 503) {
+      const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
+      return { status: "unavailable", misconfigured: body?.error === "misconfigured" };
+    }
     if (!response.ok) return { status: "unavailable" };
     const body = SessionBody.safeParse(await response.json());
     return body.success ? { status: "signed_in", ...body.data } : { status: "unavailable" };
@@ -68,7 +77,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback((reason: "expired" | "signed_out") => {
     setSession((current) => (current.status === "signed_out" ? current : { status: "signed_out", reason }));
-  }, []);
+    // The pilot session cookie is httpOnly, so only the server can clear it. The screen
+    // changes at once either way; a failed request leaves a cookie that still expires.
+    if (mode === "live" && reason === "signed_out") {
+      void fetch("/api/sign-out", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
+    }
+  }, [mode]);
 
   // Any 401 from a read or a write ends the session.
   useEffect(() => {

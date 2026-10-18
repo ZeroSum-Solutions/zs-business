@@ -4,7 +4,7 @@ import { CALENDAR_UNAVAILABLE, defaultMessage, demoErrorBody } from "../../src/l
 import { MAX_PAGES } from "../../src/lib/api/http-client";
 import { expectDialogInset, mainNav, openBookingOnFirstOpenDay, shot, viewportShot } from "../helpers";
 import { LIVE } from "./env";
-import { expect, test } from "./fixtures";
+import { accessCode, expect, signInRequest, test } from "./fixtures";
 
 const PREFIX = "live-";
 
@@ -97,6 +97,65 @@ test("renders all six areas from the live API", async ({ page }, info) => {
   expect(withAuth, "browser requests with an Authorization header").toEqual([]);
   const html = await page.content();
   expect(html).not.toContain(process.env.ZS_LIVE_TOKEN!);
+});
+
+test("refuses anonymous callers with 401, and never spends the token for them", async ({ request }, info) => {
+  test.skip(info.project.name !== "desktop", "API-only check; one project is enough");
+  // No Cookie, Authorization or Origin: the request that used to read every contact.
+  for (const path of ["/api/v1/crm/contacts", "/api/v1/booking/resources", "/api/v1/crm/deals"]) {
+    const response = await request.get(`${LIVE.webUrl}${path}`);
+    expect(response.status(), path).toBe(401);
+    expect(((await response.json()) as { error: { code: string } }).error.code, path).toBe("Unauthorized");
+  }
+  expect((await request.get(`${LIVE.webUrl}/api/session`)).status()).toBe(401);
+  const forged = await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`, { headers: { Cookie: "zs_dashboard_session=v1.9999999999.abc.def" } });
+  expect(forged.status()).toBe(401);
+  // A bearer token from the caller is no way in either.
+  const bearer = await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`, { headers: { Authorization: `Bearer ${process.env.ZS_LIVE_TOKEN}` } });
+  expect(bearer.status()).toBe(401);
+
+  const wrong = await request.post(`${LIVE.webUrl}/api/sign-in`, { headers: { Origin: LIVE.webUrl }, data: { code: "not-the-access-code" } });
+  expect(wrong.status()).toBe(401);
+  expect(wrong.headers()["set-cookie"]).toBeUndefined();
+  await signInRequest(request);
+  expect((await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`)).status()).toBe(200);
+  expect((await request.get(`${LIVE.webUrl}/api/session`)).status()).toBe(200);
+});
+
+test("signs an anonymous visitor in through /sign-in, and out again", async ({ anonymousPage: page }, info) => {
+  await page.goto("/customers");
+  await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toHaveCount(0);
+  const link = page.getByRole("link", { name: "Sign in", exact: true });
+  await expect(link).toHaveAttribute("href", "/sign-in?next=%2Fcustomers");
+  await link.click();
+  await expect(page.getByRole("heading", { level: 1, name: "Sign in to Halden & Rowe" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Main" })).toHaveCount(0);
+  await shot(page, "18-sign-in", info.project.name, PREFIX);
+
+  await page.getByLabel("Access code").fill("not-the-access-code");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("main").getByRole("alert")).toHaveText("That code is not right. Check it and try again.");
+  await expect(page.getByLabel("Access code")).toHaveAttribute("aria-invalid", "true");
+
+  await page.getByLabel("Access code").fill(accessCode());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL(/\/customers$/);
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toBeVisible();
+  const session = (await page.context().cookies()).find((cookie) => cookie.name === "zs_dashboard_session");
+  expect(session?.httpOnly).toBe(true);
+  expect(session?.sameSite).toBe("Strict");
+  expect(session?.path).toBe("/");
+  expect(await page.evaluate(() => document.cookie)).not.toContain("zs_dashboard_session");
+
+  // Sign out clears the cookie on the server, so this browser is refused again.
+  await page.getByRole("button", { name: "Account menu" }).filter({ visible: true }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
+  await expect.poll(async () => (await page.context().cookies()).some((cookie) => cookie.name === "zs_dashboard_session")).toBe(false);
+  expect((await page.request.get("/api/v1/crm/contacts")).status()).toBe(401);
+  await page.reload();
+  await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
 });
 
 test("books a slot, then shows the conflict when another person took the time", async ({ page, request }, info) => {
@@ -201,12 +260,20 @@ test("refuses tokens with the wrong role, no issuer or too long a lifetime", asy
   }
   expect((await resources(process.env.ZS_LIVE_TOKEN!)).status()).toBe(200);
 
-  // The dashboard's proxy holds the owner token, so it must refuse other sites.
+  // The dashboard's proxy holds the owner token, so it must refuse other sites, even for a
+  // signed-in browser (SameSite=Strict already keeps the cookie off cross-site requests).
+  await signInRequest(request);
   const crossSite = await request.post(`${LIVE.webUrl}/api/v1/crm/contacts`, {
     headers: { Origin: "https://evil.example", "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
     data: { email: "evil@example.com" },
   });
   expect(crossSite.status()).toBe(403);
+  // Without DASHBOARD_TRUST_PROXY=1 a caller's X-Forwarded-Host does not count as the host.
+  const forgedHost = await request.post(`${LIVE.webUrl}/api/v1/crm/contacts`, {
+    headers: { Origin: "https://evil.example", "X-Forwarded-Host": "evil.example", "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
+    data: { email: "evil@example.com" },
+  });
+  expect(forgedHost.status()).toBe(403);
   const sameOrigin = await request.get(`${LIVE.webUrl}/api/v1/booking/resources`);
   expect(sameOrigin.status()).toBe(200);
 });

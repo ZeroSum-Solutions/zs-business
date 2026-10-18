@@ -41,8 +41,11 @@ loopback only). Its global setup (`e2e/live/global-setup.ts`):
 3. starts `@zs/api` on port 8798 as `zs_runtime` with `JWT_ISSUER` set,
    `JWT_MAX_TTL_SECONDS=3600` and `JWT_CLOCK_SKEW_SECONDS=60`, the production defaults;
 4. builds the dashboard into `.next-live/` with `ZS_API_URL` and the owner token as
-   `ZS_API_TOKEN` (server-only), fails if the build output holds any token or the JWT
-   secret, and serves it on `127.0.0.1:3218`;
+   `ZS_API_TOKEN` (server-only), and serves it on `127.0.0.1:3218` with a random
+   `DASHBOARD_ACCESS_CODE` and `DASHBOARD_SESSION_SECRET` for this run (given to `next start`
+   only, not the build). It fails if the build output holds any token, the JWT secret, the
+   access code or the session secret. Every test's `page` signs in through `/sign-in` first
+   (`e2e/live/fixtures.ts`); `anonymousPage` and the bare `request` context never do;
 5. snapshots the seeded bookings, contacts and deals into a `zs_e2e` schema. Before each
    test the `seededRows` fixture (`e2e/live/fixtures.ts`, `e2e/live/reset.ts`) deletes
    rows added since and restores every deal's stage and revision, so tests do not depend
@@ -56,9 +59,12 @@ variable. So a `RUNTIME_DATABASE_URL` in your shell cannot reach the seed or the
 
 The live run also checks that the API refuses the 7-day seed token and tokens with the
 wrong role, no issuer, no `iat` or a lifetime one second over the cap. It checks that the
-browser makes no request to the API origin and sends no `Authorization` header, that the
-proxy refuses a cross-site POST, that slots for an unknown calendar answer 403 with the
-same body the demo adapter sends, and that a booking whose answer was dropped is retried
+browser makes no request to the API origin and sends no `Authorization` header, that an
+anonymous caller, a forged cookie and a caller's own bearer token all get 401 from the proxy
+and `/api/session`, that a visitor signs in at `/sign-in` and out again (the cookie is
+httpOnly and `SameSite=Strict`, and the proxy refuses the browser after sign-out), that the
+proxy refuses a cross-site POST and a forged `X-Forwarded-Host`, that
+slots for an unknown calendar answer 403 with the same body the demo adapter sends, and that a booking whose answer was dropped is retried
 with the same `Idempotency-Key` and replayed by the API.
 
 The tests make the conflicting writes (a booking for the chosen time, a re-save of a deal)
@@ -82,14 +88,31 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   `apps/api`. Both variables are server-only; the build only learns
   `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET and POST to `/v1/booking/*` and
   `/v1/crm/*`, only `Accept`, `Content-Type` and `Idempotency-Key`, refuses cross-site
-  callers (`Origin`, `Sec-Fetch-Site`) and non-JSON POSTs, and answers `no-store`.
+  callers and non-JSON POSTs, and answers `no-store`. A request whose `Sec-Fetch-Site` is
+  present and not `same-origin` is refused, and so is an `Origin` that is not the request's
+  `Host`. `X-Forwarded-Host` counts instead of `Host` only with `DASHBOARD_TRUST_PROXY=1`.
+- Pilot gate (`src/lib/server/pilot-gate.ts`, `src/lib/server/sign-in.ts`): live mode
+  serves only a browser that signed in at `/sign-in` with the shared access code. Live mode
+  needs `DASHBOARD_ACCESS_CODE` (16+ characters) and `DASHBOARD_SESSION_SECRET` (32+
+  characters); while either is missing or short, the proxy, `/api/session` and sign-in
+  answer 503 and the server log says which. `POST /api/sign-in` compares the code in
+  constant time and sets `zs_dashboard_session`: httpOnly, `SameSite=Strict`, `Path=/`,
+  `Secure` over https, valid for `DASHBOARD_SESSION_TTL_SECONDS` (default 12 hours). The
+  value is an expiry and a nonce, HMAC-signed with a key made from the session secret and
+  the access code, so changing either signs everyone out. Without a valid cookie the proxy
+  and `/api/session` answer 401 and never attach the token. Wrong codes are rate limited in
+  memory: 5 per address and 30 in total per 15 minutes, then 429 with `Retry-After`, even
+  for the right code. Without a trusted proxy the per-address key can be forged, so the
+  total limit is the real bound. "Sign out" posts `/api/sign-out`, which clears the cookie;
+  the signed-out screen links to `/sign-in?next=<page>`. Demo mode has no gate.
   `build` runs `scripts/bundle-secrets.ts`, which fails if `.next/static` or a prerendered
   page holds a JWT or the value of `ZS_API_TOKEN` or `JWT_SECRET`. See `.env.example`;
   put real values in `.env.local`, which is never committed. Request, response, page and
   error shapes all come from `@zs/contracts` (`http.ts`); calendars and pipeline stages
   come from `GET /v1/booking/resources` and `GET /v1/crm/pipelines`.
-  `TODO(auth)`: one server-side owner token is a pilot setup. Real sign-in replaces it
-  with the signed-in person's token, kept in an httpOnly session on this server.
+  `TODO(auth)`: one server-side owner token behind a shared access code is a pilot setup.
+  Real sign-in replaces both with the signed-in person's own token, kept in an httpOnly
+  session on this server.
 - `ZS_API_URL` unset: an in-memory demo adapter serves made-up data for
   "Halden & Rowe Fine Jewelry", including the booking and deal conflicts. Changes reset
   on reload. In demo mode `window.__zsDemo` exposes `bookAsSomeoneElse` and
@@ -112,8 +135,8 @@ to an `ApiError` kind and shows plain copy, not the server message. A 409 with
 `concurrent_update` is a changed deal (`isDealChanged`): the board reloads it. A 429 is
 `rate_limited` and is never retried. A 401 is `unauthorized`: the session ends.
 
-Session: `GET /api/session` returns the server's `{ tenantId, userId }` (401 when signed
-out). Every query key starts with that `tenantId`, and queries wait for it
+Session: `GET /api/session` returns the server's `{ tenantId, userId }` (401 without a
+valid pilot cookie: `signed_out` when there is none, `expired` when it is stale or forged). Every query key starts with that `tenantId`, and queries wait for it
 (`useKeys()` in `src/lib/queries.ts`, `src/lib/session.tsx`). Any 401 or "Sign out"
 clears the query cache and shows the signed-out screen. API reads use `cache: "no-store"`.
 

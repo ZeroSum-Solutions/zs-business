@@ -1,7 +1,7 @@
 import { WarningCircle } from "@phosphor-icons/react/ssr";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { isApiError } from "@/lib/api";
+import { isApiError, readEnvConfig } from "@/lib/api";
 import { SampleBadge } from "./sample";
 
 export function Skeleton({ className }: { className?: string }) {
@@ -26,7 +26,7 @@ export function ErrorNote({ error, retry, message: override }: { error: unknown;
       <div className="flex-1">
         <p>{message}</p>
         {signedOut ? (
-          <button type="button" onClick={() => window.location.assign("/")} className="mt-2 min-h-11 font-medium text-accent underline-offset-4 hover:underline">
+          <button type="button" onClick={() => window.location.assign(readEnvConfig().mode === "live" ? "/sign-in" : "/")} className="mt-2 min-h-11 font-medium text-accent underline-offset-4 hover:underline">
             Sign in again
           </button>
         ) : retry ? (

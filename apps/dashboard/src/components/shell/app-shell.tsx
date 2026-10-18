@@ -34,6 +34,16 @@ export function AppShell({ children }: { children: ReactNode }) {
   const unread = useInboxCount();
   const { mode } = useApiRuntime();
 
+  // Sign-in stands alone: no navigation into areas the visitor cannot open yet.
+  if (pathname === "/sign-in") {
+    return (
+      <main id="main" className="mx-auto min-h-dvh w-full max-w-content px-4 pt-5 sm:px-6 lg:px-8">
+        <div className="pt-2"><Brand /></div>
+        {children}
+      </main>
+    );
+  }
+
   return (
     <div className="relative min-h-dvh lg:pl-[var(--sidebar-width)]">
       <a href="#main" className="sr-only z-[70] rounded-sm bg-surface focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:inline-flex focus:min-h-11 focus:items-center focus:px-4">

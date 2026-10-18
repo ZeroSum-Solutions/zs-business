@@ -7,6 +7,8 @@
  * and the default one-hour lifetime cap. The seed's 7-day token is only a source of the demo
  * principal; the dashboard server gets a one-hour token for that principal as ZS_API_TOKEN
  * and adds it in its /api proxy. The browser never sees a token: the build is scanned for one.
+ * The proxy serves only a browser signed in through /sign-in: each run gets a random
+ * DASHBOARD_ACCESS_CODE and DASHBOARD_SESSION_SECRET, given to `next start` only, not the build.
  *
  * Children never inherit the shell's environment (see child-env.ts): each gets an allowlist
  * plus what is set here, and every database URL must name this run's zs_e2e_* database.
@@ -217,14 +219,19 @@ export default async function globalSetup() {
     await waitFor(`${LIVE.apiUrl}/healthz`, api, "api", 30_000);
 
     // ZS_API_URL and ZS_API_TOKEN are server-only: the dashboard's /api proxy reads them.
-    const webEnv = envFor({
+    const webSettings = {
       NEXT_DIST_DIR: ".next-live",
       ZS_API_URL: LIVE.apiUrl,
       ZS_API_TOKEN: ownerToken,
       NEXT_TELEMETRY_DISABLED: "1",
-    });
-    await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: webEnv });
-    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, token, jwtSecret]);
+    };
+    const buildEnv = envFor(webSettings);
+    // The pilot gate's settings are read at request time, so only the server gets them.
+    const accessCode = randomBytes(18).toString("base64url");
+    const sessionSecret = randomBytes(32).toString("hex");
+    const webEnv = envFor({ ...webSettings, DASHBOARD_ACCESS_CODE: accessCode, DASHBOARD_SESSION_SECRET: sessionSecret });
+    await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: buildEnv });
+    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, token, jwtSecret, accessCode, sessionSecret]);
     if (leaks.length > 0) {
       throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);
     }
@@ -236,6 +243,7 @@ export default async function globalSetup() {
     process.env.ZS_LIVE_TOKEN = ownerToken;
     process.env.ZS_LIVE_OTHER_TOKEN = otherToken;
     process.env.ZS_LIVE_REFUSED_TOKENS = JSON.stringify(refusedTokens);
+    process.env.ZS_LIVE_ACCESS_CODE = accessCode;
     // Superuser URL for this run's database only; reset.ts checks the name before using it.
     process.env.ZS_LIVE_RESET_DB_URL = databaseUrl.href;
   } catch (error) {
