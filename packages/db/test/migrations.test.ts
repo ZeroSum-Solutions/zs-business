@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,81 @@ import { asService } from "../src/scoped.js";
 import { withTestDatabase } from "../src/testing.js";
 
 const migrations = new URL("../../../supabase/migrations/", import.meta.url);
+
+/**
+ * Migrations shipped on main, with the checksum the runner records when it applies them.
+ * A database migrated at main holds these rows, so an edit to one fails every upgrade with
+ * "Applied migration changed". Change the schema in a new migration instead. Add an entry
+ * when a migration lands on main; never edit one.
+ */
+const shipped: Record<string, string> = {
+  "20261017150322_shared_actions.sql": "365f66a76d36be9b93b77a5fee56cc059709d9092ecbc399f26439cb9bac576b",
+  "20261017160000_dispatcher_boundary.sql": "e41a17d1a0d0af604d92d4f983e25e38280e2c10234d25a07cd2fecba1a708ed",
+  "20261017170000_booking.sql": "a58d0d558bb560fbccc61a15726ad628132caefa77781a1414b9e142cd62d093",
+  "20261017170100_crm.sql": "4b90ad716bce286e447d56c84edbb11b2d33dbbc8ff1b69c494219086e583ec9",
+};
+const checksum = async (name: string) =>
+  createHash("sha256").update(await readFile(new URL(name, migrations), "utf8")).digest("hex");
+
+it("keeps every shipped migration byte for byte", async () => {
+  const actual: Record<string, string> = {};
+  for (const name of Object.keys(shipped)) actual[name] = await checksum(name);
+  expect(actual).toEqual(shipped);
+});
+
+/** Names, owners, grants, settings and definitions of everything the migrations create. */
+async function schemaState(pool: Pool) {
+  const queries = {
+    functions: `SELECT p.oid::regprocedure::text AS fn, p.proowner::regrole::text AS owner, p.prosecdef,
+      p.proconfig, p.proacl::text, pg_get_functiondef(p.oid) AS body
+      FROM pg_proc p WHERE p.pronamespace='public'::regnamespace ORDER BY 1`,
+    relations: `SELECT c.relname, c.relkind, c.relowner::regrole::text AS owner, c.relacl::text,
+      c.relrowsecurity, c.relforcerowsecurity FROM pg_class c
+      WHERE c.relnamespace='public'::regnamespace ORDER BY 1`,
+    columns: `SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod) AS type, a.attnotnull,
+      a.attidentity, a.attgenerated, pg_get_expr(d.adbin, d.adrelid) AS default, a.attacl::text
+      FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
+      LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+      WHERE c.relnamespace='public'::regnamespace AND a.attnum > 0 AND NOT a.attisdropped ORDER BY 1,2`,
+    constraints: `SELECT conrelid::regclass::text AS rel, conname, pg_get_constraintdef(oid) AS def
+      FROM pg_constraint WHERE connamespace='public'::regnamespace ORDER BY 1,2`,
+    indexes: "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY 1",
+    policies: `SELECT tablename, policyname, permissive, roles::text, cmd, qual, with_check
+      FROM pg_policies WHERE schemaname='public' ORDER BY 1,2`,
+    triggers: `SELECT tgrelid::regclass::text AS rel, tgname, pg_get_triggerdef(oid) AS def
+      FROM pg_trigger WHERE NOT tgisinternal ORDER BY 1,2`,
+    schemas: "SELECT nspname, nspowner::regrole::text AS owner, nspacl::text FROM pg_namespace WHERE nspname IN ('public','zs_internal') ORDER BY 1",
+  };
+  const state: Record<string, unknown[]> = {};
+  for (const [key, sql] of Object.entries(queries)) state[key] = (await pool.query(sql)).rows;
+  return state;
+}
+
+it("upgrades a database migrated at main to the same schema as a fresh install", async () => {
+  const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-main-"));
+  try {
+    for (const name of Object.keys(shipped)) {
+      // Fail here, not with a misleading pass, if a shipped file was edited.
+      expect(await checksum(name), name).toBe(shipped[name]);
+      await copyFile(new URL(name, migrations), join(atMain, name));
+    }
+    const upgraded = await withTestDatabase(async (database) => {
+      await migrate(database.pool);
+      const applied = await database.pool.query<{ name: string }>(
+        "SELECT name FROM zs_internal.schema_migrations ORDER BY name",
+      );
+      expect(applied.rows.map((row) => row.name)).toEqual(
+        (await readdir(migrations)).filter((name) => name.endsWith(".sql")).sort(),
+      );
+      return schemaState(database.pool);
+    }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
+    const fresh = await withTestDatabase((database) => schemaState(database.pool));
+    expect(upgraded.functions).toHaveLength(5);
+    expect(upgraded).toEqual(fresh);
+  } finally {
+    await rm(atMain, { recursive: true, force: true });
+  }
+}, 30000);
 
 it("the full chain applies as a non-superuser CREATEROLE migrator and hands functions to their owner roles", async () => {
   await withTestDatabase(async (database) => {
@@ -30,12 +105,20 @@ it("the full chain applies as a non-superuser CREATEROLE migrator and hands func
 });
 
 it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requires", async () => {
-  const statements: string[] = [];
-  for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql"))) {
+  // Each CREATE ROLE sits behind IF NOT EXISTS, so only a role's first one in migration
+  // order ever runs. The shipped 20261017160000 still names NO* attributes; 20261017155900
+  // creates zs_dispatcher before it.
+  const first: Record<string, string> = {};
+  for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql")).sort()) {
     const source = await readFile(new URL(name, migrations), "utf8");
-    statements.push(...(source.match(/CREATE ROLE zs_\w+[^;]*;/g) ?? []));
+    for (const statement of source.match(/CREATE ROLE zs_\w+[^;]*;/g) ?? []) {
+      first[statement.split(" ")[2]!] ??= statement;
+    }
   }
-  expect(statements).toEqual(["CREATE ROLE zs_dispatcher NOLOGIN;", "CREATE ROLE zs_function_owner NOLOGIN;"]);
+  expect(first).toEqual({
+    zs_dispatcher: "CREATE ROLE zs_dispatcher NOLOGIN;",
+    zs_function_owner: "CREATE ROLE zs_function_owner NOLOGIN;",
+  });
 });
 
 /** Applies migrations before 20261018090000, stores one resource, then runs the rest as the migrator. */

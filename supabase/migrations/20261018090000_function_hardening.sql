@@ -46,7 +46,7 @@ ALTER FUNCTION public.booking_overrides_valid(jsonb) SET search_path = pg_catalo
 -- whichever role ran the migration (a superuser locally, postgres on Supabase). It is
 -- NOLOGIN and standalone, so no runtime login can assume it. The SECURITY DEFINER
 -- function stays with zs_dispatcher (20261017160000). CREATE ROLE names NOLOGIN only, as
--- there: supautils refuses SUPERUSER, REPLICATION or BYPASSRLS even as NO*; the check
+-- in 20261017155900: supautils refuses SUPERUSER, REPLICATION or BYPASSRLS even as NO*; the check
 -- below asserts every attribute.
 DO $$ BEGIN
   BEGIN
@@ -61,7 +61,7 @@ DO $$ BEGIN
     RAISE EXCEPTION 'zs_function_owner must be an unprivileged standalone NOLOGIN role';
   END IF;
   -- ALTER ... OWNER needs SET ROLE on the new owner; a non-superuser migrator (Supabase
-  -- postgres) can be a member without it. PostgreSQL 15 has no SET privilege (see 20261017160000).
+  -- postgres) can be a member without it. PostgreSQL 15 has no SET privilege (see 20261017155900).
   IF current_setting('server_version_num')::int >= 160000 THEN
     IF NOT (pg_has_role(current_user, 'zs_function_owner', 'SET') AND pg_has_role(current_user, 'zs_function_owner', 'USAGE')) THEN
       EXECUTE format('GRANT zs_function_owner TO %I WITH INHERIT TRUE, SET TRUE', current_user);
