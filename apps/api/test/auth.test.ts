@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SignJWT } from "jose";
 import { apiErrorBodySchema } from "@zs/contracts";
+import { createHs256Verifier } from "../src/auth.js";
 import { signDevToken } from "../src/dev-token.js";
-import { call, createApiHarness, ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
+import { call, clock, createApiHarness, NOW, ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
 
 let h: ApiHarness;
 beforeAll(async () => { h = await createApiHarness(); });
@@ -52,6 +53,47 @@ describe("authentication", () => {
     const [, payload] = h.a.token.split(".");
     const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
     expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: `${header}.${payload}.` }));
+  });
+});
+
+const nowSeconds = Math.floor(Date.parse(NOW) / 1000);
+/** A correctly signed token for tenant A; each test overrides one claim. */
+function token(claims: Record<string, unknown>, { iat = nowSeconds as number | null, exp = nowSeconds + 600 } = {}) {
+  const jwt = new SignJWT({ role: "authenticated", app_metadata: { tenant_id: h.a.tenantId }, ...claims })
+    .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated").setExpirationTime(exp);
+  if (iat !== null) jwt.setIssuedAt(iat);
+  return jwt.sign(new TextEncoder().encode(SECRET));
+}
+
+describe("token claims", () => {
+  it("accepts the role authenticated and refuses any other role or none", async () => {
+    expect((await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}) })).status).toBe(200);
+    for (const role of ["service_role", "anon", undefined])
+      expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({ role }) }));
+  });
+
+  it("checks iss when an issuer is configured", async () => {
+    const issuer = "https://example.supabase.co/auth/v1";
+    const verifier = createHs256Verifier(SECRET, { clock, issuer });
+    await expect(verifier.verify(await token({ iss: issuer }))).resolves.toMatchObject({ tenantId: h.a.tenantId });
+    await expect(verifier.verify(await token({ iss: "https://evil.example/auth/v1" }))).rejects.toThrow("Invalid or missing");
+    await expect(verifier.verify(await token({}))).rejects.toThrow("Invalid or missing");
+  });
+
+  it("refuses a lifetime above the default hour, measured from iat or from now", async () => {
+    expect((await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { exp: nowSeconds + 3600 }) })).status).toBe(200);
+    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { exp: nowSeconds + 3601 }) }));
+    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { iat: nowSeconds - 3000, exp: nowSeconds + 700 }) }));
+    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { iat: null, exp: nowSeconds + 7200 }) }));
+    // A future iat cannot stretch the window past the limit.
+    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await token({}, { iat: nowSeconds + 7200, exp: nowSeconds + 7300 }) }));
+    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token: await signDevToken(SECRET, h.a, clock) }));
+  });
+
+  it("accepts the 7-day dev token when local config raises the limit", async () => {
+    const verifier = createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 7 * 24 * 3600 });
+    await expect(verifier.verify(await signDevToken(SECRET, h.a, clock))).resolves.toEqual({ tenantId: h.a.tenantId, actorId: h.a.actorId });
+    expect(() => createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 0 })).toThrow(/positive/);
   });
 });
 

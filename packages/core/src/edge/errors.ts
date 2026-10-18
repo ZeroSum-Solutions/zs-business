@@ -22,38 +22,52 @@ export function validationError(message: string, issues: readonly { path: readon
   });
 }
 
+/** Documented conflict reasons; anything else leaves the server as the generic "conflict". */
+const CONFLICT_REASONS = new Set([
+  "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
+  "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch",
+]);
+
+/** One fixed message per code, so database or handler text never reaches a response. */
+const MESSAGES: Readonly<Record<ApiErrorCode, string>> = {
+  ValidationFailed: "Invalid request",
+  Unauthorized: "Invalid or missing access token",
+  Forbidden: "Forbidden",
+  NotFound: "Not found",
+  Conflict: "Request conflicts with the current state",
+  Internal: "Internal error",
+};
+
 /** Only documented detail keys leave the server; SQL codes and constraint names stay inside. */
 function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<string, JsonValue> {
   const safe: Record<string, JsonValue> = {};
-  if (typeof details.reason === "string") safe.reason = details.reason;
+  if (typeof details.reason === "string") safe.reason = CONFLICT_REASONS.has(details.reason) ? details.reason : "conflict";
   else if (details.postgresCode === "23P01") safe.reason = "overlap";
   else safe.reason = "concurrent_update";
   if (typeof details.currentRevision === "number") safe.currentRevision = details.currentRevision;
   return safe;
 }
 
+const mapped = (status: ApiErrorStatus, code: ApiErrorCode, details: Record<string, JsonValue> = {}): MappedError =>
+  ({ status, body: apiErrorBody(code, MESSAGES[code], details) });
+
 /** Map any thrown value to one HTTP status and the shared error body. Unknown errors become 500. */
 export function mapError(error: unknown): MappedError {
-  if (!(error instanceof ActionError))
-    return { status: 500, body: apiErrorBody("Internal", "Internal error") };
+  if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":
-      return {
-        status: 400,
-        body: apiErrorBody("ValidationFailed", error.message,
-          Array.isArray(error.details.issues) ? { issues: error.details.issues } : {}),
-      };
+      return mapped(400, "ValidationFailed", Array.isArray(error.details.issues) ? { issues: error.details.issues } : {});
     case "TenantDenied":
-      return { status: 403, body: apiErrorBody("Forbidden", "Forbidden") };
+      return mapped(403, "Forbidden");
     case "NotFound":
-      return { status: 404, body: apiErrorBody("NotFound", error.message) };
+      return mapped(404, "NotFound");
     case "Conflict":
-      return { status: 409, body: apiErrorBody("Conflict", error.message, conflictDetails(error.details)) };
+      return mapped(409, "Conflict", conflictDetails(error.details));
     case "IdempotencyConflict":
-      return { status: 409, body: apiErrorBody("Conflict", error.message, { reason: "idempotency_key_reused" }) };
+      return mapped(409, "Conflict", { reason: "idempotency_key_reused" });
     case "BindingMismatch":
-      return { status: 409, body: apiErrorBody("Conflict", error.message, { reason: "binding_mismatch" }) };
+      return mapped(409, "Conflict", { reason: "binding_mismatch" });
     default:
-      return { status: 500, body: apiErrorBody("Internal", "Internal error") };
+      return mapped(500, "Internal");
   }
 }

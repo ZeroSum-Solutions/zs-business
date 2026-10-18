@@ -1,3 +1,4 @@
+import type { Pool } from "pg";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 
@@ -46,20 +47,40 @@ export function assertLocalDatabaseUrl(value: string): LocalDatabaseTarget {
   };
 }
 
+/** The pool's own destination must pass assertLocalDatabaseUrl: a connection string and no override fields. */
+export function assertLocalPool(pool: Pool): LocalDatabaseTarget {
+  const { connectionString, host, port, user, database } = pool.options;
+  if (typeof connectionString !== "string") refuse("database pool must be built from a checked connection string");
+  if ([host, port, user, database].some((value) => value !== undefined))
+    refuse("database pool must not override the connection string's host, port, user or database");
+  return assertLocalDatabaseUrl(connectionString);
+}
+
 /** Non-secret fields only, for logs: never the password or the raw URL. */
 export function describeDatabase(target: LocalDatabaseTarget): { host: string; port: string; database: string } {
   return { host: target.host, port: target.port, database: target.database };
 }
 
+/** The value shipped in .env.example; a server that still uses it must not start. */
+export const PLACEHOLDER_JWT_SECRET = "replace-with-a-local-dev-secret-of-32-or-more-chars";
+export const jwtSecretSchema = z.string()
+  .min(32, "JWT_SECRET must be at least 32 characters")
+  .refine((value) => value !== PLACEHOLDER_JWT_SECRET, "JWT_SECRET is still the .env.example placeholder");
+
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
-  JWT_SECRET: z.string().min(32, "JWT_SECRET must be at least 32 characters"),
+  JWT_SECRET: jwtSecretSchema,
+  JWT_ISSUER: z.string().min(1).optional(),
+  // Default one hour, like Supabase Auth. Local dev raises it to accept the 7-day seed token.
+  JWT_MAX_TTL_SECONDS: z.coerce.number().int().min(60).max(30 * 24 * 3600).default(3600),
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
   readonly jwtSecret: string;
+  readonly jwtIssuer: string | undefined;
+  readonly jwtMaxLifetimeSeconds: number;
   readonly allowedOrigins: string[];
   readonly port: number;
 }
@@ -72,6 +93,8 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
   return {
     databaseUrl: parsed.data.DATABASE_URL,
     jwtSecret: parsed.data.JWT_SECRET,
+    jwtIssuer: parsed.data.JWT_ISSUER,
+    jwtMaxLifetimeSeconds: parsed.data.JWT_MAX_TTL_SECONDS,
     allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
     port: parsed.data.PORT,
   };

@@ -28,6 +28,20 @@ describe("contacts", () => {
     expect(matched).toMatchObject({ created: false, contact: { id: created.contact.id, phone: "+12025550101" } });
   });
 
+  it("replays a contact create with its original status: 201 for a create, 200 for a match", async () => {
+    const createKey = randomUUID();
+    const body = { displayName: "Replay", email: "replay@example.com" };
+    const created = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: createKey, body });
+    const replayed = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: createKey, body });
+    expect([created.status, replayed.status]).toEqual([201, 201]);
+    expect(replayed.body).toEqual(created.body);
+    const matchKey = randomUUID();
+    const matched = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: matchKey, body });
+    const matchReplay = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: matchKey, body });
+    expect([matched.status, matchReplay.status]).toEqual([200, 200]);
+    expect(matchReplay.body).toEqual(matched.body);
+  });
+
   it("rejects a contact without any identity", async () => {
     const response = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: randomUUID(), body: { displayName: "X" } });
     expect(response.status).toBe(400);
@@ -56,6 +70,16 @@ describe("deal stage moves", () => {
     });
     expect(stale.status).toBe(409);
     expect(apiErrorBodySchema.parse(stale.body).error.details).toEqual({ reason: "stale_revision", currentRevision: 2 });
+  });
+
+  it("replays a deal create with its original 201", async () => {
+    const { contactId } = await contactAndDeal(h, h.a, "deal-replay@example.com");
+    const key = randomUUID();
+    const body = { contactId, pipelineId: h.a.pipelineId, stageId: h.a.stages[0], title: "Replay" };
+    const created = await call(h.app, "POST", "/v1/crm/deals", { token: h.a.token, key, body });
+    const replayed = await call(h.app, "POST", "/v1/crm/deals", { token: h.a.token, key, body });
+    expect([created.status, replayed.status]).toEqual([201, 201]);
+    expect(replayed.body).toEqual(created.body);
   });
 
   it("returns 400 for a non-UUID deal ID", async () => {

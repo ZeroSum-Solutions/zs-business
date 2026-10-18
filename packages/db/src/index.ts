@@ -7,3 +7,4 @@ export {
 } from "./scoped.js";
 export { migrate } from "./migrate.js";
 export * from "./schema/index.js";
+export { assertRuntimeLogin } from "./runtime-login.js";

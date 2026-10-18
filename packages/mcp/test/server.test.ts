@@ -66,7 +66,10 @@ afterAll(async () => {
 async function callTool(target: Client, name: string, args: Record<string, unknown> = {}) {
   const response = await target.callTool({ name, arguments: args }) as CallToolResult;
   const text = response.content[0]?.type === "text" ? response.content[0].text : "null";
-  return { isError: response.isError === true, value: JSON.parse(text) as unknown, raw: response };
+  const value = JSON.parse(text) as unknown;
+  // Success and error alike carry one object, as JSON text and as structuredContent.
+  expect(response.structuredContent).toEqual(value);
+  return { isError: response.isError === true, value, raw: response };
 }
 
 describe("MCP tools over an in-memory transport", () => {
@@ -129,16 +132,14 @@ describe("MCP tools over an in-memory transport", () => {
     expect(contacts.items.map((item) => item.id)).toEqual([contactId]);
     expect(deals.items.map((item) => item.id)).toEqual([dealId]);
     expect(bookings.items).toHaveLength(1);
-    const pipelines = (await callTool(client, "list_pipelines")).value as unknown[];
+    const pipelines = ((await callTool(client, "list_pipelines")).value as { items: unknown[] }).items;
     expect(pipelines.map((item) => pipelineSummarySchema.parse(item).id)).toEqual([tenant.pipelineId]);
-    const resources = (await callTool(client, "list_resources")).value as unknown[];
+    const resources = ((await callTool(client, "list_resources")).value as { items: unknown[] }).items;
     expect(resources.map((item) => resourceSummarySchema.parse(item))).toEqual([
       { id: tenant.resourceId, name: "Showroom", timeZone: "UTC", slotLengthMinutes: 60 },
     ]);
-    for (const tool of ["list_contacts", "list_deals", "list_bookings", "list_pipelines", "list_resources"]) {
-      const value = (await callTool(other, tool)).value as { items?: unknown[] } | unknown[];
-      expect(Array.isArray(value) ? value : value.items).toEqual([]);
-    }
+    for (const tool of ["list_contacts", "list_deals", "list_bookings", "list_pipelines", "list_resources"])
+      expect(((await callTool(other, tool)).value as { items: unknown[] }).items).toEqual([]);
   });
 
   it("another tenant's server cannot move this tenant's deal", async () => {

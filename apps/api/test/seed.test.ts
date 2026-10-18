@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, type TestDatabase } from "@zs/db/testing";
 import { assertLocalDatabaseUrl } from "../src/config.js";
@@ -12,7 +13,7 @@ afterAll(async () => { await database?.close(); });
 
 describe("demo seed", () => {
   it("seeds the jeweler tenant through the action path and is idempotent", async () => {
-    const deps = { service: database.servicePool, db: database.db, clock, generateId: randomUUID };
+    const deps = { service: database.servicePool, runtime: database.runtimePool, clock, generateId: randomUUID };
     const first = await seedDemo(deps);
     expect(first).toMatchObject({ contacts: 12, deals: 8 });
     expect(first.resources.map((resource) => resource.name)).toEqual(["Showroom appointments", "Repair intake"]);
@@ -27,6 +28,22 @@ describe("demo seed", () => {
     )).rows[0];
     // 12 contacts + 8 deals + 6 stage moves + 6 bookings, each recorded once.
     expect(counts).toEqual({ actions: 32, deals: 8, moved: 6 });
+  });
+
+  it("refuses remote or unchecked pools before any query", async () => {
+    const remote = new Pool({ connectionString: "postgres://postgres@db.abcd.supabase.co:5432/postgres" });
+    const overridden = new Pool({ connectionString: "postgres://postgres@127.0.0.1:55432/zs_dev", host: "db.example.com" });
+    const bare = new Pool({ host: "127.0.0.1", port: 55432, user: "postgres", database: "zs_dev" });
+    try {
+      const cases: [Pool, Pool][] = [
+        [remote, database.runtimePool], [database.servicePool, remote], [overridden, database.runtimePool], [bare, database.runtimePool],
+      ];
+      for (const [service, runtime] of cases)
+        await expect(seedDemo({ service, runtime, clock, generateId: randomUUID })).rejects.toThrow(/Refusing to run/);
+      for (const pool of [remote, overridden, bare]) expect(pool.totalCount).toBe(0);
+    } finally {
+      await Promise.all([remote.end(), overridden.end(), bare.end()]);
+    }
   });
 
   it("refuses non-loopback database URLs", () => {
@@ -59,7 +76,7 @@ describe("demo seed", () => {
   });
 
   it("prints the runtime database without credentials", async () => {
-    const summary = await seedDemo({ service: database.servicePool, db: database.db, clock, generateId: randomUUID });
+    const summary = await seedDemo({ service: database.servicePool, runtime: database.runtimePool, clock, generateId: randomUUID });
     const admin = assertLocalDatabaseUrl("postgres://postgres:admin-pw@127.0.0.1:55432/zs_dev");
     const runtime = runtimeTargetFor(admin, "postgres://zs_runtime:runtime-pw@127.0.0.1:55432/zs_dev");
     const report = formatSeedReport(summary, runtime);

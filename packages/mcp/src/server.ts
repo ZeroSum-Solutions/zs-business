@@ -27,16 +27,17 @@ export interface McpDependencies extends EdgeDependencies {
 const keyed = <Shape extends z.ZodRawShape>(shape: Shape) =>
   z.strictObject({ idempotencyKey: idempotencyKeySchema, ...shape });
 
-function result(value: unknown): CallToolResult {
-  const structured = { result: value } as Record<string, unknown>;
-  return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: structured };
+type ToolOutput = Record<string, unknown>;
+
+/** The same object goes in `structuredContent` and, as JSON, in `content[0].text`. */
+function result(value: ToolOutput, isError = false): CallToolResult {
+  return { ...(isError ? { isError } : {}), content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
 }
-async function run(work: () => Promise<unknown>): Promise<CallToolResult> {
+async function run(work: () => Promise<ToolOutput>): Promise<CallToolResult> {
   try {
     return result(await work());
   } catch (error) {
-    const { body } = mapError(error);
-    return { isError: true, content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body };
+    return result(mapError(error).body, true);
   }
 }
 
@@ -57,7 +58,7 @@ export function createMcpServer(deps: McpDependencies): McpServer {
   // The SDK lists each tool with its real JSON schema, but its own argument check would answer
   // a malformed call with bare "MCP error -32602" text. Calls are therefore dispatched below,
   // parsing with the same strict contracts schema so failures carry the ValidationFailed body.
-  function tool<Input extends z.ZodObject>(name: string, config: ToolConfig<Input>, handler: (args: z.output<Input>) => Promise<unknown>): void {
+  function tool<Input extends z.ZodObject>(name: string, config: ToolConfig<Input>, handler: (args: z.output<Input>) => Promise<ToolOutput>): void {
     const call = (args: unknown) => run(() => handler(parseInput(config.inputSchema, args ?? {}, `arguments for ${name}`)));
     // Not reached while the dispatcher below owns tools/call; kept equivalent for safety.
     server.registerTool(name, config, ((args: unknown) => call(args)) as ToolCallback<Input>);
@@ -99,7 +100,7 @@ export function createMcpServer(deps: McpDependencies): McpServer {
 
   tool("list_pipelines", {
     description: "List pipelines with their ordered stages.", inputSchema: z.strictObject({}), annotations: read,
-  }, () => session.listPipelines());
+  }, async () => ({ items: await session.listPipelines() }));
 
   tool("list_bookings", {
     description: "List bookings by start time; optionally one resource.",
@@ -108,7 +109,7 @@ export function createMcpServer(deps: McpDependencies): McpServer {
 
   tool("list_resources", {
     description: "List bookable resources (calendars).", inputSchema: z.strictObject({}), annotations: read,
-  }, () => session.listResources());
+  }, async () => ({ items: await session.listResources() }));
 
   tool("find_slots", {
     description: "Find free slots on a resource between two UTC instants (at most 31 days).",

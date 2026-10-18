@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { apiErrorBodySchema, bookingPageSchema, createBookingOutputSchema, slotsResponseSchema } from "@zs/contracts";
-import { call, createApiHarness, type ApiHarness } from "./helpers.js";
+import {
+  apiErrorBodySchema,
+  bookingPageSchema,
+  contactPageSchema,
+  createBookingOutputSchema,
+  dealPageSchema,
+  slotsResponseSchema,
+} from "@zs/contracts";
+import { call, contactAndDeal, createApiHarness, type ApiHarness } from "./helpers.js";
 
 let h: ApiHarness;
 beforeAll(async () => { h = await createApiHarness(); });
@@ -38,6 +45,32 @@ describe("POST /v1/booking/bookings", () => {
     expect(apiErrorBodySchema.parse(reused.body).error.details).toEqual({ reason: "idempotency_key_reused" });
   });
 
+  it("rejects a booking key reused on the contact and deal endpoints without writing", async () => {
+    const key = randomUUID();
+    expect((await book("2026-10-19T16:00:00.000Z", key)).status).toBe(201);
+    const { contactId } = await contactAndDeal(h, h.a, "reuse@example.com");
+    const [contactsBefore, dealsBefore] = await Promise.all([
+      call(h.app, "GET", "/v1/crm/contacts?limit=100", { token: h.a.token }),
+      call(h.app, "GET", "/v1/crm/deals?limit=100", { token: h.a.token }),
+    ]);
+    const contact = await call(h.app, "POST", "/v1/crm/contacts", {
+      token: h.a.token, key, body: { displayName: "Reuse", email: "reuse-key@example.com" },
+    });
+    const deal = await call(h.app, "POST", "/v1/crm/deals", {
+      token: h.a.token, key, body: { contactId, pipelineId: h.a.pipelineId, stageId: h.a.stages[0], title: "Reuse" },
+    });
+    for (const response of [contact, deal]) {
+      expect(response.status).toBe(409);
+      expect(apiErrorBodySchema.parse(response.body).error).toMatchObject({
+        code: "Conflict", details: { reason: "idempotency_key_reused" },
+      });
+    }
+    const contacts = contactPageSchema.parse((await call(h.app, "GET", "/v1/crm/contacts?limit=100", { token: h.a.token })).body);
+    const deals = dealPageSchema.parse((await call(h.app, "GET", "/v1/crm/deals?limit=100", { token: h.a.token })).body);
+    expect(contacts).toEqual(contactPageSchema.parse(contactsBefore.body));
+    expect(deals).toEqual(dealPageSchema.parse(dealsBefore.body));
+  });
+
   it("returns 400 with the error shape for a bad body", async () => {
     const response = await call(h.app, "POST", "/v1/booking/bookings", {
       token: h.a.token, key: randomUUID(), body: { resourceId: "not-a-uuid", startsAt: "tomorrow", extra: 1 },
@@ -71,15 +104,59 @@ describe("POST /v1/booking/bookings", () => {
   });
 });
 
+/** Another Monday 09:00-17:00 UTC calendar for tenant A: one-hour slots, no buffers. */
+async function addResource(stepMinutes = 60): Promise<string> {
+  const id = randomUUID();
+  await h.fixture.service((tx) => tx.query(
+    `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+       buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+     VALUES ($1,$2,'UTC',$3::jsonb,'[]'::jsonb,60,$4,0,0,0,20160)`,
+    [h.a.tenantId, id, JSON.stringify([{ weekday: 1, windows: [{ startMinute: 540, endMinute: 1020 }] }]), stepMinutes],
+  ));
+  return id;
+}
+
+describe("bookings across several resources", () => {
+  it("books two resources at the same instant", async () => {
+    const [first, second] = [await addResource(), await addResource()];
+    const responses = await Promise.all([first, second].map((resourceId) =>
+      book("2026-10-19T09:00:00.000Z", randomUUID(), h.a, resourceId)));
+    expect(responses.map((response) => response.status)).toEqual([201, 201]);
+    expect(responses.map((response) => createBookingOutputSchema.parse(response.body).result.resourceId)).toEqual([first, second]);
+  });
+
+  it("refuses an overlapping booking on the same resource", async () => {
+    // Half-hour steps make 10:30 a real slot, so only the 10:00 booking can block it.
+    const [resourceId, control] = [await addResource(30), await addResource(30)];
+    expect((await book("2026-10-19T10:00:00.000Z", randomUUID(), h.a, resourceId)).status).toBe(201);
+    const overlap = await book("2026-10-19T10:30:00.000Z", randomUUID(), h.a, resourceId);
+    expect(overlap.status).toBe(409);
+    expect(apiErrorBodySchema.parse(overlap.body).error).toMatchObject({ code: "Conflict", details: { reason: "slot_unavailable" } });
+    expect((await book("2026-10-19T10:30:00.000Z", randomUUID(), h.a, control)).status).toBe(201);
+  });
+
+  it("books abutting slots on the same resource", async () => {
+    const resourceId = await addResource();
+    const first = await book("2026-10-19T10:00:00.000Z", randomUUID(), h.a, resourceId);
+    const next = await book("2026-10-19T11:00:00.000Z", randomUUID(), h.a, resourceId);
+    expect([first.status, next.status]).toEqual([201, 201]);
+    expect(createBookingOutputSchema.parse(first.body).result.endsAt).toBe("2026-10-19T11:00:00.000Z");
+  });
+});
+
 describe("GET /v1/booking/slots", () => {
   it("lists free slots with local labels and hides booked ones", async () => {
+    // Book here, so the test does not depend on another test's booking.
+    expect((await book("2026-10-19T14:30:00.000Z")).status).toBe(201);
     const query = `resourceId=${h.a.resourceId}&from=2026-10-19T09:00:00.000Z&to=2026-10-19T17:00:00.000Z&zone=America/New_York`;
     const response = await call(h.app, "GET", `/v1/booking/slots?${query}`, { token: h.a.token });
     expect(response.status).toBe(200);
     const body = slotsResponseSchema.parse(response.body);
     expect(body.zone).toBe("America/New_York");
     const starts = body.slots.map((slot) => slot.startsAt);
-    expect(starts).not.toContain("2026-10-19T12:00:00.000Z");
+    // One-hour slots on a half-hour grid: 14:00 and 15:00 overlap the 14:30 booking too.
+    for (const taken of ["2026-10-19T14:00:00.000Z", "2026-10-19T14:30:00.000Z", "2026-10-19T15:00:00.000Z"])
+      expect(starts).not.toContain(taken);
     expect(starts).toContain("2026-10-19T09:00:00.000Z");
     expect(body.slots.find((slot) => slot.startsAt === "2026-10-19T09:00:00.000Z")?.localStart).toBe("2026-10-19T05:00:00");
   });
