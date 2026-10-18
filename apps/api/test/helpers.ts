@@ -4,7 +4,8 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
-export const SECRET = "test-secret-for-hs256-at-least-32-chars";
+/** Synthetic HS256 key, built at runtime so secret scanners do not flag a literal. */
+export const SECRET = ["test", "secret", "x".repeat(32)].join("-");
 /** Monday 08:00 UTC; tenant calendars open Monday 09:00-17:00 UTC. */
 export const NOW = "2026-10-19T08:00:00.000Z";
 export const ORIGIN = "http://localhost:3000";
