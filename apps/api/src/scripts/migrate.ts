@@ -4,11 +4,11 @@ import { Pool } from "pg";
 import { migrate } from "@zs/db";
 import { assertLocalDatabaseUrl } from "../config.js";
 
-const url = assertLocalDatabaseUrl(process.env.DATABASE_URL ?? "");
-const pool = new Pool({ connectionString: url.href, max: 1 });
+const target = assertLocalDatabaseUrl(process.env.DATABASE_URL ?? "");
+const pool = new Pool({ connectionString: target.connectionString, max: 1 });
 try {
   await migrate(pool);
-  console.log(`Migrations applied to ${url.pathname.slice(1)}`);
+  console.log(`Migrations applied to ${target.database}`);
 } finally {
   await pool.end();
 }

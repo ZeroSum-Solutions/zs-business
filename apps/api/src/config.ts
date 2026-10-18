@@ -1,18 +1,54 @@
+import { parse } from "pg-connection-string";
 import { z } from "zod";
 
-const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
+/** The only fields a plain postgres URL yields; anything else came from a query parameter. */
+const PLAIN_FIELDS = new Set(["user", "password", "host", "port", "database"]);
 
-/** Dev scripts may only touch a loopback database: never Supabase or any shared host. */
-export function assertLocalDatabaseUrl(value: string): URL {
-  let url: URL;
+export interface LocalDatabaseTarget {
+  /** The validated string, unchanged: pass exactly this to `pg`. */
+  readonly connectionString: string;
+  readonly host: string;
+  readonly port: string;
+  readonly database: string;
+  readonly user: string;
+}
+
+function refuse(reason: string): never {
+  throw new Error(`Refusing to run: ${reason}`);
+}
+
+/**
+ * Dev scripts may only touch a loopback database: never Supabase or any shared host.
+ * Checks the destination `pg` will actually use (it parses with pg-connection-string, where
+ * query parameters such as host, hostaddr and port override the URL), so any query string,
+ * unix-socket path or multi-host list is refused outright.
+ */
+export function assertLocalDatabaseUrl(value: string): LocalDatabaseTarget {
+  if (!/^postgres(ql)?:\/\//i.test(value)) refuse("database URL must be a postgres:// URL");
+  if (value.includes("?")) refuse("database URL must not carry query parameters");
+  let config: ReturnType<typeof parse>;
   try {
-    url = new URL(value);
+    config = parse(value);
   } catch {
-    throw new Error("DATABASE_URL is not a valid URL");
+    refuse("database URL is not a valid URL");
   }
-  if (!["postgres:", "postgresql:"].includes(url.protocol) || !LOOPBACK.has(url.hostname.toLowerCase()))
-    throw new Error("Refusing to run: DATABASE_URL must point at 127.0.0.1 or localhost");
-  return url;
+  const extra = Object.keys(config).filter((key) => config[key] !== undefined && !PLAIN_FIELDS.has(key));
+  if (extra.length > 0) refuse(`database URL must not set ${extra.join(", ")}`);
+  const host = (config.host ?? "").toLowerCase();
+  if (!LOOPBACK.has(host)) refuse("database URL must point at 127.0.0.1 or localhost");
+  return {
+    connectionString: value,
+    host,
+    port: config.port || "5432",
+    database: config.database ?? "",
+    user: config.user ?? "",
+  };
+}
+
+/** Non-secret fields only, for logs: never the password or the raw URL. */
+export function describeDatabase(target: LocalDatabaseTarget): { host: string; port: string; database: string } {
+  return { host: target.host, port: target.port, database: target.database };
 }
 
 const envSchema = z.object({
