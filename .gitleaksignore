@@ -1,2 +1,5 @@
 # Synthetic HS256 test key in an earlier commit of apps/api/test/helpers.ts; the file now builds it at runtime.
 c180a8ea6832d99f9583ee8e33d58e5a777b2760:apps/api/test/helpers.ts:generic-api-key:7
+# Synthetic fixtures in earlier commits of the dashboard tests; both files now build them at runtime.
+051dca1f33bd23cf0c8cd3e3b4185225a573b6d3:apps/dashboard/test/live-redact.test.ts:jwt:8
+47d6ad2ef331aee098734a9660e839442d188006:apps/dashboard/test/bundle-secrets.test.ts:generic-api-key:22
