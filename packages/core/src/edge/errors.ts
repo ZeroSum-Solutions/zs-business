@@ -26,6 +26,7 @@ export function validationError(message: string, issues: readonly { path: readon
 const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch",
+  "disclosure_changed", "already_reviewed",
 ]);
 
 /** One fixed message per code, so database or handler text never reaches a response. */
@@ -35,6 +36,7 @@ const MESSAGES: Readonly<Record<ApiErrorCode, string>> = {
   Forbidden: "Forbidden",
   NotFound: "Not found",
   Conflict: "Request conflicts with the current state",
+  RateLimited: "Too many requests",
   Internal: "Internal error",
 };
 

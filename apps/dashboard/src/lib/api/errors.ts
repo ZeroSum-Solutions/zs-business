@@ -101,6 +101,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   identity_mismatch: "That email or phone is already on another customer record.",
   idempotency_key_reused: "This request was already used for a different change.",
   concurrent_update: "Someone saved a change at the same moment. Try again.",
+  already_reviewed: "This website request was already reviewed.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -160,6 +161,7 @@ export const API_ERRORS: Readonly<Record<ApiErrorCode, { status: number; message
   Forbidden: { status: 403, message: "Forbidden" },
   NotFound: { status: 404, message: "Not found" },
   Conflict: { status: 409, message: "Request conflicts with the current state" },
+  RateLimited: { status: 429, message: "Too many requests" },
   Internal: { status: 500, message: "Internal error" },
 };
 

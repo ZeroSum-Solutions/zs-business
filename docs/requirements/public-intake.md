@@ -30,7 +30,7 @@ key, approval binding, state plus action plus outbox in one transaction. No othe
 action is reachable without an owner principal.
 
 **P-2. Tenant from the server, never from the body.** A booking page is addressed by a
-public booking key: `zsb1_` followed by 66 base64url characters that encode the tenant
+public booking key: `zsb1_` followed by 64 base64url characters that encode the tenant
 UUID (16 bytes), the page UUID (16 bytes) and a 16-byte HMAC-SHA-256 tag over
 `zsb1:<tenantId>:<pageId>` with the server secret `PUBLIC_BOOKING_KEY_SECRET`. The server
 verifies the tag in constant time before any database work, then opens a transaction

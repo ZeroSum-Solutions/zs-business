@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { bookingInstantSchema, bookingRecordSchema, bookingTimeZoneSchema } from "./booking.js";
+import { bookingInstantSchema, bookingTimeZoneSchema } from "./booking.js";
 import {
   contactRecordSchema,
   createOrFindContactInputSchema,
@@ -7,7 +7,9 @@ import {
   dealRecordSchema,
   moveDealStageInputSchema,
 } from "./crm.js";
+import { bookingSummarySchema } from "./intake.js";
 import { isPostgresText, jsonValueSchema } from "./json.js";
+import { pageSchema } from "./page.js";
 
 // The root module re-exports this one, so shared root schemas are not initialized yet here.
 const idSchema = z.uuid().toLowerCase();
@@ -91,17 +93,13 @@ export const slotsResponseSchema = z.strictObject({
 });
 export type SlotsResponse = z.infer<typeof slotsResponseSchema>;
 
-export const pageSchema = <Item extends z.ZodType>(item: Item) => z.strictObject({
-  items: z.array(item),
-  limit: z.number().int(),
-  offset: z.number().int(),
-  nextOffset: z.number().int().nullable(),
-});
+export { pageSchema } from "./page.js";
 export const contactPageSchema = pageSchema(contactRecordSchema);
 export type ContactPage = z.infer<typeof contactPageSchema>;
 export const dealPageSchema = pageSchema(dealRecordSchema);
 export type DealPage = z.infer<typeof dealPageSchema>;
-export const bookingPageSchema = pageSchema(bookingRecordSchema);
+/** Bookings as the owner's lists show them: each record plus its source and customer (public-intake.md P-12). */
+export const bookingPageSchema = pageSchema(bookingSummarySchema);
 export type BookingPage = z.infer<typeof bookingPageSchema>;
 
 export const pipelineSummarySchema = z.strictObject({
@@ -120,7 +118,7 @@ export type ResourceSummary = z.infer<typeof resourceSummarySchema>;
 
 /** One error body for every non-2xx response and every failed MCP tool call. */
 export const apiErrorCodeSchema = z.enum([
-  "ValidationFailed", "Unauthorized", "Forbidden", "NotFound", "Conflict", "Internal",
+  "ValidationFailed", "Unauthorized", "Forbidden", "NotFound", "Conflict", "RateLimited", "Internal",
 ]);
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 export const apiErrorBodySchema = z.strictObject({

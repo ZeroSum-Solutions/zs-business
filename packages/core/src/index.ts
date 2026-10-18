@@ -4,3 +4,14 @@ export { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "./c
 export * from "./edge/index.js";
 export { findSlots, listBookings, listResources } from "./reads/booking.js";
 export { listContacts, listDeals, listPipelines } from "./reads/crm.js";
+export {
+  intakeHandlers,
+  linkIntakeItem,
+  rejectIntakeItem,
+  requestPublicBooking,
+  signBookingKey,
+  verifyBookingKey,
+  type BookingKeySecrets,
+  type BookingPageRef,
+} from "./intake/index.js";
+export { listBookingPages, listIntakeItems } from "./reads/intake.js";

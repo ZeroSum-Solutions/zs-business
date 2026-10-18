@@ -3,6 +3,8 @@
 import {
   type BookingPage,
   type BookingRecord,
+  type BookingSummary,
+  type IntakeStatus,
   type ListBookingsQuery,
   type ResourceSummary,
   type SlotsQuery,
@@ -26,6 +28,13 @@ interface BookingRow {
   buffer_after_minutes: number;
   created_at: Date;
 }
+interface SummaryRow extends BookingRow {
+  source: "owner" | "website";
+  intake_item_id: string | null;
+  intake_status: IntakeStatus;
+  customer_contact_id: string | null;
+  customer_name: string | null;
+}
 
 const bookingRecord = (row: BookingRow): BookingRecord => ({
   id: row.id,
@@ -41,15 +50,30 @@ const bookingRecord = (row: BookingRow): BookingRecord => ({
   createdAt: row.created_at.toISOString(),
 });
 
+/** P-12: a website booking names its intake item; the customer is the contact once known. */
+const bookingSummary = (row: SummaryRow): BookingSummary => ({
+  ...bookingRecord(row),
+  source: row.source,
+  intakeItemId: row.intake_item_id,
+  customer: row.intake_item_id === null
+    ? null
+    : { contactId: row.customer_contact_id, name: row.customer_name, status: row.intake_status },
+});
+
 export async function listBookings(tx: Transaction, tenantId: string, query: ListBookingsQuery): Promise<BookingPage> {
-  const rows = (await tx.query<BookingRow>(
-    `SELECT id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
-            buffer_before_minutes, buffer_after_minutes, created_at
-       FROM bookings WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2)
-      ORDER BY starts_at, id LIMIT $3 OFFSET $4`,
+  const rows = (await tx.query<SummaryRow>(
+    `SELECT b.id, b.tenant_id, b.resource_id, b.starts_at, b.ends_at, b.occupied_starts_at, b.occupied_ends_at,
+            b.buffer_before_minutes, b.buffer_after_minutes, b.created_at, b.source, b.intake_item_id,
+            i.status AS intake_status, i.contact_id AS customer_contact_id,
+            coalesce(c.display_name, i.submitted_name) AS customer_name
+       FROM bookings b
+       LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id
+       LEFT JOIN crm_contacts c ON c.tenant_id = i.tenant_id AND c.id = i.contact_id
+      WHERE b.tenant_id=$1 AND ($2::uuid IS NULL OR b.resource_id=$2)
+      ORDER BY b.starts_at, b.id LIMIT $3 OFFSET $4`,
     [tenantId, query.resourceId ?? null, query.limit + 1, query.offset],
   )).rows;
-  return page(rows.map(bookingRecord), query);
+  return page(rows.map(bookingSummary), query);
 }
 
 export async function listResources(tx: Transaction, tenantId: string): Promise<ResourceSummary[]> {

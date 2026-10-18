@@ -66,8 +66,9 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         FROM pg_constraint k WHERE k.conrelid=$1::regclass AND k.contype='f'`, [table])).rows;
       let ready = true;
       for (const key of keys) {
-        // A nullable relationship need not be populated by a minimal fixture.
-        if (!key.columns.some((column) => column in row)) continue;
+        // A nullable relationship need not be populated by a minimal fixture. tenant_id is
+        // always set, so a composite key counts as required only through its other columns.
+        if (!key.columns.some((column) => column !== "tenant_id" && column in row)) continue;
         const referenced = tables.find((candidate) => `public.${quote(candidate.name)}` === key.table || candidate.name === key.table || quote(candidate.name) === key.table);
         const referenceTable = referenced ? `public.${quote(referenced.name)}` : key.table;
         const record = (await tx.query(`select ${key.references.map(quote).join(",")} from ${referenceTable} ${referenced ? "where tenant_id=$1" : ""} limit 1`, referenced ? [tenantId] : [])).rows[0] as Record<string, unknown> | undefined;
