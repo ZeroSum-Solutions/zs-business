@@ -22,6 +22,12 @@ export interface ScopedDatabase {
   ): Promise<T>;
 }
 
+// DISCARD ALL without its DEALLOCATE ALL: node-postgres caches the names of the prepared
+// statements it created on each connection, so deallocating them breaks later named queries.
+const SESSION_RESET =
+  "CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; " +
+  "SELECT pg_catalog.pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES";
+
 async function transaction<T>(
   pool: Pool,
   role: "authenticated" | "service_role",
@@ -67,6 +73,15 @@ async function transaction<T>(
     }
     throw error;
   } finally {
+    // Work may set session-scoped state (set_config(..., false), SET, temp objects) that a
+    // commit keeps; the next borrower must start clean. A failed reset discards the client.
+    if (!discard) {
+      try {
+        await client.query(SESSION_RESET);
+      } catch {
+        discard = true;
+      }
+    }
     client.release(discard);
   }
 }
