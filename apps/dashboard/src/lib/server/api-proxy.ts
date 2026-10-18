@@ -25,12 +25,25 @@ function reply(status: number, code: ApiErrorCode): Response {
   return Response.json(demoErrorBody(code), { status, headers: { "Cache-Control": "no-store" } });
 }
 
-/** True unless the browser says the request came from another site or origin. */
+/**
+ * True unless the browser says the request came from another site or origin. The Origin is
+ * compared with the host the browser asked for, not with request.url: Next builds that URL
+ * from its own bind address (http://localhost:<port>), which differs from the browser's
+ * host behind a reverse proxy or on 127.0.0.1. A cross-site page cannot set Host, and a
+ * custom X-Forwarded-Host would need a CORS preflight this route never grants.
+ */
 export function isSameOrigin(request: Request): boolean {
   const site = request.headers.get("sec-fetch-site");
   if (site !== null && site !== "same-origin") return false;
   const origin = request.headers.get("origin");
-  return origin === null || origin === new URL(request.url).origin;
+  if (origin === null) return true;
+  const forwarded = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  const host = forwarded || request.headers.get("host") || new URL(request.url).host;
+  try {
+    return new URL(origin).host === host.toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 /** Read the proxy settings from server env; null when the dashboard runs on demo data. */

@@ -72,6 +72,29 @@ describe("api proxy", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("judges the origin by the Host the browser used, not the URL Next builds", async () => {
+    // `next start --hostname 127.0.0.1` hands route handlers http://localhost:<port> URLs;
+    // behind a reverse proxy the URL is the internal address and X-Forwarded-Host is public.
+    const { calls, config } = recorder(201, {});
+    const fromLoopback = new Request("http://localhost:3218/api/v1/crm/contacts", {
+      method: "POST", body: "{}",
+      headers: { "Content-Type": "application/json", Host: "127.0.0.1:3218", Origin: "http://127.0.0.1:3218", "Sec-Fetch-Site": "same-origin" },
+    });
+    const behindProxy = new Request("http://localhost:3000/api/v1/crm/contacts", {
+      method: "POST", body: "{}",
+      headers: { "Content-Type": "application/json", Host: "localhost:3000", "X-Forwarded-Host": "app.example.com", Origin: "https://app.example.com" },
+    });
+    for (const request of [fromLoopback, behindProxy]) {
+      expect((await proxyApiRequest(request, ["v1", "crm", "contacts"], config)).status).toBe(201);
+    }
+    const spoofed = new Request("http://localhost:3218/api/v1/crm/contacts", {
+      method: "POST", body: "{}",
+      headers: { "Content-Type": "application/json", Host: "127.0.0.1:3218", Origin: "http://localhost:3218" },
+    });
+    expect((await proxyApiRequest(spoofed, ["v1", "crm", "contacts"], config)).status).toBe(403);
+    expect(calls).toHaveLength(2);
+  });
+
   it("only forwards the booking and CRM routes", async () => {
     const { calls, config } = recorder();
     for (const path of [["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"]]) {
