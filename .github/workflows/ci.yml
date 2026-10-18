@@ -28,6 +28,18 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Some hosted Supabase projects still run PostgreSQL 15; the migrations gate on version.
+      postgres15:
+        image: postgres:15
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       ZS_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:55432/postgres
     steps:
@@ -38,3 +50,7 @@ jobs:
       - run: pnpm -r test
       - run: pnpm --filter @zs/core test:booking
       - run: pnpm --filter @zs/core test:crm
+      - name: pnpm -r test (PostgreSQL 15)
+        run: pnpm -r test
+        env:
+          ZS_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:55433/postgres
