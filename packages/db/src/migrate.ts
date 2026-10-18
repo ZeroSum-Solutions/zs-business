@@ -2,10 +2,26 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import type { Pool } from "pg";
 
+export interface MigrateOptions {
+  /** Apply every pending migration inside the one transaction, then roll it back. */
+  readonly dryRun?: boolean;
+}
+export interface MigrationRecord {
+  readonly name: string;
+  readonly checksum: string;
+}
+
+/**
+ * Apply pending files from `directory` in one transaction under an advisory lock. Returns
+ * the migrations it applied (or, with `dryRun`, would have applied: they ran and were
+ * rolled back, so a dry run also proves they execute under this login).
+ */
 export async function migrate(
   pool: Pool,
   directory = new URL("../../../supabase/migrations/", import.meta.url),
-): Promise<void> {
+  options: MigrateOptions = {},
+): Promise<MigrationRecord[]> {
+  const applied: MigrationRecord[] = [];
   const client = await pool.connect();
   let discard = false;
   try {
@@ -41,8 +57,10 @@ export async function migrate(
         "INSERT INTO zs_internal.schema_migrations (name,checksum) VALUES ($1,$2)",
         [name, checksum],
       );
+      applied.push({ name, checksum });
     }
-    await client.query("COMMIT");
+    await client.query(options.dryRun ? "ROLLBACK" : "COMMIT");
+    return applied;
   } catch (error) {
     try {
       await client.query("ROLLBACK");
