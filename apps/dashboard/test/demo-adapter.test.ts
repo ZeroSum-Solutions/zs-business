@@ -1,0 +1,128 @@
+import { describe, expect, it } from "vitest";
+import { ApiError } from "../src/lib/api/errors";
+import { createDemoAdapter } from "../src/lib/api/demo/adapter";
+import { DEMO_PIPELINE, REPAIR_ID, SHOWROOM_ID } from "../src/lib/api/demo/seed";
+
+// Sunday 2026-10-18, 09:00 in New York.
+const NOW = new Date("2026-10-18T13:00:00.000Z");
+
+function adapter() {
+  let ids = 0;
+  return createDemoAdapter({
+    clock: { now: () => NOW },
+    newId: () => `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
+  });
+}
+
+const week = { from: "2026-10-19T04:00:00.000Z", to: "2026-10-26T04:00:00.000Z", zone: "America/New_York" };
+
+describe("demo adapter: booking", () => {
+  it("lists open slots inside open hours and outside existing bookings", async () => {
+    const api = adapter();
+    const { slots, timeZone } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
+    expect(timeZone).toBe("America/New_York");
+    expect(slots.length).toBeGreaterThan(10);
+    const booked = await api.listBookings({ resourceId: SHOWROOM_ID, from: week.from, to: week.to });
+    for (const booking of booked) {
+      expect(slots.some((slot) => slot.startsAt === booking.startsAt)).toBe(false);
+    }
+  });
+
+  it("books a free slot and removes it from the list", async () => {
+    const api = adapter();
+    const before = await api.getSlots({ resourceId: REPAIR_ID, ...week });
+    const slot = before.slots[0]!;
+    const record = await api.createBooking({ resourceId: REPAIR_ID, startsAt: slot.startsAt });
+    expect(record).toMatchObject({ resourceId: REPAIR_ID, startsAt: slot.startsAt, endsAt: slot.endsAt, status: "confirmed" });
+    expect(Date.parse(record.occupiedEndsAt) - Date.parse(record.endsAt)).toBe(record.bufferAfterMinutes * 60000);
+    const after = await api.getSlots({ resourceId: REPAIR_ID, ...week });
+    expect(after.slots.some((item) => item.startsAt === slot.startsAt)).toBe(false);
+  });
+
+  it("returns a 409 conflict when someone else took the slot first", async () => {
+    const api = adapter();
+    const { slots } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
+    const slot = slots[0]!;
+    api.bookAsSomeoneElse(SHOWROOM_ID, slot.startsAt);
+    const error = await api.createBooking({ resourceId: SHOWROOM_ID, startsAt: slot.startsAt }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ kind: "conflict", status: 409, code: "Conflict" });
+  });
+
+  it("only lets one of two concurrent creates for the same time win", async () => {
+    const api = adapter();
+    const { slots } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
+    const startsAt = slots[2]!.startsAt;
+    const results = await Promise.allSettled([
+      api.createBooking({ resourceId: SHOWROOM_ID, startsAt }),
+      api.createBooking({ resourceId: SHOWROOM_ID, startsAt }),
+    ]);
+    expect(results.filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((item) => item.status === "rejected");
+    expect((rejected as PromiseRejectedResult).reason).toMatchObject({ kind: "conflict" });
+  });
+
+  it("replays the same result for the same idempotency key and rejects a reused key", async () => {
+    const api = adapter();
+    const { slots } = await api.getSlots({ resourceId: SHOWROOM_ID, ...week });
+    const input = { resourceId: SHOWROOM_ID, startsAt: slots[1]!.startsAt, bookingId: "b8c2d4e6-1a3f-4b5c-9d7e-000000000777" };
+    const first = await api.createBooking(input, { idempotencyKey: "k-1" });
+    const replay = await api.createBooking(input, { idempotencyKey: "k-1" });
+    expect(replay).toEqual(first);
+    await expect(api.createBooking({ ...input, startsAt: slots[3]!.startsAt }, { idempotencyKey: "k-1" }))
+      .rejects.toMatchObject({ kind: "conflict", code: "IdempotencyConflict" });
+  });
+
+  it("rejects a time outside open hours as a validation error", async () => {
+    const api = adapter();
+    // Monday 03:00 in New York.
+    await expect(api.createBooking({ resourceId: SHOWROOM_ID, startsAt: "2026-10-19T07:00:00.000Z" }))
+      .rejects.toMatchObject({ kind: "validation", status: 400 });
+  });
+});
+
+describe("demo adapter: CRM", () => {
+  it("finds the existing customer for a known email instead of creating a duplicate", async () => {
+    const api = adapter();
+    const before = await api.listContacts();
+    const result = await api.createOrFindContact({ displayName: "Marguerite O.", email: "  Marguerite.Okafor@EXAMPLE.com ", phone: null });
+    expect(result.created).toBe(false);
+    expect(result.contact.displayName).toBe("Marguerite Okafor");
+    expect(await api.listContacts()).toHaveLength(before.length);
+  });
+
+  it("creates a new customer and finds them by search", async () => {
+    const api = adapter();
+    const result = await api.createOrFindContact({ displayName: "Lior Benzaquen", email: "lior.b@example.com", phone: "+1 (646) 555-0177" });
+    expect(result.created).toBe(true);
+    expect(result.contact.phone).toBe("+16465550177");
+    const found = await api.listContacts({ search: "benzaq" });
+    expect(found.map((item) => item.id)).toEqual([result.contact.id]);
+  });
+
+  it("rejects a contact with no email or phone", async () => {
+    const api = adapter();
+    await expect(api.createOrFindContact({ displayName: "No details", email: null, phone: null }))
+      .rejects.toMatchObject({ kind: "validation" });
+  });
+
+  it("moves a deal and bumps its revision", async () => {
+    const api = adapter();
+    const [deal] = await api.listDeals();
+    const moved = await api.moveDealStage({
+      dealId: deal!.id, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[4]!.id, expectedRevision: deal!.revision,
+    });
+    expect(moved.stageId).toBe(DEMO_PIPELINE.stages[4]!.id);
+    expect(moved.revision).toBe(deal!.revision + 1);
+  });
+
+  it("returns a 409 conflict for a stale revision", async () => {
+    const api = adapter();
+    const [deal] = await api.listDeals();
+    api.editDealElsewhere(deal!.id);
+    const error = await api.moveDealStage({
+      dealId: deal!.id, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[1]!.id, expectedRevision: deal!.revision,
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ kind: "conflict", status: 409, code: "Conflict", details: { currentRevision: deal!.revision + 1 } });
+  });
+});

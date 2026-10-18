@@ -1,0 +1,65 @@
+@import "tailwindcss";
+@import "../styles/theme.css";
+
+@layer base {
+  html {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    min-height: 100dvh;
+    font-size: var(--text-base);
+    line-height: var(--leading-body);
+  }
+  h1, h2, h3 {
+    line-height: var(--leading-tight);
+    font-weight: 600;
+    color: var(--fg);
+  }
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--accent), transparent 75%);
+  }
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility transition-quick {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-standard);
+}
+
+@keyframes enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@utility animate-enter {
+  animation: enter var(--motion-base) var(--ease-standard) both;
+}
+
+@keyframes pulse-soft {
+  50% { opacity: 0.55; }
+}
+
+@utility skeleton {
+  background: var(--surface-warm);
+  border-radius: var(--radius-sm);
+  animation: pulse-soft 1.4s ease-in-out infinite;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
