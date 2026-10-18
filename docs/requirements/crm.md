@@ -1,6 +1,10 @@
 # F2: CRM transaction slice
 
-Status: frozen requirements and interfaces; feature logic is not implemented.
+Status: implemented. The numbered rules below are the contract the code and tests
+follow. The three handlers, their wrappers, the schema and the migration ship in this
+repository. At the time of writing, `pnpm --filter @zs/core test:crm` runs 40 tests in
+five files (public examples, contact and deal acceptance, email uniqueness and the real
+Postgres seam), and all pass.
 This slice covers contact identity, consent storage, deal creation and stage moves.
 It provides no messaging, contact merge, general contact edit or pipeline editor.
 
@@ -179,8 +183,8 @@ raises `ValidationFailed` without reaching dispatch. Validate the returned envel
 with the matching output schema's `safeParse`; a parse failure raises
 `ValidationFailed`. Return the parsed envelope on success. The shared dispatcher raises
 `ValidationFailed` for a non-finite clock; the wrapper propagates every dispatcher error unchanged. The wrapper never re-dispatches; C-8's race
-recovery stays inside the handler transaction. Feature stubs register no handler;
-future composition roots supply handlers without changing the dispatcher or its types.
+recovery stays inside the handler transaction. `crmHandlers` registers the three handlers (C-23); composition roots supply
+them to `createDispatcher` without changing the dispatcher or its types.
 
 **C-18. Desired, target verification.** Action/target pairs are
 `crm.contact.create-or-find`/`contact`, `crm.deal.create`/`deal`, and
@@ -203,14 +207,14 @@ parents in the same transaction. Echoing unverified input is not ownership proof
 **C-19. Desired, atomic history and errors.** Contact/consent changes or deal
 changes, one action result and one outbox event commit together. Preserve shared
 `ValidationFailed`, `TenantDenied`, `BindingMismatch`, `IdempotencyConflict` and
-`Conflict` codes. `NotImplemented` marks the public stubs/unregistered actions.
+`Conflict` codes. `NotImplemented` marks an unregistered action.
 Exported error aliases describe typed domain errors; unexpected infrastructure
 errors still propagate. No failed command leaves partial consent, an incremented
 revision, a contact/deal row, action history or an outbox event.
 
-**C-20. Desired, schema ownership.** Implement schema in
-`packages/db/src/schema/crm.ts` and migrations in `supabase/migrations/*_crm.sql`.
-This scaffold adds neither. Use `timestamptz` for times and require these tables:
+**C-20. Desired, schema ownership.** The schema lives in
+`packages/db/src/schema/crm.ts` and the SQL in
+`supabase/migrations/20261017170100_crm.sql`. Use `timestamptz` for times and require these tables:
 
 | Table | Required columns and constraints |
 | --- | --- |
@@ -232,34 +236,32 @@ tenant FK, enabled and forced RLS, and tenant-matching `USING`/`WITH CHECK` poli
 All relationship constraints include the tenant. Runtime credentials cannot bypass
 RLS or write action/outbox history directly. Add two-tenant read/write denial tests
 under `zs_runtime`; a service-role test is insufficient. Use local Postgres or a
-Supabase branch for future integration tests and clean up their data.
+Supabase branch for integration tests and clean up their data.
 
-**C-22. Desired, public test scope.** Run seven ordinary feature tests, separate from
-baseline `test`. Public JSON examples show creation with normalized email, import
+**C-22. Desired, public test scope.** `test:crm` runs the CRM folder, separate from
+baseline `test`. Seven of its tests are the public examples described here. Public JSON examples show creation with normalized email, import
 preservation, split identity conflict, deal creation, a revision bump and a stale
 move. Write tests use a scripted bound dispatcher to check command/result/error
 forwarding; they are boundary examples and do not prove handler algorithms or
 database persistence. A seventh test in `packages/core/test/crm/integration.test.ts`
 uses the C-23/C-24 seam with the real `@zs/db/testing` database, two-tenant fixture
 and `zs_runtime` scoped database. It seeds a pipeline and stages with service-role
-SQL, calls `createOrFindContact`, and checks the committed contact. Setup runs
-inside the bound dispatch callback so the current wrapper stub fails with
-`NotImplemented` before accessing the absent feature tables. This is a template,
-not the acceptance set. All seven currently fail with `NotImplemented`. Later real
-Postgres acceptance must prove C-1, C-6 through C-16 and C-19 through C-21, including
-uniqueness races, RLS, concurrent moves, idempotency and rollback. Hidden tests
-exercise cases beyond these public examples. Never replace failures with skips,
-`todo`, expected-failure flags or assertions that a stub throws.
+SQL, calls `createOrFindContact`, and checks the committed contact. This is a
+template, not the acceptance set. All seven pass at the time of writing. Real Postgres
+acceptance lives in `packages/core/test/crm/contact.acceptance.test.ts`,
+`deal.acceptance.test.ts` and `email-uniqueness.test.ts`. It must keep proving C-1, C-6
+through C-16 and C-19 through C-21, including uniqueness races, RLS, concurrent moves,
+idempotency and rollback. Separate hidden tests may exercise cases beyond these public
+examples. Never replace failures with skips, `todo` or expected-failure flags.
 
 **C-23. Desired, handler export and composition.**
 `packages/core/src/crm/index.ts` exports
 `crmHandlers: Readonly<Record<string, ActionHandler>>`, keyed by action types
 `crm.contact.create-or-find`, `crm.deal.create` and `crm.deal.move-stage`.
 `ActionHandler` uses the default `DispatchConfig`; handlers require no config keys
-because all feature settings live in tables. The scaffold exports `{}` without
-registering handlers, so direct dispatch of an unregistered action raises the
-shared dispatcher's `NotImplemented`. When implemented, the map contains exactly
-those three keys and no other key, so it is disjoint from `bookingHandlers`.
+because all feature settings live in tables. The map contains exactly
+those three keys and no other key, so it is disjoint from `bookingHandlers`. Direct
+dispatch of an unregistered action raises the shared dispatcher's `NotImplemented`.
 Export `crmHandlers` through
 `packages/core/src/index.ts` as well. A server composes both features with
 `const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers })`.

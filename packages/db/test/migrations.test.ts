@@ -24,9 +24,12 @@ const shipped: Record<string, string> = {
   "20261017170000_booking.sql": "a58d0d558bb560fbccc61a15726ad628132caefa77781a1414b9e142cd62d093",
   "20261017170100_crm.sql": "4b90ad716bce286e447d56c84edbb11b2d33dbbc8ff1b69c494219086e583ec9",
   "20261018090000_function_hardening.sql": "104a8c4f9dd25a76eadd4500e92f524535967d153a6b4863ff623e7a6466dca2",
+  "20261018120000_booking_multi_resource.sql": "715a1a92788f566562c6cff962583a3ca7de2bce8f2d4789c483699641a6ba14",
 };
+/** Main before multi-resource booking (#3): the seventh shipped file is the only one missing. */
+const beforeMultiResource = Object.keys(shipped).filter((name) => name !== "20261018120000_booking_multi_resource.sql");
 /** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
-const beforeHardening = Object.keys(shipped).filter((name) =>
+const beforeHardening = beforeMultiResource.filter((name) =>
   !["20261017155900_dispatcher_owner_role.sql", "20261018090000_function_hardening.sql"].includes(name));
 const checksum = async (name: string) =>
   createHash("sha256").update(await readFile(new URL(name, migrations), "utf8")).digest("hex");
@@ -67,6 +70,7 @@ async function schemaState(pool: Pool) {
 
 it.each([
   ["main", Object.keys(shipped)],
+  ["main before multi-resource booking", beforeMultiResource],
   ["main before the hardening follow-ups", beforeHardening],
 ])("upgrades a database migrated at %s to the same schema as a fresh install", async (_, baseline) => {
   const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-main-"));
