@@ -1,4 +1,4 @@
-import { jwtVerify, type JWTVerifyGetKey } from "jose";
+import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { accessTokenClaimsSchema } from "@zs/contracts";
 import type { Principal } from "@zs/core";
 
@@ -18,20 +18,29 @@ export interface SupabaseTokenOptions {
   readonly clock: { now(): Date };
   /** Supabase access tokens carry aud "authenticated". */
   readonly audience?: string;
+  /** When set, the token's `iss` must equal it. */
   readonly issuer?: string;
+  /** Longest accepted token lifetime, `exp` minus `iat` (or now, if earlier or absent). Default 1 hour. */
+  readonly maxLifetimeSeconds?: number;
 }
+
+export const DEFAULT_MAX_TOKEN_LIFETIME_SECONDS = 3600;
 
 type Key = Uint8Array | JWTVerifyGetKey;
 
 /**
  * Verify like a Supabase Auth access token: signature, exp/nbf against the injected clock,
- * audience, then map `sub` to the actor and `app_metadata.tenant_id` to the tenant.
+ * audience, issuer when configured, `role = authenticated` and a bounded lifetime, then map
+ * `sub` to the actor and `app_metadata.tenant_id` to the tenant.
  * The key is either an HS256 secret or a JWKS resolver (`createRemoteJWKSet`) for ES256/RS256.
  */
 function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOptions): TokenVerifier {
+  const maxLifetime = options.maxLifetimeSeconds ?? DEFAULT_MAX_TOKEN_LIFETIME_SECONDS;
+  if (!Number.isSafeInteger(maxLifetime) || maxLifetime <= 0)
+    throw new Error("Maximum token lifetime must be a positive whole number of seconds");
   return {
     async verify(token) {
-      let payload: unknown;
+      let payload: JWTPayload;
       try {
         const verifyOptions = {
           algorithms,
@@ -46,6 +55,11 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
       } catch {
         throw new Unauthenticated();
       }
+      if (payload.role !== "authenticated") throw new Unauthenticated("Access token role must be authenticated");
+      // A future iat must not stretch the window, so measure from the earlier of iat and now.
+      const now = Math.floor(options.clock.now().getTime() / 1000);
+      const start = typeof payload.iat === "number" ? Math.min(payload.iat, now) : now;
+      if (payload.exp! - start > maxLifetime) throw new Unauthenticated("Access token lifetime is too long");
       const claims = accessTokenClaimsSchema.safeParse(payload);
       if (!claims.success) throw new Unauthenticated("Access token lacks a user or tenant claim");
       return { actorId: claims.data.sub, tenantId: claims.data.app_metadata.tenant_id };

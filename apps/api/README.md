@@ -14,15 +14,16 @@ psql postgres://postgres@127.0.0.1:55432/postgres -c 'CREATE DATABASE zs_dev'
 # 2. Apply supabase/migrations (packages/db/src/migrate.ts). Loopback URLs only.
 DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api db:migrate
 
-# 3. Seed the demo jeweler and print a 7-day dev JWT. It also runs migrations and makes sure
-#    the unprivileged zs_runtime login exists. JWT_SECRET must match the API's.
-DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev \
-JWT_SECRET=replace-with-a-local-dev-secret-of-32-or-more-chars \
-  mise exec -- pnpm --filter @zs/api seed:demo
-
-# 4. Start the API as the runtime role (see .env.example).
-cp apps/api/.env.example apps/api/.env   # then edit; or export the variables
+# 3. Make a local env file with a real secret; the API and seed refuse the placeholder.
+sed "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" apps/api/.env.example > apps/api/.env
 set -a; . apps/api/.env; set +a
+
+# 4. Seed the demo jeweler and print a 7-day dev JWT. It also runs migrations and makes sure
+#    the unprivileged zs_runtime login exists. JWT_SECRET must match the API's.
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api seed:demo
+
+# 5. Start the API as the runtime role. The example env sets JWT_MAX_TTL_SECONDS=604800 so the
+#    7-day dev token works; the default is one hour.
 mise exec -- pnpm --filter @zs/api start
 
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8787/v1/crm/contacts
@@ -41,7 +42,9 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | Variable | Meaning |
 |---|---|
 | `DATABASE_URL` | API: the runtime LOGIN role (`zs_runtime`), never a superuser. Scripts: the local admin URL. |
-| `JWT_SECRET` | HS256 secret for Supabase-style access tokens (32+ characters). |
+| `JWT_SECRET` | HS256 secret for Supabase-style access tokens (32+ characters). The `.env.example` placeholder is refused. |
+| `JWT_ISSUER` | Optional. When set, tokens must carry this `iss`. |
+| `JWT_MAX_TTL_SECONDS` | Longest accepted token lifetime, default 3600. Local dev sets 604800 so the 7-day seed token works for seed and dashboard e2e; production keeps the default. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
@@ -52,7 +55,9 @@ clock. Everything else gets them through `createApp(deps)`.
 ## Auth
 
 `Authorization: Bearer <JWT>`, verified like a Supabase Auth access token: signature, `exp`,
-`aud = authenticated`. `sub` is the actor and `app_metadata.tenant_id` is the tenant. HS256
+`aud = authenticated`, `role = authenticated`, `iss` when `JWT_ISSUER` is set, and a lifetime
+(`exp` minus `iat`, or minus now when `iat` is absent or later) of at most `JWT_MAX_TTL_SECONDS`.
+`sub` is the actor and `app_metadata.tenant_id` is the tenant. HS256
 uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing keys pass
 `createJwksVerifier(createRemoteJWKSet(new URL(".../auth/v1/.well-known/jwks.json")), { clock })`.
 

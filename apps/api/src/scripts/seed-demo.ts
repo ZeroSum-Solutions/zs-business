@@ -5,15 +5,16 @@ import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { Pool } from "pg";
 import { createScopedDatabase, migrate } from "@zs/db";
-import { assertLocalDatabaseUrl } from "../config.js";
+import { assertLocalDatabaseUrl, jwtSecretSchema } from "../config.js";
 import { signDevToken } from "../dev-token.js";
 import { seedDemo } from "../seed/demo.js";
 import { formatSeedReport, runtimeTargetFor } from "../seed/report.js";
 import { ensureRuntimeLogin } from "../seed/runtime-login.js";
 
 const adminTarget = assertLocalDatabaseUrl(process.env.DATABASE_URL ?? "");
-const jwtSecret = process.env.JWT_SECRET ?? "";
-if (jwtSecret.length < 32) throw new Error("Set JWT_SECRET (32+ characters) to the value the API uses");
+const secret = jwtSecretSchema.safeParse(process.env.JWT_SECRET ?? "");
+if (!secret.success) throw new Error(`Set JWT_SECRET to the value the API uses: ${secret.error.issues[0]?.message}`);
+const jwtSecret = secret.data;
 const runtimeTarget = runtimeTargetFor(adminTarget, process.env.RUNTIME_DATABASE_URL);
 
 const clock = { now: () => new Date() };
@@ -25,7 +26,7 @@ try {
   const summary = await seedDemo({ service: admin, db: createScopedDatabase(runtime), clock, generateId: randomUUID });
   const token = await signDevToken(jwtSecret, summary.principal, clock);
   console.log(formatSeedReport(summary, runtimeTarget));
-  console.log(`\nDev JWT (7 days, tenant ${summary.principal.tenantId}):\n${token}`);
+  console.log(`\nDev JWT (7 days, tenant ${summary.principal.tenantId}; the API accepts it only with JWT_MAX_TTL_SECONDS=604800):\n${token}`);
 } finally {
   await Promise.all([admin.end(), runtime.end()]);
 }

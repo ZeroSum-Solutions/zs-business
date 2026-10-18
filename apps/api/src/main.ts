@@ -17,7 +17,11 @@ await assertRuntimeLogin(pool).catch(async (error: unknown) => {
   throw error;
 });
 const app = createApp({
-  verifier: createHs256Verifier(env.jwtSecret, { clock }),
+  verifier: createHs256Verifier(env.jwtSecret, {
+    clock,
+    maxLifetimeSeconds: env.jwtMaxLifetimeSeconds,
+    ...(env.jwtIssuer === undefined ? {} : { issuer: env.jwtIssuer }),
+  }),
   clock,
   db: createScopedDatabase(pool),
   generateId: randomUUID,
