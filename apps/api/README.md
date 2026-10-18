@@ -48,6 +48,9 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | `JWT_CLOCK_SKEW_SECONDS` | How far a token's `iat` may lie ahead of the API's clock, 0 to 300, default 60. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
+| `DATABASE_POOL_MAX` | Runtime pool size, default 10. |
+| `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
+| `REQUEST_TIMEOUT_MS` | Longest time a `/v1` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
 
 Only `src/main.ts` and the `src/scripts/*` entry points read the environment or the system
@@ -68,7 +71,8 @@ uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing k
 
 | Method and path | Result |
 |---|---|
-| `GET /healthz` | `{ ok: true }`, no auth |
+| `GET /healthz` | `{ ok: true }`, no auth. Liveness: the process answers. |
+| `GET /readyz` | `{ ok: true }`, or 503 when a bounded `SELECT 1` fails. No auth. |
 | `GET /v1/booking/resources` | `{ items: ResourceSummary[] }` |
 | `GET /v1/booking/slots?resourceId&from&to[&zone]` | free slots; `from`/`to` are UTC instants with milliseconds, at most 31 days |
 | `GET /v1/booking/bookings?[resourceId&]limit&offset` | page of bookings |
@@ -91,4 +95,19 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`; anything else is `conflict`),
-`Internal` 500 with no internal detail. Each code has one fixed `message`.
+`Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
+one fixed `message`.
+
+## Database pool and request limits
+
+`main.ts` builds the runtime pool with `createRuntimePool` from `@zs/db`. A lost idle
+connection (a restart, failover or network drop) is logged as `Database pool error <SQLSTATE>`
+without the URL, at most 10 a minute, and the next request opens a new connection; the
+process does not exit. A request waits at most `DATABASE_CONNECT_TIMEOUT_MS` for a connection;
+when 50 requests already wait, the next is refused at once. Each `/v1` request has a deadline
+(`REQUEST_TIMEOUT_MS`) that also ends when the caller disconnects: its transaction then sends
+no further statement or `COMMIT` and rolls back, and the API answers 503 `Unavailable`. A
+statement already running stops at the 15-second statement timeout. Nothing is committed by a
+request that answers 503 before its `COMMIT`; a write whose commit raced the deadline replays
+when the caller retries with the same `Idempotency-Key`. The MCP server uses the same pool
+settings (4 connections).

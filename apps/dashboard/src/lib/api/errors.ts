@@ -161,6 +161,7 @@ export const API_ERRORS: Readonly<Record<ApiErrorCode, { status: number; message
   NotFound: { status: 404, message: "Not found" },
   Conflict: { status: 409, message: "Request conflicts with the current state" },
   Internal: { status: 500, message: "Internal error" },
+  Unavailable: { status: 503, message: "Service unavailable" },
 };
 
 /** The exact body the API sends for `code`, for the demo adapter. */
