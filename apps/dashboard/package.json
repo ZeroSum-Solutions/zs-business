@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "next dev --webpack --port 3200",
-    "build": "next build --webpack",
+    "build": "next build --webpack && node scripts/bundle-secrets.ts",
     "start": "next start --port 3200",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "e2e": "playwright test",
-    "e2e:live": "playwright test -c playwright.live.config.ts"
+    "e2e:live": "playwright test -c playwright.live.config.ts",
+    "check:bundle": "node scripts/bundle-secrets.ts"
   },
   "dependencies": {
     "@phosphor-icons/react": "2.1.10",

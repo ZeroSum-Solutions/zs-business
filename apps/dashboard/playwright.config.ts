@@ -21,11 +21,11 @@ export default defineConfig({
     { name: "desktop", use: { browserName: "chromium", viewport: { width: 1440, height: 900 } } },
   ],
   webServer: {
-    // Production build on the in-memory demo adapter (no API URL).
+    // Production build on the in-memory demo adapter (no API URL or token).
     command: `pnpm build && pnpm exec next start --port ${PORT}`,
     url: `http://localhost:${PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
-    env: { NEXT_PUBLIC_API_URL: "" },
+    env: { ZS_API_URL: "", ZS_API_TOKEN: "" },
   },
 });

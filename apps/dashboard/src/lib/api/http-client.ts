@@ -24,9 +24,10 @@ import {
 } from "./types";
 
 export interface HttpClientConfig {
+  /** Absolute API URL, or a same-origin path such as "/api" (the dashboard's proxy). */
   baseUrl: string;
-  /** Returns the bearer JWT, or null when signed out. */
-  getToken: () => string | null;
+  /** Returns a bearer JWT to send. The dashboard leaves it out: its proxy adds the token. */
+  getToken?: () => string | null;
   fetch?: typeof fetch;
   newId?: () => string;
 }
@@ -56,19 +57,20 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
   const base = config.baseUrl.replace(/\/+$/, "");
 
   async function request<T extends z.ZodType>(spec: RequestSpec<T>): Promise<z.infer<T>> {
-    const url = new URL(base + spec.path);
+    const search = new URLSearchParams();
     for (const [key, value] of Object.entries(spec.query ?? {})) {
-      if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
+      if (value !== undefined && value !== "") search.set(key, String(value));
     }
+    const url = search.size > 0 ? `${base}${spec.path}?${search}` : `${base}${spec.path}`;
     const headers: Record<string, string> = { Accept: "application/json" };
-    const token = config.getToken();
+    const token = config.getToken?.() ?? null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (spec.body !== undefined) headers["Content-Type"] = "application/json";
     if (spec.method !== "GET") headers["Idempotency-Key"] = spec.idempotencyKey ?? newId();
 
     let response: Response;
     try {
-      response = await doFetch(url.toString(), {
+      response = await doFetch(url, {
         method: spec.method,
         headers,
         ...(spec.body !== undefined ? { body: JSON.stringify(spec.body) } : {}),

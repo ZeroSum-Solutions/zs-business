@@ -34,7 +34,7 @@ them. The SQL seed/read contracts are B-28 and C-24 in the requirements.
 errors and the local demo seed. `packages/mcp` (`@zs/mcp`) exposes the same writes and
 reads as MCP tools over stdio.
 `apps/dashboard` (`@zs/dashboard`) is the owner's phone-first PWA over that API, with an
-in-memory demo mode when `NEXT_PUBLIC_API_URL` is unset; see `apps/dashboard/README.md`.
+in-memory demo mode when `ZS_API_URL` is unset; see `apps/dashboard/README.md`.
 
 Tests default to the dedicated local Postgres at
 `postgres://postgres@127.0.0.1:55432/postgres`. `ZS_TEST_DATABASE_URL` accepts a

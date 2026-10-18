@@ -220,3 +220,19 @@ describe("http client", () => {
     expect(calls.map((call) => new URL(call.url).pathname)).toEqual(["/v1/booking/resources", "/v1/crm/pipelines"]);
   });
 });
+
+describe("http client through the dashboard proxy", () => {
+  it("calls the same-origin path and sends no Authorization header", async () => {
+    const calls: Call[] = [];
+    const api = createHttpClient({
+      baseUrl: "/api",
+      fetch: async (input, init) => {
+        calls.push({ url: String(input), init: init ?? {} });
+        return json(200, { resourceId: RESOURCE, timeZone: "America/New_York", zone: "America/New_York", slots: [] });
+      },
+    });
+    await api.getSlots({ resourceId: RESOURCE, from: "2026-10-20T04:00:00.000Z", to: "2026-10-21T04:00:00.000Z" });
+    expect(calls[0]!.url).toBe(`/api/v1/booking/slots?resourceId=${RESOURCE}&from=2026-10-20T04%3A00%3A00.000Z&to=2026-10-21T04%3A00%3A00.000Z`);
+    expect(Object.keys(headers(calls[0])).map((name) => name.toLowerCase())).not.toContain("authorization");
+  });
+});
