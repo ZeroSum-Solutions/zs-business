@@ -182,3 +182,39 @@ describe("demo adapter: lost responses", () => {
     expect(api.writeLog()).toEqual([]);
   });
 });
+
+describe("demo adapter: website intake", () => {
+  it("shows website bookings in the calendar with their customer", async () => {
+    const api = adapter();
+    const website = (await api.listBookings()).items.filter((booking) => booking.source === "website");
+    expect(website).toHaveLength(3);
+    expect(website.map((booking) => booking.customer?.status).sort()).toEqual(["new_contact", "possible_match", "possible_match"]);
+    expect(website.find((booking) => booking.customer?.status === "new_contact")?.customer?.name).toBe("Linnea Castellanos");
+  });
+
+  it("links a possible match without overriding recorded consent, then refuses a second review", async () => {
+    const api = adapter();
+    const [item] = (await api.listIntakeItems({ status: "possible_match" })).items.filter((row) => row.submitted.name === "M. Okafor");
+    const contactId = item!.matchedContactIds[0]!;
+    const before = await api.getContact(contactId);
+    expect(before.consent.sms?.status).toBe("denied");
+    const linked = await api.linkIntakeItem({ itemId: item!.id, contactId }, key());
+    expect(linked).toMatchObject({ status: "linked", contactId });
+    const after = await api.getContact(contactId);
+    expect(after.consent).toEqual(before.consent);
+    expect(after.displayName).toBe(before.displayName);
+    const booking = (await api.listBookings()).items.find((row) => row.intakeItemId === item!.id);
+    expect(booking?.customer).toEqual({ contactId, name: before.displayName, status: "linked" });
+    const again = await api.rejectIntakeItem(item!.id, key()).catch((error: unknown) => error);
+    expect(again).toBeInstanceOf(ApiError);
+    expect((again as ApiError).reason).toBe("already_reviewed");
+  });
+
+  it("rejects a possible match and drops it from the review list", async () => {
+    const api = adapter();
+    const pending = (await api.listIntakeItems({ status: "possible_match" })).items;
+    await api.rejectIntakeItem(pending[0]!.id, key());
+    expect((await api.listIntakeItems({ status: "possible_match" })).items).toHaveLength(pending.length - 1);
+    expect(await api.listBookingPages()).toEqual([expect.objectContaining({ published: true })]);
+  });
+});

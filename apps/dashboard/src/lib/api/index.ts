@@ -5,7 +5,7 @@ import type { ZsApi } from "./types";
 
 export * from "./errors";
 export type * from "./types";
-export { byContactName, matchesSearch, normalizePhone } from "./types";
+export { bookingCustomerName, byContactName, matchesSearch, normalizePhone } from "./types";
 export type * from "./workspace-types";
 
 /** Where the browser sends API calls in live mode: the same-origin proxy in app/api. */

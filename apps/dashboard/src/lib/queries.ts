@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useApi } from "./api/react";
 import { useTenantId } from "./session";
-import { ApiError, type BookingListQuery, type DealRecord, type ListResult, type SlotQuery } from "./api";
+import { ApiError, type BookingListQuery, type DealRecord, type IntakeStatus, type ListResult, type SlotQuery } from "./api";
 import { preferNewerDeals } from "./deal-merge";
 
 /** Key suffixes. Queries and invalidations go through `useKeys`, which puts the tenant first. */
@@ -13,6 +13,9 @@ export const keys = {
   slotsAll: ["booking", "slots"] as const,
   bookings: (query: BookingListQuery = {}) => ["booking", "bookings", query] as const,
   bookingsAll: ["booking", "bookings"] as const,
+  bookingPages: ["booking", "pages"] as const,
+  intake: (status?: IntakeStatus) => ["intake", "items", status ?? "all"] as const,
+  intakeAll: ["intake", "items"] as const,
   pipeline: ["crm", "pipeline"] as const,
   contacts: (search = "") => ["crm", "contacts", search] as const,
   contactsAll: ["crm", "contacts"] as const,
@@ -76,6 +79,19 @@ export function useBookings(query: BookingListQuery = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.bookings(query), queryFn: () => api.listBookings(query) });
+}
+
+/** Website booking requests, newest first (public-intake.md P-12). */
+export function useIntakeItems(status?: IntakeStatus) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.intake(status), queryFn: () => api.listIntakeItems(status ? { status } : {}) });
+}
+
+export function useBookingPages() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.bookingPages, queryFn: () => api.listBookingPages(), staleTime: 5 * 60_000 });
 }
 
 export function usePipeline() {

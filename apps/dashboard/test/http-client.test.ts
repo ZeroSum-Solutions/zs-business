@@ -305,4 +305,29 @@ describe("http client through the dashboard proxy", () => {
     expect(calls[0]!.url).toBe(`/api/v1/booking/slots?resourceId=${RESOURCE}&from=2026-10-20T04%3A00%3A00.000Z&to=2026-10-21T04%3A00%3A00.000Z`);
     expect(Object.keys(headers(calls[0])).map((name) => name.toLowerCase())).not.toContain("authorization");
   });
+
+  it("lists intake items by status and sends reviews to the item's route", async () => {
+    const item = {
+      id: "1f4e6a8c-3b5d-4e7f-8a9b-000000000001", tenantId: TENANT, kind: "booking_request", status: "possible_match",
+      channel: "widget", pageId: "7c9e1b3d-5f7a-4b9c-8d1e-2f3a4b5c6d01",
+      submitted: { name: "M. Okafor", email: "m@example.com", phone: null, notes: null },
+      matchedContactIds: ["5e0c1a2b-7d3f-4c8a-9b1e-000000000001"], contactId: null, consent: { email: null, sms: null },
+      booking: null, reviewedAt: null, createdAt: "2026-10-18T12:00:00.000Z",
+    };
+    const linked = { ...item, status: "linked", contactId: item.matchedContactIds[0], reviewedAt: "2026-10-18T13:00:00.000Z" };
+    const envelope = { actionId: ACTION, result: linked };
+    const { api, calls } = client([
+      json(200, { items: [item], limit: 100, offset: 0, nextOffset: null }),
+      json(200, envelope),
+      json(200, { ...envelope, result: { ...linked, status: "rejected", contactId: null } }),
+    ]);
+    expect((await api.listIntakeItems({ status: "possible_match" })).items).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://api.example.test/v1/intake/items?status=possible_match&limit=100&offset=0");
+    await api.linkIntakeItem({ itemId: item.id, contactId: item.matchedContactIds[0]! }, key());
+    expect(calls[1]!.url).toBe(`https://api.example.test/v1/intake/items/${item.id}/link`);
+    expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ contactId: item.matchedContactIds[0] });
+    await api.rejectIntakeItem(item.id, key());
+    expect(calls[2]!.url).toBe(`https://api.example.test/v1/intake/items/${item.id}/reject`);
+    expect(JSON.parse(String(calls[2]!.init.body))).toEqual({});
+  });
 });

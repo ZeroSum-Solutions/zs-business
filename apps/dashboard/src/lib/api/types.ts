@@ -1,9 +1,13 @@
 import type {
+  BookingPageSummary,
   BookingRecord,
+  BookingSummary,
   ConsentEvidence,
   ContactRecord,
   CreateBookingRequest,
   DealRecord,
+  IntakeItemRecord,
+  IntakeStatus,
   PipelineSummary,
   ResourceSummary,
   SlotsResponse,
@@ -11,7 +15,18 @@ import type {
 } from "@zs/contracts";
 import type { WorkspaceApi } from "./workspace-types";
 
-export type { BookingRecord, ConsentEvidence, ContactRecord, DealRecord, PipelineSummary, ResourceSummary, SlotsResponse };
+export type {
+  BookingPageSummary,
+  BookingRecord,
+  ConsentEvidence,
+  ContactRecord,
+  DealRecord,
+  IntakeItemRecord,
+  IntakeStatus,
+  PipelineSummary,
+  ResourceSummary,
+  SlotsResponse,
+};
 
 /**
  * Options every write needs. The caller owns the Idempotency-Key (see `useIntentKey`):
@@ -36,13 +51,21 @@ export function completeList<T>(items: T[]): ListResult<T> {
 }
 
 /**
- * A booking as the calendar shows it. The API returns plain `BookingRecord`s; the demo
- * adapter adds display labels for its seeded appointments.
+ * A booking as the calendar shows it. The API returns each record with its source and, for
+ * website bookings, the customer (public-intake.md P-12); the demo adapter adds display labels.
  */
 export type BookingView = BookingRecord & {
   title?: string | null;
   contactName?: string | null;
+  source?: BookingSummary["source"];
+  intakeItemId?: string | null;
+  customer?: BookingSummary["customer"];
 };
+
+/** Who a booking is for: the linked customer, the website visitor's name, or the demo label. */
+export function bookingCustomerName(booking: BookingView): string | null {
+  return booking.customer?.name ?? booking.contactName ?? null;
+}
 
 export interface SlotQuery {
   resourceId: string;
@@ -101,7 +124,22 @@ export interface CrmApi {
   moveDealStage(input: StageMove, options: WriteOptions): Promise<DealRecord>;
 }
 
-export type ZsApi = BookingApi & CrmApi & WorkspaceApi;
+export interface IntakeLink {
+  itemId: string;
+  contactId: string;
+}
+
+/** Website booking requests and the pages that take them (public-intake.md P-12). */
+export interface IntakeApi {
+  /** Newest first. */
+  listIntakeItems(query?: { status?: IntakeStatus }): Promise<ListResult<IntakeItemRecord>>;
+  /** Throws a conflict with reason `already_reviewed` when someone reviewed it first. */
+  linkIntakeItem(input: IntakeLink, options: WriteOptions): Promise<IntakeItemRecord>;
+  rejectIntakeItem(itemId: string, options: WriteOptions): Promise<IntakeItemRecord>;
+  listBookingPages(): Promise<BookingPageSummary[]>;
+}
+
+export type ZsApi = BookingApi & CrmApi & IntakeApi & WorkspaceApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

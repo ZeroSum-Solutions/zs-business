@@ -2,7 +2,7 @@
  * Same-origin proxy from the dashboard to apps/api. The browser calls /api/v1/...; this
  * server adds the bearer token from a server-only env var, so the token never ships in
  * page JS. Only a caller with a valid pilot session cookie (pilot-gate.ts) gets through,
- * only to the booking and CRM routes, only with GET and POST, and only from this origin:
+ * only to the booking, CRM and intake routes, only with GET and POST, and only from this origin:
  * the token is ambient here, so neither an anonymous caller nor a cross-site page may spend it.
  */
 import type { ApiErrorCode } from "@zs/contracts";
@@ -24,7 +24,7 @@ export interface ApiProxyConfig {
 }
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
-const AREAS = new Set(["booking", "crm"]);
+const AREAS = new Set(["booking", "crm", "intake"]);
 const REQUEST_HEADERS = ["accept", "content-type", "idempotency-key"];
 const MAX_BODY_BYTES = 64 * 1024;
 
