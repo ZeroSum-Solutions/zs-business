@@ -8,6 +8,7 @@ import { expect, it } from "vitest";
 import { migrate } from "../src/migrate.js";
 import { asService } from "../src/scoped.js";
 import { withTestDatabase } from "../src/testing.js";
+import { expectedOwner } from "./owners.js";
 
 const migrations = new URL("../../../supabase/migrations/", import.meta.url);
 
@@ -24,9 +25,10 @@ const shipped: Record<string, string> = {
   "20261017170000_booking.sql": "a58d0d558bb560fbccc61a15726ad628132caefa77781a1414b9e142cd62d093",
   "20261017170100_crm.sql": "4b90ad716bce286e447d56c84edbb11b2d33dbbc8ff1b69c494219086e583ec9",
   "20261018090000_function_hardening.sql": "104a8c4f9dd25a76eadd4500e92f524535967d153a6b4863ff623e7a6466dca2",
+  "20261018120000_booking_multi_resource.sql": "715a1a92788f566562c6cff962583a3ca7de2bce8f2d4789c483699641a6ba14",
 };
 /** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
-const beforeHardening = Object.keys(shipped).filter((name) =>
+const beforeHardening = Object.keys(shipped).filter((name) => name < "20261018120000" &&
   !["20261017155900_dispatcher_owner_role.sql", "20261018090000_function_hardening.sql"].includes(name));
 const checksum = async (name: string) =>
   createHash("sha256").update(await readFile(new URL(name, migrations), "utf8")).digest("hex");
@@ -87,7 +89,7 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(5);
+    expect(upgraded.functions).toHaveLength(6);
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });
@@ -103,7 +105,7 @@ it("the full chain applies as a non-superuser CREATEROLE migrator and hands func
       "booking_resources_time_zone_known()", expect.stringMatching(/^record_action_and_event\(/),
     ]));
     for (const row of rows) {
-      expect(row.owner).toBe(row.definer ? "zs_dispatcher" : "zs_function_owner");
+      expect(row.owner).toBe(expectedOwner(row));
     }
     const tables = await database.pool.query<{ owner: string }>(
       "SELECT DISTINCT tableowner AS owner FROM pg_tables WHERE schemaname='public'",
@@ -126,6 +128,7 @@ it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requir
   expect(first).toEqual({
     zs_dispatcher: "CREATE ROLE zs_dispatcher NOLOGIN;",
     zs_function_owner: "CREATE ROLE zs_function_owner NOLOGIN;",
+    zs_session_reader: "CREATE ROLE zs_session_reader NOLOGIN;",
   });
 });
 

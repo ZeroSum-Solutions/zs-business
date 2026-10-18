@@ -16,9 +16,13 @@ const idSchema = z.uuid().toLowerCase();
 export const idempotencyKeySchema = z.string().min(1).max(200)
   .refine(isPostgresText, "Text is not valid in Postgres");
 
-/** Supabase Auth access-token claims the edge relies on; other claims pass through. */
+/**
+ * Supabase Auth access-token claims the edge relies on; other claims pass through.
+ * `session_id` names the auth.sessions row, so a signed-out token is refused at once.
+ */
 export const accessTokenClaimsSchema = z.object({
   sub: idSchema,
+  session_id: idSchema,
   app_metadata: z.object({ tenant_id: idSchema }),
 });
 export type AccessTokenClaims = z.infer<typeof accessTokenClaimsSchema>;

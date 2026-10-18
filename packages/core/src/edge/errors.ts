@@ -25,7 +25,7 @@ export function validationError(message: string, issues: readonly { path: readon
 /** Documented conflict reasons; anything else leaves the server as the generic "conflict". */
 const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
-  "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch",
+  "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
 ]);
 
 /** One fixed message per code, so database or handler text never reaches a response. */

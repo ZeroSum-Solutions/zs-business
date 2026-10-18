@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
 import type { Transaction } from "../src/scoped.js";
+import { expectedOwner } from "./owners.js";
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -37,6 +38,7 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
 }
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
+  "auth_session_is_live(uuid,uuid,timestamp with time zone)": "pg_catalog, pg_temp",
   "booking_overrides_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
@@ -76,10 +78,10 @@ it("the search_path check catches a function without its pinned path", async () 
 
 it("owns every function by a NOLOGIN role no runtime login can assume", async () => {
   const rows = await fixture.service(ourFunctions);
-  expect(rows.length).toBeGreaterThanOrEqual(5);
+  expect(rows.length).toBeGreaterThanOrEqual(6);
   for (const row of rows) {
     expect(row).toMatchObject({
-      owner: row.definer ? "zs_dispatcher" : "zs_function_owner",
+      owner: expectedOwner(row),
       owner_unsafe: false,
       runtime_can_assume: false,
     });

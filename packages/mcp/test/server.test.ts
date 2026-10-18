@@ -26,12 +26,19 @@ let client: Client;
 let other: Client;
 const tenant = { resourceId: randomUUID(), pipelineId: randomUUID(), stages: [randomUUID(), randomUUID()] as const };
 
-async function connect(tenantId: string): Promise<Client> {
+/** The process's principal must be a member of its tenant, like any caller. */
+async function connect(tenantId: string, role: "owner" | "staff" | null = "owner"): Promise<Client> {
+  const actorId = randomUUID();
+  if (role)
+    await fixture.service((tx) => tx.query(
+      "INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$6)",
+      [tenantId, randomUUID(), `${actorId}@example.com`, actorId, role, NOW],
+    ));
   const server = createMcpServer({
     db: database.db,
     clock: { now: () => new Date(NOW) },
     generateId: randomUUID,
-    principal: { tenantId, actorId: randomUUID() },
+    principal: { tenantId, actorId },
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const connected = new Client({ name: "test", version: "0.0.0" });
@@ -147,6 +154,19 @@ describe("MCP tools over an in-memory transport", () => {
       idempotencyKey: "x-1", dealId, pipelineId: tenant.pipelineId, stageId: tenant.stages[0], expectedRevision: 2,
     });
     expect(apiErrorBodySchema.parse(denied.value).error.code).toBe("Forbidden");
+  });
+
+  it("refuses a principal that is not a member of its tenant", async () => {
+    const stranger = await connect(fixture.a.tenantId, null);
+    try {
+      for (const [name, args] of [["list_contacts", {}], ["upsert_contact", { idempotencyKey: "s-1", email: "s@example.com" }]] as const) {
+        const denied = await callTool(stranger, name, args);
+        expect(denied.isError).toBe(true);
+        expect(apiErrorBodySchema.parse(denied.value).error.code).toBe("Forbidden");
+      }
+    } finally {
+      await stranger.close();
+    }
   });
 
   it("rejects tenant or actor fields in tool input with the shared error body", async () => {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import { installAuthStub } from "./local-auth.js";
 import { migrate } from "./migrate.js";
 import {
   asService,
@@ -7,6 +8,8 @@ import {
   type ScopedDatabase,
   type Transaction,
 } from "./scoped.js";
+
+export { endAuthSession, installAuthStub, startAuthSession, upsertAuthUser, type LocalAuthUser } from "./local-auth.js";
 
 const defaultUrl = "postgres://postgres@127.0.0.1:55432/postgres";
 export interface TestDatabase {
@@ -30,6 +33,11 @@ export interface TestDatabaseOptions {
    * CREATEROLE there may grant itself any non-superuser role. Dropped on close.
    */
   nonSuperuserMigrator?: boolean;
+  /**
+   * Install the local auth.users / auth.sessions stub after migrating (default true), so
+   * `auth_session_is_live` can answer. False leaves plain Postgres with no auth schema.
+   */
+  authStub?: boolean;
 }
 /** Hard boundary: this harness cannot connect outside the dedicated test cluster. */
 export function testAdminUrl(
@@ -142,7 +150,7 @@ export async function createTestDatabase(
       );
       migratorCreated = true;
       // Dynamic SQL: PostgreSQL 15 cannot parse the 16-only INHERIT and SET grant options.
-      for (const role of ["zs_dispatcher", "zs_function_owner"]) {
+      for (const role of ["zs_dispatcher", "zs_function_owner", "zs_session_reader"]) {
         await admin.query(`DO $$ BEGIN
           IF current_setting('server_version_num')::int >= 160000
             AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}') THEN
@@ -185,6 +193,7 @@ export async function createTestDatabase(
       await client.query("ROLLBACK");
       throw error;
     } finally { client.release(); }
+    if (options.authStub ?? true) await installAuthStub(pool);
     return {
       name,
       url: databaseUrl.href,
