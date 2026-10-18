@@ -1,0 +1,15 @@
+# What `vercel deploy` from the repo root must never upload.
+node_modules
+.git
+.env
+.env.*
+!.env.example
+.t3-runs
+.codegraph
+**/.vercel
+**/.next
+**/.next-live
+**/test-results
+**/e2e/__screenshots__
+**/coverage
+**/dist

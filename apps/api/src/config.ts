@@ -77,6 +77,13 @@ const envSchema = z.object({
   JWT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(60),
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
+  // PEM of the CA that signs the database's TLS certificate (hosted Supabase: the Supabase
+  // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Unset: plain TCP.
+  DATABASE_CA_CERT: z.string().includes("BEGIN CERTIFICATE").optional(),
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(50).default(10),
+}).refine((env) => env.DATABASE_CA_CERT === undefined || !/[?&]ssl/i.test(env.DATABASE_URL), {
+  // pg lets URL ssl options replace the ssl config, which would drop the CA check.
+  path: ["DATABASE_URL"], message: "must not carry ssl options when DATABASE_CA_CERT is set",
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
@@ -86,6 +93,8 @@ export interface ServerEnv {
   readonly jwtClockSkewSeconds: number;
   readonly allowedOrigins: string[];
   readonly port: number;
+  readonly databaseCaCert: string | undefined;
+  readonly databasePoolMax: number;
 }
 
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
@@ -101,5 +110,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     jwtClockSkewSeconds: parsed.data.JWT_CLOCK_SKEW_SECONDS,
     allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
     port: parsed.data.PORT,
+    databaseCaCert: parsed.data.DATABASE_CA_CERT,
+    databasePoolMax: parsed.data.DATABASE_POOL_MAX,
   };
 }

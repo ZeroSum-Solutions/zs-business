@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { createSession, derivedId, type Principal } from "@zs/core";
 import { asService, createScopedDatabase } from "@zs/db";
 import { assertLocalPool } from "../config.js";
+import { hostedPool, type HostedDatabaseTarget } from "../hosted.js";
 import {
   DEMO_CONTACTS,
   DEMO_DEALS,
@@ -38,6 +39,35 @@ const CONSENT_RECORDED_AT = "2026-01-15T15:00:00.000Z";
 export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
   assertLocalPool(deps.service);
   assertLocalPool(deps.runtime);
+  return seedTenant(deps);
+}
+
+export interface HostedSeedDependencies {
+  /** A login that may SET ROLE service_role (postgres on hosted Supabase). */
+  readonly service: HostedDatabaseTarget;
+  /** The zs_runtime login. */
+  readonly runtime: HostedDatabaseTarget;
+  readonly clock: { now(): Date };
+  readonly generateId: () => string;
+}
+
+/**
+ * Owner-run seed of the same invented tenant into a hosted Supabase project. Takes checked
+ * targets, not pools, and builds TLS-verified pools itself; both must name one project.
+ */
+export async function seedHostedDemo(deps: HostedSeedDependencies): Promise<SeedSummary> {
+  if (deps.service.projectRef !== deps.runtime.projectRef || deps.runtime.role !== "zs_runtime")
+    throw new Error("Refusing to run: service and runtime targets must be one project, and runtime must be zs_runtime");
+  const service = hostedPool(deps.service);
+  const runtime = hostedPool(deps.runtime);
+  try {
+    return await seedTenant({ service, runtime, clock: deps.clock, generateId: deps.generateId });
+  } finally {
+    await Promise.all([service.end(), runtime.end()]);
+  }
+}
+
+async function seedTenant(deps: SeedDependencies): Promise<SeedSummary> {
   const principal: Principal = { tenantId: id("tenant"), actorId: id("owner") };
   const { tenantId } = principal;
   const pipelineId = id("pipeline");
