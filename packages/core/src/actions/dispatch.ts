@@ -140,7 +140,9 @@ export function createDispatcher<Config = DispatchConfig>(
           )
         ).rows[0];
         if (stored) {
-          if (canonical(stored.binding.payload) !== canonical(binding.payload))
+          // A key names one action: another action type or payload is a reuse, not a replay.
+          if (stored.binding.actionType !== binding.actionType ||
+            canonical(stored.binding.payload) !== canonical(binding.payload))
             throw new IdempotencyConflict();
           if (canonical(stored.binding) !== canonical(binding))
             throw new BindingMismatch();

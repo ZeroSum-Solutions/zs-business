@@ -4,9 +4,8 @@ Business service for the Zero Sum Business OS: CRM, booking, inbox, automations,
 approvals and the owner dashboard. Mish (public, Apache-2.0) stays the front door and site
 builder and calls this service over HTTP and MCP. No authoritative business records live in Mish.
 
-Status: the shared action path is implemented. Booking and CRM have frozen
-requirements, contracts, public fixtures and `NotImplemented` stubs; feature logic
-and feature migrations are still pending. Requirements live in
+Status: the shared action path, booking (F1) and CRM (F2) are implemented. M1 adds the
+HTTP API (`apps/api`) and the MCP adapter (`packages/mcp`) over them. Requirements live in
 `docs/requirements/booking.md` and `docs/requirements/crm.md`.
 Plan: `/Users/zero-suminc./Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
 
@@ -25,17 +24,15 @@ mise exec -- pnpm --filter @zs/core test:crm
 `@zs/contracts` owns zod action types and stable error codes. `@zs/db` owns the
 Drizzle schema, SQL migration runner (`migrate(pool)`), and transaction-scoped tenant
 access. `@zs/core` exports `createDispatcher(handlers)`, `bookingHandlers` and
-`crmHandlers`. Both feature handler maps are empty until implementation; a server
-will compose them with `createDispatcher({ ...bookingHandlers, ...crmHandlers })`.
-Baseline `test` excludes the booking and CRM folders. `test:booking` and `test:crm`
-run ordinary public examples and currently fail with `NotImplemented`. Slot examples
-check exact output; write examples check the bound-dispatcher interface with scripted
-responses. One integration template per feature binds the exported handler map to
-the real runtime database and seeds configuration with service-role SQL. Setup
-runs inside its dispatch callback so today's wrapper stub raises `NotImplemented`
-before accessing absent feature tables. These templates do not cover concurrency
-or establish persistence until the features are implemented. The SQL seed/read
-contracts are B-28 and C-24 in the requirements.
+`crmHandlers`. The server composes them with `createDispatcher({ ...bookingHandlers, ...crmHandlers })`;
+`createSession(deps, principal)` in `@zs/core` binds that dispatcher, the contracts
+request schemas and the tenant-scoped reads to one verified principal for both edges.
+Baseline `test` excludes the booking and CRM folders; `test:booking` and `test:crm` run
+them. The SQL seed/read contracts are B-28 and C-24 in the requirements.
+
+`apps/api` (`@zs/api`) is the Hono HTTP API; see `apps/api/README.md` for routes, auth,
+errors and the local demo seed. `packages/mcp` (`@zs/mcp`) exposes the same writes and
+reads as MCP tools over stdio.
 
 Tests default to the dedicated local Postgres at
 `postgres://postgres@127.0.0.1:55432/postgres`. `ZS_TEST_DATABASE_URL` accepts a
