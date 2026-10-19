@@ -7,10 +7,10 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import type { CreateBookingRequest, SlotsResponse } from "@zs/contracts";
+import type { CreateBookingRequest } from "@zs/contracts";
 import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
-import { useKeys, useSlots } from "@/lib/queries";
+import { dropBookedTime, useKeys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
 import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
@@ -53,13 +53,7 @@ export function BookingDialog({
     mutationFn: ({ request }: Attempt) => api.createBooking(request, { idempotencyKey: intents.keyFor(request) }),
     onSettled: (_record, error, attempt) => intents.settle(attempt.request, error),
     onSuccess: (record, attempt) => {
-      // Take the booked time out of every cached list of open times before the refetch, so
-      // reopening the sheet never offers it while the new list loads. Invalidating after
-      // the edit keeps those lists stale.
-      const [taken, takenEnd] = [Date.parse(record.occupiedStartsAt), Date.parse(record.occupiedEndsAt)];
-      queryClient.setQueriesData<SlotsResponse>({ queryKey: keys.slotsAll }, (current) => current && {
-        ...current, slots: current.slots.filter((slot) => Date.parse(slot.endsAt) <= taken || Date.parse(slot.startsAt) >= takenEnd),
-      });
+      dropBookedTime(queryClient, keys.slotsAll, record);
       void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
       void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
       const current = generation.isCurrent(attempt.generation);

@@ -193,6 +193,100 @@ describe("readiness probe", () => {
   });
 });
 
+describe("abandoning a statement at the deadline (W3)", () => {
+  const lockWaiters = async () => (await database.pool.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND usename = 'zs_runtime' AND wait_event_type = 'Lock'`,
+  )).rows[0]?.n;
+
+  it("answers at once when the connection stops replying mid-statement, and closes that connection", async () => {
+    const proxy = await stallingProxy(new URL(database.url));
+    const pool = createRuntimePool({ connectionString: proxy.url, max: 1, connectionTimeoutMs: 2000, onError: () => undefined });
+    const db = createScopedDatabase(pool);
+    try {
+      const controller = new AbortController();
+      const { ms, outcome } = await elapsed(() => db.tenant(fixture.a.tenantId, async (tx) => {
+        await tx.query("SELECT 1");
+        proxy.stall();
+        setTimeout(() => controller.abort(), 200);
+        await tx.query("SELECT 2");
+      }, { signal: controller.signal }));
+      expect(outcome).toBeInstanceOf(DatabaseUnavailable);
+      expect((outcome as DatabaseUnavailable).reason).toBe("aborted");
+      // No wait for a ROLLBACK or reset that cannot answer.
+      expect(ms).toBeLessThan(1000);
+      // The stalled connection left the pool; the next caller gets a new one.
+      expect(pool.totalCount).toBe(0);
+      expect(pool.waitingCount).toBe(0);
+    } finally {
+      await proxy.close();
+      await pool.end().catch(() => undefined);
+    }
+  });
+
+  it("cancels a statement still running when the signal fires, so it stops holding its lock wait", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
+    const db = createScopedDatabase(pool);
+    const holder = await database.pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 200);
+      // Under the default 5 s lock timeout this read would wait on the lock for 5 s.
+      const { ms, outcome } = await elapsed(() => db.tenant(fixture.a.tenantId,
+        (tx) => tx.query("SELECT count(*) FROM booking_resources"), { signal: controller.signal }));
+      expect(outcome).toBeInstanceOf(DatabaseUnavailable);
+      expect(ms).toBeLessThan(1000);
+      // Postgres was told to cancel it while the lock is still held.
+      await expect.poll(lockWaiters, { timeout: 1500, interval: 50 }).toBe(0);
+      await holder.query("ROLLBACK");
+      await expect(db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT 1"))).resolves.toBeDefined();
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+      await pool.end();
+    }
+  });
+
+  it("re-reads the time left before each statement, so a second statement cannot run past the deadline", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
+    const db = createScopedDatabase(pool);
+    try {
+      // 400 ms in all: each 250 ms statement fits the timeout set at the start, both do not.
+      const deadline = performance.now() + 400;
+      const { ms, outcome } = await elapsed(() => db.tenant(fixture.a.tenantId, async (tx) => {
+        await tx.query("SELECT pg_sleep(0.25)");
+        await tx.query("SELECT pg_sleep(0.25)");
+      }, { remainingMs: () => deadline - performance.now() }));
+      expect(outcome).toBeInstanceOf(DatabaseUnavailable);
+      expect(ms).toBeLessThan(700);
+      await expect(db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT 1"))).resolves.toBeDefined();
+    } finally {
+      await pool.end();
+    }
+  });
+});
+
+describe("waiting bound", () => {
+  it("with maxWaiting 0 still takes an idle connection, and refuses only a checkout that would queue", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
+    const db = createScopedDatabase(pool, { maxWaiting: 0 });
+    try {
+      await expect(db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT 1"))).resolves.toBeDefined();
+      expect(pool.idleCount).toBe(1);
+      await expect(db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT 1"))).resolves.toBeDefined();
+      const held = await pool.connect();
+      const refused = await db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT 1")).catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(DatabaseUnavailable);
+      expect((refused as DatabaseUnavailable).reason).toBe("busy");
+      held.release();
+    } finally {
+      await pool.end();
+    }
+  });
+});
+
 describe("transaction setup", () => {
   it("sets the role, limits and tenant in five round trips for one statement, and leaves the session clean", async () => {
     const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });

@@ -14,6 +14,7 @@ import {
   type Page,
   type SlotQuery,
 } from "./api";
+import type { BookingRecord, SlotsResponse } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
 
 /** Key suffixes. Queries and invalidations go through `useKeys`, which puts the tenant first. */
@@ -83,6 +84,19 @@ export function useSlots(query: SlotQuery | null) {
     queryFn: ({ signal }) => api.getSlots(query!, { signal }),
     enabled: enabled && query !== null,
   });
+}
+
+/**
+ * Takes a just-booked time out of the cached open times of the booking's own calendar, before
+ * the refetch, so reopening the sheet never offers it. Other calendars' lists stay as they are:
+ * the same time can still be free there. Invalidate afterwards, so the lists still refetch.
+ */
+export function dropBookedTime(queryClient: QueryClient, slotsKey: QueryKey, booking: BookingRecord): void {
+  const [taken, takenEnd] = [Date.parse(booking.occupiedStartsAt), Date.parse(booking.occupiedEndsAt)];
+  queryClient.setQueriesData<SlotsResponse>({ queryKey: slotsKey }, (current) => current?.resourceId === booking.resourceId
+    ? { ...current, slots: current.slots.filter((slot) => Date.parse(slot.endsAt) <= taken || Date.parse(slot.startsAt) >= takenEnd) }
+    // Undefined leaves a list untouched, its age and staleness included.
+    : undefined);
 }
 
 /** One range of bookings, filtered by the API; a day or week is one short read. */
