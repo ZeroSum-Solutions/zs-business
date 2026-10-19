@@ -87,6 +87,12 @@ test("books through the widget on a client's site, then the owner links the poss
   await expect(page.getByRole("status").getByText("Linked the booking to Maren Ashby.")).toBeVisible();
   await expect(request).toHaveCount(0);
 
+  // Calendar still caches the pre-link days; a slow refetch must not let the old name pass for
+  // the current one, so the day stays busy until fresh data lands.
+  await page.route("**/api/v1/booking/bookings**", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await route.continue();
+  });
   await mainNav(page).getByRole("link", { name: "Calendar" }).click();
   const linked = await findWebsiteBooking(page, "Maren Ashby");
   await expect(linked.getByTestId("website-badge")).toHaveText("Website");

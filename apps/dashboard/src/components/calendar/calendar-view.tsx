@@ -89,7 +89,8 @@ function DayView({ resource, dateKey, onPickSlot }: { resource: ResourceSummary;
   const open = slots.data?.slots ?? [];
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-      <section aria-labelledby="day-booked">
+      {/* Busy while a cached day refetches too, e.g. after a website booking was linked elsewhere. */}
+      <section aria-labelledby="day-booked" aria-busy={bookings.isFetching}>
         <h2 id="day-booked" className="mb-3 text-sm font-medium text-fg-2">Booked</h2>
         <IncompleteNote list={bookings.data} />
         {bookings.data.items.length === 0 ? (
@@ -141,7 +142,7 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
   return (
     <>
     <IncompleteNote list={bookings.data} />
-    <ol className="grid grid-cols-1 gap-2 lg:grid-cols-7">
+    <ol className="grid grid-cols-1 gap-2 lg:grid-cols-7" aria-busy={bookings.isFetching}>
       {days.map((day) => {
         const items = bookings.data.items.filter((booking) => zonedDateKey(booking.startsAt, zone) === day);
         const [weekday, rest] = formatDateKey(day).split(", ");
