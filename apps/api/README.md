@@ -18,8 +18,10 @@ DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filt
 sed "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" apps/api/.env.example > apps/api/.env
 set -a; . apps/api/.env; set +a
 
-# 4. Seed the demo jeweler and print a 7-day dev JWT. It also runs migrations and makes sure
-#    the unprivileged zs_runtime login exists. JWT_SECRET must match the API's.
+# 4. Seed the demo jeweler and print a 7-day dev JWT. It also runs migrations, makes sure
+#    the unprivileged zs_runtime login exists, installs the local auth stub (auth.users,
+#    auth.sessions), adds the owner (owner@example.com) as a member and starts a session for
+#    the token. JWT_SECRET must match the API's.
 DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api seed:demo
 
 # 5. Start the API as the runtime role. The example env sets JWT_MAX_TTL_SECONDS=604800 so the
@@ -60,7 +62,33 @@ clock. Everything else gets them through `createApp(deps)`.
 `iat`. A token whose `iat` is more than `JWT_CLOCK_SKEW_SECONDS` ahead of the clock is refused,
 and its lifetime (`exp` minus `iat`) must be at most `JWT_MAX_TTL_SECONDS`. Within the skew, a
 full-lifetime token from an issuer whose clock runs slightly ahead is still accepted.
-`sub` is the actor and `app_metadata.tenant_id` is the tenant. HS256
+`sub` is the actor, `app_metadata.tenant_id` is the tenant the token claims and `session_id`
+(required) is the Supabase Auth session.
+
+Then, on every request, in one transaction:
+
+1. **Live session.** `auth_session_is_live(session_id, sub, now)` must find the row in
+   `auth.sessions` for that user, not past `not_after`, with the user neither banned nor
+   deleted. Otherwise 401 `Unauthorized`. Supabase deletes the row on sign-out, so a token
+   is refused at once after sign-out, not at its `exp`. The function is SECURITY DEFINER,
+   owned by the NOLOGIN role `zs_session_reader`, which alone may read three columns of
+   `auth.sessions` and `auth.users`; the runtime role cannot read `auth.*`.
+2. **Membership.** `tenant_members` must hold an active row for `sub` in the claimed tenant.
+   Otherwise 403 `Forbidden`, answered like another tenant's row. A removed member is
+   refused on the next request, including a replay of an earlier idempotency key: the
+   check runs before the replay lookup.
+3. **Role.** The member's role must allow the route. `owner` may do everything: members,
+   billing, plan and publish. `staff` may use the calendar, customers and inbox drafts
+   (`ROLE_PERMISSIONS` in `@zs/contracts`). Otherwise 403.
+
+Member writes hold an exclusive per-tenant advisory lock and every other request a shared
+one, so a role change or removal is never interleaved with a request it affects. Plain
+Postgres has no `auth` schema: tests and `seed:demo` install a loopback-only stub
+(`@zs/db/local-auth`); migrations only grant on it when it exists. On Supabase the role that
+runs migrations needs `GRANT ... WITH GRANT OPTION` on `auth.sessions` and `auth.users`, or
+the migration fails loudly.
+
+HS256
 uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing keys pass
 `createJwksVerifier(createRemoteJWKSet(new URL(".../auth/v1/.well-known/jwks.json")), { clock })`.
 
@@ -79,8 +107,17 @@ uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing k
 | `GET /v1/crm/deals?[pipelineId&]limit&offset` | page of deals |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
 | `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
+| `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
+| `GET /v1/members` | `{ items: Member[] }`, owners only |
+| `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
+| `POST /v1/members/:id/role` `{ role }` | 200 member; 409 `last_owner` when it would leave no owner; owners only |
+| `DELETE /v1/members/:id` | 200 removed member; 409 `last_owner`; owners only |
 
-Every `POST` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
+Staff cannot invite, remove or change roles, including their own. An invite is a pending row
+with no `user_id`; the runtime role cannot set `user_id` (binding an invite to a signed-up
+user is M2b's invite worker).
+
+Every `POST` and `DELETE` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
 the same key returns the stored result with the original status; reusing a key with a
 different body, or on another endpoint, is 409 `idempotency_key_reused`. Keys are per tenant.
 Target IDs derive from the tenant and the key.
@@ -90,5 +127,6 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `Unauthorized` 401, `Forbidden` 403 (another tenant's row or an unknown ID, answered alike),
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
-`concurrent_update`, `split_identity`, `identity_mismatch`; anything else is `conflict`),
+`concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`;
+anything else is `conflict`),
 `Internal` 500 with no internal detail. Each code has one fixed `message`.

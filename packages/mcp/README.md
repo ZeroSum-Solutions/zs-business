@@ -16,6 +16,11 @@ ZS_TENANT_ID=<tenant uuid> ZS_ACTOR_ID=<actor uuid> \
   mise exec -- pnpm --filter @zs/mcp start
 ```
 
+`ZS_ACTOR_ID` must be a member of `ZS_TENANT_ID` (`tenant_members`); otherwise every tool
+answers `Forbidden`. Its tools are calendar and customer work, which staff may do too. It is an
+operator credential on the server, so it checks membership and role but not a Supabase
+session.
+
 `DATABASE_URL` must log in as the unprivileged runtime role; the server refuses to start
 when the login is a superuser or has BYPASSRLS. `createMcpServer(deps)` takes
 the scoped database, clock, ID generator and principal, so tests connect it to an
