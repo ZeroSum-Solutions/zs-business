@@ -82,16 +82,16 @@ export async function loadBusy(tx: Transaction, tenantId: string, resourceId: st
 export type BookingOrigin = { source: "owner" } | { source: "website"; intakeItemId: string };
 
 /**
- * B-19..B-22 for one booking inside the caller's dispatcher transaction: take the resource lock,
- * recheck the requested start against authoritative state, and insert under the exclusion
- * constraint. booking.create and booking.public_request both book through here.
+ * B-19, B-21, B-22 inside the caller's dispatcher transaction: take the resource lock and
+ * recheck the requested start against authoritative state. The lock is held until commit, so
+ * the slot stays free for insertBooking later in the same transaction. booking.public_request
+ * runs this before any identity-dependent work, so a taken slot fails the same way for anyone.
  */
-export async function insertCheckedBooking(
+export async function checkBookingSlot(
   tx: Transaction,
   tenantId: string,
   request: { bookingId: string; resourceId: string; startsAt: string },
   now: Date,
-  origin: BookingOrigin = { source: "owner" },
 ): Promise<BookingRecord> {
   const { bookingId, resourceId, startsAt } = request;
   // B-21: the shared per-resource lock, taken after the dispatcher's idempotency lock.
@@ -128,6 +128,15 @@ export async function insertCheckedBooking(
     status: "confirmed",
     createdAt: now.toISOString(),
   };
+  return record;
+}
+
+/** Insert a booking checkBookingSlot approved, in the same transaction (B-20). */
+export async function insertBooking(
+  tx: Transaction,
+  record: BookingRecord,
+  origin: BookingOrigin = { source: "owner" },
+): Promise<BookingRecord> {
   // bookings_resource_occupied_excl (B-20) arbitrates anything the lock did not serialize.
   await tx.query(
     `INSERT INTO bookings (tenant_id, id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
@@ -139,6 +148,17 @@ export async function insertCheckedBooking(
       origin.source, origin.source === "website" ? origin.intakeItemId : null],
   );
   return record;
+}
+
+/** Check and insert one booking; booking.create books through here. */
+export async function insertCheckedBooking(
+  tx: Transaction,
+  tenantId: string,
+  request: { bookingId: string; resourceId: string; startsAt: string },
+  now: Date,
+  origin: BookingOrigin = { source: "owner" },
+): Promise<BookingRecord> {
+  return insertBooking(tx, await checkBookingSlot(tx, tenantId, request, now), origin);
 }
 
 export const createBookingHandler: ActionHandler = {

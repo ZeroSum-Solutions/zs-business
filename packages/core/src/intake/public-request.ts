@@ -13,7 +13,7 @@ import {
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
-import { assertBookingIdUnused, currentTenant, insertCheckedBooking } from "../booking/create.js";
+import { assertBookingIdUnused, checkBookingSlot, currentTenant, insertBooking } from "../booking/create.js";
 import { lockIdentities } from "../crm/contact.js";
 import { idInUse, pgCode } from "../crm/rows.js";
 import { loadPublishedPage, pageHasResource } from "../reads/intake.js";
@@ -91,7 +91,11 @@ export const publicRequestHandler: ActionHandler = {
     if (page.disclosure_version !== input.disclosureVersion)
       throw new Conflict("The consent disclosure changed", { reason: "disclosure_changed" });
 
-    // Identity locks first, then the resource lock inside insertCheckedBooking: one fixed order.
+    // The slot is checked under the resource lock before anything that depends on who the visitor
+    // is, so a taken slot costs the same work for a known and an unknown person (P-6). Resource
+    // lock, then identity locks: the one path that takes both, so the order cannot deadlock.
+    const slot = await checkBookingSlot(tx, tenantId,
+      { bookingId: input.bookingId, resourceId: input.resourceId, startsAt: input.startsAt }, now);
     await lockIdentities(tx, tenantId, input);
     const claim = await claimWithRetry(tx, tenantId, input, now);
 
@@ -121,9 +125,7 @@ export const publicRequestHandler: ActionHandler = {
         );
     }
 
-    const booking = await insertCheckedBooking(tx, tenantId,
-      { bookingId: input.bookingId, resourceId: input.resourceId, startsAt: input.startsAt }, now,
-      { source: "website", intakeItemId: input.intakeItemId });
+    const booking = await insertBooking(tx, slot, { source: "website", intakeItemId: input.intakeItemId });
     const result: PublicBookingRequestResult = {
       bookingId: booking.id,
       intakeItemId: input.intakeItemId,
