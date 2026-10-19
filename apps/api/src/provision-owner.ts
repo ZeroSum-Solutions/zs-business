@@ -3,12 +3,14 @@
 // refused and nobody can invite anyone. The database holds no tenant-to-email data, so a
 // migration cannot backfill it: the owner names the person here, and this binds their
 // Supabase user when it exists and gives it the tenant claim (app_metadata.tenant_id) that
-// every token must carry. Entry points: src/scripts/provision-owner.ts (local).
+// every token must carry. Entry points: src/scripts/provision-owner.ts (local, the auth stub)
+// and src/scripts/hosted-provision-owner.ts (hosted, the Supabase Auth admin API).
 import { open, type FileHandle } from "node:fs/promises";
 import type { Pool } from "pg";
 import { memberEmailSchema, uuidSchema, type MemberRole } from "@zs/contracts";
 import { lockMembership } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
+import { redactSecrets } from "./hosted.js";
 
 export interface ProvisionOwnerDeps {
   /** A pool whose login may SET ROLE service_role (asService); never the runtime pool. */
@@ -225,21 +227,11 @@ export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionO
   return summary;
 }
 
-/**
- * For receipts, logs and errors: hides connection strings (with or without credentials) and
- * password=... settings. A copy of redactSecrets in src/hosted.ts on feat/m2b-hosting; import
- * that one instead once it lands.
- */
-export function redactSecrets(text: string): string {
-  return text
-    .replace(/\b(postgres(?:ql)?|socket):\/\/[^\s"'`]*/gi, "$1://[redacted]")
-    .replace(/\b(password|PGPASSWORD)\s*=\s*('[^']*'|"[^"]*"|\S+)/gi, "$1=[redacted]");
-}
-
 /** Where an --apply run stopped; the receipt names it. */
-export type ProvisionPhase = "dry-run" | "apply" | "verify";
+export type ProvisionPhase = "dry-run" | "backup-check" | "apply" | "verify";
 
-export type ProvisionOwnerMode = { mode: "dry-run" } | { mode: "apply"; receiptPath: string };
+/** `backupPath`: a backup that must pass `checkBackup` before the apply (hosted always sets it). */
+export type ProvisionOwnerMode = { mode: "dry-run" } | { mode: "apply"; receiptPath: string; backupPath?: string };
 
 export interface ProvisionOwnerRunDeps {
   readonly input: { readonly tenantId: string; readonly email: string };
@@ -251,6 +243,8 @@ export interface ProvisionOwnerRunDeps {
   readonly readMember: (tenantId: string, email: string) => Promise<MemberState | null>;
   /** The user's app_metadata.tenant_id as Supabase Auth now holds it. */
   readonly readTenantClaim: (userId: string) => Promise<string | null>;
+  /** Checks the backup named by the mode's backupPath and returns its facts for the receipt. */
+  readonly checkBackup?: (path: string) => Promise<object>;
   readonly clock: { now(): Date };
   readonly log: (line: string) => void;
   readonly logError: (line: string) => void;
@@ -265,7 +259,8 @@ const stateOf = (summary: ProvisionOwnerSummary): MemberState =>
 /**
  * The flow behind the provision-owner entry points, in the shape of hosted-migrate's
  * runHostedMigrate. --dry-run prints what would change. --apply reserves the receipt ("wx")
- * before it touches the database, runs a dry run, applies, reads the row back, and always
+ * before it touches the database, runs a dry run, checks the backup when the mode names one,
+ * applies, reads the row and the claim back, and always
  * writes the outcome: result, the phase that failed, the redacted error, and whether anything
  * committed (false before the apply phase; read back from the member row after it).
  */
@@ -277,6 +272,8 @@ export async function runProvisionOwner(mode: ProvisionOwnerMode, deps: Provisio
     return plan;
   }
 
+  const checkBackup = deps.checkBackup;
+  if (mode.backupPath !== undefined && !checkBackup) throw new Error("A backup path needs a checkBackup dependency");
   // An existing file or a missing folder fails here, before any database work.
   const receiptFile: FileHandle = await open(mode.receiptPath, "wx");
   const receipt: Record<string, unknown> = { mode: "apply", startedAt, target: deps.target, tenantId: deps.input.tenantId };
@@ -287,6 +284,11 @@ export async function runProvisionOwner(mode: ProvisionOwnerMode, deps: Provisio
   try {
     plan = await deps.provision({ ...deps.input, dryRun: true });
     receipt.plan = plan;
+
+    if (mode.backupPath !== undefined) {
+      phase = "backup-check";
+      receipt.backup = { file: mode.backupPath, ...(await checkBackup!(mode.backupPath)) };
+    }
 
     phase = "apply";
     applied = await deps.provision({ ...deps.input, dryRun: false });

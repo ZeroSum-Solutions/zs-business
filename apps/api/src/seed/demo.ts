@@ -3,6 +3,7 @@ import { createSession, derivedId, type Principal } from "@zs/core";
 import { asService, createScopedDatabase } from "@zs/db";
 import { assertLocalPool } from "../config.js";
 import { hostedPool, type HostedDatabaseTarget } from "../hosted.js";
+import { provisionOwner, type AuthAdmin, type ProvisionOwnerSummary } from "../provision-owner.js";
 import {
   DEMO_CONTACTS,
   DEMO_DEALS,
@@ -45,6 +46,13 @@ export async function seedDemo(deps: SeedDependencies): Promise<SeedSummary> {
   return seedTenant(deps);
 }
 
+export interface HostedSeedOwner {
+  /** The person who owns the hosted demo tenant; provisioned like db:hosted-provision-owner. */
+  readonly email: string;
+  /** The Supabase Auth admin API of the same project. */
+  readonly auth: AuthAdmin;
+}
+
 export interface HostedSeedDependencies {
   /** A login that may SET ROLE service_role (postgres on hosted Supabase). */
   readonly service: HostedDatabaseTarget;
@@ -52,22 +60,53 @@ export interface HostedSeedDependencies {
   readonly runtime: HostedDatabaseTarget;
   readonly clock: { now(): Date };
   readonly generateId: () => string;
+  /** Absent: the tenant is left without a member until db:hosted-provision-owner runs. */
+  readonly owner?: HostedSeedOwner;
+}
+
+export interface HostedSeedSummary extends SeedSummary {
+  /** The seed's own member was removed: its user id names no Supabase user. */
+  readonly seedMemberRemoved: boolean;
+  /** provisionOwner's report for the real owner, or null when none was named. */
+  readonly provisionedOwner: ProvisionOwnerSummary | null;
 }
 
 /**
  * Owner-run seed of the same invented tenant into a hosted Supabase project. Takes checked
  * targets, not pools, and builds TLS-verified pools itself; both must name one project.
  */
-export async function seedHostedDemo(deps: HostedSeedDependencies): Promise<SeedSummary> {
+export async function seedHostedDemo(deps: HostedSeedDependencies): Promise<HostedSeedSummary> {
   if (deps.service.projectRef !== deps.runtime.projectRef || deps.runtime.role !== "zs_runtime")
     throw new Error("Refusing to run: service and runtime targets must be one project, and runtime must be zs_runtime");
   const service = hostedPool(deps.service);
   const runtime = hostedPool(deps.runtime);
   try {
-    return await seedTenant({ service, runtime, clock: deps.clock, generateId: deps.generateId });
+    return await seedHostedTenant({ service, runtime, clock: deps.clock, generateId: deps.generateId }, deps.owner);
   } finally {
     await Promise.all([service.end(), runtime.end()]);
   }
+}
+
+/**
+ * The hosted seed on open pools (seedHostedDemo builds them; tests pass local ones). The seed
+ * writes through the action path as its own owner member, whose user id is derived and names
+ * no Supabase user. Hosted, nobody may hold that membership, so it is removed once the writes
+ * are done; the action history keeps the record. The real owner then comes from the same
+ * provisionOwner the db:hosted-provision-owner step runs: bound to their Supabase user and
+ * given the tenant claim, or pending until that user exists. A rerun replays the seed and
+ * reports the owner "unchanged".
+ */
+export async function seedHostedTenant(deps: SeedDependencies, owner?: HostedSeedOwner): Promise<HostedSeedSummary> {
+  const summary = await seedTenant(deps);
+  const removed = await asService(deps.service, async (tx) => (await tx.query(
+    "DELETE FROM tenant_members WHERE tenant_id=$1 AND id=$2 AND user_id=$3",
+    [summary.principal.tenantId, summary.owner.memberId, summary.principal.actorId],
+  )).rowCount === 1);
+  const provisionedOwner = owner
+    ? await provisionOwner({ service: deps.service, clock: deps.clock, generateId: deps.generateId, auth: owner.auth },
+      { tenantId: summary.principal.tenantId, email: owner.email, dryRun: false })
+    : null;
+  return { ...summary, seedMemberRemoved: removed, provisionedOwner };
 }
 
 async function seedTenant(deps: SeedDependencies): Promise<SeedSummary> {

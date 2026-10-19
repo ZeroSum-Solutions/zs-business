@@ -1,4 +1,5 @@
 // Entry point, owner-run, local only: make <email> an owner of <tenant> (src/provision-owner.ts).
+// Hosted projects use src/scripts/hosted-provision-owner.ts (db:hosted-provision-owner).
 //   DATABASE_URL   the local admin URL (loopback only); writes run as service_role
 // Modes:
 //   --tenant <uuid> --email <addr> --dry-run                     report what would change, roll back
@@ -15,7 +16,8 @@ import { parseArgs } from "node:util";
 import { Pool } from "pg";
 import { findAuthUserByEmail, readAuthUserTenant, setAuthUserTenant } from "@zs/db/local-auth";
 import { assertLocalDatabaseUrl, describeDatabase } from "../config.js";
-import { provisionOwner, readMemberByEmail, redactSecrets, runProvisionOwner } from "../provision-owner.js";
+import { redactSecrets } from "../hosted.js";
+import { provisionOwner, readMemberByEmail, runProvisionOwner } from "../provision-owner.js";
 
 const { values } = parseArgs({
   options: {

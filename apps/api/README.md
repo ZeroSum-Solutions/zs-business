@@ -75,9 +75,9 @@ signs in again to get a token with the claim. If setting the claim fails, the ro
 committed and a re-run sets it (`claimed`). An `--apply` run reads both the row and the claim
 back.
 
-Locally the Supabase user is looked up, and given the claim, in the auth stub's `auth.users`. The hosted entry point
-(Supabase Auth admin API, `SERVICE_DATABASE_URL`) arrives with the M2b hosting scripts, and
-the hosted seed must then create the demo tenant's owner member too.
+Locally the Supabase user is looked up, and given the claim, in the auth stub's `auth.users`.
+Hosted, `db:hosted-provision-owner` (`src/hosted-provision.ts`) runs the same step with the
+Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 
 ## Environment
 
@@ -288,11 +288,33 @@ against the pinned Supabase Root 2021 CA.
    rehearsing an upgrade from a partial set. Receipts go outside the repo.
 3. **Seed (fake data only).** `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432)
    and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
-   migrate and prints ids and counts only.
-4. **Tokens.** There is no static token any more: every person signs in through the dashboard
-   with Supabase Auth (an email link), and the API checks each token's session with Supabase
-   Auth (`SESSION_CHECK=supabase`). A tenant needs an owner first; see "Provision the first
-   owner".
+   migrate and prints ids and counts only. The seed writes through the action path as its own
+   owner member, whose user id names no Supabase user, and removes that member when it is
+   done (the action history keeps the record). With `-- --owner-email <addr>` and
+   `SUPABASE_SERVICE_ROLE_KEY` it then gives the tenant its owner through the same
+   `provisionOwner` as step 4 (no receipt: the seed is fake data); without it the tenant has
+   no member until step 4 runs.
+4. **Owner.** There is no static token: every person signs in through the dashboard with
+   Supabase Auth (an email link), and the API checks each token's session with Supabase Auth
+   (`SESSION_CHECK=supabase`). A tenant needs an owner first ("Provision the first owner").
+   With `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432) and
+   `SUPABASE_SERVICE_ROLE_KEY` (the project's service_role or `sb_secret_` key; a JWT key
+   must name `ZS_TARGET_REF` in its `ref` claim):
+   ```sh
+   mise exec -- pnpm --filter @zs/api db:hosted-provision-owner --tenant <uuid> --email <addr> --dry-run
+   mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/<ref>-<date>.dump
+   mise exec -- pnpm --filter @zs/api db:hosted-provision-owner --tenant <uuid> --email <addr> \
+     --apply --backup ~/Backups/zs-business/<ref>-<date>.dump --receipt <file.json>
+   ```
+   The user is found by exact email, and given `app_metadata.tenant_id`, through the Auth
+   admin API at `https://<ref>.supabase.co` (never `auth.users`); a user whose claim names
+   another tenant is refused. Signups are disabled, so create the user first (Supabase
+   dashboard > Authentication > Add user), or run it once to leave a pending owner and again
+   to bind. `--apply` takes the same guards as `db:hosted-migrate`: the receipt is reserved
+   before any Auth or database call, the backup must pass the same manifest and archive
+   checks (this project, under two hours old, the live ledger and every table), and the
+   receipt records every outcome (`failedPhase`: `dry-run`, `backup-check`, `apply` or
+   `verify`) with ids and role facts only; errors are redacted, and the key is never printed.
 5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
    upload), with `VERCEL_TOKEN` in the environment:
    ```sh
