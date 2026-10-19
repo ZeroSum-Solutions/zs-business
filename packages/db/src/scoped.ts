@@ -70,11 +70,13 @@ export interface ScopedDatabase {
  * No connection in time (pool saturated, queue full, connect timeout or failure), or the
  * caller's deadline passed before the transaction committed. Nothing was committed by this
  * transaction, except with "commit_unknown": the deadline passed while COMMIT was in flight,
- * so the transaction may have committed. Either way the caller may retry, and a write
- * retries with its original idempotency key, which replays a commit that did happen.
+ * so the transaction may have committed. "in_progress": another transaction still held the
+ * write's idempotency key when the lock wait ended, so that one may yet commit. Either way
+ * the caller may retry, and a write retries with its original idempotency key, which replays
+ * a commit that did happen.
  */
 export class DatabaseUnavailable extends Error {
-  constructor(readonly reason: "busy" | "connect" | "aborted" | "commit_unknown", options?: { cause?: unknown }) {
+  constructor(readonly reason: "busy" | "connect" | "aborted" | "commit_unknown" | "in_progress", options?: { cause?: unknown }) {
     super(`Database unavailable (${reason})`, options);
     this.name = "DatabaseUnavailable";
   }

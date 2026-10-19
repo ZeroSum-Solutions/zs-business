@@ -1,16 +1,18 @@
 "use client";
 
-import { CaretLeft, CaretRight, Plus } from "@phosphor-icons/react";
+import { CaretLeft, CaretRight, Globe, Plus } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows, PageHeader } from "@/components/ui/states";
-import type { BookingView, ResourceSummary } from "@/lib/api";
+import { bookingCustomerName, type BookingView, type ResourceSummary } from "@/lib/api";
 import { resourceLabel } from "@/lib/resources";
 import { useBookings, useResources, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatTime, startOfZonedDay, weekdayOf, zonedDateKey } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { BookingDialog } from "./booking-dialog";
+import { BookingPageCard } from "./booking-page-card";
 import { SlotsError } from "./slots-error";
 
 type View = "day" | "week";
@@ -41,16 +43,32 @@ function Segmented<T extends string>({ label, value, options, onChange }: {
   );
 }
 
-function BookingRow({ booking, zone }: { booking: BookingView; zone: string }) {
+const fromWebsite = (booking: BookingView) => booking.source === "website";
+
+/** Website bookings say so; one still waiting for review says that too (public-intake.md P-12). */
+function WebsiteBadge({ booking }: { booking: BookingView }) {
+  if (!fromWebsite(booking)) return null;
   return (
-    <li className="flex gap-4 rounded-md bg-surface p-3 shadow-ring">
+    <Badge tone="accent" data-testid="website-badge">
+      <Globe aria-hidden />Website{booking.customer?.status === "possible_match" ? " · to review" : ""}
+    </Badge>
+  );
+}
+
+function BookingRow({ booking, zone }: { booking: BookingView; zone: string }) {
+  const customer = bookingCustomerName(booking);
+  return (
+    <li className="flex gap-4 rounded-md bg-surface p-3 shadow-ring" data-source={booking.source ?? "owner"}>
       <div className="w-20 shrink-0">
         <p className="tabular text-sm font-semibold text-fg">{formatTime(booking.startsAt, zone)}</p>
         <p className="tabular text-xs text-meta">to {formatTime(booking.endsAt, zone)}</p>
       </div>
-      <div className="min-w-0 border-l-2 border-accent pl-3">
-        <p className="truncate text-sm font-medium text-fg">{booking.title ?? "Appointment"}</p>
-        <p className="truncate text-sm text-muted">{booking.contactName ?? "No customer linked"}</p>
+      <div className="min-w-0 flex-1 border-l-2 border-accent pl-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="truncate text-sm font-medium text-fg">{booking.title ?? (fromWebsite(booking) ? "Website booking" : "Appointment")}</p>
+          <WebsiteBadge booking={booking} />
+        </div>
+        <p className="truncate text-sm text-muted">{customer ?? "No customer linked"}</p>
       </div>
     </li>
   );
@@ -71,7 +89,8 @@ function DayView({ resource, dateKey, onPickSlot }: { resource: ResourceSummary;
   const open = slots.data?.slots ?? [];
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-      <section aria-labelledby="day-booked">
+      {/* Busy while a cached day refetches too, e.g. after a website booking was linked elsewhere. */}
+      <section aria-labelledby="day-booked" aria-busy={bookings.isFetching}>
         <h2 id="day-booked" className="mb-3 text-sm font-medium text-fg-2">Booked</h2>
         <IncompleteNote list={bookings.data} />
         {bookings.data.items.length === 0 ? (
@@ -123,7 +142,7 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
   return (
     <>
     <IncompleteNote list={bookings.data} />
-    <ol className="grid grid-cols-1 gap-2 lg:grid-cols-7">
+    <ol className="grid grid-cols-1 gap-2 lg:grid-cols-7" aria-busy={bookings.isFetching}>
       {days.map((day) => {
         const items = bookings.data.items.filter((booking) => zonedDateKey(booking.startsAt, zone) === day);
         const [weekday, rest] = formatDateKey(day).split(", ");
@@ -136,9 +155,10 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
             {items.length > 0 ? (
               <ul className="mt-2 space-y-1.5">
                 {items.map((booking) => (
-                  <li key={booking.id} className="rounded-sm bg-accent/8 px-2 py-1.5 text-xs">
+                  <li key={booking.id} className="rounded-sm bg-accent/8 px-2 py-1.5 text-xs" data-source={booking.source ?? "owner"}>
                     <span className="tabular font-semibold text-fg">{formatTime(booking.startsAt, zone)}</span>{" "}
-                    <span className="text-fg-2">{booking.contactName ?? booking.title ?? "Appointment"}</span>
+                    <span className="text-fg-2">{bookingCustomerName(booking) ?? booking.title ?? "Appointment"}</span>
+                    {fromWebsite(booking) ? <span className="ml-1 inline-flex align-middle text-accent" title="Booked on your website"><Globe size={14} aria-label="Website" /></span> : null}
                   </li>
                 ))}
               </ul>
@@ -198,6 +218,8 @@ export function CalendarView() {
       ) : (
         <WeekView resource={resource} weekStart={weekStart} today={today} onOpenDay={(day) => { setDateKey(day); setView("day"); }} />
       )}
+
+      <BookingPageCard />
 
       <Card className="mt-6 bg-surface-warm shadow-none">
         <p className="text-sm text-muted">Times show in {resource.timeZone.split("/").pop()?.replaceAll("_", " ")} time. A slot is only booked once it is saved, so two people can never take the same time.</p>

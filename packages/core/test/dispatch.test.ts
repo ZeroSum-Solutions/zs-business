@@ -274,7 +274,7 @@ describe("shared transactional action path", () => {
       expect((await counts()).state).toBe(0);
     },
   );
-  it("bounds advisory lock waits and returns a typed conflict without writes", async () => {
+  it("bounds the idempotency key wait and answers retryable, without writes, while another request holds the key", async () => {
     const holder = await db.pool.connect();
     try {
       await holder.query("begin");
@@ -290,9 +290,10 @@ describe("shared transactional action path", () => {
         statementTimeoutMs: 1000,
       });
       try {
+        // The holder may yet commit this key, so the answer is "try again", not a conflict.
         await expect(
           dispatch({ ...ctx, db: bounded }, command),
-        ).rejects.toBeInstanceOf(Conflict);
+        ).rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "in_progress" });
       } finally {
         clearTimeout(fallbackRelease);
       }

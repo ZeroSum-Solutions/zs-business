@@ -75,3 +75,36 @@ export async function expectUnobscured(target: Locator, label = "element") {
   });
   expect(hit.ok, `${label} is covered by ${hit.covering}`).toBe(true);
 }
+
+/**
+ * Step the Calendar's day view forward, on each calendar in turn, until a website booking
+ * shows. Returns its row. Website bookings land on whichever calendar the visitor picked.
+ * Each step waits for the new day's heading and data, so a stale list is never read.
+ */
+export async function findWebsiteBooking(page: Page, name: string | RegExp, maxDays = 14): Promise<Locator> {
+  const calendars = page.getByRole("group", { name: "Calendar" }).getByRole("button");
+  const heading = page.locator('h2[aria-live="polite"]');
+  const step = async (direction: "Next day" | "Previous day") => {
+    const before = await heading.textContent();
+    await page.getByRole("button", { name: direction }).click();
+    await expect(heading).not.toHaveText(before ?? "");
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  };
+  await page.getByRole("button", { name: "Day", exact: true }).click();
+  const count = await calendars.count();
+  for (let index = 0; index < Math.max(count, 1); index += 1) {
+    if (count > 0) {
+      await calendars.nth(index).click();
+      await expect(calendars.nth(index)).toHaveAttribute("aria-pressed", "true");
+    }
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+    for (let day = 0; day < maxDays; day += 1) {
+      const row = page.locator('li[data-source="website"]').filter({ hasText: name });
+      if (await row.count() > 0) return row.first();
+      if (day < maxDays - 1) await step("Next day");
+    }
+    // Back to the first day before trying the next calendar.
+    for (let day = 0; day < maxDays - 1; day += 1) await step("Previous day");
+  }
+  throw new Error(`No website booking for ${String(name)} in the next ${maxDays} days`);
+}

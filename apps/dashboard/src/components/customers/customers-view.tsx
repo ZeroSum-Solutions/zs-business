@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { AddContactDialog } from "./add-contact-dialog";
 import { ContactList } from "./contact-list";
 import { PipelineBoard } from "./pipeline-board";
+import { WebsiteRequests } from "./website-requests";
 
 export function CustomersView() {
   const params = useSearchParams();
@@ -38,7 +39,7 @@ export function CustomersView() {
           </Link>
         ))}
       </nav>
-      {view === "pipeline" ? <PipelineBoard /> : <ContactList />}
+      {view === "pipeline" ? <PipelineBoard /> : <><WebsiteRequests /><ContactList /></>}
       <AddContactDialog open={adding} onOpenChange={setAdding} />
     </>
   );

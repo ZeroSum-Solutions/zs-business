@@ -18,7 +18,7 @@ import {
   type JsonValue,
   type Target,
 } from "@zs/contracts";
-import type { ScopedDatabase, Transaction } from "@zs/db";
+import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 
 export type DispatchConfig = Readonly<Record<string, unknown>>;
 export interface DispatchContext<Config = DispatchConfig> {
@@ -132,9 +132,14 @@ export function createDispatcher<Config = DispatchConfig>(
       .tenant(binding.tenantId, async (tx) => {
         if (ctx.authorize) await ctx.authorize(tx, binding);
         // Lock before lookup: concurrent same-key callers see the committed winner at READ COMMITTED.
+        // A lock wait that times out means an earlier request with this key is still running and
+        // may yet commit, so the answer is retryable (503), not a definitive conflict.
         await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
           `${binding.tenantId}:${key}`,
-        ]);
+        ]).catch((error: unknown) => {
+          const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+          throw code === "55P03" ? new DatabaseUnavailable("in_progress", { cause: error }) : error;
+        });
         const stored = (
           await tx.query<{
             id: string;

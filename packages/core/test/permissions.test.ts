@@ -1,14 +1,19 @@
 // M2a owner/staff matrix, enforced in core: every action and read the edge session offers,
-// run as an owner, a staff member and a signed-in stranger under the runtime role.
+// run as an owner, a staff member and a signed-in stranger under the runtime role. M3 intake
+// review is owner-only; the public principal runs the one public action and nothing else.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ROLE_PERMISSIONS, TenantDenied, roleCan, type MemberRole, type Permission } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { ACTION_PERMISSIONS, createSession, type Session } from "../src/edge/session.js";
-import { bookingHandlers, createDispatcher, crmHandlers, memberHandlers, type DispatchContext } from "../src/index.js";
+import { createPublicSession } from "../src/edge/public-session.js";
+import { ACTION_PERMISSIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
+import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
+import { bookingHandlers, createDispatcher, crmHandlers, intakeHandlers, memberHandlers, type DispatchContext } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
 const clock = { now: () => new Date(NOW) };
+/** Synthetic booking key secret, built at runtime so secret scanners do not flag a literal. */
+const bookingKeys = { secret: ["test", "booking", "k".repeat(32)].join("-"), publicBaseUrl: "http://book.test" };
 
 /** What each action needs, written out so a change to the map has to change this test too. */
 const EXPECTED_ACTIONS: Record<string, Permission> = {
@@ -16,6 +21,8 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
+  "intake.item.link": "intake",
+  "intake.item.reject": "intake",
   "member.invite": "members",
   "member.change-role": "members",
   "member.remove": "members",
@@ -29,6 +36,9 @@ interface Tenant {
   ownerId: string;
   dealId: string;
   contactId: string;
+  /** A published booking page over its own every-day resource, for website requests. */
+  pageId: string;
+  publicResourceId: string;
 }
 
 let database: TestDatabase;
@@ -45,8 +55,21 @@ async function addMember(tenantId: string, role: MemberRole): Promise<{ userId: 
   return { userId, memberId };
 }
 
-const sessionFor = (actorId: string, tenantId = tenant.tenantId): Session =>
-  createSession({ db: database.db, clock, generateId: randomUUID }, { tenantId, actorId });
+const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys });
+const sessionFor = (actorId: string, tenantId = tenant.tenantId): Session => createSession(deps(), { tenantId, actorId });
+
+/** Each website request takes the next free hour, from Tuesday 09:00 UTC. */
+let publicSlot = 0;
+/** A website request from a known email: a `possible_match` item the owner must review. */
+async function intakeItem(): Promise<string> {
+  const n = publicSlot++;
+  const startsAt = `2026-10-${20 + Math.floor(n / 8)}T${String(9 + (n % 8)).padStart(2, "0")}:00:00.000Z`;
+  const reply = await createPublicSession(deps(), { tenantId: tenant.tenantId, pageId: tenant.pageId }).request({
+    resourceId: tenant.publicResourceId, startsAt, name: "Ada", email: "ada@example.com",
+    consent: { email: false, sms: false }, disclosureVersion: "v1", channel: "widget", website: "",
+  }, randomUUID());
+  return reply.requestId;
+}
 
 async function actionRows(tenantId: string, actorId: string): Promise<number> {
   return Number((await fixture.service((tx) => tx.query<{ n: string }>(
@@ -74,12 +97,30 @@ beforeAll(async () => {
       [tenantId, stages[0], pipelineId, stages[1]],
     );
   });
+  const publicResourceId = randomUUID();
+  const pageId = randomUUID();
+  await fixture.service(async (tx) => {
+    await tx.query(
+      `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+         buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+       VALUES ($1,$2,'UTC',$3::jsonb,'[]'::jsonb,60,60,0,0,0,20160)`,
+      [tenantId, publicResourceId, JSON.stringify([1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, windows: [{ startMinute: 540, endMinute: 1020 }] })))],
+    );
+    await tx.query(
+      "INSERT INTO booking_pages (tenant_id,id,title,published,disclosure_version,created_at) VALUES ($1,$2,'Book',true,'v1',$3)",
+      [tenantId, pageId, NOW],
+    );
+    await tx.query("INSERT INTO booking_page_resources (tenant_id,page_id,resource_id,position) VALUES ($1,$2,$3,0)", [tenantId, pageId, publicResourceId]);
+  });
   const owner = await addMember(tenantId, "owner");
   const ownerSession = createSession({ db: database.db, clock, generateId: randomUUID }, { tenantId, actorId: owner.userId });
   const contact = await ownerSession.upsertContact({ displayName: "Ada", email: "ada@example.com" }, randomUUID());
   const deal = await ownerSession.createDeal(
     { contactId: contact.result.contact.id, pipelineId, stageId: stages[0], title: "Ring" }, randomUUID());
-  tenant = { tenantId, resourceId, pipelineId, stages, ownerId: owner.userId, dealId: deal.result.id, contactId: contact.result.contact.id };
+  tenant = {
+    tenantId, resourceId, pipelineId, stages, ownerId: owner.userId, dealId: deal.result.id, contactId: contact.result.contact.id,
+    pageId, publicResourceId,
+  };
 });
 afterAll(async () => { await database?.close(); });
 
@@ -120,20 +161,27 @@ function operations(session: Session): Record<string, { permission: Permission |
     listDeals: { permission: "customers", run: () => session.listDeals({}) },
     listPipelines: { permission: "customers", run: () => session.listPipelines() },
     listMembers: { permission: "members", run: () => session.listMembers() },
+    linkIntakeItem: { permission: "intake", run: async () => session.linkIntakeItem(await intakeItem(), { contactId: tenant.contactId }, randomUUID()) },
+    rejectIntakeItem: { permission: "intake", run: async () => session.rejectIntakeItem(await intakeItem(), {}, randomUUID()) },
+    listIntakeItems: { permission: "intake", run: () => session.listIntakeItems({}) },
+    listBookingPages: { permission: "publish", run: () => session.listBookingPages() },
     me: { permission: null, run: () => session.me() },
   };
 }
 
 describe("permission map", () => {
   it("names a permission for every registered action, and only those", () => {
-    const registered = Object.keys({ ...bookingHandlers, ...crmHandlers, ...memberHandlers }).sort();
+    // The public request is the one action no member session may run (public-intake.md P-1).
+    const registered = Object.keys({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers })
+      .filter((action) => action !== PUBLIC_REQUEST_ACTION).sort();
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);
+    expect(Object.keys(ACTION_PERMISSIONS)).not.toContain(PUBLIC_REQUEST_ACTION);
     expect({ ...ACTION_PERMISSIONS }).toEqual(EXPECTED_ACTIONS);
   });
 
-  it("leaves members, billing, plan and publish to owners", () => {
+  it("leaves members, billing, plan, publish and intake review to owners", () => {
     expect(ROLE_PERMISSIONS.staff).toEqual(["calendar", "customers", "inbox.drafts"]);
-    for (const permission of ["members", "billing", "plan", "publish"] as const) expect(roleCan("staff", permission)).toBe(false);
+    for (const permission of ["members", "billing", "plan", "publish", "intake"] as const) expect(roleCan("staff", permission)).toBe(false);
   });
 });
 

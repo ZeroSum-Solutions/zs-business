@@ -10,6 +10,7 @@ import {
   type ContactRecord,
   type DealListQuery,
   type DealRecord,
+  type IntakeStatus,
   type ListResult,
   type Page,
   type SlotQuery,
@@ -24,6 +25,9 @@ export const keys = {
   slotsAll: ["booking", "slots"] as const,
   bookings: (query: BookingListQuery = {}) => ["booking", "bookings", query] as const,
   bookingsAll: ["booking", "bookings"] as const,
+  bookingPages: ["booking", "pages"] as const,
+  intake: (status?: IntakeStatus) => ["intake", "items", status ?? "all"] as const,
+  intakeAll: ["intake", "items"] as const,
   pipelines: ["crm", "pipelines"] as const,
   /** Pages of the customer list for one search; "" is the whole list. */
   contacts: (search = "") => ["crm", "contacts", "list", search] as const,
@@ -104,6 +108,19 @@ export function useBookings(query: BookingListQuery = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.bookings(query), queryFn: ({ signal }) => api.listBookings(query, { signal }) });
+}
+
+/** Website booking requests, newest first (public-intake.md P-12). */
+export function useIntakeItems(status?: IntakeStatus) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.intake(status), queryFn: ({ signal }) => api.listIntakeItems(status ? { status } : {}, { signal }) });
+}
+
+export function useBookingPages() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.bookingPages, queryFn: () => api.listBookingPages(), staleTime: 5 * 60_000 });
 }
 
 /** Every pipeline with its stages, in name order. A business may have none yet. */

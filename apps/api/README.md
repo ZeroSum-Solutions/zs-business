@@ -99,10 +99,16 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
-| `REQUEST_TIMEOUT_MS` | Longest time a `/v1` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
+| `REQUEST_TIMEOUT_MS` | Longest time a `/v1` or `/public/v1` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
 | `DATABASE_CA_CERT` | PEM. When set, the pool verifies the server against it (`rejectUnauthorized`). Required whenever `DATABASE_URL` is not a loopback host (`127.0.0.1`, `::1`, `localhost`), so a hosted API never falls back to plain TCP; only a loopback database runs without TLS. A non-loopback URL, or any URL with a CA, must carry no query string, because pg lets URL ssl options (`sslmode=no-verify`, `ssl=false`, a `host` override) replace the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
 | `DATABASE_POOL_MAX` | Pool size per process, 1 to 50, default 10. Vercel sets 3: each serverless instance has its own pool. |
+| `PUBLIC_BOOKING_KEY_SECRET` | Signs public booking page keys (32+ characters; the `.env.example` placeholder is refused). Unset, the public booking routes are off. |
+| `PUBLIC_BOOKING_KEY_PREVIOUS_SECRET` | Optional, during a key rotation: keys signed with it still verify. |
+| `PUBLIC_BASE_URL` | Public origin of the booking page and embed script, default `http://localhost:<PORT>`. |
+| `PUBLIC_CLIENT_IP_HEADER` | Optional: a header the host overwrites on every request (Vercel: `x-vercel-forwarded-for`), used for the per-address limits. Only when the API is reachable through that host alone. |
+| `PUBLIC_TRUSTED_PROXIES` | Optional, instead of the header: comma-separated CIDRs whose `X-Forwarded-For` entries count. |
+| `PUBLIC_RATE_ADDRESS_WRITES`, `PUBLIC_RATE_ADDRESS_READS`, `PUBLIC_RATE_TENANT_WRITES` | Optional overrides of the public rate limits. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
 environment or the system clock. Everything else gets them through `createApp(deps)`.
@@ -138,8 +144,10 @@ Then, on every request:
    removed member is refused on the next request, including a replay of an earlier
    idempotency key: the check runs before the replay lookup.
 3. **Role.** The member's role must allow the route. `owner` may do everything: members,
-   billing, plan and publish. `staff` may use the calendar, customers and inbox drafts
-   (`ROLE_PERMISSIONS` in `@zs/contracts`). Otherwise 403.
+   billing, plan, publish (booking page keys and embed snippets) and intake (website request
+   review). `staff` may use the calendar, customers and inbox drafts (`ROLE_PERMISSIONS` in
+   `@zs/contracts`). Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
+   booking page key names the tenant, and they may run the one public action only.
 
 Member writes hold an exclusive per-tenant advisory lock and every other request a shared
 one, so a role change or removal is never interleaved with a request it affects.
@@ -334,8 +342,12 @@ against the pinned Supabase Root 2021 CA.
    API env per target: `DATABASE_URL` (zs_runtime, port 6543), `DATABASE_CA_CERT`,
    `DATABASE_POOL_MAX=3`, `JWT_VERIFIER` with `JWT_SECRET` or `JWT_JWKS_URL`, `JWT_ISSUER`
    (`https://<ref>.supabase.co/auth/v1`), `SESSION_CHECK=supabase`, `SUPABASE_URL`,
-   `SUPABASE_ANON_KEY`. Dashboard env per target: `ZS_API_URL`, `SUPABASE_URL`,
-   `SUPABASE_ANON_KEY`, `DASHBOARD_TRUST_PROXY=1`. Both set
+   `SUPABASE_ANON_KEY`, and for public booking `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BASE_URL`
+   and `PUBLIC_CLIENT_IP_HEADER=x-vercel-forwarded-for`. The bundle carries `static/` for the
+   booking page. Hosted: keep public intake disabled (leave `PUBLIC_BOOKING_KEY_SECRET` unset)
+   until a shared limiter is configured; the public rate limits are counted per function instance.
+   Dashboard env per target: `ZS_API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+   `DASHBOARD_TRUST_PROXY=1`. Both set
    `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel uses the pinned pnpm.
 6. **Check.** `pnpm --filter @zs/api check:hosted` runs the negative checks against one
    project and its deploys and exits 1 on any failure: unprivileged runtime login, migrator

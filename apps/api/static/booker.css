@@ -1,0 +1,48 @@
+/* Hosted booking page (public-intake.md P-14). Neutral on purpose: it sits inside client sites. */
+:root {
+  --zs-ink: #1d232a;
+  --zs-muted: #5b6672;
+  --zs-line: #d8dde3;
+  --zs-surface: #ffffff;
+  --zs-accent: #24577a;
+  --zs-accent-ink: #ffffff;
+  --zs-danger: #a3271f;
+  --zs-radius: 8px;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--zs-surface); color: var(--zs-ink); }
+body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.booker { max-width: 640px; margin: 0 auto; padding: 24px 20px 32px; }
+.booker h1 { font-size: 1.4rem; margin: 0 0 4px; }
+.booker h2 { font-size: 1.1rem; margin: 20px 0 12px; }
+.booker-sub, .booker-status { color: var(--zs-muted); margin: 0 0 12px; }
+.booker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+.booker button { font: inherit; cursor: pointer; border-radius: var(--zs-radius); }
+.booker-choice {
+  border: 1px solid var(--zs-line); background: var(--zs-surface); color: var(--zs-ink);
+  padding: 10px 12px; text-align: left; min-height: 44px;
+}
+.booker-choice:hover, .booker-choice:focus-visible { border-color: var(--zs-accent); outline: none; box-shadow: 0 0 0 2px rgb(36 87 122 / 25%); }
+.booker-choice[aria-pressed="true"] { border-color: var(--zs-accent); background: rgb(36 87 122 / 8%); }
+.booker-choice small { display: block; color: var(--zs-muted); }
+.booker-primary {
+  border: 0; background: var(--zs-accent); color: var(--zs-accent-ink); padding: 12px 18px; min-height: 44px; font-weight: 600;
+}
+.booker-primary[disabled] { opacity: .6; cursor: progress; }
+.booker-link { border: 0; background: none; color: var(--zs-accent); padding: 8px 0; text-decoration: underline; }
+.booker-summary { border: 1px solid var(--zs-line); border-radius: var(--zs-radius); padding: 12px; margin: 0 0 16px; }
+.booker-field { display: grid; gap: 4px; margin: 0 0 14px; }
+.booker-field label { font-weight: 600; }
+.booker-field input, .booker-field textarea {
+  font: inherit; padding: 10px; border: 1px solid var(--zs-line); border-radius: var(--zs-radius); width: 100%;
+}
+.booker-field input:focus, .booker-field textarea:focus { outline: 2px solid var(--zs-accent); outline-offset: 1px; }
+.booker-hint { color: var(--zs-muted); font-size: .875rem; }
+.booker-consent { border: 1px solid var(--zs-line); border-radius: var(--zs-radius); padding: 12px; margin: 0 0 16px; }
+.booker-consent legend { font-weight: 600; padding: 0 4px; }
+.booker-consent p { margin: 0 0 8px; color: var(--zs-muted); font-size: .9rem; }
+.booker-check { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+.booker-error { color: var(--zs-danger); margin: 0 0 12px; }
+.booker-trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+.booker-done { border-left: 4px solid var(--zs-accent); padding: 4px 0 4px 12px; }

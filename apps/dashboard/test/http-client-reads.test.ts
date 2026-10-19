@@ -55,7 +55,7 @@ const booking = (n: number, startsAt: string): Row => ({
   id: id("b8c2d4e6", n), tenantId: TENANT, resourceId: RESOURCE, startsAt,
   endsAt: new Date(Date.parse(startsAt) + HOUR).toISOString(), occupiedStartsAt: startsAt,
   occupiedEndsAt: new Date(Date.parse(startsAt) + HOUR).toISOString(), bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
-  status: "confirmed", createdAt: "2026-01-01T00:00:00.000Z",
+  status: "confirmed", createdAt: "2026-01-01T00:00:00.000Z", source: "owner", intakeItemId: null, customer: null,
 });
 const contact = (n: number, name: string): Row => ({
   id: id("5e0c1a2b", n), tenantId: TENANT, displayName: name, email: null, phone: "+16465550100",

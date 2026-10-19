@@ -19,7 +19,7 @@ import { MINUTE_MS } from "./time-zone.js";
 
 const ACTION_TYPE = "booking.create";
 
-const currentTenant = async (tx: Transaction): Promise<string | undefined> =>
+export const currentTenant = async (tx: Transaction): Promise<string | undefined> =>
   (await tx.query<{ tenant_id: string }>(
     "SELECT tenant_id FROM tenants WHERE tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid",
   )).rows[0]?.tenant_id;
@@ -29,7 +29,7 @@ const isSupportedInstant = (instant: number): boolean => {
   return Number.isFinite(date.getTime()) && bookingInstantSchema.safeParse(date.toISOString()).success;
 };
 
-async function assertBookingIdUnused(tx: Transaction, tenantId: string, bookingId: string): Promise<void> {
+export async function assertBookingIdUnused(tx: Transaction, tenantId: string, bookingId: string): Promise<void> {
   const used = await tx.query("SELECT 1 FROM bookings WHERE tenant_id=$1 AND id=$2", [tenantId, bookingId]);
   if (used.rowCount) throw new Conflict("Booking ID is already in use", { reason: "id_in_use" });
 }
@@ -78,6 +78,89 @@ export async function loadBusy(tx: Transaction, tenantId: string, resourceId: st
   return rows.map((row) => ({ start: Number(row.start_ms), end: Number(row.end_ms) }));
 }
 
+/** Where a booking came from: the owner, or a website visitor's intake item (public-intake.md P-9). */
+export type BookingOrigin = { source: "owner" } | { source: "website"; intakeItemId: string };
+
+/**
+ * B-19, B-21, B-22 inside the caller's dispatcher transaction: take the resource lock and
+ * recheck the requested start against authoritative state. The lock is held until commit, so
+ * the slot stays free for insertBooking later in the same transaction. booking.public_request
+ * runs this before any identity-dependent work, so a taken slot fails the same way for anyone.
+ */
+export async function checkBookingSlot(
+  tx: Transaction,
+  tenantId: string,
+  request: { bookingId: string; resourceId: string; startsAt: string },
+  now: Date,
+): Promise<BookingRecord> {
+  const { bookingId, resourceId, startsAt } = request;
+  // B-21: the shared per-resource lock, taken after the dispatcher's idempotency lock.
+  await tx.query(
+    "SELECT pg_advisory_xact_lock(hashtextextended('booking-resource:' || $1::uuid::text || ':' || $2::uuid::text, 0))",
+    [tenantId, resourceId],
+  );
+  const resource = await loadResource(tx, tenantId, resourceId);
+  await assertBookingIdUnused(tx, tenantId, bookingId);
+
+  const rules = compileRules(resource);
+  const start = Date.parse(startsAt);
+  const end = start + rules.slotLengthMinutes * MINUTE_MS;
+  const occupiedStart = start - rules.bufferBeforeMinutes * MINUTE_MS;
+  const occupiedEnd = end + rules.bufferAfterMinutes * MINUTE_MS;
+  // The derived bounds must be valid instants too, or Postgres rejects them with a raw SQLSTATE.
+  for (const bound of [start, end, occupiedStart, occupiedEnd])
+    if (!isSupportedInstant(bound)) throw new ValidationFailed("Booking interval leaves the supported instant range");
+  const busy = await loadBusy(tx, tenantId, resourceId, occupiedStart, occupiedEnd);
+  // B-19: re-evaluate exactly this appointment; the query range is the appointment itself.
+  if (!evaluateSlots(rules, start, end, busy, now.getTime()).includes(start))
+    throw new Conflict("Requested slot is unavailable", { reason: "slot_unavailable" });
+
+  const record: BookingRecord = {
+    id: bookingId,
+    tenantId,
+    resourceId: resource.id,
+    startsAt: new Date(start).toISOString(),
+    endsAt: new Date(end).toISOString(),
+    occupiedStartsAt: new Date(occupiedStart).toISOString(),
+    occupiedEndsAt: new Date(occupiedEnd).toISOString(),
+    bufferBeforeMinutes: rules.bufferBeforeMinutes,
+    bufferAfterMinutes: rules.bufferAfterMinutes,
+    status: "confirmed",
+    createdAt: now.toISOString(),
+  };
+  return record;
+}
+
+/** Insert a booking checkBookingSlot approved, in the same transaction (B-20). */
+export async function insertBooking(
+  tx: Transaction,
+  record: BookingRecord,
+  origin: BookingOrigin = { source: "owner" },
+): Promise<BookingRecord> {
+  // bookings_resource_occupied_excl (B-20) arbitrates anything the lock did not serialize.
+  await tx.query(
+    `INSERT INTO bookings (tenant_id, id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
+       buffer_before_minutes, buffer_after_minutes, status, created_at, source, intake_item_id)
+     VALUES ($1, $2, $3, $4::timestamptz, $5::timestamptz, $6::timestamptz, $7::timestamptz, $8, $9, 'confirmed',
+       $10::timestamptz, $11, $12)`,
+    [record.tenantId, record.id, record.resourceId, record.startsAt, record.endsAt, record.occupiedStartsAt,
+      record.occupiedEndsAt, record.bufferBeforeMinutes, record.bufferAfterMinutes, record.createdAt,
+      origin.source, origin.source === "website" ? origin.intakeItemId : null],
+  );
+  return record;
+}
+
+/** Check and insert one booking; booking.create books through here. */
+export async function insertCheckedBooking(
+  tx: Transaction,
+  tenantId: string,
+  request: { bookingId: string; resourceId: string; startsAt: string },
+  now: Date,
+  origin: BookingOrigin = { source: "owner" },
+): Promise<BookingRecord> {
+  return insertBooking(tx, await checkBookingSlot(tx, tenantId, request, now), origin);
+}
+
 export const createBookingHandler: ActionHandler = {
   async resolveTarget(tx, target): Promise<Target | null> {
     if (target.type !== "booking") throw new ValidationFailed("booking.create requires a booking target");
@@ -91,50 +174,7 @@ export const createBookingHandler: ActionHandler = {
     const parsed = createBookingCommandSchema.safeParse(command);
     if (!parsed.success) throw new ValidationFailed(parsed.error.message);
     const { bookingId, resourceId, startsAt } = parsed.data.payload;
-    const tenantId = binding.tenantId;
-    // B-21: the shared per-resource lock, taken after the dispatcher's idempotency lock.
-    await tx.query(
-      "SELECT pg_advisory_xact_lock(hashtextextended('booking-resource:' || $1::uuid::text || ':' || $2::uuid::text, 0))",
-      [tenantId, resourceId],
-    );
-    const resource = await loadResource(tx, tenantId, resourceId);
-    await assertBookingIdUnused(tx, tenantId, bookingId);
-
-    const rules = compileRules(resource);
-    const start = Date.parse(startsAt);
-    const end = start + rules.slotLengthMinutes * MINUTE_MS;
-    const occupiedStart = start - rules.bufferBeforeMinutes * MINUTE_MS;
-    const occupiedEnd = end + rules.bufferAfterMinutes * MINUTE_MS;
-    // The derived bounds must be valid instants too, or Postgres rejects them with a raw SQLSTATE.
-    for (const bound of [start, end, occupiedStart, occupiedEnd])
-      if (!isSupportedInstant(bound)) throw new ValidationFailed("Booking interval leaves the supported instant range");
-    const busy = await loadBusy(tx, tenantId, resourceId, occupiedStart, occupiedEnd);
-    // B-19: re-evaluate exactly this appointment; the query range is the appointment itself.
-    if (!evaluateSlots(rules, start, end, busy, now.getTime()).includes(start))
-      throw new Conflict("Requested slot is unavailable", { reason: "slot_unavailable" });
-
-    const record: BookingRecord = {
-      id: bookingId,
-      tenantId,
-      resourceId: resource.id,
-      startsAt: new Date(start).toISOString(),
-      endsAt: new Date(end).toISOString(),
-      occupiedStartsAt: new Date(occupiedStart).toISOString(),
-      occupiedEndsAt: new Date(occupiedEnd).toISOString(),
-      bufferBeforeMinutes: rules.bufferBeforeMinutes,
-      bufferAfterMinutes: rules.bufferAfterMinutes,
-      status: "confirmed",
-      createdAt: now.toISOString(),
-    };
-    // bookings_resource_occupied_excl (B-20) arbitrates anything the lock did not serialize.
-    await tx.query(
-      `INSERT INTO bookings (tenant_id, id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
-         buffer_before_minutes, buffer_after_minutes, status, created_at)
-       VALUES ($1, $2, $3, $4::timestamptz, $5::timestamptz, $6::timestamptz, $7::timestamptz, $8, $9, 'confirmed', $10::timestamptz)`,
-      [record.tenantId, record.id, record.resourceId, record.startsAt, record.endsAt, record.occupiedStartsAt,
-        record.occupiedEndsAt, record.bufferBeforeMinutes, record.bufferAfterMinutes, record.createdAt],
-    );
-    return { result: { ...record } };
+    return { result: { ...(await insertCheckedBooking(tx, binding.tenantId, { bookingId, resourceId, startsAt }, now)) } };
   },
 };
 

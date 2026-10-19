@@ -39,6 +39,8 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
   "booking_overrides_valid(jsonb)": "pg_catalog, public, pg_temp",
+  "booking_pages_disclosure_versioned()": "pg_catalog, pg_temp",
+  "booking_page_disclosures_append_only()": "pg_catalog, pg_temp",
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_windows_valid(jsonb)": "pg_catalog, pg_temp",

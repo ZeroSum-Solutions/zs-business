@@ -44,8 +44,15 @@ export function shouldWriteConsent(
   return incoming.status === "denied" && existing.status === "granted";
 }
 
-/** Serialize claims on each identity key so concurrent create/find commands see one winner. */
-async function lockIdentities(tx: Transaction, tenantId: string, input: CreateOrFindContactInput): Promise<void> {
+/**
+ * Serialize claims on each identity key so concurrent create/find commands see one winner. Public
+ * intake (booking.public_request) takes the same keys, so it serializes with this handler too.
+ */
+export async function lockIdentities(
+  tx: Transaction,
+  tenantId: string,
+  input: Pick<CreateOrFindContactInput, "email" | "phone" | "contactId">,
+): Promise<void> {
   const keys = [
     input.email === null ? null : `crm:contact:email:${tenantId}:${input.email}`,
     input.phone === null ? null : `crm:contact:phone:${tenantId}:${input.phone}`,

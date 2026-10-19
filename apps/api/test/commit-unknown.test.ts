@@ -1,14 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { createServer, connect, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { apiErrorBodySchema, createOrFindContactOutputSchema } from "@zs/contracts";
+import { apiErrorBodySchema, createOrFindContactOutputSchema, publicBookingReplySchema } from "@zs/contracts";
 import { createLocalStubSessionCheck } from "@zs/core";
-import { createRuntimePool, createScopedDatabase, DatabaseUnavailable, type ScopedDatabase } from "@zs/db";
+import { createRuntimePool, createScopedDatabase, DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createApp, createHs256Verifier } from "../src/app.js";
-import { call, clock, createApiHarness, ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
+import {
+  call, clock, createApiHarness, KEY_SECRET, ORIGIN, provisionPage, PUBLIC_BASE_URL, SECRET, type ApiHarness,
+} from "./helpers.js";
 
 let h: ApiHarness;
-beforeAll(async () => { h = await createApiHarness(); });
+// Public routes on, so a public request's replay goes through the same app as an owner's.
+beforeAll(async () => { h = await createApiHarness({ publicIntake: {} }); });
 afterAll(async () => { await h?.close(); });
 
 /**
@@ -102,5 +105,115 @@ describe("a COMMIT whose reply is lost at the deadline", () => {
       await proxy.close();
       await pool.end().catch(() => undefined);
     }
+  });
+});
+
+const publicIntake = { keySecrets: { current: KEY_SECRET }, publicBaseUrl: PUBLIC_BASE_URL };
+
+/** A weekday 09:00-17:00 UTC resource on its own published page, so no test shares a slot. */
+async function bookablePage() {
+  const resourceId = randomUUID();
+  await h.fixture.service((tx) => tx.query(
+    `INSERT INTO booking_resources (tenant_id,id,name,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+       buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+     VALUES ($1,$2,'Fitting room','UTC',$3::jsonb,'[]'::jsonb,60,60,0,0,0,20160)`,
+    [h.a.tenantId, resourceId, JSON.stringify([1, 2, 3, 4, 5].map((weekday) =>
+      ({ weekday, windows: [{ startMinute: 540, endMinute: 1020 }] })))],
+  ));
+  const page = await provisionPage(h, h.a, { resourceIds: [resourceId] });
+  const body = {
+    resourceId, startsAt: "2026-10-20T10:00:00.000Z", name: "Mira Rowe",
+    email: `mira.${randomUUID().slice(0, 8)}@haldenrowe.example`, phone: null, notes: null,
+    consent: { email: false, sms: false }, disclosureVersion: "v1", channel: "widget", website: "",
+  };
+  const bookings = async () => (await h.database.pool.query(
+    "SELECT id FROM bookings WHERE tenant_id=$1 AND resource_id=$2", [h.a.tenantId, resourceId])).rows;
+  return { path: `/public/v1/pages/${page.key}/requests`, body, bookings };
+}
+
+describe("a public booking request under the request deadline", () => {
+  it("answers 503 when its COMMIT reply is lost, and the retry with the same key replays the booking", async () => {
+    const proxy = await commitReplyLosingProxy(h.database.url);
+    const pool = createRuntimePool({ connectionString: proxy.url, max: 2, connectionTimeoutMs: 2000, onError: () => undefined });
+    const stalling = createApp({
+      verifier: createHs256Verifier(SECRET, { clock }),
+      sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
+      clock,
+      db: createScopedDatabase(pool),
+      generateId: randomUUID,
+      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: 500 },
+      publicIntake,
+    });
+    try {
+      const { path, body, bookings } = await bookablePage();
+      const key = randomUUID();
+      const started = Date.now();
+      const first = await call(stalling, "POST", path, { key, body });
+      // Before this was bounded the request waited for a reply that never came.
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(first.status).toBe(503);
+      expect(apiErrorBodySchema.parse(first.body).error.code).toBe("Unavailable");
+      expect(first.headers.get("retry-after")).toBe("1");
+      expect(first.headers.get("cache-control")).toBe("no-store");
+      // It did commit.
+      expect(await bookings()).toHaveLength(1);
+
+      const retried = await call(h.app, "POST", path, { key, body });
+      expect(retried.status).toBe(201);
+      expect(publicBookingReplySchema.parse(retried.body).startsAt).toBe(body.startsAt);
+      expect(await bookings()).toHaveLength(1);
+    } finally {
+      await proxy.close();
+      await pool.end().catch(() => undefined);
+    }
+  });
+
+  it("answers a retry that times out waiting on its key with 503, and a later replay returns the booking", async () => {
+    // The original request takes its idempotency key lock, then stalls until released.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => { holding = resolve; });
+    const runtime = createScopedDatabase(h.database.runtimePool);
+    const slow: ScopedDatabase = {
+      tenant: (tenantId, work, options) => runtime.tenant(tenantId, (tx) => {
+        let first = true;
+        const gated: Transaction = {
+          query: (async (...args: unknown[]) => {
+            const result = await (tx.query as (...a: unknown[]) => Promise<unknown>)(...args);
+            if (first && String(args[0]).includes("pg_advisory_xact_lock")) {
+              first = false;
+              holding();
+              await gate;
+            }
+            return result;
+          }) as Transaction["query"],
+        };
+        return work(gated);
+      }, options),
+    };
+    const app = (db: ScopedDatabase) => createApp({
+      verifier: createHs256Verifier(SECRET, { clock }),
+      sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
+      clock,
+      db,
+      generateId: randomUUID,
+      config: { allowedOrigins: [ORIGIN], requestTimeoutMs: 10_000 },
+      publicIntake,
+    });
+    const { path, body, bookings } = await bookablePage();
+    const key = randomUUID();
+    const original = call(app(slow), "POST", path, { key, body });
+    await held;
+    // A short lock wait, well inside the deadline, so the timeout is the lock's own.
+    const retry = await call(app(createScopedDatabase(h.database.runtimePool, { lockTimeoutMs: 200 })), "POST", path, { key, body });
+    expect(retry.status).toBe(503);
+    expect(apiErrorBodySchema.parse(retry.body).error.code).toBe("Unavailable");
+    release();
+    expect((await original).status).toBe(201);
+    const replay = await call(h.app, "POST", path, { key, body });
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual((await original).body);
+    expect(await bookings()).toHaveLength(1);
   });
 });

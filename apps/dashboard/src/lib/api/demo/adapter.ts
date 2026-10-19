@@ -8,12 +8,16 @@
 import type { z } from "zod";
 import {
   createBookingRequestSchema,
+  linkIntakeItemRequestSchema,
+  listIntakeItemsQuerySchema,
+  uuidSchema,
   moveDealStageRequestSchema,
   slotsQuerySchema,
   upsertContactRequestSchema,
   type BookingRecord,
   type ContactRecord,
   type DealRecord,
+  type IntakeItemRecord,
   type PipelineSummary,
 } from "@zs/contracts";
 import { addDays, localIso, wallTimeInstants, weekdayOf, zonedDateKey } from "../../time";
@@ -29,9 +33,10 @@ import {
   type BookingView,
   type ContactWriteResult,
   type CrmApi,
+  type IntakeApi,
   type WriteOptions,
 } from "../types";
-import { buildSeed, DEMO_PIPELINE, DEMO_RESOURCES, DEMO_TENANT_ID, type DemoResource } from "./seed";
+import { buildSeed, DEMO_BOOKING_PAGE, DEMO_PIPELINE, DEMO_RESOURCES, DEMO_TENANT_ID, type DemoBooking, type DemoResource } from "./seed";
 
 export interface DemoClock {
   now(): Date;
@@ -82,11 +87,11 @@ export interface DemoWrite {
   outcome: "applied" | "replayed" | "rejected";
 }
 
-type StoredBooking = BookingRecord & { title: string | null; contactName: string | null };
+type StoredBooking = DemoBooking;
 
 const clone = <T>(value: T): T => structuredClone(value);
 
-export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi & CrmApi & DemoControls {
+export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi & CrmApi & IntakeApi & DemoControls {
   const clock = options.clock ?? { now: () => new Date() };
   const newId = options.newId ?? defaultNewId;
   const latency = options.latencyMs ?? 0;
@@ -94,6 +99,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   const contacts = new Map(seed.contacts.map((item) => [item.id, item]));
   const deals = new Map(seed.deals.map((item) => [item.id, item]));
   const bookings = new Map<string, StoredBooking>(seed.bookings.map((item) => [item.id, item]));
+  const intakeItems = new Map(seed.intakeItems.map((item) => [item.id, item]));
   const replays = new Map<string, { fingerprint: string; result: unknown }>();
   const writes: DemoWrite[] = [];
   let offline = false;
@@ -221,12 +227,33 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       createdAt: nowIso(),
       title,
       contactName: null,
+      source: "owner",
+      intakeItemId: null,
     };
     bookings.set(record.id, record);
     return record;
   }
 
-  const toRecord = ({ title: _title, contactName: _contactName, ...record }: StoredBooking): BookingRecord => record;
+  const toRecord = ({ title: _title, contactName: _contactName, source: _source, intakeItemId: _item, ...record }: StoredBooking): BookingRecord => record;
+
+  /** Like the API's bookings list: website bookings carry their customer (public-intake.md P-12). */
+  function toView(booking: StoredBooking): BookingView {
+    const item = booking.intakeItemId ? intakeItems.get(booking.intakeItemId) : undefined;
+    const contact = item?.contactId ? contacts.get(item.contactId) : undefined;
+    return {
+      ...booking,
+      customer: item ? { contactId: item.contactId, name: contact?.displayName ?? item.submitted.name, status: item.status } : null,
+    };
+  }
+
+  /** The API refuses a reviewed item and treats an unknown one as another tenant's (403). */
+  function pendingItem(id: string): IntakeItemRecord {
+    parse(uuidSchema, id);
+    const item = intakeItems.get(id);
+    if (!item) throw demoError("Forbidden");
+    if (item.status !== "possible_match") throw demoError("Conflict", { reason: "already_reviewed" });
+    return item;
+  }
 
   return {
     async listResources() {
@@ -262,7 +289,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       const rows: BookingView[] = [...bookings.values()]
         .filter((item) => (!query.resourceId || item.resourceId === query.resourceId) &&
           Date.parse(item.endsAt) > fromMs && Date.parse(item.startsAt) < toMs)
-        .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+        .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
+        .map(toView);
       return completeList(clone(query.limit === undefined ? rows : rows.slice(0, query.limit)));
     },
 
@@ -358,6 +386,48 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
         deals.set(updated.id, updated);
         return updated;
       });
+    },
+
+    async listIntakeItems(query = {}) {
+      await wait();
+      const { status } = parse(listIntakeItemsQuerySchema, query);
+      const rows = [...intakeItems.values()]
+        .filter((item) => !status || item.status === status)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
+      return completeList(clone(rows));
+    },
+
+    linkIntakeItem(input, options) {
+      return idempotent("intake.item.link", input, options, () => {
+        const { contactId } = parse(linkIntakeItemRequestSchema, { contactId: input.contactId });
+        const item = pendingItem(input.itemId);
+        const contact = contacts.get(contactId);
+        if (!contact) throw demoError("Forbidden");
+        // Intake consent fills only channels with no recorded evidence; a denial stays.
+        const fill = (channel: "email" | "sms") => {
+          const given = item.consent[channel];
+          return contact.consent[channel] ?? (given ? { status: given.status, source: `intake:${item.id}`, recordedAt: given.recordedAt } : null);
+        };
+        const consent = { email: fill("email"), sms: fill("sms") };
+        if (JSON.stringify(consent) !== JSON.stringify(contact.consent))
+          contacts.set(contact.id, { ...contact, consent, updatedAt: nowIso() });
+        const linked: IntakeItemRecord = { ...item, status: "linked", contactId, reviewedAt: nowIso() };
+        intakeItems.set(item.id, linked);
+        return linked;
+      });
+    },
+
+    rejectIntakeItem(itemId, options) {
+      return idempotent("intake.item.reject", { itemId }, options, () => {
+        const rejected: IntakeItemRecord = { ...pendingItem(itemId), status: "rejected", reviewedAt: nowIso() };
+        intakeItems.set(itemId, rejected);
+        return rejected;
+      });
+    },
+
+    async listBookingPages() {
+      await wait();
+      return [clone(DEMO_BOOKING_PAGE)];
     },
 
     bookAsSomeoneElse(resourceId, startsAt) {

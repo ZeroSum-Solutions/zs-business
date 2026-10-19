@@ -2,7 +2,15 @@
  * Made-up demo data for "Halden & Rowe Fine Jewelry". No real people or businesses.
  * Emails use reserved example domains and phones use the fictional 555-01xx range.
  */
-import type { BookingRecord, ContactRecord, DealRecord, PipelineSummary, ResourceSummary } from "@zs/contracts";
+import type {
+  BookingPageSummary,
+  BookingRecord,
+  ContactRecord,
+  DealRecord,
+  IntakeItemRecord,
+  PipelineSummary,
+  ResourceSummary,
+} from "@zs/contracts";
 import { addDays, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
 
 export const DEMO_TENANT_ID = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70";
@@ -90,7 +98,10 @@ const CONTACTS: [string, string | null, string | null][] = [
   ["Noor Haddad", "noor.haddad@example.net", "+19175550172"],
   ["Wendell Ashby", "wendell.ashby@example.com", "+12125550108"],
   ["Saoirse Ng", "saoirse.ng@example.org", "+13475550125"],
+  // Created by a website booking (see WEBSITE_REQUESTS).
+  ["Linnea Castellanos", "linnea.castellanos@example.com", null],
 ];
+const WEBSITE_CONTACT_INDEX = 14;
 
 const DEALS: [number, keyof typeof STAGE_IDS, string][] = [
   [0, "design", "Custom engagement ring, 2 ct oval"],
@@ -118,10 +129,66 @@ const BOOKINGS: [number, "showroom" | "repair", number, number | null, string][]
   [-3, "repair", 600, 8, "Chain repair estimate"],
 ];
 
+const intakeId = (n: number) => `1f4e6a8c-3b5d-4e7f-8a9b-${String(n).padStart(12, "0")}`;
+export const DEMO_PAGE_ID = "7c9e1b3d-5f7a-4b9c-8d1e-2f3a4b5c6d01";
+/** A key-shaped placeholder; demo mode has no signing secret and no public route. */
+const DEMO_PAGE_KEY = `zsb1_${"DemoHaldenRoweBookingPage".padEnd(64, "0")}`;
+const DEMO_BOOKING_HOST = "https://book.example.com";
+
+export const DEMO_BOOKING_PAGE: BookingPageSummary = {
+  id: DEMO_PAGE_ID,
+  title: "Book a Halden & Rowe appointment",
+  published: true,
+  disclosureVersion: "2026-10",
+  resourceIds: [SHOWROOM_ID, REPAIR_ID],
+  publicKey: DEMO_PAGE_KEY,
+  bookingUrl: `${DEMO_BOOKING_HOST}/book/${DEMO_PAGE_KEY}`,
+  embedScript: `<div data-zs-booking="${DEMO_PAGE_KEY}"></div>\n<script src="${DEMO_BOOKING_HOST}/embed.js" async></script>`,
+  embedIframe: `<iframe src="${DEMO_BOOKING_HOST}/book/${DEMO_PAGE_KEY}?embed=1" title="Book an appointment" style="width:100%;min-height:640px;border:0" loading="lazy"></iframe>`,
+};
+
+interface WebsiteRequest {
+  dayOffset: number;
+  kind: "showroom" | "repair";
+  minute: number;
+  status: "new_contact" | "possible_match";
+  name: string;
+  email: string;
+  phone: string | null;
+  notes: string | null;
+  /** Indexes into CONTACTS of the customers holding this email or phone. */
+  matched: number[];
+  consent: { email: boolean; sms: boolean };
+}
+
+/** Website bookings: one brand-new customer and two that look like people already on file. */
+const WEBSITE_REQUESTS: WebsiteRequest[] = [
+  {
+    dayOffset: 1, kind: "showroom", minute: 900, status: "new_contact", name: "Linnea Castellanos",
+    email: "linnea.castellanos@example.com", phone: null, notes: "Looking at sapphire halos.", matched: [], consent: { email: true, sms: false },
+  },
+  {
+    dayOffset: 2, kind: "repair", minute: 720, status: "possible_match", name: "M. Okafor",
+    email: "marguerite.okafor@example.com", phone: "+12125550199", notes: "Clasp keeps opening.", matched: [0], consent: { email: true, sms: true },
+  },
+  {
+    dayOffset: 3, kind: "repair", minute: 840, status: "possible_match", name: "Teo Lindqvist",
+    email: "teo.lindqvist@example.net", phone: "+19175550183", notes: null, matched: [1, 2], consent: { email: false, sms: false },
+  },
+];
+
+export type DemoBooking = BookingRecord & {
+  title: string | null;
+  contactName: string | null;
+  source: "owner" | "website";
+  intakeItemId: string | null;
+};
+
 export interface DemoSeed {
   contacts: ContactRecord[];
   deals: DealRecord[];
-  bookings: (BookingRecord & { title: string | null; contactName: string | null })[];
+  bookings: DemoBooking[];
+  intakeItems: IntakeItemRecord[];
 }
 
 export function buildSeed(now: Date): DemoSeed {
@@ -154,15 +221,15 @@ export function buildSeed(now: Date): DemoSeed {
 
   const today = zonedDateKey(now, DEMO_ZONE);
   const bookings: DemoSeed["bookings"] = [];
-  BOOKINGS.forEach(([dayOffset, kind, minute, contactIndex, title], index) => {
+  const place = (dayOffset: number, kind: "showroom" | "repair", minute: number, id: string, extra: Pick<DemoBooking, "title" | "contactName" | "source" | "intakeItemId">) => {
     const resource = DEMO_RESOURCES.find((item) => item.kind === kind)!;
     let day = addDays(today, dayOffset);
     for (let tries = 0; tries < 7 && !resource.hours[weekdayOf(day)]; tries += 1) day = addDays(day, dayOffset < 0 ? -1 : 1);
     const [y, m, d] = day.split("-").map(Number) as [number, number, number];
     const starts = zonedTimeToUtc(y, m, d, minute, DEMO_ZONE);
     const ends = new Date(starts.getTime() + resource.slotLengthMinutes * 60000);
-    const record = {
-      id: bookingId(index + 1),
+    const record: DemoBooking = {
+      id,
       tenantId: DEMO_TENANT_ID,
       resourceId: resource.id,
       startsAt: starts.toISOString(),
@@ -173,13 +240,47 @@ export function buildSeed(now: Date): DemoSeed {
       bufferAfterMinutes: resource.bufferAfterMinutes,
       status: "confirmed" as const,
       createdAt: iso(-60 * 24 * 3),
-      title,
-      contactName: contactIndex === null ? null : CONTACTS[contactIndex]?.[0] ?? null,
+      ...extra,
     };
     const clash = bookings.some((other) => other.resourceId === record.resourceId &&
       other.occupiedStartsAt < record.occupiedEndsAt && record.occupiedStartsAt < other.occupiedEndsAt);
-    if (!clash) bookings.push(record);
+    if (clash) return null;
+    bookings.push(record);
+    return record;
+  };
+  BOOKINGS.forEach(([dayOffset, kind, minute, contactIndex, title], index) => {
+    place(dayOffset, kind, minute, bookingId(index + 1), {
+      title, contactName: contactIndex === null ? null : CONTACTS[contactIndex]?.[0] ?? null, source: "owner", intakeItemId: null,
+    });
   });
 
-  return { contacts, deals, bookings };
+  const intakeItems: IntakeItemRecord[] = [];
+  WEBSITE_REQUESTS.forEach((request, index) => {
+    const id = intakeId(index + 1);
+    const createdAt = iso(-60 * (index * 9 + 2));
+    const booking = place(request.dayOffset, request.kind, request.minute, bookingId(100 + index), {
+      title: null, contactName: null, source: "website", intakeItemId: id,
+    });
+    if (!booking) return;
+    const consent = (ticked: boolean) => ticked
+      ? { status: "granted" as const, purpose: "marketing_updates", disclosureVersion: DEMO_BOOKING_PAGE.disclosureVersion, source: `widget:${DEMO_PAGE_ID}`, recordedAt: createdAt }
+      : null;
+    intakeItems.push({
+      id,
+      tenantId: DEMO_TENANT_ID,
+      kind: "booking_request",
+      status: request.status,
+      channel: "widget",
+      pageId: DEMO_PAGE_ID,
+      submitted: { name: request.name, email: request.email, phone: request.phone, notes: request.notes },
+      matchedContactIds: request.matched.map((contactIndex) => contactId(contactIndex + 1)),
+      contactId: request.status === "new_contact" ? contactId(WEBSITE_CONTACT_INDEX + 1) : null,
+      consent: { email: consent(request.consent.email), sms: consent(request.consent.sms) },
+      booking: { id: booking.id, resourceId: booking.resourceId, startsAt: booking.startsAt, endsAt: booking.endsAt },
+      reviewedAt: null,
+      createdAt,
+    });
+  });
+
+  return { contacts, deals, bookings, intakeItems };
 }

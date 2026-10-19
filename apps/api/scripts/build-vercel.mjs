@@ -2,7 +2,7 @@
 // (.vercel/output): every path routes to the one Node function. Workspace packages ship
 // TypeScript with NodeNext ".js" specifiers, which Vercel's own Node builder does not map,
 // so the bundle is made here. Run from apps/api: `pnpm build:vercel`.
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { build } from "esbuild";
 
 const output = new URL("../.vercel/output/", import.meta.url);
@@ -36,6 +36,8 @@ await build({
   logLevel: "warning",
 });
 
+// The hosted booking page and widget read these at start-up (src/public/assets.ts).
+await cp(new URL("../static/", import.meta.url), new URL("static/", fn), { recursive: true });
 await writeFile(new URL(".vc-config.json", fn), JSON.stringify({
   runtime: "nodejs24.x",
   handler: "index.mjs",

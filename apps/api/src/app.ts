@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
@@ -8,7 +8,9 @@ import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
+import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
+import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 
 export interface AppConfig {
   /** Exact origins allowed to call the API from a browser; empty means no CORS. */
@@ -29,6 +31,8 @@ export interface AppDependencies {
   readonly db: ScopedDatabase;
   readonly generateId: () => string;
   readonly config: AppConfig;
+  /** Public booking pages and the widget (public-intake.md); absent means the routes are off. */
+  readonly publicIntake?: PublicIntakeConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -78,9 +82,10 @@ export function createApp(deps: AppDependencies) {
       : c.json(mapError(new DatabaseUnavailable("connect")).body, 503, { "Retry-After": "1", "Cache-Control": "no-store" }));
   }
 
-  // A deadline per request, which also ends when the caller goes away.
+  // A deadline per request, which also ends when the caller goes away. Anonymous public
+  // requests get the same one, so a lost reply cannot hold a pool connection open.
   const requestTimeoutMs = deps.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  app.use("/v1/*", async (c, next) => {
+  const deadline: MiddlewareHandler<AppEnv> = async (c, next) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
     const clientGone = () => controller.abort();
@@ -97,7 +102,27 @@ export function createApp(deps: AppDependencies) {
       clearTimeout(timer);
       raw?.removeEventListener("abort", clientGone);
     }
-  });
+  };
+  app.use("/v1/*", deadline);
+  app.use("/public/v1/*", deadline);
+
+  const edge = {
+    db: deps.db,
+    clock: deps.clock,
+    generateId: deps.generateId,
+    ...(deps.publicIntake
+      ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
+      : {}),
+  };
+  /** The edge for one request: its database work stops at the request's deadline. */
+  const requestEdge = (c: Context<AppEnv>) =>
+    ({ ...edge, db: withDeadline(edge.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime()) });
+  // Anonymous routes sit outside /v1, so the owner auth middleware never runs for them.
+  if (deps.publicIntake) {
+    const routes = publicRoutes(edge, deps.publicIntake, requestEdge);
+    app.route("/public/v1", routes.api);
+    app.route("/", routes.site);
+  }
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -110,18 +135,18 @@ export function createApp(deps: AppDependencies) {
     // Verify the token, then require a live Supabase session (sign-out ends it) and a
     // membership in the claimed tenant (@zs/core authenticate, shared with the MCP server).
     // Each read and write then re-checks the membership and its role, all within the deadline.
-    const db = withDeadline(deps.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime());
-    c.set("session", await authenticate(
-      { db, clock: deps.clock, generateId: deps.generateId }, deps.verifier, deps.sessionCheck, match[1]!,
-    ));
+    c.set("session", await authenticate(requestEdge(c), deps.verifier, deps.sessionCheck, match[1]!));
     await next();
   });
   app.route("/v1/booking", bookingRoutes);
   app.route("/v1/crm", crmRoutes);
+  app.route("/v1/intake", intakeRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   app.onError((error, c) => {
+    if (error instanceof RateLimited)
+      return c.json(apiErrorBody("RateLimited", "Too many requests"), 429, { "Retry-After": String(error.retryAfterSeconds) });
     if (error instanceof Unauthenticated) {
       const mapped = mapError(error);
       return c.json(mapped.body, mapped.status, { "WWW-Authenticate": "Bearer" });
@@ -134,10 +159,14 @@ export function createApp(deps: AppDependencies) {
     const mapped = mapError(error);
     // An Auth outage answers 503 like a busy pool, but someone should hear about it.
     if (mapped.status === 500 || error instanceof AuthUnavailable) deps.onError?.(error);
-    if (mapped.status === 503) return c.json(mapped.body, 503, { "Retry-After": "1" });
+    // A public route's own no-store header is not set when the deadline answers for it.
+    if (mapped.status === 503)
+      return c.json(mapped.body, 503, { "Retry-After": "1", ...(c.req.path.startsWith("/public/") ? { "Cache-Control": "no-store" } : {}) });
     return c.json(mapped.body, mapped.status);
   });
   return app;
 }
 export type App = ReturnType<typeof createApp>;
+export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
+export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";

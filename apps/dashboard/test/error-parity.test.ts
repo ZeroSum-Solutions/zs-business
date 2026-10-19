@@ -74,6 +74,18 @@ describe("error bodies match the API", () => {
     await expectSame(demo().createBooking({ resourceId: UNKNOWN, startsAt: "2026-10-20T14:00:00.000Z" }, key()), new TenantDenied());
   });
 
+  it("answers a review of an unknown intake item with 403", async () => {
+    await expectSame(demo().rejectIntakeItem(UNKNOWN, key()), new TenantDenied());
+  });
+
+  it("maps an intake item reviewed twice the same way", async () => {
+    const api = demo();
+    const [item] = (await api.listIntakeItems({ status: "possible_match" })).items;
+    await api.rejectIntakeItem(item!.id, key());
+    await expectSame(api.linkIntakeItem({ itemId: item!.id, contactId: item!.matchedContactIds[0]! }, key()),
+      new Conflict("The intake item was already reviewed", { reason: "already_reviewed" }));
+  });
+
   it("answers a stage move on an unknown deal with 403", async () => {
     await expectSame(demo().moveDealStage({
       dealId: UNKNOWN, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[1]!.id, expectedRevision: 1,

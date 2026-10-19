@@ -10,19 +10,24 @@ import {
   createDealRequestSchema,
   idempotencyKeySchema,
   inviteMemberRequestSchema,
+  linkIntakeItemRequestSchema,
   memberOutputSchema,
+  NotFound,
   removeMemberOutputSchema,
   TenantDenied,
   listBookingsQuerySchema,
+  listIntakeItemsQuerySchema,
   listContactsQuerySchema,
   listDealsQuerySchema,
   moveDealStageRequestSchema,
+  rejectIntakeItemRequestSchema,
   slotsQuerySchema,
   upsertContactRequestSchema,
   uuidSchema,
   type ActionBinding,
   type ActionCommand,
   type ActionResult,
+  type BookingPageSummary,
   type MeResponse,
   type MemberList,
   type MemberOutput,
@@ -34,6 +39,8 @@ import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
+import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
+import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { requireMember } from "../members/access.js";
@@ -46,6 +53,8 @@ export interface EdgeDependencies {
   readonly db: ScopedDatabase;
   readonly clock: { now(): Date };
   readonly generateId: () => string;
+  /** Signs public booking keys for the owner's page list (public-intake.md P-2, P-12). */
+  readonly bookingKeys?: { readonly secret: string; readonly publicBaseUrl: string };
 }
 /** A verified caller. Never built from request bodies or tool input. */
 export interface Principal {
@@ -62,28 +71,46 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
   return parsed.data;
 }
 
-const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...memberHandlers });
+const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers });
 
-/** The permission each action needs. An action missing here is refused. */
+/**
+ * The permission each member action needs. An action missing here is refused, so the public
+ * request (public-intake.md P-1) is never reachable from a member session.
+ */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
+  "intake.item.link": "intake",
+  "intake.item.reject": "intake",
   "member.invite": "members",
   "member.change-role": "members",
   "member.remove": "members",
 });
 
-export function createSession(deps: EdgeDependencies, principal: Principal) {
-  const tenantId = uuidSchema.parse(principal.tenantId);
-  const actorId = uuidSchema.parse(principal.actorId);
+/** Checks inside the action's transaction, before its idempotency lock, that the caller may run it. */
+export type Authorize = NonNullable<DispatchContext["authorize"]>;
 
-  /**
-   * Direct approval: the authenticated principal approves exactly the command it submits.
-   * resolveApproval returns that binding only for this command's own reference.
-   */
-  const run = (command: ActionCommand): Promise<ActionResult> => {
+/**
+ * M2a: a member session runs only the actions its role grants. Membership changes hold the
+ * membership lock exclusively, so they serialize with each other and with every role check.
+ */
+export function memberAuthorize(tenantId: string, actorId: string): Authorize {
+  return async (tx, binding) => {
+    const permission = ACTION_PERMISSIONS[binding.actionType];
+    if (!permission) throw new TenantDenied();
+    await requireMember(tx, tenantId, actorId, permission, binding.actionType.startsWith("member.") ? "exclusive" : "shared");
+  };
+}
+
+/**
+ * Direct approval: the principal approves exactly the command it submits. resolveApproval returns
+ * that binding only for this command's own reference. Member sessions and the server-built public
+ * principal (public-intake.md P-3) both dispatch through here, each with its own authorize.
+ */
+export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId: string, authorize: Authorize) {
+  return (command: ActionCommand): Promise<ActionResult> => {
     const { idempotencyKey: _key, ...fields } = command;
     const approved: ActionBinding = { ...fields, tenantId, actorId };
     const ctx: DispatchContext = {
@@ -95,20 +122,38 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       generateId: deps.generateId,
       resolveApproval: async (_tx, reference) =>
         reference.tenantId === tenantId && reference.id === command.approvalReference.id ? approved : null,
-      // Membership changes hold the membership lock exclusively, so they serialize with each
-      // other and with every role check.
-      authorize: async (tx, binding) => {
-        const permission = ACTION_PERMISSIONS[binding.actionType];
-        if (!permission) throw new TenantDenied();
-        await requireMember(tx, tenantId, actorId, permission, binding.actionType.startsWith("member.") ? "exclusive" : "shared");
-      },
+      authorize,
     };
     return dispatch(ctx, command);
   };
+}
+
+/** Drop trailing slashes in one linear pass; a /\/+$/ regex backtracks on long runs of "/". */
+export function trimTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end -= 1;
+  return url.slice(0, end);
+}
+
+/** Embed snippets for one page; the key is the only tenant reference a website ever holds. */
+export function bookingPageSnippets(publicBaseUrl: string, publicKey: string) {
+  const base = trimTrailingSlashes(publicBaseUrl);
+  const bookingUrl = `${base}/book/${publicKey}`;
+  return {
+    bookingUrl,
+    embedScript: `<div data-zs-booking="${publicKey}"></div>\n<script src="${base}/embed.js" async></script>`,
+    embedIframe: `<iframe src="${bookingUrl}?embed=1" title="Book an appointment" style="width:100%;min-height:640px;border:0" loading="lazy"></iframe>`,
+  };
+}
+
+export function createSession(deps: EdgeDependencies, principal: Principal) {
+  const tenantId = uuidSchema.parse(principal.tenantId);
+  const actorId = uuidSchema.parse(principal.actorId);
+  const run = directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId));
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  const envelope = <Type extends "booking" | "contact" | "deal" | "member">(rawKey: unknown, type: Type, targetId?: string) => {
+  const envelope = <Type extends "booking" | "contact" | "deal" | "intake_item" | "member">(rawKey: unknown, type: Type, targetId?: string) => {
     const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
     const id = targetId ?? derivedId(tenantId, idempotencyKey, type);
     return {
@@ -168,6 +213,34 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     listDeals: (query: unknown) => {
       const parsed = parseInput(listDealsQuerySchema, query, "query");
       return read("customers", (tx) => listDeals(tx, tenantId, parsed));
+    },
+    async linkIntakeItem(itemId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, itemId, "intake item ID");
+      const request = parseInput(linkIntakeItemRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "intake_item", id);
+      return linkIntakeItem({ actionType: "intake.item.link", ...rest, payload: { intakeItemId: id, ...request } }, writeContext);
+    },
+
+    async rejectIntakeItem(itemId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, itemId, "intake item ID");
+      parseInput(rejectIntakeItemRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "intake_item", id);
+      return rejectIntakeItem({ actionType: "intake.item.reject", ...rest, payload: { intakeItemId: id } }, writeContext);
+    },
+
+    listIntakeItems: (query: unknown) => {
+      const parsed = parseInput(listIntakeItemsQuerySchema, query, "query");
+      return read("intake", (tx) => listIntakeItems(tx, tenantId, parsed));
+    },
+    /** Public keys and embed snippets put a page on a website, so only publishers see them. */
+    listBookingPages: async (): Promise<BookingPageSummary[]> => {
+      const keys = deps.bookingKeys;
+      if (!keys) throw new NotFound();
+      const pages = await read("publish", (tx) => listBookingPages(tx, tenantId));
+      return pages.map((page) => {
+        const publicKey = signBookingKey(keys.secret, { tenantId, pageId: page.id });
+        return { ...page, publicKey, ...bookingPageSnippets(keys.publicBaseUrl, publicKey) };
+      });
     },
     listPipelines: () => read("customers", (tx) => listPipelines(tx, tenantId)),
     listResources: () => read("calendar", (tx) => listResources(tx, tenantId)),

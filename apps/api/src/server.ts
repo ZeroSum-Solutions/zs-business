@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
 import { createSessionCheckFromConfig } from "@zs/core";
-import { createApp } from "./app.js";
+import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits } from "./app.js";
 import { createVerifierFromConfig } from "./auth.js";
 import type { ServerEnv } from "./config.js";
 
@@ -31,6 +31,13 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
     // A failed reset discards the connection; say so, since a pattern of them means trouble.
     onResetFailure: (error) => console.error("Session reset failed; connection discarded", error),
   });
+  const publicIntake: PublicIntakeConfig | undefined = env.publicIntake === null ? undefined : {
+    keySecrets: env.publicIntake.keySecrets,
+    publicBaseUrl: env.publicIntake.publicBaseUrl,
+    clientIp: env.publicIntake.clientIp,
+    limits: Object.fromEntries(Object.entries(env.publicIntake.limitOverrides).map(([name, limit]) =>
+      [name, { ...DEFAULT_RATE_LIMITS[name as keyof RateLimits], limit }])),
+  };
   const app = createApp({
     verifier: createVerifierFromConfig(env.jwt, clock),
     sessionCheck: createSessionCheckFromConfig(env.sessionCheck, { db, clock }),
@@ -38,6 +45,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
     db,
     generateId: randomUUID,
     config: { allowedOrigins: env.allowedOrigins, requestTimeoutMs: env.requestTimeoutMs },
+    ...(publicIntake === undefined ? {} : { publicIntake }),
     onError: (error) => console.error("Unhandled API error", error),
     ready: () => checkDatabase(pool),
   });

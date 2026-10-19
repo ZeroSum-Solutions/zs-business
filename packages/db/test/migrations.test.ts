@@ -28,9 +28,20 @@ const shipped: Record<string, string> = {
   "20261018120000_booking_multi_resource.sql": "715a1a92788f566562c6cff962583a3ca7de2bce8f2d4789c483699641a6ba14",
   // Ships with the audit fixes; frozen here so the commit that lands it cannot drift.
   "20261018180000_read_indexes.sql": "ed61fd5d247f4389bf03b33c401718bdda5bd7624d311ba7b2b9032c75f8134e",
+  // Frozen ahead of landing (REVIEW r1 on #9): any later intake change ships as a new migration.
+  "20261018200000_public_intake.sql": "85d553cabf471202999f1872a853d15c59e84fe213186dc07d71a506fd30ab97",
+  // M2a auth (#8).
+  "20261019090000_members_and_sessions.sql": "ea534900166381f1665ab4cf173882bc0f94e5c5ef0c0f7449acb0f12f08ad30",
 };
-/** Main before the read indexes (the audit fixes): the state hosted databases hold today. */
-const beforeReadIndexes = Object.keys(shipped).filter((name) => name !== "20261018180000_read_indexes.sql");
+/**
+ * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is
+ * applied after it, since the runner applies every file it has no row for.
+ */
+const beforeIntake = Object.keys(shipped).filter((name) => name !== "20261018200000_public_intake.sql");
+/** Main before M2a members (#8): bookings, contacts and resources exist, members do not. */
+const beforeMembers = beforeIntake.filter((name) => name !== "20261019090000_members_and_sessions.sql");
+/** Main before the read indexes (the audit fixes). */
+const beforeReadIndexes = beforeMembers.filter((name) => name !== "20261018180000_read_indexes.sql");
 /** Main before multi-resource booking (#3). */
 const beforeMultiResource = beforeReadIndexes.filter((name) => name !== "20261018120000_booking_multi_resource.sql");
 /** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
@@ -75,6 +86,8 @@ async function schemaState(pool: Pool) {
 
 it.each([
   ["main", Object.keys(shipped)],
+  ["main before public intake", beforeIntake],
+  ["main before members", beforeMembers],
   ["main before the read indexes", beforeReadIndexes],
   ["main before multi-resource booking", beforeMultiResource],
   ["main before the hardening follow-ups", beforeHardening],
@@ -97,7 +110,7 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(5);
+    expect(upgraded.functions).toHaveLength(7);
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });
@@ -182,6 +195,51 @@ it("migrates over an existing booking resource whose zone is a lowercase IANA na
 it("refuses to migrate over a stored unknown zone, though forced RLS hides rows from the migrator", async () => {
   await expect(migrateOverStoredZone("Foo/Bar")).rejects.toThrow(/holds unknown time zones/);
 });
+
+it("adds public intake over a pre-M3 database that holds bookings and contacts", async () => {
+  const partial = await mkdtemp(join(tmpdir(), "zs-migrations-pre-m3-"));
+  try {
+    for (const name of beforeIntake) await copyFile(new URL(name, migrations), join(partial, name));
+    const after = await withTestDatabase(async (database) => {
+      const tenantId = randomUUID();
+      const resourceId = randomUUID();
+      await asService(database.servicePool, async (tx) => {
+        await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Tenant')", [tenantId]);
+        await tx.query(
+          `INSERT INTO booking_resources (tenant_id,id,name,time_zone,slot_length_minutes,slot_step_minutes,
+             buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+           VALUES ($1,$2,'Room','UTC',60,60,0,0,0,20160)`, [tenantId, resourceId]);
+        await tx.query(
+          `INSERT INTO bookings (tenant_id,id,resource_id,starts_at,ends_at,occupied_starts_at,occupied_ends_at,
+             buffer_before_minutes,buffer_after_minutes,status,created_at)
+           VALUES ($1,$2,$3,'2026-10-19T09:00Z','2026-10-19T10:00Z','2026-10-19T09:00Z','2026-10-19T10:00Z',0,0,
+             'confirmed','2026-10-18T09:00Z')`, [tenantId, randomUUID(), resourceId]);
+        await tx.query(
+          `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,created_at,updated_at)
+           VALUES ($1,$2,'Mira Rowe','mira@haldenrowe.example','2026-10-18T09:00Z','2026-10-18T09:00Z')`,
+          [tenantId, randomUUID()]);
+      });
+      // Every remaining migration, as the non-superuser migrator hosted databases use.
+      for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql") && name >= "20261018200000"))
+        await copyFile(new URL(name, migrations), join(partial, name));
+      const url = new URL(database.url);
+      url.username = database.migrator!;
+      const migrator = new Pool({ connectionString: url.href, max: 1 });
+      try {
+        await migrate(migrator, pathToFileURL(`${partial}/`));
+      } finally {
+        await migrator.end();
+      }
+      return asService(database.servicePool, async (tx) => ({
+        bookings: (await tx.query("SELECT source, intake_item_id FROM bookings")).rows,
+        contacts: (await tx.query("SELECT display_name FROM crm_contacts")).rows,
+      }));
+    }, undefined, { migrations: pathToFileURL(`${partial}/`), nonSuperuserMigrator: true });
+    expect(after).toEqual({ bookings: [{ source: "owner", intake_item_id: null }], contacts: [{ display_name: "Mira Rowe" }] });
+  } finally {
+    await rm(partial, { recursive: true, force: true });
+  }
+}, 30000);
 
 it("a dry run rolls back, and an apply commits only the set the dry run reported", async () => {
   const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-dry-"));

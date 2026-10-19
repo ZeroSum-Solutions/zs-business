@@ -3,6 +3,8 @@
 import {
   type BookingPage,
   type BookingRecord,
+  type BookingSummary,
+  type IntakeStatus,
   type ListBookingsQuery,
   type ResourceSummary,
   type SlotsQuery,
@@ -27,6 +29,13 @@ interface BookingRow {
   buffer_after_minutes: number;
   created_at: Date;
 }
+interface SummaryRow extends BookingRow {
+  source: "owner" | "website";
+  intake_item_id: string | null;
+  intake_status: IntakeStatus;
+  customer_contact_id: string | null;
+  customer_name: string | null;
+}
 
 const bookingRecord = (row: BookingRow): BookingRecord => ({
   id: row.id,
@@ -42,8 +51,18 @@ const bookingRecord = (row: BookingRow): BookingRecord => ({
   createdAt: row.created_at.toISOString(),
 });
 
+/** P-12: a website booking names its intake item; the customer is the contact once known. */
+const bookingSummary = (row: SummaryRow): BookingSummary => ({
+  ...bookingRecord(row),
+  source: row.source,
+  intakeItemId: row.intake_item_id,
+  customer: row.intake_item_id === null
+    ? null
+    : { contactId: row.customer_contact_id, name: row.customer_name, status: row.intake_status },
+});
+
 const bookingColumns = `id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
-            buffer_before_minutes, buffer_after_minutes, created_at`;
+            buffer_before_minutes, buffer_after_minutes, created_at, source, intake_item_id`;
 
 /**
  * Bookings overlapping [from, to) when given, in start order, so a day or week is one short
@@ -66,15 +85,24 @@ export async function listBookings(tx: Transaction, tenantId: string, query: Lis
   const columns = `${bookingColumns}, ${timestampToMicros("starts_at")} AS sort_value`;
   const scope = [tenantId, query.resourceId ?? null, query.limit + 1, query.offset];
   const cursorParams = cursor ? [...cursor] : [];
-  const toPage = (rows: (BookingRow & { sort_value: string })[]) =>
-    page(rows.map(bookingRecord), query, (index) => encodeCursor("bookings.start", [rows[index]!.sort_value, rows[index]!.id]));
+  type Row = SummaryRow & { sort_value: string };
+  const toPage = (rows: Row[]) =>
+    page(rows.map(bookingSummary), query, (index) => encodeCursor("bookings.start", [rows[index]!.sort_value, rows[index]!.id]));
+  // P-12: name each page's website customers after the page is chosen, so the join never
+  // changes which bookings are on it.
+  const withCustomers = (hits: string) => `SELECT b.*, i.status AS intake_status, i.contact_id AS customer_contact_id,
+          coalesce(c.display_name, i.submitted_name) AS customer_name
+     FROM (${hits}) b
+     LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id
+     LEFT JOIN crm_contacts c ON c.tenant_id = i.tenant_id AND c.id = i.contact_id
+    ORDER BY b.starts_at, b.id`;
   if (query.from === undefined) {
     // $5 is the end of the range, so the cursor's parameters follow it.
-    const rows = (await tx.query<BookingRow & { sort_value: string }>(
-      `SELECT ${columns} FROM bookings
+    const rows = (await tx.query<Row>(
+      withCustomers(`SELECT ${columns} FROM bookings
         WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2) AND ($5::timestamptz IS NULL OR starts_at < $5)
           ${position("$6", "$7")}
-        ORDER BY starts_at, id LIMIT $3 OFFSET $4`,
+        ORDER BY starts_at, id LIMIT $3 OFFSET $4`),
       [...scope, query.to ?? null, ...cursorParams],
     )).rows;
     return toPage(rows);
@@ -96,7 +124,7 @@ export async function listBookings(tx: Transaction, tenantId: string, query: Lis
            ORDER BY starts_at, id LIMIT $3::int + $4::int
         ) hits
         ORDER BY starts_at, id LIMIT $3 OFFSET $4`;
-  const rows = (await tx.query<BookingRow & { sort_value: string }>(sql, [...scope, query.from, query.to ?? null, ...cursorParams])).rows;
+  const rows = (await tx.query<Row>(withCustomers(sql), [...scope, query.from, query.to ?? null, ...cursorParams])).rows;
   return toPage(rows);
 }
 

@@ -13,6 +13,9 @@
  * sending the link, serves the last one at /__test/last-link. The dashboard server gets its URL
  * and a random anon key; the browser never sees a token or the key: the build is scanned for them.
  *
+ * The API also serves the public booking page and widget (public-intake.md), with a random
+ * per-run key secret and PUBLIC_BASE_URL set to its own loopback address.
+ *
  * Children never inherit the shell's environment (see child-env.ts): each gets an allowlist
  * plus what is set here, and every database URL must name this run's zs_e2e_* database.
  *
@@ -135,6 +138,8 @@ export default async function globalSetup() {
   runtimeUrl.username = "zs_runtime";
   runtimeUrl.password = "";
   const jwtSecret = randomBytes(32).toString("hex");
+  // Signs this run's public booking keys; the API serves the booking page and widget with it.
+  const bookingKeySecret = randomBytes(32).toString("hex");
   const children: ChildProcess[] = [];
   const closers: (() => Promise<void>)[] = [];
 
@@ -260,6 +265,8 @@ export default async function globalSetup() {
         SUPABASE_ANON_KEY: anonKey,
         SESSION_CACHE_SECONDS: "0",
         PORT: String(LIVE.apiPort),
+        PUBLIC_BOOKING_KEY_SECRET: bookingKeySecret,
+        PUBLIC_BASE_URL: LIVE.apiUrl,
       }),
     });
     children.push(api);
@@ -278,7 +285,7 @@ export default async function globalSetup() {
       NEXT_TELEMETRY_DISABLED: "1",
     });
     await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: webEnv });
-    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, outsiderToken, token, jwtSecret, anonKey]);
+    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, outsiderToken, token, jwtSecret, anonKey, bookingKeySecret]);
     if (leaks.length > 0) {
       throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);
     }

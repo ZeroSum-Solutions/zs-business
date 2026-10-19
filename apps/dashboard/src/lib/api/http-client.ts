@@ -1,6 +1,9 @@
 import { z } from "zod";
 import {
   bookingPageSchema,
+  bookingPageSummarySchema,
+  intakeItemOutputSchema,
+  intakeItemPageSchema,
   contactPageSchema,
   contactRecordSchema,
   createBookingOutputSchema,
@@ -12,6 +15,7 @@ import {
   slotsResponseSchema,
   uuidSchema,
   type CreateBookingRequest,
+  type LinkIntakeItemRequest,
   type MoveDealStageRequest,
 } from "@zs/contracts";
 import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError } from "./errors";
@@ -20,6 +24,7 @@ import {
   toUpsertContactRequest,
   type BookingApi,
   type CrmApi,
+  type IntakeApi,
   type ListResult,
   type WriteOptions,
 } from "./types";
@@ -46,6 +51,7 @@ interface RequestSpec<T extends z.ZodType> {
 
 const resourceListSchema = z.object({ items: z.array(resourceSummarySchema) });
 const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
+const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema) });
 
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
@@ -55,7 +61,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi {
+export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi & IntakeApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
   const base = config.baseUrl.replace(/\/+$/, "");
 
@@ -211,6 +217,25 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
       };
       const path = `/v1/crm/deals/${encodeURIComponent(input.dealId)}/stage`;
       return (await write(path, body, moveDealStageOutputSchema, options)).result;
+    },
+
+    listIntakeItems(query = {}, options = {}) {
+      return listAll("/v1/intake/items", intakeItemPageSchema, { status: query.status }, options.signal);
+    },
+
+    async linkIntakeItem(input, options) {
+      const body: LinkIntakeItemRequest = { contactId: input.contactId };
+      const path = `/v1/intake/items/${encodeURIComponent(input.itemId)}/link`;
+      return (await write(path, body, intakeItemOutputSchema, options)).result;
+    },
+
+    async rejectIntakeItem(itemId, options) {
+      const path = `/v1/intake/items/${encodeURIComponent(itemId)}/reject`;
+      return (await write(path, {}, intakeItemOutputSchema, options)).result;
+    },
+
+    async listBookingPages() {
+      return (await request({ method: "GET", path: "/v1/booking/pages", schema: bookingPageListSchema })).items;
     },
   };
 }
