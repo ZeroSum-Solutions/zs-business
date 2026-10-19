@@ -101,6 +101,7 @@ try {
     return { ok: rows.length === TENANT_TABLES.length && rows.length >= 10
       && rows.every((row) => row.owner === "zs_migrator" && row.rls && row.forced && !row.anon_any), detail: rows };
   });
+  let contactsA = -1;
   await check("runtime sees tenant A rows only under tenant A, none under tenant B or no tenant", async () => {
     const counts = async (tenant: string | null) => {
       const client = await runtime.connect();
@@ -119,7 +120,9 @@ try {
     const a = await counts(tenantA);
     const b = await counts(tenantB);
     const none = await counts(null);
-    return { ok: a.crm_contacts === 12 && Object.values(b).every((n) => n === 0) && Object.values(none).every((n) => n === 0), detail: { a, b, none } };
+    // The seed makes 12 contacts; pilot use may add more. Later checks compare with this count.
+    contactsA = a.crm_contacts ?? 0;
+    return { ok: contactsA >= 12 && Object.values(b).every((n) => n === 0) && Object.values(none).every((n) => n === 0), detail: { a, b, none } };
   });
   await check("runtime cannot write history or tenants directly", async () => {
     // Each probe throws after its statement, so even an allowed write rolls back and never
@@ -150,7 +153,7 @@ try {
       });
     });
     const rows = await Promise.all(jobs);
-    const bad = rows.filter((row) => row.setting !== row.tenant || row.foreign !== 0 || row.contacts !== (row.tenant === tenantA ? 12 : 0));
+    const bad = rows.filter((row) => row.setting !== row.tenant || row.foreign !== 0 || row.contacts !== (row.tenant === tenantA ? contactsA : 0));
     return { ok: bad.length === 0, detail: { total: rows.length, bad: bad.slice(0, 5) } };
   });
 
@@ -162,7 +165,7 @@ try {
   await check("API: tenant A reads its own records", async () => {
     const contacts = await api("/v1/crm/contacts?limit=100", tokenA);
     const items = contacts.body?.items as unknown[] | undefined;
-    return { ok: contacts.status === 200 && items?.length === 12 && resources.status === 200 && Boolean(resourceId) && Boolean(deal),
+    return { ok: contacts.status === 200 && contactsA >= 12 && items?.length === contactsA && resources.status === 200 && Boolean(resourceId) && Boolean(deal),
       detail: { contacts: items?.length, resources: resources.status, deals: deals.status } };
   });
   await check("API: tenant B sees nothing and is refused tenant A's ids", async () => {
