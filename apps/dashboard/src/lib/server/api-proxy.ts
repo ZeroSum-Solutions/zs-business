@@ -21,6 +21,8 @@ export interface ApiProxyConfig {
   gate: PilotGateSetup;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** Clock for the session check; tests pass a fixed time. */
+  now?: () => Date;
 }
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
@@ -48,7 +50,7 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
   }
   const gate = config.gate.config;
   // Checked before anything else, so no anonymous request ever reaches the token.
-  if (checkSession(request, gate) !== "valid") return reply(401, "Unauthorized");
+  if (checkSession(request, gate, config.now?.()) !== "valid") return reply(401, "Unauthorized");
   if (request.method !== "GET" && request.method !== "POST") return reply(404, "NotFound");
   const [version, area, ...rest] = path;
   if (version !== "v1" || !area || !AREAS.has(area) || rest.length === 0 || !path.every((segment) => SEGMENT.test(segment))) {
