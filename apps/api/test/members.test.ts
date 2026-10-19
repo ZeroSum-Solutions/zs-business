@@ -221,6 +221,15 @@ describe("session liveness", () => {
     expectSessionEnded(await call(h.app, "GET", "/v1/crm/contacts", { token: staff.token }));
   });
 
+  it("ends only the signed-out session: the same person's other devices stay signed in", async () => {
+    const staff = await signedInStaff();
+    const laptop = await tokenFor({ ...staff, sessionId: await startAuthSession(h.database.pool, staff.actorId) });
+    await endAuthSession(h.database.pool, staff.sessionId);
+    expectSessionEnded(await call(h.app, "GET", "/v1/me", { token: staff.token }));
+    expect((await call(h.app, "GET", "/v1/me", { token: laptop })).status).toBe(200);
+    expect((await createContact(laptop, `${randomUUID()}@example.com`)).status).toBe(201);
+  });
+
   it("refuses a session past not_after, an unknown session and another user's session", async () => {
     const staff = await signedInStaff();
     const other = await signedInStaff();
