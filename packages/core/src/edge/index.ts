@@ -3,6 +3,7 @@ export {
   createSession,
   directDispatch,
   parseInput,
+  trimTrailingSlashes,
   type EdgeDependencies,
   type Principal,
   type Session,

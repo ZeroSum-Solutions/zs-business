@@ -81,9 +81,16 @@ export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId
   };
 }
 
+/** Drop trailing slashes in one linear pass; a /\/+$/ regex backtracks on long runs of "/". */
+export function trimTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end -= 1;
+  return url.slice(0, end);
+}
+
 /** Embed snippets for one page; the key is the only tenant reference a website ever holds. */
 export function bookingPageSnippets(publicBaseUrl: string, publicKey: string) {
-  const base = publicBaseUrl.replace(/\/+$/, "");
+  const base = trimTrailingSlashes(publicBaseUrl);
   const bookingUrl = `${base}/book/${publicKey}`;
   return {
     bookingUrl,

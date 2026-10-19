@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
+import { trimTrailingSlashes } from "@zs/core";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 /** The only fields a plain postgres URL yields; anything else came from a query parameter. */
@@ -147,7 +148,7 @@ function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | n
       current: data.PUBLIC_BOOKING_KEY_SECRET,
       ...(data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET === undefined ? {} : { previous: data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET }),
     },
-    publicBaseUrl: (data.PUBLIC_BASE_URL ?? `http://localhost:${data.PORT}`).replace(/\/+$/, ""),
+    publicBaseUrl: trimTrailingSlashes(data.PUBLIC_BASE_URL ?? `http://localhost:${data.PORT}`),
     trustProxy: data.TRUST_PROXY === "1",
     limitOverrides,
   };
