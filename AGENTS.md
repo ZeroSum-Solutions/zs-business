@@ -24,3 +24,15 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
 - Never edit `/Users/zero-suminc./projects/mish` or `/Users/zero-suminc./projects/rise-scheduler`
   from this repo's work. Read them only.
 - Conventional commits on feature branches. No AI attribution lines.
+
+## Cloud sessions (Claude Code on the web / desktop cloud)
+- `scripts/cloud-setup.sh` runs at session start (`.claude/settings.json`). It installs Node 24,
+  pnpm and Postgres on `127.0.0.1:55432`, so `pnpm -r test`, `test:booking` and `test:crm` work
+  as in CI. It does nothing on a laptop.
+- Cloud sessions hold no secrets and never touch hosted Supabase, Vercel, Resend or DNS.
+  Deploys, hosted checks and the hidden test gate run on Devin's Mac.
+- Work on a `cloud/<checkpoint>` branch and open a draft PR. Keep a `Status:` line at the
+  top of the PR body. When the work is done and tests pass, comment `READY FOR REVIEW`.
+  The Mac hub then runs a GPT-6.1 Sol review and posts findings as a PR comment that starts
+  `REVIEW`. Fix verified findings, push, and comment `READY FOR REVIEW` again.
+- Never merge. The hub lands PRs after review and green CI.
