@@ -1,18 +1,22 @@
 -- Owner-run, once per hosted Supabase project, as the project's `postgres` login, before
 -- the first migration. Idempotent: a rerun rotates both passwords and re-asserts the rules.
--- Passwords come from the environment, never argv:
---   ZS_MIGRATOR_PASSWORD  zs_migrator, the restricted role that applies supabase/migrations
---   ZS_RUNTIME_PASSWORD   zs_runtime, the API's login (member of authenticated only)
+-- The server only ever sees SCRAM-SHA-256 verifiers, never a plaintext password: Supabase
+-- runs log_statement=ddl, which logs CREATE/ALTER ROLE text. Compute them client-side with
+-- scram-verifier.mjs and pass them through the environment, never argv:
+--   ZS_MIGRATOR_VERIFIER  zs_migrator, the restricted role that applies supabase/migrations
+--   ZS_RUNTIME_VERIFIER   zs_runtime, the API's login (member of authenticated only)
 -- CREATE/ALTER ROLE name only LOGIN, CREATEROLE and PASSWORD: supautils refuses a
 -- non-superuser statement that names SUPERUSER, REPLICATION or BYPASSRLS, even as NO*.
 -- The checks at the end assert every attribute instead.
 \set ON_ERROR_STOP 1
-\getenv migrator_password ZS_MIGRATOR_PASSWORD
-\getenv runtime_password ZS_RUNTIME_PASSWORD
-SELECT length(:'migrator_password') >= 32 AND length(:'runtime_password') >= 32 AS passwords_ok \gset
-\if :passwords_ok
+\getenv migrator_verifier ZS_MIGRATOR_VERIFIER
+\getenv runtime_verifier ZS_RUNTIME_VERIFIER
+SELECT :'migrator_verifier' ~ '^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]{24}\$[A-Za-z0-9+/=]{44}:[A-Za-z0-9+/=]{44}$'
+   AND :'runtime_verifier' ~ '^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]{24}\$[A-Za-z0-9+/=]{44}:[A-Za-z0-9+/=]{44}$'
+   AND :'migrator_verifier' <> :'runtime_verifier' AS verifiers_ok \gset
+\if :verifiers_ok
 \else
-  \echo 'Set ZS_MIGRATOR_PASSWORD and ZS_RUNTIME_PASSWORD (32+ characters each)'
+  \echo 'Set ZS_MIGRATOR_VERIFIER and ZS_RUNTIME_VERIFIER from scram-verifier.mjs (two different passwords)'
   \quit 3
 \endif
 
@@ -20,14 +24,14 @@ BEGIN;
 SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zs_migrator') AS create_migrator,
        NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zs_runtime') AS create_runtime \gset
 \if :create_migrator
-  CREATE ROLE zs_migrator LOGIN CREATEROLE PASSWORD :'migrator_password';
+  CREATE ROLE zs_migrator LOGIN CREATEROLE PASSWORD :'migrator_verifier';
 \else
-  ALTER ROLE zs_migrator LOGIN CREATEROLE PASSWORD :'migrator_password';
+  ALTER ROLE zs_migrator LOGIN CREATEROLE PASSWORD :'migrator_verifier';
 \endif
 \if :create_runtime
-  CREATE ROLE zs_runtime LOGIN PASSWORD :'runtime_password';
+  CREATE ROLE zs_runtime LOGIN PASSWORD :'runtime_verifier';
 \else
-  ALTER ROLE zs_runtime LOGIN NOCREATEROLE PASSWORD :'runtime_password';
+  ALTER ROLE zs_runtime LOGIN NOCREATEROLE PASSWORD :'runtime_verifier';
 \endif
 ALTER ROLE zs_migrator RESET ALL;
 ALTER ROLE zs_runtime RESET ALL;

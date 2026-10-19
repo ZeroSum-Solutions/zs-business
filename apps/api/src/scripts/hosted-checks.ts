@@ -122,8 +122,13 @@ try {
     return { ok: a.crm_contacts === 12 && Object.values(b).every((n) => n === 0) && Object.values(none).every((n) => n === 0), detail: { a, b, none } };
   });
   await check("runtime cannot write history or tenants directly", async () => {
-    const attempt = (sql: string) => createScopedDatabase(runtime).tenant(tenantA, (tx) => tx.query(sql, [tenantA]))
-      .then(() => "ALLOWED", (error: { code?: string }) => `refused ${error.code}`);
+    // Each probe throws after its statement, so even an allowed write rolls back and never
+    // touches tenant A's records.
+    const rolledBack = new Error("probe rolled back");
+    const attempt = (sql: string) => createScopedDatabase(runtime).tenant(tenantA, async (tx) => {
+      await tx.query(sql, [tenantA]);
+      throw rolledBack;
+    }).then(() => "ALLOWED", (error: { code?: string }) => error === rolledBack ? "ALLOWED (rolled back)" : `refused ${error.code}`);
     const outcome = {
       insertAction: await attempt(`INSERT INTO actions (tenant_id,id,actor_id,action_type,target,payload,idempotency_key,result,created_at)
         VALUES ($1,gen_random_uuid(),gen_random_uuid(),'x','{}','{}','k','{}',now())`),
@@ -235,6 +240,12 @@ try {
       const body = await response.json().catch(() => null) as unknown;
       return { status: response.status, rows: Array.isArray(body) ? body.length : null, code: (body as { code?: string } | null)?.code ?? null };
     };
+    // Only an explicit denial counts: 200 with an empty array, or 401/403/404 carrying a
+    // PostgREST (PGRST...) or Postgres privilege (42501) code. An outage (5xx, HTML, no
+    // code) fails the check instead of passing it.
+    const denied = (reply: { status: number; rows: number | null; code: string | null }) =>
+      (reply.status === 200 && reply.rows === 0)
+      || ([401, 403, 404].includes(reply.status) && /^(PGRST\d+|42501)$/.test(reply.code ?? ""));
     await check("Data API: anon and a signed-in user claiming tenant A read no tenant rows", async () => {
       const detail: Record<string, unknown> = { userCreated: Boolean(created.id), signedIn: Boolean(session.access_token) };
       let ok = Boolean(session.access_token);
@@ -242,20 +253,21 @@ try {
         const anon = await rest(`${table}?select=*&limit=5`, anonKey);
         const user = await rest(`${table}?select=*&limit=5`, session.access_token ?? anonKey);
         detail[table] = { anon, user };
-        // A refusal (401/403/404) or an empty array both pass; any returned row fails.
-        ok &&= (anon.rows ?? 0) === 0 && (user.rows ?? 0) === 0;
+        ok &&= denied(anon) && denied(user);
       }
       const rpc = await rest("rpc/record_action_and_event", session.access_token ?? anonKey, { method: "POST", body: JSON.stringify({
         p_tenant: tenantA, p_id: randomUUID(), p_actor: randomUUID(), p_type: "x", p_target: { tenantId: tenantA, id: randomUUID() },
         p_payload: {}, p_approval: { tenantId: tenantA, id: randomUUID() }, p_key: randomUUID(), p_result: {}, p_created_at: new Date().toISOString(),
         p_event_id: randomUUID(), p_event_type: "x", p_event_payload: {} }) });
       detail.rpcRecordAction = rpc;
-      ok &&= rpc.status >= 400;
+      ok &&= rpc.status !== 200 && denied(rpc);
       return { ok, detail };
     });
   } finally {
-    if (created.id)
-      await fetch(`${supabaseUrl}/auth/v1/admin/users/${created.id}`, { method: "DELETE", headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } });
+    if (created.id) {
+      const removed = await fetch(`${supabaseUrl}/auth/v1/admin/users/${created.id}`, { method: "DELETE", headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } });
+      results.push({ name: "cleanup: the temporary Auth user is deleted", ok: removed.ok, detail: { status: removed.status, userId: created.id } });
+    }
   }
 } finally {
   await Promise.all([runtime.end(), migrator.end()]);

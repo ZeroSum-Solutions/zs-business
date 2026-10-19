@@ -5,6 +5,11 @@ import type { Pool } from "pg";
 export interface MigrateOptions {
   /** Apply every pending migration inside the one transaction, then roll it back. */
   readonly dryRun?: boolean;
+  /**
+   * The exact set a dry run reported. Checked inside the transaction before COMMIT, so a
+   * migration file that changed between the dry run and the apply rolls back instead.
+   */
+  readonly expect?: readonly MigrationRecord[];
 }
 export interface MigrationRecord {
   readonly name: string;
@@ -59,6 +64,8 @@ export async function migrate(
       );
       applied.push({ name, checksum });
     }
+    if (options.expect && !sameRecords(applied, options.expect))
+      throw new Error("Pending migrations differ from the expected set; rolled back");
     await client.query(options.dryRun ? "ROLLBACK" : "COMMIT");
     return applied;
   } catch (error) {
@@ -71,4 +78,8 @@ export async function migrate(
   } finally {
     client.release(discard);
   }
+}
+
+function sameRecords(a: readonly MigrationRecord[], b: readonly MigrationRecord[]): boolean {
+  return a.length === b.length && a.every((row, index) => row.name === b[index]!.name && row.checksum === b[index]!.checksum);
 }

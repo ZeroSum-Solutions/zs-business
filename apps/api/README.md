@@ -108,12 +108,22 @@ port 5432 (session mode) for roles, migrations, seed and backups; port 6543 (tra
 mode) for the API. The scripts check the host, role and ref (`src/hosted.ts`) and verify TLS
 against the pinned Supabase Root 2021 CA.
 
-1. **Roles, once per project.** As the project's `postgres` login, with
-   `ZS_MIGRATOR_PASSWORD` and `ZS_RUNTIME_PASSWORD` (32+ characters) in the environment:
-   `psql "host=… port=5432 user=postgres.<ref> dbname=postgres sslmode=require" -X -f supabase/hosted/bootstrap-roles.sql`.
-   It creates `zs_migrator` (LOGIN CREATEROLE; owns every table it creates) and `zs_runtime`
-   (LOGIN, member of `authenticated` only), creates `btree_gist`, and asserts that neither
-   role is superuser, BYPASSRLS or REPLICATION. A rerun rotates both passwords.
+1. **Roles, once per project.** As the project's `postgres` login (`PGPASSWORD`), with
+   `ZS_MIGRATOR_PASSWORD` and `ZS_RUNTIME_PASSWORD` (32+ printable ASCII characters) in the
+   environment:
+   ```sh
+   ZS_MIGRATOR_VERIFIER=$(node supabase/hosted/scram-verifier.mjs ZS_MIGRATOR_PASSWORD) \
+   ZS_RUNTIME_VERIFIER=$(node supabase/hosted/scram-verifier.mjs ZS_RUNTIME_PASSWORD) \
+   psql "host=aws-0-us-east-1.pooler.supabase.com port=5432 user=postgres.<ref> dbname=postgres sslmode=verify-full sslrootcert=supabase/hosted/supabase-root-2021-ca.crt" \
+     -X -f supabase/hosted/bootstrap-roles.sql
+   ```
+   Supabase logs DDL (`log_statement=ddl`), so the server only receives SCRAM-SHA-256
+   verifiers, never a plaintext password. The script creates `zs_migrator` (LOGIN
+   CREATEROLE; owns every table it creates) and `zs_runtime` (LOGIN, member of
+   `authenticated` only), creates `btree_gist`, and asserts that neither role is superuser,
+   BYPASSRLS or REPLICATION. A rerun with new passwords rotates both; then update
+   `DATABASE_URL` in Vercel and redeploy the API. Every psql and pg_dump call uses
+   `sslmode=verify-full` with the pinned CA.
 2. **Back up, dry-run, apply.** Take a `pg_dump -Fc` of `public`, `zs_internal` and
    `extensions` into `~/Backups/zs-business/`, then, with `ZS_TARGET_REF` and
    `MIGRATOR_DATABASE_URL` (zs_migrator, port 5432):
@@ -121,9 +131,14 @@ against the pinned Supabase Root 2021 CA.
    mise exec -- pnpm --filter @zs/api db:hosted-migrate --dry-run
    mise exec -- pnpm --filter @zs/api db:hosted-migrate --apply --backup <dump> --receipt <file.json>
    ```
-   `--apply` dry-runs first, refuses an empty backup, and fails if the applied set differs
-   from the dry run. The receipt holds migration names, checksums, the login's attributes and
-   the backup's size and sha256, never credentials. `--migrations <dir>` points at another
+   `--apply` dry-runs first. It refuses a backup that is not a custom-format archive
+   pg_restore can read end to end, that is older than two hours, or (for an upgrade) whose
+   migration ledger differs from the database's; `pg_restore` comes from `PG_RESTORE` or
+   `PATH`. It reserves the receipt file before anything commits (an existing file is
+   refused), and the apply rolls back unless it runs exactly the migrations and checksums the
+   dry run reported. The receipt holds migration names, checksums, the login's attributes and
+   the backup's size, sha256 and creation time, never credentials. If the receipt cannot be
+   written after the commit, the script prints it to stderr marked `committed: true`. `--migrations <dir>` points at another
    directory, for rehearsing an upgrade from a partial set. Receipts go outside the repo.
 3. **Seed (fake data only).** `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432)
    and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
@@ -131,8 +146,9 @@ against the pinned Supabase Root 2021 CA.
 4. **Tokens.** Until M2a auth lands, the dashboard calls the API with one static owner token
    (`ZS_API_TOKEN`), HS256, issuer `https://api.zerosumsolutions.com/pilot`, at most 30 days
    (the API's `JWT_MAX_TTL_SECONDS=2592000`). Mint it straight into the vault; the script
-   refuses to print to a terminal:
-   `JWT_SECRET=… JWT_ISSUER=… ZS_TOKEN_TENANT_ID=… ZS_TOKEN_SUBJECT=… ZS_TOKEN_TTL_SECONDS=2592000 pnpm --filter @zs/api token:mint | zsvault add <id>`.
+   refuses to print to a terminal. Use `pnpm -s` so no pnpm banner lands in the value, and
+   `pipefail` so a failed mint does not store an empty token:
+   `set -o pipefail; JWT_SECRET=… JWT_ISSUER=… ZS_TOKEN_TENANT_ID=… ZS_TOKEN_SUBJECT=… ZS_TOKEN_TTL_SECONDS=2592000 mise exec -- pnpm -s --filter @zs/api token:mint | zsvault edit <id> --yes --value-stdin` (`zsvault add <id> --type plain_secret --yes --value-stdin` for a new entry).
    To rotate, mint a new token, set it as the dashboard's `ZS_API_TOKEN` for that target, and
    redeploy the dashboard. Rotating `JWT_SECRET` invalidates every token at once.
 5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
@@ -155,7 +171,9 @@ against the pinned Supabase Root 2021 CA.
    refused at runtime, every SET ROLE / SET SESSION AUTHORIZATION escape refused, forced RLS
    and owner on every tenant table, two-tenant denial in SQL, over HTTP and through the
    dashboard proxy, 200 concurrent pooled transactions and 120 concurrent HTTP requests with
-   no crossover, bad tokens 401, and the Data API reading nothing. Its header lists the
+   no crossover, bad tokens 401, and the Data API reading nothing (only an explicit denial
+   or an empty result passes; an outage fails). Write probes always roll back, and the
+   temporary Auth user's deletion is checked too. Its header lists the
    environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication on preview.
 
 Hosted settings that the scripts do not manage:

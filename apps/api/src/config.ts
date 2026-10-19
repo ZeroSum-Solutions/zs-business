@@ -81,9 +81,10 @@ const envSchema = z.object({
   // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Unset: plain TCP.
   DATABASE_CA_CERT: z.string().includes("BEGIN CERTIFICATE").optional(),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(50).default(10),
-}).refine((env) => env.DATABASE_CA_CERT === undefined || !/[?&]ssl/i.test(env.DATABASE_URL), {
-  // pg lets URL ssl options replace the ssl config, which would drop the CA check.
-  path: ["DATABASE_URL"], message: "must not carry ssl options when DATABASE_CA_CERT is set",
+}).refine((env) => env.DATABASE_CA_CERT === undefined || !env.DATABASE_URL.includes("?"), {
+  // pg lets URL options (ssl, sslmode, also percent-encoded) replace the ssl config, which
+  // would drop the CA check, so a verified URL carries no query string at all.
+  path: ["DATABASE_URL"], message: "must not carry a query string when DATABASE_CA_CERT is set",
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
