@@ -8,20 +8,22 @@
 //   JWT_SECRET, JWT_ISSUER   the API's token settings, to mint five-minute test tokens
 //   ZS_TENANT_ID             the seeded tenant (tenant A); tenant B is random and empty
 //   VERCEL_PROTECTION_BYPASS optional: passes Vercel Authentication on a protected preview
-// Flag: --expect-transport=transaction|session names the runtime URL's Supavisor mode;
+// Flags: --expect-transport=transaction|session names the runtime URL's Supavisor mode;
 // default transaction (port 6543), as the API deploys. Any other port fails the run.
+// --abandon-rounds=N reruns the abandoned-transaction probe with N rounds (default 10)
+// after an inconclusive result.
 // Prints one JSON report and exits 1 if any check fails.
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { signDevToken } from "../dev-token.js";
 import {
-  abandonedTransactionProbe, concurrentTenantProbe, expectedTransport, poolerTransport, sessionContaminationProbe, transportGate,
+  abandonedTransactionProbe, abandonGate, concurrentTenantProbe, hostedCheckArgs, poolerTransport, sessionContaminationProbe, transportGate,
 } from "../hosted-probes.js";
 import { assertHostedDatabaseUrl, hostedPool, redactSecrets } from "../hosted.js";
 
 const env = process.env;
-const expected = expectedTransport(process.argv.slice(2));
+const { transport: expected, abandonRounds } = hostedCheckArgs(process.argv.slice(2));
 const projectRef = env.ZS_TARGET_REF ?? "";
 const runtimeTarget = assertHostedDatabaseUrl(env.RUNTIME_DATABASE_URL ?? "", { projectRef, role: "zs_runtime" });
 const migratorTarget = assertHostedDatabaseUrl(env.MIGRATOR_DATABASE_URL ?? "", { projectRef, role: "zs_migrator" });
@@ -44,6 +46,9 @@ async function check(name: string, run: () => Promise<{ ok: boolean; detail?: un
 }
 
 const runtime = hostedPool(runtimeTarget, 10);
+// The abandoned-transaction probe's observer: plain queries on the runtime URL, never the
+// scoped path, whose cleanup would erase the state it looks for.
+const observer = hostedPool(runtimeTarget, 2);
 // Pooler mode of the runtime URL: 6543 is Supavisor transaction mode, as the API uses.
 const transport = { ...poolerTransport(runtimeTarget.port), expected };
 // Every scoped transaction here reports a failed session reset; any one fails the run.
@@ -170,8 +175,11 @@ try {
     // Tenant B, session state only. Each abandoned transaction is reported through
     // onResetFailure by design, so it counts here instead of failing the next check.
     let reported = 0;
-    const probe = await abandonedTransactionProbe(createScopedDatabase(runtime, { onResetFailure: () => { reported += 1; } }), tenantB);
-    return { ok: probe.ok && reported === probe.detail.abandoned, detail: { transport, reported, ...probe.detail } };
+    const probe = await abandonedTransactionProbe(createScopedDatabase(runtime, { onResetFailure: () => { reported += 1; } }), observer, tenantB,
+      abandonRounds === undefined ? {} : { rounds: abandonRounds });
+    const gate = abandonGate(probe, expected);
+    const unreported = reported === probe.detail.abandoned ? [] : [`${probe.detail.abandoned} abandoned, ${reported} reported through onResetFailure`];
+    return { ok: gate.ok && unreported.length === 0, detail: { transport, verdict: gate.verdict, unreported, reported, ...probe.detail } };
   });
   await check("no scoped transaction failed its session reset", async () =>
     ({ ok: resetFailures.length === 0, detail: { transport, failures: resetFailures.length, first: resetFailures.slice(0, 3) } }));
@@ -301,7 +309,7 @@ try {
     }
   }
 } finally {
-  await Promise.all([runtime.end(), migrator.end()]);
+  await Promise.all([runtime.end(), observer.end(), migrator.end()]);
 }
 
 const failed = results.filter((result) => !result.ok);

@@ -1,5 +1,6 @@
 import { randomBytes, randomInt } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import type { Pool } from "pg";
 import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 
 export type PoolerMode = "transaction" | "session";
@@ -10,23 +11,43 @@ export function poolerTransport(port: string): { port: string; mode: PoolerMode 
 }
 
 const TRANSPORT_FLAG = "--expect-transport=";
+const ABANDON_ROUNDS_FLAG = "--abandon-rounds=";
+const MAX_ABANDON_ROUNDS = 200;
+
+export interface HostedCheckArgs {
+  /** The runtime URL's Supavisor mode. */
+  transport: PoolerMode;
+  /** Rounds for the abandoned-transaction probe; undefined keeps its default. */
+  abandonRounds?: number;
+}
 
 /**
- * The transport the deployment uses, from `--expect-transport=transaction|session`. The
- * default is transaction mode (port 6543), which the serverless API needs. A bare `--`
- * (as pnpm passes it) is ignored; any other argument is refused.
+ * The flags of `check:hosted`. `--expect-transport=transaction|session` names the transport
+ * the deployment uses; the default is transaction mode (port 6543), which the serverless API
+ * needs. `--abandon-rounds=N` (1 to 200) reruns the abandoned-transaction probe with more
+ * rounds after an inconclusive result. A bare `--` (as pnpm passes it) is ignored; any other
+ * argument is refused.
  */
-export function expectedTransport(argv: readonly string[]): PoolerMode {
-  let expected: PoolerMode = "transaction";
+export function hostedCheckArgs(argv: readonly string[]): HostedCheckArgs {
+  const args: HostedCheckArgs = { transport: "transaction" };
   for (const arg of argv) {
     if (arg === "--") continue;
-    if (!arg.startsWith(TRANSPORT_FLAG)) throw new Error(`unknown argument ${arg}; only ${TRANSPORT_FLAG}transaction|session`);
-    const value = arg.slice(TRANSPORT_FLAG.length);
-    if (value !== "transaction" && value !== "session")
-      throw new Error(`unsupported transport ${JSON.stringify(value)}: expected transaction (6543) or session (5432)`);
-    expected = value;
+    if (arg.startsWith(TRANSPORT_FLAG)) {
+      const value = arg.slice(TRANSPORT_FLAG.length);
+      if (value !== "transaction" && value !== "session")
+        throw new Error(`unsupported transport ${JSON.stringify(value)}: expected transaction (6543) or session (5432)`);
+      args.transport = value;
+    } else if (arg.startsWith(ABANDON_ROUNDS_FLAG)) {
+      const value = arg.slice(ABANDON_ROUNDS_FLAG.length);
+      const rounds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (!(rounds >= 1 && rounds <= MAX_ABANDON_ROUNDS))
+        throw new Error(`unsupported abandon rounds ${JSON.stringify(value)}: expected a whole number from 1 to ${MAX_ABANDON_ROUNDS}`);
+      args.abandonRounds = rounds;
+    } else {
+      throw new Error(`unknown argument ${arg}; only ${TRANSPORT_FLAG}transaction|session and ${ABANDON_ROUNDS_FLAG}N`);
+    }
   }
-  return expected;
+  return args;
 }
 
 /** A gate, not metadata: the runtime URL must use the expected transport, and unknown ports are unsupported. */
@@ -235,12 +256,32 @@ export interface AbandonProbeOptions {
   settleMs?: number;
 }
 
+/**
+ * A plain connection pool on the runtime URL, for example a pg Pool, that the observer
+ * queries one statement at a time. It must not be the scoped path: the observer runs no
+ * cleanup, so the state it finds stays where it is.
+ */
+export interface ObserverPool {
+  query: Pool["query"];
+}
+
 interface AbandonRead {
   pid: number;
   custom: string | null;
   advisory: number;
   prepared: number;
 }
+interface Observation extends AbandonRead {
+  lockedBy: number[];
+}
+
+/**
+ * clean: readers or observer polls ran on backends abandoned before them and none saw
+ * leftover state. contaminated: some did, or a backend still held a probe lock after
+ * settleMs. inconclusive: no leftover state, but nothing proves that a reused backend would
+ * have shown it (no reuse observed, or the abandonments did not happen as planned).
+ */
+export type AbandonProbeStatus = "clean" | "contaminated" | "inconclusive";
 
 /**
  * Abandoned-transaction probe for a pooled runtime database. Each abandoned transaction dirties
@@ -248,20 +289,25 @@ interface AbandonRead {
  * setting), starts a pg_sleep and is abandoned through its AbortSignal while the sleep runs:
  * createScopedDatabase then closes the connection without cleaning the backend. What happens
  * to that backend is the pooler's business: Postgres ends it on a direct connection; behind a
- * transaction pooler it may be destroyed, or cleaned and given to another client. Once the
- * sleeps have ended, reader transactions on the same database check their backend: none may
- * see any marker. No backend at all may still hold a probe lock after settleMs. The probe
- * records every backend pid it saw, so `reused` tells whether a reader ran on a backend that
- * an abandoned transaction had used before it.
+ * transaction pooler it may be destroyed, or cleaned and given to another client.
+ *
+ * Once the sleeps have ended, reader transactions on `db` check their own backend; the
+ * scoped path cleans each backend after its reader has looked. The observer, on a separate
+ * plain pool against the same URL, never cleans: each poll is one SELECT that checks its own
+ * backend for the markers and reads pg_locks for probe locks held by any backend. It polls
+ * once per round alongside the readers, then until no probe lock is held or settleMs passed.
+ * Every reader and poll records its backend pid; `reused` counts those that ran on a backend
+ * an abandoned transaction had used before them. Only a clean result with reuse is evidence.
  */
-export async function abandonedTransactionProbe(db: ScopedDatabase, tenantId: string, options: AbandonProbeOptions = {}) {
-  const { rounds = 5, abandonedPerRound = 4, readsPerRound = 8, sleepMs = 1000, abandonAfterMs = 100, settleMs = 5000 } = options;
+export async function abandonedTransactionProbe(db: ScopedDatabase, observer: ObserverPool, tenantId: string, options: AbandonProbeOptions = {}) {
+  const { rounds = 10, abandonedPerRound = 4, readsPerRound = 12, sleepMs = 1000, abandonAfterMs = 100, settleMs = 5000 } = options;
   const abandonedPids = new Set<number>();
   const keys: number[] = [];
   const applied = { advisory: 0, prepared: 0, custom: 0 };
   const outcomes: Record<string, number> = {};
   const reads: AbandonRead[] = [];
-  let reused = 0;
+  const observations: Observation[] = [];
+  const reusedBy = { readers: 0, observer: 0 };
 
   const abandon = async () => {
     const marker = ABANDON_MARKER + randomBytes(6).toString("hex");
@@ -282,52 +328,102 @@ export async function abandonedTransactionProbe(db: ScopedDatabase, tenantId: st
     outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
     if (pid) abandonedPids.add(pid);
   };
-  const read = () => db.tenant(tenantId, async (tx) => (await tx.query<AbandonRead>(
-    `SELECT pg_backend_pid() AS pid, current_setting('zs.abandon_probe', true) AS custom,
+  const ownState = `pg_backend_pid() AS pid, current_setting('zs.abandon_probe', true) AS custom,
             (SELECT count(*)::int FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid()) AS advisory,
-            (SELECT count(*)::int FROM pg_prepared_statements WHERE name LIKE 'zs\\_abandon\\_probe\\_%') AS prepared,
-            pg_sleep(random() * 0.02)`)).rows[0]!);
-  // Every backend, not only the reader's, still holding a probe lock.
-  const heldLocks = () => db.tenant(tenantId, async (tx) => (await tx.query<{ pid: number }>(
-    `SELECT pid FROM pg_locks WHERE locktype='advisory' AND classid=$1::int::oid AND objsubid=2 AND objid::bigint = ANY($2::bigint[])`,
-    [ABANDON_LOCK_SPACE, keys])).rows.map((row) => row.pid));
+            (SELECT count(*)::int FROM pg_prepared_statements WHERE name LIKE 'zs\\_abandon\\_probe\\_%') AS prepared`;
+  const read = async () => {
+    const row = await db.tenant(tenantId, async (tx) => (await tx.query<AbandonRead>(`SELECT ${ownState}, pg_sleep(random() * 0.02)`)).rows[0]!);
+    // A later round may abandon a backend this reader used; only earlier abandonments count.
+    if (abandonedPids.has(row.pid)) reusedBy.readers += 1;
+    reads.push(row);
+  };
+  // One statement, so one backend even behind a transaction pooler; it only reads.
+  const observe = async () => {
+    const row = (await observer.query<Observation>(
+      `SELECT ${ownState},
+              ARRAY(SELECT l.pid FROM pg_locks l WHERE l.locktype='advisory' AND l.classid=$1::int::oid AND l.objsubid=2
+                      AND l.objid::bigint = ANY($2::bigint[]) ORDER BY l.pid) AS "lockedBy"`,
+      [ABANDON_LOCK_SPACE, keys])).rows[0]!;
+    if (abandonedPids.has(row.pid)) reusedBy.observer += 1;
+    observations.push(row);
+    return row.lockedBy;
+  };
 
   for (let round = 0; round < rounds; round += 1) {
     await Promise.all(Array.from({ length: abandonedPerRound }, abandon));
     // Readers start once the abandoned statements have ended, so their backends are free for reuse.
     await delay(Math.max(0, sleepMs - abandonAfterMs) + 100);
-    const batch = await Promise.all(Array.from({ length: readsPerRound }, read));
-    // A later round may abandon a backend these readers used; only earlier abandonments count.
-    reused += batch.filter((row) => abandonedPids.has(row.pid)).length;
-    reads.push(...batch);
+    await Promise.all([...Array.from({ length: readsPerRound }, read), observe()]);
   }
-  let lockedBy = await heldLocks();
-  for (const giveUp = Date.now() + settleMs; lockedBy.length > 0 && Date.now() < giveUp; lockedBy = await heldLocks()) await delay(100);
+  let lockedBy = await observe();
+  for (const giveUp = Date.now() + settleMs; lockedBy.length > 0 && Date.now() < giveUp; lockedBy = await observe()) await delay(100);
 
   const abandoned = outcomes.aborted ?? 0;
-  const contaminated = {
-    custom: reads.filter((row) => (row.custom ?? "").startsWith(ABANDON_MARKER)).length,
-    advisory: reads.filter((row) => row.advisory > 0).length,
-    prepared: reads.filter((row) => row.prepared > 0).length,
-  };
-  const failures = [
-    ...Object.entries(contaminated).filter(([, count]) => count > 0).map(([kind, count]) => `${count} reads saw leftover ${kind} state`),
+  const leftovers = (rows: readonly AbandonRead[]) => ({
+    custom: rows.filter((row) => (row.custom ?? "").startsWith(ABANDON_MARKER)).length,
+    advisory: rows.filter((row) => row.advisory > 0).length,
+    prepared: rows.filter((row) => row.prepared > 0).length,
+  });
+  const contaminated = { readers: leftovers(reads), observer: leftovers(observations) };
+  const reused = reusedBy.readers + reusedBy.observer;
+  const contamination = [
+    ...Object.entries(contaminated.readers).filter(([, count]) => count > 0).map(([kind, count]) => `${count} reads saw leftover ${kind} state`),
+    ...Object.entries(contaminated.observer).filter(([, count]) => count > 0).map(([kind, count]) => `${count} observer polls saw leftover ${kind} state`),
     ...(lockedBy.length > 0 ? [`${lockedBy.length} probe advisory locks still held ${settleMs} ms later, by backends ${[...new Set(lockedBy)].join(", ")}`] : []),
+  ];
+  const problems = [
     ...(abandoned === 0 ? ["no transaction was abandoned in flight"] : []),
     ...Object.entries(outcomes).filter(([code]) => code !== "aborted").map(([code, count]) => `${count} transactions ended with ${code}, not aborted`),
+    ...(reused === 0 ? ["no reader or observer poll ran on a backend abandoned before it"] : []),
   ];
+  const status: AbandonProbeStatus = contamination.length > 0 ? "contaminated" : problems.length > 0 ? "inconclusive" : "clean";
   return {
-    ok: failures.length === 0,
+    ok: status === "clean",
+    status,
     detail: {
+      status,
+      rounds,
       abandoned,
       outcomes,
       reads: reads.length,
+      observations: observations.length,
       applied,
-      backends: { abandoned: [...abandonedPids].sort((x, y) => x - y), read: [...new Set(reads.map((row) => row.pid))].sort((x, y) => x - y) },
+      backends: {
+        abandoned: [...abandonedPids].sort((x, y) => x - y),
+        read: [...new Set(reads.map((row) => row.pid))].sort((x, y) => x - y),
+        observed: [...new Set(observations.map((row) => row.pid))].sort((x, y) => x - y),
+      },
       reused,
+      reusedBy,
       contaminated,
       lockedBy,
-      failures,
+      failures: [...contamination, ...problems],
     },
+  };
+}
+
+/**
+ * check:hosted's verdict on the abandoned-transaction probe. Transaction mode needs a clean
+ * result: an inconclusive one fails with what to do next. Session mode keeps one backend per
+ * client connection, so there an inconclusive result passes, but only when the sole reason is
+ * that no backend was reused; a contaminated result fails in either mode.
+ */
+export function abandonGate(
+  probe: { status: AbandonProbeStatus; detail: { rounds: number; reused: number; failures: readonly string[] } },
+  transport: PoolerMode,
+): { ok: boolean; verdict: string } {
+  const toSession = "switch the runtime DATABASE_URL to session mode (port 5432) and run with -- --expect-transport=session";
+  if (probe.status === "clean")
+    return { ok: true, verdict: `clean: ${probe.detail.reused} readers or observer polls ran on abandoned backends and saw no leftover state` };
+  if (probe.status === "contaminated")
+    return { ok: false, verdict: `contaminated: an abandoned transaction's session state outlived it (${probe.detail.failures.join("; ")}); ${toSession}` };
+  const noReuseOnly = probe.detail.reused === 0 && probe.detail.failures.length === 1;
+  if (transport === "session" && noReuseOnly)
+    return { ok: true, verdict: "inconclusive, accepted in session mode: no backend of an abandoned transaction was handed on" };
+  const more = `rerun with -- --abandon-rounds=N above ${probe.detail.rounds}`;
+  return {
+    ok: false,
+    verdict: `inconclusive: ${probe.detail.failures.join("; ")}, so this run does not show that ${transport} mode is safe; `
+      + (noReuseOnly ? `${more}, or ${toSession}` : `fix the probe run and rerun${transport === "transaction" ? `, or ${toSession}` : ""}`),
   };
 }
