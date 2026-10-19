@@ -65,7 +65,7 @@ export function createLiveHarness(overrides: { ttlSeconds?: number; trustProxy?:
     trustProxy: overrides.trustProxy ?? false,
     fetch: async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
-      if (url.startsWith(SUPABASE_URL)) return gotrue.fetch(input, init);
+      if (new URL(url).origin === new URL(SUPABASE_URL).origin) return gotrue.fetch(input, init);
       const call = { url, init: init ?? {} };
       apiCalls.push(call);
       return harness.api(call);
