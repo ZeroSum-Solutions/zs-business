@@ -231,3 +231,27 @@ it("adds public intake over a pre-M3 database that holds bookings and contacts",
     await rm(partial, { recursive: true, force: true });
   }
 }, 30000);
+
+it("a dry run rolls back, and an apply commits only the set the dry run reported", async () => {
+  const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-dry-"));
+  try {
+    for (const name of beforeHardening) await copyFile(new URL(name, migrations), join(atMain, name));
+    await withTestDatabase(async (database) => {
+      const names = async () => (await database.pool.query<{ name: string }>(
+        "SELECT name FROM zs_internal.schema_migrations ORDER BY name")).rows.map((row) => row.name);
+      const before = await names();
+      const pending = await migrate(database.pool, migrations, { dryRun: true });
+      expect(pending.map((row) => row.name)).toEqual(Object.keys(shipped).filter((name) => !before.includes(name))
+        .concat((await readdir(migrations)).filter((name) => name.endsWith(".sql") && !(name in shipped))).sort());
+      expect(await names()).toEqual(before);
+      // A file that changed after the dry run (here: a stale checksum) rolls back the apply.
+      const stale = pending.map((row, index) => index === 0 ? { ...row, checksum: "0".repeat(64) } : row);
+      await expect(migrate(database.pool, migrations, { expect: stale })).rejects.toThrow(/differ from the expected set/);
+      expect(await names()).toEqual(before);
+      expect(await migrate(database.pool, migrations, { expect: pending })).toEqual(pending);
+      expect(await names()).toEqual([...before, ...pending.map((row) => row.name)].sort());
+    }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
+  } finally {
+    await rm(atMain, { recursive: true, force: true });
+  }
+}, 30000);

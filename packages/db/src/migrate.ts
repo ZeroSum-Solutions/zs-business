@@ -2,10 +2,31 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import type { Pool } from "pg";
 
+export interface MigrateOptions {
+  /** Apply every pending migration inside the one transaction, then roll it back. */
+  readonly dryRun?: boolean;
+  /**
+   * The exact set a dry run reported. Checked inside the transaction before COMMIT, so a
+   * migration file that changed between the dry run and the apply rolls back instead.
+   */
+  readonly expect?: readonly MigrationRecord[];
+}
+export interface MigrationRecord {
+  readonly name: string;
+  readonly checksum: string;
+}
+
+/**
+ * Apply pending files from `directory` in one transaction under an advisory lock. Returns
+ * the migrations it applied (or, with `dryRun`, would have applied: they ran and were
+ * rolled back, so a dry run also proves they execute under this login).
+ */
 export async function migrate(
   pool: Pool,
   directory = new URL("../../../supabase/migrations/", import.meta.url),
-): Promise<void> {
+  options: MigrateOptions = {},
+): Promise<MigrationRecord[]> {
+  const applied: MigrationRecord[] = [];
   const client = await pool.connect();
   let discard = false;
   try {
@@ -41,8 +62,12 @@ export async function migrate(
         "INSERT INTO zs_internal.schema_migrations (name,checksum) VALUES ($1,$2)",
         [name, checksum],
       );
+      applied.push({ name, checksum });
     }
-    await client.query("COMMIT");
+    if (options.expect && !sameRecords(applied, options.expect))
+      throw new Error("Pending migrations differ from the expected set; rolled back");
+    await client.query(options.dryRun ? "ROLLBACK" : "COMMIT");
+    return applied;
   } catch (error) {
     try {
       await client.query("ROLLBACK");
@@ -53,4 +78,8 @@ export async function migrate(
   } finally {
     client.release(discard);
   }
+}
+
+function sameRecords(a: readonly MigrationRecord[], b: readonly MigrationRecord[]): boolean {
+  return a.length === b.length && a.every((row, index) => row.name === b[index]!.name && row.checksum === b[index]!.checksum);
 }

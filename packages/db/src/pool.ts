@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
 
 /** What a pool error log may say: the SQLSTATE or socket code and a short message, never the URL. */
 export interface PoolErrorSummary {
@@ -18,6 +18,8 @@ export interface RuntimePoolOptions {
   readonly idleTimeoutMs?: number;
   /** Shown in pg_stat_activity, so an operator can tell this process's sessions apart. */
   readonly applicationName?: string;
+  /** TLS settings, for example a pinned CA with rejectUnauthorized for a hosted database. */
+  readonly ssl?: PoolConfig["ssl"];
   /** Receives at most `maxErrorReportsPerMinute` summaries of idle-connection errors. */
   readonly onError: (summary: PoolErrorSummary) => void;
   readonly maxErrorReportsPerMinute?: number;
@@ -47,6 +49,7 @@ export function createRuntimePool(options: RuntimePoolOptions): Pool {
     connectionTimeoutMillis: options.connectionTimeoutMs ?? 5000,
     idleTimeoutMillis: options.idleTimeoutMs ?? 10_000,
     ...(options.applicationName ? { application_name: options.applicationName } : {}),
+    ...(options.ssl === undefined ? {} : { ssl: options.ssl }),
   });
   const limit = options.maxErrorReportsPerMinute ?? 10;
   const now = options.now ?? (() => Date.now());
