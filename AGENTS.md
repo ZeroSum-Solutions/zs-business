@@ -37,5 +37,5 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
   The Mac hub then runs a GPT-6.1 Sol review and posts findings as a PR comment that starts
   `REVIEW`. Fix verified findings, push, and comment `READY FOR REVIEW` again.
 - Never merge. The hub lands PRs after review and green CI.
-- Fan out freely: subagents are capped at 100 at once (`.claude/settings.json`). A session has
+- Fan out freely: subagents are capped at 25 at once per session; for wider work, split it across project threads (each gets its own machine) (`.claude/settings.json`). A session has
   4 CPUs and one Postgres, so run heavy test suites one at a time.
