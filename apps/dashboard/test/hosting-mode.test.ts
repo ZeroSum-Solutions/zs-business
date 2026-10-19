@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hostingModeGuard, hostingModeProblem } from "../src/lib/server/hosting-mode";
 import { config as proxyConfig, proxy } from "../src/proxy";
@@ -92,6 +93,32 @@ describe("hosting mode guard", () => {
         expect(await answer.text()).toMatch(/Dashboard misconfigured/);
       }
     }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("no /api route file escapes the guard: every handler it exports refuses a mismatch", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubEnv("NEXT_PUBLIC_API_MODE", "demo");
+    vi.stubEnv("ZS_API_URL", LIVE.ZS_API_URL);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const apiDir = new URL("../src/app/api/", import.meta.url);
+    const files = readdirSync(apiDir, { recursive: true, encoding: "utf8" }).filter((file) => /(^|\/)route\.ts$/.test(file));
+    expect(files.length).toBeGreaterThanOrEqual(4);
+    const context = { params: Promise.resolve({ path: ["v1", "me"] }) };
+    let handlers = 0;
+    for (const file of files) {
+      const route = (await import(new URL(file, apiDir).href)) as Record<string, unknown>;
+      for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+        const handler = route[method];
+        if (typeof handler !== "function") continue;
+        handlers += 1;
+        const body = method === "GET" || method === "HEAD" ? null : "{}";
+        const answer = await (handler as (request: Request, context: unknown) => Promise<Response>)(
+          new Request("http://127.0.0.1/api/x", { method, body }), context);
+        expect(answer.status, `${method} ${file}`).toBe(500);
+      }
+    }
+    expect(handlers).toBeGreaterThanOrEqual(6);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
