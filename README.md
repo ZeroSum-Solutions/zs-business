@@ -9,6 +9,24 @@ HTTP API (`apps/api`) and the MCP adapter (`packages/mcp`) over them. Requiremen
 `docs/requirements/booking.md` and `docs/requirements/crm.md`.
 Plan: `/Users/zero-suminc./Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
 
+## Hosting (M2b)
+
+Pilot data only (the invented Halden & Rowe tenant). Everything is in US East.
+
+| Piece | Production | Preview |
+|---|---|---|
+| Supabase project (org Zerosumsolutions-Projects, Micro, Postgres 17) | `zs-business`, ref `ubzyxrflvxymikpijnto` | `zs-business-preview`, ref `cmpnzcijdumzyddoubga` |
+| API (Vercel `zs-business-api`, root `apps/api`) | https://api.zerosumsolutions.com | https://zs-business-api-preview.vercel.app |
+| Dashboard (Vercel `zs-business-dashboard`, root `apps/dashboard`) | https://app.zerosumsolutions.com | https://zs-business-dashboard-preview.vercel.app (Vercel Authentication on) |
+| Auth email (Supabase custom SMTP through Resend) | `no-reply@mail.zerosumsolutions.com` | same |
+
+Each deploy uses only its own database: the preview API's `DATABASE_URL` names the preview
+ref, and the preview dashboard's `ZS_API_URL` is the preview API. DNS is on Cloudflare
+(`app`/`api` CNAMEs to Vercel, DNS only; Resend DKIM, SPF, MX and DMARC under `mail`).
+Secrets live in ZS Vault (`zs_business_<prod|preview>_*`) and in Vercel env vars, never in
+the repo. The runbook (roles, migrations, seed, tokens, deploy, checks) is in
+`apps/api/README.md`, "Hosted deploy".
+
 ## Development
 
 Use the pinned Node and pnpm versions through mise:
