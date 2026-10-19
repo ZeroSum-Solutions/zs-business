@@ -150,6 +150,22 @@ describe("owner member management", () => {
     expect(owners.rowCount).toBe(1);
   });
 
+  it("keeps the membership lock apart from idempotency locks, even for the key \"members\"", async () => {
+    // Were they one lock, each request would take it shared for the role check, then wait to
+    // take it exclusively for the key: concurrent requests would deadlock and one would fail.
+    for (let round = 0; round < 5; round += 1) {
+      const tenantId = await h.fixture.service(async (tx) => {
+        const id = randomUUID();
+        await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Keys')", [id]);
+        return id;
+      });
+      const owner = await signedInMember(h.database, h.fixture, tenantId, "owner");
+      const responses = await Promise.all([0, 1, 2].map(() => createContact(owner.token, "keys@example.com", "members")));
+      // One creates the contact; the others wait for its key and replay it.
+      expect(responses.map((response) => response.status), `round ${round}`).toEqual([201, 201, 201]);
+    }
+  });
+
   it("cannot reach another tenant's members", async () => {
     const staffB = await staffOf(h.b.tenantId);
     expectForbidden(await changeRole(h.a.token, staffB.memberId, "owner"));
