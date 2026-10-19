@@ -158,9 +158,9 @@ describe("demo adapter: lost responses", () => {
     const second = await api.createBooking({ resourceId: SHOWROOM_ID, startsAt }, { idempotencyKey: "k2" }).catch((caught: unknown) => caught);
     expect(isSlotTaken(second)).toBe(true);
     expect(api.writeLog()).toEqual([
-      { operation: "booking.create", idempotencyKey: "k1", outcome: "applied" },
-      { operation: "booking.create", idempotencyKey: "k1", outcome: "replayed" },
-      { operation: "booking.create", idempotencyKey: "k2", outcome: "rejected" },
+      { operation: "booking.create", idempotencyKey: "k1", payload: { resourceId: SHOWROOM_ID, startsAt }, outcome: "applied" },
+      { operation: "booking.create", idempotencyKey: "k1", payload: { resourceId: SHOWROOM_ID, startsAt }, outcome: "replayed" },
+      { operation: "booking.create", idempotencyKey: "k2", payload: { resourceId: SHOWROOM_ID, startsAt }, outcome: "rejected" },
     ]);
   });
 

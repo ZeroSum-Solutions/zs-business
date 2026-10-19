@@ -169,13 +169,14 @@ test("shows the pipeline setup states, and switches between several pipelines", 
 
   await setPipelines([{ id: id(1), name: "Sales", stages: [] }]);
   await expect(board.getByText("Sales has no stages yet")).toBeVisible();
-  await expect(page.getByLabel("Pipeline", { exact: true })).toHaveCount(0);
+  // The section is labelled "Pipeline" too, so look for the picker by its role.
+  await expect(page.getByRole("combobox", { name: "Pipeline", exact: true })).toHaveCount(0);
 
   await setPipelines([
     { id: id(1), name: "Sales", stages: [{ id: id(11), name: "Inquiry", position: 0 }] },
     { id: id(2), name: "Repairs", stages: [{ id: id(21), name: "Received", position: 0 }, { id: id(22), name: "Returned", position: 1 }] },
   ]);
-  const choice = page.getByLabel("Pipeline", { exact: true });
+  const choice = page.getByRole("combobox", { name: "Pipeline", exact: true });
   await expect(choice).toHaveValue(id(1));
   await expect(page.locator('[data-stage="Inquiry"]')).toBeAttached();
   await choice.selectOption({ label: "Repairs" });

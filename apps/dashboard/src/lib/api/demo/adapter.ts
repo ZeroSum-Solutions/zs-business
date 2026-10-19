@@ -16,7 +16,7 @@ import {
   type DealRecord,
   type PipelineSummary,
 } from "@zs/contracts";
-import { addDays, localIso, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
+import { addDays, localIso, wallTimeInstants, weekdayOf, zonedDateKey } from "../../time";
 import { newId as defaultNewId } from "../../id";
 import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError } from "../errors";
 import {
@@ -67,11 +67,18 @@ export interface DemoControls {
   failDealReads(failing: boolean): void;
   /** Replaces the business's pipelines, such as none, one without stages, or several. */
   setPipelines(pipelines: PipelineSummary[]): void;
+  /**
+   * Opens every calendar on an ISO weekday (1 = Monday) between two local minutes, or closes
+   * it with null, such as across the night clocks change.
+   */
+  setOpenHours(weekday: number, hours: [number, number] | null): void;
 }
 
 export interface DemoWrite {
   operation: string;
   idempotencyKey: string;
+  /** The request body as the adapter received it, such as the instant a booking asked for. */
+  payload: unknown;
   outcome: "applied" | "replayed" | "rejected";
 }
 
@@ -95,6 +102,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   let delayNext = 0;
   let dealReadsFail = false;
   let pipelines = clone(options.pipelines ?? [DEMO_PIPELINE]);
+  // A copy per adapter: setOpenHours changes this business's calendars only.
+  const resources = clone(DEMO_RESOURCES);
 
   const networkError = () => new ApiError("network", defaultMessage("network"));
   const wait = async () => {
@@ -114,7 +123,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       delayNext = 0;
       await new Promise((resolve) => setTimeout(resolve, ms));
     }
-    const log = (outcome: DemoWrite["outcome"]) => writes.push({ operation, idempotencyKey: key, outcome });
+    const log = (outcome: DemoWrite["outcome"]) => writes.push({ operation, idempotencyKey: key, payload: clone(payload), outcome });
     // Like a dropped connection after the server committed: the write stands, the answer is lost.
     const answer = (result: T): T => {
       if (loseNext) {
@@ -148,7 +157,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
   /** Like the API, a calendar this tenant does not own is 403 whether or not it exists. */
   function resourceOrThrow(id: string): DemoResource {
-    const resource = DEMO_RESOURCES.find((item) => item.id === id);
+    const resource = resources.find((item) => item.id === id);
     if (!resource) throw demoError("Forbidden");
     return resource;
   }
@@ -177,16 +186,20 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     return false;
   }
 
-  /** Every grid start for a resource on one local day, ignoring existing bookings. */
+  /**
+   * Every grid start for a resource on one local day, ignoring existing bookings, in time
+   * order. Like the API, a wall time the clocks pass twice gives two slots and one they skip
+   * gives none.
+   */
   function gridStarts(resource: DemoResource, dateKey: string): number[] {
     const hours = resource.hours[weekdayOf(dateKey)];
     if (!hours) return [];
     const [y, m, d] = dateKey.split("-").map(Number) as [number, number, number];
     const starts: number[] = [];
     for (let minute = hours[0]; minute + resource.slotLengthMinutes <= hours[1]; minute += resource.slotStepMinutes) {
-      starts.push(zonedTimeToUtc(y, m, d, minute, resource.timeZone).getTime());
+      starts.push(...wallTimeInstants(y, m, d, minute, resource.timeZone));
     }
-    return starts;
+    return starts.sort((a, b) => a - b);
   }
 
   function insertBooking(resource: DemoResource, startsAt: string, id: string, title: string | null): StoredBooking {
@@ -218,7 +231,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   return {
     async listResources() {
       await wait();
-      return DEMO_RESOURCES.map(({ id, name, timeZone, slotLengthMinutes }) => ({ id, name, timeZone, slotLengthMinutes }));
+      return resources.map(({ id, name, timeZone, slotLengthMinutes }) => ({ id, name, timeZone, slotLengthMinutes }));
     },
 
     async getSlots({ resourceId, from, to, zone }) {
@@ -383,6 +396,13 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
     setPipelines(next) {
       pipelines = clone(next);
+    },
+
+    setOpenHours(weekday, hours) {
+      for (const resource of resources) {
+        if (hours) resource.hours[weekday] = [...hours];
+        else delete resource.hours[weekday];
+      }
     },
   };
 }
