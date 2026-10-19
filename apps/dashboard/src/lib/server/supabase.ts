@@ -26,6 +26,11 @@ export function expiredCookies(request: Request, secure: boolean): string[] {
     .map((cookie) => serializeCookieHeader(cookie.name, "", { path: "/", sameSite: "strict", httpOnly: true, secure, maxAge: 0 }));
 }
 
+/** True when the request carries a Supabase session cookie (not just the retired pilot cookie). */
+export function hasSessionCookie(request: Request): boolean {
+  return parseCookieHeader(request.headers.get("cookie") ?? "").some((cookie) => isAuthCookie(cookie.name));
+}
+
 export interface AuthContext {
   readonly client: SupabaseClient;
   /** True when the browser sent a session cookie or the old pilot cookie: a missing session then "ended". */

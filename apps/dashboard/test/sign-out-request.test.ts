@@ -21,8 +21,8 @@ describe("requestSignOut", () => {
     expect(fake.calls[0]!.init).toMatchObject({ method: "POST", credentials: "same-origin", cache: "no-store" });
   });
 
-  it("is not done when Supabase could not be told (502), or on any other non-2xx answer", async () => {
-    for (const status of [502, 500, 403, 405]) {
+  it("is not done when Supabase could not be told (502), cannot try (503), or on any other non-2xx answer", async () => {
+    for (const status of [502, 503, 500, 403, 405]) {
       const fake = fakeFetch(async () => Response.json({ error: "unavailable" }, { status }));
       expect(await requestSignOut(fake.impl), String(status)).toBe(false);
     }

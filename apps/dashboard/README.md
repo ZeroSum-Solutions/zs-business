@@ -146,7 +146,8 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
     (`signOut({ scope: "local" })`: this session only) and clears the cookies. The API asks
     Supabase Auth whether the session is live, so cookies copied before sign-out get 401 within
     its short cache window. If Supabase cannot be reached the answer is 502 and the cookies
-    stay, so Try again can still revoke the session.
+    stay, so Try again can still revoke the session. Without the Supabase settings, a request
+    holding a session cookie gets 503 `sign_out_unavailable` and keeps it too.
     The browser waits for that answer: the pages and cache go at once, but the signed-out
     screen shows only after a 2xx. A 502 or a network error shows "Sign-out did not
     finish. Try again." with a Try again button that posts again (`src/lib/session.tsx`,

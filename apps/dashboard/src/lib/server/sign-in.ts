@@ -17,6 +17,8 @@
  * only) and clears the cookies. The API refuses the revoked session's access token at once.
  * When Supabase cannot be told, it answers 502 and keeps the cookies, so the browser's
  * Try again can still revoke the session instead of being told it ended when it did not.
+ * Without the Supabase settings it answers 503 `sign_out_unavailable` to a request that holds
+ * a session cookie, again keeping it; 204 means there was no session to end or it was revoked.
  */
 import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import { z } from "zod";
@@ -25,7 +27,7 @@ import { readBoundedBody, type BodyTiming } from "./body";
 import { isHttps, jsonAnswer, publicOrigin, reportSetupProblem, trustProxyFromEnv, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
 import { clientAddress, type AttemptLimiter } from "./rate-limit";
-import { authFor, expiredCookies, lookupSession } from "./supabase";
+import { authFor, expiredCookies, hasSessionCookie, lookupSession } from "./supabase";
 
 const SignInBody = z.object({
   email: z.string().trim().toLowerCase().pipe(z.email().max(254)),
@@ -124,6 +126,9 @@ export async function signOut(request: Request, setup: LiveSetup | null): Promis
   if (request.method !== "POST") return jsonAnswer(405, { error: "method_not_allowed" }, { Allow: "POST" });
   if (!isSameOrigin(request, trustProxy)) return jsonAnswer(403, { error: "forbidden" });
   if (!setup?.ok) {
+    // Without the Supabase settings nothing can revoke a session: keep its cookies and say so,
+    // rather than answer 204 for a session that stays live.
+    if (hasSessionCookie(request)) return jsonAnswer(503, { error: "sign_out_unavailable" });
     const response = new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
     for (const cookie of expiredCookies(request, isHttps(request, trustProxy))) response.headers.append("Set-Cookie", cookie);
     return response;

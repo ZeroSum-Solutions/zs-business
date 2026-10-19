@@ -196,9 +196,15 @@ describe("sign-out", () => {
     const pilot = await signOut(signOutRequest(`${PILOT_COOKIE}=v1.1.a.b`), harness.setup);
     expect(pilot.status).toBe(204);
     expect(setCookies(pilot).get(PILOT_COOKIE)?.value).toBeNull();
+    // Without settings nothing can revoke a session: a session cookie gets 503 and is kept.
     const unset = await signOut(signOutRequest(`${AUTH_COOKIE}.0=x; ${PILOT_COOKIE}=y`), { ok: false, problem: "unset" });
-    expect(unset.status).toBe(204);
-    expect([...setCookies(unset).keys()].sort()).toEqual([`${AUTH_COOKIE}.0`, PILOT_COOKIE]);
+    expect(unset.status).toBe(503);
+    expect(await unset.json()).toEqual({ error: "sign_out_unavailable" });
+    expect(setCookies(unset).size).toBe(0);
+    expect((await signOut(signOutRequest(`${AUTH_COOKIE}=x`), null)).status).toBe(503);
+    const pilotOnly = await signOut(signOutRequest(`${PILOT_COOKIE}=y`), { ok: false, problem: "unset" });
+    expect(pilotOnly.status).toBe(204);
+    expect([...setCookies(pilotOnly).keys()]).toEqual([PILOT_COOKIE]);
     expect((await signOut(signOutRequest("", {}), null)).status).toBe(204);
     expect((await signOut(signOutRequest("", { Origin: "https://evil.example" }), harness.setup)).status).toBe(403);
   });
