@@ -7,13 +7,21 @@ set -euo pipefail
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 
 log() { echo "[cloud-setup] $*" >&2; }
-SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+is_root() { [ "$(id -u)" -eq 0 ]; }
+as_root() { if is_root; then "$@"; else sudo "$@"; fi; }
+as_postgres() { if is_root; then runuser -u postgres -- "$@"; else sudo -u postgres "$@"; fi; }
 cd "${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}"
 
 # Node 24
 if ! node -v 2>/dev/null | grep -q '^v24\.'; then
   log "installing Node 24 (found $(node -v 2>/dev/null || echo none))"
-  npm install -g n >/dev/null 2>&1 && $SUDO n 24 >/dev/null
+  npm install -g n >/dev/null 2>&1 && as_root n 24 >/dev/null
+  # Cloud images put /opt/node22/bin first on PATH; point it at Node 24.
+  if [ -d /opt/node22/bin ]; then
+    for b in node npm npx corepack; do
+      [ -e "/usr/local/bin/$b" ] && as_root ln -sf "/usr/local/bin/$b" "/opt/node22/bin/$b"
+    done
+  fi
   hash -r
 fi
 
@@ -28,16 +36,16 @@ fi
 if ! pg_isready -h 127.0.0.1 -p 55432 >/dev/null 2>&1; then
   if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
     log "installing PostgreSQL"
-    $SUDO apt-get update -qq >/dev/null
-    DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -qq postgresql >/dev/null
+    as_root apt-get update -qq >/dev/null
+    DEBIAN_FRONTEND=noninteractive as_root apt-get install -y -qq postgresql >/dev/null
   fi
   bin=$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)
   data=/tmp/zs-pg
   if [ ! -f "$data/PG_VERSION" ]; then
-    $SUDO mkdir -p "$data" && $SUDO chown postgres:postgres "$data"
-    $SUDO -u postgres "$bin/initdb" -D "$data" -U postgres --auth=trust >/dev/null
+    as_root mkdir -p "$data" && as_root chown postgres:postgres "$data"
+    as_postgres "$bin/initdb" -D "$data" -U postgres --auth=trust >/dev/null
   fi
-  $SUDO -u postgres "$bin/pg_ctl" -D "$data" -o "-p 55432 -k /tmp" -l /tmp/zs-pg.log -w start >/dev/null
+  as_postgres "$bin/pg_ctl" -D "$data" -o "-p 55432 -k /tmp" -l /tmp/zs-pg.log -w start >/dev/null
   log "postgres $("$bin/postgres" --version | awk '{print $3}') up on 55432"
 fi
 

@@ -23,7 +23,8 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
   changes ship as migrations.
 - Never edit `/Users/zero-suminc./projects/mish` or `/Users/zero-suminc./projects/rise-scheduler`
   from this repo's work. Read them only.
-- Conventional commits on feature branches. No AI attribution lines.
+- Conventional commits on feature branches. No AI attribution lines in commits, PR bodies or
+  PR comments (no "Generated with", no Co-Authored-By, no session links).
 
 ## Cloud sessions (Claude Code on the web / desktop cloud)
 - `scripts/cloud-setup.sh` runs at session start (`.claude/settings.json`). It installs Node 24,
@@ -36,3 +37,5 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
   The Mac hub then runs a GPT-6.1 Sol review and posts findings as a PR comment that starts
   `REVIEW`. Fix verified findings, push, and comment `READY FOR REVIEW` again.
 - Never merge. The hub lands PRs after review and green CI.
+- Fan out freely: subagents are capped at 100 at once (`.claude/settings.json`). A session has
+  4 CPUs and one Postgres, so run heavy test suites one at a time.
