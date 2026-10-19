@@ -29,10 +29,6 @@ the signed-out state after a 401 and sign-out, and that no cached query outlives
 both viewports and checks 44px targets, `label[for]` targets, visible reasons on disabled
 buttons, focus rings no overflow clips, one visible h1 in an open conversation, and toasts
 that stay 10 seconds and can be dismissed from the keyboard.
-`e2e/body-limits.spec.ts` (desktop only) starts the same build a second time in live mode,
-with an in-process fake Supabase Auth, and sends raw chunked and `Content-Length` uploads
-past the sign-in (2 KiB) and proxy (64 KiB) limits: each gets 413 while still sending, and
-a client that hangs up mid-body leaves the server serving.
 
 `e2e:live` needs the local test cluster at `127.0.0.1:55432` (or `ZS_TEST_DATABASE_URL`,
 loopback only). Its global setup (`e2e/live/global-setup.ts`):
@@ -85,6 +81,14 @@ proxy refuses a cross-site POST and a forged `X-Forwarded-Host`, that a failed r
 a deal conflict keeps the move off, that slots for an unknown calendar answer 403 with the
 same body the demo adapter sends, and that a booking whose answer was dropped is retried
 with the same `Idempotency-Key` and replayed by the API.
+
+`e2e/live/body-limits.spec.ts` (desktop only) starts the live build (`.next-live/`) a second
+time on a free port, with its own in-process fake Supabase Auth and a stand-in API that only
+counts calls, and sends raw chunked and `Content-Length` uploads past the sign-in (2 KiB) and
+proxy (64 KiB) limits: each gets 413 while still sending, a declared length over the limit
+gets it before any body is sent, and a client that hangs up mid-body leaves the server
+serving. It needs a live build: started with live settings, the demo build answers 500 to
+everything (the hosting-mode guard).
 
 The tests make the conflicting writes (a booking for the chosen time, a re-save of a deal)
 through the API with the staff token. Teardown stops the servers, drops the
@@ -166,7 +170,9 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   `editDealElsewhere` so tests can trigger the conflicts.
 - Build and server must agree on the mode. `NEXT_PUBLIC_API_MODE` is baked in at build
   time from `ZS_API_URL`; `src/proxy.ts` compares it with the server's `ZS_API_URL` on every
-  request (`src/lib/server/hosting-mode.ts`). A demo build started with `ZS_API_URL`, or a
+  page request, and each `/api` route does the same itself (`withHostingModeGuard` in
+  `src/lib/server/hosting-mode.ts`): with a proxy in front of a route, Next reads the whole
+  request body before the route starts, which would defeat the body limits. A demo build started with `ZS_API_URL`, or a
   live build started without it, answers every page and `/api` request with a 500 that
   names the mismatch, and logs it once at start (`src/instrumentation.ts`). Rebuild with
   the same `ZS_API_URL` setting the server runs with.

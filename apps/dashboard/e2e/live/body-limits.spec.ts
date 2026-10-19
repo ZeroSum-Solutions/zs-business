@@ -1,10 +1,12 @@
 /**
- * Body limits through a running Next server. The demo e2e build is started a second time in
- * live mode (env is read at request time) on a free port, with an in-process fake Supabase
- * Auth and a stand-in API that only counts calls, so /api/sign-in and the /api/v1 proxy reach
- * their body reads. Requests go over raw sockets: a chunked upload past the limit must get its
- * 413 while the client is still sending, a declared Content-Length over it must get its 413
- * before any body is sent, and a client that hangs up mid-body must not hurt the server.
+ * Body limits through a running Next server. The live build that global setup made
+ * (.next-live, built with ZS_API_URL set) is started a second time on a free port, with an
+ * in-process fake Supabase Auth and a stand-in API that only counts calls, so /api/sign-in and
+ * the /api/v1 proxy reach their body reads. It has to be a live build: the hosting-mode guard
+ * answers 500 to everything when a demo build runs with live settings. Requests go over raw
+ * sockets: a chunked upload past the limit must get its 413 while the client is still sending,
+ * a declared Content-Length over it must get its 413 before any body is sent, and a client
+ * that hangs up mid-body must not hurt the server.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -13,11 +15,11 @@ import { connect, createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
-import { childEnv } from "./live/child-env";
-import { createFakeGoTrue, memoryAuthStore, serveFakeGoTrue, type FakeGoTrue } from "./live/fake-gotrue";
-import { redactJwts } from "./live/redact";
+import { childEnv } from "./child-env";
+import { createFakeGoTrue, memoryAuthStore, serveFakeGoTrue, type FakeGoTrue } from "./fake-gotrue";
+import { redactJwts } from "./redact";
 
-const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SIGN_IN_LIMIT = 2048;
 const PROXY_LIMIT = 64 * 1024;
 
@@ -132,12 +134,13 @@ test.describe("request body limits on a running server", () => {
 
     port = await freePort();
     origin = `http://127.0.0.1:${port}`;
-    // The build the demo webServer just made; live mode comes from these, read per request.
+    // The live build global setup made; the server reads these per request.
     web = spawn("pnpm", ["exec", "next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
       cwd: dashboardDir,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: childEnv({
+        NEXT_DIST_DIR: ".next-live",
         ZS_API_URL: `http://127.0.0.1:${apiPort}`,
         SUPABASE_URL: auth.url,
         SUPABASE_ANON_KEY: anonKey,

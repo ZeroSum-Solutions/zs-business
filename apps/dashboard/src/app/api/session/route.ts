@@ -1,3 +1,4 @@
+import { withHostingModeGuard } from "@/lib/server/hosting-mode";
 import { liveSetupFromEnv } from "@/lib/server/live-config";
 import { sessionForRequest } from "@/lib/server/session";
 
@@ -6,6 +7,4 @@ import { sessionForRequest } from "@/lib/server/session";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export function GET(request: Request) {
-  return sessionForRequest(request, liveSetupFromEnv());
-}
+export const GET = withHostingModeGuard((request: Request) => sessionForRequest(request, liveSetupFromEnv()));

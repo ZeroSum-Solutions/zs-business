@@ -4,7 +4,7 @@
  * read chunk by chunk and cancelled as soon as it runs past the limit, misses the deadline,
  * or the caller goes away (an aborted or broken upload is a result, never a thrown error).
  * Under `next start` the route's answer still reaches a client that is mid-upload
- * (e2e/body-limits.spec.ts).
+ * (e2e/live/body-limits.spec.ts).
  */
 
 /** too_large: over maxBytes. timeout: not all there by the deadline. failed: a malformed Content-Length, or the upload broke off. */

@@ -1,3 +1,4 @@
+import { withHostingModeGuard } from "@/lib/server/hosting-mode";
 import { liveSetupFromEnv } from "@/lib/server/live-config";
 import { AttemptLimiter, attemptLimitsFromEnv } from "@/lib/server/rate-limit";
 import { requestSignInLink } from "@/lib/server/sign-in";
@@ -9,6 +10,4 @@ export const runtime = "nodejs";
 // One limiter per server process: enough for a single dashboard server.
 const limiter = new AttemptLimiter(attemptLimitsFromEnv());
 
-export function POST(request: Request) {
-  return requestSignInLink(request, liveSetupFromEnv(), limiter);
-}
+export const POST = withHostingModeGuard((request: Request) => requestSignInLink(request, liveSetupFromEnv(), limiter));
