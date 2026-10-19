@@ -427,6 +427,17 @@ describe("owner review (P-12)", () => {
     for (const booking of owner.items) expect(booking).toMatchObject({ source: "owner", intakeItemId: null, customer: null });
   });
 
+  it("names the linked customer on a website booking once the owner links it", async () => {
+    const page = await freshPage(h.a);
+    const { itemId, contactId } = await possibleMatch(page, at(15));
+    const customerOf = async () => bookingPageSchema.parse((await call(h.app, "GET", `/v1/booking/bookings?resourceId=${page.resourceId}`, { token: h.a.token })).body)
+      .items.find((booking) => booking.intakeItemId === itemId)?.customer;
+    expect(await customerOf()).toEqual({ contactId: null, name: "Mira Rowe", status: "possible_match" });
+    const linked = await call(h.app, "POST", `/v1/intake/items/${itemId}/link`, { token: h.a.token, key: randomUUID(), body: { contactId } });
+    expect(linked.status).toBe(200);
+    expect(await customerOf()).toEqual({ contactId, name: "Owner Copy", status: "linked" });
+  });
+
   it("lists the owner's pages with a working key and embed snippets", async () => {
     const page = await freshPage(h.a);
     const response = await call(h.app, "GET", "/v1/booking/pages", { token: h.a.token });

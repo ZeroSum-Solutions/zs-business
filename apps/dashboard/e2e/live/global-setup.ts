@@ -10,6 +10,9 @@
  * The proxy serves only a browser signed in through /sign-in: each run gets a random
  * DASHBOARD_ACCESS_CODE and DASHBOARD_SESSION_SECRET, given to `next start` only, not the build.
  *
+ * The API also serves the public booking page and widget (public-intake.md), with a random
+ * per-run key secret and PUBLIC_BASE_URL set to its own loopback address.
+ *
  * Children never inherit the shell's environment (see child-env.ts): each gets an allowlist
  * plus what is set here, and every database URL must name this run's zs_e2e_* database.
  *
@@ -130,6 +133,8 @@ export default async function globalSetup() {
   runtimeUrl.username = "zs_runtime";
   runtimeUrl.password = "";
   const jwtSecret = randomBytes(32).toString("hex");
+  // Signs this run's public booking keys; the API serves the booking page and widget with it.
+  const bookingKeySecret = randomBytes(32).toString("hex");
   const children: ChildProcess[] = [];
 
   const adminClient = async <T>(work: (client: pg.Client) => Promise<T>) => {
@@ -213,6 +218,8 @@ export default async function globalSetup() {
         JWT_MAX_TTL_SECONDS: String(MAX_TTL_SECONDS),
         JWT_CLOCK_SKEW_SECONDS: String(CLOCK_SKEW_SECONDS),
         PORT: String(LIVE.apiPort),
+        PUBLIC_BOOKING_KEY_SECRET: bookingKeySecret,
+        PUBLIC_BASE_URL: LIVE.apiUrl,
       }),
     });
     children.push(api);
@@ -231,7 +238,7 @@ export default async function globalSetup() {
     const sessionSecret = randomBytes(32).toString("hex");
     const webEnv = envFor({ ...webSettings, DASHBOARD_ACCESS_CODE: accessCode, DASHBOARD_SESSION_SECRET: sessionSecret });
     await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: buildEnv });
-    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, token, jwtSecret, accessCode, sessionSecret]);
+    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, token, jwtSecret, bookingKeySecret, accessCode, sessionSecret]);
     if (leaks.length > 0) {
       throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);
     }
