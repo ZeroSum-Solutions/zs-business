@@ -79,6 +79,13 @@ function guarded(client: PoolClient, signal: AbortSignal | undefined): Transacti
   return { query: query as PoolClient["query"] };
 }
 
+/** Only an unprivileged LOGIN whose sole membership is authenticated may serve tenant reads. */
+const RUNTIME_LOGIN_CHECK = `SELECT rolcanlogin AND NOT (rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication)
+    AND pg_has_role(oid, 'authenticated', 'MEMBER')
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid AND m.roleid <> 'authenticated'::regrole)
+    AND NOT pg_has_role(oid, 'service_role', 'MEMBER') AS safe
+   FROM pg_roles r WHERE rolname=session_user`;
+
 // DISCARD ALL without its DEALLOCATE ALL: node-postgres caches the names of the prepared
 // statements it created on each connection, so deallocating them breaks later named queries.
 const SESSION_RESET =
@@ -96,30 +103,23 @@ async function transaction<T>(
   const client = await checkout(pool, limits.maxWaiting, signal);
   let discard = false;
   try {
-    await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+    // Two round trips before the work. The first opens the transaction and, for the runtime
+    // role, checks the login; the second sets the role, limits and tenant. set_config('role')
+    // is SET LOCAL ROLE with the same membership check. All of it is transaction-local.
     if (role === "authenticated") {
-      const login = await client.query<{ safe: boolean }>(
-        `SELECT rolcanlogin AND NOT (rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication)
-          AND pg_has_role(oid, 'authenticated', 'MEMBER')
-          AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid AND m.roleid <> 'authenticated'::regrole)
-          AND NOT pg_has_role(oid, 'service_role', 'MEMBER') AS safe
-         FROM pg_roles r WHERE rolname=session_user`,
-      );
+      const [, login] = (await client.query(
+        `BEGIN ISOLATION LEVEL READ COMMITTED; ${RUNTIME_LOGIN_CHECK}`,
+      )) as unknown as [unknown, { rows: { safe: boolean }[] }];
       if (!login.rows[0]?.safe)
         throw new Error("Runtime pool requires an unprivileged LOGIN member of authenticated only");
+    } else {
+      await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
     }
     await client.query(
-      "SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true)",
-      [`${limits.lockTimeoutMs}ms`, `${limits.statementTimeoutMs}ms`],
+      `SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true),
+              set_config('role',$3,true),set_config('app.tenant_id',$4,true)`,
+      [`${limits.lockTimeoutMs}ms`, `${limits.statementTimeoutMs}ms`, role, tenantId ?? ""],
     );
-    await client.query(
-      role === "authenticated"
-        ? "SET LOCAL ROLE authenticated"
-        : "SET LOCAL ROLE service_role",
-    );
-    await client.query("SELECT set_config('app.tenant_id', $1, true)", [
-      tenantId ?? "",
-    ]);
     const result = await work(guarded(client, signal));
     if (signal?.aborted) throw new DatabaseUnavailable("aborted");
     await client.query("COMMIT");

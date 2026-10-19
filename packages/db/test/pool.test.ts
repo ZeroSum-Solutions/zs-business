@@ -110,3 +110,42 @@ describe("runtime pool bounds", () => {
     expect(await checkDatabase(pool)).toBe(false);
   });
 });
+
+describe("transaction setup", () => {
+  it("sets the role, limits and tenant in five round trips for one statement, and leaves the session clean", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
+    const sent: string[] = [];
+    pool.on("connect", (client) => {
+      const query = client.query.bind(client) as (...args: unknown[]) => unknown;
+      (client as { query: unknown }).query = (...args: unknown[]) => {
+        sent.push(String(typeof args[0] === "string" ? args[0] : (args[0] as { text: string }).text));
+        return query(...args);
+      };
+    });
+    try {
+      const db = createScopedDatabase(pool, { lockTimeoutMs: 1234, statementTimeoutMs: 5678 });
+      const inside = await db.tenant(fixture.a.tenantId, async (tx) => (await tx.query<Record<string, string>>(
+        `SELECT current_user AS role, current_setting('app.tenant_id') AS tenant,
+                current_setting('lock_timeout') AS lock, current_setting('statement_timeout') AS statement,
+                current_setting('transaction_isolation') AS isolation`,
+      )).rows[0]);
+      expect(inside).toEqual({ role: "authenticated", tenant: fixture.a.tenantId, lock: "1234ms", statement: "5678ms", isolation: "read committed" });
+      expect(sent).toHaveLength(5);
+      sent.length = 0;
+      // A privileged login is still refused before any work runs.
+      const admin = createScopedDatabase(database.pool);
+      await expect(admin.tenant(fixture.a.tenantId, () => Promise.resolve("ran"))).rejects.toThrow("unprivileged LOGIN");
+      // Nothing set inside the transaction survives it on the pooled connection.
+      const client = await pool.connect();
+      try {
+        expect((await client.query<Record<string, string>>(
+          `SELECT current_user AS role, current_setting('app.tenant_id', true) AS tenant, current_setting('lock_timeout') AS lock`,
+        )).rows[0]).toEqual({ role: "zs_runtime", tenant: "", lock: "0" });
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.end();
+    }
+  });
+});
