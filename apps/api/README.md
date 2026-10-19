@@ -69,11 +69,13 @@ second run reports `unchanged`. A dry run of a new owner shows a member id that 
 replaces. Output and receipts hold ids, names and role facts only.
 
 Every token must carry the tenant in `app_metadata.tenant_id`, which only the server can set.
-After the row commits, the step sets that claim on the bound user (keeping other
+Before its transaction commits, the step sets that claim on the bound user (keeping other
 `app_metadata` keys) and refuses a user whose claim already names another tenant. The user
-signs in again to get a token with the claim. If setting the claim fails, the row stays
-committed and a re-run sets it (`claimed`). An `--apply` run reads both the row and the claim
-back.
+signs in again to get a token with the claim. If setting the claim fails, the row rolls back
+and a re-run starts over; a claim that is gone from an existing row is set again (`claimed`).
+Runs for the same Supabase user take a per-user advisory lock before the tenant's lock and
+re-read the claim under it, so two runs for two tenants cannot both bind one user: the second
+is refused. An `--apply` run reads both the row and the claim back.
 
 Locally the Supabase user is looked up, and given the claim, in the auth stub's `auth.users`.
 Hosted, `db:hosted-provision-owner` (`src/hosted-provision.ts`) runs the same step with the

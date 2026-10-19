@@ -121,8 +121,13 @@ export async function readMemberByEmail(service: Pool, tenantId: string, email: 
  * - Refuses an unknown tenant, a row bound to a different user, a bound row whose user is gone,
  *   a user already bound to another member of the tenant, and a user whose tenant claim names
  *   another tenant.
- * - After the transaction commits, gives the bound user this tenant's claim when it lacks it.
- *   If that call fails the row stays committed and a re-run sets the claim ("claimed").
+ * - Gives the bound user this tenant's claim when it lacks it, inside the transaction, so a
+ *   failed claim write rolls the row back and a re-run starts over.
+ *
+ * Runs for the same Supabase user serialize on a per-user advisory lock, taken before the
+ * tenant's membership lock, which covers the claim re-read, the member row and the claim write.
+ * Without it two runs for two tenants could both read "no claim" and both bind the user, and
+ * the later claim write would silently take the user away from the first tenant.
  */
 export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionOwnerInput): Promise<ProvisionOwnerSummary> {
   const tenant = uuidSchema.safeParse(input.tenantId);
@@ -131,16 +136,23 @@ export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionO
   if (!parsedEmail.success) refuse("the email is not a valid address");
   const tenantId = tenant.data;
   const email = parsedEmail.data;
-  // Outside the transaction: on hosted this is an HTTP call, and no lock should wait on it.
+  // A first read names the user to lock on, and refuses a claimed user without taking any lock.
   const found = await deps.auth.findUser(email);
   const userId = found === null ? null : uuidSchema.parse(found.id);
-  if (found?.tenantId && found.tenantId !== tenantId)
-    refuse(`that Supabase user's tenant claim already names another tenant (${found.tenantId})`);
-  const claimMissing = found !== null && found.tenantId !== tenantId;
+  refuseOtherTenant(found, tenantId);
 
-  let summary: ProvisionOwnerSummary;
   try {
-    summary = await asService(deps.service, async (tx) => {
+    return await asService(deps.service, async (tx) => {
+      let claimMissing = false;
+      if (userId !== null) {
+        await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`provision-owner:user:${userId}`]);
+        // Under the lock: another run may have claimed the user since the first read.
+        const current = await deps.auth.findUser(email);
+        if (current === null || current.id !== userId)
+          refuse("the Supabase user with this email changed while provisioning; run it again");
+        refuseOtherTenant(current, tenantId);
+        claimMissing = current.tenantId !== tenantId;
+      }
       await lockMembership(tx, tenantId, "exclusive");
       const tenantRow = (await tx.query<{ name: string }>("SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows[0];
       if (!tenantRow) refuse(`tenant ${tenantId} does not exist`);
@@ -217,14 +229,20 @@ export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionO
         notes,
       };
       if (input.dryRun) throw new DryRunRollback(result);
+      // Still under both locks. If this fails the row rolls back; if COMMIT fails after it, the
+      // claim names this tenant with no member yet, and a re-run creates the row.
+      if (tenantClaim === "set") await deps.auth.setTenantClaim(boundUserId!, tenantId);
       return result;
     });
   } catch (error) {
     if (error instanceof DryRunRollback) return error.summary;
     throw error;
   }
-  if (summary.tenantClaim === "set") await deps.auth.setTenantClaim(summary.userId!, tenantId);
-  return summary;
+}
+
+function refuseOtherTenant(found: { tenantId: string | null } | null, tenantId: string): void {
+  if (found?.tenantId && found.tenantId !== tenantId)
+    refuse(`that Supabase user's tenant claim already names another tenant (${found.tenantId})`);
 }
 
 /** Where an --apply run stopped; the receipt names it. */

@@ -216,7 +216,7 @@ describe("provisionOwner", () => {
     expect(await provision({ tenantId, email })).toMatchObject({ action: "unchanged", tenantClaim: "present", notes: [] });
     expect(claimWrites.length).toBe(writes);
 
-    // The claim call failed after the row committed (or someone cleared it): a re-run sets it.
+    // Someone cleared the claim of a bound owner: a re-run sets it again.
     claims.delete(userId);
     expect(await provision({ tenantId, email })).toMatchObject({ action: "claimed", tenantClaim: "set", boundUser: false });
     expect(claims.get(userId)).toBe(tenantId);
@@ -228,7 +228,7 @@ describe("provisionOwner", () => {
     expect(claims.get(userId)).toBe(tenantId);
   });
 
-  it("with a real auth user: a failed claim write leaves the committed row, and a re-run finishes", async () => {
+  it("with a real auth user: a failed claim write rolls the row back, and a re-run creates it", async () => {
     await installAuthStub(database.pool);
     const tenantId = await newTenant();
     const email = newEmail();
@@ -239,11 +239,56 @@ describe("provisionOwner", () => {
     };
     const deps = { service: database.servicePool, clock, generateId: randomUUID, auth };
     await expect(provisionOwner(deps, { tenantId, email, dryRun: false })).rejects.toThrow(/503/);
-    expect(await rows(tenantId)).toMatchObject([{ email, user_id: userId, role: "owner" }]);
+    expect(await rows(tenantId)).toEqual([]);
     auth.setTenantClaim = (id, claim) => setAuthUserTenant(database.pool, id, claim);
-    expect(await provisionOwner(deps, { tenantId, email, dryRun: false })).toMatchObject({ action: "claimed", tenantClaim: "set" });
+    expect(await provisionOwner(deps, { tenantId, email, dryRun: false })).toMatchObject({ action: "created", tenantClaim: "set" });
+    expect(await rows(tenantId)).toMatchObject([{ email, user_id: userId, role: "owner" }]);
     const meta = await database.pool.query("SELECT raw_app_meta_data AS meta FROM auth.users WHERE id=$1", [userId]);
     expect(meta.rows[0].meta).toEqual({ provider: "email", tenant_id: tenantId });
+  });
+
+  it("two concurrent runs for one user and two tenants: exactly one binds the user, the other is refused", async () => {
+    const email = newEmail();
+    const userId = randomUUID();
+    const tenantClaims = new Map<string, string>();
+    // The first two lookups (one per run, before any lock) wait for each other, so both runs
+    // see a user with no claim yet: the window the per-user lock has to close.
+    let waiting = 2;
+    let release!: () => void;
+    const bothRead = new Promise<void>((resolve) => { release = resolve; });
+    const auth: AuthAdmin = {
+      findUser: async (wanted) => {
+        expect(wanted).toBe(email);
+        const answer = { id: userId, tenantId: tenantClaims.get(userId) ?? null };
+        if (waiting > 0) {
+          waiting -= 1;
+          if (waiting === 0) release();
+          await bothRead;
+        }
+        return answer;
+      },
+      setTenantClaim: async (id, tenantId) => {
+        // An admin API round trip, so the other run is surely waiting on the lock by now.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        tenantClaims.set(id, tenantId);
+      },
+    };
+    const deps = { service: database.servicePool, clock, generateId: randomUUID, auth };
+    const [first, second] = [await newTenant(), await newTenant()];
+    const results = await Promise.allSettled([
+      provisionOwner(deps, { tenantId: first, email, dryRun: false }),
+      provisionOwner(deps, { tenantId: second, email, dryRun: false }),
+    ]);
+    const won = results.filter((result) => result.status === "fulfilled");
+    const lost = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(1);
+    expect(String(lost[0]!.reason)).toMatch(/tenant claim already names another tenant/);
+    const winner = results[0]!.status === "fulfilled" ? first : second;
+    const loser = winner === first ? second : first;
+    expect(tenantClaims.get(userId)).toBe(winner);
+    expect(await rows(winner)).toMatchObject([{ email, user_id: userId, role: "owner" }]);
+    expect(await rows(loser)).toEqual([]);
   });
 
   it("is idempotent: a second run reports unchanged and writes nothing", async () => {
