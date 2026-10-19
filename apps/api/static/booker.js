@@ -57,11 +57,18 @@
     window.parent.postMessage({ type: "zs-booking:height", height }, "*");
   }
 
+  /** A read that never throws: no connection answers status 0, so callers always reach render(). */
   async function getJson(path) {
-    const response = await fetch(path, { headers: { Accept: "application/json" }, credentials: "omit" });
-    const body = await response.json().catch(() => null);
-    return { status: response.status, body, retryAfter: response.headers.get("Retry-After") };
+    try {
+      const response = await fetch(path, { headers: { Accept: "application/json" }, credentials: "omit" });
+      const body = await response.json().catch(() => null);
+      return { status: response.status, body, retryAfter: response.headers.get("Retry-After") };
+    } catch {
+      return { status: 0, body: null, retryAfter: null };
+    }
   }
+
+  const OFFLINE = "We could not reach the booking service. Check your connection and try again.";
 
   /** True while a request is in flight or unconfirmed: the slot and step must hold still. */
   function locked() {
@@ -396,7 +403,9 @@
 
   async function loadPage() {
     const { status, body } = await getJson(`/public/v1/pages/${match[1]}`);
-    if (status !== 200 || !body) {
+    // Offline after a definitive reply: keep the page shown so the visitor can try again.
+    if (status === 0 && state.page) { state.notice = OFFLINE; return false; }
+    if (status !== 200 || !body || !Array.isArray(body.resources)) {
       state.page = null;
       state.notice = status === 429 ? "Too many requests. Please try again shortly." : "This booking page is not available.";
       return false;
@@ -421,6 +430,7 @@
     if (fetchId !== slotsFetch || locked()) return false;
     if (status === 200 && body) state.slots = body.slots;
     else if (status === 429) state.notice = "Too many requests. Please try again shortly.";
+    else if (status === 0) state.notice = OFFLINE;
     if (rerender) render();
     return true;
   }

@@ -43,6 +43,8 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
   const taken = new Set<string>();
   let slotFetches = 0;
   let slotsHold: Promise<void> | null = null;
+  // The next read of this kind fails at the network, as a dropped connection would.
+  const failNext = { page: false, slots: false };
   const json = (route: Route, status: number, body: unknown) =>
     route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -55,6 +57,7 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
     if (url.pathname === "/booker.js") return route.fulfill({ contentType: "text/javascript; charset=utf-8", body: asset("booker.js") });
     if (url.pathname === "/booker.css") return route.fulfill({ contentType: "text/css; charset=utf-8", body: asset("booker.css") });
     if (url.pathname === `/public/v1/pages/${KEY}`) {
+      if (failNext.page) { failNext.page = false; return route.abort("connectionreset"); }
       return json(route, 200, {
         businessName: "Halden & Rowe",
         title: "Book a fitting",
@@ -65,6 +68,7 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
     }
     if (url.pathname === `/public/v1/pages/${KEY}/slots`) {
       slotFetches += 1;
+      if (failNext.slots) { failNext.slots = false; return route.abort("connectionreset"); }
       if (slotsHold) { const hold = slotsHold; slotsHold = null; await hold; }
       // Answered from the slots held at release time, not at request time.
       return json(route, 200, { resourceId: RESOURCE_ID, timeZone: "UTC", zone: "UTC", slots: slotsAfter(url.searchParams.get("from")!, taken) });
@@ -88,6 +92,7 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
       slotsHold = gate.promise;
       return gate.resolve;
     },
+    failNextRead: (kind: "page" | "slots") => { failNext[kind] = true; },
     /** The slot is now held, as it would be after the first request committed. */
     take: (startsAt: string) => taken.add(startsAt),
     confirmed: (route: Route, entry: Posted) => {
@@ -95,6 +100,8 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
       taken.add(startsAt);
       return json(route, 201, { requestId: REQUEST_ID, status: "confirmed", resourceId, startsAt, endsAt: new Date(Date.parse(startsAt) + 3_600_000).toISOString() });
     },
+    conflict: (route: Route, reason: string) =>
+      json(route, 409, { error: { code: "Conflict", message: "Request conflicts with the current state", details: { reason } } }),
     slotUnavailable: (route: Route, entry: Posted) => {
       taken.add((JSON.parse(entry.body) as { startsAt: string }).startsAt);
       return json(route, 409, { error: { code: "Conflict", message: "Request conflicts with the current state", details: { reason: "slot_unavailable" } } });
@@ -223,3 +230,31 @@ test("a refresh in flight during submit cannot strand the attempt after a 502", 
   expect(mock.posted[1]!.key).toBe(mock.posted[0]!.key);
   expect(mock.posted[1]!.body).toBe(mock.posted[0]!.body);
 });
+
+for (const reason of ["slot_unavailable", "disclosure_changed"] as const) {
+  test(`a failed read after a definitive ${reason} still leaves a form that can be sent again`, async ({ page }) => {
+    const mock = await mockBooker(page, [
+      (route) => {
+        // The follow-up read (free times or the page) drops, after the definitive answer.
+        mock.failNextRead(reason === "slot_unavailable" ? "slots" : "page");
+        return mock.conflict(route, reason);
+      },
+      (route, entry) => mock.confirmed(route, entry),
+    ]);
+    await page.goto(`${ORIGIN}/book/${KEY}`);
+    await pickTimeAndFill(page);
+    await page.getByRole("button", { name: "Confirm booking" }).click();
+
+    await expect(page.getByText("We could not reach the booking service. Check your connection and try again.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Booking…" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Choose another time" })).toBeEnabled();
+    const confirm = page.getByRole("button", { name: "Confirm booking" });
+    await expect(confirm).toBeEnabled();
+
+    await confirm.click();
+    await expect(page.getByRole("heading", { name: "You're booked" })).toBeVisible();
+    expect(mock.posted).toHaveLength(2);
+    // The 409 was definitive, so the next submit is a new attempt.
+    expect(mock.posted[1]!.key).not.toBe(mock.posted[0]!.key);
+  });
+}
