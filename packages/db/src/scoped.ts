@@ -15,6 +15,13 @@ const limitsSchema = z.strictObject({
     .max(2147483647)
     .default(15000),
 });
+export interface ScopedDatabaseOptions extends TransactionLimits {
+  /**
+   * Called when the session reset after a transaction fails; the connection is then
+   * discarded instead of reused. Hosted checks count these: any is a failure.
+   */
+  onResetFailure?: (error: unknown) => void;
+}
 export interface ScopedDatabase {
   tenant<T>(
     tenantId: string,
@@ -27,6 +34,12 @@ export interface ScopedDatabase {
 const SESSION_RESET =
   "CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; " +
   "SELECT pg_catalog.pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES";
+// Behind a transaction pooler (Supavisor, port 6543) the server connection may serve another
+// client between COMMIT and SESSION_RESET, which then may run on another backend. So the
+// settings and session locks work can leave behind are also reset inside the transaction,
+// after deferred constraints fire with the tenant and role still set.
+const TRANSACTION_RESET =
+  "SET CONSTRAINTS ALL IMMEDIATE; RESET ALL; RESET ROLE; SELECT pg_catalog.pg_advisory_unlock_all()";
 
 async function transaction<T>(
   pool: Pool,
@@ -34,6 +47,7 @@ async function transaction<T>(
   tenantId: string | null,
   work: (tx: Transaction) => Promise<T>,
   limits = limitsSchema.parse({}),
+  onResetFailure?: (error: unknown) => void,
 ): Promise<T> {
   const client = await pool.connect();
   let discard = false;
@@ -63,6 +77,7 @@ async function transaction<T>(
       tenantId ?? "",
     ]);
     const result = await work(client);
+    await client.query(TRANSACTION_RESET);
     await client.query("COMMIT");
     return result;
   } catch (error) {
@@ -78,8 +93,9 @@ async function transaction<T>(
     if (!discard) {
       try {
         await client.query(SESSION_RESET);
-      } catch {
+      } catch (error) {
         discard = true;
+        onResetFailure?.(error);
       }
     }
     client.release(discard);
@@ -89,9 +105,10 @@ async function transaction<T>(
 /** Use separate unprivileged LOGIN credentials, never a superuser/service pool. */
 export function createScopedDatabase(
   pool: Pool,
-  options: TransactionLimits = {},
+  options: ScopedDatabaseOptions = {},
 ): ScopedDatabase {
-  const limits = limitsSchema.parse(options);
+  const { onResetFailure, ...limitOptions } = options;
+  const limits = limitsSchema.parse(limitOptions);
   return {
     tenant: (tenantId, work) =>
       transaction(
@@ -100,6 +117,7 @@ export function createScopedDatabase(
         z.uuid().parse(tenantId),
         work,
         limits,
+        onResetFailure,
       ),
   };
 }

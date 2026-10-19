@@ -2,6 +2,7 @@ export {
   createScopedDatabase,
   asService,
   type ScopedDatabase,
+  type ScopedDatabaseOptions,
   type Transaction,
   type TransactionLimits,
 } from "./scoped.js";
