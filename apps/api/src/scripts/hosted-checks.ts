@@ -8,15 +8,18 @@
 //   JWT_SECRET, JWT_ISSUER   the API's token settings, to mint five-minute test tokens
 //   ZS_TENANT_ID             the seeded tenant (tenant A); tenant B is random and empty
 //   VERCEL_PROTECTION_BYPASS optional: passes Vercel Authentication on a protected preview
+// Flag: --expect-transport=transaction|session names the runtime URL's Supavisor mode;
+// default transaction (port 6543), as the API deploys. Any other port fails the run.
 // Prints one JSON report and exits 1 if any check fails.
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { signDevToken } from "../dev-token.js";
-import { poolerTransport, sessionContaminationProbe } from "../hosted-probes.js";
+import { expectedTransport, poolerTransport, sessionContaminationProbe, transportGate } from "../hosted-probes.js";
 import { assertHostedDatabaseUrl, hostedPool, redactSecrets } from "../hosted.js";
 
 const env = process.env;
+const expected = expectedTransport(process.argv.slice(2));
 const projectRef = env.ZS_TARGET_REF ?? "";
 const runtimeTarget = assertHostedDatabaseUrl(env.RUNTIME_DATABASE_URL ?? "", { projectRef, role: "zs_runtime" });
 const migratorTarget = assertHostedDatabaseUrl(env.MIGRATOR_DATABASE_URL ?? "", { projectRef, role: "zs_migrator" });
@@ -40,7 +43,7 @@ async function check(name: string, run: () => Promise<{ ok: boolean; detail?: un
 
 const runtime = hostedPool(runtimeTarget, 10);
 // Pooler mode of the runtime URL: 6543 is Supavisor transaction mode, as the API uses.
-const transport = poolerTransport(runtimeTarget.port);
+const transport = { ...poolerTransport(runtimeTarget.port), expected };
 // Every scoped transaction here reports a failed session reset; any one fails the run.
 const resetFailures: string[] = [];
 const scopedOptions = { onResetFailure: (error: unknown) => { resetFailures.push(redactSecrets(String(error))); } };
@@ -63,6 +66,7 @@ const TENANT_TABLES = (await runtime.query<{ name: string }>(
 
 try {
   // --- Database roles -------------------------------------------------------------------
+  await check("runtime URL uses the transport the deployment uses", async () => transportGate(runtimeTarget.port, expected));
   await check("runtime login is unprivileged and a member of authenticated only", async () => {
     const row = (await runtime.query(
       `SELECT r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb, r.rolreplication,
@@ -163,7 +167,8 @@ try {
     return { ok: bad.length === 0, detail: { transport, total: rows.length, bad: bad.slice(0, 5) } };
   });
   await check("pooled runtime sessions carry no session state into later transactions", async () => {
-    // Tenant A and B alike: the probe reads only settings, never rows.
+    // Tenant B: the probe reads only session state, never rows. Committed and throwing
+    // transactions dirty their backend; it fails unless readers reuse those backends.
     const probe = await sessionContaminationProbe(createScopedDatabase(runtime, scopedOptions), tenantB);
     return { ok: probe.ok, detail: { transport, ...probe.detail } };
   });

@@ -193,11 +193,15 @@ against the pinned Supabase Root 2021 CA.
    refused at runtime, every SET ROLE / SET SESSION AUTHORIZATION escape refused, forced RLS
    and owner on every tenant table, two-tenant denial in SQL, over HTTP and through the
    dashboard proxy, 200 concurrent pooled transactions and 120 concurrent HTTP requests with
-   no crossover (the pooled checks record the runtime URL's transport: port 6543 is
-   Supavisor transaction mode, 5432 session mode), a session-contamination probe (every
-   tenth transaction leaves a custom setting and `application_name` behind; no later
-   transaction on the pool may see either), no failed session reset in any scoped
-   transaction (counted through `createScopedDatabase`'s `onResetFailure`), bad tokens 401, and the Data API reading nothing (only an explicit denial
+   no crossover, the runtime URL on the deployment's transport (default Supavisor
+   transaction mode, port 6543; pass `-- --expect-transport=session` for 5432; any other
+   port fails as unsupported), a session-contamination probe (in 20 rounds, committed and
+   throwing transactions leave a custom setting, `application_name`, a session advisory
+   lock, a temp table, a held cursor and a `LISTEN` behind; later transactions must see
+   none of it, and must have run on a backend a committed and a throwing transaction used
+   first, by `pg_backend_pid()`, or the probe fails with "no handoff observed"), no failed
+   session cleanup in any scoped transaction (counted through `createScopedDatabase`'s
+   `onResetFailure`), bad tokens 401, and the Data API reading nothing (only an explicit denial
    or an empty result passes; an outage fails). Write probes always roll back, and the
    temporary Auth user's deletion is checked too. Its header lists the
    environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication on preview.
