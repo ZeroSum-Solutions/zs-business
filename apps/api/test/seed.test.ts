@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, type TestDatabase } from "@zs/db/testing";
 import { assertLocalDatabaseUrl } from "../src/config.js";
-import { seedDemo, seedHostedTenant } from "../src/seed/demo.js";
+import { assertNoHostedSeedArgs, hostedOwnerSteps, seedDemo, seedHostedTenant } from "../src/seed/demo.js";
 import { createSupabaseAuthAdmin } from "../src/supabase-auth-admin.js";
 import { FAKE_REF, FAKE_SERVICE_KEY, fakeGoTrue } from "./fake-gotrue.js";
 import { formatSeedReport, runtimeTargetFor } from "../src/seed/report.js";
@@ -97,35 +97,41 @@ describe("hosted seed", () => {
   const members = (tenantId: string) => hosted.pool.query<{ email: string; user_id: string | null; role: string }>(
     "SELECT email, user_id, role::text AS role FROM tenant_members WHERE tenant_id=$1 ORDER BY email", [tenantId]).then((result) => result.rows);
 
-  it("removes the seed's own member and gives the tenant its owner through provisionOwner and the Auth admin API", async () => {
+  it("removes the seed's own member, leaves the tenant with no member and never calls Supabase Auth", async () => {
     const gotrue = fakeGoTrue();
-    const userId = gotrue.addUser("devin@example.com");
+    gotrue.addUser("devin@example.com");
     const auth = createSupabaseAuthAdmin({ projectRef: FAKE_REF, serviceKey: FAKE_SERVICE_KEY, fetch: gotrue.fetch });
     const deps = { service: hosted.servicePool, runtime: hosted.runtimePool, clock, generateId: randomUUID };
 
-    const first = await seedHostedTenant(deps, { email: "Devin@Example.com", auth });
-    expect(first).toMatchObject({ contacts: 12, deals: 8, bookings: 6, seedMemberRemoved: true,
-      provisionedOwner: { action: "created", userId, role: "owner", tenantClaim: "set", activeOwnersBefore: 0 } });
+    // An owner handed in the old way is ignored: the seed has no path to Auth or a real membership.
+    const first = await (seedHostedTenant as (...args: unknown[]) => ReturnType<typeof seedHostedTenant>)(deps, { email: "devin@example.com", auth });
+    expect(first).toMatchObject({ contacts: 12, deals: 8, bookings: 6, seedMemberRemoved: true });
+    expect(first).not.toHaveProperty("provisionedOwner");
     const tenantId = first.principal.tenantId;
-    expect(await members(tenantId)).toEqual([{ email: "devin@example.com", user_id: userId, role: "owner" }]);
-    expect(gotrue.claimOf(userId)).toBe(tenantId);
+    expect(await members(tenantId)).toEqual([]);
+    expect(gotrue.requests).toEqual([]);
 
-    // A rerun replays the seed, removes its member again and leaves the owner as it was.
-    const again = await seedHostedTenant(deps, { email: "devin@example.com", auth });
-    expect(again).toMatchObject({ seedMemberRemoved: true, bookings: 6, provisionedOwner: { action: "unchanged", tenantClaim: "present" } });
-    expect(await members(tenantId)).toEqual([{ email: "devin@example.com", user_id: userId, role: "owner" }]);
+    // A rerun replays the seed and removes its member again.
+    const again = await seedHostedTenant(deps);
+    expect(again).toMatchObject({ seedMemberRemoved: true, bookings: 6 });
+    expect(await members(tenantId)).toEqual([]);
     const actions = await hosted.pool.query<{ n: number }>("SELECT count(*)::int AS n FROM actions WHERE tenant_id=$1", [tenantId]);
     expect(actions.rows[0]!.n).toBe(32);
   });
 
-  it("without an owner email leaves the tenant with no member for db:hosted-provision-owner to fill", async () => {
-    const fresh = await createTestDatabase();
-    try {
-      const summary = await seedHostedTenant({ service: fresh.servicePool, runtime: fresh.runtimePool, clock, generateId: randomUUID });
-      expect(summary).toMatchObject({ seedMemberRemoved: true, provisionedOwner: null });
-      expect((await fresh.pool.query("SELECT 1 FROM tenant_members WHERE tenant_id=$1", [summary.principal.tenantId])).rowCount).toBe(0);
-    } finally {
-      await fresh.close();
-    }
+  it("names the tenant and the guarded db:hosted-provision-owner steps that give it an owner", () => {
+    const tenantId = randomUUID();
+    expect(hostedOwnerSteps(tenantId, "abcdefghijklmnopqrst")).toEqual([
+      `mise exec -- pnpm --filter @zs/api db:hosted-provision-owner --tenant ${tenantId} --email <addr> --dry-run`,
+      "mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/abcdefghijklmnopqrst-<date>.dump",
+      `mise exec -- pnpm --filter @zs/api db:hosted-provision-owner --tenant ${tenantId} --email <addr> --apply ` +
+        "--backup ~/Backups/zs-business/abcdefghijklmnopqrst-<date>.dump --receipt <file.json>",
+    ]);
+  });
+
+  it("seed:hosted refuses --owner-email and any other argument", () => {
+    expect(() => assertNoHostedSeedArgs(["--owner-email", "devin@example.com"])).toThrow(/takes no arguments.*db:hosted-provision-owner/);
+    expect(() => assertNoHostedSeedArgs(["--owner-email=devin@example.com"])).toThrow(/takes no arguments/);
+    expect(() => assertNoHostedSeedArgs([])).not.toThrow();
   });
 });

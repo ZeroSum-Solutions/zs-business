@@ -290,10 +290,10 @@ against the pinned Supabase Root 2021 CA.
    and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
    migrate and prints ids and counts only. The seed writes through the action path as its own
    owner member, whose user id names no Supabase user, and removes that member when it is
-   done (the action history keeps the record). With `-- --owner-email <addr>` and
-   `SUPABASE_SERVICE_ROLE_KEY` it then gives the tenant its owner through the same
-   `provisionOwner` as step 4 (no receipt: the seed is fake data); without it the tenant has
-   no member until step 4 runs.
+   done (the action history keeps the record). It takes no arguments and never calls
+   Supabase Auth or writes a real person's membership: the tenant has no member until step 4
+   runs. The summary prints the tenant id and, under `nextSteps`, the exact step 4 commands
+   for it (dry run, backup, then apply with a receipt).
 4. **Owner.** There is no static token: every person signs in through the dashboard with
    Supabase Auth (an email link), and the API checks each token's session with Supabase Auth
    (`SESSION_CHECK=supabase`). A tenant needs an owner first ("Provision the first owner").
