@@ -87,8 +87,6 @@ test("books through the widget on a client's site, then the owner links the poss
   await expect(page.getByRole("status").getByText("Linked the booking to Maren Ashby.")).toBeVisible();
   await expect(request).toHaveCount(0);
 
-  page.on("response", async (r) => { if (r.url().includes("/api/v1/booking/bookings")) console.log("DEBUG", r.status(), r.url(), (await r.text()).slice(0, 1500)); });
-  page.on("console", (m) => console.log("DEBUG console", m.text()));
   await mainNav(page).getByRole("link", { name: "Calendar" }).click();
   const linked = await findWebsiteBooking(page, "Maren Ashby");
   await expect(linked.getByTestId("website-badge")).toHaveText("Website");
