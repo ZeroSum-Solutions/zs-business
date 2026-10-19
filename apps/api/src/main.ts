@@ -5,7 +5,7 @@ import { serve } from "@hono/node-server";
 import { Pool } from "pg";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { createApp } from "./app.js";
-import { createHs256Verifier } from "./auth.js";
+import { createVerifierFromConfig } from "./auth.js";
 import { parseServerEnv } from "./config.js";
 
 const env = parseServerEnv(process.env);
@@ -17,12 +17,7 @@ await assertRuntimeLogin(pool).catch(async (error: unknown) => {
   throw error;
 });
 const app = createApp({
-  verifier: createHs256Verifier(env.jwtSecret, {
-    clock,
-    maxLifetimeSeconds: env.jwtMaxLifetimeSeconds,
-    clockSkewSeconds: env.jwtClockSkewSeconds,
-    ...(env.jwtIssuer === undefined ? {} : { issuer: env.jwtIssuer }),
-  }),
+  verifier: createVerifierFromConfig(env.jwt, clock),
   clock,
   db: createScopedDatabase(pool),
   generateId: randomUUID,

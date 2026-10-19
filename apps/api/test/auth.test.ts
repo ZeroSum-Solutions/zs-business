@@ -1,7 +1,12 @@
+import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { SignJWT } from "jose";
+import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { apiErrorBodySchema } from "@zs/contracts";
-import { createHs256Verifier } from "../src/auth.js";
+import { createApp } from "../src/app.js";
+import { createHs256Verifier, createVerifierFromConfig } from "../src/auth.js";
+import { parseServerEnv } from "../src/config.js";
 import { signDevToken } from "../src/dev-token.js";
 import { call, clock, createApiHarness, NOW, ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
 
@@ -141,5 +146,57 @@ describe("CORS", () => {
       headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" },
     });
     expect(denied.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+});
+
+describe("signing method chosen by config, end to end", () => {
+  let jwks: Server;
+  let jwksUrl = "";
+  let signingKey: CryptoKey;
+  let otherKey: CryptoKey;
+
+  beforeAll(async () => {
+    const pair = await generateKeyPair("ES256");
+    signingKey = pair.privateKey;
+    otherKey = (await generateKeyPair("ES256")).privateKey;
+    const jwk = { ...(await exportJWK(pair.publicKey)), kid: "key-1", alg: "ES256", use: "sig" };
+    jwks = createServer((_request, response) => {
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ keys: [jwk] }));
+    });
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/auth/v1/.well-known/jwks.json`;
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve) => (jwks ? jwks.close(() => resolve()) : resolve()));
+  });
+
+  /** An ES256 token for tenant A's owner, as Supabase issues with asymmetric signing keys. */
+  const es256 = (key: CryptoKey) => new SignJWT({
+    role: "authenticated", session_id: h.a.sessionId, app_metadata: { tenant_id: h.a.tenantId },
+  }).setProtectedHeader({ alg: "ES256", typ: "JWT", kid: "key-1" }).setSubject(h.a.actorId).setAudience("authenticated")
+    .setIssuedAt(nowSeconds).setExpirationTime(nowSeconds + 600).sign(key);
+
+  /** The app main.ts builds from this environment. */
+  const appFor = (env: Record<string, string>) => createApp({
+    verifier: createVerifierFromConfig(parseServerEnv({ DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", ...env }).jwt, clock),
+    clock,
+    db: h.database.db,
+    generateId: randomUUID,
+    config: { allowedOrigins: [] },
+  });
+
+  it("JWT_VERIFIER=jwks accepts an ES256 token from the JWKS and refuses another key's or an HS256 token", async () => {
+    const app = appFor({ JWT_VERIFIER: "jwks", JWT_JWKS_URL: jwksUrl });
+    expect((await call(app, "GET", "/v1/me", { token: await es256(signingKey) })).body).toMatchObject({
+      tenantId: h.a.tenantId, userId: h.a.actorId, role: "owner",
+    });
+    expect401(await call(app, "GET", "/v1/crm/contacts", { token: await es256(otherKey) }));
+    expect401(await call(app, "GET", "/v1/crm/contacts", { token: h.a.token }));
+  });
+
+  it("JWT_VERIFIER=hs256 accepts the HS256 token and refuses an ES256 one", async () => {
+    const app = appFor({ JWT_VERIFIER: "hs256", JWT_SECRET: SECRET });
+    expect((await call(app, "GET", "/v1/crm/contacts", { token: h.a.token })).status).toBe(200);
+    expect401(await call(app, "GET", "/v1/crm/contacts", { token: await es256(signingKey) }));
   });
 });

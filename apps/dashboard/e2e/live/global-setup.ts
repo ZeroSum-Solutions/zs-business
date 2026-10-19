@@ -248,6 +248,7 @@ export default async function globalSetup() {
       // No ALLOWED_ORIGINS: the browser only talks to the dashboard, never to the API.
       env: envFor({
         DATABASE_URL: runtimeUrl.href,
+        JWT_VERIFIER: "hs256",
         JWT_SECRET: jwtSecret,
         JWT_ISSUER: ISSUER,
         JWT_MAX_TTL_SECONDS: String(MAX_TTL_SECONDS),

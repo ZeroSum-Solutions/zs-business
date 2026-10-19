@@ -15,6 +15,7 @@ psql postgres://postgres@127.0.0.1:55432/postgres -c 'CREATE DATABASE zs_dev'
 DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api db:migrate
 
 # 3. Make a local env file with a real secret; the API and seed refuse the placeholder.
+#    The example env sets JWT_VERIFIER=hs256, as local tokens are HS256.
 sed "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" apps/api/.env.example > apps/api/.env
 set -a; . apps/api/.env; set +a
 
@@ -44,7 +45,9 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | Variable | Meaning |
 |---|---|
 | `DATABASE_URL` | API: the runtime LOGIN role (`zs_runtime`); the API refuses to start as a superuser or BYPASSRLS role. Scripts: the local admin URL. |
-| `JWT_SECRET` | HS256 secret for Supabase-style access tokens (32+ characters). The `.env.example` placeholder is refused. |
+| `JWT_VERIFIER` | Required: how access tokens are verified. `hs256` (the legacy Supabase JWT secret, needs `JWT_SECRET`) or `jwks` (asymmetric Supabase signing keys, ES256/RS256, needs `JWT_JWKS_URL`). Anything else, or none, is refused. |
+| `JWT_SECRET` | `hs256` only, and `seed:demo`: HS256 secret for Supabase-style access tokens (32+ characters). The `.env.example` placeholder is refused. |
+| `JWT_JWKS_URL` | `jwks` only: the project's JWKS, `https://<project>.supabase.co/auth/v1/.well-known/jwks.json`. Must be https; plain http only on `127.0.0.1`, `[::1]` or `localhost` (local tests). |
 | `JWT_ISSUER` | Optional. When set, tokens must carry this `iss`. |
 | `JWT_MAX_TTL_SECONDS` | Longest accepted token lifetime (`exp` minus `iat`), default 3600. Local dev sets 604800 so the 7-day seed token works for seed and dashboard e2e; production keeps the default. |
 | `JWT_CLOCK_SKEW_SECONDS` | How far a token's `iat` may lie ahead of the API's clock, 0 to 300, default 60. |
@@ -88,9 +91,17 @@ Postgres has no `auth` schema: tests and `seed:demo` install a loopback-only stu
 runs migrations needs `GRANT ... WITH GRANT OPTION` on `auth.sessions` and `auth.users`, or
 the migration fails loudly.
 
-HS256
-uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing keys pass
-`createJwksVerifier(createRemoteJWKSet(new URL(".../auth/v1/.well-known/jwks.json")), { clock })`.
+The signing method is explicit config, never inferred from the token: `JWT_VERIFIER=hs256`
+accepts only HS256 tokens signed with `JWT_SECRET`; `JWT_VERIFIER=jwks` accepts only ES256 or
+RS256 tokens signed by a key in `JWT_JWKS_URL` (fetched and cached by `jose`'s
+`createRemoteJWKSet`), so an HS256 token is refused there and an ES256 token under `hs256`.
+`parseServerEnv` parses the `JWT_*` variables with `jwtEnvSchema` from `@zs/core` and `main.ts`
+builds the verifier with `createVerifierFromConfig(env.jwt, clock)`.
+
+The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above live in
+`@zs/core` (`edge/auth.ts`, and `authenticate(deps, verifier, token)` in
+`edge/authenticate.ts`), so the MCP server runs exactly the same checks on every tool call.
+`src/auth.ts` re-exports them.
 
 ## Routes (`/v1`, JSON)
 

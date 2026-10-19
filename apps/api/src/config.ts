@@ -1,6 +1,7 @@
 import type { Pool } from "pg";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
+import { formatEnvIssues, jwtEnvSchema, type JwtConfig } from "@zs/core";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 /** The only fields a plain postgres URL yields; anything else came from a query parameter. */
@@ -61,29 +62,19 @@ export function describeDatabase(target: LocalDatabaseTarget): { host: string; p
   return { host: target.host, port: target.port, database: target.database };
 }
 
-/** The value shipped in .env.example; a server that still uses it must not start. */
-export const PLACEHOLDER_JWT_SECRET = "replace-with-a-local-dev-secret-of-32-or-more-chars";
-export const jwtSecretSchema = z.string()
-  .min(32, "JWT_SECRET must be at least 32 characters")
-  .refine((value) => value !== PLACEHOLDER_JWT_SECRET, "JWT_SECRET is still the .env.example placeholder");
+// The JWT_* variables (signing method, secret or JWKS URL, issuer, lifetime, skew) are parsed
+// by the schema in @zs/core, shared with the MCP server.
+export { jwtSecretSchema, PLACEHOLDER_JWT_SECRET } from "@zs/core";
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
-  JWT_SECRET: jwtSecretSchema,
-  JWT_ISSUER: z.string().min(1).optional(),
-  // Default one hour, like Supabase Auth. Local dev raises it to accept the 7-day seed token.
-  JWT_MAX_TTL_SECONDS: z.coerce.number().int().min(60).max(30 * 24 * 3600).default(3600),
-  // How far a token's iat may lie ahead of this server's clock. Default one minute.
-  JWT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(60),
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
-  readonly jwtSecret: string;
-  readonly jwtIssuer: string | undefined;
-  readonly jwtMaxLifetimeSeconds: number;
-  readonly jwtClockSkewSeconds: number;
+  /** How access tokens are verified: `JWT_VERIFIER=hs256` with JWT_SECRET, or `jwks` with JWT_JWKS_URL. */
+  readonly jwt: JwtConfig;
   readonly allowedOrigins: string[];
   readonly port: number;
 }
@@ -91,14 +82,12 @@ export interface ServerEnv {
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
 export function parseServerEnv(env: Readonly<Record<string, string | undefined>>): ServerEnv {
   const parsed = envSchema.safeParse(env);
-  if (!parsed.success)
-    throw new Error(`Invalid environment: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+  const jwt = jwtEnvSchema.safeParse(env);
+  if (!parsed.success || !jwt.success)
+    throw new Error(formatEnvIssues([...(parsed.error?.issues ?? []), ...(jwt.error?.issues ?? [])]));
   return {
     databaseUrl: parsed.data.DATABASE_URL,
-    jwtSecret: parsed.data.JWT_SECRET,
-    jwtIssuer: parsed.data.JWT_ISSUER,
-    jwtMaxLifetimeSeconds: parsed.data.JWT_MAX_TTL_SECONDS,
-    jwtClockSkewSeconds: parsed.data.JWT_CLOCK_SKEW_SECONDS,
+    jwt: jwt.data,
     allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
     port: parsed.data.PORT,
   };

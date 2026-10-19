@@ -11,6 +11,18 @@ export interface MappedError {
   readonly body: ApiErrorBody;
 }
 
+/**
+ * The caller could not be authenticated: a missing, forged or expired token, or a Supabase
+ * session that has ended. Maps to 401 Unauthorized. Its message is always one of the fixed
+ * strings written in core (never token, request or database text), so it may reach the caller.
+ */
+export class Unauthenticated extends Error {
+  constructor(message = "Invalid or missing access token") {
+    super(message);
+    this.name = "Unauthenticated";
+  }
+}
+
 export function apiErrorBody(code: ApiErrorCode, message: string, details: Record<string, JsonValue> = {}): ApiErrorBody {
   return { error: { code, message, details } };
 }
@@ -53,6 +65,7 @@ const mapped = (status: ApiErrorStatus, code: ApiErrorCode, details: Record<stri
 
 /** Map any thrown value to one HTTP status and the shared error body. Unknown errors become 500. */
 export function mapError(error: unknown): MappedError {
+  if (error instanceof Unauthenticated) return { status: 401, body: apiErrorBody("Unauthorized", error.message) };
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":
