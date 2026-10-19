@@ -15,7 +15,8 @@ cd "${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}"
 # Node 24
 if ! node -v 2>/dev/null | grep -q '^v24\.'; then
   log "installing Node 24 (found $(node -v 2>/dev/null || echo none))"
-  npm install -g n >/dev/null 2>&1 && as_root n 24 >/dev/null
+  npm install -g n >/dev/null 2>&1
+  as_root n 24 >/dev/null
   # Cloud images put /opt/node22/bin first on PATH; point it at Node 24.
   if [ -d /opt/node22/bin ]; then
     for b in node npm npx corepack; do
@@ -23,6 +24,7 @@ if ! node -v 2>/dev/null | grep -q '^v24\.'; then
     done
   fi
   hash -r
+  node -v | grep -q '^v24\.' || { log "Node 24 not active (found $(node -v))"; exit 1; }
 fi
 
 # pnpm pinned by package.json
@@ -52,6 +54,6 @@ fi
 pnpm install --frozen-lockfile >/dev/null
 log "ready: node $(node -v), pnpm $(pnpm -v)"
 
-if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+if [ -n "${CLAUDE_ENV_FILE:-}" ] && ! grep -qs ZS_TEST_DATABASE_URL "$CLAUDE_ENV_FILE"; then
   echo "export ZS_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres" >> "$CLAUDE_ENV_FILE"
 fi
