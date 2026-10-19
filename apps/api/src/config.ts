@@ -78,13 +78,28 @@ const envSchema = z.object({
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   // PEM of the CA that signs the database's TLS certificate (hosted Supabase: the Supabase
-  // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Unset: plain TCP.
+  // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Required for any
+  // host other than loopback; only a loopback database may use plain TCP.
   DATABASE_CA_CERT: z.string().includes("BEGIN CERTIFICATE").optional(),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(50).default(10),
-}).refine((env) => env.DATABASE_CA_CERT === undefined || !env.DATABASE_URL.includes("?"), {
+}).superRefine((env, ctx) => {
+  const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+  let host: string;
+  try {
+    // The host pg will actually use: a query parameter such as host overrides the URL's.
+    host = (parse(env.DATABASE_URL).host ?? "").toLowerCase();
+  } catch {
+    // Never echo the value: it holds the password.
+    issue("DATABASE_URL", "is not a valid connection string");
+    return;
+  }
+  const loopback = LOOPBACK.has(host);
+  if (!loopback && env.DATABASE_CA_CERT === undefined)
+    issue("DATABASE_CA_CERT", "is required when DATABASE_URL is not a loopback host (127.0.0.1, ::1, localhost)");
   // pg lets URL options (ssl, sslmode, also percent-encoded) replace the ssl config, which
-  // would drop the CA check, so a verified URL carries no query string at all.
-  path: ["DATABASE_URL"], message: "must not carry a query string when DATABASE_CA_CERT is set",
+  // would drop the CA check or TLS itself, so a remote or verified URL carries no query string.
+  if ((!loopback || env.DATABASE_CA_CERT !== undefined) && env.DATABASE_URL.includes("?"))
+    issue("DATABASE_URL", "must not carry a query string when it is not a loopback host or DATABASE_CA_CERT is set");
 });
 export interface ServerEnv {
   readonly databaseUrl: string;

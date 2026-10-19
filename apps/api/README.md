@@ -49,7 +49,7 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
-| `DATABASE_CA_CERT` | Optional PEM. When set, the pool verifies the server against it (`rejectUnauthorized`), and `DATABASE_URL` must carry no query string, because pg lets URL ssl options override the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
+| `DATABASE_CA_CERT` | PEM. When set, the pool verifies the server against it (`rejectUnauthorized`). Required whenever `DATABASE_URL` is not a loopback host (`127.0.0.1`, `::1`, `localhost`), so a hosted API never falls back to plain TCP; only a loopback database runs without TLS. A non-loopback URL, or any URL with a CA, must carry no query string, because pg lets URL ssl options (`sslmode=no-verify`, `ssl=false`, a `host` override) replace the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
 | `DATABASE_POOL_MAX` | Pool size per process, 1 to 50, default 10. Vercel sets 3: each serverless instance has its own pool. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
