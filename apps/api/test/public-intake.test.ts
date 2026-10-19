@@ -194,7 +194,8 @@ describe("same reply for new and known people (P-6, P-7)", () => {
       expect(reply).toMatchObject({ status: "confirmed", resourceId: page.resourceId, startsAt: at(9 + index), endsAt: at(10 + index) });
       shapes.add(JSON.stringify({
         keys: Object.keys(response.body).sort(),
-        headers: [...response.headers.keys()].sort(),
+        // Names and values, so even Content-Length cannot tell a known person from a new one.
+        headers: [...response.headers.entries()].filter(([name]) => name !== "date").sort(),
       }));
     }
     expect(shapes.size).toBe(1);
@@ -237,6 +238,28 @@ describe("same reply for new and known people (P-6, P-7)", () => {
     )).rows[0]!);
     expect(row).toMatchObject({ status: "new_contact", notes: "Hem only", display_name: "Mira Rowe" });
     expect(row.consent).toBe(`email:granted:intake:${response.body.requestId}`);
+  });
+
+  it("records what the visitor agreed to, when and on which form, even after the page text changes", async () => {
+    const page = await freshPage(h.a);
+    const shown = (await call(h.app, "GET", `/public/v1/pages/${page.key}`, { headers: { "X-Forwarded-For": nextAddress() } }))
+      .body.disclosure as { version: string; text: string };
+    const response = await book(page.key, visitor(page.resourceId, { consent: { email: true, sms: false }, channel: "booking_page" }));
+    expect(response.status).toBe(201);
+    const provenance = () => h.fixture.service(async (tx) => (await tx.query(
+      `SELECT channel::text, status::text, purpose, disclosure_version, disclosure_text, source, recorded_at
+         FROM intake_item_consent WHERE tenant_id=$1 AND intake_item_id=$2`,
+      [h.a.tenantId, response.body.requestId],
+    )).rows);
+    const recorded = [{
+      channel: "email", status: "granted", purpose: "marketing_updates", disclosure_version: shown.version,
+      disclosure_text: shown.text, source: `booking_page:${page.pageId}`, recorded_at: new Date(NOW),
+    }];
+    // The unticked SMS box records nothing: no evidence, not a denial.
+    expect(await provenance()).toEqual(recorded);
+    await h.fixture.service((tx) => tx.query(
+      "UPDATE booking_pages SET disclosure_text='Different words' WHERE tenant_id=$1 AND id=$2", [h.a.tenantId, page.pageId]));
+    expect(await provenance()).toEqual(recorded);
   });
 });
 

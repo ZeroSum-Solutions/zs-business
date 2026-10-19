@@ -106,9 +106,11 @@ export const publicRequestHandler: ActionHandler = {
     for (const channel of CHANNELS) {
       if (!input.consent[channel]) continue;
       await tx.query(
-        `INSERT INTO intake_item_consent (tenant_id,intake_item_id,channel,status,purpose,disclosure_version,source,recorded_at)
-         VALUES ($1,$2,$3::crm_consent_channel,'granted',$4,$5,$6,$7)`,
-        [tenantId, input.intakeItemId, channel, intakeConsentPurpose, page.disclosure_version, source, now],
+        `INSERT INTO intake_item_consent (tenant_id,intake_item_id,channel,status,purpose,disclosure_version,
+           disclosure_text,source,recorded_at)
+         VALUES ($1,$2,$3::crm_consent_channel,'granted',$4,$5,$6,$7,$8)`,
+        [tenantId, input.intakeItemId, channel, intakeConsentPurpose, page.disclosure_version, page.disclosure_text,
+          source, now],
       );
       // A contact created in this transaction has no recorded evidence to override.
       if (claim.outcome === "new_contact")

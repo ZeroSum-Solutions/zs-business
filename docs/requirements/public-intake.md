@@ -1,6 +1,7 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18). Code follows this file; a change to a
+Status: frozen contract for M3a/M3b (2026-10-18), revision 2 (2026-10-19: P-8 and P-13 keep
+the disclosure text on each intake consent row). Code follows this file; a change to a
 numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -95,8 +96,8 @@ A uniqueness race during the create is retried inside a savepoint and becomes a
 `possible_match`.
 
 **P-8. Consent at intake.** Each ticked box becomes an `intake_item_consent` row:
-channel, status `granted`, purpose `marketing_updates`, the page's disclosure version,
-source `booking_page:<pageId>` or `widget:<pageId>`, and the server's transaction time.
+channel, status `granted`, purpose `marketing_updates`, the page's disclosure version and
+the exact disclosure text shown, source `booking_page:<pageId>` or `widget:<pageId>`, and the server's transaction time.
 The client sends no status, time, source or purpose; an unticked box records nothing (no
 evidence, not a denial). `disclosureVersion` must equal the page's current version, or
 the request fails with 409 `disclosure_changed` and nothing is written.
@@ -151,7 +152,7 @@ embed snippets.
 | `booking_pages` | `tenant_id`, `id`, `title`, `description` NULL, `published`, `disclosure_version`, `disclosure_text`, `created_at`; PK `(tenant_id,id)` |
 | `booking_page_resources` | `tenant_id`, `page_id`, `resource_id`, `position`; PK `(tenant_id,page_id,resource_id)`; FKs to pages and resources with the tenant |
 | `intake_items` | `tenant_id`, `id`, `kind`, `status`, `channel`, `page_id`, `submitted_name`, `submitted_email`, `submitted_phone` NULL, `notes` NULL, `matched_contact_ids`, `contact_id` NULL, `reviewed_at` NULL, `reviewed_by` NULL, `created_at`; status/contact consistency checks |
-| `intake_item_consent` | `tenant_id`, `intake_item_id`, `channel`, `status`, `purpose`, `disclosure_version`, `source`, `recorded_at`; PK `(tenant_id,intake_item_id,channel)` |
+| `intake_item_consent` | `tenant_id`, `intake_item_id`, `channel`, `status`, `purpose`, `disclosure_version`, `disclosure_text` (added by `*_intake_consent_disclosure_text.sql`), `source`, `recorded_at`; PK `(tenant_id,intake_item_id,channel)` |
 | `bookings` (added) | `source` (`owner` default, or `website`), `intake_item_id` NULL; `source='website'` exactly when the intake item is set |
 
 Every table has `tenant_id`, a tenant FK, forced RLS with the shared `tenant_scope`
