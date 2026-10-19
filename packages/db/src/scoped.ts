@@ -17,7 +17,8 @@ const limitsSchema = z.strictObject({
 });
 export interface ScopedDatabaseOptions extends TransactionLimits {
   /**
-   * Called when the session reset after a transaction fails; the connection is then
+   * Called when a backend cannot be cleaned: the in-transaction cleanup fails, work ended
+   * the transaction itself, or the session reset after it fails. The connection is then
    * discarded instead of reused. Hosted checks count these: any is a failure.
    */
   onResetFailure?: (error: unknown) => void;
@@ -34,12 +35,23 @@ export interface ScopedDatabase {
 const SESSION_RESET =
   "CLOSE ALL; SET SESSION AUTHORIZATION DEFAULT; RESET ALL; UNLISTEN *; " +
   "SELECT pg_catalog.pg_advisory_unlock_all(); DISCARD PLANS; DISCARD TEMP; DISCARD SEQUENCES";
-// Behind a transaction pooler (Supavisor, port 6543) the server connection may serve another
-// client between COMMIT and SESSION_RESET, which then may run on another backend. So the
-// settings and session locks work can leave behind are also reset inside the transaction,
-// after deferred constraints fire with the tenant and role still set.
-const TRANSACTION_RESET =
-  "SET CONSTRAINTS ALL IMMEDIATE; RESET ALL; RESET ROLE; SELECT pg_catalog.pg_advisory_unlock_all()";
+// Behind a transaction pooler (Supavisor, port 6543) the backend serves another client as
+// soon as the transaction ends, and the post-commit SESSION_RESET may reach a different
+// backend. So every transaction also clears its backend inside the transaction block, where
+// all of this is legal on PostgreSQL 15 and 16 (only DISCARD ALL is refused there). It
+// drops temp objects, held cursors, LISTEN subscriptions, SQL-level prepared statements
+// (from_sql; node-postgres's own stay), cached plans and sequence state, session settings,
+// role and session advisory locks. The transactional parts take effect at COMMIT.
+const IN_TRANSACTION_CLEANUP =
+  "CLOSE ALL; UNLISTEN *; DISCARD TEMP; DISCARD PLANS; DISCARD SEQUENCES; RESET ALL; RESET ROLE; " +
+  "SET SESSION AUTHORIZATION DEFAULT; SELECT pg_catalog.pg_advisory_unlock_all(); " +
+  "DO $$DECLARE s text; BEGIN FOR s IN SELECT name FROM pg_catalog.pg_prepared_statements WHERE from_sql " +
+  "LOOP EXECUTE format('DEALLOCATE %I', s); END LOOP; END$$";
+// Work runs under this savepoint. Deferred constraints fire inside it, with the tenant and
+// role still set, so a violation there still rolls back to the savepoint. RELEASE fails if
+// work ended the transaction itself; the client is then discarded.
+const WORK_SAVEPOINT = "zs_work";
+const WORK_DONE = `SET CONSTRAINTS ALL IMMEDIATE; RELEASE SAVEPOINT ${WORK_SAVEPOINT}`;
 
 async function transaction<T>(
   pool: Pool,
@@ -51,6 +63,11 @@ async function transaction<T>(
 ): Promise<T> {
   const client = await pool.connect();
   let discard = false;
+  const failed = (error: unknown) => {
+    discard = true;
+    onResetFailure?.(error);
+  };
+  let stage: "setup" | "work" | "cleanup" = "setup";
   try {
     await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
     if (role === "authenticated") {
@@ -76,11 +93,31 @@ async function transaction<T>(
     await client.query("SELECT set_config('app.tenant_id', $1, true)", [
       tenantId ?? "",
     ]);
+    await client.query(`SAVEPOINT ${WORK_SAVEPOINT}`);
+    stage = "work";
     const result = await work(client);
-    await client.query(TRANSACTION_RESET);
+    await client.query(WORK_DONE);
+    stage = "cleanup";
+    await client.query(IN_TRANSACTION_CLEANUP);
     await client.query("COMMIT");
     return result;
   } catch (error) {
+    // Rolling back to the savepoint undoes the work but keeps its session advisory locks,
+    // sequence state and SQL prepared statements, so the backend is cleaned before the
+    // transaction ends. Before the savepoint only transaction-local settings exist.
+    if (stage === "cleanup") failed(error);
+    if (stage === "work") {
+      try {
+        await client.query(`ROLLBACK TO SAVEPOINT ${WORK_SAVEPOINT}`);
+        await client.query(IN_TRANSACTION_CLEANUP);
+      } catch (cleanupError) {
+        // A broken connection, or work ended the transaction (or released the savepoint)
+        // itself, so the backend may keep session state. Discarding the client ends a direct
+        // backend; behind a transaction pooler it closes only this client's socket, and the
+        // pooler decides what becomes of the backend: residual risk, reported as a failure.
+        failed(cleanupError);
+      }
+    }
     try {
       await client.query("ROLLBACK");
     } catch {
@@ -88,8 +125,8 @@ async function transaction<T>(
     }
     throw error;
   } finally {
-    // Work may set session-scoped state (set_config(..., false), SET, temp objects) that a
-    // commit keeps; the next borrower must start clean. A failed reset discards the client.
+    // Belt and braces: on a direct or session-mode connection this reaches the same backend.
+    // A failed reset discards the client.
     if (!discard) {
       try {
         await client.query(SESSION_RESET);
