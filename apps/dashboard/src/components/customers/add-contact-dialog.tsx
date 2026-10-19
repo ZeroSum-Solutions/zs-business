@@ -32,6 +32,8 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
     onSettled: (_result, error, attempt) => intents.settle(attempt.input, error),
     onSuccess: ({ contact, created }, attempt) => {
       void queryClient.invalidateQueries({ queryKey: keys.contactsAll });
+      // The API's answer is the current record: its page opens from it, not an older copy.
+      queryClient.setQueryData(keys.contact(contact.id), contact);
       const name = contact.displayName ?? contact.email ?? "customer";
       if (!generation.isCurrent(attempt.generation)) {
         // The dialog is closed: say the save went through. Reopened: stay out of the new draft.

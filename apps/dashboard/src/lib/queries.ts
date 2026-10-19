@@ -126,12 +126,17 @@ export function useContacts(search = "") {
   });
 }
 
-/** A customer already in a cached list or name lookup, so opening it shows at once. */
+/**
+ * A customer already in a cached list or name lookup, so opening it shows at once. A list a
+ * write has invalidated does not count: its row may be older than what the write returned.
+ */
 function cachedContact(queryClient: QueryClient, listKey: QueryKey, id: string): { contact: ContactRecord; updatedAt: number } | undefined {
-  for (const [key, data] of queryClient.getQueriesData<InfiniteData<Page<ContactRecord>> | ContactRecord[]>({ queryKey: listKey })) {
+  for (const query of queryClient.getQueryCache().findAll({ queryKey: listKey })) {
+    if (query.state.isInvalidated) continue;
+    const data = query.state.data as InfiniteData<Page<ContactRecord>> | ContactRecord[] | undefined;
     const rows = Array.isArray(data) ? data : data?.pages.flatMap((page) => page.items) ?? [];
     const contact = rows.find((row) => row.id === id);
-    if (contact) return { contact, updatedAt: queryClient.getQueryState(key)?.dataUpdatedAt ?? 0 };
+    if (contact) return { contact, updatedAt: query.state.dataUpdatedAt };
   }
   return undefined;
 }
