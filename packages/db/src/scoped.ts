@@ -83,9 +83,11 @@ export class DatabaseUnavailable extends Error {
 async function checkout(pool: Pool, maxWaiting: number, signal: AbortSignal | undefined): Promise<PoolClient> {
   if (signal?.aborted) throw new DatabaseUnavailable("aborted");
   // The bound applies only to a checkout that would queue: an idle connection, or room for a
-  // new one, is always taken, even with maxWaiting 0.
-  const wouldQueue = pool.idleCount === 0 && pool.totalCount >= (pool.options.max ?? 10);
-  if (wouldQueue && pool.waitingCount >= maxWaiting) throw new DatabaseUnavailable("busy");
+  // new one, is always taken, even with maxWaiting 0. pg-pool queues a checkout even when a
+  // connection is idle and hands it over on the next tick, so in a burst the idle count stays
+  // put while waitingCount grows; those waiting first take the idle connections and the room.
+  const available = pool.idleCount + Math.max(0, (pool.options.max ?? 10) - pool.totalCount);
+  if (pool.waitingCount - available >= maxWaiting) throw new DatabaseUnavailable("busy");
   const pending = pool.connect();
   if (!signal) return pending.catch((error: unknown) => { throw new DatabaseUnavailable("connect", { cause: error }); });
   return new Promise<PoolClient>((resolve, reject) => {
