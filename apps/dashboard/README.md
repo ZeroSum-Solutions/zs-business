@@ -47,10 +47,12 @@ loopback only). Its global setup (`e2e/live/global-setup.ts`):
 3. serves a fake Supabase Auth (`e2e/live/fake-gotrue.ts`) on a free loopback port. It
    answers the GoTrue endpoints the dashboard uses (`/otp`, `/verify`, `/token`, `/logout`,
    `/user`), signs access tokens with the run's secret and keeps sessions in the run's
-   `auth.sessions` stub (`e2e/live/pg-auth-store.ts`), so the API sees a sign-out at once.
+   `auth.sessions` stub (`e2e/live/pg-auth-store.ts`).
    It sends no email: it keeps the last link per address at `GET /__test/last-link`;
 4. starts `@zs/api` on port 8798 as `zs_runtime` with `JWT_ISSUER` set,
-   `JWT_MAX_TTL_SECONDS=3600` and `JWT_CLOCK_SKEW_SECONDS=60`, the production defaults;
+   `JWT_MAX_TTL_SECONDS=3600` and `JWT_CLOCK_SKEW_SECONDS=60`, the production defaults, and
+   `SESSION_CHECK=supabase` against the fake's `/user` with no cache, so the API sees a
+   sign-out on the next request, as hosted;
 5. builds the dashboard into `.next-live/` with `ZS_API_URL`, `SUPABASE_URL` (the fake) and
    a random `SUPABASE_ANON_KEY` (all server-only), with the sign-in limits raised for the
    run, and serves it on `127.0.0.1:3218`. It fails if the build output holds any token,
@@ -141,9 +143,15 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
     and writes the new cookies on that response. When Supabase refuses the session, or the
     API answers 401, the cookies are cleared and the browser shows the signed-out screen.
   - "Sign out" posts `/api/sign-out`, which revokes the session in Supabase
-    (`signOut({ scope: "local" })`: this session only) and clears the cookies. The API
-    checks `auth.sessions` on every request, so cookies copied before sign-out get 401 at
-    once. If Supabase cannot be reached the cookies are still cleared and the answer is 502.
+    (`signOut({ scope: "local" })`: this session only) and clears the cookies. The API asks
+    Supabase Auth whether the session is live, so cookies copied before sign-out get 401 within
+    its short cache window. If Supabase cannot be reached the answer is 502 and the cookies
+    stay, so Try again can still revoke the session.
+    The browser waits for that answer: the pages and cache go at once, but the signed-out
+    screen shows only after a 2xx. A 502 or a network error shows "Sign-out did not
+    finish. Try again." with a Try again button that posts again (`src/lib/session.tsx`,
+    `src/components/shell/session-gate.tsx`). A 401 from the API ends the session at once
+    and posts nothing.
   - The retired pilot cookie `zs_dashboard_session` opens nothing: any request carrying it
     gets 401 (unless it also has a live session) and the cookie is expired.
   `build` runs `scripts/bundle-secrets.ts`, which fails if `.next/static` or a prerendered
@@ -177,7 +185,8 @@ Session: `GET /api/session` returns `{ tenantId, userId, role }` from the API's 
 for the signed-in person (401 `signed_out` with no session, `expired` when it ended or the
 browser sent the old pilot cookie; 403 `no_access` when the person is not a member). Every query key starts with that `tenantId`, and queries wait for it
 (`useKeys()` in `src/lib/queries.ts`, `src/lib/session.tsx`). Any 401 or "Sign out"
-clears the query cache and shows the signed-out screen. API reads use `cache: "no-store"`.
+clears the query cache and shows the signed-out screen (in live mode, "Sign out" only once
+`/api/sign-out` answers 2xx; until then a "Signing out" screen says so and offers Try again). API reads use `cache: "no-store"`.
 
 Writes: the client never makes up an `Idempotency-Key`; every write method requires one
 and throws without it. Every write path (booking, contact, deal move) gets it from

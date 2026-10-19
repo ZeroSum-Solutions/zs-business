@@ -15,6 +15,8 @@
  *
  * POST /api/sign-out revokes the session in Supabase (signOut, scope "local": this device
  * only) and clears the cookies. The API refuses the revoked session's access token at once.
+ * When Supabase cannot be told, it answers 502 and keeps the cookies, so the browser's
+ * Try again can still revoke the session instead of being told it ended when it did not.
  */
 import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import { z } from "zod";
@@ -116,7 +118,7 @@ export async function confirmSignIn(request: Request, setup: LiveSetup | null): 
   return auth.finish(redirect(next));
 }
 
-/** Always clears the cookies; answers 502 when Supabase could not be told to end the session. */
+/** Clears the cookies once the session is revoked (or already gone); 502, cookies kept, when Supabase could not be told. */
 export async function signOut(request: Request, setup: LiveSetup | null): Promise<Response> {
   const trustProxy = setup?.ok ? setup.config.trustProxy : trustProxyFromEnv();
   if (request.method !== "POST") return jsonAnswer(405, { error: "method_not_allowed" }, { Allow: "POST" });
@@ -130,11 +132,14 @@ export async function signOut(request: Request, setup: LiveSetup | null): Promis
   const lookup = await lookupSession(auth);
   let revoked = lookup.status === "signed_out";
   if (lookup.status === "signed_in") {
+    // supabase-js drops its session even when the logout call fails; keep the (possibly just
+    // refreshed) cookies then, so a retry still holds a token to revoke.
+    const rollback = auth.checkpoint();
     const { error } = await auth.client.auth.signOut({ scope: "local" });
     revoked = !error;
+    if (!revoked) rollback();
   }
+  if (!revoked) return auth.finish(jsonAnswer(502, { error: "unavailable" }));
   auth.clearAll();
-  return auth.finish(revoked
-    ? new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } })
-    : jsonAnswer(502, { error: "unavailable" }));
+  return auth.finish(new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } }));
 }

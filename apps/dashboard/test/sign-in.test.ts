@@ -166,7 +166,7 @@ describe("sign-out", () => {
     expect((await contacts(laptop)).status).toBe(200);
   });
 
-  it("clears the cookies even when Supabase cannot be reached, and says so", async () => {
+  it("keeps the cookies when Supabase cannot be reached and says so, so a retry can still revoke the session", async () => {
     const harness = createLiveHarness();
     const jar = await signInThroughLink(harness);
     const fetchOk = harness.config.fetch!;
@@ -174,10 +174,21 @@ describe("sign-out", () => {
       if (String(input instanceof Request ? input.url : input).includes("/logout")) throw new TypeError("fetch failed");
       return fetchOk(input, init);
     };
-    const response = await signOut(signOutRequest(jar.header()), harness.setup);
-    expect(response.status).toBe(502);
-    expect(new Jar().apply(response).values.size).toBe(0);
-    expect([...setCookies(response).values()].every((cookie) => cookie.value === null)).toBe(true);
+    const failed = await signOut(signOutRequest(jar.header()), harness.setup);
+    expect(failed.status).toBe(502);
+    // Every session cookie the browser held is still there.
+    const held = [...jar.values.keys()].sort();
+    jar.apply(failed);
+    expect(held.length).toBeGreaterThan(0);
+    expect([...jar.values.keys()].sort()).toEqual(held);
+    expect(harness.store.sessions.size).toBe(1);
+
+    harness.config.fetch = fetchOk;
+    const retried = await signOut(signOutRequest(jar.header()), harness.setup);
+    expect(retried.status).toBe(204);
+    expect(harness.store.sessions.size).toBe(0);
+    jar.apply(retried);
+    expect(jar.values.size).toBe(0);
   });
 
   it("clears the retired pilot cookie, works without a session or settings, and refuses other sites", async () => {

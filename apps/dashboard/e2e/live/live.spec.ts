@@ -564,3 +564,74 @@ test("says the list is incomplete at the page cap, and cannot claim a customer i
   await expect(page.getByRole("main").getByRole("alert")).toContainText(`first ${(MAX_PAGES * 100).toLocaleString("en-US")} customers`);
   await expect(page.getByText("not found", { exact: false })).toHaveCount(0);
 });
+
+test("says sign-out did not finish and offers Try again until the server confirms it, and a 401 posts nothing", async ({ page }) => {
+  // Each POST /api/sign-out: first held then 502, then a network error, then the real server.
+  const posts: string[] = [];
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`${LIVE.webUrl}/api/sign-out`, async (route) => {
+    posts.push(route.request().method());
+    if (posts.length === 1) {
+      await held;
+      return route.fulfill({ status: 502, json: { error: "unavailable" } });
+    }
+    if (posts.length === 2) return route.abort("failed");
+    return route.continue();
+  });
+
+  // A 401 from the API ends the session on screen at once and never posts a sign-out.
+  const unauthorized = `${LIVE.webUrl}/api/v1/**`;
+  await page.route(unauthorized, (route) => route.fulfill({ status: 401, json: apiError("Unauthorized") }));
+  await page.goto("/customers");
+  await expect(page.getByRole("heading", { level: 1, name: "Your session ended" })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(posts).toEqual([]);
+  await page.unroute(unauthorized);
+  // The 401 was made up here, so the session is still live.
+  await page.reload();
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Account menu" }).filter({ visible: true }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  // While the request runs: the pages are gone, the screen says it is working on it, and
+  // nothing says the session ended.
+  await expect(page.getByRole("heading", { level: 1, name: "Signing out" })).toBeVisible();
+  await expect(page.getByRole("main").getByRole("status")).toHaveText("Ending your session…");
+  await expect(page.getByRole("button", { name: "Signing out…" })).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toHaveCount(0);
+  await expect(page.getByTestId("signed-out")).toHaveCount(0);
+  expect(posts).toEqual(["POST"]);
+  release();
+
+  // 502: Supabase could not be told.
+  const alert = page.getByRole("main").getByRole("alert");
+  await expect(alert).toHaveText("Sign-out did not finish. Try again.");
+  await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toHaveCount(0);
+  await expect(page.getByTestId("signed-out")).toHaveCount(0);
+  const serious = (await new AxeBuilder({ page }).analyze()).violations
+    .filter((violation) => violation.impact === "serious" || violation.impact === "critical").map((violation) => violation.id);
+  expect(serious).toEqual([]);
+
+  // A network error: the server may never have heard the request.
+  const tryAgain = page.getByRole("button", { name: "Try again" });
+  await tryAgain.click();
+  await expect.poll(() => posts.length).toBe(2);
+  await expect(alert).toHaveText("Sign-out did not finish. Try again.");
+  await expect(tryAgain).toBeFocused();
+  await expect(page.getByTestId("signed-out")).toHaveCount(0);
+  // Neither failure reached the server, so the session really is still live: the screen was
+  // right not to say it ended.
+  expect((await page.request.get("/api/session")).status()).toBe(200);
+
+  // The retry reaches the real server, which ends the session and answers 204.
+  const answered = page.waitForResponse((response) => response.url() === `${LIVE.webUrl}/api/sign-out`);
+  await tryAgain.click();
+  expect((await answered).status()).toBe(204);
+  await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
+  await expect(page.getByTestId("signing-out")).toHaveCount(0);
+  await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
+  expect(posts).toEqual(["POST", "POST", "POST"]);
+  await expect.poll(async () => (await page.context().cookies()).some((cookie) => cookie.name.startsWith("zs-auth"))).toBe(false);
+  expect((await page.request.get("/api/v1/crm/contacts")).status()).toBe(401);
+});

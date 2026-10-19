@@ -32,6 +32,8 @@ export interface AuthContext {
   readonly hadSession: boolean;
   /** Expire every auth cookie the browser sent, for example after the API refused the session. */
   clearAll(): void;
+  /** Remember the cookie changes so far; the returned function drops any made after it. */
+  checkpoint(): () => void;
   /** Put this request's cookie changes on the response. */
   finish(response: Response): Response;
 }
@@ -71,6 +73,15 @@ export function authFor(request: Request, config: LiveConfig): AuthContext {
     hadSession,
     clearAll() {
       for (const name of [...jar.keys()]) expire(name);
+    },
+    checkpoint() {
+      const [savedJar, savedWrites] = [new Map(jar), new Map(writes)];
+      return () => {
+        jar.clear();
+        writes.clear();
+        for (const [name, value] of savedJar) jar.set(name, value);
+        for (const [name, value] of savedWrites) writes.set(name, value);
+      };
     },
     finish(response) {
       for (const cookie of writes.values()) response.headers.append("Set-Cookie", cookie);
