@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { trimTrailingSlashes } from "@zs/core";
+import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 /** The only fields a plain postgres URL yields; anything else came from a query parameter. */
@@ -73,6 +74,8 @@ export const PLACEHOLDER_BOOKING_KEY_SECRET = "replace-with-a-booking-key-secret
 const bookingKeySecretSchema = z.string()
   .min(32, "booking key secrets must be at least 32 characters")
   .refine((value) => value !== PLACEHOLDER_BOOKING_KEY_SECRET, "booking key secret is still the .env.example placeholder");
+/** Headers that hosting platforms overwrite, so a caller cannot choose the value. */
+export const CLIENT_IP_HEADERS = ["x-vercel-forwarded-for", "x-real-ip", "cf-connecting-ip", "fly-client-ip"] as const;
 const rateLimit = z.coerce.number().int().min(1).max(1_000_000).optional();
 
 const envSchema = z.object({
@@ -91,8 +94,11 @@ const envSchema = z.object({
   PUBLIC_BOOKING_KEY_PREVIOUS_SECRET: bookingKeySecretSchema.optional(),
   // Origin of the hosted booking page and embed script; defaults to http://localhost:<PORT>.
   PUBLIC_BASE_URL: z.url({ protocol: /^https?$/ }).optional(),
-  // "1" only behind a proxy that sets X-Forwarded-For (P-10).
-  TRUST_PROXY: z.enum(["0", "1"]).default("0"),
+  // P-10: a header the host overwrites on every request (Vercel: x-vercel-forwarded-for or
+  // x-real-ip), set only when the API is reachable through that host alone.
+  PUBLIC_CLIENT_IP_HEADER: z.enum(CLIENT_IP_HEADERS).optional(),
+  // Or: comma-separated CIDRs of the proxies whose X-Forwarded-For entries count.
+  PUBLIC_TRUSTED_PROXIES: z.string().optional(),
   PUBLIC_RATE_ADDRESS_WRITES: rateLimit,
   PUBLIC_RATE_ADDRESS_READS: rateLimit,
   PUBLIC_RATE_TENANT_WRITES: rateLimit,
@@ -110,13 +116,16 @@ export interface ServerEnv {
 export interface PublicIntakeEnv {
   readonly keySecrets: { readonly current: string; readonly previous?: string };
   readonly publicBaseUrl: string;
-  readonly trustProxy: boolean;
+  readonly clientIp: ClientIpConfig;
   /** Per-window counts that override the P-10 defaults; windows stay fixed. */
   readonly limitOverrides: { readonly addressWrites?: number; readonly addressReads?: number; readonly tenantWrites?: number };
 }
 
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
 export function parseServerEnv(env: Readonly<Record<string, string | undefined>>): ServerEnv {
+  // A stale TRUST_PROXY=1 would otherwise be ignored silently and every caller share one bucket.
+  if (env.TRUST_PROXY !== undefined && env.TRUST_PROXY !== "0")
+    throw new Error("Invalid environment: TRUST_PROXY was replaced by PUBLIC_CLIENT_IP_HEADER or PUBLIC_TRUSTED_PROXIES");
   const parsed = envSchema.safeParse(env);
   if (!parsed.success)
     throw new Error(`Invalid environment: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
@@ -130,6 +139,19 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     port: parsed.data.PORT,
     publicIntake: parsePublicIntake(parsed.data),
   };
+}
+
+function parseClientIp(data: z.infer<typeof envSchema>): ClientIpConfig {
+  const proxies = (data.PUBLIC_TRUSTED_PROXIES ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (data.PUBLIC_CLIENT_IP_HEADER !== undefined && proxies.length > 0)
+    throw new Error("Invalid environment: set PUBLIC_CLIENT_IP_HEADER or PUBLIC_TRUSTED_PROXIES, not both");
+  try {
+    trustedProxyList(proxies);
+  } catch (error) {
+    throw new Error(`Invalid environment: PUBLIC_TRUSTED_PROXIES: ${(error as Error).message}`);
+  }
+  if (data.PUBLIC_CLIENT_IP_HEADER !== undefined) return { header: data.PUBLIC_CLIENT_IP_HEADER };
+  return proxies.length > 0 ? { trustedProxies: proxies } : {};
 }
 
 function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | null {
@@ -149,7 +171,7 @@ function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | n
       ...(data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET === undefined ? {} : { previous: data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET }),
     },
     publicBaseUrl: trimTrailingSlashes(data.PUBLIC_BASE_URL ?? `http://localhost:${data.PORT}`),
-    trustProxy: data.TRUST_PROXY === "1",
+    clientIp: parseClientIp(data),
     limitOverrides,
   };
 }

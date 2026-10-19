@@ -90,6 +90,8 @@ export interface Call {
   body?: unknown;
   key?: string;
   headers?: Record<string, string>;
+  /** The TCP peer the Node server would report; absent, the request has no socket. */
+  socket?: string;
 }
 export async function call(app: App, method: string, path: string, options: Call = {}) {
   const headers: Record<string, string> = { ...options.headers };
@@ -100,7 +102,7 @@ export async function call(app: App, method: string, path: string, options: Call
     method,
     headers,
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
+  }, options.socket === undefined ? undefined : { incoming: { socket: { remoteAddress: options.socket } } });
   const text = await response.text();
   return { status: response.status, headers: response.headers, body: text ? JSON.parse(text) : null };
 }

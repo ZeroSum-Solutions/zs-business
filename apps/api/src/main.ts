@@ -19,7 +19,7 @@ await assertRuntimeLogin(pool).catch(async (error: unknown) => {
 const publicIntake: PublicIntakeConfig | undefined = env.publicIntake === null ? undefined : {
   keySecrets: env.publicIntake.keySecrets,
   publicBaseUrl: env.publicIntake.publicBaseUrl,
-  trustProxy: env.publicIntake.trustProxy,
+  clientIp: env.publicIntake.clientIp,
   limits: Object.fromEntries(Object.entries(env.publicIntake.limitOverrides).map(([name, limit]) =>
     [name, { ...DEFAULT_RATE_LIMITS[name as keyof RateLimits], limit }])),
 };

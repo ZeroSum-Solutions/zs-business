@@ -9,6 +9,7 @@ import { apiErrorBody, createPublicSession, verifyBookingKey, type BookingKeySec
 import { jsonBody } from "../routes/request.js";
 import { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./limiter.js";
 import { bookerAssets } from "./assets.js";
+import { addressBucket, createClientAddress, type ClientIpConfig } from "./client-ip.js";
 
 /** P-10: an injected bot check; the default accepts every request. */
 export type BotCheck = (input: { token: string | null; address: string }) => Promise<boolean>;
@@ -18,8 +19,8 @@ export interface PublicIntakeConfig {
   readonly keySecrets: BookingKeySecrets;
   /** Origin the booking page and embed snippets point at, for example https://book.example.com. */
   readonly publicBaseUrl: string;
-  /** Trust the right-most X-Forwarded-For entry; only behind a proxy that sets it. */
-  readonly trustProxy?: boolean;
+  /** Where the caller's address comes from (P-10); by default the socket address. */
+  readonly clientIp?: ClientIpConfig;
   readonly limits?: Partial<RateLimits>;
   /** Defaults to an in-memory limiter on the app clock. */
   readonly limiter?: RateLimiter;
@@ -32,16 +33,6 @@ interface NodeBindings {
   incoming?: { socket?: { remoteAddress?: string } };
 }
 
-/** P-10: the socket address, or the right-most forwarded entry when a trusted proxy sets it. */
-export function clientAddress(c: Context, trustProxy: boolean): string {
-  if (trustProxy) {
-    const forwarded = (c.req.header("X-Forwarded-For") ?? "").split(",").map((part) => part.trim()).filter(Boolean);
-    const last = forwarded.at(-1);
-    if (last) return last;
-  }
-  return (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress ?? "unknown";
-}
-
 export class RateLimited extends Error {
   constructor(readonly retryAfterSeconds: number) {
     super("Too many requests");
@@ -52,15 +43,17 @@ export function publicRoutes(edge: EdgeDependencies, config: PublicIntakeConfig)
   const limits: RateLimits = { ...DEFAULT_RATE_LIMITS, ...config.limits };
   const limiter = config.limiter ?? createMemoryRateLimiter(edge.clock);
   const botCheck = config.botCheck ?? allowAllBots;
-  const trustProxy = config.trustProxy ?? false;
+  const clientAddress = createClientAddress(config.clientIp);
 
   /** Charge the address (and, for a valid key, the tenant) before any database work. */
   const admit = (c: Context, kind: "read" | "write") => {
-    const address = clientAddress(c, trustProxy);
+    const socket = (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress;
+    const address = clientAddress(socket, (name) => c.req.header(name));
     const ref = verifyBookingKey(config.keySecrets, c.req.param("key") ?? "");
+    const bucket = addressBucket(address);
     const charges = [kind === "write"
-      ? { key: `address-write:${address}`, rule: limits.addressWrites }
-      : { key: `address-read:${address}`, rule: limits.addressReads }];
+      ? { key: `address-write:${bucket}`, rule: limits.addressWrites }
+      : { key: `address-read:${bucket}`, rule: limits.addressReads }];
     if (ref && kind === "write") charges.push({ key: `tenant-write:${ref.tenantId}`, rule: limits.tenantWrites });
     const taken = limiter.take(charges);
     if (!taken.ok) throw new RateLimited(taken.retryAfterSeconds);

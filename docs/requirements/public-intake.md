@@ -1,8 +1,9 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 2 (2026-10-19: P-8 and P-13 keep
-the disclosure text on each intake consent row). Code follows this file; a change to a
-numbered rule needs a new revision of this file first.
+Status: frozen contract for M3a/M3b (2026-10-18), revision 2 (2026-10-19, review r1: P-8 and
+P-13 keep the disclosure text on each consent row and fix one text per version; P-9 checks
+the slot before identity work; P-10 names the client address source; P-14 retries).
+Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
 website book a published calendar of one business. The hosted booking page and the
@@ -107,13 +108,19 @@ Contact consent:
 - `possible_match`: nothing is written to the contact. On `intake.item.link` the intake
   consent fills only channels that have no recorded evidence (C-10 import semantics). A
   recorded denial or grant is never replaced.
+A disclosure version names one text: `booking_pages_disclosure_versioned` rejects a change to
+`disclosure_text` that keeps `disclosure_version`, so a visitor holding the old version gets
+`disclosure_changed`. Do not reuse an earlier version name for new words.
 Sending (M3d/M5) re-checks consent and adds confirmation for unverified addresses.
 
 **P-9. One transaction.** Contact (when new), intake item, intake consent, booking (with
 `source='website'` and the intake item ID), action row and one outbox event commit
-together or not at all. The booking obeys B-19..B-21: identity locks first, then the
-per-resource advisory lock, then the authoritative recheck, then the insert under
-`bookings_resource_occupied_excl`. Two conflicting public requests: one commits, the
+together or not at all. The booking obeys B-19..B-21: the per-resource advisory lock
+and the authoritative recheck come first, before anything that depends on who the visitor
+is, so a taken slot answers 409 after the same work for a known and an unknown person.
+Then the identity locks, the intake writes, and the insert under
+`bookings_resource_occupied_excl`. This is the only path that takes both lock kinds, so the
+order cannot deadlock. Two conflicting public requests: one commits, the
 other gets 409 `slot_unavailable` or `overlap` and leaves no row behind.
 
 **P-10. Abuse limits.** In the API process, before any database work:
@@ -121,8 +128,13 @@ other gets 409 `slot_unavailable` or `overlap` and leaves no row behind.
 - per tenant: 200 writes per hour across all its pages;
 - 429 `RateLimited` with `Retry-After`; a refused request consumes nothing else. The numbers
   are server configuration with these defaults.
-The client address is the socket address, or the right-most `X-Forwarded-For` entry
-only when `TRUST_PROXY=1`. Bodies over 8 KiB answer 413. A non-empty honeypot answers 400.
+The client address is the socket address, unless the deployment names another source:
+`PUBLIC_CLIENT_IP_HEADER`, a header the host overwrites (on Vercel `x-vercel-forwarded-for`
+or `x-real-ip`, only when the API is reachable through the host alone); or
+`PUBLIC_TRUSTED_PROXIES`, CIDRs whose `X-Forwarded-For` entries count, walked right to left
+past trusted hops, and only when the socket peer is one of them. Addresses are
+canonicalized (port, brackets and zone dropped; IPv4-mapped IPv6 as IPv4), and IPv6
+addresses share a bucket per /64. `TRUST_PROXY=1` is refused at startup. Bodies over 8 KiB answer 413. A non-empty honeypot answers 400.
 `BotCheck` is an injected hook `(input: { token, address }) => Promise<boolean>`; the
 default accepts every request, and a `false` answers 400. The limiter is in memory per
 process; a multi-instance deploy (M2b) needs a shared store behind the same interface.
@@ -152,7 +164,7 @@ embed snippets.
 | `booking_pages` | `tenant_id`, `id`, `title`, `description` NULL, `published`, `disclosure_version`, `disclosure_text`, `created_at`; PK `(tenant_id,id)` |
 | `booking_page_resources` | `tenant_id`, `page_id`, `resource_id`, `position`; PK `(tenant_id,page_id,resource_id)`; FKs to pages and resources with the tenant |
 | `intake_items` | `tenant_id`, `id`, `kind`, `status`, `channel`, `page_id`, `submitted_name`, `submitted_email`, `submitted_phone` NULL, `notes` NULL, `matched_contact_ids`, `contact_id` NULL, `reviewed_at` NULL, `reviewed_by` NULL, `created_at`; status/contact consistency checks |
-| `intake_item_consent` | `tenant_id`, `intake_item_id`, `channel`, `status`, `purpose`, `disclosure_version`, `disclosure_text` (added by `*_intake_consent_disclosure_text.sql`), `source`, `recorded_at`; PK `(tenant_id,intake_item_id,channel)` |
+| `intake_item_consent` | `tenant_id`, `intake_item_id`, `channel`, `status`, `purpose`, `disclosure_version`, `disclosure_text`, `source`, `recorded_at`; PK `(tenant_id,intake_item_id,channel)` |
 | `bookings` (added) | `source` (`owner` default, or `website`), `intake_item_id` NULL; `source='website'` exactly when the intake item is set |
 
 Every table has `tenant_id`, a tenant FK, forced RLS with the shared `tenant_scope`

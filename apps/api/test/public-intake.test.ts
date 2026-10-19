@@ -26,7 +26,7 @@ beforeAll(async () => {
   // Generous limits here; the abuse-limit suite below runs its own harness.
   h = await createApiHarness({
     publicIntake: {
-      trustProxy: true,
+      clientIp: { header: "x-real-ip" },
       keySecrets: { current: KEY_SECRET, previous: PREVIOUS_KEY_SECRET },
       limits: {
         addressWrites: { limit: 1000, windowMs: 600_000 },
@@ -72,7 +72,7 @@ const visitor = (resourceId: string, over: Record<string, unknown> = {}) => ({
 });
 
 const book = (key: string, body: unknown, idempotencyKey: string = randomUUID(), from = nextAddress()) =>
-  call(h.app, "POST", `/public/v1/pages/${key}/requests`, { body, key: idempotencyKey, headers: { "X-Forwarded-For": from } });
+  call(h.app, "POST", `/public/v1/pages/${key}/requests`, { body, key: idempotencyKey, headers: { "X-Real-IP": from } });
 
 const count = (sql: string, params: unknown[]) =>
   h.fixture.service(async (tx) => Number((await tx.query<{ n: string }>(sql, params)).rows[0]!.n));
@@ -240,9 +240,9 @@ describe("same reply for new and known people (P-6, P-7)", () => {
     expect(row.consent).toBe(`email:granted:intake:${response.body.requestId}`);
   });
 
-  it("records what the visitor agreed to, when and on which form, even after the page text changes", async () => {
+  it("records what the visitor agreed to, when and on which form, and keeps one text per version", async () => {
     const page = await freshPage(h.a);
-    const shown = (await call(h.app, "GET", `/public/v1/pages/${page.key}`, { headers: { "X-Forwarded-For": nextAddress() } }))
+    const shown = (await call(h.app, "GET", `/public/v1/pages/${page.key}`, { headers: { "X-Real-IP": nextAddress() } }))
       .body.disclosure as { version: string; text: string };
     const response = await book(page.key, visitor(page.resourceId, { consent: { email: true, sms: false }, channel: "booking_page" }));
     expect(response.status).toBe(201);
@@ -257,9 +257,16 @@ describe("same reply for new and known people (P-6, P-7)", () => {
     }];
     // The unticked SMS box records nothing: no evidence, not a denial.
     expect(await provenance()).toEqual(recorded);
-    await h.fixture.service((tx) => tx.query(
-      "UPDATE booking_pages SET disclosure_text='Different words' WHERE tenant_id=$1 AND id=$2", [h.a.tenantId, page.pageId]));
+    // New words under the same version would rewrite what earlier visitors agreed to.
+    const edit = (version: string) => h.fixture.service((tx) => tx.query(
+      "UPDATE booking_pages SET disclosure_text='Different words', disclosure_version=$3 WHERE tenant_id=$1 AND id=$2",
+      [h.a.tenantId, page.pageId, version]));
+    await expect(edit(shown.version)).rejects.toThrow(/needs a new disclosure version/);
+    await edit("v2");
     expect(await provenance()).toEqual(recorded);
+    // A visitor still holding the old version is asked to read the new words.
+    const stale = await book(page.key, visitor(page.resourceId, { startsAt: at(10), consent: { email: true, sms: false } }));
+    expect(stale).toMatchObject({ status: 409, body: { error: { details: { reason: "disclosure_changed" } } } });
   });
 });
 
@@ -340,6 +347,40 @@ describe("one transaction (P-9)", () => {
       actions: before.actions + 1,
       outbox: before.outbox + 1,
     });
+  });
+
+  it("refuses a taken slot before any work that depends on who the visitor is", async () => {
+    const page = await freshPage(h.a);
+    const tag = randomUUID().slice(0, 8);
+    await ownerContact(h.a, { displayName: "Known", email: `taken.${tag}@haldenrowe.example`, phone: "+447700900401" });
+    expect((await book(page.key, visitor(page.resourceId, { startsAt: at(14) }))).status).toBe(201);
+    // Any contact or intake write for this tenant now fails loudly: a 409 proves none was attempted.
+    const fail = `zs_fail_${randomUUID().replaceAll("-", "")}`;
+    await h.database.pool.query(`
+      CREATE FUNCTION ${fail}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.tenant_id = '${h.a.tenantId}' THEN RAISE EXCEPTION 'identity work before the slot check'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER ${fail} BEFORE INSERT ON crm_contacts FOR EACH ROW EXECUTE FUNCTION ${fail}();
+      CREATE TRIGGER ${fail} BEFORE INSERT ON intake_items FOR EACH ROW EXECUTE FUNCTION ${fail}();
+      CREATE TRIGGER ${fail} BEFORE INSERT ON intake_item_consent FOR EACH ROW EXECUTE FUNCTION ${fail}();`);
+    try {
+      const before = await tenantCounts(h.a.tenantId);
+      const replies = [];
+      for (const identity of [
+        { email: `unknown.${tag}@haldenrowe.example`, phone: "+447700900402" },
+        { email: `taken.${tag}@haldenrowe.example`, phone: "+447700900401" },
+      ]) {
+        const response = await book(page.key, visitor(page.resourceId, { ...identity, startsAt: at(14), consent: { email: true, sms: true } }));
+        expect(response.status, JSON.stringify(response.body)).toBe(409);
+        replies.push({ body: response.body, headers: [...response.headers.entries()].filter(([name]) => name !== "date") });
+      }
+      expect(replies[0]).toEqual(replies[1]);
+      expect(replies[0]!.body.error.details.reason).toBe("slot_unavailable");
+      expect(await tenantCounts(h.a.tenantId)).toEqual(before);
+    } finally {
+      await h.database.pool.query(`
+        DROP TRIGGER ${fail} ON crm_contacts; DROP TRIGGER ${fail} ON intake_items;
+        DROP TRIGGER ${fail} ON intake_item_consent; DROP FUNCTION ${fail}();`);
+    }
   });
 
   it("rolls everything back when a late step fails", async () => {
@@ -514,7 +555,7 @@ describe("abuse limits (P-10)", () => {
     limited = await createApiHarness({
       clock: { now: () => new Date(now) },
       publicIntake: {
-        trustProxy: true,
+        clientIp: { trustedProxies: ["10.0.0.0/8"] },
         limits: {
           addressWrites: { limit: 2, windowMs: 600_000 },
           addressReads: { limit: 3, windowMs: 600_000 },
@@ -526,8 +567,9 @@ describe("abuse limits (P-10)", () => {
   });
   afterAll(async () => limited.close());
 
-  const post = (key: string, body: unknown, from: string) => call(limited.app, "POST", `/public/v1/pages/${key}/requests`,
-    { body, key: randomUUID(), headers: { "X-Forwarded-For": `198.51.100.250, ${from}` } });
+  // Through the trusted proxy 10.0.0.1, which appends the address it saw.
+  const post = (key: string, body: unknown, from: string, forwarded = `198.51.100.250, ${from}`, socket = "10.0.0.1") =>
+    call(limited.app, "POST", `/public/v1/pages/${key}/requests`, { body, key: randomUUID(), headers: { "X-Forwarded-For": forwarded }, socket });
   const body = (resourceId: string, hour: number, over: Record<string, unknown> = {}) => ({
     resourceId, startsAt: at(hour), name: "Limit Test", email: `limit.${randomUUID().slice(0, 8)}@haldenrowe.example`,
     phone: null, notes: null, consent: { email: false, sms: false }, disclosureVersion: "v1", channel: "booking_page", website: "", ...over,
@@ -556,12 +598,37 @@ describe("abuse limits (P-10)", () => {
     expect((await post(page.key, body(resourceId, 13), "192.0.2.1")).status).toBe(201);
   });
 
-  it("limits reads per address and uses the right-most forwarded entry", async () => {
+  it("limits reads per address, walking forwarded entries past trusted proxies only", async () => {
     const page = await provisionPage(limited, limited.a);
-    const read = (from: string) => call(limited.app, "GET", `/public/v1/pages/${page.key}`, { headers: { "X-Forwarded-For": `10.0.0.1, ${from}` } });
-    for (let i = 0; i < 3; i++) expect((await read("192.0.2.50")).status).toBe(200);
-    expect((await read("192.0.2.50")).status).toBe(429);
-    expect((await read("192.0.2.51")).status).toBe(200);
+    // Client, then two trusted hops: 10.0.0.2 forwarded to 10.0.0.1, which is the socket peer.
+    const read = (forwarded: string) => call(limited.app, "GET", `/public/v1/pages/${page.key}`,
+      { headers: { "X-Forwarded-For": forwarded }, socket: "10.0.0.1" });
+    for (let i = 0; i < 3; i++) expect((await read(`203.0.113.${i}, 192.0.2.50, 10.0.0.2`)).status).toBe(200);
+    // A different spoofed left-most entry is still the same caller.
+    expect((await read("203.0.113.99, 192.0.2.50, 10.0.0.2")).status).toBe(429);
+    expect((await read("192.0.2.51, 10.0.0.2")).status).toBe(200);
+    // IPv4-mapped IPv6 and a port are the same address.
+    expect((await read("[::ffff:192.0.2.51]:443")).status).toBe(200);
+    expect((await read("192.0.2.51:8080")).status).toBe(200);
+    expect((await read("192.0.2.51")).status).toBe(429);
+  });
+
+  it("ignores X-Forwarded-For from a peer that is not a trusted proxy", async () => {
+    const page = await provisionPage(limited, limited.b);
+    const direct = (forwarded: string) => post(page.key, body(limited.b.resourceId, 10, { email: `direct.${randomUUID().slice(0, 8)}@haldenrowe.example` }),
+      "", forwarded, "203.0.113.77");
+    expect((await direct("192.0.2.70")).status).not.toBe(429);
+    // Changing only the header does not buy a fresh quota: the socket address is the caller.
+    expect((await direct("192.0.2.71")).status).not.toBe(429);
+    expect((await direct("192.0.2.72")).status).toBe(429);
+  });
+
+  it("puts every address of one IPv6 /64 in one bucket", async () => {
+    const page = await provisionPage(limited, limited.b);
+    const read = (socket: string) => call(limited.app, "GET", `/public/v1/pages/${page.key}`, { socket });
+    for (let i = 1; i <= 3; i++) expect((await read(`2001:db8:1:2::${i}`)).status).toBe(200);
+    expect((await read("2001:db8:1:2:ffff:ffff:ffff:ffff")).status).toBe(429);
+    expect((await read("2001:db8:1:3::1")).status).toBe(200);
   });
 
   it("refuses a request the bot check rejects", async () => {
