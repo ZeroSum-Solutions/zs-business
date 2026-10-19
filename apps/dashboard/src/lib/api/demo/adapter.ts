@@ -14,11 +14,23 @@ import {
   type BookingRecord,
   type ContactRecord,
   type DealRecord,
+  type PipelineSummary,
 } from "@zs/contracts";
 import { addDays, localIso, weekdayOf, zonedDateKey, zonedTimeToUtc } from "../../time";
 import { newId as defaultNewId } from "../../id";
 import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError } from "../errors";
-import { byContactName, completeList, matchesSearch, toUpsertContactRequest, type BookingApi, type BookingView, type ContactWriteResult, type CrmApi, type WriteOptions } from "../types";
+import {
+  byContactName,
+  completeList,
+  CONTACT_PAGE_SIZE,
+  matchesSearch,
+  toUpsertContactRequest,
+  type BookingApi,
+  type BookingView,
+  type ContactWriteResult,
+  type CrmApi,
+  type WriteOptions,
+} from "../types";
 import { buildSeed, DEMO_PIPELINE, DEMO_RESOURCES, DEMO_TENANT_ID, type DemoResource } from "./seed";
 
 export interface DemoClock {
@@ -30,6 +42,8 @@ export interface DemoAdapterOptions {
   newId?: () => string;
   /** Artificial delay per call so loading states are visible. Tests pass 0. */
   latencyMs?: number;
+  /** The business's pipelines; the seed's one by default. */
+  pipelines?: PipelineSummary[];
 }
 
 /** Hooks that act as a second person using the business, to show conflicts. */
@@ -51,6 +65,8 @@ export interface DemoControls {
   delayNextWrite(ms: number): void;
   /** While on, every read of the deal list fails with a network error; writes still work. */
   failDealReads(failing: boolean): void;
+  /** Replaces the business's pipelines, such as none, one without stages, or several. */
+  setPipelines(pipelines: PipelineSummary[]): void;
 }
 
 export interface DemoWrite {
@@ -78,6 +94,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   let expired = false;
   let delayNext = 0;
   let dealReadsFail = false;
+  let pipelines = clone(options.pipelines ?? [DEMO_PIPELINE]);
 
   const networkError = () => new ApiError("network", defaultMessage("network"));
   const wait = async () => {
@@ -233,7 +250,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
         .filter((item) => (!query.resourceId || item.resourceId === query.resourceId) &&
           Date.parse(item.endsAt) > fromMs && Date.parse(item.startsAt) < toMs)
         .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
-      return completeList(clone(rows));
+      return completeList(clone(query.limit === undefined ? rows : rows.slice(0, query.limit)));
     },
 
     createBooking(input, options) {
@@ -252,13 +269,18 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
     async listPipelines() {
       await wait();
-      return [clone(DEMO_PIPELINE)];
+      return clone(pipelines);
     },
 
     async listContacts(query = {}) {
       await wait();
-      const rows = [...contacts.values()].filter((item) => matchesSearch(item, query.search)).sort(byContactName);
-      return completeList(clone(rows));
+      const ids = query.ids ? new Set(query.ids) : null;
+      const rows = [...contacts.values()]
+        .filter((item) => matchesSearch(item, query.search) && (!ids || ids.has(item.id)))
+        .sort(byContactName);
+      const offset = query.offset ?? 0;
+      const limit = query.limit ?? CONTACT_PAGE_SIZE;
+      return { items: clone(rows.slice(offset, offset + limit)), nextOffset: offset + limit < rows.length ? offset + limit : null };
     },
 
     async getContact(id) {
@@ -299,7 +321,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       await wait();
       if (dealReadsFail) throw networkError();
       const rows = [...deals.values()]
-        .filter((item) => !query.contactId || item.contactId === query.contactId)
+        .filter((item) => (!query.contactId || item.contactId === query.contactId) && (!query.pipelineId || item.pipelineId === query.pipelineId))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       return completeList(clone(rows));
     },
@@ -309,8 +331,9 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
         const { dealId, ...body } = input;
         const move = parse(moveDealStageRequestSchema, body);
         const deal = deals.get(dealId);
-        // One pipeline: an unknown deal, pipeline or stage is the API's 403, never a 404.
-        if (!deal || move.pipelineId !== DEMO_PIPELINE.id || !DEMO_PIPELINE.stages.some((stage) => stage.id === move.stageId)) {
+        // An unknown deal, pipeline or stage is the API's 403, never a 404.
+        const pipeline = pipelines.find((item) => item.id === move.pipelineId);
+        if (!deal || deal.pipelineId !== move.pipelineId || !pipeline?.stages.some((stage) => stage.id === move.stageId)) {
           throw demoError("Forbidden");
         }
         if (move.expectedRevision !== deal.revision) {
@@ -356,6 +379,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
 
     failDealReads(failing) {
       dealReadsFail = failing;
+    },
+
+    setPipelines(next) {
+      pipelines = clone(next);
     },
   };
 }

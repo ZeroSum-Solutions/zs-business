@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import AxeBuilder from "@axe-core/playwright";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { CALENDAR_UNAVAILABLE, defaultMessage, demoErrorBody } from "../../src/lib/api/errors";
-import { MAX_PAGES } from "../../src/lib/api/http-client";
 import { expectDialogInset, mainNav, openBookingOnFirstOpenDay, shot, viewportShot } from "../helpers";
 import { LIVE } from "./env";
 import { accessCode, expect, signInRequest, test } from "./fixtures";
@@ -490,25 +489,37 @@ test("shows a signed-out screen, not Try again, when the API answers 401", async
   await expect(page.getByRole("link", { name: /Maren Ashby/ })).toHaveCount(0);
 });
 
-test("says the list is incomplete at the page cap, and cannot claim a customer is missing", async ({ page }) => {
+test("pages a long customer list, searches all of it, and opens a customer it has not loaded", async ({ page }) => {
   const tenantId = "7a1c2b3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
   const fake = (index: number) => ({
     id: `5e0c1a2b-7d3f-4c8a-9b1e-${String(index).padStart(12, "0")}`, tenantId,
     displayName: `Customer ${String(index).padStart(4, "0")}`, email: null, phone: "+16465550100",
     consent: { email: null, sms: null }, createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
   });
-  // Every page says there is more, so the dashboard stops at its cap.
+  // 2,500 customers, more than the old 2,000-row cap; the API pages and searches them.
+  const searches: string[] = [];
   await page.route(`${LIVE.webUrl}/api/v1/crm/contacts?*`, (route) => {
     const url = new URL(route.request().url());
+    const search = url.searchParams.get("search") ?? "";
+    searches.push(search);
     const offset = Number(url.searchParams.get("offset") ?? 0);
-    const limit = Number(url.searchParams.get("limit") ?? 100);
-    const items = Array.from({ length: limit }, (_, index) => fake(offset + index + 1));
-    return route.fulfill({ json: { items, limit, offset, nextOffset: offset + limit } });
+    const limit = Number(url.searchParams.get("limit") ?? 50);
+    const all = Array.from({ length: 2_500 }, (_, index) => fake(index + 1)).filter((item) => item.displayName.includes(search));
+    return route.fulfill({ json: { items: all.slice(offset, offset + limit), limit, offset, nextOffset: offset + limit < all.length ? offset + limit : null } });
   });
   await page.goto("/customers");
-  await expect(page.getByTestId("list-incomplete")).toHaveText(`List incomplete — showing first ${(MAX_PAGES * 100).toLocaleString("en-US")}.`);
+  const rows = page.getByRole("main").getByRole("listitem");
+  await expect(rows).toHaveCount(50);
+  await page.getByRole("button", { name: "Show more customers" }).click();
+  await expect(rows).toHaveCount(100);
 
+  await page.getByLabel("Search customers").pressSequentially("2499", { delay: 40 });
+  await expect(page.getByRole("link", { name: /Customer 2499/ })).toBeVisible();
+  await expect(rows).toHaveCount(1);
+  // Typing waits for a pause: one search request, not one per key.
+  expect(searches.filter((search) => search !== "")).toEqual(["2499"]);
+
+  // The single-contact route answers for itself; an unknown customer is "not found".
   await page.goto(`/customers/${randomUUID()}`);
-  await expect(page.getByRole("main").getByRole("alert")).toContainText(`first ${(MAX_PAGES * 100).toLocaleString("en-US")} customers`);
-  await expect(page.getByText("not found", { exact: false })).toHaveCount(0);
+  await expect(page.getByRole("main").getByRole("alert")).toContainText("We could not find that customer.");
 });

@@ -9,9 +9,7 @@ export type ApiErrorKind =
   | "rate_limited"
   | "server"
   | "network"
-  | "invalid_response"
-  /** A lookup ran past the list cap, so "not found" cannot be claimed. */
-  | "incomplete";
+  | "invalid_response";
 
 /** The one error type every API implementation (HTTP or demo) throws. `message` is safe to show. */
 export class ApiError extends Error {
@@ -75,7 +73,6 @@ const DEFAULT_MESSAGES: Record<ApiErrorKind, string> = {
   server: "Something went wrong on our side. Try again.",
   network: "You look offline. Check your connection and try again.",
   invalid_response: "We got an answer we did not expect. Try again.",
-  incomplete: "That is past the part of the list we can read, so we could not check it.",
 };
 
 export function defaultMessage(kind: ApiErrorKind): string {
@@ -181,18 +178,7 @@ export function demoValidationError(issues: readonly { path: readonly PropertyKe
   });
 }
 
-/** There is no single-contact route, so both clients raise this after a list lookup. */
+/** Both clients raise this for an unknown customer, or one the signed-in business cannot see. */
 export function contactNotFound(): ApiError {
   return new ApiError("not_found", "We could not find that customer.", 404, "NotFound");
-}
-
-/** The contact list stopped at the page cap without a match: the customer may still exist. */
-export function contactBeyondList(loaded: number): ApiError {
-  return new ApiError(
-    "incomplete",
-    `We could not open this customer. The dashboard reads the first ${loaded.toLocaleString("en-US")} customers, and they are not among them.`,
-    null,
-    "ListIncomplete",
-    { loaded },
-  );
 }

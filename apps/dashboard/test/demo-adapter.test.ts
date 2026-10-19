@@ -107,7 +107,7 @@ describe("demo adapter: CRM", () => {
     expect(result.contact.phone).toBe("+16465550177");
     const found = await api.listContacts({ search: "benzaq" });
     expect(found.items.map((item) => item.id)).toEqual([result.contact.id]);
-    expect(found.incomplete).toBe(false);
+    expect(found.nextOffset).toBeNull();
   });
 
   it("rejects a contact with no email or phone", async () => {
