@@ -1,11 +1,12 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 4 (2026-10-19). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 5 (2026-10-19). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
 Revision 4 (review r4): P-14 puts public requests under the request deadline and answers a
-busy idempotency key with a retryable 503.
+busy idempotency key with a retryable 503. Revision 5 (review r5): P-10 keeps public intake
+off in hosted deploys until a shared limiter exists.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -135,6 +136,9 @@ other gets 409 `slot_unavailable` or `overlap` and leaves no row behind.
 - per tenant: 200 writes per hour across all its pages;
 - 429 `RateLimited` with `Retry-After`; a refused request consumes nothing else. The numbers
   are server configuration with these defaults.
+The counters live in each API process, so on Vercel every function instance counts on its
+own. Hosted: keep public intake disabled (no `PUBLIC_BOOKING_KEY_SECRET`) until a shared,
+atomic limiter is configured behind the same interface.
 The client address is the socket address, unless the deployment names another source:
 `PUBLIC_CLIENT_IP_HEADER`, a header the host overwrites (on Vercel `x-vercel-forwarded-for`
 or `x-real-ip`, only when the API is reachable through the host alone); or

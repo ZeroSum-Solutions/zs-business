@@ -228,6 +228,8 @@ against the pinned Supabase Root 2021 CA.
    `DATABASE_POOL_MAX=3`, `JWT_SECRET`, `JWT_ISSUER`, `JWT_MAX_TTL_SECONDS=2592000`, and for
    public booking `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BASE_URL` and
    `PUBLIC_CLIENT_IP_HEADER=x-vercel-forwarded-for`. The bundle carries `static/` for the booking page.
+   Hosted: keep public intake disabled (leave `PUBLIC_BOOKING_KEY_SECRET` unset) until a shared
+   limiter is configured; the public rate limits are counted per function instance.
    Dashboard env per target: `ZS_API_URL`, `ZS_API_TOKEN`, `DASHBOARD_ACCESS_CODE`,
    `DASHBOARD_SESSION_SECRET`, `DASHBOARD_TRUST_PROXY=1`. Both set
    `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel uses the pinned pnpm.
