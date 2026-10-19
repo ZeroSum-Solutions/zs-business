@@ -179,6 +179,11 @@ framing by any site (`frame-ancestors *`) because embedding is the point. The wi
 script tag that turns each `[data-zs-booking]` element into an iframe of the hosted page
 and resizes it from validated `postMessage` events; a plain iframe snippet works too.
 The widget passes no personal data to the host page.
+The booker freezes each attempt's Idempotency-Key and exact body on the first submit and
+keeps them until a definitive reply (a 2xx with a body, or a 4xx). After a network error, a
+5xx or a non-JSON reply it shows the details as sent and offers only "Try again" with the
+same key and body, and slot refreshes wait, so a committed request replays instead of
+looking taken.
 
 **P-15. Tests.** Real Postgres under `zs_runtime`: forged keys, forged and foreign
 resource IDs, an unknown body `tenantId`, enumeration (identical replies for unknown,

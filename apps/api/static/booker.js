@@ -23,7 +23,9 @@
     notice: "",
     errors: {},
     form: { name: "", email: "", phone: "", notes: "", consentEmail: false, consentSms: false, website: "" },
-    attemptKey: null,
+    // The request in flight or unconfirmed: { key, json, fields, slot, uncertain }. Key and body
+    // are frozen together, so every resend is byte for byte the request the server may have saved.
+    attempt: null,
     submitting: false,
     result: null,
   };
@@ -166,15 +168,44 @@
       value: state.form[name],
       "aria-invalid": state.errors[name] ? "true" : null,
       "aria-describedby": state.errors[name] ? `booker-${name}-error` : null,
-      oninput: (event) => { state.form[name] = event.target.value; state.attemptKey = null; },
+      oninput: (event) => { state.form[name] = event.target.value; },
       ...attrs,
       multiline: null,
     });
   }
 
+  function slotSummary(slot) {
+    return h("div", { class: "booker-summary" },
+      h("strong", {}, longDay.format(new Date(slot.startsAt))),
+      h("div", {}, `${timeLabel.format(new Date(slot.startsAt))} – ${timeLabel.format(new Date(slot.endsAt))}`));
+  }
+
+  /** No answer we can trust: show what was sent and offer only the same request again. */
+  function unconfirmedView() {
+    const { fields, slot } = state.attempt;
+    const updates = [fields.consent.email ? "email" : null, fields.consent.sms ? "text" : null].filter(Boolean);
+    return [
+      h("h2", { tabindex: "-1", "data-focus": true }, "We could not confirm your booking"),
+      slotSummary(slot),
+      h("p", { class: "booker-error", role: "alert" },
+        `${state.notice} Your booking may already have gone through. Trying again will not book you twice.`),
+      h("div", { class: "booker-summary" },
+        h("strong", {}, "Details as submitted"),
+        h("div", {}, `Name: ${fields.name}`),
+        h("div", {}, `Email: ${fields.email}`),
+        fields.phone ? h("div", {}, `Phone: ${fields.phone}`) : null,
+        fields.notes ? h("div", {}, `Notes: ${fields.notes}`) : null,
+        h("div", {}, `Updates: ${updates.length ? updates.join(" and ") : "none"}`)),
+      h("button", { type: "button", class: "booker-primary", disabled: state.submitting, onclick: send },
+        state.submitting ? "Checking…" : "Try again"),
+    ];
+  }
+
   function detailsView() {
     const slot = state.slot;
     const page = state.page;
+    // An unconfirmed attempt may hold this very slot, so it is never shown as lost.
+    if (state.attempt && state.attempt.uncertain) return unconfirmedView();
     if (!stillAvailable()) {
       return [
         h("h2", { tabindex: "-1", "data-focus": true }, "That time is no longer available"),
@@ -185,13 +216,11 @@
     const checkbox = (name, label) => h("label", { class: "booker-check" },
       h("input", {
         type: "checkbox", name, checked: state.form[name],
-        onchange: (event) => { state.form[name] = event.target.checked; state.attemptKey = null; },
+        onchange: (event) => { state.form[name] = event.target.checked; },
       }), label);
     return [
       h("h2", { tabindex: "-1", "data-focus": true }, "Your details"),
-      h("div", { class: "booker-summary" },
-        h("strong", {}, longDay.format(new Date(slot.startsAt))),
-        h("div", {}, `${timeLabel.format(new Date(slot.startsAt))} – ${timeLabel.format(new Date(slot.endsAt))}`)),
+      slotSummary(slot),
       noticeLine(),
       h("form", { novalidate: true, onsubmit: submit },
         field("name", "Name", input("name", { autocomplete: "name", required: true, maxlength: "200" })),
@@ -256,54 +285,78 @@
   async function submit(event) {
     event.preventDefault();
     if (state.submitting) return;
-    state.errors = localErrors();
-    state.notice = "";
-    if (Object.keys(state.errors).length > 0) { render(); return; }
-    // One key per attempt; a retry after a lost reply reuses it, so the server replays.
-    if (!state.attemptKey) state.attemptKey = crypto.randomUUID();
+    if (!state.attempt) {
+      state.errors = localErrors();
+      state.notice = "";
+      if (Object.keys(state.errors).length > 0) { render(); return; }
+      const fields = {
+        resourceId: state.resourceId,
+        startsAt: state.slot.startsAt,
+        name: state.form.name.trim(),
+        email: state.form.email.trim(),
+        phone: normalizedPhone(),
+        notes: state.form.notes.trim() || null,
+        consent: { email: state.form.consentEmail, sms: state.form.consentSms },
+        disclosureVersion: state.page.disclosure.version,
+        channel,
+        website: state.form.website,
+      };
+      // One key per attempt, kept with its body until a definitive answer, so a retry replays.
+      state.attempt = { key: crypto.randomUUID(), json: JSON.stringify(fields), fields, slot: state.slot, uncertain: false };
+    }
+    await send();
+  }
+
+  /** Send the frozen attempt; also the "Try again" action while its outcome is unknown. */
+  async function send() {
+    const attempt = state.attempt;
+    if (state.submitting || !attempt) return;
     state.submitting = true;
     render();
-    const body = {
-      resourceId: state.resourceId,
-      startsAt: state.slot.startsAt,
-      name: state.form.name.trim(),
-      email: state.form.email.trim(),
-      phone: normalizedPhone(),
-      notes: state.form.notes.trim() || null,
-      consent: { email: state.form.consentEmail, sms: state.form.consentSms },
-      disclosureVersion: state.page.disclosure.version,
-      channel,
-      website: state.form.website,
-    };
-    let response;
+    let response = null;
     try {
       const reply = await fetch(`/public/v1/pages/${match[1]}/requests`, {
         method: "POST",
         credentials: "omit",
-        headers: { "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": state.attemptKey },
-        body: JSON.stringify(body),
+        headers: { "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": attempt.key },
+        body: attempt.json,
       });
       response = { status: reply.status, body: await reply.json().catch(() => null), retryAfter: reply.headers.get("Retry-After") };
     } catch {
-      state.submitting = false;
-      state.notice = "We could not reach the booking service. Check your connection and try again.";
-      render();
-      return;
+      response = null;
     }
     state.submitting = false;
-    await handleReply(response);
+    await handleReply(attempt, response);
   }
 
-  async function handleReply(response) {
-    const reason = response.body && response.body.error && response.body.error.details && response.body.error.details.reason;
-    if (response.status === 201) {
+  async function handleReply(attempt, response) {
+    const reason = response && response.body && response.body.error && response.body.error.details && response.body.error.details.reason;
+    if (response && response.status === 201 && response.body) {
       state.result = response.body;
-      state.attemptKey = null;
+      state.attempt = null;
+      state.notice = "";
       state.step = "done";
       render();
       return;
     }
-    state.attemptKey = null;
+    if (response && response.status === 429) {
+      // Refused before any database work. A fresh attempt drops its key; one that may already
+      // have been saved keeps it, so the later retry still replays instead of looking taken.
+      if (!attempt.uncertain) state.attempt = null;
+      const minutes = Math.max(1, Math.ceil(Number(response.retryAfter || 60) / 60));
+      state.notice = `Too many attempts. Please try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`;
+      render();
+      return;
+    }
+    // No reply, a 5xx or a gateway page: the request may have committed. Keep key and body.
+    if (!response || response.status >= 500 || !response.body || typeof response.body !== "object") {
+      attempt.uncertain = true;
+      state.notice = response ? "The booking service did not answer properly." : "We could not reach the booking service.";
+      render();
+      return;
+    }
+    // Anything else is a definitive answer: this attempt is over and the next one gets a new key.
+    state.attempt = null;
     if (response.status === 409 && reason === "disclosure_changed") {
       state.notice = "The updates notice changed. Please read it again and confirm.";
       await loadPage();
@@ -319,9 +372,6 @@
         if (FIELD_MESSAGES[name]) state.errors[name] = FIELD_MESSAGES[name];
       }
       if (Object.keys(state.errors).length === 0) state.notice = "Something in the form is not right. Please check it and try again.";
-    } else if (response.status === 429) {
-      const minutes = Math.max(1, Math.ceil(Number(response.retryAfter || 60) / 60));
-      state.notice = `Too many attempts. Please try again in ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`;
     } else if (response.status === 404) {
       state.page = null;
       state.notice = "This booking page is not available.";
@@ -360,7 +410,8 @@
     render();
     // Free times go stale while the page is open: refetch on focus and on a timer.
     const refresh = async () => {
-      if (!state.page || state.step === "done" || state.submitting) return;
+      // An attempt in flight or unconfirmed may hold the slot itself; its retry reconciles first.
+      if (!state.page || state.step === "done" || state.submitting || state.attempt) return;
       await loadSlots(false);
       // Re-rendering the form would drop the visitor's focus; only do it when the slot was lost.
       if (state.step !== "details" || !stillAvailable()) render();
