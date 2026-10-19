@@ -6,13 +6,15 @@
 //   --dry-run                                   run every pending migration, then roll back
 //   --apply --backup <file> --receipt <file>    dry run, then apply; --backup is a pg_dump -Fc
 //                                               of this project taken within the last two hours
-//                                               (pg_restore must read all of it), recorded by
-//                                               size and sha256; --receipt must not exist yet
+//                                               (pg_restore must read all of it, every table in
+//                                               public and zs_internal with its data), recorded
+//                                               by size and sha256; --receipt must not exist yet
+//                                               and afterwards always records the outcome
 //   --migrations <dir>                          another directory (staged upgrade rehearsal)
 // Output and the receipt hold names, checksums and role facts only, never credentials.
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { open, readFile, unlink } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 import process from "node:process";
@@ -44,11 +46,12 @@ const run = promisify(execFile);
 
 /**
  * The backup must be a custom-format archive that pg_restore reads end to end (a truncated
- * file fails), made within two hours, and for an upgrade it must hold the migration ledger
- * at the state being upgraded. The dump cannot prove which project it came from; name it
- * with the ref and keep it next to the receipt.
+ * file fails), made within the last two hours, hold the definition and data of every table
+ * now in public and zs_internal, and for an upgrade hold the migration ledger at the state
+ * being upgraded. The dump cannot prove which project it came from; name it with the ref
+ * and keep it next to the receipt.
  */
-async function checkBackup(path: string, appliedBefore: string[]): Promise<{ bytes: number; sha256: string; createdAt: string }> {
+async function checkBackup(path: string, appliedBefore: string[], tables: string[]): Promise<{ bytes: number; sha256: string; createdAt: string; tables: number }> {
   const bytes = await readFile(path);
   if (bytes.subarray(0, 5).toString("latin1") !== "PGDMP") throw new Error("Refusing to apply: the backup is not a pg_dump -Fc archive");
   const restore = process.env.PG_RESTORE ?? "pg_restore";
@@ -57,8 +60,12 @@ async function checkBackup(path: string, appliedBefore: string[]): Promise<{ byt
   const created = /^;\s+Archive created at (.+)$/m.exec(toc)?.[1]?.trim() ?? "";
   // pg_dump writes the client's local time and a zone name; run both on the same machine.
   const createdAt = new Date(created.replace(/ [A-Za-z]+$/, ""));
-  if (Number.isNaN(createdAt.getTime()) || Date.now() - createdAt.getTime() > 2 * 3600_000)
+  const age = Date.now() - createdAt.getTime();
+  if (Number.isNaN(age) || age < -60_000 || age > 2 * 3600_000)
     throw new Error(`Refusing to apply: the backup must be made within the last two hours (archive created at ${created || "unknown"})`);
+  const missing = tables.filter((table) => !toc.includes(` TABLE ${table} `) || !toc.includes(` TABLE DATA ${table} `));
+  if (missing.length > 0)
+    throw new Error(`Refusing to apply: the backup lacks the definition or data of ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ", ..." : ""}`);
   if (appliedBefore.length > 0) {
     // The archive's migration ledger must match this database's, name for name.
     const { stdout: data } = await run(restore, ["--data-only", "--schema=zs_internal", "--table=schema_migrations", "--file=-", path],
@@ -67,7 +74,14 @@ async function checkBackup(path: string, appliedBefore: string[]): Promise<{ byt
     if (JSON.stringify(ledger) !== JSON.stringify(appliedBefore))
       throw new Error("Refusing to apply: the backup's migration ledger does not match this database");
   }
-  return { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), createdAt: createdAt.toISOString() };
+  return { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), createdAt: createdAt.toISOString(), tables: tables.length };
+}
+
+/** Ordinary tables in the schemas the backup must cover, as "schema name" (pg_restore --list style). */
+async function currentTables(): Promise<string[]> {
+  return (await pool.query<{ table: string }>(
+    `SELECT n.nspname || ' ' || c.relname AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname IN ('public', 'zs_internal') AND c.relkind = 'r' ORDER BY 1`)).rows.map((row) => row.table);
 }
 
 async function appliedMigrations(): Promise<{ name: string; checksum: string }[]> {
@@ -104,21 +118,35 @@ try {
     console.log(JSON.stringify({ mode: "dry-run", startedAt, ...facts, result: "rolled back" }, null, 2));
   } else {
     const backupPath = resolve(values.backup!);
-    const backup = await checkBackup(backupPath, before.map((row) => row.name));
+    const backup = await checkBackup(backupPath, before.map((row) => row.name), await currentTables());
     // Reserve the receipt before anything commits: an existing file or a missing folder
-    // fails here, not after the migrations are in.
+    // fails here. From then on the file always ends up holding what happened.
     const receiptPath = resolve(values.receipt!);
     const receiptFile = await open(receiptPath, "wx");
-    let applied;
+    const outcome: Record<string, unknown> = {};
+    let failure: unknown;
     try {
       // migrate() rolls back unless it applies exactly what the dry run reported.
-      applied = await migrate(pool, directory, { expect: dryRun });
+      outcome.applied = await migrate(pool, directory, { expect: dryRun });
+      outcome.result = "committed";
     } catch (error) {
-      await receiptFile.close();
-      await unlink(receiptPath);
-      throw error;
+      failure = error;
+      outcome.result = "failed";
+      outcome.error = String(error);
     }
-    const after = await appliedMigrations();
+    // The ledger afterwards is the evidence, also when a COMMIT reply was lost: the
+    // migrations run in one transaction, so it holds either none or all of them.
+    const expected = [...before.map((row) => row.name), ...dryRun.map((row) => row.name)].sort();
+    try {
+      const after = (await appliedMigrations()).map((row) => row.name);
+      outcome.after = after;
+      const same = (names: string[]) => JSON.stringify(after) === JSON.stringify(names);
+      outcome.committed = same(before.map((row) => row.name)) ? false : same(expected) ? true : "unknown";
+    } catch (error) {
+      outcome.after = `unreadable: ${String(error)}`;
+      outcome.committed = failure ? "unknown" : true;
+      failure ??= error;
+    }
     const receipt = {
       kind: before.length === 0 ? "fresh-install" : "upgrade",
       mode: "apply",
@@ -127,18 +155,19 @@ try {
       ...facts,
       dryRun: { result: "rolled back", migrations: dryRun.map((row) => row.name) },
       backup: { file: backupPath, ...backup },
-      applied,
-      after: after.map((row) => row.name),
+      ...outcome,
     };
     try {
       await receiptFile.writeFile(JSON.stringify(receipt, null, 2) + "\n");
-      await receiptFile.close();
     } catch (error) {
-      // The migrations are committed; say so and print the receipt so it is not lost.
-      console.error(JSON.stringify({ committed: true, receiptWriteFailed: String(error), receipt }, null, 2));
-      throw error;
+      // Print the receipt so the evidence is not lost.
+      console.error(JSON.stringify({ receiptWriteFailed: String(error), receipt }, null, 2));
+      failure ??= error;
+    } finally {
+      await receiptFile.close().catch(() => undefined);
     }
-    console.log(JSON.stringify({ kind: receipt.kind, applied: applied.map((row) => row.name), receipt: receiptPath }, null, 2));
+    if (failure) throw failure;
+    console.log(JSON.stringify({ kind: receipt.kind, applied: dryRun.map((row) => row.name), receipt: receiptPath }, null, 2));
   }
 } finally {
   await pool.end();

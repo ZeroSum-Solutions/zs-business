@@ -163,10 +163,19 @@ try {
   const deals = await api("/v1/crm/deals?limit=1", tokenA);
   const deal = (deals.body?.items as { id: string; pipelineId: string; stageId: string; revision: number }[] | undefined)?.[0];
   await check("API: tenant A reads its own records", async () => {
-    const contacts = await api("/v1/crm/contacts?limit=100", tokenA);
-    const items = contacts.body?.items as unknown[] | undefined;
-    return { ok: contacts.status === 200 && contactsA >= 12 && items?.length === contactsA && resources.status === 200 && Boolean(resourceId) && Boolean(deal),
-      detail: { contacts: items?.length, resources: resources.status, deals: deals.status } };
+    // Page through every contact so the total compares with the SQL count.
+    let total = 0;
+    let statuses: number[] = [];
+    for (let offset: number | null = 0, pages = 0; offset !== null && pages < 100; pages += 1) {
+      const page = await api(`/v1/crm/contacts?limit=100&offset=${offset}`, tokenA);
+      statuses = [...statuses, page.status];
+      if (page.status !== 200) break;
+      total += (page.body?.items as unknown[] | undefined)?.length ?? 0;
+      offset = (page.body?.nextOffset as number | null | undefined) ?? null;
+    }
+    return { ok: statuses.every((status) => status === 200) && contactsA >= 12 && total === contactsA
+      && resources.status === 200 && Boolean(resourceId) && Boolean(deal),
+      detail: { contacts: total, pages: statuses.length, resources: resources.status, deals: deals.status } };
   });
   await check("API: tenant B sees nothing and is refused tenant A's ids", async () => {
     const from = new Date(Date.now() + 86400000).toISOString().replace(/\.\d{3}Z$/, ".000Z");

@@ -132,23 +132,31 @@ against the pinned Supabase Root 2021 CA.
    mise exec -- pnpm --filter @zs/api db:hosted-migrate --apply --backup <dump> --receipt <file.json>
    ```
    `--apply` dry-runs first. It refuses a backup that is not a custom-format archive
-   pg_restore can read end to end, that is older than two hours, or (for an upgrade) whose
+   pg_restore can read end to end, that is older than two hours, that lacks the definition
+   or data of any table now in `public` or `zs_internal`, or (for an upgrade) whose
    migration ledger differs from the database's; `pg_restore` comes from `PG_RESTORE` or
    `PATH`. It reserves the receipt file before anything commits (an existing file is
    refused), and the apply rolls back unless it runs exactly the migrations and checksums the
    dry run reported. The receipt holds migration names, checksums, the login's attributes and
    the backup's size, sha256 and creation time, never credentials. If the receipt cannot be
-   written after the commit, the script prints it to stderr marked `committed: true`. `--migrations <dir>` points at another
+   written, the script prints it to stderr. A failed apply still leaves its receipt, with
+   `result: "failed"` and `committed` read back from the ledger (`true`, `false` or
+   `"unknown"`); use a new receipt name for the retry. `--migrations <dir>` points at another
    directory, for rehearsing an upgrade from a partial set. Receipts go outside the repo.
 3. **Seed (fake data only).** `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432)
    and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
    migrate and prints ids and counts only.
 4. **Tokens.** Until M2a auth lands, the dashboard calls the API with one static owner token
    (`ZS_API_TOKEN`), HS256, issuer `https://api.zerosumsolutions.com/pilot`, at most 30 days
-   (the API's `JWT_MAX_TTL_SECONDS=2592000`). Mint it straight into the vault; the script
-   refuses to print to a terminal. Use `pnpm -s` so no pnpm banner lands in the value, and
-   `pipefail` so a failed mint does not store an empty token:
-   `set -o pipefail; JWT_SECRET=… JWT_ISSUER=… ZS_TOKEN_TENANT_ID=… ZS_TOKEN_SUBJECT=… ZS_TOKEN_TTL_SECONDS=2592000 mise exec -- pnpm -s --filter @zs/api token:mint | zsvault edit <id> --yes --value-stdin` (`zsvault add <id> --type plain_secret --yes --value-stdin` for a new entry).
+   (the API's `JWT_MAX_TTL_SECONDS=2592000`). The mint script refuses to print to a
+   terminal. Mint into a shell variable first, so a failed mint never
+   writes an empty value, and use `pnpm -s` so no pnpm banner lands in it:
+   ```sh
+   T=$(JWT_SECRET=… JWT_ISSUER=… ZS_TOKEN_TENANT_ID=… ZS_TOKEN_SUBJECT=… ZS_TOKEN_TTL_SECONDS=2592000 \
+     mise exec -- pnpm -s --filter @zs/api token:mint) && [ -n "$T" ] && \
+     printf '%s' "$T" | zsvault edit <id> --yes --value-stdin; unset T
+   ```
+   For a new entry use `zsvault add <id> --type plain_secret --yes --value-stdin`.
    To rotate, mint a new token, set it as the dashboard's `ZS_API_TOKEN` for that target, and
    redeploy the dashboard. Rotating `JWT_SECRET` invalidates every token at once.
 5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
