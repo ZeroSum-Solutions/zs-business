@@ -2,7 +2,7 @@
 
 MCP server (stdio) over `@zs/core`. Tools: `create_booking`, `upsert_contact`,
 `create_deal`, `move_deal_stage` (writes, each needs an `idempotencyKey`) and
-`list_contacts`, `list_deals`, `list_pipelines`, `list_bookings`, `list_resources`,
+`list_contacts`, `get_contact`, `list_deals`, `list_pipelines`, `list_bookings`, `list_resources`,
 `find_slots` (reads). Inputs use the `@zs/contracts` request schemas. Every result puts one
 JSON object in both `structuredContent` and `content[0].text`: the same body as the HTTP
 route (list tools return `{ items }`), or on failure `isError: true` with the shared

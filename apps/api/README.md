@@ -96,6 +96,9 @@ the hosted seed must then create the demo tenant's owner member too.
 | `SESSION_CACHE_SECONDS` | `supabase` only: how long a live answer is reused, 0 to 30, default 5. A sign-out is refused within this long. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
+| `DATABASE_POOL_MAX` | Runtime pool size, default 10. |
+| `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
+| `REQUEST_TIMEOUT_MS` | Longest time a `/v1` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
 
 Only `src/main.ts` and the `src/scripts/*` entry points read the environment or the system
@@ -152,15 +155,17 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 
 | Method and path | Result |
 |---|---|
-| `GET /healthz` | `{ ok: true }`, no auth |
+| `GET /healthz` | `{ ok: true }`, no auth. Liveness: the process answers. |
+| `GET /readyz` | `{ ok: true }`, or 503 when a bounded `SELECT 1` fails. No auth. |
 | `GET /v1/booking/resources` | `{ items: ResourceSummary[] }` |
 | `GET /v1/booking/slots?resourceId&from&to[&zone]` | free slots; `from`/`to` are UTC instants with milliseconds, at most 31 days |
-| `GET /v1/booking/bookings?[resourceId&]limit&offset` | page of bookings |
+| `GET /v1/booking/bookings?[resourceId&][from&][to&]limit&(cursor|offset)` | page of bookings in start order; with `from`/`to`, only those overlapping `[from, to)` |
 | `POST /v1/booking/bookings` `{ resourceId, startsAt }` | 201 booking; 409 if the slot is taken |
-| `GET /v1/crm/contacts?limit&offset` | page of contacts |
+| `GET /v1/crm/contacts?[search&][sort&][ids&]limit&(cursor|offset)` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
+| `GET /v1/crm/contacts/:id` | one contact; 404 if unknown or another tenant's |
 | `POST /v1/crm/contacts` `{ displayName?, email?, phone?, mode?, consent? }` | 201 created, 200 matched an existing contact |
 | `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages |
-| `GET /v1/crm/deals?[pipelineId&]limit&offset` | page of deals |
+| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals, most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
 | `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
 | `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
@@ -172,6 +177,11 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
 with no `user_id`; the runtime role cannot set `user_id` (binding an invite to a signed-up
 user is M2b's invite worker).
+
+A page is `{ items, limit, offset, nextOffset, nextCursor }`. Pass `nextCursor` back as
+`cursor` for the next page: it names the last row returned, so rows added or moved ahead of
+it while you page are neither repeated nor skipped, which `offset` cannot promise. A cursor
+belongs to one list and sort; it is not combined with `offset`.
 
 Every `POST` and `DELETE` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
 the same key returns the stored result with the original status; reusing a key with a
@@ -185,4 +195,25 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`;
 anything else is `conflict`),
-`Internal` 500 with no internal detail. Each code has one fixed `message`.
+`Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
+one fixed `message`.
+
+## Database pool and request limits
+
+`main.ts` builds the runtime pool with `createRuntimePool` from `@zs/db`. A lost idle
+connection (a restart, failover or network drop) is logged as `Database pool error <SQLSTATE>`
+without the URL, at most 10 a minute, and the next request opens a new connection; the
+process does not exit. A request waits at most `DATABASE_CONNECT_TIMEOUT_MS` for a connection;
+when 50 requests already wait, the next is refused at once. Each `/v1` request has a deadline
+(`REQUEST_TIMEOUT_MS`) that also ends when the caller disconnects: its transaction then sends
+no further statement or `COMMIT` and rolls back, and the API answers 503 `Unavailable`. Each
+transaction's statement and lock timeouts are capped at the time left before the deadline, so
+Postgres cancels a statement still running when the deadline passes. A statement still
+running just after the deadline, or when the caller disconnects, is abandoned: its connection is
+closed rather than reused, and the statement ends within that same cap. The API and MCP send no
+`pg_cancel_backend` (`createScopedDatabase`'s `cancel` stays `"none"`): behind Supavisor's
+transaction pooler the backend that ran a statement may already serve another request. Nothing
+is committed by a request that answers 503 before its `COMMIT`. A `COMMIT` abandoned at the
+deadline (`DatabaseUnavailable("commit_unknown")`) may have applied; like any 503 write, it
+replays its committed result when the caller retries with the same `Idempotency-Key`. The MCP server uses the same pool
+settings (4 connections).

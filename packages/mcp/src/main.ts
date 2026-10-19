@@ -6,10 +6,9 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { Pool } from "pg";
 import { z } from "zod";
 import { createSessionCheckFromConfig, createVerifierFromConfig, parseJwtEnv, parseSessionCheckEnv } from "@zs/core";
-import { assertLocalDatabaseUrl, assertRuntimeLogin, createScopedDatabase } from "@zs/db";
+import { assertLocalDatabaseUrl, assertRuntimeLogin, createRuntimePool, createScopedDatabase } from "@zs/db";
 import { createMcpServer } from "./server.js";
 
 const env = z.object({
@@ -21,7 +20,15 @@ const sessionCheckConfig = parseSessionCheckEnv(process.env);
 // The local auth stub exists only on loopback databases.
 if (sessionCheckConfig.method === "local-stub") assertLocalDatabaseUrl(env.DATABASE_URL);
 const clock = { now: () => new Date() };
-const pool = new Pool({ connectionString: env.DATABASE_URL, max: 4 });
+// stdout carries the MCP protocol, so pool errors go to stderr. A lost idle connection is
+// logged and replaced; it must not end the process.
+const pool = createRuntimePool({
+  connectionString: env.DATABASE_URL,
+  max: 4,
+  connectionTimeoutMs: 5000,
+  applicationName: "zs-mcp",
+  onError: ({ code, message }) => console.error("Database pool error", code ?? "", message),
+});
 await assertRuntimeLogin(pool).catch(async (error: unknown) => {
   await pool.end();
   throw error;

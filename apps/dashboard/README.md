@@ -205,11 +205,17 @@ hits a changed deal says "Reloaded" only once a read that started after the conf
 succeeded. If that reload fails, the board says so, shows the error with "Try again", and
 keeps that deal's move off until a read succeeds.
 
-The list routes take paging only (at most 100 rows a page). The client walks `nextOffset`
-and runs contact search, the deal contact filter and the booking date range itself.
-It reads at most 20 pages (2,000 rows); past that, lists say "List incomplete — showing
-first N" and a contact beyond the cap shows its own error instead of "not found".
-There is no single-contact route, so a contact page reads the list. API bookings carry no
+The API filters in SQL, so no list depends on how many older rows exist. The calendar
+asks for one day or week (`from`/`to`, plus the booking that started before and still
+runs), and home asks for the next four. The customer list reads 50 at a time, sorted by
+name, with "Show more customers"; search goes to the API after a 250 ms pause. A customer
+page reads `/v1/crm/contacts/:id` and that customer's deals (`contactId`); the board reads
+one pipeline's deals and only their customers' names (`ids`). Reads keep the last result
+on screen while the next loads, start a customer page from cached list data, and cancel
+when the screen no longer needs them. Deal lists still walk pages, at most 20 (2,000 rows);
+past that the board says "List incomplete — showing first N". The board shows "No
+pipeline yet", "<name> has no stages yet", or a pipeline picker when there are several.
+API bookings carry no
 customer or title, so live mode shows them as "Appointment".
 
 `TODO(api)`: results, usage, inbox, site, agents, connections and plan have no API yet.

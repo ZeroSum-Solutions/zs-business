@@ -94,7 +94,12 @@ also match on replay. Scoped transactions default to a 5-second lock timeout and
 State, action, and one outbox event commit together. Runtime grants permit reads;
 the dispatcher writes history through `record_action_and_event`, a narrow
 SECURITY DEFINER function whose owner obeys forced RLS. Privileged workers use
-outbox `seq` for ordering and `processed_at` for delivery progress. Administrative
+outbox `processed_at` for delivery progress and `seq` only to order the rows they can see.
+`seq` is handed out at insert, not at commit, so a lower `seq` can commit after a higher
+one: a worker must never keep a "highest seq seen" mark. It claims unprocessed rows (row
+locks or leases, `FOR UPDATE SKIP LOCKED`), records per-row delivery state and provider
+dedupe keys, and retries rows whose outcome is uncertain
+(`packages/db/test/outbox-order.test.ts` shows the inverted commit). Administrative
 migrations force RLS, revoke direct runtime history writes and tenant renames, and
 fail on unsafe existing role attributes. Isolation tests discover every public
 table with `tenant_id` through the catalog and seed scalar/default/FK fixtures;

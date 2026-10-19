@@ -2,16 +2,19 @@
 
 import { CaretRight, MagnifyingGlass } from "@phosphor-icons/react";
 import Link from "next/link";
-import { useDeferredValue, useState } from "react";
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
-import { useContacts } from "@/lib/queries";
+import { EmptyState, ErrorNote, LoadingRows } from "@/components/ui/states";
+import { useContacts, useDebouncedValue } from "@/lib/queries";
 import { formatPhone, initials } from "@/lib/utils";
 
 export function ContactList() {
   const [search, setSearch] = useState("");
-  const deferred = useDeferredValue(search);
-  const contacts = useContacts(deferred.trim());
+  // The API searches every customer; wait for a pause in typing before asking it.
+  const settled = useDebouncedValue(search.trim(), 250);
+  const contacts = useContacts(settled);
+  const items = contacts.data?.pages.flatMap((page) => page.items) ?? [];
 
   return (
     <section aria-labelledby="contacts-title">
@@ -28,17 +31,16 @@ export function ContactList() {
           onChange={(event) => setSearch(event.target.value)}
         />
       </div>
-      {contacts.isPending ? <LoadingRows rows={6} label="Loading customers" /> : contacts.isError ? (
+      {contacts.isPending ? <LoadingRows rows={6} label="Loading customers" /> : contacts.isError && !contacts.isFetchNextPageError ? (
         <ErrorNote error={contacts.error} retry={() => contacts.refetch()} />
-      ) : contacts.data.items.length === 0 ? (
-        <EmptyState title={search ? "No customers match" : "No customers yet"}>
-          {search ? "Check the spelling, or add them as a new customer." : "Add your first customer to start a record."}
+      ) : items.length === 0 ? (
+        <EmptyState title={settled ? "No customers match" : "No customers yet"}>
+          {settled ? "Check the spelling, or add them as a new customer." : "Add your first customer to start a record."}
         </EmptyState>
       ) : (
         <>
-        <IncompleteNote list={contacts.data} />
         <ul className="divide-y divide-border-soft overflow-hidden rounded-md bg-surface shadow-ring" aria-busy={contacts.isFetching}>
-          {contacts.data.items.map((contact) => (
+          {items.map((contact) => (
             <li key={contact.id}>
               <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-surface-warm">
                 <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-warm text-sm font-semibold text-fg-2">
@@ -53,6 +55,14 @@ export function ContactList() {
             </li>
           ))}
         </ul>
+        {contacts.isFetchNextPageError ? <div className="mt-3"><ErrorNote error={contacts.error} retry={() => contacts.fetchNextPage()} /></div> : null}
+        {contacts.hasNextPage ? (
+          <div className="mt-3 flex justify-center">
+            <Button variant="secondary" onClick={() => contacts.fetchNextPage()} disabled={contacts.isFetchingNextPage}>
+              {contacts.isFetchingNextPage ? "Loading…" : "Show more customers"}
+            </Button>
+          </div>
+        ) : null}
         </>
       )}
     </section>

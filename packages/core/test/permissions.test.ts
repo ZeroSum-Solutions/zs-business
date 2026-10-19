@@ -28,6 +28,7 @@ interface Tenant {
   stages: [string, string];
   ownerId: string;
   dealId: string;
+  contactId: string;
 }
 
 let database: TestDatabase;
@@ -78,7 +79,7 @@ beforeAll(async () => {
   const contact = await ownerSession.upsertContact({ displayName: "Ada", email: "ada@example.com" }, randomUUID());
   const deal = await ownerSession.createDeal(
     { contactId: contact.result.contact.id, pipelineId, stageId: stages[0], title: "Ring" }, randomUUID());
-  tenant = { tenantId, resourceId, pipelineId, stages, ownerId: owner.userId, dealId: deal.result.id };
+  tenant = { tenantId, resourceId, pipelineId, stages, ownerId: owner.userId, dealId: deal.result.id, contactId: contact.result.contact.id };
 });
 afterAll(async () => { await database?.close(); });
 
@@ -115,6 +116,7 @@ function operations(session: Session): Record<string, { permission: Permission |
     findSlots: { permission: "calendar", run: () => session.findSlots(
       { resourceId: tenant.resourceId, from: "2026-10-19T08:00:00.000Z", to: "2026-10-20T08:00:00.000Z" }) },
     listContacts: { permission: "customers", run: () => session.listContacts({}) },
+    getContact: { permission: "customers", run: () => session.getContact(tenant.contactId) },
     listDeals: { permission: "customers", run: () => session.listDeals({}) },
     listPipelines: { permission: "customers", run: () => session.listPipelines() },
     listMembers: { permission: "members", run: () => session.listMembers() },
@@ -136,6 +138,12 @@ describe("permission map", () => {
 });
 
 describe("every session operation, per role", () => {
+  it("covers every operation a session offers", () => {
+    const session = sessionFor(randomUUID());
+    const offered = Object.keys(session).filter((name) => typeof session[name as keyof Session] === "function");
+    expect(Object.keys(operations(session)).sort()).toEqual(offered.sort());
+  });
+
   for (const role of ["owner", "staff"] as const) {
     it(`${role}: allowed exactly where the role grants the permission`, async () => {
       const { userId } = await addMember(tenant.tenantId, role);

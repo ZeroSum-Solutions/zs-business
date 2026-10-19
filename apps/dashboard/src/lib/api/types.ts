@@ -22,13 +22,28 @@ export interface WriteOptions {
 }
 
 /**
- * A list read page by page. The client stops after a fixed number of pages; when the list
- * went on past that, `incomplete` is true and `loaded` is how many rows were read.
+ * A list the client reads page by page, within the filters the API applied. It stops after a
+ * fixed number of pages; when the list went on past that, `incomplete` is true and `loaded`
+ * is how many rows were read.
  */
 export interface ListResult<T> {
   items: T[];
   incomplete: boolean;
   loaded: number;
+}
+
+/**
+ * One page of a list; `nextCursor` is where the next page starts, or null after the last.
+ * It names the last row shown, so rows added ahead of it never push one onto the next page.
+ */
+export interface Page<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+/** Lets React Query cancel a read nobody waits for (a superseded search, a left page). */
+export interface ReadOptions {
+  signal?: AbortSignal;
 }
 
 export function completeList<T>(items: T[]): ListResult<T> {
@@ -52,11 +67,28 @@ export interface SlotQuery {
   zone?: string;
 }
 
-/** Filters run in the client: the list routes take only paging (and resource/pipeline IDs). */
+/** The API filters: bookings overlapping [from, to), in start order. */
 export interface BookingListQuery {
   resourceId?: string;
   from?: string;
   to?: string;
+  /** Only the first `limit` bookings, in one request (at most 100). */
+  limit?: number;
+}
+
+/** Customers in name order. `search` matches part of a name, email or phone. */
+export interface ContactListQuery {
+  search?: string;
+  /** Only these customers (at most 100), such as the ones on a page of deals. */
+  ids?: readonly string[];
+  /** The previous page's `nextCursor`. */
+  cursor?: string;
+  limit?: number;
+}
+
+export interface DealListQuery {
+  contactId?: string;
+  pipelineId?: string;
 }
 
 export type NewBooking = CreateBookingRequest;
@@ -81,25 +113,31 @@ export interface StageMove {
 }
 
 export interface BookingApi {
-  listResources(): Promise<ResourceSummary[]>;
-  getSlots(query: SlotQuery): Promise<SlotsResponse>;
-  listBookings(query?: BookingListQuery): Promise<ListResult<BookingView>>;
+  listResources(options?: ReadOptions): Promise<ResourceSummary[]>;
+  getSlots(query: SlotQuery, options?: ReadOptions): Promise<SlotsResponse>;
+  listBookings(query?: BookingListQuery, options?: ReadOptions): Promise<ListResult<BookingView>>;
   /** Throws an ApiError where `isSlotTaken(error)` holds when the time was taken first. */
   createBooking(input: NewBooking, options: WriteOptions): Promise<BookingRecord>;
 }
 
 export interface CrmApi {
   /** Pipelines with stages sorted by position. */
-  listPipelines(): Promise<PipelineSummary[]>;
-  listContacts(query?: { search?: string }): Promise<ListResult<ContactRecord>>;
-  /** Throws `not_found`, or `incomplete` when the list cap was hit before a match. */
-  getContact(id: string): Promise<ContactRecord>;
+  listPipelines(options?: ReadOptions): Promise<PipelineSummary[]>;
+  /** One page of customers; ask for the next with `cursor: nextCursor`. */
+  listContacts(query?: ContactListQuery, options?: ReadOptions): Promise<Page<ContactRecord>>;
+  /** Throws `not_found` for an unknown customer, or one of another business. */
+  getContact(id: string, options?: ReadOptions): Promise<ContactRecord>;
   /** Returns `created: false` with the existing contact when the email or phone is known. */
   createOrFindContact(input: NewContact, options: WriteOptions): Promise<ContactWriteResult>;
-  listDeals(query?: { contactId?: string }): Promise<ListResult<DealRecord>>;
+  listDeals(query?: DealListQuery, options?: ReadOptions): Promise<ListResult<DealRecord>>;
   /** Throws an ApiError where `isDealChanged(error)` holds when the deal changed since `expectedRevision`. */
   moveDealStage(input: StageMove, options: WriteOptions): Promise<DealRecord>;
 }
+
+/** Customers per page of the customer list. */
+export const CONTACT_PAGE_SIZE = 50;
+/** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
+export const CONTACT_IDS_PER_CALL = 100;
 
 export type ZsApi = BookingApi & CrmApi & WorkspaceApi;
 
@@ -119,12 +157,13 @@ export function toUpsertContactRequest(input: NewContact): UpsertContactRequest 
   };
 }
 
-/** Shared by both adapters so search and sort behave the same in demo and live mode. */
+/** The demo adapter's search; the API's ILIKE on name, email and phone matches the same rows. */
 export function matchesSearch(contact: ContactRecord, search: string | undefined): boolean {
   const needle = search?.trim().toLowerCase() ?? "";
   if (!needle) return true;
   return [contact.displayName, contact.email, contact.phone].some((field) => field?.toLowerCase().includes(needle));
 }
 
+/** The demo adapter's name order, close to the API's `sort=name`. */
 export const byContactName = (a: ContactRecord, b: ContactRecord) =>
   (a.displayName ?? a.email ?? a.phone ?? "").localeCompare(b.displayName ?? b.email ?? b.phone ?? "");

@@ -36,3 +36,4 @@ export {
   type SupabaseSessionCheckOptions,
 } from "./session-check.js";
 export { derivedId } from "./ids.js";
+export { DatabaseUnavailable } from "@zs/db";

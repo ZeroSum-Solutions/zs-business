@@ -1,9 +1,20 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient, type InfiniteData, type QueryClient, type QueryKey } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { useApi } from "./api/react";
 import { useTenantId } from "./session";
-import { ApiError, type BookingListQuery, type DealRecord, type ListResult, type SlotQuery } from "./api";
+import {
+  CONTACT_IDS_PER_CALL,
+  type BookingListQuery,
+  type ContactRecord,
+  type DealListQuery,
+  type DealRecord,
+  type ListResult,
+  type Page,
+  type SlotQuery,
+} from "./api";
+import type { BookingRecord, SlotsResponse } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
 
 /** Key suffixes. Queries and invalidations go through `useKeys`, which puts the tenant first. */
@@ -13,11 +24,14 @@ export const keys = {
   slotsAll: ["booking", "slots"] as const,
   bookings: (query: BookingListQuery = {}) => ["booking", "bookings", query] as const,
   bookingsAll: ["booking", "bookings"] as const,
-  pipeline: ["crm", "pipeline"] as const,
-  contacts: (search = "") => ["crm", "contacts", search] as const,
+  pipelines: ["crm", "pipelines"] as const,
+  /** Pages of the customer list for one search; "" is the whole list. */
+  contacts: (search = "") => ["crm", "contacts", "list", search] as const,
+  /** Customers by ID, sorted, such as the ones a page of deals names. */
+  contactNames: (ids: readonly string[]) => ["crm", "contacts", "names", ids] as const,
   contactsAll: ["crm", "contacts"] as const,
   contact: (id: string) => ["crm", "contact", id] as const,
-  deals: (contactId?: string) => ["crm", "deals", contactId ?? "all"] as const,
+  deals: (query: DealListQuery = {}) => ["crm", "deals", query] as const,
   dealsAll: ["crm", "deals"] as const,
   results: ["ws", "results"] as const,
   usage: ["ws", "usage"] as const,
@@ -59,7 +73,7 @@ export function useKeys(): { keys: ScopedKeys; enabled: boolean } {
 export function useResources() {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.resources, queryFn: () => api.listResources(), staleTime: Infinity });
+  return useQuery({ enabled, queryKey: keys.resources, queryFn: ({ signal }) => api.listResources({ signal }), staleTime: Infinity });
 }
 
 export function useSlots(query: SlotQuery | null) {
@@ -67,52 +81,119 @@ export function useSlots(query: SlotQuery | null) {
   const { keys, enabled } = useKeys();
   return useQuery({
     queryKey: query ? keys.slots(query) : [...keys.slotsAll, "idle"],
-    queryFn: () => api.getSlots(query!),
+    queryFn: ({ signal }) => api.getSlots(query!, { signal }),
     enabled: enabled && query !== null,
   });
 }
 
+/**
+ * Takes a just-booked time out of the cached open times of the booking's own calendar, before
+ * the refetch, so reopening the sheet never offers it. Other calendars' lists stay as they are:
+ * the same time can still be free there. Invalidate afterwards, so the lists still refetch.
+ */
+export function dropBookedTime(queryClient: QueryClient, slotsKey: QueryKey, booking: BookingRecord): void {
+  const [taken, takenEnd] = [Date.parse(booking.occupiedStartsAt), Date.parse(booking.occupiedEndsAt)];
+  queryClient.setQueriesData<SlotsResponse>({ queryKey: slotsKey }, (current) => current?.resourceId === booking.resourceId
+    ? { ...current, slots: current.slots.filter((slot) => Date.parse(slot.endsAt) <= taken || Date.parse(slot.startsAt) >= takenEnd) }
+    // Undefined leaves a list untouched, its age and staleness included.
+    : undefined);
+}
+
+/** One range of bookings, filtered by the API; a day or week is one short read. */
 export function useBookings(query: BookingListQuery = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.bookings(query), queryFn: () => api.listBookings(query) });
+  return useQuery({ enabled, queryKey: keys.bookings(query), queryFn: ({ signal }) => api.listBookings(query, { signal }) });
 }
 
-export function usePipeline() {
+/** Every pipeline with its stages, in name order. A business may have none yet. */
+export function usePipelines() {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({
-    enabled,
-    queryKey: keys.pipeline,
-    // M1 has one pipeline per business; the board shows the first.
-    queryFn: async () => {
-      const [first] = await api.listPipelines();
-      if (!first) throw new ApiError("not_found", "No pipeline is set up yet.", null, "NotFound");
-      return first;
-    },
-    staleTime: Infinity,
-  });
+  return useQuery({ enabled, queryKey: keys.pipelines, queryFn: ({ signal }) => api.listPipelines({ signal }), staleTime: 5 * 60_000 });
 }
 
+/** Waits until typing pauses, so a search sends one request instead of one per key. */
+export function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return settled;
+}
+
+/**
+ * The customer list, a page at a time, searched by the API. While a new search loads, the
+ * previous results stay on screen.
+ */
 export function useContacts(search = "") {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.contacts(search), queryFn: () => api.listContacts({ search }), placeholderData: (previous) => previous });
+  return useInfiniteQuery({
+    enabled,
+    queryKey: keys.contacts(search),
+    queryFn: ({ pageParam, signal }) => api.listContacts({ ...(search ? { search } : {}), ...(pageParam ? { cursor: pageParam } : {}) }, { signal }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last: Page<ContactRecord>) => last.nextCursor ?? undefined,
+    placeholderData: keepPreviousData,
+  });
+}
+
+/**
+ * A customer already in a cached list or name lookup, so opening it shows at once. A list a
+ * write has invalidated does not count: its row may be older than what the write returned.
+ */
+function cachedContact(queryClient: QueryClient, listKey: QueryKey, id: string): { contact: ContactRecord; updatedAt: number } | undefined {
+  for (const query of queryClient.getQueryCache().findAll({ queryKey: listKey })) {
+    if (query.state.isInvalidated) continue;
+    const data = query.state.data as InfiniteData<Page<ContactRecord>> | ContactRecord[] | undefined;
+    const rows = Array.isArray(data) ? data : data?.pages.flatMap((page) => page.items) ?? [];
+    const contact = rows.find((row) => row.id === id);
+    if (contact) return { contact, updatedAt: query.state.dataUpdatedAt };
+  }
+  return undefined;
 }
 
 export function useContact(id: string) {
   const api = useApi();
-  const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.contact(id), queryFn: () => api.getContact(id) });
-}
-
-export function useDeals(contactId?: string) {
-  const api = useApi();
+  const queryClient = useQueryClient();
   const { keys, enabled } = useKeys();
   return useQuery({
     enabled,
-    queryKey: keys.deals(contactId),
-    queryFn: () => api.listDeals(contactId ? { contactId } : {}),
+    queryKey: keys.contact(id),
+    queryFn: ({ signal }) => api.getContact(id, { signal }),
+    // Shown at once from the list it was opened from; refetched in the background once stale.
+    initialData: () => cachedContact(queryClient, keys.contactsAll, id)?.contact,
+    initialDataUpdatedAt: () => cachedContact(queryClient, keys.contactsAll, id)?.updatedAt,
+  });
+}
+
+/** Names for the customers a list of deals refers to, at most 100 per request. */
+export function useContactNames(ids: readonly string[]) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  const sorted = useMemo(() => [...new Set(ids)].sort(), [ids]);
+  return useQuery({
+    enabled: enabled && sorted.length > 0,
+    queryKey: keys.contactNames(sorted),
+    queryFn: async ({ signal }) => {
+      const chunks: string[][] = [];
+      for (let start = 0; start < sorted.length; start += CONTACT_IDS_PER_CALL) chunks.push(sorted.slice(start, start + CONTACT_IDS_PER_CALL));
+      const pages = await Promise.all(chunks.map((chunk) => api.listContacts({ ids: chunk, limit: chunk.length }, { signal })));
+      return pages.flatMap((page) => page.items);
+    },
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useDeals(query: DealListQuery = {}, options: { enabled?: boolean } = {}) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && (options.enabled ?? true),
+    queryKey: keys.deals(query),
+    queryFn: ({ signal }) => api.listDeals(query, { signal }),
     structuralSharing: (previous, next) => preferNewerDeals(previous as ListResult<DealRecord> | undefined, next as ListResult<DealRecord>),
   });
 }

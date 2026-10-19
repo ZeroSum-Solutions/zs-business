@@ -8,6 +8,7 @@ import {
   apiErrorBodySchema,
   bookingPageSchema,
   contactPageSchema,
+  contactRecordSchema,
   createBookingOutputSchema,
   createDealOutputSchema,
   createOrFindContactOutputSchema,
@@ -136,7 +137,7 @@ describe("MCP tools over an in-memory transport", () => {
   it("lists every write and read tool", async () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
-      "create_booking", "create_deal", "find_slots", "list_bookings", "list_contacts",
+      "create_booking", "create_deal", "find_slots", "get_contact", "list_bookings", "list_contacts",
       "list_deals", "list_pipelines", "list_resources", "move_deal_stage", "upsert_contact",
     ]);
   });
@@ -197,6 +198,24 @@ describe("MCP tools over an in-memory transport", () => {
     ]);
     for (const tool of ["list_contacts", "list_deals", "list_bookings", "list_pipelines", "list_resources"])
       expect(((await callTool(other, tool)).value as { items: unknown[] }).items).toEqual([]);
+  });
+
+  it("get_contact and the read filters answer from SQL, for this tenant only", async () => {
+    const one = await callTool(client, "get_contact", { contactId });
+    expect(contactRecordSchema.parse(one.value)).toMatchObject({ id: contactId, displayName: "Maren" });
+    const hidden = await callTool(other, "get_contact", { contactId });
+    expect(apiErrorBodySchema.parse(hidden.value).error.code).toBe("NotFound");
+    const search = (args: Record<string, unknown>) => callTool(client, "list_contacts", args)
+      .then((response) => contactPageSchema.parse(response.value).items.map((item) => item.id));
+    expect(await search({ search: "AREN" })).toEqual([contactId]);
+    expect(await search({ search: "nobody" })).toEqual([]);
+    expect(await search({ ids: contactId, sort: "name" })).toEqual([contactId]);
+    const deals = dealPageSchema.parse((await callTool(client, "list_deals", { contactId })).value);
+    expect(deals.items.map((item) => item.id)).toEqual([dealId]);
+    const range = (from: string, to: string) => callTool(client, "list_bookings", { from, to })
+      .then((response) => bookingPageSchema.parse(response.value).items.length);
+    expect(await range("2026-10-19T09:30:00.000Z", "2026-10-19T09:31:00.000Z")).toBe(1);
+    expect(await range("2026-10-19T10:00:00.000Z", "2026-10-20T00:00:00.000Z")).toBe(0);
   });
 
   it("another tenant's server cannot move this tenant's deal", async () => {

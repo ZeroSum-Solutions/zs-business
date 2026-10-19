@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiErrorCode } from "@zs/contracts";
-import { apiErrorBody, authenticate, mapError, type Session, type SessionCheck } from "@zs/core";
+import { apiErrorBody, authenticate, DatabaseUnavailable, mapError, type Session, type SessionCheck } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { bookingRoutes } from "./routes/booking.js";
@@ -13,6 +13,12 @@ import { memberRoutes } from "./routes/members.js";
 export interface AppConfig {
   /** Exact origins allowed to call the API from a browser; empty means no CORS. */
   readonly allowedOrigins: readonly string[];
+  /**
+   * Longest time a /v1 request may take, default 10 s (under the dashboard proxy's 15 s).
+   * Past it the API answers 503 and the request's transaction sends no further statement
+   * and rolls back; a write that already committed replays on a retry with its key.
+   */
+  readonly requestTimeoutMs?: number;
 }
 export interface AppDependencies {
   readonly verifier: TokenVerifier;
@@ -25,10 +31,28 @@ export interface AppDependencies {
   readonly config: AppConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
+  /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
+  readonly ready?: () => Promise<boolean>;
 }
 export interface AppEnv {
-  Variables: { session: Session };
+  Variables: { session: Session; signal: AbortSignal; deadline: number };
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * The same database, with every transaction tied to one request's deadline: it sends no
+ * statement after the signal fires, and no statement or lock wait outlasts the time left.
+ */
+function withDeadline(db: ScopedDatabase, signal: AbortSignal, remainingMs: () => number): ScopedDatabase {
+  return { tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }) };
+}
+
+const unavailable = (signal: AbortSignal) => new Promise<never>((_, reject) => {
+  const fail = () => reject(new DatabaseUnavailable("aborted"));
+  if (signal.aborted) fail();
+  else signal.addEventListener("abort", fail, { once: true });
+});
 
 /** Client errors raised by Hono middleware keep their status; the code follows it. */
 const HTTP_ERROR_CODES: Partial<Record<number, ApiErrorCode>> = {
@@ -45,7 +69,35 @@ export function createApp(deps: AppDependencies) {
     maxAge: 600,
   }));
 
+  // Liveness: the process answers. Readiness: it can reach the database too.
   app.get("/healthz", (c) => c.json({ ok: true }));
+  const ready = deps.ready;
+  if (ready) {
+    app.get("/readyz", async (c) => (await ready().catch(() => false))
+      ? c.json({ ok: true })
+      : c.json(mapError(new DatabaseUnavailable("connect")).body, 503, { "Retry-After": "1", "Cache-Control": "no-store" }));
+  }
+
+  // A deadline per request, which also ends when the caller goes away.
+  const requestTimeoutMs = deps.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  app.use("/v1/*", async (c, next) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const clientGone = () => controller.abort();
+    const raw = c.req.raw.signal;
+    raw?.addEventListener("abort", clientGone, { once: true });
+    c.set("signal", controller.signal);
+    c.set("deadline", deps.clock.now().getTime() + requestTimeoutMs);
+    // Work still running after the deadline finishes on its own; nothing waits for it.
+    const work = next();
+    work.catch(() => undefined);
+    try {
+      await Promise.race([work, unavailable(controller.signal)]);
+    } finally {
+      clearTimeout(timer);
+      raw?.removeEventListener("abort", clientGone);
+    }
+  });
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -55,11 +107,12 @@ export function createApp(deps: AppDependencies) {
     const header = c.req.header("Authorization") ?? "";
     const match = /^Bearer ([A-Za-z0-9_\-.]+)$/.exec(header);
     if (!match) throw new Unauthenticated();
-    // Verify the token, then require a live Supabase session (sign-out deletes it) and a
+    // Verify the token, then require a live Supabase session (sign-out ends it) and a
     // membership in the claimed tenant (@zs/core authenticate, shared with the MCP server).
-    // Each read and write then re-checks the membership and its role.
+    // Each read and write then re-checks the membership and its role, all within the deadline.
+    const db = withDeadline(deps.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime());
     c.set("session", await authenticate(
-      { db: deps.db, clock: deps.clock, generateId: deps.generateId }, deps.verifier, deps.sessionCheck, match[1]!,
+      { db, clock: deps.clock, generateId: deps.generateId }, deps.verifier, deps.sessionCheck, match[1]!,
     ));
     await next();
   });
@@ -80,6 +133,7 @@ export function createApp(deps: AppDependencies) {
     }
     const mapped = mapError(error);
     if (mapped.status === 500) deps.onError?.(error);
+    if (mapped.status === 503) return c.json(mapped.body, 503, { "Retry-After": "1" });
     return c.json(mapped.body, mapped.status);
   });
   return app;
