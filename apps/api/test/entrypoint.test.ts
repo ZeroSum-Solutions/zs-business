@@ -139,7 +139,7 @@ describe("API entry point", () => {
         `SELECT count(*)::int AS n FROM pg_stat_activity
           WHERE datname = current_database() AND usename = 'zs_runtime' AND wait_event_type = 'Lock'`,
       )).rows[0]?.n;
-      await expect.poll(waiting, { timeout: 1500, intervals: [100] }).toBe(0);
+      await expect.poll(waiting, { timeout: 1500, interval: 100 }).toBe(0);
       await holder.query("ROLLBACK");
       // Once the lock is gone the same process serves again.
       const after = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });
