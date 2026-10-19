@@ -353,11 +353,17 @@ against the pinned Supabase Root 2021 CA.
    records and `/v1/me`. B gets 403 on every call, also for tenant A's ids. A missing token,
    a wrong issuer, a forged signature, a token minted with `JWT_SECRET` that names no live
    session, and a signed-out session all get 401. The Data API check reads the table list
-   from `supabase/migrations/` and from the catalog (`public` and `zs_internal`). For every
-   table, as `anon` and as user A, `/rest/v1` must refuse SELECT, INSERT, UPDATE and DELETE,
-   and user A must not call `record_action_and_event`. Only an explicit denial or an empty
-   result passes; an outage, an accepted write or a migration table missing from the catalog
-   fails (`src/data-api-probe.ts`). No probe can change a row. Write probes in SQL always roll
+   from `supabase/migrations/` and from the catalog (`public` and `zs_internal`). As `anon`
+   and as user A it first calls an RPC that does not exist: PostgREST checks the token first,
+   so only "no such function" (404 `PGRST202`) or "schema not exposed" (406 `PGRST106`) shows
+   the Data API accepted it. Then neither may call `record_action_and_event` (sent with
+   `Content-Profile` and `Accept-Profile` `public` and every argument), and for every table
+   `/rest/v1` must refuse SELECT, INSERT, UPDATE and DELETE. Only these denials pass: 42501
+   permission denied (401 or 403), `PGRST106` (406), `PGRST205` or `42P01` table not exposed
+   (404), and, for reads, updates and deletes, 200 with no rows. Rejected credentials (401, or
+   `PGRST300` to `PGRST303`) fail, since they prove nothing about authorization, and so do
+   an outage, an accepted write or a migration table missing from the catalog
+   (`src/data-api-probe.ts`). No probe can change a row. Write probes in SQL always roll
    back. The removal of the temporary member and of both users is checked too. Its header
    lists the environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication
    on preview.

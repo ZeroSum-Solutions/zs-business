@@ -38,8 +38,17 @@ function fakePostgrest(answer: (request: Seen) => Answer) {
 }
 
 const tableOf = (request: Seen) => decodeURIComponent(request.url.pathname.split("/").at(-1)!);
+const isRpc = (request: Seen) => request.url.pathname.startsWith("/rest/v1/rpc/");
+const isControl = (request: Seen) => request.url.pathname.startsWith("/rest/v1/rpc/zs_probe_missing_");
 const schemaOf = (request: Seen) => request.headers["Accept-Profile"] ?? request.headers["Content-Profile"];
 const isUser = (request: Seen) => request.headers.Authorization === `Bearer ${USER_TOKEN}`;
+
+/** PostgREST with public exposed: no such function for the control, permission denied for the action RPC, `tables` for the rest. */
+const withRpcs = (tables: (request: Seen) => Answer) => (request: Seen): Answer => {
+  if (isControl(request)) return { status: 404, body: { code: "PGRST202", message: "Could not find the function" } };
+  if (isRpc(request)) return { status: isUser(request) ? 403 : 401, body: { code: "42501", message: "permission denied" } };
+  return tables(request);
+};
 
 describe("tables to probe", () => {
   it("reads every table the migrations create, tenant_members included", async () => {
@@ -107,6 +116,22 @@ describe("evaluateDataApiReply", () => {
     ["insert", { status: 406, rows: null, code: "PGRST106" }, true, "refused"],
     ["update", { status: 401, rows: null, code: "42501" }, true, "refused"],
     ["delete", { status: 403, rows: null, code: "42501" }, true, "refused"],
+    ["select", { status: 404, rows: null, code: "42P01" }, true, "refused"],
+    ["rpc", { status: 403, rows: null, code: "42501" }, true, "refused"],
+    ["rpc", { status: 406, rows: null, code: "PGRST106" }, true, "refused"],
+    // A bad, expired or missing token proves nothing about authorization.
+    ["select", { status: 401, rows: null, code: "PGRST301" }, false, "credentials rejected"],
+    ["insert", { status: 401, rows: null, code: "PGRST302" }, false, "credentials rejected"],
+    ["delete", { status: 401, rows: null, code: "PGRST303" }, false, "credentials rejected"],
+    ["update", { status: 500, rows: null, code: "PGRST300" }, false, "credentials rejected"],
+    ["rpc", { status: 401, rows: null, code: "PGRST301" }, false, "credentials rejected"],
+    ["select", { status: 401, rows: null, code: null }, false, "credentials rejected"],
+    // Only the listed denials, with the status PostgREST sends for each.
+    ["select", { status: 404, rows: null, code: "PGRST202" }, false, "unexpected reply"],
+    ["rpc", { status: 404, rows: null, code: "PGRST202" }, false, "unexpected reply"],
+    ["select", { status: 400, rows: null, code: "PGRST100" }, false, "unexpected reply"],
+    ["select", { status: 403, rows: null, code: "PGRST106" }, false, "unexpected reply"],
+    ["update", { status: 406, rows: null, code: "PGRST116" }, false, "unexpected reply"],
     ["select", { status: 200, rows: 0, code: null }, true, "empty"],
     ["update", { status: 200, rows: 0, code: null }, true, "empty"],
     ["delete", { status: 200, rows: 0, code: null }, true, "empty"],
@@ -129,7 +154,7 @@ describe("runDataApiProbes against a fake PostgREST", () => {
   const tablesPromise = readMigrationTables(migrations);
   const run = async (answer: (request: Seen) => Answer, extra: { missingFromCatalog?: string[]; tables?: DataApiTable[] } = {}) => {
     const postgrest = fakePostgrest(answer);
-    const result = await runDataApiProbes({ ...context, fetch: postgrest.fetch, userToken: USER_TOKEN,
+    const result = await runDataApiProbes({ ...context, fetch: postgrest.fetch, userToken: USER_TOKEN, generateId: randomUUID,
       tables: extra.tables ?? await tablesPromise, ...(extra.missingFromCatalog ? { missingFromCatalog: extra.missingFromCatalog } : {}) });
     return { ...result, seen: postgrest.seen };
   };
@@ -138,51 +163,97 @@ describe("runDataApiProbes against a fake PostgREST", () => {
     const { ok, detail, seen } = await run(() => ({ status: 406, body: { code: "PGRST106", message: "Invalid schema" } }));
     expect(ok).toBe(true);
     expect(detail.probed).toBe(12);
-    expect(seen).toHaveLength(12 * 2 * 4);
+    // Per caller: the control and the action RPC, then four operations on each table.
+    expect(seen).toHaveLength(2 * 2 + 12 * 2 * 4);
+    const tableProbes = seen.filter((request) => !isRpc(request));
     for (const operation of ["GET", "POST", "PATCH", "DELETE"])
-      expect(seen.filter((request) => request.method === operation)).toHaveLength(24);
-    expect(seen.filter(isUser)).toHaveLength(48);
+      expect(tableProbes.filter((request) => request.method === operation)).toHaveLength(24);
+    expect(seen.filter(isUser)).toHaveLength(50);
+    expect(detail.control).toEqual({ anon: "406 PGRST106: token accepted", authenticated: "406 PGRST106: token accepted" });
     expect(seen.every((request) => request.headers.apikey === ANON_KEY && schemaOf(request) === "public")).toBe(true);
     expect(detail.tables["public.tenant_members"]!.authenticated.select).toBe("406 PGRST106: refused");
   });
 
   it("passes when public is exposed but RLS hides every row and refuses every insert", async () => {
-    const { ok } = await run((request) => request.method === "POST"
+    const { ok, detail } = await run(withRpcs((request) => request.method === "POST"
       ? { status: 403, body: { code: "42501", message: "new row violates row-level security policy" } }
-      : { status: 200, body: [] });
+      : { status: 200, body: [] }));
     expect(ok).toBe(true);
+    expect(detail.control).toEqual({ anon: "404 PGRST202: token accepted", authenticated: "404 PGRST202: token accepted" });
+    expect(detail.actionRpc).toEqual({ anon: "401 42501: refused", authenticated: "403 42501: refused" });
   });
 
   it("fails when the signed-in user can read tenant_members, naming the table, caller and operation", async () => {
-    const { ok, detail } = await run((request) =>
+    const { ok, detail } = await run(withRpcs((request) =>
       isUser(request) && request.method === "GET" && tableOf(request) === "tenant_members"
         ? { status: 200, body: [{ tenant_id: context.tenantA, email: "owner@example.com" }] }
-        : { status: 404, body: { code: "PGRST205" } });
+        : { status: 404, body: { code: "PGRST205" } }));
     expect(ok).toBe(false);
     expect(detail.failures).toEqual(["authenticated select public.tenant_members (200 1 rows: rows returned)"]);
   });
 
   it("fails on an accepted write, an outage, an unreachable API, missing catalog tables, or nothing to probe", async () => {
-    const insertAccepted = await run((request) => request.method === "POST" && tableOf(request) === "crm_contacts" && !isUser(request)
-      ? { status: 201, body: [{}] } : { status: 401, body: { code: "42501" } });
+    const insertAccepted = await run(withRpcs((request) => request.method === "POST" && tableOf(request) === "crm_contacts" && !isUser(request)
+      ? { status: 201, body: [{}] } : { status: 401, body: { code: "42501" } }));
     expect(insertAccepted.ok).toBe(false);
     expect(insertAccepted.detail.failures).toEqual(["anon insert public.crm_contacts (201 1 rows: write accepted)"]);
 
     const outage = await run(() => ({ status: 502, html: true }));
     expect(outage.ok).toBe(false);
-    expect(outage.detail.failures).toHaveLength(96);
+    expect(outage.detail.failures).toHaveLength(2 * 2 + 96);
 
     const unreachable = fakePostgrest(() => ({ status: 200 }));
-    const thrown = await runDataApiProbes({ ...context, userToken: USER_TOKEN, tables: [{ schema: "public", name: "tenants" }],
+    const thrown = await runDataApiProbes({ ...context, userToken: USER_TOKEN, generateId: randomUUID, tables: [{ schema: "public", name: "tenants" }],
       fetch: (async (...args: Parameters<typeof fetch>) => {
         await unreachable.fetch(...args);
         throw new TypeError("fetch failed");
       }) as typeof fetch });
     expect(thrown.ok).toBe(false);
-    expect(thrown.detail.failures[0]).toMatch(/^anon select public.tenants \(0 -: unexpected reply\)$/);
+    expect(thrown.detail.failures).toContain("anon select public.tenants (0 -: unexpected reply)");
 
-    const refused = () => ({ status: 404, body: { code: "PGRST205" } });
+    const refused = withRpcs(() => ({ status: 404, body: { code: "PGRST205" } }));
     expect((await run(refused, { missingFromCatalog: ["public.tenant_members"] })).ok).toBe(false);
     expect((await run(refused, { tables: [] })).ok).toBe(false);
+  });
+
+  it("fails when the Data API rejects the signed-in token, even though every request is 'refused'", async () => {
+    // An expired or forged user token: PostgREST answers 401 PGRST301 before any authorization.
+    const { ok, detail } = await run((request) => isUser(request)
+      ? { status: 401, body: { code: "PGRST301", message: "JWT expired" } }
+      : withRpcs(() => ({ status: 404, body: { code: "PGRST205" } }))(request));
+    expect(ok).toBe(false);
+    expect(detail.control.authenticated).toBe("401 PGRST301: credentials rejected");
+    expect(detail.failures[0]).toBe("authenticated control: the Data API did not accept the token (401 PGRST301: credentials rejected)");
+    expect(detail.failures).toContain("authenticated select public.tenant_members (401 PGRST301: credentials rejected)");
+    expect(detail.failures.filter((failure) => failure.startsWith("anon"))).toEqual([]);
+  });
+
+  it("fails the control on anything but 'no such function' or 'schema not exposed'", async () => {
+    const { ok, detail } = await run((request) => isControl(request) && !isUser(request)
+      ? { status: 200, body: [] }
+      : withRpcs(() => ({ status: 404, body: { code: "PGRST205" } }))(request));
+    expect(ok).toBe(false);
+    expect(detail.failures).toEqual(["anon control: the Data API did not accept the token (200 0 rows: unexpected reply)"]);
+  });
+
+  it("calls the action RPC in the public schema with every argument, as both callers, and fails when it runs", async () => {
+    const { ok, detail, seen } = await run((request) => tableOf(request) === "record_action_and_event" && isUser(request)
+      ? { status: 200, body: { id: "x" } }
+      : withRpcs(() => ({ status: 404, body: { code: "PGRST205" } }))(request));
+    expect(ok).toBe(false);
+    expect(detail.failures).toEqual(["authenticated rpc public.record_action_and_event (200 -: write accepted)"]);
+    const calls = seen.filter((request) => tableOf(request) === "record_action_and_event");
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call.method).toBe("POST");
+      expect(call.headers).toMatchObject({ apikey: ANON_KEY, "Content-Profile": "public", "Accept-Profile": "public" });
+      expect(Object.keys(call.body as object).sort()).toEqual([
+        "p_actor", "p_approval", "p_created_at", "p_event_id", "p_event_payload", "p_event_type", "p_id", "p_key",
+        "p_payload", "p_result", "p_target", "p_tenant", "p_type",
+      ]);
+      expect(call.body).toMatchObject({ p_tenant: context.tenantA, p_target: { tenantId: context.tenantA }, p_approval: { tenantId: context.tenantA } });
+    }
+    expect(calls.map(isUser).sort()).toEqual([false, true]);
+    expect(seen.filter(isControl).every((request) => request.headers["Content-Profile"] === "public")).toBe(true);
   });
 });

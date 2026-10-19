@@ -18,9 +18,10 @@
 // Prints one JSON report and exits 1 if any check fails.
 import { randomUUID } from "node:crypto";
 import process from "node:process";
-import { asService, assertRuntimeLogin, createScopedDatabase } from "@zs/db";
-import { readMigrationTables, runDataApiProbes, sendDataApiRequest, evaluateDataApiReply, tablesToProbe, type DataApiTable } from "../data-api-probe.js";
+import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
+import { readMigrationTables, runDataApiProbes, tablesToProbe, type DataApiTable } from "../data-api-probe.js";
 import { signDevToken } from "../dev-token.js";
+import { temporaryMember } from "../hosted-check-member.js";
 import {
   abandonedTransactionProbe, abandonGate, concurrentTenantProbe, hostedCheckArgs, poolerTransport, sessionContaminationProbe, transportGate,
 } from "../hosted-probes.js";
@@ -95,7 +96,8 @@ const signIn = (email: string) => signInWithPassword({ projectRef, anonKey }, em
 const emailA = `zs-check-a-${randomUUID()}@example.com`;
 const emailB = `zs-check-b-${randomUUID()}@example.com`;
 const created: string[] = [];
-let memberA: string | null = null;
+// Its id is fixed before the insert, so cleanup also covers an insert whose COMMIT reply was lost.
+const memberA = temporaryMember(service, tenantA, randomUUID);
 let tokenA = "";
 let tokenB = "";
 let userA = "";
@@ -104,11 +106,7 @@ try {
   created.push(userA);
   created.push(await admin.createUser({ email: emailB, password, appMetadata: { tenant_id: tenantB } }));
   // Staff: the least role that reads. Inserted as service_role, like provisioning, and removed below.
-  const memberId = randomUUID();
-  await asService(service, (tx) => tx.query(
-    "INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,$3,$4,'staff',now(),now())",
-    [tenantA, memberId, emailA, userA]));
-  memberA = memberId;
+  await memberA.add({ email: emailA, userId: userA });
   tokenA = await signIn(emailA);
   tokenB = await signIn(emailB);
 } catch (error) {
@@ -314,28 +312,17 @@ try {
   });
 
   // --- Data API (PostgREST) -------------------------------------------------------------
-  // As anon and as tenant A's signed-in member: every table from the migrations and the
+  // As anon and as tenant A's signed-in member: a positive control shows the Data API accepts
+  // each token, the action RPC refuses both, and every table from the migrations and the
   // catalog refuses SELECT, INSERT, UPDATE and DELETE (src/data-api-probe.ts).
-  await check("Data API: anon and tenant A's member are refused every table, every operation", async () => {
+  await check("Data API: accepts both tokens, and refuses anon and tenant A's member the action RPC and every table, every operation", async () => {
     const { tables, missingFromCatalog } = tablesToProbe(await readMigrationTables(new URL("../../../../supabase/migrations/", import.meta.url)), CATALOG_TABLES);
-    const probe = await runDataApiProbes({ fetch, supabaseUrl, anonKey, userToken: tokenA, tenantA, tenantB, tables, missingFromCatalog });
+    const probe = await runDataApiProbes({ fetch, supabaseUrl, anonKey, userToken: tokenA, tenantA, tenantB, tables, missingFromCatalog, generateId: randomUUID });
     return { ok: Boolean(tokenA) && probe.ok, detail: { signedIn: Boolean(tokenA), ...probe.detail } };
   });
-  await check("Data API: tenant A's member cannot call the action RPC", async () => {
-    const reply = await sendDataApiRequest(fetch, { url: `${supabaseUrl}/rest/v1/rpc/record_action_and_event`, init: {
-      method: "POST", headers: { apikey: anonKey, Authorization: `Bearer ${tokenA}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        p_tenant: tenantA, p_id: randomUUID(), p_actor: randomUUID(), p_type: "x", p_target: { tenantId: tenantA, id: randomUUID() },
-        p_payload: {}, p_approval: { tenantId: tenantA, id: randomUUID() }, p_key: randomUUID(), p_result: {}, p_created_at: new Date().toISOString(),
-        p_event_id: randomUUID(), p_event_type: "x", p_event_payload: {} }) } });
-    return { ok: Boolean(tokenA) && evaluateDataApiReply("rpc", reply).denied, detail: reply };
-  });
 } finally {
-  if (memberA !== null) {
-    const removed = await asService(service, (tx) => tx.query("DELETE FROM tenant_members WHERE tenant_id=$1 AND id=$2", [tenantA, memberA]))
-      .then((result) => result.rowCount === 1, () => false);
-    results.push({ name: "cleanup: the temporary member is removed", ok: removed, detail: { memberId: memberA } });
-  }
+  const removal = await memberA.remove();
+  if (removal) results.push({ name: "cleanup: the temporary member is removed", ok: removal.ok, detail: removal.detail });
   for (const userId of created) {
     const removed = await admin.deleteUser(userId).then(() => null, (error: Error) => redactSecrets(error.message));
     results.push({ name: "cleanup: a temporary Auth user is deleted", ok: removed === null, detail: { userId, error: removed } });

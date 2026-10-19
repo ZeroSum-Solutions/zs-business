@@ -7,6 +7,12 @@
 // No probe can change a row: INSERT sends only tenant_id (a random tenant B with no rows), which
 // RLS, a NOT NULL column or the tenants foreign key refuses before anything lands; UPDATE sets
 // tenant A's tenant_id to itself; DELETE matches only tenant B, which has no rows.
+//
+// A refusal only counts when the Data API accepted the caller's credentials: a bad or expired
+// token gets 401 for every request and so proves nothing about authorization. Before the
+// tables, each caller calls an RPC that does not exist; PostgREST checks the token first, so
+// "no such function" (or "schema not exposed") shows the token was accepted. Both callers also
+// call the action RPC record_action_and_event, which must refuse them.
 import { readdir, readFile } from "node:fs/promises";
 
 export interface DataApiTable {
@@ -27,8 +33,11 @@ export interface DataApiReply {
 
 export interface DataApiVerdict {
   readonly denied: boolean;
-  /** refused: an explicit PostgREST or privilege error; empty: 200 with no rows; otherwise why it fails. */
-  readonly reason: "refused" | "empty" | "rows returned" | "write accepted" | "unexpected reply";
+  /**
+   * refused: permission denied or not exposed; empty: 200 with no rows. Otherwise why it fails;
+   * "credentials rejected" is a 401 or JWT error, which says nothing about authorization.
+   */
+  readonly reason: "refused" | "empty" | "rows returned" | "write accepted" | "credentials rejected" | "unexpected reply";
 }
 
 // The name must be followed by its column list (or PARTITION OF / AS), so a format() template
@@ -94,22 +103,76 @@ export function dataApiRequest(table: DataApiTable, operation: DataApiOperation,
   return { url: `${base}?${tenant(context.tenantB)}`, init: { method: "DELETE", headers: write } };
 }
 
-const REFUSAL_STATUS = new Set([401, 403, 404, 406]);
-const REFUSAL_CODE = /^(PGRST\d+|42501)$/;
+/** PostgREST's JWT errors: no secret, a bad or expired token, no anonymous role, failed claims. */
+const CREDENTIAL_CODES = new Set(["PGRST300", "PGRST301", "PGRST302", "PGRST303"]);
 
 /**
- * Only an explicit denial counts: 401/403/404/406 carrying a PostgREST (PGRST...) or Postgres
- * privilege (42501) code, or, for reads, updates and deletes, 200 with an empty array (RLS
- * left nothing visible). Any accepted insert fails, and so does an outage (5xx, HTML, no code).
+ * The denials that count, by code and the status PostgREST sends with it: 42501 permission
+ * denied (401 for anon, 403 for a signed-in role, also RLS refusing a new row), PGRST106 schema
+ * not exposed (406), and PGRST205 or 42P01 table not exposed (404).
+ */
+const REFUSALS: Readonly<Record<string, readonly number[]>> = {
+  "42501": [401, 403],
+  PGRST106: [406],
+  PGRST205: [404],
+  "42P01": [404],
+};
+
+/** A caller's credentials were refused: a JWT error code, or a 401 that is not permission denied. */
+export function credentialsRejected(reply: DataApiReply): boolean {
+  return CREDENTIAL_CODES.has(reply.code ?? "") || (reply.status === 401 && reply.code !== "42501");
+}
+
+/**
+ * Only an explicit denial counts: one of REFUSALS, or, for reads, updates and deletes, 200
+ * with an empty array (RLS left nothing visible). Rejected credentials fail, since they prove
+ * nothing about authorization; so does any accepted insert or RPC call and any outage (5xx,
+ * HTML, no code) or other error.
  */
 export function evaluateDataApiReply(operation: DataApiOperation | "rpc", reply: DataApiReply): DataApiVerdict {
-  if (REFUSAL_STATUS.has(reply.status) && REFUSAL_CODE.test(reply.code ?? "")) return { denied: true, reason: "refused" };
+  if (credentialsRejected(reply)) return { denied: false, reason: "credentials rejected" };
+  if (REFUSALS[reply.code ?? ""]?.includes(reply.status)) return { denied: true, reason: "refused" };
   if (reply.status >= 200 && reply.status < 300) {
     if (operation === "insert" || operation === "rpc") return { denied: false, reason: "write accepted" };
     if (reply.status === 200 && reply.rows === 0) return { denied: true, reason: "empty" };
     if (reply.rows !== null && reply.rows > 0) return { denied: false, reason: "rows returned" };
   }
   return { denied: false, reason: "unexpected reply" };
+}
+
+/** The action RPC; the probe names its schema and sends every argument, so only a refusal stops it. */
+export function actionRpcRequest(bearer: string, context: DataApiContext, generateId: () => string): { url: string; init: RequestInit } {
+  const { tenantA } = context;
+  return { url: `${context.supabaseUrl}/rest/v1/rpc/record_action_and_event`, init: {
+    method: "POST",
+    headers: rpcHeaders(bearer, context),
+    body: JSON.stringify({
+      p_tenant: tenantA, p_id: generateId(), p_actor: generateId(), p_type: "x", p_target: { tenantId: tenantA, id: generateId() },
+      p_payload: {}, p_approval: { tenantId: tenantA, id: generateId() }, p_key: generateId(), p_result: {},
+      p_created_at: "2026-01-01T00:00:00.000Z", p_event_id: generateId(), p_event_type: "x", p_event_payload: {},
+    }),
+  } };
+}
+
+/** The positive control: an RPC that does not exist. Only a caller whose token PostgREST accepted gets past the JWT check. */
+export function controlRequest(bearer: string, context: DataApiContext, generateId: () => string): { url: string; init: RequestInit } {
+  const name = `zs_probe_missing_${generateId().replaceAll("-", "")}`;
+  return { url: `${context.supabaseUrl}/rest/v1/rpc/${name}`, init: { method: "POST", headers: rpcHeaders(bearer, context), body: "{}" } };
+}
+
+function rpcHeaders(bearer: string, context: DataApiContext): Record<string, string> {
+  return {
+    apikey: context.anonKey, Authorization: `Bearer ${bearer}`, Accept: "application/json", "Content-Type": "application/json",
+    "Content-Profile": "public", "Accept-Profile": "public",
+  };
+}
+
+/** The control passes on "no such function" (404 PGRST202) or "schema not exposed" (406 PGRST106), both sent after the token check. */
+export function evaluateControlReply(reply: DataApiReply): { accepted: boolean; reason: string } {
+  if (credentialsRejected(reply)) return { accepted: false, reason: "credentials rejected" };
+  if ((reply.status === 404 && reply.code === "PGRST202") || (reply.status === 406 && reply.code === "PGRST106"))
+    return { accepted: true, reason: "token accepted" };
+  return { accepted: false, reason: "unexpected reply" };
 }
 
 /** Send one request and reduce the answer to status, row count and error code (never the rows). */
@@ -127,28 +190,46 @@ export interface DataApiProbeOptions extends DataApiContext {
   readonly tables: readonly DataApiTable[];
   /** Migration tables the catalog lacks; any fails the probe. */
   readonly missingFromCatalog?: readonly string[];
+  /** Ids for the RPC arguments and the control's function name. */
+  readonly generateId: () => string;
 }
 
 type CallerResult = Record<DataApiOperation, string>;
+type Caller = "anon" | "authenticated";
 
-/** Every table, both callers, all four operations. `ok` only when every probe was denied. */
+const describeReply = (reply: DataApiReply, reason: string) =>
+  `${reply.status} ${reply.code ?? (reply.rows === null ? "-" : `${reply.rows} rows`)}: ${reason}`;
+
+/**
+ * Both callers: the positive control, the action RPC, then every table with all four
+ * operations. `ok` only when both controls show the token accepted and every probe was denied.
+ */
 export async function runDataApiProbes(options: DataApiProbeOptions) {
-  const callers = { anon: options.anonKey, authenticated: options.userToken } as const;
+  const callers: Record<Caller, string> = { anon: options.anonKey, authenticated: options.userToken };
   const failures: string[] = [];
-  const tables: Record<string, Record<keyof typeof callers, CallerResult>> = {};
+  const send = (request: { url: string; init: RequestInit }) =>
+    sendDataApiRequest(options.fetch, request).catch((): DataApiReply => ({ status: 0, rows: null, code: null }));
+  const control = {} as Record<Caller, string>;
+  const actionRpc = {} as Record<Caller, string>;
+  for (const [caller, bearer] of Object.entries(callers) as [Caller, string][]) {
+    const controlReply = await send(controlRequest(bearer, options, options.generateId));
+    const controlVerdict = evaluateControlReply(controlReply);
+    control[caller] = describeReply(controlReply, controlVerdict.reason);
+    if (!controlVerdict.accepted) failures.push(`${caller} control: the Data API did not accept the token (${control[caller]})`);
+    const rpcReply = await send(actionRpcRequest(bearer, options, options.generateId));
+    const rpcVerdict = evaluateDataApiReply("rpc", rpcReply);
+    actionRpc[caller] = describeReply(rpcReply, rpcVerdict.reason);
+    if (!rpcVerdict.denied) failures.push(`${caller} rpc public.record_action_and_event (${actionRpc[caller]})`);
+  }
+  const tables: Record<string, Record<Caller, CallerResult>> = {};
   for (const table of options.tables) {
-    const row = {} as Record<keyof typeof callers, CallerResult>;
-    for (const [caller, bearer] of Object.entries(callers) as [keyof typeof callers, string][]) {
+    const row = {} as Record<Caller, CallerResult>;
+    for (const [caller, bearer] of Object.entries(callers) as [Caller, string][]) {
       const result = {} as CallerResult;
       for (const operation of DATA_API_OPERATIONS) {
-        let reply: DataApiReply;
-        try {
-          reply = await sendDataApiRequest(options.fetch, dataApiRequest(table, operation, bearer, options));
-        } catch {
-          reply = { status: 0, rows: null, code: null };
-        }
+        const reply = await send(dataApiRequest(table, operation, bearer, options));
         const verdict = evaluateDataApiReply(operation, reply);
-        result[operation] = `${reply.status} ${reply.code ?? (reply.rows === null ? "-" : `${reply.rows} rows`)}: ${verdict.reason}`;
+        result[operation] = describeReply(reply, verdict.reason);
         if (!verdict.denied) failures.push(`${caller} ${operation} ${tableKey(table)} (${result[operation]})`);
       }
       row[caller] = result;
@@ -158,6 +239,6 @@ export async function runDataApiProbes(options: DataApiProbeOptions) {
   const missing = options.missingFromCatalog ?? [];
   return {
     ok: options.tables.length > 0 && failures.length === 0 && missing.length === 0,
-    detail: { probed: options.tables.length, failures, missingFromCatalog: missing, tables },
+    detail: { probed: options.tables.length, failures, missingFromCatalog: missing, control, actionRpc, tables },
   };
 }
