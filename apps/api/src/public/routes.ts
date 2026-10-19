@@ -1,8 +1,7 @@
 // public-intake.md P-2..P-11: anonymous booking routes. They never see an owner token; the
 // tenant and page come only from the signed key in the path, and the session builds the
 // principal itself. Everything here stays independent of the owner auth middleware.
-import type { Context } from "hono";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { NotFound, ValidationFailed } from "@zs/contracts";
 import { apiErrorBody, createPublicSession, verifyBookingKey, type BookingKeySecrets, type EdgeDependencies } from "@zs/core";
@@ -10,6 +9,7 @@ import { jsonBody } from "../routes/request.js";
 import { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./limiter.js";
 import { bookerAssets } from "./assets.js";
 import { addressBucket, createClientAddress, type ClientIpConfig } from "./client-ip.js";
+import type { AppEnv } from "../app.js";
 
 /** P-10: an injected bot check; the default accepts every request. */
 export type BotCheck = (input: { token: string | null; address: string }) => Promise<boolean>;
@@ -39,14 +39,22 @@ export class RateLimited extends Error {
   }
 }
 
-export function publicRoutes(edge: EdgeDependencies, config: PublicIntakeConfig) {
+/**
+ * `requestEdge` gives one request's dependencies, whose database work ends at that request's
+ * deadline; `edge` serves what outlives a request, such as the limiter's clock.
+ */
+export function publicRoutes(
+  edge: EdgeDependencies,
+  config: PublicIntakeConfig,
+  requestEdge: (c: Context<AppEnv>) => EdgeDependencies,
+) {
   const limits: RateLimits = { ...DEFAULT_RATE_LIMITS, ...config.limits };
   const limiter = config.limiter ?? createMemoryRateLimiter(edge.clock);
   const botCheck = config.botCheck ?? allowAllBots;
   const clientAddress = createClientAddress(config.clientIp);
 
   /** Charge the address (and, for a valid key, the tenant) before any database work. */
-  const admit = (c: Context, kind: "read" | "write") => {
+  const admit = (c: Context<AppEnv>, kind: "read" | "write") => {
     const socket = (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress;
     const address = clientAddress(socket, (name) => c.req.header(name));
     const ref = verifyBookingKey(config.keySecrets, c.req.param("key") ?? "");
@@ -59,10 +67,10 @@ export function publicRoutes(edge: EdgeDependencies, config: PublicIntakeConfig)
     if (!taken.ok) throw new RateLimited(taken.retryAfterSeconds);
     // P-4: a forged key looks exactly like an unpublished page.
     if (!ref) throw new NotFound();
-    return { address, session: createPublicSession(edge, ref) };
+    return { address, session: createPublicSession(requestEdge(c), ref) };
   };
 
-  const api = new Hono()
+  const api = new Hono<AppEnv>()
     .use("*", async (c, next) => {
       await next();
       c.header("Cache-Control", "no-store");

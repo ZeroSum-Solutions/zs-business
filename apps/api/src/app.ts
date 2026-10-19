@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
@@ -79,9 +79,10 @@ export function createApp(deps: AppDependencies) {
       : c.json(mapError(new DatabaseUnavailable("connect")).body, 503, { "Retry-After": "1", "Cache-Control": "no-store" }));
   }
 
-  // A deadline per request, which also ends when the caller goes away.
+  // A deadline per request, which also ends when the caller goes away. Anonymous public
+  // requests get the same one, so a lost reply cannot hold a pool connection open.
   const requestTimeoutMs = deps.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  app.use("/v1/*", async (c, next) => {
+  const deadline: MiddlewareHandler<AppEnv> = async (c, next) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
     const clientGone = () => controller.abort();
@@ -98,7 +99,9 @@ export function createApp(deps: AppDependencies) {
       clearTimeout(timer);
       raw?.removeEventListener("abort", clientGone);
     }
-  });
+  };
+  app.use("/v1/*", deadline);
+  app.use("/public/v1/*", deadline);
 
   const edge = {
     db: deps.db,
@@ -108,9 +111,12 @@ export function createApp(deps: AppDependencies) {
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
   };
+  /** The edge for one request: its database work stops at the request's deadline. */
+  const requestEdge = (c: Context<AppEnv>) =>
+    ({ ...edge, db: withDeadline(edge.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime()) });
   // Anonymous routes sit outside /v1, so the owner auth middleware never runs for them.
   if (deps.publicIntake) {
-    const routes = publicRoutes(edge, deps.publicIntake);
+    const routes = publicRoutes(edge, deps.publicIntake, requestEdge);
     app.route("/public/v1", routes.api);
     app.route("/", routes.site);
   }
@@ -124,7 +130,7 @@ export function createApp(deps: AppDependencies) {
     const match = /^Bearer ([A-Za-z0-9_\-.]+)$/.exec(header);
     if (!match) throw new Unauthenticated();
     const principal = await deps.verifier.verify(match[1]!);
-    c.set("session", createSession({ ...edge, db: withDeadline(edge.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime()) }, principal));
+    c.set("session", createSession(requestEdge(c), principal));
     await next();
   });
   app.route("/v1/booking", bookingRoutes);
@@ -144,7 +150,9 @@ export function createApp(deps: AppDependencies) {
     }
     const mapped = mapError(error);
     if (mapped.status === 500) deps.onError?.(error);
-    if (mapped.status === 503) return c.json(mapped.body, 503, { "Retry-After": "1" });
+    // A public route's own no-store header is not set when the deadline answers for it.
+    if (mapped.status === 503)
+      return c.json(mapped.body, 503, { "Retry-After": "1", ...(c.req.path.startsWith("/public/") ? { "Cache-Control": "no-store" } : {}) });
     return c.json(mapped.body, mapped.status);
   });
   return app;

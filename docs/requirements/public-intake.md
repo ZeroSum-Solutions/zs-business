@@ -1,9 +1,11 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 3 (2026-10-19). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 4 (2026-10-19). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
+Revision 4 (review r4): P-14 puts public requests under the request deadline and answers a
+busy idempotency key with a retryable 503.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -189,7 +191,11 @@ The booker freezes each attempt's Idempotency-Key and exact body on the first su
 keeps them until a definitive reply (a 2xx with a body, or a 4xx). After a network error, a
 5xx or a non-JSON reply it shows the details as sent and offers only "Try again" with the
 same key and body, and slot refreshes wait, so a committed request replays instead of
-looking taken.
+looking taken. Public requests run under the same request deadline as `/v1`: a COMMIT
+whose reply is lost answers 503 (`commit_unknown`) instead of holding a pool connection,
+and a same-key request whose wait for the idempotency key lock times out answers 503
+(`in_progress`), because the earlier request may still commit. The booker keeps the attempt
+on both.
 
 **P-15. Tests.** Real Postgres under `zs_runtime`: forged keys, forged and foreign
 resource IDs, an unknown body `tenantId`, enumeration (identical replies for unknown,

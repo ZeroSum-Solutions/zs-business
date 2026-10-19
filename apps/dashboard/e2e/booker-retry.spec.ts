@@ -121,14 +121,21 @@ async function pickTimeAndFill(page: Page, timeIndex = 0) {
 
 test.use({ timezoneId: "UTC" });
 
-for (const failure of ["gateway 502", "lost connection"] as const) {
+// "API 503" is the API's own answer when the request deadline passes with the COMMIT reply
+// lost (commit_unknown), or when the same key is still held by an earlier request (in_progress).
+for (const failure of ["gateway 502", "lost connection", "API 503"] as const) {
   test(`retries a committed request after a ${failure} with the same key and body`, async ({ page }) => {
     const mock = await mockBooker(page, [
       async (route, entry) => {
         // The request commits and holds the slot, then the reply never makes it back.
         mock.take((JSON.parse(entry.body) as { startsAt: string }).startsAt);
         if (failure === "gateway 502") await route.fulfill({ status: 502, contentType: "text/html", body: "<h1>Bad gateway</h1>" });
-        else await route.abort("connectionreset");
+        else if (failure === "API 503") {
+          await route.fulfill({
+            status: 503, contentType: "application/json", headers: { "Retry-After": "1" },
+            body: JSON.stringify({ error: { code: "Unavailable", message: "Service unavailable", details: {} } }),
+          });
+        } else await route.abort("connectionreset");
       },
       (route, entry) => mock.confirmed(route, entry),
     ]);
