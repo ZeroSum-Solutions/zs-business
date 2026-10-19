@@ -24,6 +24,9 @@ const shipped: Record<string, string> = {
   "20261017170000_booking.sql": "a58d0d558bb560fbccc61a15726ad628132caefa77781a1414b9e142cd62d093",
   "20261017170100_crm.sql": "4b90ad716bce286e447d56c84edbb11b2d33dbbc8ff1b69c494219086e583ec9",
   "20261018090000_function_hardening.sql": "104a8c4f9dd25a76eadd4500e92f524535967d153a6b4863ff623e7a6466dca2",
+  "20261018120000_booking_multi_resource.sql": "715a1a92788f566562c6cff962583a3ca7de2bce8f2d4789c483699641a6ba14",
+  // Frozen ahead of landing (REVIEW r1 on #9): any later intake change ships as a new migration.
+  "20261018200000_public_intake.sql": "33ed637933c8bcd7e40966b858cafa532ffd5043515c5f16211af88f98bc2ddd",
 };
 /** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
 const beforeHardening = Object.keys(shipped).filter((name) =>
@@ -65,8 +68,12 @@ async function schemaState(pool: Pool) {
   return state;
 }
 
+/** Main before M3 public intake: bookings, contacts and resources exist, intake does not. */
+const beforeIntake = Object.keys(shipped).filter((name) => name < "20261018200000");
+
 it.each([
   ["main", Object.keys(shipped)],
+  ["main before public intake", beforeIntake],
   ["main before the hardening follow-ups", beforeHardening],
 ])("upgrades a database migrated at %s to the same schema as a fresh install", async (_, baseline) => {
   const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-main-"));
@@ -87,7 +94,7 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(5);
+    expect(upgraded.functions).toHaveLength(6);
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });
@@ -172,3 +179,48 @@ it("migrates over an existing booking resource whose zone is a lowercase IANA na
 it("refuses to migrate over a stored unknown zone, though forced RLS hides rows from the migrator", async () => {
   await expect(migrateOverStoredZone("Foo/Bar")).rejects.toThrow(/holds unknown time zones/);
 });
+
+it("adds public intake over a pre-M3 database that holds bookings and contacts", async () => {
+  const partial = await mkdtemp(join(tmpdir(), "zs-migrations-pre-m3-"));
+  try {
+    for (const name of beforeIntake) await copyFile(new URL(name, migrations), join(partial, name));
+    const after = await withTestDatabase(async (database) => {
+      const tenantId = randomUUID();
+      const resourceId = randomUUID();
+      await asService(database.servicePool, async (tx) => {
+        await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Tenant')", [tenantId]);
+        await tx.query(
+          `INSERT INTO booking_resources (tenant_id,id,name,time_zone,slot_length_minutes,slot_step_minutes,
+             buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+           VALUES ($1,$2,'Room','UTC',60,60,0,0,0,20160)`, [tenantId, resourceId]);
+        await tx.query(
+          `INSERT INTO bookings (tenant_id,id,resource_id,starts_at,ends_at,occupied_starts_at,occupied_ends_at,
+             buffer_before_minutes,buffer_after_minutes,status,created_at)
+           VALUES ($1,$2,$3,'2026-10-19T09:00Z','2026-10-19T10:00Z','2026-10-19T09:00Z','2026-10-19T10:00Z',0,0,
+             'confirmed','2026-10-18T09:00Z')`, [tenantId, randomUUID(), resourceId]);
+        await tx.query(
+          `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,created_at,updated_at)
+           VALUES ($1,$2,'Mira Rowe','mira@haldenrowe.example','2026-10-18T09:00Z','2026-10-18T09:00Z')`,
+          [tenantId, randomUUID()]);
+      });
+      // Every remaining migration, as the non-superuser migrator hosted databases use.
+      for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql") && name >= "20261018200000"))
+        await copyFile(new URL(name, migrations), join(partial, name));
+      const url = new URL(database.url);
+      url.username = database.migrator!;
+      const migrator = new Pool({ connectionString: url.href, max: 1 });
+      try {
+        await migrate(migrator, pathToFileURL(`${partial}/`));
+      } finally {
+        await migrator.end();
+      }
+      return asService(database.servicePool, async (tx) => ({
+        bookings: (await tx.query("SELECT source, intake_item_id FROM bookings")).rows,
+        contacts: (await tx.query("SELECT display_name FROM crm_contacts")).rows,
+      }));
+    }, undefined, { migrations: pathToFileURL(`${partial}/`), nonSuperuserMigrator: true });
+    expect(after).toEqual({ bookings: [{ source: "owner", intake_item_id: null }], contacts: [{ display_name: "Mira Rowe" }] });
+  } finally {
+    await rm(partial, { recursive: true, force: true });
+  }
+}, 30000);

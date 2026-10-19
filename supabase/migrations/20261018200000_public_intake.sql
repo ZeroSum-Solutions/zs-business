@@ -16,6 +16,34 @@ CREATE TABLE public.booking_pages (
   PRIMARY KEY (tenant_id, id)
 );
 
+-- P-8: a disclosure version names one text. Changing the text without a new version would
+-- let consent given against version N be read as agreement to words the visitor never saw,
+-- so the text is immutable per version.
+CREATE FUNCTION public.booking_pages_disclosure_versioned() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF NEW.disclosure_text IS DISTINCT FROM OLD.disclosure_text
+     AND NEW.disclosure_version IS NOT DISTINCT FROM OLD.disclosure_version THEN
+    RAISE EXCEPTION 'A changed disclosure text needs a new disclosure version'
+      USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'booking_pages',
+        COLUMN = 'disclosure_text', CONSTRAINT = 'booking_pages_disclosure_versioned';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER booking_pages_disclosure_versioned
+  BEFORE UPDATE OF disclosure_text, disclosure_version ON public.booking_pages
+  FOR EACH ROW EXECUTE FUNCTION public.booking_pages_disclosure_versioned();
+REVOKE ALL ON FUNCTION public.booking_pages_disclosure_versioned() FROM PUBLIC;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+    REVOKE ALL ON FUNCTION public.booking_pages_disclosure_versioned() FROM anon;
+  END IF;
+END $$;
+-- Same owner as every invoker function (20261018090000); CREATE only for the transfer.
+GRANT CREATE ON SCHEMA public TO zs_function_owner;
+ALTER FUNCTION public.booking_pages_disclosure_versioned() OWNER TO zs_function_owner;
+REVOKE CREATE ON SCHEMA public FROM zs_function_owner;
+
 CREATE TABLE public.booking_page_resources (
   tenant_id uuid NOT NULL REFERENCES public.tenants(tenant_id),
   page_id uuid NOT NULL,
@@ -69,6 +97,9 @@ CREATE TABLE public.intake_item_consent (
   purpose text NOT NULL CONSTRAINT intake_item_consent_purpose_length CHECK (char_length(purpose) BETWEEN 1 AND 100),
   disclosure_version text NOT NULL
     CONSTRAINT intake_item_consent_disclosure_length CHECK (char_length(disclosure_version) BETWEEN 1 AND 50),
+  -- The exact text shown with that version (P-8), so the evidence never depends on the page row.
+  disclosure_text text NOT NULL
+    CONSTRAINT intake_item_consent_disclosure_text_length CHECK (char_length(disclosure_text) BETWEEN 1 AND 2000),
   source text NOT NULL CONSTRAINT intake_item_consent_source_length CHECK (char_length(source) BETWEEN 1 AND 200),
   recorded_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, intake_item_id, channel),
