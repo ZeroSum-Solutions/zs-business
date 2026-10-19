@@ -1,6 +1,6 @@
 /**
- * Same-origin check for the dashboard's own routes. Live mode spends a server-held token on
- * every proxied call, so a request another site makes the browser send must not pass.
+ * Same-origin check for the dashboard's own routes. Live mode spends the signed-in person's
+ * session on every proxied call, so a request another site makes the browser send must not pass.
  */
 
 /**

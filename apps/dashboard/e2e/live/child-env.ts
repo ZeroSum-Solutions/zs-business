@@ -37,6 +37,15 @@ export function assertThrowawayDatabaseEnv(env: Env, database: string): void {
   if (!THROWAWAY_DATABASE.test(database)) throw new Error(`e2e:live database must be a zs_e2e_* name, not ${database}`);
   for (const [name, value] of Object.entries(env)) {
     if (!isDatabaseVariable(name)) continue;
+    // The dashboard's Supabase Auth settings: the run's fake auth server on loopback, and its key.
+    if (name === "SUPABASE_ANON_KEY") continue;
+    if (name === "SUPABASE_URL") {
+      const url = URL.parse(value ?? "");
+      if (url?.protocol !== "http:" || !LOOPBACK.has(url.hostname.toLowerCase()) || url.pathname !== "/" || url.search) {
+        throw new Error("SUPABASE_URL must be the run's fake auth server on loopback");
+      }
+      continue;
+    }
     if (/^PG[A-Z]/.test(name)) throw new Error(`e2e:live children must not get ${name}`);
     let url: URL;
     try {

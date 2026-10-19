@@ -101,6 +101,8 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   identity_mismatch: "That email or phone is already on another customer record.",
   idempotency_key_reused: "This request was already used for a different change.",
   concurrent_update: "Someone saved a change at the same moment. Try again.",
+  last_owner: "A business needs at least one owner. Make someone else an owner first.",
+  member_exists: "That email is already on the team.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */

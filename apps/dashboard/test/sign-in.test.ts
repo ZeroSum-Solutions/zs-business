@@ -1,189 +1,233 @@
 import { describe, expect, it } from "vitest";
 import { proxyApiRequest } from "../src/lib/server/api-proxy";
-import { AttemptLimiter, checkSessionValue, clientAddress, DIRECT_ADDRESS, SESSION_COOKIE, type PilotGateConfig } from "../src/lib/server/pilot-gate";
-import { signIn, signOut } from "../src/lib/server/sign-in";
-import { GATE } from "./helpers/gate";
+import { AttemptLimiter, attemptLimitsFromEnv, clientAddress, DIRECT_ADDRESS } from "../src/lib/server/rate-limit";
+import { confirmSignIn, requestSignInLink, signOut } from "../src/lib/server/sign-in";
+import { AUTH_COOKIE, PILOT_COOKIE } from "../src/lib/server/supabase";
+import { createLiveHarness, Jar, linkRequest, ORIGIN, sameOrigin, setCookies, signInThroughLink } from "./helpers/live";
 
-const ORIGIN = "http://127.0.0.1:3218";
 const NOW = new Date("2026-10-18T12:00:00.000Z");
 const LIMITS = { windowMs: 15 * 60 * 1000, perAddress: 5, global: 30 };
+const ask = (email: string, headers: Record<string, string> = {}, limiter = new AttemptLimiter(LIMITS), harness = createLiveHarness()) =>
+  requestSignInLink(linkRequest(email, undefined, headers), harness.setup, limiter, NOW);
+const open = (harness: ReturnType<typeof createLiveHarness>, url: string, cookie = "") =>
+  confirmSignIn(new Request(url, { headers: cookie ? { Cookie: cookie } : {} }), harness.setup);
 
-function attempt(code: string, headers: Record<string, string> = {}, url = `${ORIGIN}/api/sign-in`) {
-  return new Request(url, {
-    method: "POST",
-    body: JSON.stringify({ code }),
-    headers: { "Content-Type": "application/json", Host: new URL(url).host, Origin: new URL(url).origin, "Sec-Fetch-Site": "same-origin", "X-Forwarded-For": "203.0.113.7", ...headers },
-  });
-}
-
-/** An attempt whose body arrives a moment later, as a slow or deliberate client sends it. */
-function slowAttempt(code: string, headers: Record<string, string> = {}) {
-  const bytes = new TextEncoder().encode(JSON.stringify({ code }));
-  const body = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-  return new Request(`${ORIGIN}/api/sign-in`, {
-    method: "POST",
-    body,
-    duplex: "half",
-    headers: { "Content-Type": "application/json", Host: new URL(ORIGIN).host, Origin: ORIGIN, "Sec-Fetch-Site": "same-origin", "X-Forwarded-For": "203.0.113.7", ...headers },
-  } as RequestInit);
-}
-
-const setup = (config: PilotGateConfig = GATE) => ({ ok: true as const, config });
-/** Behind a trusted proxy, so X-Forwarded-For names the caller. */
-const proxied = () => setup({ ...GATE, trustProxy: true });
-const cookieValue = (response: Response) => /^zs_dashboard_session=([^;]*)/.exec(response.headers.get("set-cookie") ?? "")?.[1] ?? null;
-
-describe("pilot sign-in", () => {
-  it("refuses a wrong code with 401 and sets no cookie", async () => {
-    const response = await signIn(attempt("not-the-code-at-all"), setup(), new AttemptLimiter(LIMITS), NOW);
-    expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: "wrong_code" });
-    expect(response.headers.get("set-cookie")).toBeNull();
-    expect(response.headers.get("cache-control")).toBe("no-store");
-  });
-
-  it("sets an httpOnly, SameSite=Strict, signed and expiring cookie for the right code", async () => {
-    const response = await signIn(attempt(GATE.accessCode), setup(), new AttemptLimiter(LIMITS), NOW);
+describe("email sign-in link", () => {
+  it("asks Supabase for a link back to /auth/confirm, never creating an account", async () => {
+    const harness = createLiveHarness();
+    const response = await requestSignInLink(linkRequest(" Owner@Example.com ", "/customers"), harness.setup, new AttemptLimiter(LIMITS), NOW);
     expect(response.status).toBe(204);
-    const header = response.headers.get("set-cookie")!;
-    expect(header).toMatch(new RegExp(`^${SESSION_COOKIE}=v1\\.`));
-    expect(header).toContain("HttpOnly");
-    expect(header).toContain("SameSite=Strict");
-    expect(header).toContain("Path=/");
-    expect(header).toContain(`Max-Age=${12 * 60 * 60}`);
-    // Plain http on loopback: a Secure cookie would never come back.
-    expect(header).not.toContain("Secure");
-    const value = cookieValue(response)!;
-    expect(checkSessionValue(value, GATE, NOW)).toBe("valid");
-    expect(checkSessionValue(value, GATE, new Date(NOW.getTime() + 12 * 60 * 60 * 1000))).toBe("expired");
-
-    // The proxy lets that cookie through.
-    const proxied = await proxyApiRequest(
-      new Request(`${ORIGIN}/api/v1/crm/contacts`, { headers: { Cookie: `${SESSION_COOKIE}=${value}` } }),
-      ["v1", "crm", "contacts"],
-      { apiUrl: "http://api.internal", token: "t", gate: setup(), fetch: async () => Response.json({ items: [] }) },
-    );
-    expect(proxied.status).toBe(200);
+    expect(response.headers.get("cache-control")).toMatch(/\bno-store\b/);
+    const link = new URL(harness.gotrue.lastLink("owner@example.com")!);
+    expect(`${link.origin}${link.pathname}`).toBe(`${ORIGIN}/auth/confirm`);
+    expect(link.searchParams.get("next")).toBe("/customers");
   });
 
-  it("marks the cookie Secure over https, and trusts X-Forwarded-Proto only behind a trusted proxy", async () => {
-    const https = await signIn(attempt(GATE.accessCode, {}, "https://app.example.com/api/sign-in"), setup(), new AttemptLimiter(LIMITS), NOW);
-    expect(https.headers.get("set-cookie")).toContain("Secure");
-    const forwarded = { "X-Forwarded-Proto": "https" };
-    const untrusted = await signIn(attempt(GATE.accessCode, forwarded), setup(), new AttemptLimiter(LIMITS), NOW);
-    expect(untrusted.headers.get("set-cookie")).not.toContain("Secure");
-    const trusted = await signIn(attempt(GATE.accessCode, forwarded), setup({ ...GATE, trustProxy: true }), new AttemptLimiter(LIMITS), NOW);
-    expect(trusted.headers.get("set-cookie")).toContain("Secure");
+  it("answers an address with no account exactly like one with an account", async () => {
+    const harness = createLiveHarness();
+    const unknown = await requestSignInLink(linkRequest("nobody@example.com"), harness.setup, new AttemptLimiter(LIMITS), NOW);
+    expect(unknown.status).toBe(204);
+    expect(await unknown.text()).toBe("");
+    expect(harness.gotrue.lastLink("nobody@example.com")).toBeNull();
+    // supabase-js sent create_user: false, so the fake refused instead of creating one.
+    expect(harness.gotrue.calls.filter((call) => call.path === "/auth/v1/otp")).toHaveLength(1);
   });
 
-  it("trips the per-address limit after repeated wrong codes, and then refuses even the right one", async () => {
-    const limiter = new AttemptLimiter(LIMITS);
-    for (let index = 0; index < LIMITS.perAddress; index += 1) {
-      expect((await signIn(attempt(`wrong-${index}`), proxied(), limiter, NOW)).status).toBe(401);
+  it("signs in when the link is opened, with httpOnly SameSite=Strict cookies, and sends the browser to next", async () => {
+    const harness = createLiveHarness();
+    await requestSignInLink(linkRequest("owner@example.com", "/customers?tab=pipeline"), harness.setup, new AttemptLimiter(LIMITS), NOW);
+    // Opened on another device: no cookie from the browser that asked.
+    const opened = await open(harness, harness.gotrue.lastLink("owner@example.com")!);
+    expect(opened.status).toBe(303);
+    expect(opened.headers.get("location")).toBe("/customers?tab=pipeline");
+    expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
+    const cookies = setCookies(opened);
+    const session = [...cookies].filter(([name, cookie]) => name.startsWith(AUTH_COOKIE) && cookie.value);
+    expect(session.length).toBeGreaterThan(0);
+    for (const [, cookie] of session) {
+      expect(cookie.header).toMatch(/HttpOnly/);
+      expect(cookie.header).toMatch(/SameSite=Strict/);
+      expect(cookie.header).toMatch(/Path=\//);
+      // Plain http on loopback: a Secure cookie would never come back.
+      expect(cookie.header).not.toMatch(/Secure/);
     }
-    const limited = await signIn(attempt("wrong-again"), proxied(), limiter, NOW);
+    expect(harness.store.sessions.size).toBe(1);
+  });
+
+  it("marks the cookies Secure over https, and trusts X-Forwarded-Proto only behind a trusted proxy", async () => {
+    const secure = async (trustProxy: boolean, url: string, headers: Record<string, string> = {}) => {
+      const harness = createLiveHarness({ trustProxy });
+      await requestSignInLink(linkRequest("owner@example.com"), harness.setup, new AttemptLimiter(LIMITS), NOW);
+      const link = new URL(harness.gotrue.lastLink("owner@example.com")!);
+      const opened = await confirmSignIn(new Request(`${url}${link.search}`, { headers }), harness.setup);
+      return [...setCookies(opened).values()].every((cookie) => /Secure/.test(cookie.header));
+    };
+    expect(await secure(false, "https://app.example.com/auth/confirm")).toBe(true);
+    expect(await secure(false, `${ORIGIN}/auth/confirm`, { "X-Forwarded-Proto": "https" })).toBe(false);
+    expect(await secure(true, `${ORIGIN}/auth/confirm`, { "X-Forwarded-Proto": "https" })).toBe(true);
+  });
+
+  it("builds the link from the host the browser used, behind a trusted proxy from X-Forwarded-Host", async () => {
+    const harness = createLiveHarness({ trustProxy: true });
+    const headers = { Host: "localhost:3000", "X-Forwarded-Host": "app.example.com", "X-Forwarded-Proto": "https", Origin: "https://app.example.com" };
+    expect((await requestSignInLink(linkRequest("owner@example.com", "/", headers), harness.setup, new AttemptLimiter(LIMITS), NOW)).status).toBe(204);
+    expect(harness.gotrue.lastLink("owner@example.com")).toMatch(/^https:\/\/app\.example\.com\/auth\/confirm\?/);
+  });
+
+  it("refuses a used, unknown or malformed link and sends the browser back to sign in", async () => {
+    const harness = createLiveHarness();
+    await requestSignInLink(linkRequest("owner@example.com", "/calendar"), harness.setup, new AttemptLimiter(LIMITS), NOW);
+    const link = harness.gotrue.lastLink("owner@example.com")!;
+    expect((await open(harness, link)).status).toBe(303);
+    const reused = await open(harness, link);
+    expect(reused.headers.get("location")).toBe("/sign-in?error=link&next=%2Fcalendar");
+    expect(setCookies(reused).size).toBe(0);
+    for (const query of ["token_hash=nope&type=email", "type=email", "token_hash=abc&type=signup", "token_hash=abc"]) {
+      expect((await open(harness, `${ORIGIN}/auth/confirm?${query}`)).headers.get("location"), query).toBe("/sign-in?error=link");
+    }
+    expect(harness.store.sessions.size).toBe(1);
+  });
+
+  it("only ever sends the browser to a page on this site", async () => {
+    const harness = createLiveHarness();
+    for (const next of ["//evil.example/", "/\t/evil.example/", "https://evil.example/", "/.//evil.example/", "/%2e//evil.example/", "javascript:alert(1)"]) {
+      await requestSignInLink(linkRequest("owner@example.com", next), harness.setup, new AttemptLimiter(LIMITS), NOW);
+      const location = (await open(harness, harness.gotrue.lastLink("owner@example.com")!)).headers.get("location")!;
+      expect(location, next).toMatch(/^\/(?![/\\])/);
+      // A tampered link's next is checked again on the way in.
+      const tampered = new URL(harness.gotrue.lastLink("owner@example.com")!);
+      tampered.searchParams.set("next", next);
+      expect((await open(harness, tampered.href)).headers.get("location"), next).toMatch(/^\/sign-in\?error=link(&next=%2F(?!%2F))?/);
+    }
+  });
+
+  it("refuses bad requests before calling Supabase", async () => {
+    const harness = createLiveHarness();
+    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 100 });
+    expect((await ask("owner@example.com", { Origin: "https://evil.example" }, limiter, harness)).status).toBe(403);
+    expect((await ask("owner@example.com", { "Sec-Fetch-Site": "cross-site" }, limiter, harness)).status).toBe(403);
+    expect((await ask("owner@example.com", { "Content-Type": "text/plain" }, limiter, harness)).status).toBe(415);
+    expect((await ask("not-an-email", {}, limiter, harness)).status).toBe(400);
+    const get = new Request(`${ORIGIN}/api/sign-in`, { headers: sameOrigin() });
+    expect((await requestSignInLink(get, harness.setup, limiter, NOW)).status).toBe(405);
+    expect(harness.gotrue.calls).toHaveLength(0);
+  });
+
+  it("says Supabase is unavailable without charging the attempt, and passes its rate limit on", async () => {
+    const harness = createLiveHarness();
+    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 1 });
+    harness.config.fetch = async () => { throw new TypeError("fetch failed"); };
+    expect((await ask("owner@example.com", {}, limiter, harness)).status).toBe(502);
+    expect(limiter.retryAfter(DIRECT_ADDRESS, NOW.getTime())).toBe(0);
+    harness.config.fetch = async () => Response.json({ code: 429, error_code: "over_email_send_rate_limit", msg: "slow down" }, { status: 429 });
+    const limited = await ask("owner@example.com", {}, limiter, harness);
     expect(limited.status).toBe(429);
-    expect(Number(limited.headers.get("retry-after"))).toBe(15 * 60);
-    const right = await signIn(attempt(GATE.accessCode), proxied(), limiter, NOW);
-    expect(right.status).toBe(429);
-    expect(right.headers.get("set-cookie")).toBeNull();
-
-    // Another address still gets in; this one does once the window has passed.
-    expect((await signIn(attempt(GATE.accessCode, { "X-Forwarded-For": "198.51.100.4" }), proxied(), limiter, NOW)).status).toBe(204);
-    const later = new Date(NOW.getTime() + LIMITS.windowMs + 1000);
-    expect((await signIn(attempt(GATE.accessCode), proxied(), limiter, later)).status).toBe(204);
+    expect(limited.headers.get("retry-after")).toBe("60");
   });
 
-  it("trips the global limit when wrong codes come from many addresses", async () => {
-    const limiter = new AttemptLimiter(LIMITS);
-    for (let index = 0; index < LIMITS.global; index += 1) {
-      const response = await signIn(attempt(`wrong-${index}`, { "X-Forwarded-For": `192.0.2.${index}` }), proxied(), limiter, NOW);
-      expect(response.status).toBe(401);
-    }
-    expect((await signIn(attempt(GATE.accessCode, { "X-Forwarded-For": "192.0.2.250" }), proxied(), limiter, NOW)).status).toBe(429);
-  });
-
-  it("refuses cross-site and non-JSON attempts before counting them, and counts a malformed body", async () => {
-    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 2 });
-    expect((await signIn(attempt(GATE.accessCode, { Origin: "https://evil.example" }), setup(), limiter, NOW)).status).toBe(403);
-    expect((await signIn(attempt(GATE.accessCode, { "Sec-Fetch-Site": "cross-site" }), setup(), limiter, NOW)).status).toBe(403);
-    expect((await signIn(attempt(GATE.accessCode, { "Content-Type": "text/plain" }), setup(), limiter, NOW)).status).toBe(415);
-    // A body is read only after its attempt is reserved, so a malformed one still spends it.
-    const garbled = new Request(`${ORIGIN}/api/sign-in`, { method: "POST", body: "{", headers: { "Content-Type": "application/json" } });
-    expect((await signIn(garbled, setup(), limiter, NOW)).status).toBe(400);
-    expect((await signIn(attempt(GATE.accessCode), setup(), limiter, NOW)).status).toBe(204);
-    expect((await signIn(attempt("wrong-code-here"), setup(), limiter, NOW)).status).toBe(401);
-    expect((await signIn(attempt(GATE.accessCode), setup(), limiter, NOW)).status).toBe(429);
-  });
-
-  it("gives the attempt back only when the sign-in succeeds", async () => {
-    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 2 });
-    for (let index = 0; index < 6; index += 1) {
-      expect((await signIn(attempt(GATE.accessCode), setup(), limiter, NOW)).status).toBe(204);
-    }
-    expect((await signIn(attempt("wrong-code-one"), setup(), limiter, NOW)).status).toBe(401);
-    expect((await signIn(attempt("wrong-code-two"), setup(), limiter, NOW)).status).toBe(401);
-    expect((await signIn(attempt(GATE.accessCode), setup(), limiter, NOW)).status).toBe(429);
-  });
-
-  it("lets at most the per-address limit past when attempts arrive together with slow bodies", async () => {
-    const limiter = new AttemptLimiter(LIMITS);
-    const statuses = await Promise.all(Array.from({ length: 40 }, (_, index) => signIn(slowAttempt(`wrong-${index}`), proxied(), limiter, NOW).then((response) => response.status)));
-    expect(statuses.filter((status) => status !== 429)).toHaveLength(LIMITS.perAddress);
-    expect(statuses.filter((status) => status === 401)).toHaveLength(LIMITS.perAddress);
-  });
-
-  it("lets at most the global limit past when many addresses attempt together with slow bodies", async () => {
-    const limiter = new AttemptLimiter(LIMITS);
-    const statuses = await Promise.all(Array.from({ length: 80 }, (_, index) =>
-      signIn(slowAttempt(`wrong-${index}`, { "X-Forwarded-For": `192.0.2.${index}` }), proxied(), limiter, NOW).then((response) => response.status)));
-    expect(statuses.filter((status) => status !== 429)).toHaveLength(LIMITS.global);
-  });
-
-  it("ignores X-Forwarded-For without a trusted proxy, so forged addresses share one key", async () => {
-    const limiter = new AttemptLimiter(LIMITS);
-    for (let index = 0; index < LIMITS.perAddress; index += 1) {
-      expect((await signIn(attempt(`wrong-${index}`, { "X-Forwarded-For": `198.51.100.${index}` }), setup(), limiter, NOW)).status).toBe(401);
-    }
-    expect((await signIn(attempt(GATE.accessCode, { "X-Forwarded-For": "198.51.100.200" }), setup(), limiter, NOW)).status).toBe(429);
-    expect((await signIn(attempt(GATE.accessCode, { "X-Forwarded-For": "" }), setup(), limiter, NOW)).status).toBe(429);
-  });
-
-  it("keys on the right-most X-Forwarded-For entry behind a trusted proxy", async () => {
-    const forwarded = (sent: string) => ({ "X-Forwarded-For": `${sent}, 203.0.113.9` });
-    expect(clientAddress(attempt("x", forwarded("1.2.3.4")), true)).toBe("203.0.113.9");
-    expect(clientAddress(attempt("x", forwarded("1.2.3.4")), false)).toBe(DIRECT_ADDRESS);
-    expect(clientAddress(attempt("x", { "X-Forwarded-For": "" }), true)).toBe(DIRECT_ADDRESS);
-
-    // What the caller sends to the left of the proxy's entry changes nothing.
-    const limiter = new AttemptLimiter(LIMITS);
-    for (let index = 0; index < LIMITS.perAddress; index += 1) {
-      expect((await signIn(attempt(`wrong-${index}`, forwarded(`10.0.0.${index}`)), proxied(), limiter, NOW)).status).toBe(401);
-    }
-    expect((await signIn(attempt(GATE.accessCode, forwarded("10.0.0.99")), proxied(), limiter, NOW)).status).toBe(429);
-    expect((await signIn(attempt(GATE.accessCode, { "X-Forwarded-For": "10.0.0.1, 203.0.113.10" }), proxied(), limiter, NOW)).status).toBe(204);
-  });
-
-  it("has no gate in demo mode and refuses to sign in when live mode is not set up", async () => {
-    expect((await signIn(attempt("anything-at-all-123"), null, new AttemptLimiter(LIMITS), NOW)).status).toBe(404);
-    const unset = await signIn(attempt("anything-at-all-123"), { ok: false, problem: "no code" }, new AttemptLimiter(LIMITS), NOW);
+  it("has nothing to sign in to in demo mode and refuses when live mode is not set up", async () => {
+    expect((await requestSignInLink(linkRequest("owner@example.com"), null, new AttemptLimiter(LIMITS), NOW)).status).toBe(404);
+    const unset = await requestSignInLink(linkRequest("owner@example.com"), { ok: false, problem: "no key" }, new AttemptLimiter(LIMITS), NOW);
     expect(unset.status).toBe(503);
     expect(await unset.json()).toEqual({ error: "misconfigured" });
+    expect((await confirmSignIn(new Request(`${ORIGIN}/auth/confirm?token_hash=x&type=email`), null)).headers.get("location")).toBe("/");
+  });
+});
+
+describe("sign-out", () => {
+  const signOutRequest = (cookie: string, headers: Record<string, string> = {}) =>
+    new Request(`${ORIGIN}/api/sign-out`, { method: "POST", headers: { Cookie: cookie, ...sameOrigin(headers) } });
+
+  it("revokes the session in Supabase and clears the cookies, so a replayed cookie gets 401", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    const stolen = jar.header();
+    const response = await signOut(signOutRequest(stolen), harness.setup);
+    expect(response.status).toBe(204);
+    expect(harness.store.sessions.size).toBe(0);
+    jar.apply(response);
+    expect(jar.values.size).toBe(0);
+    // The old cookies still hold an unexpired access token; the API refuses its session.
+    const replay = await proxyApiRequest(new Request(`${ORIGIN}/api/v1/crm/contacts`, { headers: { Cookie: stolen } }), ["v1", "crm", "contacts"], harness.setup);
+    expect(replay.status).toBe(401);
   });
 
-  it("signs out by clearing the cookie", async () => {
-    const response = signOut(new Request(`${ORIGIN}/api/sign-out`, { method: "POST", headers: { Origin: ORIGIN, Host: "127.0.0.1:3218" } }), {});
-    expect(response.status).toBe(204);
-    const header = response.headers.get("set-cookie")!;
-    expect(header).toMatch(new RegExp(`^${SESSION_COOKIE}=;`));
-    expect(header).toContain("Max-Age=0");
-    expect(header).toContain("HttpOnly");
-    expect(signOut(new Request(`${ORIGIN}/api/sign-out`, { method: "POST", headers: { Origin: "https://evil.example" } }), {}).status).toBe(403);
+  it("clears the cookies even when Supabase cannot be reached, and says so", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    const fetchOk = harness.config.fetch!;
+    harness.config.fetch = async (input, init) => {
+      if (String(input instanceof Request ? input.url : input).includes("/logout")) throw new TypeError("fetch failed");
+      return fetchOk(input, init);
+    };
+    const response = await signOut(signOutRequest(jar.header()), harness.setup);
+    expect(response.status).toBe(502);
+    expect(new Jar().apply(response).values.size).toBe(0);
+    expect([...setCookies(response).values()].every((cookie) => cookie.value === null)).toBe(true);
+  });
+
+  it("clears the retired pilot cookie, works without a session or settings, and refuses other sites", async () => {
+    const harness = createLiveHarness();
+    const pilot = await signOut(signOutRequest(`${PILOT_COOKIE}=v1.1.a.b`), harness.setup);
+    expect(pilot.status).toBe(204);
+    expect(setCookies(pilot).get(PILOT_COOKIE)?.value).toBeNull();
+    const unset = await signOut(signOutRequest(`${AUTH_COOKIE}.0=x; ${PILOT_COOKIE}=y`), { ok: false, problem: "unset" });
+    expect(unset.status).toBe(204);
+    expect([...setCookies(unset).keys()].sort()).toEqual([`${AUTH_COOKIE}.0`, PILOT_COOKIE]);
+    expect((await signOut(signOutRequest("", {}), null)).status).toBe(204);
+    expect((await signOut(signOutRequest("", { Origin: "https://evil.example" }), harness.setup)).status).toBe(403);
+  });
+});
+
+describe("sign-in rate limits", () => {
+  /** Behind a trusted proxy, so X-Forwarded-For names the caller. */
+  const proxied = () => createLiveHarness({ trustProxy: true });
+
+  it("trips the per-address limit, then the window passes", async () => {
+    const harness = proxied();
+    const limiter = new AttemptLimiter(LIMITS);
+    const from = (address: string, at = NOW) =>
+      requestSignInLink(linkRequest("owner@example.com", "/", { "X-Forwarded-For": address }), harness.setup, limiter, at).then((response) => response.status);
+    for (let index = 0; index < LIMITS.perAddress; index += 1) expect(await from("203.0.113.7")).toBe(204);
+    const limited = await requestSignInLink(linkRequest("owner@example.com", "/", { "X-Forwarded-For": "203.0.113.7" }), harness.setup, limiter, NOW);
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("retry-after"))).toBe(15 * 60);
+    expect(await from("198.51.100.4")).toBe(204);
+    expect(await from("203.0.113.7", new Date(NOW.getTime() + LIMITS.windowMs + 1000))).toBe(204);
+  });
+
+  it("trips the global limit across many addresses", async () => {
+    const harness = proxied();
+    const limiter = new AttemptLimiter(LIMITS);
+    for (let index = 0; index < LIMITS.global; index += 1) {
+      expect((await requestSignInLink(linkRequest(`x${index}@example.com`, "/", { "X-Forwarded-For": `192.0.2.${index}` }), harness.setup, limiter, NOW)).status).toBe(204);
+    }
+    expect((await requestSignInLink(linkRequest("owner@example.com", "/", { "X-Forwarded-For": "192.0.2.250" }), harness.setup, limiter, NOW)).status).toBe(429);
+  });
+
+  it("counts a malformed body, and lets at most the limit past when requests arrive together", async () => {
+    const harness = createLiveHarness();
+    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 2 });
+    const garbled = new Request(`${ORIGIN}/api/sign-in`, { method: "POST", body: "{", headers: { "Content-Type": "application/json", ...sameOrigin() } });
+    expect((await requestSignInLink(garbled, harness.setup, limiter, NOW)).status).toBe(400);
+    expect((await ask("owner@example.com", {}, limiter, harness)).status).toBe(204);
+    expect((await ask("owner@example.com", {}, limiter, harness)).status).toBe(429);
+
+    const together = new AttemptLimiter(LIMITS);
+    const statuses = await Promise.all(Array.from({ length: 40 }, () => ask("owner@example.com", {}, together, harness).then((response) => response.status)));
+    expect(statuses.filter((status) => status !== 429)).toHaveLength(LIMITS.perAddress);
+  });
+
+  it("ignores X-Forwarded-For without a trusted proxy and keys on its right-most entry behind one", () => {
+    const request = (value: string) => linkRequest("a@example.com", "/", { "X-Forwarded-For": value });
+    expect(clientAddress(request("1.2.3.4, 203.0.113.9"), true)).toBe("203.0.113.9");
+    expect(clientAddress(request("1.2.3.4, 203.0.113.9"), false)).toBe(DIRECT_ADDRESS);
+    expect(clientAddress(request(""), true)).toBe(DIRECT_ADDRESS);
+  });
+
+  it("reads its limits from env, falling back on bad values", () => {
+    expect(attemptLimitsFromEnv({})).toEqual(LIMITS);
+    expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "50", DASHBOARD_SIGN_IN_GLOBAL: "200" })).toEqual({ ...LIMITS, perAddress: 50, global: 200 });
+    expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "0", DASHBOARD_SIGN_IN_GLOBAL: "lots" })).toEqual(LIMITS);
   });
 });

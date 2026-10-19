@@ -50,7 +50,7 @@ describe("bundle secret check", () => {
 
   it("collects the token, the JWT secret and extra values, skipping short ones", () => {
     expect(secretValues({ ZS_API_TOKEN: jwt, JWT_SECRET: secret, ZS_BUNDLE_SECRETS: `short\n${secret}x` })).toEqual([jwt, secret, `${secret}x`]);
-    // The pilot gate's code and session secret are server-only too.
-    expect(secretValues({ DASHBOARD_ACCESS_CODE: `${secret}-code`, DASHBOARD_SESSION_SECRET: `${secret}-session` })).toEqual([`${secret}-code`, `${secret}-session`]);
+    // The Supabase anon key stays on the server too.
+    expect(secretValues({ SUPABASE_ANON_KEY: `${secret}-anon` })).toEqual([`${secret}-anon`]);
   });
 });

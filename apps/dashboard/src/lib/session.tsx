@@ -14,10 +14,13 @@ import { useApiRuntime } from "./api/react";
  */
 export type Session =
   | { status: "loading" }
-  | { status: "signed_in"; tenantId: string; userId: string }
-  | { status: "signed_out"; reason: "expired" | "signed_out" }
-  /** `misconfigured`: live mode without the pilot gate's settings; the server refuses to serve. */
+  | { status: "signed_in"; tenantId: string; userId: string; role: "owner" | "staff" }
+  /** `no_access`: signed in, but not (or no longer) a member of this business. */
+  | { status: "signed_out"; reason: SignedOutReason }
+  /** `misconfigured`: live mode without the Supabase settings; the server refuses to serve. */
   | { status: "unavailable"; misconfigured?: boolean };
+
+export type SignedOutReason = "expired" | "signed_out" | "no_access";
 
 interface SessionValue {
   session: Session;
@@ -28,8 +31,8 @@ interface SessionValue {
 
 const SessionContext = createContext<SessionValue | null>(null);
 
-const SessionBody = z.object({ tenantId: z.string().min(1), userId: z.string().min(1) });
-const DEMO_SESSION: Session = { status: "signed_in", tenantId: DEMO_TENANT_ID, userId: "demo-owner" };
+const SessionBody = z.object({ tenantId: z.string().min(1), userId: z.string().min(1), role: z.enum(["owner", "staff"]) });
+const DEMO_SESSION: Session = { status: "signed_in", tenantId: DEMO_TENANT_ID, userId: "demo-owner", role: "owner" };
 
 declare global {
   interface Window {
@@ -42,10 +45,11 @@ async function fetchSession(): Promise<Session> {
   try {
     const response = await fetch("/api/session", { cache: "no-store", credentials: "same-origin" });
     if (response.status === 401) {
-      // No session cookie at all is "signed out"; a stale or forged one is an ended session.
+      // No session cookie at all is "signed out"; an ended or revoked session is "expired".
       const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
       return { status: "signed_out", reason: body?.error === "signed_out" ? "signed_out" : "expired" };
     }
+    if (response.status === 403) return { status: "signed_out", reason: "no_access" };
     if (response.status === 503) {
       const body = (await response.json().catch(() => null)) as { error?: unknown } | null;
       return { status: "unavailable", misconfigured: body?.error === "misconfigured" };
@@ -77,8 +81,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback((reason: "expired" | "signed_out") => {
     setSession((current) => (current.status === "signed_out" ? current : { status: "signed_out", reason }));
-    // The pilot session cookie is httpOnly, so only the server can clear it. The screen
-    // changes at once either way; a failed request leaves a cookie that still expires.
+    // The session cookies are httpOnly, so only the server can clear them, and it revokes the
+    // session in Supabase too. The screen changes at once either way.
     if (mode === "live" && reason === "signed_out") {
       void fetch("/api/sign-out", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
     }

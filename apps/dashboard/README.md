@@ -35,20 +35,25 @@ loopback only). Its global setup (`e2e/live/global-setup.ts`):
 
 1. creates a throwaway `zs_e2e_*` database;
 2. runs `@zs/api seed:demo` with a random `JWT_SECRET` (migrations, the `zs_runtime` login,
-   the Halden & Rowe seed and a 7-day dev JWT). It takes the owner from that JWT and signs
-   one-hour tokens (`role` authenticated, a run-specific `iss`, always an `iat`) for the
-   owner and for a "second person" in the same business. The second token is only a
-   signed claim: that user id has no membership row. The API trusts the token's tenant
-   claim, which is all the conflict tests need; it is not a second real account;
-3. starts `@zs/api` on port 8798 as `zs_runtime` with `JWT_ISSUER` set,
+   the local auth stub, the Halden & Rowe seed with its owner as a member, and a 7-day dev
+   JWT). It adds a staff member (`staff@example.com`) and a signed-up person who belongs to
+   no business to the auth stub, and signs one-hour tokens (`role` authenticated, a
+   run-specific `iss`, always an `iat`, and a live `session_id` in `auth.sessions`) for the
+   owner, the staff member and the outsider. The staff token makes the conflicting writes;
+3. serves a fake Supabase Auth (`e2e/live/fake-gotrue.ts`) on a free loopback port. It
+   answers the GoTrue endpoints the dashboard uses (`/otp`, `/verify`, `/token`, `/logout`,
+   `/user`), signs access tokens with the run's secret and keeps sessions in the run's
+   `auth.sessions` stub (`e2e/live/pg-auth-store.ts`), so the API sees a sign-out at once.
+   It sends no email: it keeps the last link per address at `GET /__test/last-link`;
+4. starts `@zs/api` on port 8798 as `zs_runtime` with `JWT_ISSUER` set,
    `JWT_MAX_TTL_SECONDS=3600` and `JWT_CLOCK_SKEW_SECONDS=60`, the production defaults;
-4. builds the dashboard into `.next-live/` with `ZS_API_URL` and the owner token as
-   `ZS_API_TOKEN` (server-only), and serves it on `127.0.0.1:3218` with a random
-   `DASHBOARD_ACCESS_CODE` and `DASHBOARD_SESSION_SECRET` for this run (given to `next start`
-   only, not the build). It fails if the build output holds any token, the JWT secret, the
-   access code or the session secret. Every test's `page` signs in through `/sign-in` first
-   (`e2e/live/fixtures.ts`); `anonymousPage` and the bare `request` context never do;
-5. snapshots the seeded bookings, contacts and deals into a `zs_e2e` schema. Before each
+5. builds the dashboard into `.next-live/` with `ZS_API_URL`, `SUPABASE_URL` (the fake) and
+   a random `SUPABASE_ANON_KEY` (all server-only), with the sign-in limits raised for the
+   run, and serves it on `127.0.0.1:3218`. It fails if the build output holds any token,
+   the JWT secret or the anon key. Every test's `page` signs in the way a person does: it
+   asks for a link at `/sign-in` and opens it (`e2e/live/fixtures.ts`); `anonymousPage` and
+   the bare `request` context never sign in;
+6. snapshots the seeded bookings, contacts and deals into a `zs_e2e` schema. Before each
    test the `seededRows` fixture (`e2e/live/fixtures.ts`, `e2e/live/reset.ts`) deletes
    rows added since and restores every deal's stage and revision, so tests do not depend
    on order. It refuses any database that is not a loopback `zs_e2e_*` one.
@@ -57,21 +62,26 @@ No child process inherits the shell's environment (`e2e/live/child-env.ts`): eac
 `PATH`, `HOME`, locale and terminal variables plus what setup sets. Before each start,
 setup checks that every database variable (`*DATABASE*`, `*_DB_*`, `POSTGRES*`,
 `SUPABASE*`) names the run's `zs_e2e_*` database on loopback, and refuses any libpq `PG*`
-variable. So a `RUNTIME_DATABASE_URL` in your shell cannot reach the seed or the API.
+variable. The one exception is `SUPABASE_URL` (with its anon key), which must be the run's
+fake auth server on loopback. So a `RUNTIME_DATABASE_URL` in your shell cannot reach the seed or the API.
 
 The live run also checks that the API refuses the 7-day seed token and tokens with the
-wrong role, no issuer, no `iat` or a lifetime one second over the cap. It checks that the
+wrong role, no issuer, no `iat`, a lifetime one second over the cap or a signed-out
+session (401), and a signed-in person who is not a member (403); that staff can read the
+calendar but not the team list. It checks that the
 browser makes no request to the API origin and sends no `Authorization` header, that an
-anonymous caller, a forged cookie and a caller's own bearer token all get 401 from the proxy
-and `/api/session`, that a visitor signs in at `/sign-in` and out again (the cookie is
-httpOnly and `SameSite=Strict`, and the proxy refuses the browser after sign-out), that the
+anonymous caller, the old pilot cookie and a caller's own bearer token all get 401 from the
+proxy and `/api/session`, that an unknown address gets the same answer as the owner's and
+no link, that a visitor signs in by email link and out again (the `zs-auth` cookies are
+httpOnly and `SameSite=Strict`, a link works once, and after sign-out cookies copied
+before it get 401), that the
 proxy refuses a cross-site POST and a forged `X-Forwarded-Host`, that a failed reload after
 a deal conflict keeps the move off, that slots for an unknown calendar answer 403 with the
 same body the demo adapter sends, and that a booking whose answer was dropped is retried
 with the same `Idempotency-Key` and replayed by the API.
 
 The tests make the conflicting writes (a booking for the chosen time, a re-save of a deal)
-through the API with the second token. Teardown stops both servers, drops the
+through the API with the staff token. Teardown stops the servers, drops the
 database and deletes `.next-live/` and `test-results/live/`, also when setup fails.
 Server logs go to `test-results/live/` with every JWT replaced by `[redacted-jwt]`
 (`e2e/live/redact.ts`); set `ZS_LIVE_KEEP_LOGS=1` to keep them. Setup also keeps them when
@@ -85,45 +95,52 @@ second production build plus the live run would push that job past about four mi
 All data goes through one typed client in `src/lib/api/`. Components use the hooks in
 `src/lib/queries.ts` and never import the demo adapter.
 
-- `ZS_API_URL` set (with `ZS_API_TOKEN`): live mode. The browser calls the same-origin
-  proxy `/api/v1/...` (`src/app/api/[...path]/route.ts`, `src/lib/server/api-proxy.ts`),
-  which adds `Authorization: Bearer $ZS_API_TOKEN` on the server and forwards to
-  `apps/api`. Both variables are server-only; the build only learns
-  `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET and POST to `/v1/booking/*` and
-  `/v1/crm/*`, only `Accept`, `Content-Type` and `Idempotency-Key`, refuses cross-site
-  callers and non-JSON POSTs, and answers `no-store`. A request whose `Sec-Fetch-Site` is
-  present and not `same-origin` is refused, and so is an `Origin` that is not the request's
-  `Host`. `X-Forwarded-Host` counts instead of `Host` only with `DASHBOARD_TRUST_PROXY=1`.
-- Pilot gate (`src/lib/server/pilot-gate.ts`, `src/lib/server/sign-in.ts`): live mode
-  serves only a browser that signed in at `/sign-in` with the shared access code. Live mode
-  needs `DASHBOARD_ACCESS_CODE` (16+ characters) and `DASHBOARD_SESSION_SECRET` (32+
-  characters); while either is missing or short, the proxy, `/api/session` and sign-in
-  answer 503 and the server log says which. `POST /api/sign-in` compares the code in
-  constant time and sets `zs_dashboard_session`: httpOnly, `SameSite=Strict`, `Path=/`,
-  `Secure` over https, valid for `DASHBOARD_SESSION_TTL_SECONDS` (default 12 hours). The
-  value is an expiry and a nonce, HMAC-signed with a key made from the session secret and
-  the access code, so changing either signs everyone out. Without a valid cookie the proxy
-  and `/api/session` answer 401 and never attach the token. Sign-in attempts are rate
-  limited in memory: 5 per address and 30 in total per 15 minutes, then 429 with
-  `Retry-After`, even for the right code. Each attempt is reserved before its body is read,
-  so parallel requests cannot outrun the limit, and only a successful sign-in gives its
-  attempt back. The address comes from the right-most `X-Forwarded-For` entry only with
-  `DASHBOARD_TRUST_PROXY=1` (the trusted proxy appends it). Without that, anyone can forge
-  the header, so every caller shares one "direct" key: 5 attempts per 15 minutes for
-  everyone together, inside the total of 30. "Sign out" posts `/api/sign-out`, which clears
-  the cookie in that browser; a copied cookie stays valid until it expires or until the
-  access code or session secret is rotated, and rotating either one is the way to revoke
-  every session. The signed-out screen links to `/sign-in?next=<page>`; after sign-in,
-  `next` leads only to a page on this site (`src/lib/safe-next.ts`). Demo mode has no gate.
+- `ZS_API_URL` set: live mode. The browser calls the same-origin proxy `/api/v1/...`
+  (`src/app/api/[...path]/route.ts`, `src/lib/server/api-proxy.ts`), which sends the
+  signed-in person's own Supabase access token as `Authorization: Bearer` and forwards to
+  `apps/api`. The API checks the token, that its session is still live in Supabase Auth,
+  and the person's membership and role on every request. All settings are server-only; the
+  build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST and DELETE
+  to `/v1/booking/*`, `/v1/crm/*`, `/v1/me` and `/v1/members*`, only `Accept`,
+  `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POSTs, and
+  answers `no-store`. A request whose `Sec-Fetch-Site` is present and not `same-origin` is
+  refused, and so is an `Origin` that is not the request's `Host`. `X-Forwarded-Host`
+  counts instead of `Host` only with `DASHBOARD_TRUST_PROXY=1`.
+- Sign-in (`src/lib/server/supabase.ts`, `src/lib/server/sign-in.ts`): Supabase Auth with
+  an email link, through `@supabase/ssr` on the server only. Live mode needs `SUPABASE_URL`
+  and `SUPABASE_ANON_KEY`; while either is missing, the proxy, `/api/session` and sign-in
+  answer 503 and the server log says which. The anon key never reaches the browser.
+  - `POST /api/sign-in` `{ email, next? }` asks Supabase to email a link
+    (`shouldCreateUser: false`: people join only by invitation) and always answers 204, so
+    it never tells whether an address has an account. The link goes to `/auth/confirm` on
+    the host the browser used (after the same-origin check), so the Supabase redirect allow
+    list must hold only this dashboard's URL. Requests are rate limited in memory, 5 per
+    address and 30 in total per 15 minutes by default (`DASHBOARD_SIGN_IN_PER_ADDRESS`,
+    `DASHBOARD_SIGN_IN_GLOBAL`), then 429 with `Retry-After`. Each attempt is reserved
+    before its body is read, so parallel requests cannot outrun the limit; one Supabase
+    could not take is given back. The address comes from the right-most `X-Forwarded-For`
+    entry only with `DASHBOARD_TRUST_PROXY=1`; otherwise every caller shares one key.
+  - `GET /auth/confirm?token_hash=…&type=email&next=…` verifies the link with Supabase and
+    sets the session cookies: `zs-auth` (split into `zs-auth.0`, `zs-auth.1`, … when long),
+    httpOnly, `SameSite=Strict`, `Path=/`, `Secure` over https. It then redirects to
+    `next`, which leads only to a page on this site (`src/lib/safe-next.ts`). A used,
+    expired or forged link goes back to `/sign-in?error=link`. The Magic Link email
+    template must link to `{{ .RedirectTo }}&token_hash={{ .TokenHash }}&type=email`, so
+    the link works on any device.
+  - The server refreshes the access token from the refresh token when it is near expiry
+    and writes the new cookies on that response. When Supabase refuses the session, or the
+    API answers 401, the cookies are cleared and the browser shows the signed-out screen.
+  - "Sign out" posts `/api/sign-out`, which revokes the session in Supabase
+    (`signOut({ scope: "local" })`: this session only) and clears the cookies. The API
+    checks `auth.sessions` on every request, so cookies copied before sign-out get 401 at
+    once. If Supabase cannot be reached the cookies are still cleared and the answer is 502.
+  - The retired pilot cookie `zs_dashboard_session` opens nothing: any request carrying it
+    gets 401 (unless it also has a live session) and the cookie is expired.
   `build` runs `scripts/bundle-secrets.ts`, which fails if `.next/static` or a prerendered
-  page holds a JWT or the value of `ZS_API_TOKEN`, `JWT_SECRET`, `DASHBOARD_ACCESS_CODE` or
-  `DASHBOARD_SESSION_SECRET`. See `.env.example`;
-  put real values in `.env.local`, which is never committed. Request, response, page and
-  error shapes all come from `@zs/contracts` (`http.ts`); calendars and pipeline stages
-  come from `GET /v1/booking/resources` and `GET /v1/crm/pipelines`.
-  `TODO(auth)`: one server-side owner token behind a shared access code is a pilot setup.
-  Real sign-in replaces both with the signed-in person's own token, kept in an httpOnly
-  session on this server.
+  page holds a JWT or the value of `SUPABASE_ANON_KEY`, `ZS_API_TOKEN` or `JWT_SECRET`. See
+  `.env.example`; put real values in `.env.local`, which is never committed. Request,
+  response, page and error shapes all come from `@zs/contracts` (`http.ts`); calendars and
+  pipeline stages come from `GET /v1/booking/resources` and `GET /v1/crm/pipelines`.
 - `ZS_API_URL` unset: an in-memory demo adapter serves made-up data for
   "Halden & Rowe Fine Jewelry", including the booking and deal conflicts. Changes reset
   on reload. In demo mode `window.__zsDemo` exposes `bookAsSomeoneElse` and
@@ -146,8 +163,9 @@ to an `ApiError` kind and shows plain copy, not the server message. A 409 with
 `concurrent_update` is a changed deal (`isDealChanged`): the board reloads it. A 429 is
 `rate_limited` and is never retried. A 401 is `unauthorized`: the session ends.
 
-Session: `GET /api/session` returns the server's `{ tenantId, userId }` (401 without a
-valid pilot cookie: `signed_out` when there is none, `expired` when it is stale or forged). Every query key starts with that `tenantId`, and queries wait for it
+Session: `GET /api/session` returns `{ tenantId, userId, role }` from the API's `/v1/me`
+for the signed-in person (401 `signed_out` with no session, `expired` when it ended or the
+browser sent the old pilot cookie; 403 `no_access` when the person is not a member). Every query key starts with that `tenantId`, and queries wait for it
 (`useKeys()` in `src/lib/queries.ts`, `src/lib/session.tsx`). Any 401 or "Sign out"
 clears the query cache and shows the signed-out screen. API reads use `cache: "no-store"`.
 

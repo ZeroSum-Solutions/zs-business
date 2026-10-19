@@ -5,10 +5,13 @@
  *
  * Auth runs as in production: a random per-run secret, a required issuer, a required `iat`
  * and the default one-hour lifetime cap. The seed's 7-day token is only a source of the demo
- * principal; the dashboard server gets a one-hour token for that principal as ZS_API_TOKEN
- * and adds it in its /api proxy. The browser never sees a token: the build is scanned for one.
- * The proxy serves only a browser signed in through /sign-in: each run gets a random
- * DASHBOARD_ACCESS_CODE and DASHBOARD_SESSION_SECRET, given to `next start` only, not the build.
+ * principal. Every token names a session in the auth stub (auth.sessions), which the API checks
+ * on each request, and its user must be a member of the business.
+ *
+ * Sign-in runs as in production too, except for the email: a fake Supabase Auth (fake-gotrue.ts)
+ * on a free loopback port keeps its users and sessions in this run's auth stub and, instead of
+ * sending the link, serves the last one at /__test/last-link. The dashboard server gets its URL
+ * and a random anon key; the browser never sees a token or the key: the build is scanned for them.
  *
  * Children never inherit the shell's environment (see child-env.ts): each gets an allowlist
  * plus what is set here, and every database URL must name this run's zs_e2e_* database.
@@ -26,6 +29,8 @@ import { fileURLToPath } from "node:url";
 import { SignJWT, decodeJwt } from "jose";
 import pg from "pg";
 import { findBundleLeaks } from "../../scripts/bundle-secrets";
+import { createFakeGoTrue, serveFakeGoTrue } from "./fake-gotrue";
+import { pgAuthStore } from "./pg-auth-store";
 import { assertThrowawayDatabaseEnv, childEnv, type Env } from "./child-env";
 import { LIVE } from "./env";
 import { redactingLog } from "./redact";
@@ -131,6 +136,7 @@ export default async function globalSetup() {
   runtimeUrl.password = "";
   const jwtSecret = randomBytes(32).toString("hex");
   const children: ChildProcess[] = [];
+  const closers: (() => Promise<void>)[] = [];
 
   const adminClient = async <T>(work: (client: pg.Client) => Promise<T>) => {
     const client = new pg.Client({ connectionString: admin.href });
@@ -145,6 +151,7 @@ export default async function globalSetup() {
   /** Stop everything, drop the database and delete the build; logs stay only on request. */
   const teardown = async (keepLogs = process.env.ZS_LIVE_KEEP_LOGS === "1") => {
     for (const child of children.reverse()) await stop(child);
+    for (const close of closers.reverse()) await close();
     await adminClient((client) => client.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`));
     rmSync(path.join(dashboardDir, ".next-live"), { recursive: true, force: true });
     if (!keepLogs) rmSync(logDir, { recursive: true, force: true });
@@ -179,11 +186,40 @@ export default async function globalSetup() {
     const seedClaims = decodeJwt(token) as { sub?: string; app_metadata?: { tenant_id?: string } };
     const tenantId = seedClaims.app_metadata?.tenant_id;
     if (!seedClaims.sub || !tenantId) throw new Error("Dev JWT has no user or tenant");
+    const ownerId = seedClaims.sub;
+
+    // The fake Supabase Auth and the people it knows, in this run's auth stub.
+    const authPool = new pg.Pool({ connectionString: databaseUrl.href, max: 4 });
+    closers.push(() => authPool.end());
+    const store = pgAuthStore(authPool);
+    const owner = await store.userById(ownerId);
+    if (!owner) throw new Error("seed:demo did not add the owner to the auth stub");
+    // A second person in the same business (staff), for the conflicting writes, and a signed-in
+    // person who belongs to no business.
+    const addUser = async (email: string, role?: "staff") => {
+      const id = randomUUID();
+      await authPool.query("INSERT INTO auth.users (id, email, raw_app_meta_data) VALUES ($1, $2, $3::jsonb)", [id, email, JSON.stringify({ tenant_id: tenantId })]);
+      if (role) {
+        await authPool.query(
+          `INSERT INTO public.tenant_members (tenant_id, id, email, user_id, role, invited_by, created_at, updated_at)
+           VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, now(), now())`,
+          [tenantId, email, id, role, ownerId],
+        );
+      }
+      return id;
+    };
+    const staffId = await addUser("staff@example.com", "staff");
+    const outsiderId = await addUser("outsider@example.com");
+    const anonKey = randomBytes(24).toString("base64url");
+    const gotrue = createFakeGoTrue({ jwtSecret, issuer: ISSUER, anonKey, store, ttlSeconds: MAX_TTL_SECONDS });
+    const auth = await serveFakeGoTrue(gotrue);
+    closers.push(auth.close);
+
     const now = Math.floor(Date.now() / 1000);
     // Every token carries iat: the API requires it and checks exp - iat against the cap.
-    const sign = (sub: string, claims: { role: string; iss?: string }, ttlSeconds = MAX_TTL_SECONDS, withIat = true) => {
-      const { iss, ...rest } = claims;
-      let jwt = new SignJWT({ ...rest, app_metadata: { tenant_id: tenantId } })
+    const sign = async (sub: string, claims: { role: string; iss?: string; sessionId?: string }, ttlSeconds = MAX_TTL_SECONDS, withIat = true) => {
+      const { iss, sessionId, ...rest } = claims;
+      let jwt = new SignJWT({ ...rest, session_id: sessionId ?? (await store.startSession(sub)), app_metadata: { tenant_id: tenantId } })
         .setProtectedHeader({ alg: "HS256", typ: "JWT" })
         .setSubject(sub)
         .setAudience("authenticated")
@@ -191,17 +227,21 @@ export default async function globalSetup() {
       if (withIat) jwt = jwt.setIssuedAt(now);
       return (iss ? jwt.setIssuer(iss) : jwt).sign(new TextEncoder().encode(jwtSecret));
     };
-    const ownerToken = await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER });
-    // A second person in the same business, for the conflicting writes.
-    const otherToken = await sign(randomUUID(), { role: "authenticated", iss: ISSUER });
-    // Tokens the API must refuse: wrong role, missing issuer, missing iat, one second over the cap.
+    const ownerToken = await sign(ownerId, { role: "authenticated", iss: ISSUER });
+    const otherToken = await sign(staffId, { role: "authenticated", iss: ISSUER });
+    const outsiderToken = await sign(outsiderId, { role: "authenticated", iss: ISSUER });
+    const endedSession = await store.startSession(ownerId);
+    // Tokens the API must refuse: wrong role, missing issuer, missing iat, one second over the
+    // cap, and a session that was signed out.
     const refusedTokens = {
-      anonRole: await sign(seedClaims.sub, { role: "anon", iss: ISSUER }),
-      noIssuer: await sign(seedClaims.sub, { role: "authenticated" }),
-      noIssuedAt: await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER }, MAX_TTL_SECONDS, false),
-      tooLong: await sign(seedClaims.sub, { role: "authenticated", iss: ISSUER }, MAX_TTL_SECONDS + 1),
+      anonRole: await sign(ownerId, { role: "anon", iss: ISSUER }),
+      noIssuer: await sign(ownerId, { role: "authenticated" }),
+      noIssuedAt: await sign(ownerId, { role: "authenticated", iss: ISSUER }, MAX_TTL_SECONDS, false),
+      tooLong: await sign(ownerId, { role: "authenticated", iss: ISSUER }, MAX_TTL_SECONDS + 1),
+      signedOut: await sign(ownerId, { role: "authenticated", iss: ISSUER, sessionId: endedSession }),
       seedSevenDay: token,
     };
+    await store.endSession(endedSession);
 
     const api = start("api", "pnpm", ["run", "start"], {
       cwd: apiDir,
@@ -218,20 +258,20 @@ export default async function globalSetup() {
     children.push(api);
     await waitFor(`${LIVE.apiUrl}/healthz`, api, "api", 30_000);
 
-    // ZS_API_URL and ZS_API_TOKEN are server-only: the dashboard's /api proxy reads them.
-    const webSettings = {
+    // All server-only: the dashboard's server reads them at request time. The build gets them
+    // too, so the scan below would catch code that inlines one into the browser bundle.
+    const webEnv = envFor({
       NEXT_DIST_DIR: ".next-live",
       ZS_API_URL: LIVE.apiUrl,
-      ZS_API_TOKEN: ownerToken,
+      SUPABASE_URL: auth.url,
+      SUPABASE_ANON_KEY: anonKey,
+      // One address for every test (no trusted proxy): lift the sign-in limits for the run.
+      DASHBOARD_SIGN_IN_PER_ADDRESS: "10000",
+      DASHBOARD_SIGN_IN_GLOBAL: "10000",
       NEXT_TELEMETRY_DISABLED: "1",
-    };
-    const buildEnv = envFor(webSettings);
-    // The pilot gate's settings are read at request time, so only the server gets them.
-    const accessCode = randomBytes(18).toString("base64url");
-    const sessionSecret = randomBytes(32).toString("hex");
-    const webEnv = envFor({ ...webSettings, DASHBOARD_ACCESS_CODE: accessCode, DASHBOARD_SESSION_SECRET: sessionSecret });
-    await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: buildEnv });
-    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, token, jwtSecret, accessCode, sessionSecret]);
+    });
+    await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: webEnv });
+    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, outsiderToken, token, jwtSecret, anonKey]);
     if (leaks.length > 0) {
       throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);
     }
@@ -242,8 +282,10 @@ export default async function globalSetup() {
     // Workers inherit these.
     process.env.ZS_LIVE_TOKEN = ownerToken;
     process.env.ZS_LIVE_OTHER_TOKEN = otherToken;
+    process.env.ZS_LIVE_OUTSIDER_TOKEN = outsiderToken;
     process.env.ZS_LIVE_REFUSED_TOKENS = JSON.stringify(refusedTokens);
-    process.env.ZS_LIVE_ACCESS_CODE = accessCode;
+    process.env.ZS_LIVE_AUTH_URL = auth.url;
+    process.env.ZS_LIVE_OWNER_EMAIL = owner.email;
     // Superuser URL for this run's database only; reset.ts checks the name before using it.
     process.env.ZS_LIVE_RESET_DB_URL = databaseUrl.href;
   } catch (error) {

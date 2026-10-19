@@ -1,234 +1,186 @@
 import { describe, expect, it } from "vitest";
-import { proxyApiRequest, proxyConfigFromEnv, type ApiProxyConfig } from "../src/lib/server/api-proxy";
-import { DEFAULT_SESSION_TTL_SECONDS, issueSessionValue, pilotGateFromEnv, SESSION_COOKIE, type PilotGateConfig } from "../src/lib/server/pilot-gate";
-import { GATE, sessionCookieHeader } from "./helpers/gate";
+import { proxyApiRequest } from "../src/lib/server/api-proxy";
+import { liveSetupFromEnv } from "../src/lib/server/live-config";
+import { AUTH_COOKIE, PILOT_COOKIE } from "../src/lib/server/supabase";
+import { ANON_KEY, createLiveHarness, forwardedClaims, ORIGIN, setCookies, signInThroughLink, type LiveHarness } from "./helpers/live";
 
-const ORIGIN = "http://localhost:3200";
-const TOKEN = "server-only-token";
+const contacts = ["v1", "crm", "contacts"];
 
-function recorder(status = 200, body: unknown = { items: [] }, gate: PilotGateConfig = GATE) {
-  const calls: { url: string; init: RequestInit }[] = [];
-  const config: ApiProxyConfig = {
-    apiUrl: "http://api.internal:8787/",
-    token: TOKEN,
-    gate: { ok: true, config: gate },
-    fetch: async (url, init) => {
-      calls.push({ url: String(url), init: init! });
-      return Response.json(body, { status, headers: { "Set-Cookie": "upstream=1" } });
-    },
-  };
-  return { calls, config };
+async function signedIn(options: Parameters<typeof createLiveHarness>[0] = {}) {
+  const harness = createLiveHarness(options);
+  const jar = await signInThroughLink(harness);
+  const get = (path: string, headers: Record<string, string> = {}) =>
+    new Request(`${ORIGIN}/api/${path}`, { headers: { Cookie: jar.header(), ...headers } });
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+    new Request(`${ORIGIN}/api/${path}`, { method: "POST", body: JSON.stringify(body), headers: { Cookie: jar.header(), "Content-Type": "application/json", ...headers } });
+  return { harness, jar, get, post };
 }
 
-// Every request carries a valid pilot session unless a test says otherwise.
-const signedIn = (headers: Record<string, string>) => ({ Cookie: sessionCookieHeader(), ...headers });
-const get = (path: string, headers: Record<string, string> = {}) => new Request(`${ORIGIN}/api/${path}`, { headers: signedIn(headers) });
-const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
-  new Request(`${ORIGIN}/api/${path}`, { method: "POST", body: JSON.stringify(body), headers: signedIn({ "Content-Type": "application/json", ...headers }) });
+const errorCode = async (response: Response) => ((await response.json()) as { error: { code: string } }).error.code;
 
-describe("api proxy pilot gate", () => {
-  const anonymous = (headers: Record<string, string> = {}) => new Request(`${ORIGIN}/api/v1/crm/contacts`, { headers });
-
-  it("refuses a request with no session cookie and never sends the token", async () => {
-    const { calls, config } = recorder();
-    // No Cookie, Authorization or Origin: the request Sol's review used to read 12 contacts.
-    const response = await proxyApiRequest(anonymous(), ["v1", "crm", "contacts"], config);
+describe("api proxy sign-in", () => {
+  it("refuses a request with no session and never calls the API", async () => {
+    const harness = createLiveHarness();
+    const anonymous = new Request(`${ORIGIN}/api/v1/crm/contacts`);
+    const response = await proxyApiRequest(anonymous, contacts, harness.setup);
     expect(response.status).toBe(401);
-    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("Unauthorized");
+    expect(await errorCode(response)).toBe("Unauthorized");
     expect(response.headers.get("cache-control")).toBe("no-store");
-    // A bearer token from the browser is no substitute for the cookie.
-    expect((await proxyApiRequest(anonymous({ Authorization: `Bearer ${TOKEN}` }), ["v1", "crm", "contacts"], config)).status).toBe(401);
-    expect(calls).toHaveLength(0);
+    // A bearer token from the browser is no way in: the proxy ignores the caller's Authorization.
+    const signedInElsewhere = await harness.gotrue.signIn(harness.owner);
+    const bearer = new Request(`${ORIGIN}/api/v1/crm/contacts`, { headers: { Authorization: `Bearer ${signedInElsewhere.accessToken}` } });
+    expect((await proxyApiRequest(bearer, contacts, harness.setup)).status).toBe(401);
+    expect(harness.apiCalls).toHaveLength(0);
   });
 
-  it("refuses a cookie with a bad signature", async () => {
-    const { calls, config } = recorder();
-    const good = issueSessionValue(GATE).value;
-    const parts = good.split(".");
-    const cases = [
-      `${parts.slice(0, 3).join(".")}.${"A".repeat(43)}`,
-      // Signed with another secret.
-      issueSessionValue({ ...GATE, sessionSecret: "z".repeat(40) }).value,
-      // Signed under another access code.
-      issueSessionValue({ ...GATE, accessCode: "another-code-0123456789" }).value,
-      // A later expiry pasted onto a real signature.
-      [parts[0], String(Number(parts[1]) + 3600), parts[2], parts[3]].join("."),
-      "v1.garbage",
-      "",
-    ];
-    for (const value of cases) {
-      const response = await proxyApiRequest(anonymous({ Cookie: `${SESSION_COOKIE}=${value}` }), ["v1", "crm", "contacts"], config);
-      expect(response.status, value).toBe(401);
-    }
-    expect(calls).toHaveLength(0);
-  });
-
-  it("refuses an expired cookie", async () => {
-    const { calls, config } = recorder();
-    const issued = new Date(Date.now() - (GATE.ttlSeconds + 1) * 1000);
-    const response = await proxyApiRequest(anonymous({ Cookie: sessionCookieHeader(GATE, issued) }), ["v1", "crm", "contacts"], config);
+  it("refuses the retired pilot cookie and expires it", async () => {
+    const harness = createLiveHarness();
+    const old = new Request(`${ORIGIN}/api/v1/crm/contacts`, { headers: { Cookie: `${PILOT_COOKIE}=v1.9999999999.abc.def` } });
+    const response = await proxyApiRequest(old, contacts, harness.setup);
     expect(response.status).toBe(401);
-    // A cookie signed under a longer TTL than the server now allows is expired too.
-    const longer = sessionCookieHeader({ ...GATE, ttlSeconds: GATE.ttlSeconds * 2 });
-    expect((await proxyApiRequest(anonymous({ Cookie: longer }), ["v1", "crm", "contacts"], config)).status).toBe(401);
-    expect(calls).toHaveLength(0);
+    expect(setCookies(response).get(PILOT_COOKIE)?.value).toBeNull();
+    expect(harness.apiCalls).toHaveLength(0);
   });
 
-  it("passes a valid cookie, and only the token goes upstream", async () => {
-    const { calls, config } = recorder();
-    const response = await proxyApiRequest(anonymous({ Cookie: `other=1; ${sessionCookieHeader()}` }), ["v1", "crm", "contacts"], config);
+  it("sends the signed-in person's own access token, and nothing else of theirs", async () => {
+    const { harness, get } = await signedIn();
+    const response = await proxyApiRequest(get("v1/crm/contacts", { Authorization: "Bearer from-the-browser", "Sec-Fetch-Site": "same-origin" }), contacts, harness.setup);
     expect(response.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    const headers = new Headers(calls[0]!.init.headers);
-    expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
-    expect(headers.get("cookie")).toBeNull();
+    expect(harness.apiCalls).toHaveLength(1);
+    const call = harness.apiCalls[0]!;
+    expect(call.url).toBe("http://api.internal:8787/v1/crm/contacts");
+    const claims = forwardedClaims(call);
+    expect(claims.sub).toBe(harness.owner.id);
+    expect(harness.store.sessions.get(claims.session_id)).toBe(harness.owner.id);
+    expect(new Headers(call.init.headers).get("cookie")).toBeNull();
+    expect(response.headers.get("set-cookie")).toBeNull();
   });
 
-  it("refuses to serve live mode without a long enough access code and session secret", async () => {
-    const live = { ZS_API_URL: "http://localhost:8787", ZS_API_TOKEN: "t" };
-    const strong = { DASHBOARD_ACCESS_CODE: GATE.accessCode, DASHBOARD_SESSION_SECRET: GATE.sessionSecret };
-    expect(pilotGateFromEnv({ ...live, ...strong })).toEqual({ ok: true, config: { ...GATE, ttlSeconds: DEFAULT_SESSION_TTL_SECONDS } });
-    expect(pilotGateFromEnv({ ...strong, DASHBOARD_SESSION_TTL_SECONDS: "3600", DASHBOARD_TRUST_PROXY: "1" }))
-      .toEqual({ ok: true, config: { ...GATE, ttlSeconds: 3600, trustProxy: true } });
-    for (const env of [
-      { DASHBOARD_SESSION_SECRET: GATE.sessionSecret },
-      { ...strong, DASHBOARD_ACCESS_CODE: "x".repeat(15) },
-      { ...strong, DASHBOARD_SESSION_SECRET: "y".repeat(31) },
-      { ...strong, DASHBOARD_SESSION_TTL_SECONDS: "12h" },
-      { ...strong, DASHBOARD_SESSION_TTL_SECONDS: "0" },
-    ]) {
-      const setup = pilotGateFromEnv(env);
-      expect(setup.ok, JSON.stringify(env)).toBe(false);
-    }
-    expect(pilotGateFromEnv({})).toEqual({ ok: false, problem: expect.stringMatching(/DASHBOARD_ACCESS_CODE of at least 16/) });
+  it("refreshes an expiring session on the server and sends the new token", async () => {
+    // A 60-second token is inside supabase-js's refresh margin from the start.
+    const { harness, get } = await signedIn({ ttlSeconds: 60 });
+    const first = await proxyApiRequest(get("v1/crm/contacts"), contacts, harness.setup);
+    expect(first.status).toBe(200);
+    const refreshed = setCookies(first);
+    expect([...refreshed.keys()].some((name) => name.startsWith(AUTH_COOKIE))).toBe(true);
+    for (const cookie of refreshed.values()) expect(cookie.header).toMatch(/HttpOnly/);
+    expect(harness.gotrue.calls.filter((call) => call.path === "/auth/v1/token")).toHaveLength(1);
+    // The refreshed token belongs to the same session.
+    expect(harness.store.sessions.size).toBe(1);
+    expect(forwardedClaims(harness.apiCalls[0]!).session_id).toBe([...harness.store.sessions.keys()][0]);
+  });
 
-    const { calls } = recorder();
-    const config = { ...proxyConfigFromEnv(live)!, fetch: async () => { calls.push({ url: "", init: {} }); return Response.json({}); } };
-    expect(config.gate.ok).toBe(false);
-    const response = await proxyApiRequest(get("v1/crm/contacts"), ["v1", "crm", "contacts"], config);
-    expect(response.status).toBe(503);
-    expect(calls).toHaveLength(0);
+  it("drops the session cookies when the API refuses the session", async () => {
+    const { harness, get } = await signedIn();
+    // Signed out on another device: the session row is gone, the access token still verifies.
+    await harness.store.endSession([...harness.store.sessions.keys()][0]!);
+    const response = await proxyApiRequest(get("v1/crm/contacts"), contacts, harness.setup);
+    expect(response.status).toBe(401);
+    const cleared = setCookies(response);
+    expect(cleared.size).toBeGreaterThan(0);
+    for (const cookie of cleared.values()) expect(cookie.value).toBeNull();
+  });
+
+  it("is refused when the session was revoked before a refresh", async () => {
+    const { harness, get } = await signedIn({ ttlSeconds: 60 });
+    await harness.store.endSession([...harness.store.sessions.keys()][0]!);
+    // The refresh fails; supabase-js keeps the unexpired access token, and the API refuses it.
+    const response = await proxyApiRequest(get("v1/crm/contacts"), contacts, harness.setup);
+    expect(response.status).toBe(401);
+    expect(harness.gotrue.calls.filter((call) => call.path === "/auth/v1/token")).toHaveLength(1);
+    for (const cookie of setCookies(response).values()) expect(cookie.value).toBeNull();
   });
 });
 
 describe("api proxy", () => {
-  it("adds the server's token and forwards only the API headers", async () => {
-    const { calls, config } = recorder();
-    const response = await proxyApiRequest(
-      get("v1/booking/slots?resourceId=r1&from=a", { Authorization: "Bearer from-the-browser", Cookie: `session=x; ${sessionCookieHeader()}`, "Sec-Fetch-Site": "same-origin" }),
-      ["v1", "booking", "slots"], config,
-    );
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ items: [] });
-    expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(response.headers.get("set-cookie")).toBeNull();
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe("http://api.internal:8787/v1/booking/slots?resourceId=r1&from=a");
-    const headers = new Headers(calls[0]!.init.headers);
-    expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
-    expect(headers.get("cookie")).toBeNull();
-  });
-
   it("passes the body, the Idempotency-Key and the API's status and error body through", async () => {
+    const { harness, post } = await signedIn();
     const error = { error: { code: "Conflict", message: "Request conflicts with the current state", details: { reason: "overlap" } } };
-    const { calls, config } = recorder(409, error);
-    const response = await proxyApiRequest(
-      post("v1/booking/bookings", { resourceId: "r1", startsAt: "2026-10-20T14:00:00.000Z" }, { "Idempotency-Key": "k-1", Origin: ORIGIN }),
-      ["v1", "booking", "bookings"], config,
-    );
+    harness.api = async () => Response.json(error, { status: 409, headers: { "Set-Cookie": "upstream=1" } });
+    const response = await proxyApiRequest(post("v1/booking/bookings", { resourceId: "r1" }, { "Idempotency-Key": "k-1", Origin: ORIGIN }), ["v1", "booking", "bookings"], harness.setup);
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual(error);
-    const sent = calls[0]!;
+    expect(response.headers.get("set-cookie")).toBeNull();
+    const sent = harness.apiCalls[0]!;
     expect(sent.init.method).toBe("POST");
     expect(new Headers(sent.init.headers).get("idempotency-key")).toBe("k-1");
-    expect(JSON.parse(new TextDecoder().decode(sent.init.body as ArrayBuffer))).toEqual({ resourceId: "r1", startsAt: "2026-10-20T14:00:00.000Z" });
+    expect(JSON.parse(new TextDecoder().decode(sent.init.body as ArrayBuffer))).toEqual({ resourceId: "r1" });
   });
 
-  it("refuses cross-site callers, so another page cannot spend the token", async () => {
-    const { calls, config } = recorder();
+  it("refuses cross-site callers, so another page cannot spend the session", async () => {
+    const { harness, get, post } = await signedIn();
     const cases = [
       post("v1/crm/contacts", {}, { Origin: "https://evil.example" }),
       post("v1/crm/contacts", {}, { "Sec-Fetch-Site": "cross-site" }),
       get("v1/crm/deals", { "Sec-Fetch-Site": "same-site" }),
     ];
     for (const request of cases) {
-      const response = await proxyApiRequest(request, ["v1", "crm", request.method === "GET" ? "deals" : "contacts"], config);
+      const response = await proxyApiRequest(request, ["v1", "crm", request.method === "GET" ? "deals" : "contacts"], harness.setup);
       expect(response.status).toBe(403);
-      expect(((await response.json()) as { error: { code: string } }).error.code).toBe("Forbidden");
+      expect(await errorCode(response)).toBe("Forbidden");
     }
-    // A form post can only send simple content types.
-    const form = new Request(`${ORIGIN}/api/v1/crm/contacts`, { method: "POST", body: "email=a", headers: signedIn({ "Content-Type": "text/plain" }) });
-    expect((await proxyApiRequest(form, ["v1", "crm", "contacts"], config)).status).toBe(400);
-    expect(calls).toHaveLength(0);
+    const form = new Request(`${ORIGIN}/api/v1/crm/contacts`, { method: "POST", body: "email=a", headers: { Cookie: (await signInThroughLink(harness)).header(), "Content-Type": "text/plain" } });
+    expect((await proxyApiRequest(form, contacts, harness.setup)).status).toBe(400);
+    expect(harness.apiCalls).toHaveLength(0);
   });
 
-  it("judges the origin by the Host the browser used, not the URL Next builds", async () => {
-    // `next start --hostname 127.0.0.1` hands route handlers http://localhost:<port> URLs.
-    const { calls, config } = recorder(201, {});
-    const fromLoopback = new Request("http://localhost:3218/api/v1/crm/contacts", {
-      method: "POST", body: "{}",
-      headers: signedIn({ "Content-Type": "application/json", Host: "127.0.0.1:3218", Origin: "http://127.0.0.1:3218", "Sec-Fetch-Site": "same-origin" }),
+  it("judges the origin by the Host the browser used, and X-Forwarded-Host only behind a trusted proxy", async () => {
+    const { harness, jar } = await signedIn();
+    const request = (headers: Record<string, string>) => new Request("http://localhost:3218/api/v1/crm/contacts", {
+      method: "POST", body: "{}", headers: { Cookie: jar.header(), "Content-Type": "application/json", ...headers },
     });
-    expect((await proxyApiRequest(fromLoopback, ["v1", "crm", "contacts"], config)).status).toBe(201);
-    const spoofed = new Request("http://localhost:3218/api/v1/crm/contacts", {
-      method: "POST", body: "{}",
-      headers: signedIn({ "Content-Type": "application/json", Host: "127.0.0.1:3218", Origin: "http://localhost:3218" }),
-    });
-    expect((await proxyApiRequest(spoofed, ["v1", "crm", "contacts"], config)).status).toBe(403);
-    expect(calls).toHaveLength(1);
+    expect((await proxyApiRequest(request({ Host: "127.0.0.1:3218", Origin: "http://127.0.0.1:3218", "Sec-Fetch-Site": "same-origin" }), contacts, harness.setup)).status).toBe(200);
+    expect((await proxyApiRequest(request({ Host: "127.0.0.1:3218", Origin: "http://localhost:3218" }), contacts, harness.setup)).status).toBe(403);
+    const behindProxy = { Host: "localhost:3000", "X-Forwarded-Host": "app.example.com", Origin: "https://app.example.com" };
+    expect((await proxyApiRequest(request(behindProxy), contacts, harness.setup)).status).toBe(403);
+    const trusted = { ok: true as const, config: { ...harness.config, trustProxy: true } };
+    expect((await proxyApiRequest(request(behindProxy), contacts, trusted)).status).toBe(200);
   });
 
-  it("honours X-Forwarded-Host only behind a trusted proxy", async () => {
-    // Behind a reverse proxy the URL and Host are internal and X-Forwarded-Host is public.
-    const behindProxy = () => new Request("http://localhost:3000/api/v1/crm/contacts", {
-      method: "POST", body: "{}",
-      headers: signedIn({ "Content-Type": "application/json", Host: "localhost:3000", "X-Forwarded-Host": "app.example.com", Origin: "https://app.example.com" }),
-    });
-    // Without DASHBOARD_TRUST_PROXY=1 anyone can send X-Forwarded-Host, so Host decides.
-    const forged = () => new Request("http://localhost:3218/api/v1/crm/contacts", {
-      method: "POST", body: "{}",
-      headers: signedIn({ "Content-Type": "application/json", Host: "127.0.0.1:3218", "X-Forwarded-Host": "evil.example", Origin: "https://evil.example" }),
-    });
-    const direct = recorder(201, {});
-    expect((await proxyApiRequest(forged(), ["v1", "crm", "contacts"], direct.config)).status).toBe(403);
-    expect((await proxyApiRequest(behindProxy(), ["v1", "crm", "contacts"], direct.config)).status).toBe(403);
-    expect(direct.calls).toHaveLength(0);
-
-    const trusted = recorder(201, {}, { ...GATE, trustProxy: true });
-    expect((await proxyApiRequest(behindProxy(), ["v1", "crm", "contacts"], trusted.config)).status).toBe(201);
-    expect(trusted.calls).toHaveLength(1);
-  });
-
-  it("refuses any Sec-Fetch-Site but same-origin, with or without an Origin", async () => {
-    const { calls, config } = recorder();
-    for (const site of ["cross-site", "same-site", "none"]) {
-      expect((await proxyApiRequest(get("v1/crm/deals", { "Sec-Fetch-Site": site }), ["v1", "crm", "deals"], config)).status, site).toBe(403);
-      expect((await proxyApiRequest(post("v1/crm/contacts", {}, { "Sec-Fetch-Site": site, Origin: ORIGIN }), ["v1", "crm", "contacts"], config)).status, site).toBe(403);
+  it("forwards only the booking, CRM, member and /me routes, with GET, POST and DELETE", async () => {
+    const { harness, jar, get } = await signedIn();
+    for (const path of [["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"], ["v1", "me", "x"]]) {
+      expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(404);
     }
-    expect(calls).toHaveLength(0);
-    expect((await proxyApiRequest(get("v1/crm/deals", { "Sec-Fetch-Site": "same-origin" }), ["v1", "crm", "deals"], config)).status).toBe(200);
+    const put = new Request(`${ORIGIN}/api/v1/crm/deals`, { method: "PUT", headers: { Cookie: jar.header() } });
+    expect((await proxyApiRequest(put, ["v1", "crm", "deals"], harness.setup)).status).toBe(404);
+    expect(harness.apiCalls).toHaveLength(0);
+    for (const path of [["v1", "me"], ["v1", "members"]]) expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status).toBe(200);
+    const remove = new Request(`${ORIGIN}/api/v1/members/m-1`, { method: "DELETE", headers: { Cookie: jar.header(), "Idempotency-Key": "k" } });
+    expect((await proxyApiRequest(remove, ["v1", "members", "m-1"], harness.setup)).status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.init.method).toBe("DELETE");
   });
 
-  it("only forwards the booking and CRM routes", async () => {
-    const { calls, config } = recorder();
-    for (const path of [["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"]]) {
-      expect((await proxyApiRequest(get(path.join("/")), path, config)).status, path.join("/")).toBe(404);
+  it("answers 503 in demo mode or without the Supabase settings, and 502 when the API is unreachable", async () => {
+    const anonymous = new Request(`${ORIGIN}/api/v1/crm/deals`);
+    expect((await proxyApiRequest(anonymous, ["v1", "crm", "deals"], null)).status).toBe(503);
+    expect((await proxyApiRequest(anonymous, ["v1", "crm", "deals"], { ok: false, problem: "unset" })).status).toBe(503);
+    const { harness, get } = await signedIn();
+    harness.api = async () => { throw new TypeError("fetch failed"); };
+    expect((await proxyApiRequest(get("v1/crm/deals"), ["v1", "crm", "deals"], harness.setup)).status).toBe(502);
+  });
+});
+
+describe("live settings", () => {
+  const live = { ZS_API_URL: "http://localhost:8787/", SUPABASE_URL: "https://abcd.supabase.co/", SUPABASE_ANON_KEY: ANON_KEY };
+
+  it("reads server-only env names, and is demo mode without ZS_API_URL", () => {
+    expect(liveSetupFromEnv(live)).toEqual({
+      ok: true, config: { apiUrl: "http://localhost:8787", supabaseUrl: "https://abcd.supabase.co", supabaseAnonKey: ANON_KEY, trustProxy: false },
+    });
+    expect(liveSetupFromEnv({ ...live, DASHBOARD_TRUST_PROXY: "1" })).toMatchObject({ ok: true, config: { trustProxy: true } });
+    expect(liveSetupFromEnv({})).toBeNull();
+    expect(liveSetupFromEnv({ NEXT_PUBLIC_API_URL: "http://localhost:8787", NEXT_PUBLIC_SUPABASE_URL: "https://abcd.supabase.co" })).toBeNull();
+  });
+
+  it("refuses live mode without a Supabase URL and anon key", () => {
+    for (const env of [
+      { ZS_API_URL: live.ZS_API_URL },
+      { ...live, SUPABASE_URL: "" },
+      { ...live, SUPABASE_URL: "ftp://abcd.supabase.co" },
+      { ...live, SUPABASE_ANON_KEY: "short" },
+    ]) {
+      expect(liveSetupFromEnv(env), JSON.stringify(env)).toMatchObject({ ok: false });
     }
-    const put = new Request(`${ORIGIN}/api/v1/crm/deals`, { method: "PUT", headers: signedIn({}) });
-    expect((await proxyApiRequest(put, ["v1", "crm", "deals"], config)).status).toBe(404);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("answers 503 when no API is configured and 502 when the API is unreachable", async () => {
-    expect((await proxyApiRequest(get("v1/crm/deals"), ["v1", "crm", "deals"], null)).status).toBe(503);
-    const down: ApiProxyConfig = { apiUrl: "http://api.internal", token: TOKEN, gate: { ok: true, config: GATE }, fetch: async () => { throw new TypeError("fetch failed"); } };
-    expect((await proxyApiRequest(get("v1/crm/deals"), ["v1", "crm", "deals"], down)).status).toBe(502);
-  });
-
-  it("reads its settings from server-only env names", () => {
-    const env = { ZS_API_URL: "http://localhost:8787", ZS_API_TOKEN: "t", DASHBOARD_ACCESS_CODE: GATE.accessCode, DASHBOARD_SESSION_SECRET: GATE.sessionSecret };
-    expect(proxyConfigFromEnv(env)).toEqual({ apiUrl: "http://localhost:8787", token: "t", gate: { ok: true, config: GATE } });
-    expect(proxyConfigFromEnv({ ZS_API_URL: "http://localhost:8787" })).toBeNull();
-    expect(proxyConfigFromEnv({ NEXT_PUBLIC_API_URL: "http://localhost:8787", NEXT_PUBLIC_API_TOKEN: "t" })).toBeNull();
   });
 });
