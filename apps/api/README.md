@@ -346,10 +346,21 @@ against the pinned Supabase Root 2021 CA.
    none of it, and must have run on a backend a committed and a throwing transaction used
    first, by `pg_backend_pid()`, or the probe fails with "no handoff observed"), an
    abandoned-transaction probe (below), no failed session cleanup in any scoped transaction (counted through `createScopedDatabase`'s
-   `onResetFailure`), bad tokens 401, and the Data API reading nothing (only an explicit denial
-   or an empty result passes; an outage fails). Write probes always roll back, and the
-   temporary Auth user's deletion is checked too. Its header lists the
-   environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication on preview.
+   `onResetFailure`), and real Supabase sessions over HTTP. It creates two temporary Auth
+   users (synthetic `example.com` addresses): A, a `staff` member of tenant A (a temporary
+   `tenant_members` row written through `SERVICE_DATABASE_URL`), and B, who claims a random
+   tenant and is a member of nothing. Both sign in with a password. A reads tenant A's
+   records and `/v1/me`. B gets 403 on every call, also for tenant A's ids. A missing token,
+   a wrong issuer, a forged signature, a token minted with `JWT_SECRET` that names no live
+   session, and a signed-out session all get 401. The Data API check reads the table list
+   from `supabase/migrations/` and from the catalog (`public` and `zs_internal`). For every
+   table, as `anon` and as user A, `/rest/v1` must refuse SELECT, INSERT, UPDATE and DELETE,
+   and user A must not call `record_action_and_event`. Only an explicit denial or an empty
+   result passes; an outage, an accepted write or a migration table missing from the catalog
+   fails (`src/data-api-probe.ts`). No probe can change a row. Write probes in SQL always roll
+   back. The removal of the temporary member and of both users is checked too. Its header
+   lists the environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication
+   on preview.
 
    The abandoned-transaction probe ("abandoned in-flight transactions leave no session state
    on reused backends", `abandonedTransactionProbe` in `src/hosted-probes.ts`) covers what the
@@ -385,8 +396,8 @@ against the pinned Supabase Root 2021 CA.
    backend ends with its connection, so the local test sees `inconclusive`; simulated
    poolers in `test/hosted-probes.test.ts` cover the clean and contaminated cases. The hub
    (Devin's Mac) runs `check:hosted` against the Supabase preview branch, with
-   `ZS_TARGET_REF` and both database URLs set to that branch; cloud sessions and CI never
-   run it.
+   `ZS_TARGET_REF` and the three database URLs set to that branch; cloud sessions and CI
+   never run it.
 
 Hosted settings that the scripts do not manage:
 - The Data API (PostgREST) exposes only `graphql_public`; tenant tables are not reachable
