@@ -5,7 +5,15 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { endAuthSession, installAuthStub, startAuthSession, upsertAuthUser } from "../src/local-auth.js";
+import {
+  endAuthSession,
+  findAuthUserByEmail,
+  installAuthStub,
+  readAuthUserTenant,
+  setAuthUserTenant,
+  startAuthSession,
+  upsertAuthUser,
+} from "../src/local-auth.js";
 import { migrate } from "../src/migrate.js";
 import { createTestDatabase, createTwoTenantFixture, withTestDatabase, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
 
@@ -160,6 +168,9 @@ describe("local auth stub", () => {
         await expect(upsertAuthUser(pool, { email: "a@example.com" })).rejects.toThrow(/loopback/);
         await expect(startAuthSession(pool, randomUUID())).rejects.toThrow(/loopback/);
         await expect(endAuthSession(pool, randomUUID())).rejects.toThrow(/loopback/);
+        await expect(findAuthUserByEmail(pool, "a@example.com")).rejects.toThrow(/loopback/);
+        await expect(setAuthUserTenant(pool, randomUUID(), randomUUID())).rejects.toThrow(/loopback/);
+        await expect(readAuthUserTenant(pool, randomUUID())).rejects.toThrow(/loopback/);
         expect(pool.totalCount).toBe(0);
       }
     } finally {

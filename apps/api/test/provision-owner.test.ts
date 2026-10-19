@@ -10,17 +10,22 @@ import { createLocalStubSessionCheck } from "@zs/core";
 import { asService, migrate } from "@zs/db";
 import {
   createTestDatabase,
+  findAuthUserByEmail,
   installAuthStub,
+  readAuthUserTenant,
+  setAuthUserTenant,
   startAuthSession,
   upsertAuthUser,
   withTestDatabase,
   type TestDatabase,
 } from "@zs/db/testing";
 import { createApp, createHs256Verifier } from "../src/app.js";
+import { signDevToken } from "../src/dev-token.js";
 import {
   provisionOwner,
   readMemberByEmail,
   runProvisionOwner,
+  type AuthAdmin,
   type MemberState,
   type ProvisionOwnerInput,
   type ProvisionOwnerRunDeps,
@@ -75,12 +80,16 @@ describe("provisioning the first owner of a tenant that predates tenant_members"
         const owners = await database.pool.query("SELECT 1 FROM tenant_members WHERE tenant_id=$1", [tenantId]);
         expect(owners.rowCount).toBe(0);
 
-        // The person signs in to Supabase; the stub stands in for hosted Auth after migrating.
+        // The person signs up with Supabase like anyone else, so their user has no tenant claim
+        // yet; the stub stands in for hosted Auth after migrating.
         await installAuthStub(database.pool);
         const email = "pilot.owner@example.com";
-        const actorId = await upsertAuthUser(database.pool, { email, appMetadata: { tenant_id: tenantId } });
+        const actorId = await upsertAuthUser(database.pool, { email });
         const sessionId = await startAuthSession(database.pool, actorId);
-        const token = await tokenFor({ tenantId, actorId, sessionId });
+        // Tokens as Supabase Auth issues them: app_metadata is whatever the user holds now.
+        const issued = async () => signDevToken(SECRET, {
+          tenantId: (await readAuthUserTenant(database.pool, actorId)) as string, actorId, sessionId,
+        }, clock, 3600);
         const app = createApp({
           verifier: createHs256Verifier(SECRET, { clock }),
           // As apps/api/test/helpers.ts: the loopback auth stub stands in for Supabase Auth.
@@ -91,21 +100,29 @@ describe("provisioning the first owner of a tenant that predates tenant_members"
           config: { allowedOrigins: [ORIGIN] },
         });
 
-        // Before provisioning: a valid session with no membership is refused.
-        expect((await call(app, "GET", "/v1/me", { token })).status).toBe(403);
+        // Before provisioning: the token names no tenant, and even one that claims the tenant
+        // has no membership behind it.
+        expect((await call(app, "GET", "/v1/me", { token: await issued() })).status).toBe(401);
+        expect((await call(app, "GET", "/v1/me", { token: await tokenFor({ tenantId, actorId, sessionId }) })).status).toBe(403);
 
         const summary = await provisionOwner({
           service: database.servicePool,
           clock,
           generateId: randomUUID,
-          findAuthUserId: async (wanted) => (await database.pool.query<{ id: string }>(
-            "SELECT id FROM auth.users WHERE lower(email) = $1 AND deleted_at IS NULL", [wanted],
-          )).rows[0]?.id ?? null,
+          auth: {
+            findUser: (wanted) => findAuthUserByEmail(database.pool, wanted),
+            setTenantClaim: (userId, claim) => setAuthUserTenant(database.pool, userId, claim),
+          },
         }, { tenantId, email: "  Pilot.Owner@Example.com ", dryRun: false });
         expect(summary).toMatchObject({
           tenantId, tenantName: "Pilot Tenant", email, role: "owner", userId: actorId, action: "created",
-          boundUser: true, before: null, activeOwnersBefore: 0, dryRun: false,
+          tenantClaim: "set", boundUser: true, before: null, activeOwnersBefore: 0, dryRun: false,
         });
+        expect(summary.notes.join(" ")).toMatch(/sign in again/);
+        expect(await readAuthUserTenant(database.pool, actorId)).toBe(tenantId);
+
+        // The next token Supabase issues carries the claim, and the owner can act.
+        const token = await issued();
 
         const me = await call(app, "GET", "/v1/me", { token });
         expect(me.status).toBe(200);
@@ -127,8 +144,11 @@ describe("provisioning the first owner of a tenant that predates tenant_members"
 
 describe("provisionOwner", () => {
   let database: TestDatabase;
+  /** email -> Supabase user id; claims: user id -> app_metadata.tenant_id. */
   const users = new Map<string, string>();
+  const claims = new Map<string, string>();
   const lookups: string[] = [];
+  const claimWrites: [string, string][] = [];
   beforeAll(async () => { database = await createTestDatabase(); });
   afterAll(async () => { await database?.close(); });
 
@@ -136,10 +156,17 @@ describe("provisionOwner", () => {
     service: database.servicePool,
     clock,
     generateId: randomUUID,
-    findAuthUserId: async (email) => {
-      lookups.push(email);
-      return users.get(email) ?? null;
-    },
+    auth: {
+      findUser: async (email) => {
+        lookups.push(email);
+        const id = users.get(email);
+        return id === undefined ? null : { id, tenantId: claims.get(id) ?? null };
+      },
+      setTenantClaim: async (userId, tenantId) => {
+        claimWrites.push([userId, tenantId]);
+        claims.set(userId, tenantId);
+      },
+    } satisfies AuthAdmin,
   }, { dryRun: false, ...input });
   async function newTenant(): Promise<string> {
     const tenantId = randomUUID();
@@ -168,10 +195,55 @@ describe("provisionOwner", () => {
     users.set(email, userId);
     const bound = await provision({ tenantId, email });
     expect(bound).toMatchObject({
-      action: "bound", memberId: pending.memberId, role: "owner", userId, boundUser: true,
-      before: { memberId: pending.memberId, role: "owner", userId: null }, notes: [],
+      action: "bound", memberId: pending.memberId, role: "owner", userId, boundUser: true, tenantClaim: "set",
+      before: { memberId: pending.memberId, role: "owner", userId: null },
     });
     expect(await rows(tenantId)).toMatchObject([{ id: pending.memberId, user_id: userId, role: "owner" }]);
+    expect(claims.get(userId)).toBe(tenantId);
+  });
+
+  it("gives the bound user the tenant claim, refuses a user claimed by another tenant, and re-sets a lost claim", async () => {
+    const tenantId = await newTenant();
+    const email = newEmail();
+    const userId = randomUUID();
+    users.set(email, userId);
+    const plan = await provision({ tenantId, email, dryRun: true });
+    expect(plan).toMatchObject({ action: "created", tenantClaim: "would-set" });
+    expect(claims.has(userId)).toBe(false);
+    expect(await provision({ tenantId, email })).toMatchObject({ action: "created", tenantClaim: "set" });
+    expect(claims.get(userId)).toBe(tenantId);
+    const writes = claimWrites.length;
+    expect(await provision({ tenantId, email })).toMatchObject({ action: "unchanged", tenantClaim: "present", notes: [] });
+    expect(claimWrites.length).toBe(writes);
+
+    // The claim call failed after the row committed (or someone cleared it): a re-run sets it.
+    claims.delete(userId);
+    expect(await provision({ tenantId, email })).toMatchObject({ action: "claimed", tenantClaim: "set", boundUser: false });
+    expect(claims.get(userId)).toBe(tenantId);
+
+    const elsewhere = await newTenant();
+    const before = await rows(elsewhere);
+    await expect(provision({ tenantId: elsewhere, email })).rejects.toThrow(/tenant claim already names another tenant/);
+    expect(await rows(elsewhere)).toEqual(before);
+    expect(claims.get(userId)).toBe(tenantId);
+  });
+
+  it("with a real auth user: a failed claim write leaves the committed row, and a re-run finishes", async () => {
+    await installAuthStub(database.pool);
+    const tenantId = await newTenant();
+    const email = newEmail();
+    const userId = await upsertAuthUser(database.pool, { email, appMetadata: { provider: "email" } });
+    const auth: AuthAdmin = {
+      findUser: (wanted) => findAuthUserByEmail(database.pool, wanted),
+      setTenantClaim: async () => { throw new Error("Supabase Auth admin API answered 503"); },
+    };
+    const deps = { service: database.servicePool, clock, generateId: randomUUID, auth };
+    await expect(provisionOwner(deps, { tenantId, email, dryRun: false })).rejects.toThrow(/503/);
+    expect(await rows(tenantId)).toMatchObject([{ email, user_id: userId, role: "owner" }]);
+    auth.setTenantClaim = (id, claim) => setAuthUserTenant(database.pool, id, claim);
+    expect(await provisionOwner(deps, { tenantId, email, dryRun: false })).toMatchObject({ action: "claimed", tenantClaim: "set" });
+    const meta = await database.pool.query("SELECT raw_app_meta_data AS meta FROM auth.users WHERE id=$1", [userId]);
+    expect(meta.rows[0].meta).toEqual({ provider: "email", tenant_id: tenantId });
   });
 
   it("is idempotent: a second run reports unchanged and writes nothing", async () => {
@@ -276,12 +348,13 @@ describe("runProvisionOwner", () => {
   const email = "owner@example.com";
   const summary = (overrides: Partial<ProvisionOwnerSummary> = {}): ProvisionOwnerSummary => ({
     tenantId, tenantName: "Pilot", memberId: "11111111-1111-4111-8111-111111111111", email, role: "owner",
-    userId: "22222222-2222-4222-8222-222222222222", action: "created", boundUser: true, before: null,
+    userId: "22222222-2222-4222-8222-222222222222", action: "created", tenantClaim: "set", boundUser: true, before: null,
     activeOwnersBefore: 0, dryRun: false, notes: [], ...overrides,
   });
   function stubDeps(options: {
     provision?: (input: ProvisionOwnerInput) => Promise<ProvisionOwnerSummary>;
     readMember?: () => Promise<MemberState | null>;
+    readTenantClaim?: () => Promise<string | null>;
   } = {}) {
     const calls: string[] = [];
     const logs: string[] = [];
@@ -295,6 +368,10 @@ describe("runProvisionOwner", () => {
       readMember: async () => {
         calls.push("read");
         return options.readMember ? options.readMember() : { memberId: summary().memberId, role: "owner", userId: summary().userId };
+      },
+      readTenantClaim: async () => {
+        calls.push("claim");
+        return options.readTenantClaim ? options.readTenantClaim() : tenantId;
       },
       clock,
       log: (line) => logs.push(line),
@@ -329,9 +406,9 @@ describe("runProvisionOwner", () => {
     const { deps, calls } = stubDeps();
     const result = await runProvisionOwner({ mode: "apply", receiptPath: path }, deps);
     expect(result.action).toBe("created");
-    expect(calls).toEqual(["dry-run", "apply", "read"]);
+    expect(calls).toEqual(["dry-run", "apply", "read", "claim"]);
     expect(await readReceipt(path)).toMatchObject({
-      mode: "apply", result: "committed", committed: true, tenantId,
+      mode: "apply", result: "committed", committed: true, tenantId, tenantClaimAfter: tenantId,
       plan: { dryRun: true }, applied: { action: "created", dryRun: false },
       after: { memberId: summary().memberId, role: "owner" }, startedAt: NOW, finishedAt: NOW,
     });
@@ -372,7 +449,7 @@ describe("runProvisionOwner", () => {
       },
     });
     await expect(runProvisionOwner({ mode: "apply", receiptPath: lost }, landed.deps)).rejects.toThrow(/terminated/);
-    expect(landed.calls).toEqual(["dry-run", "apply", "read"]);
+    expect(landed.calls).toEqual(["dry-run", "apply", "claim", "read"]);
     expect(await readReceipt(lost)).toMatchObject({ result: "failed", failedPhase: "apply", committed: true });
 
     const rolledBack = receiptAt("apply-rolled-back.json");
@@ -385,6 +462,19 @@ describe("runProvisionOwner", () => {
     });
     await expect(runProvisionOwner({ mode: "apply", receiptPath: rolledBack }, none.deps)).rejects.toThrow(/duplicate key/);
     expect(await readReceipt(rolledBack)).toMatchObject({ result: "failed", failedPhase: "apply", committed: false, after: null });
+  });
+
+  it("a tenant claim that did not land fails the verify phase; a claim-only run records nothing committed", async () => {
+    const path = receiptAt("claim-missing.json");
+    const { deps } = stubDeps({ readTenantClaim: async () => null });
+    await expect(runProvisionOwner({ mode: "apply", receiptPath: path }, deps)).rejects.toThrow(/tenant claim read back/);
+    expect(await readReceipt(path)).toMatchObject({ result: "failed", failedPhase: "verify", committed: true, tenantClaimAfter: null });
+
+    const claimed = receiptAt("claimed.json");
+    const claimOnly = summary({ action: "claimed", boundUser: false, before: { memberId: summary().memberId, role: "owner", userId: summary().userId } });
+    const run = stubDeps({ provision: async (input) => ({ ...claimOnly, dryRun: input.dryRun }) });
+    await runProvisionOwner({ mode: "apply", receiptPath: claimed }, run.deps);
+    expect(await readReceipt(claimed)).toMatchObject({ result: "claimed", committed: false, tenantClaimAfter: tenantId });
   });
 
   it("a read-back that disagrees fails the verify phase but still records the commit", async () => {

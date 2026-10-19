@@ -9,7 +9,17 @@ import {
   type Transaction,
 } from "./scoped.js";
 
-export { endAuthSession, installAuthStub, startAuthSession, upsertAuthUser, type LocalAuthUser } from "./local-auth.js";
+export {
+  endAuthSession,
+  findAuthUserByEmail,
+  installAuthStub,
+  readAuthUserTenant,
+  setAuthUserTenant,
+  startAuthSession,
+  upsertAuthUser,
+  type LocalAuthUser,
+  type LocalAuthUserRecord,
+} from "./local-auth.js";
 
 const defaultUrl = "postgres://postgres@127.0.0.1:55432/postgres";
 export interface TestDatabase {

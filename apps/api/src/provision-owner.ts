@@ -2,7 +2,8 @@
 // tenant_members migration (the hosted pilot tenant) have no member, so every request there is
 // refused and nobody can invite anyone. The database holds no tenant-to-email data, so a
 // migration cannot backfill it: the owner names the person here, and this binds their
-// Supabase user when it exists. Entry points: src/scripts/provision-owner.ts (local).
+// Supabase user when it exists and gives it the tenant claim (app_metadata.tenant_id) that
+// every token must carry. Entry points: src/scripts/provision-owner.ts (local).
 import { open, type FileHandle } from "node:fs/promises";
 import type { Pool } from "pg";
 import { memberEmailSchema, uuidSchema, type MemberRole } from "@zs/contracts";
@@ -14,8 +15,15 @@ export interface ProvisionOwnerDeps {
   readonly service: Pool;
   readonly clock: { now(): Date };
   readonly generateId: () => string;
-  /** The Supabase Auth user id for this exact (normalized) email, or null when none exists yet. */
-  readonly findAuthUserId: (email: string) => Promise<string | null>;
+  readonly auth: AuthAdmin;
+}
+
+/** The Supabase Auth admin calls provisioning needs; the local stub or the hosted admin API. */
+export interface AuthAdmin {
+  /** The live user with this exact (normalized) email and its app_metadata.tenant_id, or null when none exists yet. */
+  findUser(email: string): Promise<{ id: string; tenantId: string | null } | null>;
+  /** Set the user's app_metadata.tenant_id (server-owned: users cannot change app_metadata). */
+  setTenantClaim(userId: string, tenantId: string): Promise<void>;
 }
 
 export interface ProvisionOwnerInput {
@@ -25,7 +33,13 @@ export interface ProvisionOwnerInput {
   readonly dryRun: boolean;
 }
 
-export type ProvisionOwnerAction = "created" | "bound" | "promoted" | "unchanged";
+export type ProvisionOwnerAction = "created" | "bound" | "promoted" | "claimed" | "unchanged";
+
+/**
+ * The bound user's tenant claim: already this tenant, set by this run, to be set (dry run), or
+ * none yet because the owner is still pending.
+ */
+export type TenantClaimState = "present" | "set" | "would-set" | "no-user";
 
 /** A member row's identity and role facts; no credentials. */
 export interface MemberState {
@@ -42,8 +56,9 @@ export interface ProvisionOwnerSummary {
   readonly role: MemberRole;
   /** The bound Supabase user, or null while the owner is a pending invite. */
   readonly userId: string | null;
-  /** Precedence when several apply: created, then promoted, then bound. */
+  /** Precedence when several apply: created, promoted, bound, then claimed (only the tenant claim changed). */
   readonly action: ProvisionOwnerAction;
+  readonly tenantClaim: TenantClaimState;
   /** True when the member row also got its user bound in this run. */
   readonly boundUser: boolean;
   /** The row before this run, or null when there was none. */
@@ -64,6 +79,9 @@ class DryRunRollback extends Error {
 function refuse(reason: string): never {
   throw new Error(`Refusing to provision: ${reason}`);
 }
+
+const RESIGN_NOTE =
+  "The user's tenant claim was just set: tokens issued before this run lack it, so they must sign in again (or refresh).";
 
 const PENDING_NOTE =
   "No Supabase Auth user has this email yet: the owner is a pending member. Create the user " +
@@ -99,7 +117,10 @@ export async function readMemberByEmail(service: Pool, tenantId: string, email: 
  *   staff to owner only when the tenant has no active owner at all; otherwise refuse, since
  *   owners change roles in the app.
  * - Refuses an unknown tenant, a row bound to a different user, a bound row whose user is gone,
- *   and a user already bound to another member of the tenant.
+ *   a user already bound to another member of the tenant, and a user whose tenant claim names
+ *   another tenant.
+ * - After the transaction commits, gives the bound user this tenant's claim when it lacks it.
+ *   If that call fails the row stays committed and a re-run sets the claim ("claimed").
  */
 export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionOwnerInput): Promise<ProvisionOwnerSummary> {
   const tenant = uuidSchema.safeParse(input.tenantId);
@@ -109,11 +130,15 @@ export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionO
   const tenantId = tenant.data;
   const email = parsedEmail.data;
   // Outside the transaction: on hosted this is an HTTP call, and no lock should wait on it.
-  const foundUserId = await deps.findAuthUserId(email);
-  const userId = foundUserId === null ? null : uuidSchema.parse(foundUserId);
+  const found = await deps.auth.findUser(email);
+  const userId = found === null ? null : uuidSchema.parse(found.id);
+  if (found?.tenantId && found.tenantId !== tenantId)
+    refuse(`that Supabase user's tenant claim already names another tenant (${found.tenantId})`);
+  const claimMissing = found !== null && found.tenantId !== tenantId;
 
+  let summary: ProvisionOwnerSummary;
   try {
-    return await asService(deps.service, async (tx) => {
+    summary = await asService(deps.service, async (tx) => {
       await lockMembership(tx, tenantId, "exclusive");
       const tenantRow = (await tx.query<{ name: string }>("SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows[0];
       if (!tenantRow) refuse(`tenant ${tenantId} does not exist`);
@@ -167,11 +192,14 @@ export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionO
             "UPDATE tenant_members SET role=$3::public.member_role, user_id=$4, updated_at=$5 WHERE tenant_id=$1 AND id=$2",
             [tenantId, memberId, role, boundUserId, now],
           );
-        action = promote ? "promoted" : boundUser ? "bound" : "unchanged";
+        action = promote ? "promoted" : boundUser ? "bound" : claimMissing ? "claimed" : "unchanged";
       }
       if (boundUserId === null) notes.push(PENDING_NOTE);
+      else if (claimMissing) notes.push(RESIGN_NOTE);
+      const tenantClaim: TenantClaimState =
+        boundUserId === null ? "no-user" : !claimMissing ? "present" : input.dryRun ? "would-set" : "set";
 
-      const summary: ProvisionOwnerSummary = {
+      const result: ProvisionOwnerSummary = {
         tenantId,
         tenantName: tenantRow.name,
         memberId,
@@ -179,19 +207,22 @@ export async function provisionOwner(deps: ProvisionOwnerDeps, input: ProvisionO
         role,
         userId: boundUserId,
         action,
+        tenantClaim,
         boundUser,
         before: existing ? { memberId: existing.id, role: existing.role, userId: existing.user_id } : null,
         activeOwnersBefore,
         dryRun: input.dryRun,
         notes,
       };
-      if (input.dryRun) throw new DryRunRollback(summary);
-      return summary;
+      if (input.dryRun) throw new DryRunRollback(result);
+      return result;
     });
   } catch (error) {
     if (error instanceof DryRunRollback) return error.summary;
     throw error;
   }
+  if (summary.tenantClaim === "set") await deps.auth.setTenantClaim(summary.userId!, tenantId);
+  return summary;
 }
 
 /**
@@ -218,6 +249,8 @@ export interface ProvisionOwnerRunDeps {
   readonly provision: (input: ProvisionOwnerInput) => Promise<ProvisionOwnerSummary>;
   /** readMemberByEmail bound to the service pool. */
   readonly readMember: (tenantId: string, email: string) => Promise<MemberState | null>;
+  /** The user's app_metadata.tenant_id as Supabase Auth now holds it. */
+  readonly readTenantClaim: (userId: string) => Promise<string | null>;
   readonly clock: { now(): Date };
   readonly log: (line: string) => void;
   readonly logError: (line: string) => void;
@@ -263,15 +296,28 @@ export async function runProvisionOwner(mode: ProvisionOwnerMode, deps: Provisio
     const after = await deps.readMember(applied.tenantId, applied.email);
     receipt.after = after;
     if (!sameState(after, stateOf(applied))) throw new Error("The member row read back does not match what was applied");
+    if (applied.userId !== null) {
+      const claim = await deps.readTenantClaim(applied.userId);
+      receipt.tenantClaimAfter = claim;
+      if (claim !== applied.tenantId) throw new Error("The user's tenant claim read back does not name this tenant");
+    }
   } catch (error) {
     failure = error;
   }
 
   // Nothing can commit before the apply phase. From it on the row is the evidence, also when a
   // COMMIT reply was lost: provisioning is one transaction, so the row is either before or after.
+  // `committed` is about the member row; the tenant claim is read back on its own.
   let committed: boolean | "unknown" = false;
   if (phase === "apply" && plan) {
-    if (plan.action === "unchanged") committed = false;
+    if (plan.userId !== null) {
+      try {
+        receipt.tenantClaimAfter = await deps.readTenantClaim(plan.userId);
+      } catch (error) {
+        receipt.tenantClaimAfter = `unreadable: ${describeError(error)}`;
+      }
+    }
+    if (plan.action === "unchanged" || plan.action === "claimed") committed = false;
     else {
       try {
         const after = await deps.readMember(plan.tenantId, plan.email);
@@ -288,10 +334,10 @@ export async function runProvisionOwner(mode: ProvisionOwnerMode, deps: Provisio
     }
   } else if (phase === "verify" && applied) {
     // provision() returned, so its transaction committed; a failed read-back does not undo that.
-    committed = applied.action !== "unchanged";
+    committed = applied.action !== "unchanged" && applied.action !== "claimed";
   }
   receipt.committed = committed;
-  receipt.result = failure ? "failed" : applied!.action === "unchanged" ? "unchanged" : "committed";
+  receipt.result = failure ? "failed" : applied!.action === "unchanged" || applied!.action === "claimed" ? applied!.action : "committed";
   if (failure) {
     receipt.failedPhase = phase;
     receipt.error = describeError(failure);

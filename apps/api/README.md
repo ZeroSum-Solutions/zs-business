@@ -68,7 +68,14 @@ row bound to a different user, and a user already bound to another member of the
 second run reports `unchanged`. A dry run of a new owner shows a member id that the real run
 replaces. Output and receipts hold ids, names and role facts only.
 
-Locally the Supabase user is looked up in the auth stub's `auth.users`. The hosted entry point
+Every token must carry the tenant in `app_metadata.tenant_id`, which only the server can set.
+After the row commits, the step sets that claim on the bound user (keeping other
+`app_metadata` keys) and refuses a user whose claim already names another tenant. The user
+signs in again to get a token with the claim. If setting the claim fails, the row stays
+committed and a re-run sets it (`claimed`). An `--apply` run reads both the row and the claim
+back.
+
+Locally the Supabase user is looked up, and given the claim, in the auth stub's `auth.users`. The hosted entry point
 (Supabase Auth admin API, `SERVICE_DATABASE_URL`) arrives with the M2b hosting scripts, and
 the hosted seed must then create the demo tenant's owner member too.
 

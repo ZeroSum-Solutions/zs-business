@@ -109,3 +109,40 @@ export async function endAuthSession(pool: Pool, sessionId: string): Promise<voi
   assertLoopbackPool(pool);
   await pool.query("DELETE FROM auth.sessions WHERE id = $1", [sessionId]);
 }
+
+export interface LocalAuthUserRecord {
+  readonly id: string;
+  /** app_metadata.tenant_id, the tenant claim tokens carry; null when unset. */
+  readonly tenantId: string | null;
+}
+
+/** The live (not deleted) user with this email, compared lowercased, as the Supabase Auth admin API finds it. */
+export async function findAuthUserByEmail(pool: Pool, email: string): Promise<LocalAuthUserRecord | null> {
+  assertLoopbackPool(pool);
+  const stub = await pool.query<{ present: boolean }>("SELECT to_regclass('auth.users') IS NOT NULL AS present");
+  if (!stub.rows[0]?.present) throw new Error("This database has no auth.users; run seed:demo or install the local auth stub first");
+  const { rows } = await pool.query<{ id: string; tenant_id: string | null }>(
+    "SELECT id, raw_app_meta_data->>'tenant_id' AS tenant_id FROM auth.users WHERE lower(email) = lower($1) AND deleted_at IS NULL",
+    [email],
+  );
+  return rows[0] ? { id: rows[0].id, tenantId: rows[0].tenant_id } : null;
+}
+
+/** Set app_metadata.tenant_id, keeping the other keys, as an admin update of app_metadata does. */
+export async function setAuthUserTenant(pool: Pool, userId: string, tenantId: string): Promise<void> {
+  assertLoopbackPool(pool);
+  const { rowCount } = await pool.query(
+    "UPDATE auth.users SET raw_app_meta_data = raw_app_meta_data || jsonb_build_object('tenant_id', $2::text) WHERE id = $1 AND deleted_at IS NULL",
+    [userId, tenantId],
+  );
+  if (rowCount !== 1) throw new Error(`No live auth user ${userId} to set the tenant claim on`);
+}
+
+/** The user's app_metadata.tenant_id, or null when unset or the user is gone. */
+export async function readAuthUserTenant(pool: Pool, userId: string): Promise<string | null> {
+  assertLoopbackPool(pool);
+  const { rows } = await pool.query<{ tenant_id: string | null }>(
+    "SELECT raw_app_meta_data->>'tenant_id' AS tenant_id FROM auth.users WHERE id = $1 AND deleted_at IS NULL", [userId],
+  );
+  return rows[0]?.tenant_id ?? null;
+}
