@@ -272,6 +272,29 @@ describe("same reply for new and known people (P-6, P-7)", () => {
     const stale = await book(page.key, visitor(page.resourceId, { startsAt: at(10), consent: { email: true, sms: false } }));
     expect(stale).toMatchObject({ status: 409, body: { error: { details: { reason: "disclosure_changed" } } } });
   });
+
+  it("never lets a recorded disclosure be rewritten or removed, by any role", async () => {
+    const page = await freshPage(h.a);
+    const history = () => h.fixture.service(async (tx) => (await tx.query(
+      "SELECT version, text FROM booking_page_disclosures WHERE tenant_id=$1 AND page_id=$2 ORDER BY version",
+      [h.a.tenantId, page.pageId],
+    )).rows);
+    const before = await history();
+    expect(before).toHaveLength(1);
+    const where = [h.a.tenantId, page.pageId];
+    const rewrite = "UPDATE booking_page_disclosures SET text='Words never shown' WHERE tenant_id=$1 AND page_id=$2";
+    const remove = "DELETE FROM booking_page_disclosures WHERE tenant_id=$1 AND page_id=$2";
+    // The service role holds no UPDATE or DELETE grant on the history.
+    for (const sql of [rewrite, remove])
+      await expect(h.fixture.service((tx) => tx.query(sql, where))).rejects.toMatchObject({ code: "42501" });
+    // The runtime role reads it only, inside its own tenant.
+    await expect(h.database.runtimePool.query(rewrite, where)).rejects.toMatchObject({ code: "42501" });
+    // The table owner keeps its grants, so a trigger refuses it too.
+    for (const sql of [rewrite, remove, "TRUNCATE booking_page_disclosures CASCADE"])
+      await expect(h.database.pool.query(sql, sql.startsWith("TRUNCATE") ? [] : where))
+        .rejects.toThrow(/Disclosure history is append-only/);
+    expect(await history()).toEqual(before);
+  });
 });
 
 describe("victim protection (P-7, P-8)", () => {

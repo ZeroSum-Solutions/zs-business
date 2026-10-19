@@ -1,8 +1,9 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 2 (2026-10-19, review r1: P-8 and
-P-13 keep the disclosure text on each consent row and fix one text per version; P-9 checks
-the slot before identity work; P-10 names the client address source; P-14 retries).
+Status: frozen contract for M3a/M3b (2026-10-18), revision 3 (2026-10-19). Revision 2
+(review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
+version; P-9 checks the slot before identity work; P-10 names the client address source;
+P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -112,7 +113,9 @@ A disclosure version names one text for the life of the page: `booking_page_disc
 keeps every version a page has shown with its text, and `booking_pages_disclosure_versioned`
 rejects any write that pairs a known version with other text (including a return to an
 earlier version). New words need a new version, so a visitor holding the old one gets
-`disclosure_changed`.
+`disclosure_changed`. The history is append-only: no runtime or service grant allows UPDATE
+or DELETE on it, and `booking_page_disclosures_append_only` refuses UPDATE, DELETE and
+TRUNCATE for every role, the table owner included.
 Sending (M3d/M5) re-checks consent and adds confirmation for unverified addresses.
 
 **P-9. One transaction.** Contact (when new), intake item, intake consent, booking (with
@@ -164,7 +167,7 @@ embed snippets.
 | Table | Columns and constraints |
 |---|---|
 | `booking_pages` | `tenant_id`, `id`, `title`, `description` NULL, `published`, `disclosure_version`, `disclosure_text`, `created_at`; PK `(tenant_id,id)` |
-| `booking_page_disclosures` | `tenant_id`, `page_id`, `version`, `text`; PK `(tenant_id,page_id,version)`; FK to pages with the tenant; written only by the page trigger |
+| `booking_page_disclosures` | `tenant_id`, `page_id`, `version`, `text`; PK `(tenant_id,page_id,version)`; FK to pages with the tenant; written only by the page trigger; append-only (service role holds SELECT, INSERT; a trigger refuses UPDATE, DELETE and TRUNCATE) |
 | `booking_page_resources` | `tenant_id`, `page_id`, `resource_id`, `position`; PK `(tenant_id,page_id,resource_id)`; FKs to pages and resources with the tenant |
 | `intake_items` | `tenant_id`, `id`, `kind`, `status`, `channel`, `page_id`, `submitted_name`, `submitted_email`, `submitted_phone` NULL, `notes` NULL, `matched_contact_ids`, `contact_id` NULL, `reviewed_at` NULL, `reviewed_by` NULL, `created_at`; status/contact consistency checks |
 | `intake_item_consent` | `tenant_id`, `intake_item_id`, `channel`, `status`, `purpose`, `disclosure_version`, `disclosure_text`, `source`, `recorded_at`; PK `(tenant_id,intake_item_id,channel)` |

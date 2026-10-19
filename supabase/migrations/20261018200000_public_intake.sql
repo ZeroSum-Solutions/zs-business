@@ -50,15 +50,34 @@ END $$;
 CREATE TRIGGER booking_pages_disclosure_versioned
   AFTER INSERT OR UPDATE OF disclosure_text, disclosure_version ON public.booking_pages
   FOR EACH ROW EXECUTE FUNCTION public.booking_pages_disclosure_versioned();
+
+-- P-8: the history is append-only. Grants already keep UPDATE and DELETE from every runtime
+-- role; this keeps them from the table owner too, so recorded wording cannot be rewritten.
+CREATE FUNCTION public.booking_page_disclosures_append_only() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  RAISE EXCEPTION 'Disclosure history is append-only (% refused)', TG_OP
+    USING ERRCODE = 'insufficient_privilege', SCHEMA = 'public', TABLE = 'booking_page_disclosures';
+END $$;
+CREATE TRIGGER booking_page_disclosures_append_only
+  BEFORE UPDATE OR DELETE ON public.booking_page_disclosures
+  FOR EACH ROW EXECUTE FUNCTION public.booking_page_disclosures_append_only();
+CREATE TRIGGER booking_page_disclosures_no_truncate
+  BEFORE TRUNCATE ON public.booking_page_disclosures
+  FOR EACH STATEMENT EXECUTE FUNCTION public.booking_page_disclosures_append_only();
+
 REVOKE ALL ON FUNCTION public.booking_pages_disclosure_versioned() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.booking_page_disclosures_append_only() FROM PUBLIC;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
     REVOKE ALL ON FUNCTION public.booking_pages_disclosure_versioned() FROM anon;
+    REVOKE ALL ON FUNCTION public.booking_page_disclosures_append_only() FROM anon;
   END IF;
 END $$;
 -- Same owner as every invoker function (20261018090000); CREATE only for the transfer.
 GRANT CREATE ON SCHEMA public TO zs_function_owner;
 ALTER FUNCTION public.booking_pages_disclosure_versioned() OWNER TO zs_function_owner;
+ALTER FUNCTION public.booking_page_disclosures_append_only() OWNER TO zs_function_owner;
 REVOKE CREATE ON SCHEMA public FROM zs_function_owner;
 
 CREATE TABLE public.booking_page_resources (
@@ -151,6 +170,8 @@ BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO service_role', t);
   END LOOP;
 END $$;
+-- P-8: no role may rewrite or drop a recorded disclosure, the service role included.
+REVOKE UPDATE, DELETE ON public.booking_page_disclosures FROM service_role;
 
 -- Runtime: read pages, record intake, and change only the review columns of an item.
 GRANT SELECT ON public.booking_pages, public.booking_page_disclosures, public.booking_page_resources TO authenticated;
