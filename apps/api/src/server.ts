@@ -28,7 +28,8 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
       ...(env.jwtIssuer === undefined ? {} : { issuer: env.jwtIssuer }),
     }),
     clock,
-    db: createScopedDatabase(pool),
+    // A failed reset discards the connection; say so, since a pattern of them means trouble.
+    db: createScopedDatabase(pool, { onResetFailure: (error) => console.error("Session reset failed; connection discarded", error) }),
     generateId: randomUUID,
     config: { allowedOrigins: env.allowedOrigins },
     onError: (error) => console.error("Unhandled API error", error),

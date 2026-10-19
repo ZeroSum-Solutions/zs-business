@@ -13,7 +13,8 @@ import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { signDevToken } from "../dev-token.js";
-import { assertHostedDatabaseUrl, hostedPool } from "../hosted.js";
+import { poolerTransport, sessionContaminationProbe } from "../hosted-probes.js";
+import { assertHostedDatabaseUrl, hostedPool, redactSecrets } from "../hosted.js";
 
 const env = process.env;
 const projectRef = env.ZS_TARGET_REF ?? "";
@@ -38,6 +39,11 @@ async function check(name: string, run: () => Promise<{ ok: boolean; detail?: un
 }
 
 const runtime = hostedPool(runtimeTarget, 10);
+// Pooler mode of the runtime URL: 6543 is Supavisor transaction mode, as the API uses.
+const transport = poolerTransport(runtimeTarget.port);
+// Every scoped transaction here reports a failed session reset; any one fails the run.
+const resetFailures: string[] = [];
+const scopedOptions = { onResetFailure: (error: unknown) => { resetFailures.push(redactSecrets(String(error))); } };
 const migrator = hostedPool(migratorTarget, 1);
 const tokenFor = (tenantId: string, actorId: string, issuer = env.JWT_ISSUER) =>
   signDevToken(env.JWT_SECRET ?? "", { tenantId, actorId }, clock, 300, issuer);
@@ -71,7 +77,7 @@ try {
     return { ok: refused };
   });
   await check("scoped transactions refuse the migrator login", async () => {
-    const refused = await createScopedDatabase(migrator).tenant(tenantA, async () => true).then(() => false, () => true);
+    const refused = await createScopedDatabase(migrator, scopedOptions).tenant(tenantA, async () => true).then(() => false, () => true);
     return { ok: refused };
   });
   await check("runtime cannot SET ROLE to owners or privileged roles", async () => {
@@ -128,7 +134,7 @@ try {
     // Each probe throws after its statement, so even an allowed write rolls back and never
     // touches tenant A's records.
     const rolledBack = new Error("probe rolled back");
-    const attempt = (sql: string) => createScopedDatabase(runtime).tenant(tenantA, async (tx) => {
+    const attempt = (sql: string) => createScopedDatabase(runtime, scopedOptions).tenant(tenantA, async (tx) => {
       await tx.query(sql, [tenantA]);
       throw rolledBack;
     }).then(() => "ALLOWED", (error: { code?: string }) => error === rolledBack ? "ALLOWED (rolled back)" : `refused ${error.code}`);
@@ -142,7 +148,7 @@ try {
     return { ok: Object.values(outcome).every((value) => value.startsWith("refused")), detail: outcome };
   });
   await check("pooled runtime connections keep tenants apart under 200 concurrent transactions", async () => {
-    const scoped = createScopedDatabase(runtime);
+    const scoped = createScopedDatabase(runtime, scopedOptions);
     const jobs = Array.from({ length: 200 }, (_, index) => {
       const tenant = index % 2 === 0 ? tenantA : tenantB;
       return scoped.tenant(tenant, async (tx) => {
@@ -154,8 +160,15 @@ try {
     });
     const rows = await Promise.all(jobs);
     const bad = rows.filter((row) => row.setting !== row.tenant || row.foreign !== 0 || row.contacts !== (row.tenant === tenantA ? contactsA : 0));
-    return { ok: bad.length === 0, detail: { total: rows.length, bad: bad.slice(0, 5) } };
+    return { ok: bad.length === 0, detail: { transport, total: rows.length, bad: bad.slice(0, 5) } };
   });
+  await check("pooled runtime sessions carry no session state into later transactions", async () => {
+    // Tenant A and B alike: the probe reads only settings, never rows.
+    const probe = await sessionContaminationProbe(createScopedDatabase(runtime, scopedOptions), tenantB);
+    return { ok: probe.ok, detail: { transport, ...probe.detail } };
+  });
+  await check("no scoped transaction failed its session reset", async () =>
+    ({ ok: resetFailures.length === 0, detail: { transport, failures: resetFailures.length, first: resetFailures.slice(0, 3) } }));
 
   // --- HTTP API -------------------------------------------------------------------------
   const resources = await api("/v1/booking/resources", tokenA);
