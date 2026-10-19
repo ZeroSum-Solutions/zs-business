@@ -15,6 +15,12 @@ const asset = (name: string) => readFileSync(new URL(`../../api/static/${name}`,
 
 interface Posted { key: string | null; body: string }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 /** Free times on the two days after `from`, in UTC, so the test never depends on today's date. */
 function slotsAfter(from: string, taken: ReadonlySet<string>) {
   const day = new Date(from);
@@ -36,6 +42,7 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
   const posted: Posted[] = [];
   const taken = new Set<string>();
   let slotFetches = 0;
+  let slotsHold: Promise<void> | null = null;
   const json = (route: Route, status: number, body: unknown) =>
     route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -58,6 +65,8 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
     }
     if (url.pathname === `/public/v1/pages/${KEY}/slots`) {
       slotFetches += 1;
+      if (slotsHold) { const hold = slotsHold; slotsHold = null; await hold; }
+      // Answered from the slots held at release time, not at request time.
       return json(route, 200, { resourceId: RESOURCE_ID, timeZone: "UTC", zone: "UTC", slots: slotsAfter(url.searchParams.get("from")!, taken) });
     }
     if (url.pathname === `/public/v1/pages/${KEY}/requests` && request.method() === "POST") {
@@ -73,6 +82,12 @@ async function mockBooker(page: Page, replies: ((route: Route, posted: Posted) =
   return {
     posted,
     slotFetches: () => slotFetches,
+    /** Hold the next slots answer; returns the function that releases it. */
+    holdNextSlots: () => {
+      const gate = deferred();
+      slotsHold = gate.promise;
+      return gate.resolve;
+    },
     /** The slot is now held, as it would be after the first request committed. */
     take: (startsAt: string) => taken.add(startsAt),
     confirmed: (route: Route, entry: Posted) => {
@@ -161,4 +176,50 @@ test("a definitive slot_unavailable ends the attempt; the next time gets a new k
   expect(second!.key).toMatch(/^[0-9a-f-]{36}$/);
   expect(second!.key).not.toBe(first!.key);
   expect(second!.startsAt).not.toBe(first!.startsAt);
+});
+
+test("a refresh in flight during submit cannot strand the attempt after a 502", async ({ page }) => {
+  const postArrived = deferred();
+  const postRelease = deferred();
+  const mock = await mockBooker(page, [
+    async (route, entry) => {
+      // Commits and holds the slot, then waits; its reply will be a gateway 502.
+      mock.take((JSON.parse(entry.body) as { startsAt: string }).startsAt);
+      postArrived.resolve();
+      await postRelease.promise;
+      await route.fulfill({ status: 502, contentType: "text/html", body: "<h1>Bad gateway</h1>" });
+    },
+    (route, entry) => mock.confirmed(route, entry),
+  ]);
+  await page.goto(`${ORIGIN}/book/${KEY}`);
+  await pickTimeAndFill(page);
+
+  // A focus refresh starts before the submit and its answer is held.
+  const fetchesBefore = mock.slotFetches();
+  const releaseSlots = mock.holdNextSlots();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => mock.slotFetches()).toBe(fetchesBefore + 1);
+
+  // The visitor submits; the POST commits server-side and is held.
+  await page.getByRole("button", { name: "Confirm booking" }).click();
+  await postArrived.promise;
+
+  // The refresh lands with the slot now taken, then the visitor tries to leave for the date list.
+  const slotsAnswered = page.waitForResponse((response) => response.url().includes("/slots?"));
+  releaseSlots();
+  await slotsAnswered;
+  await page.waitForTimeout(300);
+  await page.getByRole("button", { name: /^(See free times|Choose another time)$/ }).click({ force: true });
+
+  postRelease.resolve();
+  const retry = page.getByRole("button", { name: "Try again" });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("may already have gone through");
+  await expect(page.getByRole("heading", { name: "Pick a day" })).toHaveCount(0);
+
+  await retry.click();
+  await expect(page.getByRole("heading", { name: "You're booked" })).toBeVisible();
+  expect(mock.posted).toHaveLength(2);
+  expect(mock.posted[1]!.key).toBe(mock.posted[0]!.key);
+  expect(mock.posted[1]!.body).toBe(mock.posted[0]!.body);
 });

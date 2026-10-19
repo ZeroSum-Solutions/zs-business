@@ -63,8 +63,20 @@
     return { status: response.status, body, retryAfter: response.headers.get("Retry-After") };
   }
 
+  /** True while a request is in flight or unconfirmed: the slot and step must hold still. */
+  function locked() {
+    return state.submitting || Boolean(state.attempt);
+  }
+
+  /** A navigation handler that does nothing while locked. */
+  function go(action) {
+    return (event) => { if (!locked()) action(event); };
+  }
+
   function render() {
-    const view = state.page ? viewFor(state.step) : h("p", { class: "booker-status" }, state.notice || "Loading…");
+    // An unconfirmed attempt may hold the slot, so its recovery panel wins over any step.
+    const view = !state.page ? h("p", { class: "booker-status" }, state.notice || "Loading…")
+      : state.attempt && state.attempt.uncertain ? unconfirmedView() : viewFor(state.step);
     root.replaceChildren(...(Array.isArray(view) ? view : [view]));
     const focus = root.querySelector("[data-focus]");
     if (focus) focus.focus({ preventScroll: true });
@@ -89,7 +101,8 @@
         type: "button",
         class: "booker-choice",
         "aria-pressed": String(resource.id === state.resourceId),
-        onclick: () => { state.resourceId = resource.id; state.day = null; state.slot = null; loadSlots(); },
+        disabled: locked(),
+        onclick: go(() => { state.resourceId = resource.id; state.day = null; state.slot = null; loadSlots(); }),
       }, resource.name || "Appointment", h("small", {}, `${resource.slotLengthMinutes} min`)))));
   }
 
@@ -126,7 +139,8 @@
         : h("div", { class: "booker-grid" }, [...days].map(([key, slots]) => h("button", {
           type: "button",
           class: "booker-choice",
-          onclick: () => { state.day = key; state.notice = ""; state.step = "time"; render(); },
+          disabled: locked(),
+          onclick: go(() => { state.day = key; state.notice = ""; state.step = "time"; render(); }),
         }, dayLabel.format(new Date(slots[0].startsAt)), h("small", {}, `${slots.length} ${slots.length === 1 ? "time" : "times"}`)))),
       h("p", { class: "booker-hint" }, `Times are shown in ${zone}.`),
     ];
@@ -142,9 +156,10 @@
         : h("div", { class: "booker-grid" }, slots.map((slot) => h("button", {
           type: "button",
           class: "booker-choice",
-          onclick: () => { state.slot = slot; state.notice = ""; state.errors = {}; state.step = "details"; render(); },
+          disabled: locked(),
+          onclick: go(() => { state.slot = slot; state.notice = ""; state.errors = {}; state.step = "details"; render(); }),
         }, timeLabel.format(new Date(slot.startsAt))))),
-      h("button", { type: "button", class: "booker-link", onclick: () => { state.step = "date"; state.notice = ""; render(); } }, "Back to days"),
+      h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days"),
     ];
   }
 
@@ -204,13 +219,11 @@
   function detailsView() {
     const slot = state.slot;
     const page = state.page;
-    // An unconfirmed attempt may hold this very slot, so it is never shown as lost.
-    if (state.attempt && state.attempt.uncertain) return unconfirmedView();
     if (!stillAvailable()) {
       return [
         h("h2", { tabindex: "-1", "data-focus": true }, "That time is no longer available"),
         h("p", { class: "booker-status" }, "Someone else booked it first. Please pick another time."),
-        h("button", { type: "button", class: "booker-primary", onclick: () => { state.slot = null; state.step = "date"; render(); } }, "See free times"),
+        h("button", { type: "button", class: "booker-primary", disabled: locked(), onclick: go(() => { state.slot = null; state.step = "date"; render(); }) }, "See free times"),
       ];
     }
     const checkbox = (name, label) => h("label", { class: "booker-check" },
@@ -238,7 +251,7 @@
           h("input", { id: "booker-website", name: "website", tabindex: "-1", autocomplete: "off", value: state.form.website,
             oninput: (event) => { state.form.website = event.target.value; } })),
         h("button", { type: "submit", class: "booker-primary", disabled: state.submitting }, state.submitting ? "Booking…" : "Confirm booking")),
-      h("button", { type: "button", class: "booker-link", onclick: () => { state.step = "time"; state.notice = ""; render(); } }, "Choose another time"),
+      h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "time"; state.notice = ""; render(); }) }, "Choose another time"),
     ];
   }
 
@@ -393,15 +406,23 @@
     return true;
   }
 
+  let slotsFetch = 0;
+
+  /** Fetch free times; false when the answer was dropped as stale. */
   async function loadSlots(rerender = true) {
-    if (!state.resourceId) { state.slots = []; if (rerender) render(); return; }
+    if (locked()) return false;
+    if (!state.resourceId) { state.slots = []; if (rerender) render(); return true; }
     const from = new Date();
     const to = new Date(from.getTime() + RANGE_DAYS * 86400000);
     const query = new URLSearchParams({ resourceId: state.resourceId, from: from.toISOString(), to: to.toISOString() });
+    const fetchId = ++slotsFetch;
     const { status, body } = await getJson(`/public/v1/pages/${match[1]}/slots?${query}`);
+    // A newer fetch went out, or an attempt began meanwhile and may itself hold the slot: drop it.
+    if (fetchId !== slotsFetch || locked()) return false;
     if (status === 200 && body) state.slots = body.slots;
     else if (status === 429) state.notice = "Too many requests. Please try again shortly.";
     if (rerender) render();
+    return true;
   }
 
   async function start() {
@@ -411,8 +432,8 @@
     // Free times go stale while the page is open: refetch on focus and on a timer.
     const refresh = async () => {
       // An attempt in flight or unconfirmed may hold the slot itself; its retry reconciles first.
-      if (!state.page || state.step === "done" || state.submitting || state.attempt) return;
-      await loadSlots(false);
+      if (!state.page || state.step === "done" || locked()) return;
+      if (!(await loadSlots(false)) || state.step === "done") return;
       // Re-rendering the form would drop the visitor's focus; only do it when the slot was lost.
       if (state.step !== "details" || !stillAvailable()) render();
     };
