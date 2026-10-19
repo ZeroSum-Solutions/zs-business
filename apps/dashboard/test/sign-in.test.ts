@@ -67,7 +67,7 @@ describe("pilot sign-in", () => {
     const proxied = await proxyApiRequest(
       new Request(`${ORIGIN}/api/v1/crm/contacts`, { headers: { Cookie: `${SESSION_COOKIE}=${value}` } }),
       ["v1", "crm", "contacts"],
-      { apiUrl: "http://api.internal", token: "t", gate: setup(), fetch: async () => Response.json({ items: [] }) },
+      { apiUrl: "http://api.internal", token: "t", gate: setup(), now: () => NOW, fetch: async () => Response.json({ items: [] }) },
     );
     expect(proxied.status).toBe(200);
   });
