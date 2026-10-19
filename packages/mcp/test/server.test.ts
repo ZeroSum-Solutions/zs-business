@@ -327,7 +327,7 @@ describe("authorization on every tool call, like the HTTP API", () => {
 
   it("refuses a forged token (another key) and a malformed one", async () => {
     const member = await signedInMember(fixture.a.tenantId, "owner");
-    const forged = await sign(member, { secret: "an-attacker-secret-that-is-32-chars-long" });
+    const forged = await sign(member, { secret: "forged-".padEnd(32, "x") });
     for (const token of [forged, "", "Bearer x", `${member.token.split(".").slice(0, 2).join(".")}.`]) {
       await using(await serve(token), async (mcp) => {
         expect(await errorCode(mcp, "list_contacts")).toBe("Unauthorized");
