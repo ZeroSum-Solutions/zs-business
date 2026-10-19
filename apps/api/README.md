@@ -231,7 +231,8 @@ against the pinned Supabase Root 2021 CA.
    256 so none is refused `busy`; every one must settle and succeed, and a refusal fails with
    its code) and 120 concurrent HTTP requests with no crossover, the runtime URL on the deployment's transport (default Supavisor
    transaction mode, port 6543; pass `-- --expect-transport=session` for 5432; any other
-   port fails as unsupported), a session-contamination probe (in 20 rounds, committed and
+   port fails as unsupported; `-- --abandon-rounds=N` sets the abandoned-transaction probe's
+   rounds), a session-contamination probe (in 20 rounds, committed and
    throwing transactions leave a custom setting, `application_name`, a session advisory
    lock, a temp table, a held cursor and a `LISTEN` behind; later transactions must see
    none of it, and must have run on a backend a committed and a throwing transaction used
@@ -245,22 +246,39 @@ against the pinned Supabase Root 2021 CA.
    The abandoned-transaction probe ("abandoned in-flight transactions leave no session state
    on reused backends", `abandonedTransactionProbe` in `src/hosted-probes.ts`) covers what the
    local tests cannot: what Supavisor's transaction mode does with a backend whose client
-   closed the connection mid-transaction. In 5 rounds, 4 tenant-B transactions each take a
+   closed the connection mid-transaction. In 10 rounds, 4 tenant-B transactions each take a
    session advisory lock, `PREPARE` a statement and set a session setting, start a 1 s
    `pg_sleep` and are abandoned through their `AbortSignal` after 100 ms, so
    `createScopedDatabase` closes the connection without cleaning the backend (each is
    reported through `onResetFailure`, counted by this check and not by the session-reset
-   check). Once the sleeps end, 8 readers per round check their own backend for the lock
-   (`pg_locks`), the statement (`pg_prepared_statements`) and the setting
-   (`current_setting`), and no backend may still hold a probe lock 5 s later. The detail lists
-   the backend pids of abandoned transactions and readers, and `reused` counts readers that
-   ran on a backend abandoned before them, so a pass with `reused: 0` shows only that
-   Supavisor did not hand those backends on. On direct Postgres the backend ends with its
-   connection, so the unit test always sees `reused: 0`. The hub (Devin's Mac) runs `check:hosted`
-   against the Supabase preview branch, with `ZS_TARGET_REF` and both database URLs set to
-   that branch; cloud sessions and CI never run it. **If this check fails, switch
-   the runtime `DATABASE_URL` to session mode (port 5432) and run the checks with
-   `-- --expect-transport=session` until the cause is fixed.**
+   check). Once the sleeps end, 12 scoped readers per round check their own backend for the
+   lock (`pg_locks`), the statement (`pg_prepared_statements`) and the setting
+   (`current_setting`). An observer on a second, plain pool against the runtime URL polls
+   once per round and then every 100 ms until no probe lock is held, for at most 5 s. Each
+   poll is one `SELECT` that checks its own backend for the same markers and reads
+   `pg_locks` for probe locks held by any backend. The observer never runs the scoped
+   cleanup, so a dirty backend it lands on stays dirty and is reported, not erased. Every
+   reader and poll records its backend pid; `reused` counts those that ran on a backend
+   abandoned before them (`reusedBy` splits readers and observer). The result is one of:
+   - **clean**: `reused` is above 0 and nothing saw leftover state. The check passes.
+   - **contaminated**: a reader or observer poll saw leftover state, or a backend still held
+     a probe lock after 5 s. The check fails in either mode. **Switch the runtime
+     `DATABASE_URL` to session mode (port 5432) and run the checks with
+     `-- --expect-transport=session` until the cause is fixed.**
+   - **inconclusive**: nothing saw leftover state, but nothing ran on an abandoned backend
+     either (`reused: 0`, for example because Supavisor destroyed those backends), or the
+     abandonments did not happen as planned. Nothing is proven, so in transaction mode the
+     check fails. Rerun with more rounds, for example
+     `pnpm --filter @zs/api check:hosted -- --abandon-rounds=40` (1 to 200; default 10). If
+     reuse never shows, switch to session mode as above. In session mode an inconclusive
+     result passes when the only reason is `reused: 0`.
+
+   The check's `verdict` field states the result and the next step. On direct Postgres the
+   backend ends with its connection, so the local test sees `inconclusive`; simulated
+   poolers in `test/hosted-probes.test.ts` cover the clean and contaminated cases. The hub
+   (Devin's Mac) runs `check:hosted` against the Supabase preview branch, with
+   `ZS_TARGET_REF` and both database URLs set to that branch; cloud sessions and CI never
+   run it.
 
 Hosted settings that the scripts do not manage:
 - The Data API (PostgREST) exposes only `graphql_public`; tenant tables are not reachable
