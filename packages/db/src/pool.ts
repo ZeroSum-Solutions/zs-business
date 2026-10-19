@@ -71,17 +71,39 @@ export function createRuntimePool(options: RuntimePoolOptions): Pool {
   return pool;
 }
 
+/** The probe each pool is running, so overlapping readiness checks share one connection. */
+const probes = new WeakMap<Pool, Promise<boolean>>();
+
 /**
  * Readiness: can this pool reach the database now? A bounded `SELECT 1`; never throws.
  * Liveness (`/healthz`) stays separate, so a database outage does not restart the process.
+ * A probe that times out closes its connection instead of leaving it checked out, and checks
+ * that arrive while one runs wait for it rather than take another connection.
  */
 export async function checkDatabase(pool: Pool, timeoutMs = 2000): Promise<boolean> {
+  let probe = probes.get(pool);
+  if (!probe) {
+    probe = runProbe(pool, timeoutMs).finally(() => probes.delete(pool));
+    probes.set(pool, probe);
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
-  const probe = pool.query("SELECT 1").then(() => true, () => false);
   try {
     return await Promise.race([probe, timeout]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function runProbe(pool: Pool, timeoutMs: number): Promise<boolean> {
+  const client = await pool.connect().catch(() => undefined);
+  if (!client) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const answered = client.query("SELECT 1").then(() => true, () => false);
+  const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+  const ok = await Promise.race([answered, timedOut]);
+  clearTimeout(timer);
+  // A connection that failed or did not answer in time is closed, not reused.
+  client.release(ok ? undefined : new Error("Readiness probe failed"));
+  return ok;
 }

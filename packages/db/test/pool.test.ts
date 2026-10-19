@@ -1,3 +1,4 @@
+import { createServer, connect, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkDatabase, createRuntimePool, summarizePoolError } from "../src/pool.js";
 import { createScopedDatabase, DatabaseUnavailable } from "../src/scoped.js";
@@ -108,6 +109,54 @@ describe("runtime pool bounds", () => {
     expect(await checkDatabase(pool)).toBe(true);
     await pool.end();
     expect(await checkDatabase(pool)).toBe(false);
+  });
+});
+
+/** A TCP proxy to the test database that can stop passing the database's answers on. */
+async function stallingProxy(target: URL) {
+  const sockets = new Set<Socket>();
+  let stalled = false;
+  const server = createServer((client) => {
+    const upstream = connect(Number(target.port || 5432), target.hostname);
+    for (const socket of [client, upstream]) {
+      sockets.add(socket);
+      socket.on("error", () => undefined);
+      socket.on("close", () => { client.destroy(); upstream.destroy(); });
+    }
+    client.on("data", (chunk) => upstream.write(chunk));
+    upstream.on("data", (chunk) => { if (!stalled) client.write(chunk); });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = new URL(runtimeUrl());
+  url.hostname = "127.0.0.1";
+  url.port = String((server.address() as { port: number }).port);
+  return {
+    url: url.href,
+    stall: () => { stalled = true; },
+    close: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+describe("readiness probe", () => {
+  it("frees the connection of a probe that timed out, and runs one probe at a time", async () => {
+    const proxy = await stallingProxy(new URL(database.url));
+    const pool = createRuntimePool({ connectionString: proxy.url, max: 1, connectionTimeoutMs: 2000, onError: () => undefined });
+    try {
+      expect(await checkDatabase(pool, 200)).toBe(true);
+      // The open connection stops answering: every probe times out.
+      proxy.stall();
+      expect(await Promise.all([checkDatabase(pool, 200), checkDatabase(pool, 200), checkDatabase(pool, 200)])).toEqual([false, false, false]);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // No probe still waits for a connection, and the hung one was closed, not kept.
+      expect(pool.waitingCount).toBe(0);
+      expect(pool.totalCount).toBe(0);
+    } finally {
+      await proxy.close();
+      await pool.end().catch(() => undefined);
+    }
   });
 });
 
