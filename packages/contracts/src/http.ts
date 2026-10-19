@@ -62,10 +62,31 @@ export const pageQuerySchema = z.strictObject({
   offset: z.coerce.number().int().min(0).max(100000).default(0),
 });
 export type PageQuery = z.infer<typeof pageQuerySchema>;
-export const listBookingsQuerySchema = pageQuerySchema.extend({ resourceId: idSchema.optional() });
+/** Bookings that overlap [from, to): either bound may be left open. */
+export const listBookingsQuerySchema = pageQuerySchema.extend({
+  resourceId: idSchema.optional(),
+  from: bookingInstantSchema.optional(),
+  to: bookingInstantSchema.optional(),
+}).refine((value) => !value.from || !value.to || value.from < value.to, "Range must have positive length");
 export type ListBookingsQuery = z.infer<typeof listBookingsQuerySchema>;
-export const listDealsQuerySchema = pageQuerySchema.extend({ pipelineId: idSchema.optional() });
+export const listDealsQuerySchema = pageQuerySchema.extend({
+  pipelineId: idSchema.optional(),
+  contactId: idSchema.optional(),
+});
 export type ListDealsQuery = z.infer<typeof listDealsQuerySchema>;
+
+/** At most one page of IDs, comma-separated, so a query string can carry them. */
+export const MAX_CONTACT_IDS = 100;
+const uuidText = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+export const listContactsQuerySchema = pageQuerySchema.extend({
+  /** Part of a name, email or phone number, case-insensitive. Blank means no filter. */
+  search: z.string().trim().max(200).refine(isPostgresText, "Text is not valid in Postgres").optional(),
+  /** `recent`: newest first (the default). `name`: by name, then email, then phone. */
+  sort: z.enum(["recent", "name"]).default("recent"),
+  /** Only these contacts, such as the ones a page of deals refers to. */
+  ids: z.string().regex(new RegExp(`^${uuidText}(,${uuidText}){0,${MAX_CONTACT_IDS - 1}}$`), `Up to ${MAX_CONTACT_IDS} comma-separated contact IDs`).optional(),
+});
+export type ListContactsQuery = z.infer<typeof listContactsQuerySchema>;
 
 export const slotsQuerySchema = z.strictObject({
   resourceId: idSchema,

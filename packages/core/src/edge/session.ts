@@ -6,9 +6,9 @@ import {
   createDealRequestSchema,
   idempotencyKeySchema,
   listBookingsQuerySchema,
+  listContactsQuerySchema,
   listDealsQuerySchema,
   moveDealStageRequestSchema,
-  pageQuerySchema,
   slotsQuerySchema,
   upsertContactRequestSchema,
   uuidSchema,
@@ -21,7 +21,7 @@ import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
-import { listContacts, listDeals, listPipelines } from "../reads/crm.js";
+import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { derivedId } from "./ids.js";
 import { validationError } from "./errors.js";
@@ -121,8 +121,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return read((tx) => listBookings(tx, tenantId, parsed));
     },
     listContacts: (query: unknown) => {
-      const parsed = parseInput(pageQuerySchema, query, "query");
+      const parsed = parseInput(listContactsQuerySchema, query, "query");
       return read((tx) => listContacts(tx, tenantId, parsed));
+    },
+    getContact: (contactId: unknown) => {
+      const id = parseInput(uuidSchema, contactId, "contact ID");
+      return read((tx) => getContact(tx, tenantId, id));
     },
     listDeals: (query: unknown) => {
       const parsed = parseInput(listDealsQuerySchema, query, "query");

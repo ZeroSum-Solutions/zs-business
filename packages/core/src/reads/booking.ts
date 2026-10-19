@@ -41,14 +41,46 @@ const bookingRecord = (row: BookingRow): BookingRecord => ({
   createdAt: row.created_at.toISOString(),
 });
 
+const bookingColumns = `id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
+            buffer_before_minutes, buffer_after_minutes, created_at`;
+
+/**
+ * Bookings overlapping [from, to) when given, in start order, so a day or week is one short
+ * read however much history comes before it.
+ *
+ * Under RLS the planner only turns leakproof operators into index conditions, and range
+ * overlap (`&&`) is not one, so the overlap test is split into btree ranges on starts_at:
+ * the bookings starting inside the range, plus, per resource, the latest one starting before
+ * `from` if it is still running. The occupied-range exclusion constraint keeps one resource's
+ * bookings apart, so no earlier booking can still be running at `from`. If cancelled bookings
+ * ever stop taking part in that constraint, both parts must filter to confirmed ones.
+ */
 export async function listBookings(tx: Transaction, tenantId: string, query: ListBookingsQuery): Promise<BookingPage> {
-  const rows = (await tx.query<BookingRow>(
-    `SELECT id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
-            buffer_before_minutes, buffer_after_minutes, created_at
-       FROM bookings WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2)
-      ORDER BY starts_at, id LIMIT $3 OFFSET $4`,
-    [tenantId, query.resourceId ?? null, query.limit + 1, query.offset],
-  )).rows;
+  const scope = [tenantId, query.resourceId ?? null, query.limit + 1, query.offset];
+  if (query.from === undefined) {
+    const rows = (await tx.query<BookingRow>(
+      `SELECT ${bookingColumns} FROM bookings
+        WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2) AND ($5::timestamptz IS NULL OR starts_at < $5)
+        ORDER BY starts_at, id LIMIT $3 OFFSET $4`,
+      [...scope, query.to ?? null],
+    )).rows;
+    return page(rows.map(bookingRecord), query);
+  }
+  const sql = `SELECT ${bookingColumns} FROM (
+          SELECT running.* FROM booking_resources r
+          CROSS JOIN LATERAL (
+            SELECT ${bookingColumns} FROM bookings b
+             WHERE b.tenant_id=r.tenant_id AND b.resource_id=r.id AND b.starts_at < $5::timestamptz
+             ORDER BY b.starts_at DESC LIMIT 1) running
+           WHERE r.tenant_id=$1 AND ($2::uuid IS NULL OR r.id=$2) AND running.ends_at > $5::timestamptz
+          UNION ALL
+          SELECT ${bookingColumns} FROM bookings
+           WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2)
+             AND starts_at >= $5::timestamptz AND ($6::timestamptz IS NULL OR starts_at < $6)
+           ORDER BY starts_at, id LIMIT $3::int + $4::int
+        ) hits
+        ORDER BY starts_at, id LIMIT $3 OFFSET $4`;
+  const rows = (await tx.query<BookingRow>(sql, [...scope, query.from, query.to ?? null])).rows;
   return page(rows.map(bookingRecord), query);
 }
 
