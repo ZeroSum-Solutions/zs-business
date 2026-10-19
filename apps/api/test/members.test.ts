@@ -24,7 +24,7 @@ const changeRole = (token: string, memberId: string, role: "owner" | "staff") =>
   call(h.app, "POST", `/v1/members/${memberId}/role`, { token, key: randomUUID(), body: { role } });
 const remove = (token: string, memberId: string, key = randomUUID()) =>
   call(h.app, "DELETE", `/v1/members/${memberId}`, { token, key });
-const createContact = (token: string, email: string, key = randomUUID()) =>
+const createContact = (token: string, email: string, key: string = randomUUID()) =>
   call(h.app, "POST", "/v1/crm/contacts", { token, key, body: { displayName: "Ada", email } });
 const expectForbidden = (response: { status: number; body: unknown }) => {
   expect(response.status).toBe(403);

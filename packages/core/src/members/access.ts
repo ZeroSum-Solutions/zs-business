@@ -13,10 +13,12 @@ export interface MemberAccess {
  * Membership changes take this lock exclusively and every other transaction takes it shared
  * before reading the caller's role, so no write runs on a role that a committed removal or
  * demotion already took away. Always taken first in a transaction, before any other lock.
+ * The key starts with a non-UUID prefix: the dispatcher locks `${tenantId}:${idempotencyKey}`,
+ * and a shared hold here plus an exclusive one there on the same key would deadlock.
  */
 export async function lockMembership(tx: Transaction, tenantId: string, mode: "shared" | "exclusive"): Promise<void> {
   const lock = mode === "exclusive" ? "pg_advisory_xact_lock" : "pg_advisory_xact_lock_shared";
-  await tx.query(`SELECT pg_catalog.${lock}(pg_catalog.hashtextextended($1, 0))`, [`${tenantId}:members`]);
+  await tx.query(`SELECT pg_catalog.${lock}(pg_catalog.hashtextextended($1, 0))`, [`tenant-members:${tenantId}`]);
 }
 
 /** The caller's membership in the tenant, or null. Pending invites (no user yet) never match. */
