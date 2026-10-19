@@ -20,6 +20,8 @@ export const SECURITY_HEADERS = [
 
 const config: NextConfig = {
   reactStrictMode: true,
+  // next dev would otherwise write apps/dashboard/AGENTS.md when it detects a coding agent.
+  agentRules: false,
   // @zs/contracts ships TypeScript source with NodeNext-style ".js" import specifiers.
   // Turbopack cannot map those to ".ts" files yet, so dev and build run on webpack.
   transpilePackages: ["@zs/contracts"],

@@ -361,10 +361,30 @@ describe("waiting bound", () => {
       await pool.end();
     }
   });
+
+  it("bounds a burst on a warm pool as on a cold one: idle connections are not room for every waiter", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 2, onError: () => undefined });
+    const db = createScopedDatabase(pool, { maxWaiting: 3 });
+    const burst = async () => {
+      const settled = await Promise.allSettled(Array.from({ length: 10 }, () =>
+        db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT pg_sleep(0.02)"))));
+      return settled.filter((outcome) => outcome.status === "rejected"
+        && outcome.reason instanceof DatabaseUnavailable && outcome.reason.reason === "busy").length;
+    };
+    try {
+      // Cold: 2 new connections and 3 waiting; the other 5 are refused.
+      expect(await burst()).toBe(5);
+      expect(pool.idleCount).toBe(2);
+      // Warm: the same 2 idle connections serve the first 2, 3 wait, 5 are refused.
+      expect(await burst()).toBe(5);
+    } finally {
+      await pool.end();
+    }
+  });
 });
 
 describe("transaction setup", () => {
-  it("sets the role, limits and tenant in five round trips for one statement, and leaves the session clean", async () => {
+  it("sets the role, limits and tenant in seven round trips for one statement, and leaves the session clean", async () => {
     const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
     const sent: string[] = [];
     pool.on("connect", (client) => {
@@ -382,7 +402,12 @@ describe("transaction setup", () => {
                 current_setting('transaction_isolation') AS isolation`,
       )).rows[0]);
       expect(inside).toEqual({ role: "authenticated", tenant: fixture.a.tenantId, lock: "1234ms", statement: "5678ms", isolation: "read committed" });
-      expect(sent).toHaveLength(5);
+      // Setup (BEGIN and login check, settings, savepoint), the work, release and
+      // in-transaction cleanup, COMMIT, and the session reset after it.
+      expect(sent).toHaveLength(7);
+      expect(sent[2]).toBe("SAVEPOINT zs_work");
+      expect(sent[4]).toMatch(/^SET CONSTRAINTS ALL IMMEDIATE; RELEASE SAVEPOINT zs_work; CLOSE ALL;/);
+      expect(sent[5]).toBe("COMMIT");
       sent.length = 0;
       // A privileged login is still refused before any work runs.
       const admin = createScopedDatabase(database.pool);

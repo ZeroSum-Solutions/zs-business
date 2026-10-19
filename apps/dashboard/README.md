@@ -128,6 +128,12 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   "Halden & Rowe Fine Jewelry", including the booking and deal conflicts. Changes reset
   on reload. In demo mode `window.__zsDemo` exposes `bookAsSomeoneElse` and
   `editDealElsewhere` so tests can trigger the conflicts.
+- Build and server must agree on the mode. `NEXT_PUBLIC_API_MODE` is baked in at build
+  time from `ZS_API_URL`; `src/proxy.ts` compares it with the server's `ZS_API_URL` on every
+  request (`src/lib/server/hosting-mode.ts`). A demo build started with `ZS_API_URL`, or a
+  live build started without it, answers every page and `/api` request with a 500 that
+  names the mismatch, and logs it once at start (`src/instrumentation.ts`). Rebuild with
+  the same `ZS_API_URL` setting the server runs with.
 - Live mode labels every area that still reads the demo workspace with a "Sample data"
   badge, and disables its writes (cancel plan, agent switches and approvals, settings,
   connections, site edits) with the reason shown as visible text

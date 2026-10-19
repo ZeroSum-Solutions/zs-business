@@ -1,0 +1,429 @@
+import { randomBytes, randomInt } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Pool } from "pg";
+import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
+
+export type PoolerMode = "transaction" | "session";
+
+/** Which Supavisor mode a pooler URL's port selects; transaction mode shares backends between clients per transaction. */
+export function poolerTransport(port: string): { port: string; mode: PoolerMode | "unknown" } {
+  return { port, mode: port === "6543" ? "transaction" : port === "5432" ? "session" : "unknown" };
+}
+
+const TRANSPORT_FLAG = "--expect-transport=";
+const ABANDON_ROUNDS_FLAG = "--abandon-rounds=";
+const MAX_ABANDON_ROUNDS = 200;
+
+export interface HostedCheckArgs {
+  /** The runtime URL's Supavisor mode. */
+  transport: PoolerMode;
+  /** Rounds for the abandoned-transaction probe; undefined keeps its default. */
+  abandonRounds?: number;
+}
+
+/**
+ * The flags of `check:hosted`. `--expect-transport=transaction|session` names the transport
+ * the deployment uses; the default is transaction mode (port 6543), which the serverless API
+ * needs. `--abandon-rounds=N` (1 to 200) reruns the abandoned-transaction probe with more
+ * rounds after an inconclusive result. A bare `--` (as pnpm passes it) is ignored; any other
+ * argument is refused.
+ */
+export function hostedCheckArgs(argv: readonly string[]): HostedCheckArgs {
+  const args: HostedCheckArgs = { transport: "transaction" };
+  for (const arg of argv) {
+    if (arg === "--") continue;
+    if (arg.startsWith(TRANSPORT_FLAG)) {
+      const value = arg.slice(TRANSPORT_FLAG.length);
+      if (value !== "transaction" && value !== "session")
+        throw new Error(`unsupported transport ${JSON.stringify(value)}: expected transaction (6543) or session (5432)`);
+      args.transport = value;
+    } else if (arg.startsWith(ABANDON_ROUNDS_FLAG)) {
+      const value = arg.slice(ABANDON_ROUNDS_FLAG.length);
+      const rounds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (!(rounds >= 1 && rounds <= MAX_ABANDON_ROUNDS))
+        throw new Error(`unsupported abandon rounds ${JSON.stringify(value)}: expected a whole number from 1 to ${MAX_ABANDON_ROUNDS}`);
+      args.abandonRounds = rounds;
+    } else {
+      throw new Error(`unknown argument ${arg}; only ${TRANSPORT_FLAG}transaction|session and ${ABANDON_ROUNDS_FLAG}N`);
+    }
+  }
+  return args;
+}
+
+/** A gate, not metadata: the runtime URL must use the expected transport, and unknown ports are unsupported. */
+export function transportGate(port: string, expected: PoolerMode): { ok: boolean; detail: Record<string, unknown> } {
+  const actual = poolerTransport(port);
+  if (actual.mode === "unknown")
+    return { ok: false, detail: { ...actual, expected, error: `unsupported transport: port ${port} is neither Supavisor transaction (6543) nor session (5432) mode` } };
+  if (actual.mode !== expected)
+    return { ok: false, detail: { ...actual, expected, error: `runtime URL uses ${actual.mode} mode; the deployment uses ${expected} mode` } };
+  return { ok: true, detail: { ...actual, expected } };
+}
+
+const MARKER = "zs-contamination-probe-";
+
+export interface ContaminationProbeOptions {
+  rounds?: number;
+  /** Dirtying transactions per round, alternately committed and thrown. */
+  dirtyPerRound?: number;
+  readsPerRound?: number;
+}
+
+interface Read {
+  pid: number;
+  custom: string | null;
+  app: string;
+  tenant: string | null;
+  advisory: number;
+  temp: number;
+  cursors: number;
+  listens: number;
+}
+
+/** One savepoint per optional step: a step the server refuses cannot leave state behind. */
+async function attempt(tx: Transaction, sql: string, values: unknown[] = []): Promise<boolean> {
+  await tx.query("SAVEPOINT zs_probe_step");
+  try {
+    await tx.query(sql, values);
+    await tx.query("RELEASE SAVEPOINT zs_probe_step");
+    return true;
+  } catch {
+    await tx.query("ROLLBACK TO SAVEPOINT zs_probe_step");
+    return false;
+  }
+}
+
+/**
+ * Session-contamination probe for a pooled runtime database. In each round some
+ * transactions leave behind every kind of session state a COMMIT or ROLLBACK keeps: a
+ * custom setting (set_config(..., false)), application_name, a session advisory lock, a
+ * temp table, a held cursor and a LISTEN subscription; half of them commit, half throw.
+ * All are harmless to other clients of a shared pooler (unique names, nobody notifies).
+ * Then other transactions read the session state of their backend; none may see any of it,
+ * and each must still see its own transaction-local tenant. Every transaction records
+ * pg_backend_pid(): unless some reader ran on a backend that a committed and a thrown
+ * dirtying transaction used before it, the probe proved nothing and fails.
+ */
+export async function sessionContaminationProbe(db: ScopedDatabase, tenantId: string, options: ContaminationProbeOptions = {}) {
+  const { rounds = 20, dirtyPerRound = 2, readsPerRound = 8 } = options;
+  const dirtied = { committed: new Set<number>(), thrown: new Set<number>() };
+  const applied = { advisory: 0, temp: 0, cursor: 0, listen: 0 };
+  const unexpected: string[] = [];
+  const reads: Read[] = [];
+  const handoffs = { fromCommitted: 0, fromThrown: 0 };
+
+  const dirty = async (throws: boolean) => {
+    const marker = MARKER + randomBytes(6).toString("hex");
+    const name = marker.replaceAll("-", "_");
+    const probeError = new Error(marker);
+    let pid = 0;
+    try {
+      await db.tenant(tenantId, async (tx) => {
+        pid = (await tx.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+        await tx.query("SELECT set_config('zs.contamination_probe', $1, false)", [marker]);
+        await tx.query(`SET application_name = '${marker}'`);
+        if (await attempt(tx, "SELECT pg_advisory_lock(hashtext($1))", [marker])) applied.advisory += 1;
+        if (await attempt(tx, `CREATE TEMP TABLE ${name} AS SELECT 1 AS probe`)) applied.temp += 1;
+        if (await attempt(tx, `DECLARE ${name} CURSOR WITH HOLD FOR SELECT 1`)) applied.cursor += 1;
+        if (await attempt(tx, `LISTEN ${name}`)) applied.listen += 1;
+        if (throws) throw probeError;
+      });
+      if (throws) unexpected.push("a throwing transaction committed");
+    } catch (error) {
+      if (error !== probeError) unexpected.push(error instanceof Error ? error.message : String(error));
+    }
+    if (pid) (throws ? dirtied.thrown : dirtied.committed).add(pid);
+  };
+  const read = () => db.tenant(tenantId, async (tx) => (await tx.query<Read>(
+    `SELECT pg_backend_pid() AS pid, current_setting('zs.contamination_probe', true) AS custom,
+            current_setting('application_name') AS app, current_setting('app.tenant_id', true) AS tenant,
+            (SELECT count(*)::int FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid()) AS advisory,
+            (SELECT count(*)::int FROM pg_class WHERE relnamespace=pg_my_temp_schema()) AS temp,
+            (SELECT count(*)::int FROM pg_cursors WHERE is_holdable) AS cursors,
+            (SELECT count(*)::int FROM pg_listening_channels()) AS listens,
+            pg_sleep(random() * 0.02)`)).rows[0]!);
+
+  for (let round = 0; round < rounds; round += 1) {
+    await Promise.all(Array.from({ length: dirtyPerRound }, (_, index) => dirty(index % 2 === 1)));
+    // Readers start only after this round's dirtying transactions ended.
+    const batch = await Promise.all(Array.from({ length: readsPerRound }, read));
+    for (const row of batch) {
+      if (dirtied.committed.has(row.pid)) handoffs.fromCommitted += 1;
+      if (dirtied.thrown.has(row.pid)) handoffs.fromThrown += 1;
+    }
+    reads.push(...batch);
+  }
+
+  const contaminated = {
+    custom: reads.filter((row) => (row.custom ?? "").startsWith(MARKER)).length,
+    app: reads.filter((row) => row.app.startsWith(MARKER)).length,
+    advisory: reads.filter((row) => row.advisory > 0).length,
+    temp: reads.filter((row) => row.temp > 0).length,
+    cursor: reads.filter((row) => row.cursors > 0).length,
+    listen: reads.filter((row) => row.listens > 0).length,
+  };
+  const wrongTenant = reads.filter((row) => row.tenant !== tenantId).length;
+  const failures = [
+    ...Object.entries(contaminated).filter(([, count]) => count > 0).map(([kind, count]) => `${count} reads saw leftover ${kind} state`),
+    ...(wrongTenant > 0 ? [`${wrongTenant} reads saw the wrong tenant`] : []),
+    ...(handoffs.fromCommitted === 0 ? ["no handoff observed from a committed dirtying transaction"] : []),
+    ...(handoffs.fromThrown === 0 ? ["no handoff observed from a throwing dirtying transaction"] : []),
+    ...(unexpected.length > 0 ? [`${unexpected.length} dirtying transactions failed unexpectedly: ${unexpected.slice(0, 3).join("; ")}`] : []),
+  ];
+  return {
+    ok: failures.length === 0,
+    detail: {
+      reads: reads.length,
+      dirtied: { committed: rounds * Math.ceil(dirtyPerRound / 2), thrown: rounds * Math.floor(dirtyPerRound / 2) },
+      applied,
+      backends: { dirtied: new Set([...dirtied.committed, ...dirtied.thrown]).size, read: new Set(reads.map((row) => row.pid)).size },
+      handoffs,
+      contaminated,
+      wrongTenant,
+      failures,
+    },
+  };
+}
+
+/** A short code for a rejected transaction: the DatabaseUnavailable reason, the SQLSTATE, or the message. */
+export function rejectionCode(error: unknown): string {
+  if (error instanceof DatabaseUnavailable) return error.reason;
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") return error.code;
+  return error instanceof Error ? error.message : String(error);
+}
+
+export interface TenantLoadTarget {
+  tenantId: string;
+  /** Contacts the tenant must see; any other count is a crossover. */
+  contacts: number;
+}
+
+/**
+ * Load probe: `transactions` concurrent scoped transactions, alternately for each target,
+ * each reading its tenant setting and contact counts. Every transaction settles before the
+ * probe returns, so none runs on into a later check. A rejection (for example "busy", when
+ * the database's maxWaiting is smaller than the queue the load builds) fails the probe and is
+ * counted by code.
+ */
+export async function concurrentTenantProbe(
+  db: ScopedDatabase,
+  targets: readonly [TenantLoadTarget, TenantLoadTarget],
+  options: { transactions?: number } = {},
+) {
+  const { transactions = 200 } = options;
+  const settled = await Promise.allSettled(Array.from({ length: transactions }, (_, index) => {
+    const target = targets[index % 2]!;
+    return db.tenant(target.tenantId, async (tx) => {
+      const row = (await tx.query<{ setting: string; contacts: number; foreign: number }>(
+        `SELECT current_setting('app.tenant_id') AS setting, (SELECT count(*)::int FROM crm_contacts) AS contacts,
+                (SELECT count(*)::int FROM crm_contacts WHERE tenant_id <> $1) AS foreign, pg_sleep(random()*0.05)`, [target.tenantId])).rows[0]!;
+      return { tenant: target.tenantId, expected: target.contacts, ...row };
+    });
+  }));
+  const rows = settled.flatMap((outcome) => (outcome.status === "fulfilled" ? [outcome.value] : []));
+  const rejected: Record<string, number> = {};
+  for (const outcome of settled) {
+    if (outcome.status === "rejected") {
+      const code = rejectionCode(outcome.reason);
+      rejected[code] = (rejected[code] ?? 0) + 1;
+    }
+  }
+  const bad = rows.filter((row) => row.setting !== row.tenant || row.foreign !== 0 || row.contacts !== row.expected);
+  const failures = [
+    ...Object.entries(rejected).map(([code, count]) => `${count} transactions rejected with ${code}`),
+    ...(bad.length > 0 ? [`${bad.length} transactions saw another tenant's setting or rows`] : []),
+  ];
+  return {
+    ok: failures.length === 0,
+    detail: { total: transactions, fulfilled: rows.length, rejected, bad: bad.slice(0, 5), failures },
+  };
+}
+
+const ABANDON_MARKER = "zs-abandon-probe-";
+/** First key of the probe's two-key advisory locks, so pg_locks can find them on any backend. */
+const ABANDON_LOCK_SPACE = 7_413_210;
+
+export interface AbandonProbeOptions {
+  rounds?: number;
+  /** Transactions per round abandoned while their statement runs. */
+  abandonedPerRound?: number;
+  readsPerRound?: number;
+  /** How long the abandoned statement runs in Postgres. */
+  sleepMs?: number;
+  /** When, after the statement starts, its caller gives up. */
+  abandonAfterMs?: number;
+  /** How long the backends of abandoned statements may keep the probe's locks once those statements ended. */
+  settleMs?: number;
+}
+
+/**
+ * A plain connection pool on the runtime URL, for example a pg Pool, that the observer
+ * queries one statement at a time. It must not be the scoped path: the observer runs no
+ * cleanup, so the state it finds stays where it is.
+ */
+export interface ObserverPool {
+  query: Pool["query"];
+}
+
+interface AbandonRead {
+  pid: number;
+  custom: string | null;
+  advisory: number;
+  prepared: number;
+}
+interface Observation extends AbandonRead {
+  lockedBy: number[];
+}
+
+/**
+ * clean: readers or observer polls ran on backends abandoned before them and none saw
+ * leftover state. contaminated: some did, or a backend still held a probe lock after
+ * settleMs. inconclusive: no leftover state, but nothing proves that a reused backend would
+ * have shown it (no reuse observed, or the abandonments did not happen as planned).
+ */
+export type AbandonProbeStatus = "clean" | "contaminated" | "inconclusive";
+
+/**
+ * Abandoned-transaction probe for a pooled runtime database. Each abandoned transaction dirties
+ * its backend's session state (a session advisory lock, a PREPAREd statement, a session
+ * setting), starts a pg_sleep and is abandoned through its AbortSignal while the sleep runs:
+ * createScopedDatabase then closes the connection without cleaning the backend. What happens
+ * to that backend is the pooler's business: Postgres ends it on a direct connection; behind a
+ * transaction pooler it may be destroyed, or cleaned and given to another client.
+ *
+ * Once the sleeps have ended, reader transactions on `db` check their own backend; the
+ * scoped path cleans each backend after its reader has looked. The observer, on a separate
+ * plain pool against the same URL, never cleans: each poll is one SELECT that checks its own
+ * backend for the markers and reads pg_locks for probe locks held by any backend. It polls
+ * once per round alongside the readers, then until no probe lock is held or settleMs passed.
+ * Every reader and poll records its backend pid; `reused` counts those that ran on a backend
+ * an abandoned transaction had used before them. Only a clean result with reuse is evidence.
+ */
+export async function abandonedTransactionProbe(db: ScopedDatabase, observer: ObserverPool, tenantId: string, options: AbandonProbeOptions = {}) {
+  const { rounds = 10, abandonedPerRound = 4, readsPerRound = 12, sleepMs = 1000, abandonAfterMs = 100, settleMs = 5000 } = options;
+  const abandonedPids = new Set<number>();
+  const keys: number[] = [];
+  const applied = { advisory: 0, prepared: 0, custom: 0 };
+  const outcomes: Record<string, number> = {};
+  const reads: AbandonRead[] = [];
+  const observations: Observation[] = [];
+  const reusedBy = { readers: 0, observer: 0 };
+
+  const abandon = async () => {
+    const marker = ABANDON_MARKER + randomBytes(6).toString("hex");
+    const key = randomInt(1, 2 ** 31 - 1);
+    keys.push(key);
+    const controller = new AbortController();
+    let pid = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await db.tenant(tenantId, async (tx) => {
+      pid = (await tx.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      if (await attempt(tx, "SELECT pg_advisory_lock($1::int, $2::int)", [ABANDON_LOCK_SPACE, key])) applied.advisory += 1;
+      if (await attempt(tx, `PREPARE ${marker.replaceAll("-", "_")} AS SELECT 1`)) applied.prepared += 1;
+      if (await attempt(tx, "SELECT set_config('zs.abandon_probe', $1, false)", [marker])) applied.custom += 1;
+      const sleeping = tx.query("SELECT pg_sleep($1)", [sleepMs / 1000]);
+      timer = setTimeout(() => controller.abort(), abandonAfterMs);
+      await sleeping;
+    }, { signal: controller.signal }).then(() => "completed", rejectionCode).finally(() => clearTimeout(timer));
+    outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
+    if (pid) abandonedPids.add(pid);
+  };
+  const ownState = `pg_backend_pid() AS pid, current_setting('zs.abandon_probe', true) AS custom,
+            (SELECT count(*)::int FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid()) AS advisory,
+            (SELECT count(*)::int FROM pg_prepared_statements WHERE name LIKE 'zs\\_abandon\\_probe\\_%') AS prepared`;
+  const read = async () => {
+    const row = await db.tenant(tenantId, async (tx) => (await tx.query<AbandonRead>(`SELECT ${ownState}, pg_sleep(random() * 0.02)`)).rows[0]!);
+    // A later round may abandon a backend this reader used; only earlier abandonments count.
+    if (abandonedPids.has(row.pid)) reusedBy.readers += 1;
+    reads.push(row);
+  };
+  // One statement, so one backend even behind a transaction pooler; it only reads.
+  const observe = async () => {
+    const row = (await observer.query<Observation>(
+      `SELECT ${ownState},
+              ARRAY(SELECT l.pid FROM pg_locks l WHERE l.locktype='advisory' AND l.classid=$1::int::oid AND l.objsubid=2
+                      AND l.objid::bigint = ANY($2::bigint[]) ORDER BY l.pid) AS "lockedBy"`,
+      [ABANDON_LOCK_SPACE, keys])).rows[0]!;
+    if (abandonedPids.has(row.pid)) reusedBy.observer += 1;
+    observations.push(row);
+    return row.lockedBy;
+  };
+
+  for (let round = 0; round < rounds; round += 1) {
+    await Promise.all(Array.from({ length: abandonedPerRound }, abandon));
+    // Readers start once the abandoned statements have ended, so their backends are free for reuse.
+    await delay(Math.max(0, sleepMs - abandonAfterMs) + 100);
+    await Promise.all([...Array.from({ length: readsPerRound }, read), observe()]);
+  }
+  let lockedBy = await observe();
+  for (const giveUp = Date.now() + settleMs; lockedBy.length > 0 && Date.now() < giveUp; lockedBy = await observe()) await delay(100);
+
+  const abandoned = outcomes.aborted ?? 0;
+  const leftovers = (rows: readonly AbandonRead[]) => ({
+    custom: rows.filter((row) => (row.custom ?? "").startsWith(ABANDON_MARKER)).length,
+    advisory: rows.filter((row) => row.advisory > 0).length,
+    prepared: rows.filter((row) => row.prepared > 0).length,
+  });
+  const contaminated = { readers: leftovers(reads), observer: leftovers(observations) };
+  const reused = reusedBy.readers + reusedBy.observer;
+  const contamination = [
+    ...Object.entries(contaminated.readers).filter(([, count]) => count > 0).map(([kind, count]) => `${count} reads saw leftover ${kind} state`),
+    ...Object.entries(contaminated.observer).filter(([, count]) => count > 0).map(([kind, count]) => `${count} observer polls saw leftover ${kind} state`),
+    ...(lockedBy.length > 0 ? [`${lockedBy.length} probe advisory locks still held ${settleMs} ms later, by backends ${[...new Set(lockedBy)].join(", ")}`] : []),
+  ];
+  const problems = [
+    ...(abandoned === 0 ? ["no transaction was abandoned in flight"] : []),
+    ...Object.entries(outcomes).filter(([code]) => code !== "aborted").map(([code, count]) => `${count} transactions ended with ${code}, not aborted`),
+    ...(reused === 0 ? ["no reader or observer poll ran on a backend abandoned before it"] : []),
+  ];
+  const status: AbandonProbeStatus = contamination.length > 0 ? "contaminated" : problems.length > 0 ? "inconclusive" : "clean";
+  return {
+    ok: status === "clean",
+    status,
+    detail: {
+      status,
+      rounds,
+      abandoned,
+      outcomes,
+      reads: reads.length,
+      observations: observations.length,
+      applied,
+      backends: {
+        abandoned: [...abandonedPids].sort((x, y) => x - y),
+        read: [...new Set(reads.map((row) => row.pid))].sort((x, y) => x - y),
+        observed: [...new Set(observations.map((row) => row.pid))].sort((x, y) => x - y),
+      },
+      reused,
+      reusedBy,
+      contaminated,
+      lockedBy,
+      failures: [...contamination, ...problems],
+    },
+  };
+}
+
+/**
+ * check:hosted's verdict on the abandoned-transaction probe. Transaction mode needs a clean
+ * result: an inconclusive one fails with what to do next. Session mode keeps one backend per
+ * client connection, so there an inconclusive result passes, but only when the sole reason is
+ * that no backend was reused; a contaminated result fails in either mode.
+ */
+export function abandonGate(
+  probe: { status: AbandonProbeStatus; detail: { rounds: number; reused: number; failures: readonly string[] } },
+  transport: PoolerMode,
+): { ok: boolean; verdict: string } {
+  const toSession = "switch the runtime DATABASE_URL to session mode (port 5432) and run with -- --expect-transport=session";
+  if (probe.status === "clean")
+    return { ok: true, verdict: `clean: ${probe.detail.reused} readers or observer polls ran on abandoned backends and saw no leftover state` };
+  if (probe.status === "contaminated")
+    return { ok: false, verdict: `contaminated: an abandoned transaction's session state outlived it (${probe.detail.failures.join("; ")}); ${toSession}` };
+  const noReuseOnly = probe.detail.reused === 0 && probe.detail.failures.length === 1;
+  if (transport === "session" && noReuseOnly)
+    return { ok: true, verdict: "inconclusive, accepted in session mode: no backend of an abandoned transaction was handed on" };
+  const more = `rerun with -- --abandon-rounds=N above ${probe.detail.rounds}`;
+  return {
+    ok: false,
+    verdict: `inconclusive: ${probe.detail.failures.join("; ")}, so this run does not show that ${transport} mode is safe; `
+      + (noReuseOnly ? `${more}, or ${toSession}` : `fix the probe run and rerun${transport === "transaction" ? `, or ${toSession}` : ""}`),
+  };
+}

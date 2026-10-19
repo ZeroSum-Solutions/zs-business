@@ -48,13 +48,16 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | `JWT_CLOCK_SKEW_SECONDS` | How far a token's `iat` may lie ahead of the API's clock, 0 to 300, default 60. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
-| `DATABASE_POOL_MAX` | Runtime pool size, default 10. |
 | `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
 | `REQUEST_TIMEOUT_MS` | Longest time a `/v1` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
+| `DATABASE_CA_CERT` | PEM. When set, the pool verifies the server against it (`rejectUnauthorized`). Required whenever `DATABASE_URL` is not a loopback host (`127.0.0.1`, `::1`, `localhost`), so a hosted API never falls back to plain TCP; only a loopback database runs without TLS. A non-loopback URL, or any URL with a CA, must carry no query string, because pg lets URL ssl options (`sslmode=no-verify`, `ssl=false`, a `host` override) replace the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
+| `DATABASE_POOL_MAX` | Pool size per process, 1 to 50, default 10. Vercel sets 3: each serverless instance has its own pool. |
 
-Only `src/main.ts` and the `src/scripts/*` entry points read the environment or the system
-clock. Everything else gets them through `createApp(deps)`.
+Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
+environment or the system clock. Everything else gets them through `createApp(deps)`.
+Both servers build the app with `createServer(env, clock)` (`src/server.ts`), which checks
+the runtime login before it serves.
 
 ## Auth
 
@@ -106,20 +109,186 @@ one fixed `message`.
 
 ## Database pool and request limits
 
-`main.ts` builds the runtime pool with `createRuntimePool` from `@zs/db`. A lost idle
-connection (a restart, failover or network drop) is logged as `Database pool error <SQLSTATE>`
-without the URL, at most 10 a minute, and the next request opens a new connection; the
-process does not exit. A request waits at most `DATABASE_CONNECT_TIMEOUT_MS` for a connection;
-when 50 requests already wait, the next is refused at once. Each `/v1` request has a deadline
-(`REQUEST_TIMEOUT_MS`) that also ends when the caller disconnects: its transaction then sends
-no further statement or `COMMIT` and rolls back, and the API answers 503 `Unavailable`. Each
-transaction's statement and lock timeouts are capped at the time left before the deadline, so
-Postgres cancels a statement still running when the deadline passes. A statement still
-running just after the deadline, or when the caller disconnects, is abandoned: its connection is
-closed rather than reused, and the statement ends within that same cap. The API and MCP send no
-`pg_cancel_backend` (`createScopedDatabase`'s `cancel` stays `"none"`): behind Supavisor's
-transaction pooler the backend that ran a statement may already serve another request. Nothing
-is committed by a request that answers 503 before its `COMMIT`. A `COMMIT` abandoned at the
-deadline (`DatabaseUnavailable("commit_unknown")`) may have applied; like any 503 write, it
-replays its committed result when the caller retries with the same `Idempotency-Key`. The MCP server uses the same pool
-settings (4 connections).
+`createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from
+`@zs/db`, for both `main.ts` and `vercel.ts`. A lost idle connection (a restart, failover or
+network drop) is logged as `Database pool error <SQLSTATE>` without the URL, at most 10 a
+minute, and the next request opens a new connection; the process does not exit. A request
+waits at most `DATABASE_CONNECT_TIMEOUT_MS` for a connection; when 50 requests already wait,
+the next is refused at once. Each `/v1` request has a deadline (`REQUEST_TIMEOUT_MS`) that
+also ends when the caller disconnects: its transaction then sends no further statement or
+`COMMIT` and rolls back, and the API answers 503 `Unavailable`. Like any failed transaction it
+first rolls back to the work savepoint and clears the backend's session state (see "Hosted
+deploy"); these recovery statements are not gated by the deadline, only bounded to 2 s each.
+Each transaction's statement and lock timeouts are capped at the time left before the
+deadline, so Postgres cancels a statement still running when the deadline passes. A statement
+still running just after the deadline, or when the caller disconnects, is abandoned: its
+connection is closed rather than reused, and the statement ends within that same cap. An
+abandoned statement leaves no chance to clear the backend, so once the work has begun it is
+reported through `onResetFailure` (logged as `Session reset failed`). The API and MCP send no
+`pg_cancel_backend` (`createScopedDatabase`'s `cancel` stays `"none"`; `createServer` sets it
+explicitly): behind Supavisor's transaction pooler the backend that ran a statement may
+already serve another request. Nothing is committed by a request that answers 503 before its
+`COMMIT`. A `COMMIT` abandoned at the deadline (`DatabaseUnavailable("commit_unknown")`) may
+have applied; like any 503 write, it replays its committed result when the caller retries
+with the same `Idempotency-Key`. The MCP server uses the same pool settings (4 connections).
+
+## Hosted deploy
+
+Projects, URLs and refs are listed in the root `README.md`, "Hosting". Every step is
+owner-run from the repo root. Credentials reach the scripts only through the environment,
+for example `zsvault run --env NAME=<vault id> -- <command>`, never argv or a file in the repo.
+Hosted URLs use the Supavisor pooler `aws-0-us-east-1.pooler.supabase.com`, user
+`<role>.<ref>`, database `postgres`, and no query string:
+port 5432 (session mode) for roles, migrations, seed and backups (`db:hosted-backup` refuses 6543); port 6543 (transaction
+mode) for the API. The scripts check the host, role and ref (`src/hosted.ts`) and verify TLS
+against the pinned Supabase Root 2021 CA.
+
+1. **Roles, once per project.** As the project's `postgres` login (`PGPASSWORD`), with
+   `ZS_MIGRATOR_PASSWORD` and `ZS_RUNTIME_PASSWORD` (32+ printable ASCII characters) in the
+   environment:
+   ```sh
+   ZS_MIGRATOR_VERIFIER=$(node supabase/hosted/scram-verifier.mjs ZS_MIGRATOR_PASSWORD) \
+   ZS_RUNTIME_VERIFIER=$(node supabase/hosted/scram-verifier.mjs ZS_RUNTIME_PASSWORD) \
+   psql "host=aws-0-us-east-1.pooler.supabase.com port=5432 user=postgres.<ref> dbname=postgres sslmode=verify-full sslrootcert=supabase/hosted/supabase-root-2021-ca.crt" \
+     -X -f supabase/hosted/bootstrap-roles.sql
+   ```
+   Supabase logs DDL (`log_statement=ddl`), so the server only receives SCRAM-SHA-256
+   verifiers, never a plaintext password. The script creates `zs_migrator` (LOGIN
+   CREATEROLE; owns every table it creates) and `zs_runtime` (LOGIN, member of
+   `authenticated` only), creates `btree_gist`, and asserts that neither role is superuser,
+   BYPASSRLS or REPLICATION. A rerun with new passwords rotates both; then update
+   `DATABASE_URL` in Vercel and redeploy the API. Every psql and pg_dump call uses
+   `sslmode=verify-full` with the pinned CA.
+2. **Back up, dry-run, apply.** Back up with the wrapper, which binds the archive to the
+   project. With `ZS_TARGET_REF` and `SERVICE_DATABASE_URL` (postgres, port 5432):
+   ```sh
+   mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/<ref>-<date>.dump
+   ```
+   It runs `pg_dump -Fc` of `public`, `zs_internal` and `extensions` (`PG_DUMP` or `PATH`;
+   credentials only in pg_dump's own environment, `sslmode=verify-full` with the pinned CA),
+   reads the migration ledger before and after (it must not move), and writes
+   `<dump>.manifest.json`: project ref, archive name, size, sha256, start time and the full
+   ledger with checksums. Neither file may exist yet. Then, with `ZS_TARGET_REF` and
+   `MIGRATOR_DATABASE_URL` (zs_migrator, port 5432):
+   ```sh
+   mise exec -- pnpm --filter @zs/api db:hosted-migrate --dry-run
+   mise exec -- pnpm --filter @zs/api db:hosted-migrate --apply --backup <dump> --receipt <file.json>
+   ```
+   `--apply` first reserves the receipt file (an existing file or a missing folder is refused
+   before any database work), then checks the login, dry-runs, and checks the backup. It
+   refuses a backup without its manifest, a manifest for another project than
+   `ZS_TARGET_REF` (a preview dump with the same tables and ledger fails here), a sha256 or
+   size that differs from the file, a manifest or archive older than two hours, a manifest
+   ledger that differs from the live one by name or checksum, an archive pg_restore cannot
+   read end to end, one that lacks the definition or data of any table now in `public` or
+   `zs_internal`, or (for an upgrade) one whose own ledger differs; `pg_restore` comes from
+   `PG_RESTORE` or `PATH`. The apply rolls back unless it runs exactly the migrations and
+   checksums the dry run reported. Every outcome lands in the receipt: `result`
+   (`committed` or `failed`), `failedPhase` (`login-check`, `dry-run`, `backup-check`,
+   `apply` or `ledger-check`), the error with connection strings and passwords redacted,
+   and `committed`: `false` for any failure before the apply, otherwise read back from the
+   ledger (`true`, `false` or `"unknown"`). It also holds migration names, checksums, the
+   login's attributes and the backup's size, sha256, creation time and manifest facts, never
+   credentials. If the receipt cannot be written, the script prints it to stderr. Use a new
+   receipt name for a retry. `--migrations <dir>` points at another directory, for
+   rehearsing an upgrade from a partial set. Receipts go outside the repo.
+3. **Seed (fake data only).** `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432)
+   and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
+   migrate and prints ids and counts only.
+4. **Tokens.** Until M2a auth lands, the dashboard calls the API with one static owner token
+   (`ZS_API_TOKEN`), HS256, issuer `https://api.zerosumsolutions.com/pilot`, at most 30 days
+   (the API's `JWT_MAX_TTL_SECONDS=2592000`). The mint script refuses to print to a
+   terminal. Mint into a shell variable first, so a failed mint never
+   writes an empty value, and use `pnpm -s` so no pnpm banner lands in it:
+   ```sh
+   T=$(JWT_SECRET=… JWT_ISSUER=… ZS_TOKEN_TENANT_ID=… ZS_TOKEN_SUBJECT=… ZS_TOKEN_TTL_SECONDS=2592000 \
+     mise exec -- pnpm -s --filter @zs/api token:mint) && [ -n "$T" ] && \
+     printf '%s' "$T" | zsvault edit <id> --yes --value-stdin; unset T
+   ```
+   For a new entry use `zsvault add <id> --type plain_secret --yes --value-stdin`.
+   To rotate, mint a new token, set it as the dashboard's `ZS_API_TOKEN` for that target, and
+   redeploy the dashboard. Rotating `JWT_SECRET` invalidates every token at once.
+5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
+   upload), with `VERCEL_TOKEN` in the environment:
+   ```sh
+   VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ \
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # API
+   VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_uTGH5yuyXfr6w9lAihGj1HcDxSdp \
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # dashboard
+   ```
+   The API builds with `pnpm build:vercel` (`scripts/build-vercel.mjs`): esbuild bundles
+   `src/vercel.ts` into one Node 24 function under `.vercel/output` (Build Output API).
+   API env per target: `DATABASE_URL` (zs_runtime, port 6543), `DATABASE_CA_CERT`,
+   `DATABASE_POOL_MAX=3`, `JWT_SECRET`, `JWT_ISSUER`, `JWT_MAX_TTL_SECONDS=2592000`.
+   Dashboard env per target: `ZS_API_URL`, `ZS_API_TOKEN`, `DASHBOARD_ACCESS_CODE`,
+   `DASHBOARD_SESSION_SECRET`, `DASHBOARD_TRUST_PROXY=1`. Both set
+   `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel uses the pinned pnpm.
+6. **Check.** `pnpm --filter @zs/api check:hosted` runs the negative checks against one
+   project and its deploys and exits 1 on any failure: unprivileged runtime login, migrator
+   refused at runtime, every SET ROLE / SET SESSION AUTHORIZATION escape refused, forced RLS
+   and owner on every tenant table, two-tenant denial in SQL, over HTTP and through the
+   dashboard proxy, 200 concurrent pooled transactions (on 10 connections, with `maxWaiting`
+   256 so none is refused `busy`; every one must settle and succeed, and a refusal fails with
+   its code) and 120 concurrent HTTP requests with no crossover, the runtime URL on the deployment's transport (default Supavisor
+   transaction mode, port 6543; pass `-- --expect-transport=session` for 5432; any other
+   port fails as unsupported; `-- --abandon-rounds=N` sets the abandoned-transaction probe's
+   rounds), a session-contamination probe (in 20 rounds, committed and
+   throwing transactions leave a custom setting, `application_name`, a session advisory
+   lock, a temp table, a held cursor and a `LISTEN` behind; later transactions must see
+   none of it, and must have run on a backend a committed and a throwing transaction used
+   first, by `pg_backend_pid()`, or the probe fails with "no handoff observed"), an
+   abandoned-transaction probe (below), no failed session cleanup in any scoped transaction (counted through `createScopedDatabase`'s
+   `onResetFailure`), bad tokens 401, and the Data API reading nothing (only an explicit denial
+   or an empty result passes; an outage fails). Write probes always roll back, and the
+   temporary Auth user's deletion is checked too. Its header lists the
+   environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication on preview.
+
+   The abandoned-transaction probe ("abandoned in-flight transactions leave no session state
+   on reused backends", `abandonedTransactionProbe` in `src/hosted-probes.ts`) covers what the
+   local tests cannot: what Supavisor's transaction mode does with a backend whose client
+   closed the connection mid-transaction. In 10 rounds, 4 tenant-B transactions each take a
+   session advisory lock, `PREPARE` a statement and set a session setting, start a 1 s
+   `pg_sleep` and are abandoned through their `AbortSignal` after 100 ms, so
+   `createScopedDatabase` closes the connection without cleaning the backend (each is
+   reported through `onResetFailure`, counted by this check and not by the session-reset
+   check). Once the sleeps end, 12 scoped readers per round check their own backend for the
+   lock (`pg_locks`), the statement (`pg_prepared_statements`) and the setting
+   (`current_setting`). An observer on a second, plain pool against the runtime URL polls
+   once per round and then every 100 ms until no probe lock is held, for at most 5 s. Each
+   poll is one `SELECT` that checks its own backend for the same markers and reads
+   `pg_locks` for probe locks held by any backend. The observer never runs the scoped
+   cleanup, so a dirty backend it lands on stays dirty and is reported, not erased. Every
+   reader and poll records its backend pid; `reused` counts those that ran on a backend
+   abandoned before them (`reusedBy` splits readers and observer). The result is one of:
+   - **clean**: `reused` is above 0 and nothing saw leftover state. The check passes.
+   - **contaminated**: a reader or observer poll saw leftover state, or a backend still held
+     a probe lock after 5 s. The check fails in either mode. **Switch the runtime
+     `DATABASE_URL` to session mode (port 5432) and run the checks with
+     `-- --expect-transport=session` until the cause is fixed.**
+   - **inconclusive**: nothing saw leftover state, but nothing ran on an abandoned backend
+     either (`reused: 0`, for example because Supavisor destroyed those backends), or the
+     abandonments did not happen as planned. Nothing is proven, so in transaction mode the
+     check fails. Rerun with more rounds, for example
+     `pnpm --filter @zs/api check:hosted -- --abandon-rounds=40` (1 to 200; default 10). If
+     reuse never shows, switch to session mode as above. In session mode an inconclusive
+     result passes when the only reason is `reused: 0`.
+
+   The check's `verdict` field states the result and the next step. On direct Postgres the
+   backend ends with its connection, so the local test sees `inconclusive`; simulated
+   poolers in `test/hosted-probes.test.ts` cover the clean and contaminated cases. The hub
+   (Devin's Mac) runs `check:hosted` against the Supabase preview branch, with
+   `ZS_TARGET_REF` and both database URLs set to that branch; cloud sessions and CI never
+   run it.
+
+Hosted settings that the scripts do not manage:
+- The Data API (PostgREST) exposes only `graphql_public`; tenant tables are not reachable
+  through it even before RLS.
+- Supabase Auth: signups disabled, custom SMTP through Resend (`smtp.resend.com:465`, a
+  sending-only key for `mail.zerosumsolutions.com`), site URL and redirect allow list set to
+  the dashboard origin. GoTrue cannot set Reply-To, so the email text names
+  devin@zerosumsolutions.com.
+- The API project has no Vercel Authentication (its callers are the dashboard and MCP
+  clients, which present a bearer token). Dashboard previews are protected; pass the
+  `x-vercel-protection-bypass` header for automated checks.
+- The dashboard's sign-in attempt limiter is in memory, so on Vercel each serverless
+  instance counts on its own; the pilot access code must stay long and random.

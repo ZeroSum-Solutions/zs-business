@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { assertRuntimeLogin } from "../src/runtime-login.js";
@@ -71,6 +72,39 @@ it("refuses a superuser login that ran SET ROLE to the runtime role", async () =
 it("fails closed when the backend's pg_stat_activity row is missing", async () => {
   const pool = { query: async () => ({ rows: [{ login: null, rolsuper: false, rolbypassrls: false }] }) } as unknown as Pool;
   await expect(assertRuntimeLogin(pool)).rejects.toThrow(/Refusing to start/);
+});
+
+/** A throwaway LOGIN member of authenticated (cluster roles are shared, so the name is unique). */
+async function withLogin(attributes: string, setup: (role: string) => string, check: (pool: Pool) => Promise<void>) {
+  const role = `zs_guard_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  await database.pool.query(`CREATE ROLE ${role} LOGIN ${attributes}; GRANT authenticated TO ${role}; ${setup(role)}`);
+  const url = new URL(database.url);
+  url.username = role;
+  url.password = "";
+  const pool = new Pool({ connectionString: url.href, max: 1 });
+  try {
+    await check(pool);
+  } finally {
+    await pool.end();
+    await database.pool.query(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  }
+}
+
+it("refuses a CREATEROLE login, as the hosted migrator is", async () => {
+  await withLogin("CREATEROLE", () => "", async (pool) => {
+    await expect(assertRuntimeLogin(pool)).rejects.toThrow(/Refusing to start/);
+  });
+});
+
+it("refuses a login that owns a table in public, as the migrator does", async () => {
+  await withLogin("", (role) => `CREATE TABLE public.${role}_owned (id int); ALTER TABLE public.${role}_owned OWNER TO ${role}`,
+    async (pool) => { await expect(assertRuntimeLogin(pool)).rejects.toThrow(/Refusing to start/); });
+});
+
+it("refuses a login that can reach the dispatcher's function owner", async () => {
+  await withLogin("", (role) => `GRANT zs_dispatcher TO ${role}`, async (pool) => {
+    await expect(assertRuntimeLogin(pool)).rejects.toThrow(/Refusing to start/);
+  });
 });
 
 it("accepts the unprivileged runtime login", async () => {
