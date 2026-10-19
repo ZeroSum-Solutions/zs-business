@@ -99,6 +99,8 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   idempotency_key_reused: "This request was already used for a different change.",
   concurrent_update: "Someone saved a change at the same moment. Try again.",
   already_reviewed: "This website request was already reviewed.",
+  last_owner: "A business needs at least one owner. Make someone else an owner first.",
+  member_exists: "That email is already on the team.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */

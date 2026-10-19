@@ -92,3 +92,4 @@ export const outbox = pgTable(
 ).enableRLS();
 export * from "./booking.js";
 export * from "./crm.js";
+export * from "./members.js";

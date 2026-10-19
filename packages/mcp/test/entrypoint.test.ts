@@ -4,11 +4,20 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { SignJWT } from "jose";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
+import {
+  createTestDatabase,
+  createTwoTenantFixture,
+  startAuthSession,
+  upsertAuthUser,
+  type TestDatabase,
+  type TwoTenantFixture,
+} from "@zs/db/testing";
 
 const MCP_DIR = fileURLToPath(new URL("..", import.meta.url));
 const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+const SECRET = ["entry", "point", "x".repeat(32)].join("-");
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -20,6 +29,24 @@ beforeAll(async () => {
 afterAll(async () => {
   await database?.close();
 });
+
+/** A live owner of tenant A and a token for them, signed for the child's real clock. */
+async function ownerToken(): Promise<string> {
+  const tenantId = fixture.a.tenantId;
+  const email = `owner-${randomUUID().slice(0, 8)}@example.com`;
+  const actorId = await upsertAuthUser(database.pool, { email, appMetadata: { tenant_id: tenantId } });
+  const sessionId = await startAuthSession(database.pool, actorId);
+  await fixture.service((tx) => tx.query(
+    "INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,$3,$4,'owner',now(),now())",
+    [tenantId, randomUUID(), email, actorId],
+  ));
+  const issuedAt = Math.floor(Date.now() / 1000);
+  return new SignJWT({ role: "authenticated", session_id: sessionId, app_metadata: { tenant_id: tenantId } })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setSubject(actorId).setAudience("authenticated")
+    .setIssuedAt(issuedAt).setExpirationTime(issuedAt + 600)
+    .sign(new TextEncoder().encode(SECRET));
+}
 
 it("keeps serving tools after its idle database connection is terminated", async () => {
   const url = new URL(database.url);
@@ -33,8 +60,10 @@ it("keeps serving tools after its idle database connection is terminated", async
       PATH: process.env.PATH ?? "",
       HOME: process.env.HOME ?? "",
       DATABASE_URL: url.href,
-      ZS_TENANT_ID: fixture.a.tenantId,
-      ZS_ACTOR_ID: randomUUID(),
+      JWT_VERIFIER: "hs256",
+      JWT_SECRET: SECRET,
+      SESSION_CHECK: "local-stub",
+      ZS_ACCESS_TOKEN: await ownerToken(),
     },
     stderr: "pipe",
   });

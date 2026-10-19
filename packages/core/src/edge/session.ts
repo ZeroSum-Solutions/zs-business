@@ -1,12 +1,20 @@
 // M1 edge session: the one place the HTTP API and the MCP server bind a verified principal to
 // the shared dispatcher. Inputs are parsed with the contracts schemas; writes run through
 // createDispatcher; reads run inside ScopedDatabase.tenant under the runtime role.
+// M2a: every transaction first requires the principal's membership and the permission the
+// read or action needs (members/access.ts), so a removed member is refused at once.
 import {
+  ROLE_PERMISSIONS,
+  changeMemberRoleRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
   idempotencyKeySchema,
+  inviteMemberRequestSchema,
   linkIntakeItemRequestSchema,
+  memberOutputSchema,
   NotFound,
+  removeMemberOutputSchema,
+  TenantDenied,
   listBookingsQuerySchema,
   listIntakeItemsQuerySchema,
   listContactsQuerySchema,
@@ -20,6 +28,11 @@ import {
   type ActionCommand,
   type ActionResult,
   type BookingPageSummary,
+  type MeResponse,
+  type MemberList,
+  type MemberOutput,
+  type Permission,
+  type RemoveMemberOutput,
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
@@ -30,6 +43,8 @@ import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
+import { requireMember } from "../members/access.js";
+import { listMembers, memberHandlers } from "../members/handlers.js";
 import { derivedId } from "./ids.js";
 import { validationError } from "./errors.js";
 
@@ -56,14 +71,45 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
   return parsed.data;
 }
 
-const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers });
+const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers });
+
+/**
+ * The permission each member action needs. An action missing here is refused, so the public
+ * request (public-intake.md P-1) is never reachable from a member session.
+ */
+export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
+  "booking.create": "calendar",
+  "crm.contact.create-or-find": "customers",
+  "crm.deal.create": "customers",
+  "crm.deal.move-stage": "customers",
+  "intake.item.link": "intake",
+  "intake.item.reject": "intake",
+  "member.invite": "members",
+  "member.change-role": "members",
+  "member.remove": "members",
+});
+
+/** Checks inside the action's transaction, before its idempotency lock, that the caller may run it. */
+export type Authorize = NonNullable<DispatchContext["authorize"]>;
+
+/**
+ * M2a: a member session runs only the actions its role grants. Membership changes hold the
+ * membership lock exclusively, so they serialize with each other and with every role check.
+ */
+export function memberAuthorize(tenantId: string, actorId: string): Authorize {
+  return async (tx, binding) => {
+    const permission = ACTION_PERMISSIONS[binding.actionType];
+    if (!permission) throw new TenantDenied();
+    await requireMember(tx, tenantId, actorId, permission, binding.actionType.startsWith("member.") ? "exclusive" : "shared");
+  };
+}
 
 /**
  * Direct approval: the principal approves exactly the command it submits. resolveApproval returns
- * that binding only for this command's own reference. Owner sessions and the server-built public
- * principal (public-intake.md P-3) both dispatch through here.
+ * that binding only for this command's own reference. Member sessions and the server-built public
+ * principal (public-intake.md P-3) both dispatch through here, each with its own authorize.
  */
-export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId: string) {
+export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId: string, authorize: Authorize) {
   return (command: ActionCommand): Promise<ActionResult> => {
     const { idempotencyKey: _key, ...fields } = command;
     const approved: ActionBinding = { ...fields, tenantId, actorId };
@@ -76,6 +122,7 @@ export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId
       generateId: deps.generateId,
       resolveApproval: async (_tx, reference) =>
         reference.tenantId === tenantId && reference.id === command.approvalReference.id ? approved : null,
+      authorize,
     };
     return dispatch(ctx, command);
   };
@@ -102,11 +149,11 @@ export function bookingPageSnippets(publicBaseUrl: string, publicKey: string) {
 export function createSession(deps: EdgeDependencies, principal: Principal) {
   const tenantId = uuidSchema.parse(principal.tenantId);
   const actorId = uuidSchema.parse(principal.actorId);
-  const run = directDispatch(deps, tenantId, actorId);
+  const run = directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId));
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  const envelope = <Type extends "booking" | "contact" | "deal" | "intake_item">(rawKey: unknown, type: Type, targetId?: string) => {
+  const envelope = <Type extends "booking" | "contact" | "deal" | "intake_item" | "member">(rawKey: unknown, type: Type, targetId?: string) => {
     const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
     const id = targetId ?? derivedId(tenantId, idempotencyKey, type);
     return {
@@ -116,7 +163,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       idempotencyKey,
     };
   };
-  const read = <T>(work: (tx: Transaction) => Promise<T>) => deps.db.tenant(tenantId, work);
+  const read = <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>) =>
+    deps.db.tenant(tenantId, async (tx) => {
+      await requireMember(tx, tenantId, actorId, permission);
+      return work(tx);
+    });
 
   return {
     principal: { tenantId, actorId } as Principal,
@@ -149,19 +200,19 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
 
     listBookings: (query: unknown) => {
       const parsed = parseInput(listBookingsQuerySchema, query, "query");
-      return read((tx) => listBookings(tx, tenantId, parsed));
+      return read("calendar", (tx) => listBookings(tx, tenantId, parsed));
     },
     listContacts: (query: unknown) => {
       const parsed = parseInput(listContactsQuerySchema, query, "query");
-      return read((tx) => listContacts(tx, tenantId, parsed));
+      return read("customers", (tx) => listContacts(tx, tenantId, parsed));
     },
     getContact: (contactId: unknown) => {
       const id = parseInput(uuidSchema, contactId, "contact ID");
-      return read((tx) => getContact(tx, tenantId, id));
+      return read("customers", (tx) => getContact(tx, tenantId, id));
     },
     listDeals: (query: unknown) => {
       const parsed = parseInput(listDealsQuerySchema, query, "query");
-      return read((tx) => listDeals(tx, tenantId, parsed));
+      return read("customers", (tx) => listDeals(tx, tenantId, parsed));
     },
     async linkIntakeItem(itemId: unknown, body: unknown, key: unknown) {
       const id = parseInput(uuidSchema, itemId, "intake item ID");
@@ -179,23 +230,48 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
 
     listIntakeItems: (query: unknown) => {
       const parsed = parseInput(listIntakeItemsQuerySchema, query, "query");
-      return read((tx) => listIntakeItems(tx, tenantId, parsed));
+      return read("intake", (tx) => listIntakeItems(tx, tenantId, parsed));
     },
+    /** Public keys and embed snippets put a page on a website, so only publishers see them. */
     listBookingPages: async (): Promise<BookingPageSummary[]> => {
       const keys = deps.bookingKeys;
       if (!keys) throw new NotFound();
-      const pages = await read((tx) => listBookingPages(tx, tenantId));
+      const pages = await read("publish", (tx) => listBookingPages(tx, tenantId));
       return pages.map((page) => {
         const publicKey = signBookingKey(keys.secret, { tenantId, pageId: page.id });
         return { ...page, publicKey, ...bookingPageSnippets(keys.publicBaseUrl, publicKey) };
       });
     },
-    listPipelines: () => read((tx) => listPipelines(tx, tenantId)),
-    listResources: () => read((tx) => listResources(tx, tenantId)),
+    listPipelines: () => read("customers", (tx) => listPipelines(tx, tenantId)),
+    listResources: () => read("calendar", (tx) => listResources(tx, tenantId)),
     findSlots: (query: unknown) => {
       const parsed = parseInput(slotsQuerySchema, query, "query");
       const now = new Date(readClock(deps.clock));
-      return read((tx) => findSlots(tx, tenantId, parsed, now));
+      return read("calendar", (tx) => findSlots(tx, tenantId, parsed, now));
+    },
+
+    /** The caller's own membership; any member may ask. */
+    me: (): Promise<MeResponse> => deps.db.tenant(tenantId, async (tx) => {
+      const access = await requireMember(tx, tenantId, actorId, null);
+      return { tenantId, userId: actorId, memberId: access.memberId, role: access.role, permissions: [...ROLE_PERMISSIONS[access.role]] };
+    }),
+    listMembers: async (): Promise<MemberList> => ({ items: await read("members", (tx) => listMembers(tx, tenantId)) }),
+
+    async inviteMember(body: unknown, key: unknown): Promise<MemberOutput> {
+      const request = parseInput(inviteMemberRequestSchema, body);
+      const { id, ...rest } = envelope(key, "member");
+      return parseInput(memberOutputSchema, await run({ actionType: "member.invite", ...rest, payload: { memberId: id, ...request } }), "result");
+    },
+    async changeMemberRole(memberId: unknown, body: unknown, key: unknown): Promise<MemberOutput> {
+      const id = parseInput(uuidSchema, memberId, "member ID");
+      const request = parseInput(changeMemberRoleRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "member", id);
+      return parseInput(memberOutputSchema, await run({ actionType: "member.change-role", ...rest, payload: { memberId: id, ...request } }), "result");
+    },
+    async removeMember(memberId: unknown, key: unknown): Promise<RemoveMemberOutput> {
+      const id = parseInput(uuidSchema, memberId, "member ID");
+      const { id: _id, ...rest } = envelope(key, "member", id);
+      return parseInput(removeMemberOutputSchema, await run({ actionType: "member.remove", ...rest, payload: { memberId: id } }), "result");
     },
   };
 }

@@ -61,11 +61,14 @@ export function describeHosted(target: HostedDatabaseTarget): { projectRef: stri
 }
 
 /**
- * For receipts, logs and errors: hides connection strings (with or without credentials)
- * and password=... settings, so an error that quotes its input never leaks a secret.
+ * For receipts, logs and errors: hides connection strings (with or without credentials),
+ * password=... settings, JWTs (service_role and access tokens) and Supabase sb_ API keys, so
+ * an error that quotes its input never leaks a secret.
  */
 export function redactSecrets(text: string): string {
   return text
     .replace(/\b(postgres(?:ql)?|socket):\/\/[^\s"'`]*/gi, "$1://[redacted]")
-    .replace(/\b(password|PGPASSWORD)\s*=\s*('[^']*'|"[^"]*"|\S+)/gi, "$1=[redacted]");
+    .replace(/\b(password|PGPASSWORD)\s*=\s*('[^']*'|"[^"]*"|\S+)/gi, "$1=[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g, "[redacted-jwt]")
+    .replace(/\bsb_(secret|publishable)_[A-Za-z0-9_-]+/g, "sb_$1_[redacted]");
 }

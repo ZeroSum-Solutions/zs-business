@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import { installAuthStub } from "./local-auth.js";
 import { migrate } from "./migrate.js";
 import {
   asService,
@@ -7,6 +8,18 @@ import {
   type ScopedDatabase,
   type Transaction,
 } from "./scoped.js";
+
+export {
+  endAuthSession,
+  findAuthUserByEmail,
+  installAuthStub,
+  readAuthUserTenant,
+  setAuthUserTenant,
+  startAuthSession,
+  upsertAuthUser,
+  type LocalAuthUser,
+  type LocalAuthUserRecord,
+} from "./local-auth.js";
 
 const defaultUrl = "postgres://postgres@127.0.0.1:55432/postgres";
 export interface TestDatabase {
@@ -30,6 +43,11 @@ export interface TestDatabaseOptions {
    * CREATEROLE there may grant itself any non-superuser role. Dropped on close.
    */
   nonSuperuserMigrator?: boolean;
+  /**
+   * Install the local auth.users / auth.sessions stub after migrating (default true), so
+   * `zs_local_auth.session_is_live` can answer. False leaves plain Postgres with no auth schema.
+   */
+  authStub?: boolean;
 }
 /** Hard boundary: this harness cannot connect outside the dedicated test cluster. */
 export function testAdminUrl(
@@ -185,6 +203,7 @@ export async function createTestDatabase(
       await client.query("ROLLBACK");
       throw error;
     } finally { client.release(); }
+    if (options.authStub ?? true) await installAuthStub(pool);
     return {
       name,
       url: databaseUrl.href,

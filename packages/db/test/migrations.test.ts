@@ -8,6 +8,7 @@ import { expect, it } from "vitest";
 import { migrate } from "../src/migrate.js";
 import { asService } from "../src/scoped.js";
 import { withTestDatabase } from "../src/testing.js";
+import { expectedOwner } from "./owners.js";
 
 const migrations = new URL("../../../supabase/migrations/", import.meta.url);
 
@@ -29,11 +30,18 @@ const shipped: Record<string, string> = {
   "20261018180000_read_indexes.sql": "ed61fd5d247f4389bf03b33c401718bdda5bd7624d311ba7b2b9032c75f8134e",
   // Frozen ahead of landing (REVIEW r1 on #9): any later intake change ships as a new migration.
   "20261018200000_public_intake.sql": "85d553cabf471202999f1872a853d15c59e84fe213186dc07d71a506fd30ab97",
+  // M2a auth (#8).
+  "20261019090000_members_and_sessions.sql": "ea534900166381f1665ab4cf173882bc0f94e5c5ef0c0f7449acb0f12f08ad30",
 };
-/** Main before M3 public intake: bookings, contacts and resources exist, intake does not. */
-const beforeIntake = Object.keys(shipped).filter((name) => name < "20261018200000");
-/** Main before the read indexes (the audit fixes): the state hosted databases hold today. */
-const beforeReadIndexes = beforeIntake.filter((name) => name !== "20261018180000_read_indexes.sql");
+/**
+ * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is
+ * applied after it, since the runner applies every file it has no row for.
+ */
+const beforeIntake = Object.keys(shipped).filter((name) => name !== "20261018200000_public_intake.sql");
+/** Main before M2a members (#8): bookings, contacts and resources exist, members do not. */
+const beforeMembers = beforeIntake.filter((name) => name !== "20261019090000_members_and_sessions.sql");
+/** Main before the read indexes (the audit fixes). */
+const beforeReadIndexes = beforeMembers.filter((name) => name !== "20261018180000_read_indexes.sql");
 /** Main before multi-resource booking (#3). */
 const beforeMultiResource = beforeReadIndexes.filter((name) => name !== "20261018120000_booking_multi_resource.sql");
 /** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
@@ -79,6 +87,7 @@ async function schemaState(pool: Pool) {
 it.each([
   ["main", Object.keys(shipped)],
   ["main before public intake", beforeIntake],
+  ["main before members", beforeMembers],
   ["main before the read indexes", beforeReadIndexes],
   ["main before multi-resource booking", beforeMultiResource],
   ["main before the hardening follow-ups", beforeHardening],
@@ -117,7 +126,7 @@ it("the full chain applies as a non-superuser CREATEROLE migrator and hands func
       "booking_resources_time_zone_known()", expect.stringMatching(/^record_action_and_event\(/),
     ]));
     for (const row of rows) {
-      expect(row.owner).toBe(row.definer ? "zs_dispatcher" : "zs_function_owner");
+      expect(row.owner).toBe(expectedOwner(row));
     }
     const tables = await database.pool.query<{ owner: string }>(
       "SELECT DISTINCT tableowner AS owner FROM pg_tables WHERE schemaname='public'",

@@ -2,6 +2,7 @@
 // from a verified booking key, never from the request; the server builds the principal itself.
 import {
   NotFound,
+  TenantDenied,
   publicBookingRequestBodySchema,
   publicIdempotencyKeySchema,
   slotsQuerySchema,
@@ -18,15 +19,20 @@ import type { BookingPageRef } from "../intake/keys.js";
 import { findSlots } from "../reads/booking.js";
 import { loadPublishedPage, pageHasResource, publicPage } from "../reads/intake.js";
 import { derivedId } from "./ids.js";
-import { directDispatch, parseInput, type EdgeDependencies } from "./session.js";
+import { directDispatch, parseInput, type Authorize, type EdgeDependencies } from "./session.js";
 
 /** The one actor every anonymous request runs as, per tenant (P-3). */
 export const publicIntakeActorId = (tenantId: string) => derivedId(tenantId, "public-intake", "actor");
 
+/** P-1, P-3: the public principal is no member and may run the one public action only. */
+const publicAuthorize: Authorize = async (_tx, binding) => {
+  if (binding.actionType !== PUBLIC_REQUEST_ACTION) throw new TenantDenied();
+};
+
 export function createPublicSession(deps: EdgeDependencies, ref: BookingPageRef) {
   const tenantId = uuidSchema.parse(ref.tenantId);
   const pageId = uuidSchema.parse(ref.pageId);
-  const run = directDispatch(deps, tenantId, publicIntakeActorId(tenantId));
+  const run = directDispatch(deps, tenantId, publicIntakeActorId(tenantId), publicAuthorize);
   const read = <T>(work: (tx: Transaction) => Promise<T>) => deps.db.tenant(tenantId, work);
 
   /** P-4: an unpublished page and an unlinked resource look exactly like a forged key. */

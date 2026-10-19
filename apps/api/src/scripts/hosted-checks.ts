@@ -1,11 +1,14 @@
 // Entry point, owner-run: negative checks against one hosted project and its deploys.
-// Reads nothing but checks; the only write is one temporary Supabase Auth user (a
-// synthetic example.com address, no email sent) for the Data API check, deleted at the end.
+// Reads nothing but checks. Its only writes are temporary and removed at the end, each removal
+// checked: two Supabase Auth users (synthetic example.com addresses, no email sent), one
+// claiming tenant A and one claiming tenant B, and a staff tenant_members row binding the
+// tenant-A user to tenant A, so that it signs in like a real member.
 //   ZS_TARGET_REF, RUNTIME_DATABASE_URL, MIGRATOR_DATABASE_URL   as for hosted-migrate/seed
+//   SERVICE_DATABASE_URL     postgres.<ref>, to add and remove the temporary member
 //   SUPABASE_ACCESS_TOKEN    Management API, to read the project's API keys
 //   API_URL                  the deployed API, for example https://api.zerosumsolutions.com
 //   DASHBOARD_URL            the deployed dashboard
-//   JWT_SECRET, JWT_ISSUER   the API's token settings, to mint five-minute test tokens
+//   JWT_SECRET, JWT_ISSUER   the API's token settings, to mint the refused test tokens
 //   ZS_TENANT_ID             the seeded tenant (tenant A); tenant B is random and empty
 //   VERCEL_PROTECTION_BYPASS optional: passes Vercel Authentication on a protected preview
 // Flags: --expect-transport=transaction|session names the runtime URL's Supavisor mode;
@@ -16,17 +19,21 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
+import { readMigrationTables, runDataApiProbes, tablesToProbe, type DataApiTable } from "../data-api-probe.js";
 import { signDevToken } from "../dev-token.js";
+import { temporaryMember } from "../hosted-check-member.js";
 import {
   abandonedTransactionProbe, abandonGate, concurrentTenantProbe, hostedCheckArgs, poolerTransport, sessionContaminationProbe, transportGate,
 } from "../hosted-probes.js";
 import { assertHostedDatabaseUrl, hostedPool, redactSecrets } from "../hosted.js";
+import { assertServiceKey, createSupabaseAuthAdmin, signInWithPassword } from "../supabase-auth-admin.js";
 
 const env = process.env;
 const { transport: expected, abandonRounds } = hostedCheckArgs(process.argv.slice(2));
 const projectRef = env.ZS_TARGET_REF ?? "";
 const runtimeTarget = assertHostedDatabaseUrl(env.RUNTIME_DATABASE_URL ?? "", { projectRef, role: "zs_runtime" });
 const migratorTarget = assertHostedDatabaseUrl(env.MIGRATOR_DATABASE_URL ?? "", { projectRef, role: "zs_migrator" });
+const serviceTarget = assertHostedDatabaseUrl(env.SERVICE_DATABASE_URL ?? "", { projectRef, role: "postgres" });
 const apiUrl = new URL(env.API_URL ?? "").origin;
 const dashboardUrl = new URL(env.DASHBOARD_URL ?? "").origin;
 const tenantA = env.ZS_TENANT_ID ?? "";
@@ -41,7 +48,7 @@ async function check(name: string, run: () => Promise<{ ok: boolean; detail?: un
     const { ok, detail } = await run();
     results.push({ name, ok, detail: detail ?? null });
   } catch (error) {
-    results.push({ name, ok: false, detail: `threw: ${error instanceof Error ? error.message : String(error)}` });
+    results.push({ name, ok: false, detail: `threw: ${redactSecrets(error instanceof Error ? error.message : String(error))}` });
   }
 }
 
@@ -55,10 +62,10 @@ const transport = { ...poolerTransport(runtimeTarget.port), expected };
 const resetFailures: string[] = [];
 const scopedOptions = { onResetFailure: (error: unknown) => { resetFailures.push(redactSecrets(String(error))); } };
 const migrator = hostedPool(migratorTarget, 1);
-const tokenFor = (tenantId: string, actorId: string, issuer = env.JWT_ISSUER) =>
-  signDevToken(env.JWT_SECRET ?? "", { tenantId, actorId }, clock, 300, issuer);
-const tokenA = await tokenFor(tenantA, randomUUID());
-const tokenB = await tokenFor(tenantB, randomUUID());
+const service = hostedPool(serviceTarget, 1);
+// Minted tokens are always refused now: the API also requires a live Supabase session.
+const mintedToken = (tenantId: string, actorId: string, issuer = env.JWT_ISSUER) =>
+  signDevToken(env.JWT_SECRET ?? "", { tenantId, actorId, sessionId: randomUUID() }, clock, 300, issuer);
 const api = async (path: string, token: string | null, init: RequestInit = {}) => {
   const response = await fetch(apiUrl + path, {
     ...init,
@@ -70,6 +77,41 @@ const TENANT_TABLES = (await runtime.query<{ name: string }>(
   `SELECT c.relname AS name FROM pg_class c WHERE c.relnamespace='public'::regnamespace AND c.relkind IN ('r','p')
      AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='tenant_id' AND NOT a.attisdropped)
    ORDER BY 1`)).rows.map((row) => row.name);
+// Every table in the schemas the Data API could expose, for its denial probe.
+const CATALOG_TABLES = (await runtime.query<DataApiTable>(
+  `SELECT n.nspname AS schema, c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname IN ('public','zs_internal') AND c.relkind IN ('r','p') ORDER BY 1, 2`)).rows;
+
+// --- Temporary users -----------------------------------------------------------------
+const keysReply = await fetch(`https://api.supabase.com/v1/projects/${projectRef}/api-keys?reveal=true`, {
+  headers: { Authorization: `Bearer ${env.SUPABASE_ACCESS_TOKEN}` }, redirect: "error",
+});
+const keys = await keysReply.json().catch(() => null) as { name?: string; api_key?: string }[] | null;
+if (!keysReply.ok || !Array.isArray(keys)) throw new Error(`Management API refused to list the project's API keys: HTTP ${keysReply.status}`);
+const anonKey = keys.find((key) => key.name === "anon")?.api_key ?? "";
+if (anonKey === "") throw new Error("the project has no anon key");
+const admin = createSupabaseAuthAdmin({ projectRef, serviceKey: assertServiceKey(keys.find((key) => key.name === "service_role")?.api_key, projectRef) });
+const password = randomUUID() + randomUUID();
+const signIn = (email: string) => signInWithPassword({ projectRef, anonKey }, email, password);
+const emailA = `zs-check-a-${randomUUID()}@example.com`;
+const emailB = `zs-check-b-${randomUUID()}@example.com`;
+const created: string[] = [];
+// Its id is fixed before the insert, so cleanup also covers an insert whose COMMIT reply was lost.
+const memberA = temporaryMember(service, tenantA, randomUUID);
+let tokenA = "";
+let tokenB = "";
+let userA = "";
+try {
+  userA = await admin.createUser({ email: emailA, password, appMetadata: { tenant_id: tenantA } });
+  created.push(userA);
+  created.push(await admin.createUser({ email: emailB, password, appMetadata: { tenant_id: tenantB } }));
+  // Staff: the least role that reads. Inserted as service_role, like provisioning, and removed below.
+  await memberA.add({ email: emailA, userId: userA });
+  tokenA = await signIn(emailA);
+  tokenB = await signIn(emailB);
+} catch (error) {
+  results.push({ name: "temporary users and member are set up", ok: false, detail: redactSecrets(error instanceof Error ? error.message : String(error)) });
+}
 
 try {
   // --- Database roles -------------------------------------------------------------------
@@ -189,6 +231,7 @@ try {
   const resourceId = (resources.body?.items as { id: string }[] | undefined)?.[0]?.id ?? "";
   const deals = await api("/v1/crm/deals?limit=1", tokenA);
   const deal = (deals.body?.items as { id: string; pipelineId: string; stageId: string; revision: number }[] | undefined)?.[0];
+  const me = await api("/v1/me", tokenA);
   await check("API: tenant A reads its own records", async () => {
     // Page through every contact so the total compares with the SQL count.
     let total = 0;
@@ -201,10 +244,13 @@ try {
       offset = (page.body?.nextOffset as number | null | undefined) ?? null;
     }
     return { ok: statuses.every((status) => status === 200) && contactsA >= 12 && total === contactsA
-      && resources.status === 200 && Boolean(resourceId) && Boolean(deal),
-      detail: { contacts: total, pages: statuses.length, resources: resources.status, deals: deals.status } };
+      && resources.status === 200 && Boolean(resourceId) && Boolean(deal)
+      && me.status === 200 && me.body?.tenantId === tenantA && me.body?.userId === userA && me.body?.role === "staff",
+      detail: { me: me.status, role: me.body?.role ?? null, contacts: total, pages: statuses.length, resources: resources.status, deals: deals.status } };
   });
-  await check("API: tenant B sees nothing and is refused tenant A's ids", async () => {
+  // Tenant B's user is signed in with a valid session but is a member of nothing: every call,
+  // including those naming tenant A's ids, is refused before any read.
+  await check("API: a signed-in user who is no member of the claimed tenant is refused, also for tenant A's ids", async () => {
     const from = new Date(Date.now() + 86400000).toISOString().replace(/\.\d{3}Z$/, ".000Z");
     const to = new Date(Date.now() + 3 * 86400000).toISOString().replace(/\.\d{3}Z$/, ".000Z");
     const outcome = {
@@ -217,31 +263,39 @@ try {
     };
     const summary = Object.fromEntries(Object.entries(outcome).map(([key, value]) =>
       [key, { status: value.status, items: (value.body?.items as unknown[] | undefined)?.length, code: (value.body?.error as { code?: string } | undefined)?.code }]));
-    return { ok: outcome.contacts.status === 200 && summary.contacts!.items === 0 && summary.bookings!.items === 0
-      && outcome.slots.status === 403 && outcome.book.status === 403 && outcome.moveDeal.status === 403, detail: summary };
+    return { ok: Object.values(outcome).every((value) => value.status === 403), detail: summary };
   });
-  await check("API: missing, wrong-issuer and forged tokens get 401", async () => {
-    const wrongIssuer = await tokenFor(tenantA, randomUUID(), "https://evil.example/");
-    const forged = await signDevToken("x".repeat(48), { tenantId: tenantA, actorId: randomUUID() }, clock, 300, env.JWT_ISSUER);
+  await check("API: missing, wrong-issuer, forged, sessionless and signed-out tokens get 401", async () => {
+    const wrongIssuer = await mintedToken(tenantA, userA, "https://evil.example/");
+    const forged = await signDevToken("x".repeat(48), { tenantId: tenantA, actorId: userA, sessionId: randomUUID() }, clock, 300, env.JWT_ISSUER);
+    // Signed with the real secret for tenant A's member, but naming no live session.
+    const noSession = await mintedToken(tenantA, userA);
+    // A real session, ended the way the dashboard's sign-out ends it.
+    const ended = await signIn(emailA);
+    const logout = await fetch(`${supabaseUrl}/auth/v1/logout?scope=local`, {
+      method: "POST", headers: { apikey: anonKey, Authorization: `Bearer ${ended}` },
+    });
     const statuses = {
       none: (await api("/v1/crm/contacts", null)).status,
       wrongIssuer: (await api("/v1/crm/contacts", wrongIssuer)).status,
       forged: (await api("/v1/crm/contacts", forged)).status,
+      noSession: (await api("/v1/crm/contacts", noSession)).status,
+      signedOut: (await api("/v1/crm/contacts", ended)).status,
     };
-    return { ok: Object.values(statuses).every((status) => status === 401), detail: statuses };
+    return { ok: logout.status === 204 && Object.values(statuses).every((status) => status === 401), detail: { logout: logout.status, ...statuses } };
   });
-  await check("API: 120 concurrent two-tenant requests never cross tenants", async () => {
+  await check("API: 120 concurrent requests from tenant A's member and a non-member never cross", async () => {
     const rows = await Promise.all(Array.from({ length: 120 }, async (_, index) => {
       const a = index % 2 === 0;
       const response = await api(index % 4 < 2 ? "/v1/crm/contacts?limit=100" : "/v1/booking/bookings?limit=100", a ? tokenA : tokenB);
       const items = (response.body?.items as unknown[] | undefined)?.length ?? -1;
       return { a, status: response.status, items };
     }));
-    const bad = rows.filter((row) => row.status !== 200 || (row.a ? row.items <= 0 : row.items !== 0));
+    const bad = rows.filter((row) => (row.a ? row.status !== 200 || row.items <= 0 : row.status !== 403));
     return { ok: bad.length === 0, detail: { total: rows.length, bad: bad.slice(0, 5) } };
   });
 
-  // --- Dashboard proxy (pilot gate) -----------------------------------------------------
+  // --- Dashboard proxy (Supabase cookie session only; a bearer is ignored) ---------------
   await check("dashboard proxy refuses anonymous, forged-cookie and bearer callers", async () => {
     const bypass: Record<string, string> = env.VERCEL_PROTECTION_BYPASS ? { "x-vercel-protection-bypass": env.VERCEL_PROTECTION_BYPASS } : {};
     // Without a bypass a protected preview answers 401 itself; the sign-in page proves the app answered.
@@ -258,58 +312,22 @@ try {
   });
 
   // --- Data API (PostgREST) -------------------------------------------------------------
-  const keys = await (await fetch(`https://api.supabase.com/v1/projects/${projectRef}/api-keys?reveal=true`, {
-    headers: { Authorization: `Bearer ${env.SUPABASE_ACCESS_TOKEN}` },
-  })).json() as { name: string; type: string; api_key: string }[];
-  const anonKey = keys.find((key) => key.name === "anon")?.api_key ?? "";
-  const serviceKey = keys.find((key) => key.name === "service_role")?.api_key ?? "";
-  const email = `zs-check-${randomUUID()}@example.com`;
-  const password = randomUUID() + randomUUID();
-  const created = await (await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
-    method: "POST",
-    headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, email_confirm: true, app_metadata: { tenant_id: tenantA } }),
-  })).json() as { id?: string };
-  try {
-    const session = await (await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
-      method: "POST", headers: { apikey: anonKey, "Content-Type": "application/json" }, body: JSON.stringify({ email, password }),
-    })).json() as { access_token?: string };
-    const rest = async (path: string, bearer: string, init: RequestInit = {}) => {
-      const response = await fetch(`${supabaseUrl}/rest/v1/${path}`, { ...init, headers: { apikey: anonKey, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" } });
-      const body = await response.json().catch(() => null) as unknown;
-      return { status: response.status, rows: Array.isArray(body) ? body.length : null, code: (body as { code?: string } | null)?.code ?? null };
-    };
-    // Only an explicit denial counts: 200 with an empty array, or 401/403/404 carrying a
-    // PostgREST (PGRST...) or Postgres privilege (42501) code. An outage (5xx, HTML, no
-    // code) fails the check instead of passing it.
-    const denied = (reply: { status: number; rows: number | null; code: string | null }) =>
-      (reply.status === 200 && reply.rows === 0)
-      || ([401, 403, 404].includes(reply.status) && /^(PGRST\d+|42501)$/.test(reply.code ?? ""));
-    await check("Data API: anon and a signed-in user claiming tenant A read no tenant rows", async () => {
-      const detail: Record<string, unknown> = { userCreated: Boolean(created.id), signedIn: Boolean(session.access_token) };
-      let ok = Boolean(session.access_token);
-      for (const table of TENANT_TABLES) {
-        const anon = await rest(`${table}?select=*&limit=5`, anonKey);
-        const user = await rest(`${table}?select=*&limit=5`, session.access_token ?? anonKey);
-        detail[table] = { anon, user };
-        ok &&= denied(anon) && denied(user);
-      }
-      const rpc = await rest("rpc/record_action_and_event", session.access_token ?? anonKey, { method: "POST", body: JSON.stringify({
-        p_tenant: tenantA, p_id: randomUUID(), p_actor: randomUUID(), p_type: "x", p_target: { tenantId: tenantA, id: randomUUID() },
-        p_payload: {}, p_approval: { tenantId: tenantA, id: randomUUID() }, p_key: randomUUID(), p_result: {}, p_created_at: new Date().toISOString(),
-        p_event_id: randomUUID(), p_event_type: "x", p_event_payload: {} }) });
-      detail.rpcRecordAction = rpc;
-      ok &&= rpc.status !== 200 && denied(rpc);
-      return { ok, detail };
-    });
-  } finally {
-    if (created.id) {
-      const removed = await fetch(`${supabaseUrl}/auth/v1/admin/users/${created.id}`, { method: "DELETE", headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } });
-      results.push({ name: "cleanup: the temporary Auth user is deleted", ok: removed.ok, detail: { status: removed.status, userId: created.id } });
-    }
-  }
+  // As anon and as tenant A's signed-in member: a positive control shows the Data API accepts
+  // each token, the action RPC refuses both, and every table from the migrations and the
+  // catalog refuses SELECT, INSERT, UPDATE and DELETE (src/data-api-probe.ts).
+  await check("Data API: accepts both tokens, and refuses anon and tenant A's member the action RPC and every table, every operation", async () => {
+    const { tables, missingFromCatalog } = tablesToProbe(await readMigrationTables(new URL("../../../../supabase/migrations/", import.meta.url)), CATALOG_TABLES);
+    const probe = await runDataApiProbes({ fetch, supabaseUrl, anonKey, userToken: tokenA, tenantA, tenantB, tables, missingFromCatalog, generateId: randomUUID });
+    return { ok: Boolean(tokenA) && probe.ok, detail: { signedIn: Boolean(tokenA), ...probe.detail } };
+  });
 } finally {
-  await Promise.all([runtime.end(), observer.end(), migrator.end()]);
+  const removal = await memberA.remove();
+  if (removal) results.push({ name: "cleanup: the temporary member is removed", ok: removal.ok, detail: removal.detail });
+  for (const userId of created) {
+    const removed = await admin.deleteUser(userId).then(() => null, (error: Error) => redactSecrets(error.message));
+    results.push({ name: "cleanup: a temporary Auth user is deleted", ok: removed === null, detail: { userId, error: removed } });
+  }
+  await Promise.all([runtime.end(), observer.end(), migrator.end(), service.end()]);
 }
 
 const failed = results.filter((result) => !result.ok);

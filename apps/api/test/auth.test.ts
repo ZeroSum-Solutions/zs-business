@@ -1,7 +1,13 @@
+import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { SignJWT } from "jose";
+import { createRemoteJWKSet, customFetch, exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { apiErrorBodySchema } from "@zs/contracts";
-import { createHs256Verifier } from "../src/auth.js";
+import { AuthUnavailable, createLocalStubSessionCheck } from "@zs/core";
+import { createApp } from "../src/app.js";
+import { createHs256Verifier, createJwksVerifier, createVerifierFromConfig } from "../src/auth.js";
+import { parseServerEnv } from "../src/config.js";
 import { signDevToken } from "../src/dev-token.js";
 import { call, clock, createApiHarness, NOW, ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
 
@@ -31,18 +37,27 @@ describe("authentication", () => {
 
   it("rejects an expired token", async () => {
     const past = { now: () => new Date("2026-10-18T06:00:00.000Z") };
-    const token = await signDevToken(SECRET, { tenantId: h.a.tenantId, actorId: h.a.actorId }, past, 3600);
+    const token = await signDevToken(SECRET, h.a, past, 3600);
     expect401(await call(h.app, "GET", "/v1/crm/contacts", { token }));
   });
 
   it("rejects a token signed with another secret", async () => {
-    const token = await signDevToken("another-secret-that-is-32-chars-long!!", { tenantId: h.a.tenantId, actorId: h.a.actorId },
+    const token = await signDevToken("another-secret-that-is-32-chars-long!!", h.a,
       { now: () => new Date("2026-10-19T07:59:00.000Z") });
     expect401(await call(h.app, "GET", "/v1/crm/contacts", { token }));
   });
 
   it("rejects a valid signature without a tenant claim", async () => {
-    const token = await new SignJWT({ role: "authenticated" })
+    const token = await new SignJWT({ role: "authenticated", session_id: h.a.sessionId })
+      .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated")
+      .setIssuedAt(Math.floor(Date.parse(NOW) / 1000))
+      .setExpirationTime(Math.floor(Date.parse("2026-10-19T09:00:00.000Z") / 1000))
+      .sign(new TextEncoder().encode(SECRET));
+    expect401(await call(h.app, "GET", "/v1/crm/contacts", { token }));
+  });
+
+  it("rejects a valid signature without a session_id claim", async () => {
+    const token = await new SignJWT({ role: "authenticated", app_metadata: { tenant_id: h.a.tenantId } })
       .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated")
       .setIssuedAt(Math.floor(Date.parse(NOW) / 1000))
       .setExpirationTime(Math.floor(Date.parse("2026-10-19T09:00:00.000Z") / 1000))
@@ -60,7 +75,7 @@ describe("authentication", () => {
 const nowSeconds = Math.floor(Date.parse(NOW) / 1000);
 /** A correctly signed token for tenant A; each test overrides one claim. */
 function token(claims: Record<string, unknown>, { iat = nowSeconds as number | null, exp = nowSeconds + 600 } = {}) {
-  const jwt = new SignJWT({ role: "authenticated", app_metadata: { tenant_id: h.a.tenantId }, ...claims })
+  const jwt = new SignJWT({ role: "authenticated", session_id: h.a.sessionId, app_metadata: { tenant_id: h.a.tenantId }, ...claims })
     .setProtectedHeader({ alg: "HS256" }).setSubject(h.a.actorId).setAudience("authenticated").setExpirationTime(exp);
   if (iat !== null) jwt.setIssuedAt(iat);
   return jwt.sign(new TextEncoder().encode(SECRET));
@@ -116,7 +131,8 @@ describe("token claims", () => {
 
   it("accepts the 7-day dev token when local config raises the limit", async () => {
     const verifier = createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 7 * 24 * 3600 });
-    await expect(verifier.verify(await signDevToken(SECRET, h.a, clock))).resolves.toEqual({ tenantId: h.a.tenantId, actorId: h.a.actorId });
+    await expect(verifier.verify(await signDevToken(SECRET, h.a, clock)))
+      .resolves.toEqual({ tenantId: h.a.tenantId, actorId: h.a.actorId, sessionId: h.a.sessionId, expiresAt: expect.any(Number) });
     expect(() => createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 0 })).toThrow(/positive/);
   });
 });
@@ -131,5 +147,97 @@ describe("CORS", () => {
       headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "POST" },
     });
     expect(denied.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+});
+
+describe("signing method chosen by config, end to end", () => {
+  let jwks: Server;
+  let jwksUrl = "";
+  let signingKey: CryptoKey;
+  let otherKey: CryptoKey;
+
+  beforeAll(async () => {
+    const pair = await generateKeyPair("ES256");
+    signingKey = pair.privateKey;
+    otherKey = (await generateKeyPair("ES256")).privateKey;
+    const jwk = { ...(await exportJWK(pair.publicKey)), kid: "key-1", alg: "ES256", use: "sig" };
+    jwks = createServer((request, response) => {
+      if (request.url?.startsWith("/broken/")) {
+        response.writeHead(500, { "Content-Type": "text/plain" }).end("upstream error");
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ keys: [jwk] }));
+    });
+    await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
+    jwksUrl = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/auth/v1/.well-known/jwks.json`;
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve) => (jwks ? jwks.close(() => resolve()) : resolve()));
+  });
+
+  /** An ES256 token for tenant A's owner, as Supabase issues with asymmetric signing keys. */
+  const es256 = (key: CryptoKey) => new SignJWT({
+    role: "authenticated", session_id: h.a.sessionId, app_metadata: { tenant_id: h.a.tenantId },
+  }).setProtectedHeader({ alg: "ES256", typ: "JWT", kid: "key-1" }).setSubject(h.a.actorId).setAudience("authenticated")
+    .setIssuedAt(nowSeconds).setExpirationTime(nowSeconds + 600).sign(key);
+
+  /** The app main.ts builds from this environment. */
+  const appFor = (env: Record<string, string>, onError?: (error: unknown) => void) => createApp({
+    verifier: createVerifierFromConfig(parseServerEnv({
+      DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", SESSION_CHECK: "local-stub", ...env,
+    }).jwt, clock),
+    sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
+    clock,
+    db: h.database.db,
+    generateId: randomUUID,
+    config: { allowedOrigins: [] },
+    ...(onError ? { onError } : {}),
+  });
+
+  it("JWT_VERIFIER=jwks accepts an ES256 token from the JWKS and refuses another key's or an HS256 token", async () => {
+    const app = appFor({ JWT_VERIFIER: "jwks", JWT_JWKS_URL: jwksUrl });
+    expect((await call(app, "GET", "/v1/me", { token: await es256(signingKey) })).body).toMatchObject({
+      tenantId: h.a.tenantId, userId: h.a.actorId, role: "owner",
+    });
+    expect401(await call(app, "GET", "/v1/crm/contacts", { token: await es256(otherKey) }));
+    expect401(await call(app, "GET", "/v1/crm/contacts", { token: h.a.token }));
+  });
+
+  it("JWT_VERIFIER=jwks answers 503 with Retry-After, not 401, when the JWKS answers 500, and reports it", async () => {
+    const reported: unknown[] = [];
+    const brokenUrl = jwksUrl.replace("/auth/v1/", "/broken/auth/v1/");
+    const app = appFor({ JWT_VERIFIER: "jwks", JWT_JWKS_URL: brokenUrl }, (error) => reported.push(error));
+    const response = await call(app, "GET", "/v1/crm/contacts", { token: await es256(signingKey) });
+    expect(response.status).toBe(503);
+    expect(apiErrorBodySchema.parse(response.body).error.code).toBe("Unavailable");
+    expect(response.headers.get("Retry-After")).toBe("1");
+    expect(response.headers.get("WWW-Authenticate")).toBeNull();
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toBeInstanceOf(AuthUnavailable);
+  });
+
+  it("a JWKS fetch that times out answers 503, and a token from a reachable JWKS still gets 401 for a bad key", async () => {
+    const hanging: typeof fetch = (_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+    });
+    const verifier = createJwksVerifier(
+      createRemoteJWKSet(new URL(jwksUrl), { [customFetch]: hanging, timeoutDuration: 50 }),
+      { clock },
+    );
+    const app = createApp({
+      verifier, sessionCheck: createLocalStubSessionCheck(h.database.db, clock), clock, db: h.database.db,
+      generateId: randomUUID, config: { allowedOrigins: [] },
+    });
+    const timedOut = await call(app, "GET", "/v1/crm/contacts", { token: await es256(signingKey) });
+    expect(timedOut.status).toBe(503);
+    expect(timedOut.headers.get("Retry-After")).toBe("1");
+    const reachable = appFor({ JWT_VERIFIER: "jwks", JWT_JWKS_URL: jwksUrl });
+    expect401(await call(reachable, "GET", "/v1/crm/contacts", { token: await es256(otherKey) }));
+  });
+
+  it("JWT_VERIFIER=hs256 accepts the HS256 token and refuses an ES256 one", async () => {
+    const app = appFor({ JWT_VERIFIER: "hs256", JWT_SECRET: SECRET });
+    expect((await call(app, "GET", "/v1/crm/contacts", { token: h.a.token })).status).toBe(200);
+    expect401(await call(app, "GET", "/v1/crm/contacts", { token: await es256(signingKey) }));
   });
 });

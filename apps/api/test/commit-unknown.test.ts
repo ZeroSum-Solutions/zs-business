@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, connect, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { apiErrorBodySchema, createOrFindContactOutputSchema, publicBookingReplySchema } from "@zs/contracts";
+import { createLocalStubSessionCheck } from "@zs/core";
 import { createRuntimePool, createScopedDatabase, DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createApp, createHs256Verifier } from "../src/app.js";
 import {
@@ -14,13 +15,15 @@ beforeAll(async () => { h = await createApiHarness({ publicIntake: {} }); });
 afterAll(async () => { await h?.close(); });
 
 /**
- * A TCP proxy to the test database, as the runtime login, that passes a connection's COMMIT on
- * to Postgres but never passes the answer back: the commit happens and its reply is lost.
+ * A TCP proxy to the test database, as the runtime login, that passes a write's COMMIT on to
+ * Postgres but never passes the answer back: the commit happens and its reply is lost. Read-only
+ * transactions (the membership check before the action) commit normally.
  */
 async function commitReplyLosingProxy(databaseUrl: string) {
   const target = new URL(databaseUrl);
   const sockets = new Set<Socket>();
   const server = createServer((client) => {
+    let wrote = false;
     let stalled = false;
     const upstream = connect(Number(target.port || 5432), target.hostname);
     for (const socket of [client, upstream]) {
@@ -30,8 +33,9 @@ async function commitReplyLosingProxy(databaseUrl: string) {
     }
     client.on("data", (chunk: Buffer) => {
       upstream.write(chunk);
+      if (chunk.includes("INSERT INTO")) wrote = true;
       // The simple-query message for COMMIT ends in its NUL; "READ COMMITTED" does not match.
-      if (chunk.includes("COMMIT\0")) stalled = true;
+      if (wrote && chunk.includes("COMMIT\0")) stalled = true;
     });
     upstream.on("data", (chunk) => { if (!stalled) client.write(chunk); });
   });
@@ -62,6 +66,8 @@ describe("a COMMIT whose reply is lost at the deadline", () => {
     };
     const stalling = createApp({
       verifier: createHs256Verifier(SECRET, { clock }),
+      // The session check reads the auth stub directly; only the action's transaction goes through the proxy.
+      sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
       clock,
       db,
       generateId: randomUUID,
@@ -131,6 +137,7 @@ describe("a public booking request under the request deadline", () => {
     const pool = createRuntimePool({ connectionString: proxy.url, max: 2, connectionTimeoutMs: 2000, onError: () => undefined });
     const stalling = createApp({
       verifier: createHs256Verifier(SECRET, { clock }),
+      sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
       clock,
       db: createScopedDatabase(pool),
       generateId: randomUUID,
@@ -187,6 +194,7 @@ describe("a public booking request under the request deadline", () => {
     };
     const app = (db: ScopedDatabase) => createApp({
       verifier: createHs256Verifier(SECRET, { clock }),
+      sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
       clock,
       db,
       generateId: randomUUID,

@@ -18,9 +18,13 @@ const idSchema = z.uuid().toLowerCase();
 export const idempotencyKeySchema = z.string().min(1).max(200)
   .refine(isPostgresText, "Text is not valid in Postgres");
 
-/** Supabase Auth access-token claims the edge relies on; other claims pass through. */
+/**
+ * Supabase Auth access-token claims the edge relies on; other claims pass through.
+ * `session_id` names the auth.sessions row, so a signed-out token is refused at once.
+ */
 export const accessTokenClaimsSchema = z.object({
   sub: idSchema,
+  session_id: idSchema,
   app_metadata: z.object({ tenant_id: idSchema }),
 });
 export type AccessTokenClaims = z.infer<typeof accessTokenClaimsSchema>;
@@ -134,7 +138,7 @@ export type ResourceSummary = z.infer<typeof resourceSummarySchema>;
 /** One error body for every non-2xx response and every failed MCP tool call. */
 export const apiErrorCodeSchema = z.enum([
   "ValidationFailed", "Unauthorized", "Forbidden", "NotFound", "Conflict", "RateLimited", "Internal",
-  /** 503: no database connection in time, or the request deadline passed. Retry later. */
+  /** 503: no database connection in time, the request deadline passed, or Supabase Auth could not answer. Retry later. */
   "Unavailable",
 ]);
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;

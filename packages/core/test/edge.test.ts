@@ -47,7 +47,7 @@ describe("mapError", () => {
 
   it("passes only allowlisted conflict reasons", () => {
     for (const reason of ["slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
-      "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch"])
+      "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists"])
       expect(mapError(new Conflict("x", { reason })).body.error.details).toEqual({ reason });
     expect(mapError(new Conflict("x", { reason: "Key (tenant_id)=(abc) exists" })).body.error.details).toEqual({ reason: "conflict" });
     expect(mapError(new Conflict("x", { reason: "constraint_crm_deals_pkey" })).body.error.details).toEqual({ reason: "conflict" });

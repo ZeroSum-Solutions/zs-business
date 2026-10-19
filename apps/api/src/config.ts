@@ -1,73 +1,15 @@
-import type { Pool } from "pg";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
-import { trimTrailingSlashes } from "@zs/core";
+import { formatEnvIssues, jwtEnvSchema, sessionCheckEnvSchema, trimTrailingSlashes, type JwtConfig, type SessionCheckConfig } from "@zs/core";
+import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 
+// The JWT_* variables (signing method, secret or JWKS URL, issuer, lifetime, skew) are parsed
+// by the schema in @zs/core, shared with the MCP server.
+export { jwtSecretSchema, PLACEHOLDER_JWT_SECRET } from "@zs/core";
+export { assertLocalDatabaseUrl, assertLocalPool, describeDatabase, type LocalDatabaseTarget } from "@zs/db";
+
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-/** The only fields a plain postgres URL yields; anything else came from a query parameter. */
-const PLAIN_FIELDS = new Set(["user", "password", "host", "port", "database"]);
-
-export interface LocalDatabaseTarget {
-  /** The validated string, unchanged: pass exactly this to `pg`. */
-  readonly connectionString: string;
-  readonly host: string;
-  readonly port: string;
-  readonly database: string;
-  readonly user: string;
-}
-
-function refuse(reason: string): never {
-  throw new Error(`Refusing to run: ${reason}`);
-}
-
-/**
- * Dev scripts may only touch a loopback database: never Supabase or any shared host.
- * Checks the destination `pg` will actually use (it parses with pg-connection-string, where
- * query parameters such as host, hostaddr and port override the URL), so any query string,
- * unix-socket path or multi-host list is refused outright.
- */
-export function assertLocalDatabaseUrl(value: string): LocalDatabaseTarget {
-  if (!/^postgres(ql)?:\/\//i.test(value)) refuse("database URL must be a postgres:// URL");
-  if (value.includes("?")) refuse("database URL must not carry query parameters");
-  let config: ReturnType<typeof parse>;
-  try {
-    config = parse(value);
-  } catch {
-    refuse("database URL is not a valid URL");
-  }
-  const extra = Object.keys(config).filter((key) => config[key] !== undefined && !PLAIN_FIELDS.has(key));
-  if (extra.length > 0) refuse(`database URL must not set ${extra.join(", ")}`);
-  const host = (config.host ?? "").toLowerCase();
-  if (!LOOPBACK.has(host)) refuse("database URL must point at 127.0.0.1 or localhost");
-  return {
-    connectionString: value,
-    host,
-    port: config.port || "5432",
-    database: config.database ?? "",
-    user: config.user ?? "",
-  };
-}
-
-/** The pool's own destination must pass assertLocalDatabaseUrl: a connection string and no override fields. */
-export function assertLocalPool(pool: Pool): LocalDatabaseTarget {
-  const { connectionString, host, port, user, database } = pool.options;
-  if (typeof connectionString !== "string") refuse("database pool must be built from a checked connection string");
-  if ([host, port, user, database].some((value) => value !== undefined))
-    refuse("database pool must not override the connection string's host, port, user or database");
-  return assertLocalDatabaseUrl(connectionString);
-}
-
-/** Non-secret fields only, for logs: never the password or the raw URL. */
-export function describeDatabase(target: LocalDatabaseTarget): { host: string; port: string; database: string } {
-  return { host: target.host, port: target.port, database: target.database };
-}
-
-/** The value shipped in .env.example; a server that still uses it must not start. */
-export const PLACEHOLDER_JWT_SECRET = "replace-with-a-local-dev-secret-of-32-or-more-chars";
-export const jwtSecretSchema = z.string()
-  .min(32, "JWT_SECRET must be at least 32 characters")
-  .refine((value) => value !== PLACEHOLDER_JWT_SECRET, "JWT_SECRET is still the .env.example placeholder");
 
 /** The .env.example value for the booking key secret; a server that still uses it must not start. */
 export const PLACEHOLDER_BOOKING_KEY_SECRET = "replace-with-a-booking-key-secret-of-32-or-more-chars";
@@ -80,12 +22,6 @@ const rateLimit = z.coerce.number().int().min(1).max(1_000_000).optional();
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
-  JWT_SECRET: jwtSecretSchema,
-  JWT_ISSUER: z.string().min(1).optional(),
-  // Default one hour, like Supabase Auth. Local dev raises it to accept the 7-day seed token.
-  JWT_MAX_TTL_SECONDS: z.coerce.number().int().min(60).max(30 * 24 * 3600).default(3600),
-  // How far a token's iat may lie ahead of this server's clock. Default one minute.
-  JWT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(60),
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   // public-intake.md P-2: signs booking page keys. Unset turns the public booking routes off.
@@ -132,10 +68,10 @@ const envSchema = z.object({
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
-  readonly jwtSecret: string;
-  readonly jwtIssuer: string | undefined;
-  readonly jwtMaxLifetimeSeconds: number;
-  readonly jwtClockSkewSeconds: number;
+  /** How access tokens are verified: `JWT_VERIFIER=hs256` with JWT_SECRET, or `jwks` with JWT_JWKS_URL. */
+  readonly jwt: JwtConfig;
+  /** How a token's session is checked: `SESSION_CHECK=supabase` (Supabase Auth) or `local-stub` (loopback only). */
+  readonly sessionCheck: SessionCheckConfig;
   readonly allowedOrigins: string[];
   readonly port: number;
   readonly databaseCaCert: string | undefined;
@@ -158,14 +94,15 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
   if (env.TRUST_PROXY !== undefined && env.TRUST_PROXY !== "0")
     throw new Error("Invalid environment: TRUST_PROXY was replaced by PUBLIC_CLIENT_IP_HEADER or PUBLIC_TRUSTED_PROXIES");
   const parsed = envSchema.safeParse(env);
-  if (!parsed.success)
-    throw new Error(`Invalid environment: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+  const jwt = jwtEnvSchema.safeParse(env);
+  const sessionCheck = sessionCheckEnvSchema.safeParse(env);
+  const issues = [...(parsed.error?.issues ?? []), ...(jwt.error?.issues ?? []), ...(sessionCheck.error?.issues ?? [])];
+  if (sessionCheck.success && env.DATABASE_URL) issues.push(...localStubIssues(sessionCheck.data, env.DATABASE_URL));
+  if (!parsed.success || !jwt.success || !sessionCheck.success || issues.length > 0) throw new Error(formatEnvIssues(issues));
   return {
     databaseUrl: parsed.data.DATABASE_URL,
-    jwtSecret: parsed.data.JWT_SECRET,
-    jwtIssuer: parsed.data.JWT_ISSUER,
-    jwtMaxLifetimeSeconds: parsed.data.JWT_MAX_TTL_SECONDS,
-    jwtClockSkewSeconds: parsed.data.JWT_CLOCK_SKEW_SECONDS,
+    jwt: jwt.data,
+    sessionCheck: sessionCheck.data,
     allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
     port: parsed.data.PORT,
     databaseCaCert: parsed.data.DATABASE_CA_CERT,
@@ -209,4 +146,15 @@ function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | n
     clientIp: parseClientIp(data),
     limitOverrides,
   };
+}
+
+/** The local auth stub exists only on loopback databases; refuse it anywhere else. */
+export function localStubIssues(config: SessionCheckConfig, databaseUrl: string): z.core.$ZodIssue[] {
+  if (config.method !== "local-stub") return [];
+  try {
+    assertLocalDatabaseUrl(databaseUrl);
+    return [];
+  } catch {
+    return [{ code: "custom", path: ["SESSION_CHECK"], message: "SESSION_CHECK=local-stub needs a loopback DATABASE_URL", input: undefined }];
+  }
 }

@@ -52,4 +52,12 @@ describe("e2e:live child env", () => {
     }
     for (const name of ["PATH", "JWT_SECRET", "PORT", "DEBUG"]) expect(isDatabaseVariable(name), name).toBe(false);
   });
+
+  it("lets SUPABASE_URL name only a fake auth server on loopback", () => {
+    const check = (value: string) => () => assertThrowawayDatabaseEnv({ SUPABASE_URL: value, SUPABASE_ANON_KEY: "anything" }, DB);
+    expect(check("http://127.0.0.1:43210")).not.toThrow();
+    for (const value of ["https://abcd.supabase.co", "http://db.example.com:5432", "http://127.0.0.1:43210/rest", `postgres://postgres@127.0.0.1:55432/${DB}`, "nonsense"]) {
+      expect(check(value), value).toThrow(/fake auth server/);
+    }
+  });
 });

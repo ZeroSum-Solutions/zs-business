@@ -2,7 +2,7 @@ import { open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { Pool } from "pg";
 import type { MigrationRecord } from "@zs/db";
-import { readLedger, type BackupFacts, type LedgerEntry } from "./hosted-backup.js";
+import { currentTables, readLedger, type BackupFacts, type LedgerEntry } from "./hosted-backup.js";
 import { redactSecrets } from "./hosted.js";
 
 /** Where an --apply run stopped; the receipt names it. */
@@ -38,13 +38,6 @@ async function checkLogin(pool: HostedMigrateDeps["pool"]): Promise<Login> {
   if (login.member_of.some((role) => !["zs_dispatcher", "zs_function_owner"].includes(role)))
     throw new Error("Refusing to run: zs_migrator belongs to an unexpected role");
   return login;
-}
-
-/** Ordinary tables in the schemas the backup must cover, as "schema name" (pg_restore --list style). */
-async function currentTables(pool: HostedMigrateDeps["pool"]): Promise<string[]> {
-  return (await pool.query<{ table: string }>(
-    `SELECT n.nspname || ' ' || c.relname AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname IN ('public', 'zs_internal') AND c.relkind = 'r' ORDER BY 1`)).rows.map((row) => row.table);
 }
 
 const names = (rows: readonly { name: string }[]) => rows.map((row) => row.name);

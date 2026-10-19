@@ -1,5 +1,7 @@
 // Made-up demo business for local development. Names, emails (example.com) and phone
 // numbers (555-01xx fictional range) are invented; no client data.
+/** The demo owner's sign-in address. */
+export const DEMO_OWNER_EMAIL = "owner@example.com";
 export const DEMO_TENANT_NAME = "Halden & Rowe Fine Jewelry";
 export const DEMO_ZONE = "America/New_York";
 

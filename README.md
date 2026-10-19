@@ -45,14 +45,18 @@ access. `@zs/core` exports `createDispatcher(handlers)`, `bookingHandlers` and
 `crmHandlers`. The server composes them with `createDispatcher({ ...bookingHandlers, ...crmHandlers })`;
 `createSession(deps, principal)` in `@zs/core` binds that dispatcher, the contracts
 request schemas and the tenant-scoped reads to one verified principal for both edges.
+Each principal must be a member of its tenant (`tenant_members`, roles `owner` and
+`staff`); the session checks the member's role against the action or read before it runs,
+and only owners invite, remove or change roles.
 Baseline `test` excludes the booking and CRM folders; `test:booking` and `test:crm` run
 them. The SQL seed/read contracts are B-28 and C-24 in the requirements.
 
 `apps/api` (`@zs/api`) is the Hono HTTP API; see `apps/api/README.md` for routes, auth,
 errors and the local demo seed. `packages/mcp` (`@zs/mcp`) exposes the same writes and
 reads as MCP tools over stdio.
-`apps/dashboard` (`@zs/dashboard`) is the owner's phone-first PWA over that API, with an
-in-memory demo mode when `ZS_API_URL` is unset; see `apps/dashboard/README.md`.
+`apps/dashboard` (`@zs/dashboard`) is the owner's phone-first PWA over that API. Live mode
+signs people in with a Supabase Auth email link and sends each person's own token; demo
+mode (no `ZS_API_URL`) needs no sign-in. See `apps/dashboard/README.md`.
 
 Tests default to the dedicated local Postgres at
 `postgres://postgres@127.0.0.1:55432/postgres`. `ZS_TEST_DATABASE_URL` accepts a

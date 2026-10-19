@@ -22,12 +22,12 @@ export default defineConfig({
     { name: "desktop", use: { browserName: "chromium", viewport: { width: 1440, height: 900 } } },
   ],
   webServer: {
-    // Production build on the in-memory demo adapter (no API URL or token).
+    // Production build on the in-memory demo adapter (no API URL or Supabase settings).
     command: `pnpm build && pnpm exec next start --hostname 127.0.0.1 --port ${PORT}`,
     url: `http://127.0.0.1:${PORT}`,
     // Always this build: a server left over from another branch would test the wrong code.
     reuseExistingServer: false,
     timeout: 180_000,
-    env: { ZS_API_URL: "", ZS_API_TOKEN: "" },
+    env: { ZS_API_URL: "", SUPABASE_URL: "", SUPABASE_ANON_KEY: "" },
   },
 });
