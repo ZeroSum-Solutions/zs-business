@@ -8,9 +8,9 @@ import {
   createDealRequestSchema,
   idempotencyKeySchema,
   listBookingsQuerySchema,
+  listContactsQuerySchema,
   listDealsQuerySchema,
   moveDealStageRequestSchema,
-  pageQuerySchema,
   slotsQuerySchema,
   upsertContactRequestSchema,
   uuidSchema,
@@ -90,11 +90,17 @@ export function createMcpServer(deps: McpDependencies): McpServer {
   }, ({ idempotencyKey, dealId, ...body }) => session.moveDealStage(dealId, body, idempotencyKey));
 
   tool("list_contacts", {
-    description: "List contacts, newest first.", inputSchema: pageQuerySchema, annotations: read,
+    description: "List contacts, newest first or by name; optionally only those matching a search (name, email or phone) or a list of IDs.",
+    inputSchema: listContactsQuerySchema, annotations: read,
   }, (query) => session.listContacts(query));
 
+  tool("get_contact", {
+    description: "Read one contact with its marketing consent.",
+    inputSchema: z.strictObject({ contactId: uuidSchema }), annotations: read,
+  }, ({ contactId }) => session.getContact(contactId));
+
   tool("list_deals", {
-    description: "List deals, most recently updated first; optionally one pipeline.",
+    description: "List deals, most recently updated first; optionally one pipeline or one contact.",
     inputSchema: listDealsQuerySchema, annotations: read,
   }, (query) => session.listDeals(query));
 
@@ -103,7 +109,7 @@ export function createMcpServer(deps: McpDependencies): McpServer {
   }, async () => ({ items: await session.listPipelines() }));
 
   tool("list_bookings", {
-    description: "List bookings by start time; optionally one resource.",
+    description: "List bookings by start time; optionally one resource, and only those overlapping [from, to).",
     inputSchema: listBookingsQuerySchema, annotations: read,
   }, (query) => session.listBookings(query));
 

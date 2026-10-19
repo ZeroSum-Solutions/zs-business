@@ -48,6 +48,8 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | `JWT_CLOCK_SKEW_SECONDS` | How far a token's `iat` may lie ahead of the API's clock, 0 to 300, default 60. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
+| `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
+| `REQUEST_TIMEOUT_MS` | Longest time a `/v1` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
 | `DATABASE_CA_CERT` | PEM. When set, the pool verifies the server against it (`rejectUnauthorized`). Required whenever `DATABASE_URL` is not a loopback host (`127.0.0.1`, `::1`, `localhost`), so a hosted API never falls back to plain TCP; only a loopback database runs without TLS. A non-loopback URL, or any URL with a CA, must carry no query string, because pg lets URL ssl options (`sslmode=no-verify`, `ssl=false`, a `host` override) replace the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
 | `DATABASE_POOL_MAX` | Pool size per process, 1 to 50, default 10. Vercel sets 3: each serverless instance has its own pool. |
@@ -72,17 +74,24 @@ uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing k
 
 | Method and path | Result |
 |---|---|
-| `GET /healthz` | `{ ok: true }`, no auth |
+| `GET /healthz` | `{ ok: true }`, no auth. Liveness: the process answers. |
+| `GET /readyz` | `{ ok: true }`, or 503 when a bounded `SELECT 1` fails. No auth. |
 | `GET /v1/booking/resources` | `{ items: ResourceSummary[] }` |
 | `GET /v1/booking/slots?resourceId&from&to[&zone]` | free slots; `from`/`to` are UTC instants with milliseconds, at most 31 days |
-| `GET /v1/booking/bookings?[resourceId&]limit&offset` | page of bookings |
+| `GET /v1/booking/bookings?[resourceId&][from&][to&]limit&(cursor|offset)` | page of bookings in start order; with `from`/`to`, only those overlapping `[from, to)` |
 | `POST /v1/booking/bookings` `{ resourceId, startsAt }` | 201 booking; 409 if the slot is taken |
-| `GET /v1/crm/contacts?limit&offset` | page of contacts |
+| `GET /v1/crm/contacts?[search&][sort&][ids&]limit&(cursor|offset)` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
+| `GET /v1/crm/contacts/:id` | one contact; 404 if unknown or another tenant's |
 | `POST /v1/crm/contacts` `{ displayName?, email?, phone?, mode?, consent? }` | 201 created, 200 matched an existing contact |
 | `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages |
-| `GET /v1/crm/deals?[pipelineId&]limit&offset` | page of deals |
+| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals, most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
 | `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
+
+A page is `{ items, limit, offset, nextOffset, nextCursor }`. Pass `nextCursor` back as
+`cursor` for the next page: it names the last row returned, so rows added or moved ahead of
+it while you page are neither repeated nor skipped, which `offset` cannot promise. A cursor
+belongs to one list and sort; it is not combined with `offset`.
 
 Every `POST` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
 the same key returns the stored result with the original status; reusing a key with a
@@ -95,7 +104,33 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`; anything else is `conflict`),
-`Internal` 500 with no internal detail. Each code has one fixed `message`.
+`Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
+one fixed `message`.
+
+## Database pool and request limits
+
+`createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from
+`@zs/db`, for both `main.ts` and `vercel.ts`. A lost idle connection (a restart, failover or
+network drop) is logged as `Database pool error <SQLSTATE>` without the URL, at most 10 a
+minute, and the next request opens a new connection; the process does not exit. A request
+waits at most `DATABASE_CONNECT_TIMEOUT_MS` for a connection; when 50 requests already wait,
+the next is refused at once. Each `/v1` request has a deadline (`REQUEST_TIMEOUT_MS`) that
+also ends when the caller disconnects: its transaction then sends no further statement or
+`COMMIT` and rolls back, and the API answers 503 `Unavailable`. Like any failed transaction it
+first rolls back to the work savepoint and clears the backend's session state (see "Hosted
+deploy"); these recovery statements are not gated by the deadline, only bounded to 2 s each.
+Each transaction's statement and lock timeouts are capped at the time left before the
+deadline, so Postgres cancels a statement still running when the deadline passes. A statement
+still running just after the deadline, or when the caller disconnects, is abandoned: its
+connection is closed rather than reused, and the statement ends within that same cap. An
+abandoned statement leaves no chance to clear the backend, so once the work has begun it is
+reported through `onResetFailure` (logged as `Session reset failed`). The API and MCP send no
+`pg_cancel_backend` (`createScopedDatabase`'s `cancel` stays `"none"`; `createServer` sets it
+explicitly): behind Supavisor's transaction pooler the backend that ran a statement may
+already serve another request. Nothing is committed by a request that answers 503 before its
+`COMMIT`. A `COMMIT` abandoned at the deadline (`DatabaseUnavailable("commit_unknown")`) may
+have applied; like any 503 write, it replays its committed result when the caller retries
+with the same `Idempotency-Key`. The MCP server uses the same pool settings (4 connections).
 
 ## Hosted deploy
 

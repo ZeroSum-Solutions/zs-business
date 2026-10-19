@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SampleBadge, useSampleOnly } from "@/components/ui/sample";
-import { EmptyState, ErrorNote, IncompleteNote, LoadingRows, PageHeader, Skeleton } from "@/components/ui/states";
+import { EmptyState, ErrorNote, LoadingRows, PageHeader, Skeleton } from "@/components/ui/states";
 import type { WeekCompare } from "@/lib/api";
 import { useBookings, useChecklist, useResources, useResults, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
@@ -171,11 +171,11 @@ function ChecklistCard() {
 
 function NextAppointments() {
   const from = useMemo(() => new Date().toISOString(), []);
-  const bookings = useBookings({ from });
+  // The API returns the next four in start order, however many bookings there are.
+  const bookings = useBookings({ from, limit: 4 });
   const resources = useResources();
   const nameOf = (id: string) => resources.data?.find((item) => item.id === id);
-  // On a capped list the next four come from the bookings read so far, so say so.
-  const upcoming = bookings.data?.items.slice(0, 4) ?? [];
+  const upcoming = bookings.data?.items ?? [];
   return (
     <Card className="lg:col-span-7" aria-labelledby="next-title">
       <CardHeader>
@@ -187,8 +187,6 @@ function NextAppointments() {
       {bookings.isPending ? <LoadingRows rows={3} /> : bookings.isError ? <ErrorNote error={bookings.error} retry={() => bookings.refetch()} /> : upcoming.length === 0 ? (
         <EmptyState title="No appointments coming up">Open slots show on the calendar.</EmptyState>
       ) : (
-        <>
-        <IncompleteNote list={bookings.data} />
         <ul className="divide-y divide-border-soft">
           {upcoming.map((booking) => {
             const resource = nameOf(booking.resourceId);
@@ -208,7 +206,6 @@ function NextAppointments() {
             );
           })}
         </ul>
-        </>
       )}
     </Card>
   );

@@ -82,6 +82,10 @@ const envSchema = z.object({
   // host other than loopback; only a loopback database may use plain TCP.
   DATABASE_CA_CERT: z.string().includes("BEGIN CERTIFICATE").optional(),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(50).default(10),
+  // Longest wait for a pooled connection; node-postgres would otherwise wait forever.
+  DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+  // Longest time one /v1 request may take; keep it under the dashboard proxy's 15 s.
+  REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
   let host: string;
@@ -111,6 +115,8 @@ export interface ServerEnv {
   readonly port: number;
   readonly databaseCaCert: string | undefined;
   readonly databasePoolMax: number;
+  readonly connectTimeoutMs: number;
+  readonly requestTimeoutMs: number;
 }
 
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
@@ -128,5 +134,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     port: parsed.data.PORT,
     databaseCaCert: parsed.data.DATABASE_CA_CERT,
     databasePoolMax: parsed.data.DATABASE_POOL_MAX,
+    connectTimeoutMs: parsed.data.DATABASE_CONNECT_TIMEOUT_MS,
+    requestTimeoutMs: parsed.data.REQUEST_TIMEOUT_MS,
   };
 }

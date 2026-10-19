@@ -10,7 +10,7 @@ import { useToast } from "@/components/ui/toast";
 import type { CreateBookingRequest } from "@zs/contracts";
 import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
-import { useKeys, useSlots } from "@/lib/queries";
+import { dropBookedTime, useKeys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
 import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
@@ -53,6 +53,7 @@ export function BookingDialog({
     mutationFn: ({ request }: Attempt) => api.createBooking(request, { idempotencyKey: intents.keyFor(request) }),
     onSettled: (_record, error, attempt) => intents.settle(attempt.request, error),
     onSuccess: (record, attempt) => {
+      dropBookedTime(queryClient, keys.slotsAll, record);
       void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
       void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
       const current = generation.isCurrent(attempt.generation);

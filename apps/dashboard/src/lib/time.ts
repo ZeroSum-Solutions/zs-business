@@ -49,12 +49,46 @@ function offsetMs(utcMs: number, zone: string): number {
   return asUtc - Math.floor(utcMs / 60000) * 60000;
 }
 
-/** Convert a local wall-clock date and minute in `zone` to a UTC instant. */
+const HOUR_MS = 3_600_000;
+
+/** Wall clock of an instant in `zone`, as epoch milliseconds read as if it were UTC (whole minutes). */
+function wallMs(utcMs: number, zone: string): number {
+  return Math.floor(utcMs / 60000) * 60000 + offsetMs(utcMs, zone);
+}
+
+/**
+ * Every instant whose wall clock in `zone` reads this date and minute, earliest first: one
+ * on an ordinary day, two when clocks fall back across it, none when it falls in a gap.
+ * Offsets are sampled 36 hours either side, so at most one transition a day is assumed
+ * (true of every tzdb zone).
+ */
+export function wallTimeInstants(year: number, month: number, day: number, minute: number, zone: string): number[] {
+  const wall = Date.UTC(year, month - 1, day, 0, minute);
+  const offsets = new Set([offsetMs(wall - 36 * HOUR_MS, zone), offsetMs(wall, zone), offsetMs(wall + 36 * HOUR_MS, zone)]);
+  return [...offsets].map((offset) => wall - offset).filter((instant) => wallMs(instant, zone) === wall).sort((a, b) => a - b);
+}
+
+/**
+ * Convert a local wall-clock date and minute in `zone` to a UTC instant. A time that occurs
+ * twice (clocks fall back) gives the earlier one. A time that does not exist (clocks spring
+ * forward over it) gives the first instant after the gap, so local midnight in a zone that
+ * skips it is the first instant of that date, never the evening before.
+ */
 export function zonedTimeToUtc(year: number, month: number, day: number, minute: number, zone: string): Date {
-  const guess = Date.UTC(year, month - 1, day, 0, minute);
-  const first = guess - offsetMs(guess, zone);
-  const second = guess - offsetMs(first, zone);
-  return new Date(second);
+  const exact = wallTimeInstants(year, month, day, minute, zone);
+  if (exact.length > 0) return new Date(exact[0]!);
+  const wall = Date.UTC(year, month - 1, day, 0, minute);
+  const before = offsetMs(wall - 36 * HOUR_MS, zone);
+  const after = offsetMs(wall + 36 * HOUR_MS, zone);
+  // In a gap the wall clock only moves forward: find the first minute it reaches `wall`.
+  let lo = Math.floor((wall - Math.max(before, after)) / 60000);
+  let hi = Math.ceil((wall - Math.min(before, after)) / 60000);
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (wallMs(mid * 60000, zone) >= wall) hi = mid;
+    else lo = mid;
+  }
+  return new Date(hi * 60000);
 }
 
 /** Wall-clock time of an instant in `zone`, ISO 8601 without an offset (the slots `localStart`). */
@@ -75,7 +109,7 @@ export function addDays(dateKey: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-/** UTC instant of local midnight for a YYYY-MM-DD key in `zone`. */
+/** The first instant of a local date (YYYY-MM-DD) in `zone`: local midnight, or the end of a gap over it. */
 export function startOfZonedDay(dateKey: string, zone: string): Date {
   const [y, m, d] = dateKey.split("-").map(Number) as [number, number, number];
   return zonedTimeToUtc(y, m, d, 0, zone);
@@ -87,8 +121,18 @@ export function weekdayOf(dateKey: string): number {
   return day === 0 ? 7 : day;
 }
 
+/**
+ * "1:30 PM". When the same wall time happens twice that day (the night clocks fall back),
+ * the zone abbreviation or offset is added ("1:30 AM EDT", "1:30 AM EST"), so slots, their
+ * accessible names and the confirmation say which of the two they mean.
+ */
 export function formatTime(instant: string, zone: string): string {
-  return new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", minute: "2-digit" }).format(new Date(instant));
+  const date = new Date(instant);
+  const p = zonedParts(date, zone);
+  const repeated = wallTimeInstants(p.year, p.month, p.day, p.minute, zone).length > 1;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: zone, hour: "numeric", minute: "2-digit", ...(repeated ? { timeZoneName: "short" } : {}),
+  }).format(date);
 }
 
 export function formatDay(instant: string | Date, zone: string, style: "short" | "long" = "short"): string {

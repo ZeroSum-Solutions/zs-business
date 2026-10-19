@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
-import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
+import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
 import { createApp } from "./app.js";
 import { createHs256Verifier } from "./auth.js";
 import type { ServerEnv } from "./config.js";
@@ -11,10 +10,14 @@ import type { ServerEnv } from "./config.js";
  * assertRuntimeLogin, so a misconfigured DATABASE_URL never serves a request.
  */
 export async function createServer(env: ServerEnv, clock: { now(): Date }) {
-  const pool = new Pool({
+  const pool = createRuntimePool({
     connectionString: env.databaseUrl,
     max: env.databasePoolMax,
+    connectionTimeoutMs: env.connectTimeoutMs,
+    applicationName: "zs-api",
     ...(env.databaseCaCert === undefined ? {} : { ssl: { ca: env.databaseCaCert, rejectUnauthorized: true } }),
+    // A lost idle connection is logged and replaced; it must not end the process.
+    onError: ({ code, message }) => console.error("Database pool error", code ?? "", message),
   });
   await assertRuntimeLogin(pool).catch(async (error: unknown) => {
     await pool.end();
@@ -28,11 +31,17 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
       ...(env.jwtIssuer === undefined ? {} : { issuer: env.jwtIssuer }),
     }),
     clock,
-    // A failed reset discards the connection; say so, since a pattern of them means trouble.
-    db: createScopedDatabase(pool, { onResetFailure: (error) => console.error("Session reset failed; connection discarded", error) }),
+    db: createScopedDatabase(pool, {
+      // Hosted, the runtime URL is Supavisor's transaction pooler (port 6543), where a
+      // backend cancel could stop another request's statement. Never "backend" here.
+      cancel: "none",
+      // A failed reset discards the connection; say so, since a pattern of them means trouble.
+      onResetFailure: (error) => console.error("Session reset failed; connection discarded", error),
+    }),
     generateId: randomUUID,
-    config: { allowedOrigins: env.allowedOrigins },
+    config: { allowedOrigins: env.allowedOrigins, requestTimeoutMs: env.requestTimeoutMs },
     onError: (error) => console.error("Unhandled API error", error),
+    ready: () => checkDatabase(pool),
   });
   return { app, pool };
 }
