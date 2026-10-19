@@ -88,6 +88,39 @@ describe("runtime pool bounds", () => {
     }
   });
 
+  it("cancels a running statement when the caller's time runs out, and reports it as aborted", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
+    const db = createScopedDatabase(pool);
+    try {
+      // The caller has 300 ms left; the statement would run 10 s under the default limits.
+      const { ms, outcome } = await elapsed(() => db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT pg_sleep(10)"), { remainingMs: () => 300 }));
+      expect(outcome).toBeInstanceOf(DatabaseUnavailable);
+      expect((outcome as DatabaseUnavailable).reason).toBe("aborted");
+      expect(ms).toBeLessThan(2000);
+      // Postgres stopped it: the one connection is free and clean for the next caller.
+      await expect(db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT 1"))).resolves.toBeDefined();
+      const active = await database.pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename='zs_runtime' AND query LIKE 'SELECT pg_sleep%' AND state='active'",
+      );
+      expect(active.rows[0]?.n).toBe(0);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("keeps a statement timeout the caller's deadline did not shorten as the database's error", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
+    const db = createScopedDatabase(pool, { statementTimeoutMs: 100 });
+    try {
+      const outcome = await db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT pg_sleep(5)"), { remainingMs: () => 10_000 })
+        .catch((error: unknown) => error);
+      expect(outcome).not.toBeInstanceOf(DatabaseUnavailable);
+      expect(outcome).toMatchObject({ code: "57014" });
+    } finally {
+      await pool.end();
+    }
+  });
+
   it("reports pool errors without the URL and at a bounded rate", () => {
     const summary = summarizePoolError(Object.assign(new Error("connect failed for postgres://zs_runtime:hunter2@db.example:5432/app"), { code: "ECONNREFUSED" }));
     expect(summary).toEqual({ code: "ECONNREFUSED", message: "connect failed for [database-url]" });

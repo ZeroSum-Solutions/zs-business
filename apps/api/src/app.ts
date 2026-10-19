@@ -32,14 +32,17 @@ export interface AppDependencies {
   readonly ready?: () => Promise<boolean>;
 }
 export interface AppEnv {
-  Variables: { session: Session; signal: AbortSignal };
+  Variables: { session: Session; signal: AbortSignal; deadline: number };
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
-/** The same database, with every transaction tied to one request's deadline. */
-function withSignal(db: ScopedDatabase, signal: AbortSignal): ScopedDatabase {
-  return { tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, ...options }) };
+/**
+ * The same database, with every transaction tied to one request's deadline: it sends no
+ * statement after the signal fires, and no statement or lock wait outlasts the time left.
+ */
+function withDeadline(db: ScopedDatabase, signal: AbortSignal, remainingMs: () => number): ScopedDatabase {
+  return { tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }) };
 }
 
 const unavailable = (signal: AbortSignal) => new Promise<never>((_, reject) => {
@@ -81,6 +84,7 @@ export function createApp(deps: AppDependencies) {
     const raw = c.req.raw.signal;
     raw?.addEventListener("abort", clientGone, { once: true });
     c.set("signal", controller.signal);
+    c.set("deadline", deps.clock.now().getTime() + requestTimeoutMs);
     // Work still running after the deadline finishes on its own; nothing waits for it.
     const work = next();
     work.catch(() => undefined);
@@ -101,7 +105,7 @@ export function createApp(deps: AppDependencies) {
     const match = /^Bearer ([A-Za-z0-9_\-.]+)$/.exec(header);
     if (!match) throw new Unauthenticated();
     const principal = await deps.verifier.verify(match[1]!);
-    c.set("session", createSession({ db: withSignal(deps.db, c.var.signal), clock: deps.clock, generateId: deps.generateId }, principal));
+    c.set("session", createSession({ db: withDeadline(deps.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime()), clock: deps.clock, generateId: deps.generateId }, principal));
     await next();
   });
   app.route("/v1/booking", bookingRoutes);

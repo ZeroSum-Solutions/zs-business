@@ -107,8 +107,10 @@ without the URL, at most 10 a minute, and the next request opens a new connectio
 process does not exit. A request waits at most `DATABASE_CONNECT_TIMEOUT_MS` for a connection;
 when 50 requests already wait, the next is refused at once. Each `/v1` request has a deadline
 (`REQUEST_TIMEOUT_MS`) that also ends when the caller disconnects: its transaction then sends
-no further statement or `COMMIT` and rolls back, and the API answers 503 `Unavailable`. A
-statement already running stops at the 15-second statement timeout. Nothing is committed by a
+no further statement or `COMMIT` and rolls back, and the API answers 503 `Unavailable`. Each
+transaction's statement and lock timeouts are capped at the time left before the deadline, so
+Postgres cancels a statement still running when the deadline passes. A caller that disconnects
+early leaves its running statement to finish within that same cap. Nothing is committed by a
 request that answers 503 before its `COMMIT`; a write whose commit raced the deadline replays
 when the caller retries with the same `Idempotency-Key`. The MCP server uses the same pool
 settings (4 connections).

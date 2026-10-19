@@ -132,6 +132,14 @@ describe("API entry point", () => {
       expect(await second.json()).toEqual({ error: { code: "Unavailable", message: "Service unavailable", details: {} } });
       expect(elapsed).toBeLessThan(1500);
       expect((await first).status).toBe(503);
+      // The deadline reached Postgres too: the first request's statement stopped waiting on
+      // the lock, though the lock is still held, instead of holding the connection for the
+      // 5 s lock timeout.
+      const waiting = async () => (await database.pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND usename = 'zs_runtime' AND wait_event_type = 'Lock'`,
+      )).rows[0]?.n;
+      await expect.poll(waiting, { timeout: 1500, intervals: [100] }).toBe(0);
       await holder.query("ROLLBACK");
       // Once the lock is gone the same process serves again.
       const after = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, { headers });

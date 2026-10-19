@@ -28,6 +28,13 @@ export interface TransactionOptions {
    * statement already running is bounded by the statement timeout.
    */
   signal?: AbortSignal;
+  /**
+   * The caller's time left, read once a connection is checked out. No statement or lock
+   * wait in this transaction runs longer, so Postgres itself cancels a statement still
+   * running when the caller's deadline passes, instead of holding the connection until the
+   * statement timeout. Such a cancellation is DatabaseUnavailable("aborted").
+   */
+  remainingMs?: () => number;
 }
 export interface ScopedDatabase {
   tenant<T>(
@@ -69,6 +76,9 @@ async function checkout(pool: Pool, maxWaiting: number, signal: AbortSignal | un
   });
 }
 
+const sqlState = (error: unknown) =>
+  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
+
 /** The work's view of the connection: once the caller's signal fires, no more statements. */
 function guarded(client: PoolClient, signal: AbortSignal | undefined): Transaction {
   if (!signal) return client;
@@ -98,11 +108,19 @@ async function transaction<T>(
   tenantId: string | null,
   work: (tx: Transaction) => Promise<T>,
   limits = limitsSchema.parse({}),
-  signal?: AbortSignal,
+  options: TransactionOptions = {},
 ): Promise<T> {
+  const { signal } = options;
   const client = await checkout(pool, limits.maxWaiting, signal);
+  // Which timeouts the caller's deadline shortened: only those report a cancellation as the deadline.
+  const cutShort = new Set<string>();
   let discard = false;
   try {
+    // Postgres takes whole milliseconds and treats 0 as no limit.
+    const remaining = options.remainingMs ? Math.max(1, Math.ceil(options.remainingMs())) : Number.POSITIVE_INFINITY;
+    if (remaining < limits.statementTimeoutMs) cutShort.add("57014");
+    if (remaining < limits.lockTimeoutMs) cutShort.add("55P03");
+    const cap = (limit: number) => Math.min(limit, remaining);
     // Two round trips before the work. The first opens the transaction and, for the runtime
     // role, checks the login; the second sets the role, limits and tenant. set_config('role')
     // is SET LOCAL ROLE with the same membership check. All of it is transaction-local.
@@ -118,7 +136,7 @@ async function transaction<T>(
     await client.query(
       `SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true),
               set_config('role',$3,true),set_config('app.tenant_id',$4,true)`,
-      [`${limits.lockTimeoutMs}ms`, `${limits.statementTimeoutMs}ms`, role, tenantId ?? ""],
+      [`${cap(limits.lockTimeoutMs)}ms`, `${cap(limits.statementTimeoutMs)}ms`, role, tenantId ?? ""],
     );
     const result = await work(guarded(client, signal));
     if (signal?.aborted) throw new DatabaseUnavailable("aborted");
@@ -130,6 +148,9 @@ async function transaction<T>(
     } catch {
       discard = true;
     }
+    // A statement (57014 query_canceled) or lock wait (55P03 lock_not_available) that the
+    // caller's deadline cut short is the deadline passing, not a fault in the work.
+    if (cutShort.has(sqlState(error) ?? "")) throw new DatabaseUnavailable("aborted", { cause: error });
     throw error;
   } finally {
     // Work may set session-scoped state (set_config(..., false), SET, temp objects) that a
@@ -159,7 +180,7 @@ export function createScopedDatabase(
         z.uuid().parse(tenantId),
         work,
         limits,
-        options.signal,
+        options,
       ),
   };
 }
