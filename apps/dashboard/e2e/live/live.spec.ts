@@ -4,7 +4,7 @@ import type { APIRequestContext, Page } from "@playwright/test";
 import { CALENDAR_UNAVAILABLE, defaultMessage, demoErrorBody } from "../../src/lib/api/errors";
 import { expectDialogInset, mainNav, openBookingOnFirstOpenDay, shot, viewportShot } from "../helpers";
 import { LIVE } from "./env";
-import { accessCode, expect, signInRequest, test } from "./fixtures";
+import { expect, lastSignInLink, ownerEmail, signInRequest, test } from "./fixtures";
 
 const PREFIX = "live-";
 
@@ -99,30 +99,36 @@ test("renders all six areas from the live API", async ({ page }, info) => {
   expect(html).not.toContain(process.env.ZS_LIVE_TOKEN!);
 });
 
-test("refuses anonymous callers with 401, and never spends the token for them", async ({ request }, info) => {
+test("refuses anonymous callers and old pilot cookies with 401, and never spends a token for them", async ({ request }, info) => {
   test.skip(info.project.name !== "desktop", "API-only check; one project is enough");
   // No Cookie, Authorization or Origin: the request that used to read every contact.
-  for (const path of ["/api/v1/crm/contacts", "/api/v1/booking/resources", "/api/v1/crm/deals"]) {
+  for (const path of ["/api/v1/crm/contacts", "/api/v1/booking/resources", "/api/v1/crm/deals", "/api/v1/members"]) {
     const response = await request.get(`${LIVE.webUrl}${path}`);
     expect(response.status(), path).toBe(401);
     expect(((await response.json()) as { error: { code: string } }).error.code, path).toBe("Unauthorized");
   }
   expect((await request.get(`${LIVE.webUrl}/api/session`)).status()).toBe(401);
-  const forged = await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`, { headers: { Cookie: "zs_dashboard_session=v1.9999999999.abc.def" } });
-  expect(forged.status()).toBe(401);
+  // The retired access-code gate's cookie opens nothing, and the answer expires it.
+  const pilot = await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`, { headers: { Cookie: "zs_dashboard_session=v1.9999999999.abc.def" } });
+  expect(pilot.status()).toBe(401);
+  expect(pilot.headers()["set-cookie"]).toMatch(/zs_dashboard_session=;.*Max-Age=0/);
   // A bearer token from the caller is no way in either.
   const bearer = await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`, { headers: { Authorization: `Bearer ${process.env.ZS_LIVE_TOKEN}` } });
   expect(bearer.status()).toBe(401);
 
-  const wrong = await request.post(`${LIVE.webUrl}/api/sign-in`, { headers: { Origin: LIVE.webUrl }, data: { code: "not-the-access-code" } });
-  expect(wrong.status()).toBe(401);
-  expect(wrong.headers()["set-cookie"]).toBeUndefined();
+  // An address with no account gets the same answer as the owner's, and no link.
+  const unknown = await request.post(`${LIVE.webUrl}/api/sign-in`, { headers: { Origin: LIVE.webUrl }, data: { email: "nobody@example.com" } });
+  expect(unknown.status()).toBe(204);
+  expect(unknown.headers()["set-cookie"] ?? "", "no session cookie").not.toMatch(/(^|\n)zs-auth(\.\d+)?=[^;]/);
+  expect(await lastSignInLink("nobody@example.com")).toBeNull();
   await signInRequest(request);
   expect((await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`)).status()).toBe(200);
-  expect((await request.get(`${LIVE.webUrl}/api/session`)).status()).toBe(200);
+  const session = await request.get(`${LIVE.webUrl}/api/session`);
+  expect(session.status()).toBe(200);
+  expect(await session.json()).toMatchObject({ role: "owner" });
 });
 
-test("signs an anonymous visitor in through /sign-in, and out again", async ({ anonymousPage: page }, info) => {
+test("signs an anonymous visitor in by email link, and out again for good", async ({ anonymousPage: page }, info) => {
   await page.goto("/customers");
   await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Maren Ashby/ })).toHaveCount(0);
@@ -136,43 +142,71 @@ test("signs an anonymous visitor in through /sign-in, and out again", async ({ a
     .filter((violation) => violation.impact === "serious" || violation.impact === "critical").map((violation) => violation.id);
   expect(await serious()).toEqual([]);
 
-  await page.getByLabel("Access code").fill("not-the-access-code");
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("main").getByRole("alert")).toHaveText("That code is not right. Check it and try again.");
-  await expect(page.getByLabel("Access code")).toHaveAttribute("aria-invalid", "true");
-  await expect(page.getByLabel("Access code")).toHaveAccessibleDescription("That code is not right. Check it and try again.");
+  await page.getByLabel("Email").fill("not an email");
+  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await expect(page.getByRole("main").getByRole("alert")).toHaveText("Enter your email address, like name@example.com.");
+  await expect(page.getByLabel("Email")).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByLabel("Email")).toHaveAccessibleDescription("Enter your email address, like name@example.com.");
   expect(await serious()).toEqual([]);
 
-  await page.getByLabel("Access code").fill(accessCode());
-  await page.getByRole("button", { name: "Sign in" }).click();
+  // No account behind the address: the page says the same as for the owner.
+  await page.getByLabel("Email").fill("nobody@example.com");
+  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Check your email" })).toBeVisible();
+  await expect(page.getByRole("main").getByRole("status")).toContainText("nobody@example.com");
+  expect(await lastSignInLink("nobody@example.com")).toBeNull();
+  expect(await serious()).toEqual([]);
+  await page.getByRole("button", { name: "Use a different email" }).click();
+
+  const before = await lastSignInLink();
+  await page.getByLabel("Email").fill(ownerEmail());
+  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Check your email" })).toBeVisible();
+  const emailed = await lastSignInLink();
+  expect(emailed).not.toBe(before);
+  expect(new URL(emailed!).pathname).toBe("/auth/confirm");
+  await page.goto(emailed!);
   await expect(page).toHaveURL(/\/customers$/);
   await expect(page.getByRole("link", { name: /Maren Ashby/ })).toBeVisible();
-  const session = (await page.context().cookies()).find((cookie) => cookie.name === "zs_dashboard_session");
-  expect(session?.httpOnly).toBe(true);
-  expect(session?.sameSite).toBe("Strict");
-  expect(session?.path).toBe("/");
-  expect(await page.evaluate(() => document.cookie)).not.toContain("zs_dashboard_session");
+  const cookies = (await page.context().cookies()).filter((cookie) => cookie.name.startsWith("zs-auth"));
+  expect(cookies.length).toBeGreaterThan(0);
+  for (const cookie of cookies) {
+    expect(cookie.httpOnly, cookie.name).toBe(true);
+    expect(cookie.sameSite, cookie.name).toBe("Strict");
+    expect(cookie.path, cookie.name).toBe("/");
+  }
+  expect(await page.evaluate(() => document.cookie)).not.toContain("zs-auth");
 
-  // Sign out clears the cookie on the server, so this browser is refused again.
+  // A link works once.
+  await page.goto(emailed!);
+  await expect(page).toHaveURL(/\/sign-in\?error=link/);
+  await expect(page.getByRole("main").getByRole("alert")).toHaveText("That sign-in link has expired or was already used. Ask for a new one below.");
+  await page.goto("/customers");
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toBeVisible();
+
+  // Sign out ends the session in Supabase Auth: the cookies a thief copied before are refused.
+  const copied = (await page.context().cookies()).filter((cookie) => cookie.name.startsWith("zs-auth"));
   await page.getByRole("button", { name: "Account menu" }).filter({ visible: true }).click();
   await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
-  await expect.poll(async () => (await page.context().cookies()).some((cookie) => cookie.name === "zs_dashboard_session")).toBe(false);
+  await expect.poll(async () => (await page.context().cookies()).some((cookie) => cookie.name.startsWith("zs-auth"))).toBe(false);
   expect((await page.request.get("/api/v1/crm/contacts")).status()).toBe(401);
+  const replay = await page.request.get("/api/v1/crm/contacts", { headers: { Cookie: copied.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ") } });
+  expect(replay.status()).toBe(401);
   await page.reload();
   await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
 
   // `next` only ever leads to a page on this site: a tab would turn "/\t/x" into "//x".
   await page.goto(`/sign-in?next=${encodeURIComponent("/\t/evil.example/")}`);
-  await page.getByLabel("Access code").fill(accessCode());
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByLabel("Email").fill(ownerEmail());
+  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Check your email" })).toBeVisible();
+  await page.goto((await lastSignInLink())!);
   await page.waitForURL(`${LIVE.webUrl}/`);
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
 });
 
 test("never follows next off the site, even when it resolves to a path of two slashes", async ({ anonymousPage: page }) => {
-  // A mocked sign-in: this checks only where the page goes next, and spends no attempts.
-  await page.route("**/api/sign-in", (route) => route.fulfill({ status: 204, headers: { "Cache-Control": "no-store" } }));
   const offSite: string[] = [];
   await page.context().route((url) => url.origin !== LIVE.webUrl, (route) => {
     offSite.push(route.request().url());
@@ -181,12 +215,22 @@ test("never follows next off the site, even when it resolves to a path of two sl
   for (const next of ["/.//evil.example/", "/foo/..//evil.example/", "/%2e//evil.example/"]) {
     // Raw, not encoded: the query string carries the value exactly as an attacker would link it.
     await page.goto(`/sign-in?next=${next}`);
-    await page.getByLabel("Access code").fill("any-code-the-mock-accepts");
-    await page.getByRole("button", { name: "Sign in" }).click();
-    await page.waitForURL((url) => !url.pathname.startsWith("/sign-in"));
+    await page.getByLabel("Email").fill(ownerEmail());
+    await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Check your email" })).toBeVisible();
+    // The emailed link goes back to this site's /auth/confirm, whatever next said.
+    const emailed = new URL((await lastSignInLink())!);
+    expect(emailed.origin, next).toBe(LIVE.webUrl);
+    expect(emailed.pathname, next).toBe("/auth/confirm");
+    await page.goto(emailed.href);
+    await page.waitForURL((url) => !url.pathname.startsWith("/auth/"));
     const landed = new URL(page.url());
     expect(landed.origin, next).toBe(LIVE.webUrl);
     expect(landed.pathname, next).not.toMatch(/^[/\\]{2}/);
+    // And an attacker who edits next in a link gets no further.
+    emailed.searchParams.set("next", next);
+    await page.goto(emailed.href);
+    expect(new URL(page.url()).origin, next).toBe(LIVE.webUrl);
   }
   expect(offSite).toEqual([]);
 });
@@ -280,10 +324,10 @@ test("moves a deal, and reloads when someone else changed it", async ({ page, re
   await expect(page.getByRole("status").getByText("Moved to Delivered.")).toBeVisible();
 });
 
-test("refuses tokens with the wrong role, no issuer or too long a lifetime", async ({ request }, info) => {
+test("refuses tokens with the wrong role, no issuer, too long a lifetime, an ended session or no membership", async ({ request }, info) => {
   test.skip(info.project.name !== "desktop", "API-only check; one project is enough");
   const refused = JSON.parse(process.env.ZS_LIVE_REFUSED_TOKENS ?? "{}") as Record<string, string>;
-  expect(Object.keys(refused).sort()).toEqual(["anonRole", "noIssuedAt", "noIssuer", "seedSevenDay", "tooLong"]);
+  expect(Object.keys(refused).sort()).toEqual(["anonRole", "noIssuedAt", "noIssuer", "seedSevenDay", "signedOut", "tooLong"]);
   const resources = (token: string) =>
     request.get(`${LIVE.apiUrl}/v1/booking/resources`, { headers: { Authorization: `Bearer ${token}` } });
   for (const [name, token] of Object.entries(refused)) {
@@ -292,9 +336,17 @@ test("refuses tokens with the wrong role, no issuer or too long a lifetime", asy
     expect(((await response.json()) as { error: { code: string } }).error.code, name).toBe("Unauthorized");
   }
   expect((await resources(process.env.ZS_LIVE_TOKEN!)).status()).toBe(200);
+  // A live session for a person who belongs to no business: authenticated, but forbidden.
+  const outsider = await resources(process.env.ZS_LIVE_OUTSIDER_TOKEN!);
+  expect(outsider.status()).toBe(403);
+  expect(((await outsider.json()) as { error: { code: string } }).error.code).toBe("Forbidden");
+  // Staff can use the calendar, but not the team list.
+  const staff = { Authorization: `Bearer ${process.env.ZS_LIVE_OTHER_TOKEN}` };
+  expect((await request.get(`${LIVE.apiUrl}/v1/booking/resources`, { headers: staff })).status()).toBe(200);
+  expect((await request.get(`${LIVE.apiUrl}/v1/members`, { headers: staff })).status()).toBe(403);
 
-  // The dashboard's proxy holds the owner token, so it must refuse other sites, even for a
-  // signed-in browser (SameSite=Strict already keeps the cookie off cross-site requests).
+  // The dashboard's proxy sends the signed-in person's token, so it must refuse other sites
+  // (SameSite=Strict already keeps the cookie off cross-site requests).
   await signInRequest(request);
   const crossSite = await request.post(`${LIVE.webUrl}/api/v1/crm/contacts`, {
     headers: { Origin: "https://evil.example", "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
@@ -524,4 +576,75 @@ test("pages a long customer list, searches all of it, and opens a customer it ha
   // The single-contact route answers for itself; an unknown customer is "not found".
   await page.goto(`/customers/${randomUUID()}`);
   await expect(page.getByRole("main").getByRole("alert")).toContainText("We could not find that customer.");
+});
+
+test("says sign-out did not finish and offers Try again until the server confirms it, and a 401 posts nothing", async ({ page }) => {
+  // Each POST /api/sign-out: first held then 502, then a network error, then the real server.
+  const posts: string[] = [];
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`${LIVE.webUrl}/api/sign-out`, async (route) => {
+    posts.push(route.request().method());
+    if (posts.length === 1) {
+      await held;
+      return route.fulfill({ status: 502, json: { error: "unavailable" } });
+    }
+    if (posts.length === 2) return route.abort("failed");
+    return route.continue();
+  });
+
+  // A 401 from the API ends the session on screen at once and never posts a sign-out.
+  const unauthorized = `${LIVE.webUrl}/api/v1/**`;
+  await page.route(unauthorized, (route) => route.fulfill({ status: 401, json: apiError("Unauthorized") }));
+  await page.goto("/customers");
+  await expect(page.getByRole("heading", { level: 1, name: "Your session ended" })).toBeVisible();
+  await page.waitForTimeout(500);
+  expect(posts).toEqual([]);
+  await page.unroute(unauthorized);
+  // The 401 was made up here, so the session is still live.
+  await page.reload();
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Account menu" }).filter({ visible: true }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  // While the request runs: the pages are gone, the screen says it is working on it, and
+  // nothing says the session ended.
+  await expect(page.getByRole("heading", { level: 1, name: "Signing out" })).toBeVisible();
+  await expect(page.getByRole("main").getByRole("status")).toHaveText("Ending your session…");
+  await expect(page.getByRole("button", { name: "Signing out…" })).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByRole("link", { name: /Maren Ashby/ })).toHaveCount(0);
+  await expect(page.getByTestId("signed-out")).toHaveCount(0);
+  expect(posts).toEqual(["POST"]);
+  release();
+
+  // 502: Supabase could not be told.
+  const alert = page.getByRole("main").getByRole("alert");
+  await expect(alert).toHaveText("Sign-out did not finish. Try again.");
+  await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toHaveCount(0);
+  await expect(page.getByTestId("signed-out")).toHaveCount(0);
+  const serious = (await new AxeBuilder({ page }).analyze()).violations
+    .filter((violation) => violation.impact === "serious" || violation.impact === "critical").map((violation) => violation.id);
+  expect(serious).toEqual([]);
+
+  // A network error: the server may never have heard the request.
+  const tryAgain = page.getByRole("button", { name: "Try again" });
+  await tryAgain.click();
+  await expect.poll(() => posts.length).toBe(2);
+  await expect(alert).toHaveText("Sign-out did not finish. Try again.");
+  await expect(tryAgain).toBeFocused();
+  await expect(page.getByTestId("signed-out")).toHaveCount(0);
+  // Neither failure reached the server, so the session really is still live: the screen was
+  // right not to say it ended.
+  expect((await page.request.get("/api/session")).status()).toBe(200);
+
+  // The retry reaches the real server, which ends the session and answers 204.
+  const answered = page.waitForResponse((response) => response.url() === `${LIVE.webUrl}/api/sign-out`);
+  await tryAgain.click();
+  expect((await answered).status()).toBe(204);
+  await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
+  await expect(page.getByTestId("signing-out")).toHaveCount(0);
+  await expect(page.getByRole("main").getByRole("alert")).toHaveCount(0);
+  expect(posts).toEqual(["POST", "POST", "POST"]);
+  await expect.poll(async () => (await page.context().cookies()).some((cookie) => cookie.name.startsWith("zs-auth"))).toBe(false);
+  expect((await page.request.get("/api/v1/crm/contacts")).status()).toBe(401);
 });

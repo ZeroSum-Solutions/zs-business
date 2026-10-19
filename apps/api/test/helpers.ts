@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { createDealOutputSchema, createOrFindContactOutputSchema } from "@zs/contracts";
-import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
+import {
+  createTestDatabase,
+  createTwoTenantFixture,
+  startAuthSession,
+  upsertAuthUser,
+  type TestDatabase,
+  type TwoTenantFixture,
+} from "@zs/db/testing";
+import { createLocalStubSessionCheck } from "@zs/core";
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
@@ -11,10 +19,17 @@ export const NOW = "2026-10-19T08:00:00.000Z";
 export const ORIGIN = "http://localhost:3000";
 export const clock = { now: () => new Date(NOW) };
 
-export interface TenantSetup {
+/** A signed-in member: an auth user with a live session and a membership row. */
+export interface MemberSetup {
   tenantId: string;
   actorId: string;
+  sessionId: string;
+  memberId: string;
+  email: string;
+  role: "owner" | "staff";
   token: string;
+}
+export interface TenantSetup extends MemberSetup {
   resourceId: string;
   pipelineId: string;
   stages: [string, string];
@@ -28,8 +43,33 @@ export interface ApiHarness {
   close(): Promise<void>;
 }
 
-async function provision(fixture: TwoTenantFixture, tenantId: string): Promise<TenantSetup> {
-  const actorId = randomUUID();
+/** Sign a token for an existing user and session (defaults: a one-hour token now). */
+export function tokenFor(member: Pick<MemberSetup, "tenantId" | "actorId" | "sessionId">, ttlSeconds = 3600): Promise<string> {
+  return signDevToken(SECRET, member, clock, ttlSeconds);
+}
+
+/** Create an auth user with a live session and, unless `membership: false`, a membership row. */
+export async function signedInMember(
+  database: TestDatabase,
+  fixture: TwoTenantFixture,
+  tenantId: string,
+  role: "owner" | "staff",
+  options: { membership?: boolean } = {},
+): Promise<MemberSetup> {
+  const memberId = randomUUID();
+  const email = `${role}-${memberId.slice(0, 8)}@example.com`;
+  const actorId = await upsertAuthUser(database.pool, { email, appMetadata: { tenant_id: tenantId } });
+  const sessionId = await startAuthSession(database.pool, actorId);
+  if (options.membership ?? true)
+    await fixture.service((tx) => tx.query(
+      `INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$6)`,
+      [tenantId, memberId, email, actorId, role, NOW],
+    ));
+  const member = { tenantId, actorId, sessionId, memberId, email, role };
+  return { ...member, token: await tokenFor(member) };
+}
+
+async function provision(database: TestDatabase, fixture: TwoTenantFixture, tenantId: string): Promise<TenantSetup> {
   const resourceId = randomUUID();
   const pipelineId = randomUUID();
   const stages: [string, string] = [randomUUID(), randomUUID()];
@@ -46,8 +86,8 @@ async function provision(fixture: TwoTenantFixture, tenantId: string): Promise<T
       [tenantId, stages[0], pipelineId, stages[1]],
     );
   });
-  const token = await signDevToken(SECRET, { tenantId, actorId }, clock, 3600);
-  return { tenantId, actorId, token, resourceId, pipelineId, stages };
+  const owner = await signedInMember(database, fixture, tenantId, "owner");
+  return { ...owner, resourceId, pipelineId, stages };
 }
 
 export async function createApiHarness(): Promise<ApiHarness> {
@@ -55,6 +95,8 @@ export async function createApiHarness(): Promise<ApiHarness> {
   const fixture = await createTwoTenantFixture(database);
   const app = createApp({
     verifier: createHs256Verifier(SECRET, { clock }),
+    // The loopback auth stub stands in for Supabase Auth; core's tests cover the Supabase check.
+    sessionCheck: createLocalStubSessionCheck(database.db, clock),
     clock,
     db: database.db,
     generateId: randomUUID,
@@ -64,8 +106,8 @@ export async function createApiHarness(): Promise<ApiHarness> {
     database,
     fixture,
     app,
-    a: await provision(fixture, fixture.a.tenantId),
-    b: await provision(fixture, fixture.b.tenantId),
+    a: await provision(database, fixture, fixture.a.tenantId),
+    b: await provision(database, fixture, fixture.b.tenantId),
     close: () => database.close(),
   };
 }

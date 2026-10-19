@@ -1,15 +1,13 @@
-import { proxyConfigFromEnv } from "@/lib/server/api-proxy";
-import { AttemptLimiter } from "@/lib/server/pilot-gate";
-import { signIn } from "@/lib/server/sign-in";
+import { withHostingModeGuard } from "@/lib/server/hosting-mode";
+import { liveSetupFromEnv } from "@/lib/server/live-config";
+import { AttemptLimiter, attemptLimitsFromEnv } from "@/lib/server/rate-limit";
+import { requestSignInLink } from "@/lib/server/sign-in";
 
-// Reads DASHBOARD_ACCESS_CODE and DASHBOARD_SESSION_SECRET at request time; never inlined.
+// Reads SUPABASE_URL and SUPABASE_ANON_KEY at request time; never inlined.
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// One limiter per server process: enough for the pilot's single server.
-const limiter = new AttemptLimiter();
+// One limiter per server process: enough for a single dashboard server.
+const limiter = new AttemptLimiter(attemptLimitsFromEnv());
 
-export function POST(request: Request) {
-  // Demo mode (no API configured) has no gate.
-  return signIn(request, proxyConfigFromEnv()?.gate ?? null, limiter);
-}
+export const POST = withHostingModeGuard((request: Request) => requestSignInLink(request, liveSetupFromEnv(), limiter));

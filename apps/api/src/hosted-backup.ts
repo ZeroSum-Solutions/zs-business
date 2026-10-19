@@ -60,6 +60,13 @@ export async function readLedger(pool: Pick<Pool, "query">): Promise<LedgerEntry
   return (await pool.query<LedgerEntry>("SELECT name, checksum FROM zs_internal.schema_migrations ORDER BY name")).rows;
 }
 
+/** Ordinary tables in the schemas the backup must cover, as "schema name" (pg_restore --list style). */
+export async function currentTables(pool: Pick<Pool, "query">): Promise<string[]> {
+  return (await pool.query<{ table: string }>(
+    `SELECT n.nspname || ' ' || c.relname AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname IN ('public', 'zs_internal') AND c.relkind = 'r' ORDER BY 1`)).rows.map((row) => row.table);
+}
+
 async function exists(path: string): Promise<boolean> {
   return access(path).then(() => true, () => false);
 }

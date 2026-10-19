@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
+import { createSessionCheckFromConfig } from "@zs/core";
 import { createApp } from "./app.js";
-import { createHs256Verifier } from "./auth.js";
+import { createVerifierFromConfig } from "./auth.js";
 import type { ServerEnv } from "./config.js";
 
 /**
@@ -23,21 +24,18 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
     await pool.end();
     throw error;
   });
+  const db = createScopedDatabase(pool, {
+    // Hosted, the runtime URL is Supavisor's transaction pooler (port 6543), where a
+    // backend cancel could stop another request's statement. Never "backend" here.
+    cancel: "none",
+    // A failed reset discards the connection; say so, since a pattern of them means trouble.
+    onResetFailure: (error) => console.error("Session reset failed; connection discarded", error),
+  });
   const app = createApp({
-    verifier: createHs256Verifier(env.jwtSecret, {
-      clock,
-      maxLifetimeSeconds: env.jwtMaxLifetimeSeconds,
-      clockSkewSeconds: env.jwtClockSkewSeconds,
-      ...(env.jwtIssuer === undefined ? {} : { issuer: env.jwtIssuer }),
-    }),
+    verifier: createVerifierFromConfig(env.jwt, clock),
+    sessionCheck: createSessionCheckFromConfig(env.sessionCheck, { db, clock }),
     clock,
-    db: createScopedDatabase(pool, {
-      // Hosted, the runtime URL is Supavisor's transaction pooler (port 6543), where a
-      // backend cancel could stop another request's statement. Never "backend" here.
-      cancel: "none",
-      // A failed reset discards the connection; say so, since a pattern of them means trouble.
-      onResetFailure: (error) => console.error("Session reset failed; connection discarded", error),
-    }),
+    db,
     generateId: randomUUID,
     config: { allowedOrigins: env.allowedOrigins, requestTimeoutMs: env.requestTimeoutMs },
     onError: (error) => console.error("Unhandled API error", error),

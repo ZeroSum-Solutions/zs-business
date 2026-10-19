@@ -35,7 +35,7 @@ const config: NextConfig = {
   // e2e:live builds into its own folder so it can run next to the demo build.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   generateBuildId: () => buildId,
-  // Public values only. ZS_API_URL and ZS_API_TOKEN stay on the server (app/api proxy);
+  // Public values only. ZS_API_URL and the Supabase settings stay on the server (app/api proxy);
   // the browser learns only whether to use it.
   env: {
     NEXT_PUBLIC_API_MODE: process.env.ZS_API_URL?.trim() ? "live" : "demo",

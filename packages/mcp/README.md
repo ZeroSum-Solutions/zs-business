@@ -8,15 +8,40 @@ JSON object in both `structuredContent` and `content[0].text`: the same body as 
 route (list tools return `{ items }`), or on failure `isError: true` with the shared
 `apiErrorBodySchema` body.
 
-The tenant and actor are fixed per process by injected config, never by tool input:
+The server acts with one member's Supabase access token and authorizes exactly like the HTTP
+API (`authenticate` in `@zs/core`). On **every** tool call it:
+
+1. verifies the token with the same `JWT_*` settings as the API, against the injected clock,
+   so the token stops working at its `exp` (401 `Unauthorized`);
+2. checks the token's Supabase session is still live, so signing out stops it at once (401);
+3. checks the token's user is a member of the tenant the token claims (403 `Forbidden`);
+4. runs the tool through the edge session, which re-checks the membership and the role the
+   read or action needs. The tools are calendar and customer work, which staff may do too.
+
+The tenant and actor come only from the verified token, never from tool input. A failed check
+answers `isError: true` with the shared error body, like any other failure.
 
 ```sh
 DATABASE_URL=postgres://zs_runtime@127.0.0.1:55432/zs_dev \
-ZS_TENANT_ID=<tenant uuid> ZS_ACTOR_ID=<actor uuid> \
+JWT_VERIFIER=hs256 JWT_SECRET=<the API's secret> SESSION_CHECK=local-stub \
+ZS_ACCESS_TOKEN=<a member's access token> \
   mise exec -- pnpm --filter @zs/mcp start
 ```
 
+| Variable | Meaning |
+|---|---|
+| `DATABASE_URL` | The runtime LOGIN role (`zs_runtime`). |
+| `ZS_ACCESS_TOKEN` | The member's Supabase access token (locally, the dev JWT `seed:demo` prints). |
+| `JWT_VERIFIER`, `JWT_SECRET`, `JWT_JWKS_URL`, `JWT_ISSUER`, `JWT_MAX_TTL_SECONDS`, `JWT_CLOCK_SKEW_SECONDS` | Exactly as for `@zs/api` (see its README); parsed by the same `jwtEnvSchema` from `@zs/core`. |
+| `SESSION_CHECK`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SESSION_CACHE_SECONDS` | Exactly as for `@zs/api`: `supabase` on any hosted project, `local-stub` only with a loopback `DATABASE_URL`. |
+
+A Supabase access token lives one hour by default, so a long-running server needs a fresh
+token: restart it with a new `ZS_ACCESS_TOKEN`, or embed `createMcpServer` with a function
+token source that returns the current token (it is read on every call). The local 7-day dev
+token needs `JWT_MAX_TTL_SECONDS=604800`, as for the API.
+
 `DATABASE_URL` must log in as the unprivileged runtime role; the server refuses to start
-when the login is a superuser or has BYPASSRLS. `createMcpServer(deps)` takes
-the scoped database, clock, ID generator and principal, so tests connect it to an
-in-memory client.
+when the login is a superuser or has BYPASSRLS. `createMcpServer(deps)` takes the scoped
+database, clock, ID generator, token verifier and access token (a string, or a function
+returning the current one), so tests connect it to an in-memory client with real signed
+tokens.

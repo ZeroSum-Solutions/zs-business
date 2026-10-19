@@ -8,6 +8,7 @@ import { expect, it } from "vitest";
 import { migrate } from "../src/migrate.js";
 import { asService } from "../src/scoped.js";
 import { withTestDatabase } from "../src/testing.js";
+import { expectedOwner } from "./owners.js";
 
 const migrations = new URL("../../../supabase/migrations/", import.meta.url);
 
@@ -112,7 +113,7 @@ it("the full chain applies as a non-superuser CREATEROLE migrator and hands func
       "booking_resources_time_zone_known()", expect.stringMatching(/^record_action_and_event\(/),
     ]));
     for (const row of rows) {
-      expect(row.owner).toBe(row.definer ? "zs_dispatcher" : "zs_function_owner");
+      expect(row.owner).toBe(expectedOwner(row));
     }
     const tables = await database.pool.query<{ owner: string }>(
       "SELECT DISTINCT tableowner AS owner FROM pg_tables WHERE schemaname='public'",

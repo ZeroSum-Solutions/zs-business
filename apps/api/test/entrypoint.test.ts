@@ -1,13 +1,13 @@
 // Runs the real `src/main.ts` entry point as a child process: the pool it builds there is
 // what has to survive a lost idle connection (W2), and what bounds a saturated checkout (W3).
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { signDevToken } from "../src/dev-token.js";
+import { signedInMember } from "./helpers.js";
 
 const SECRET = ["entry", "point", "x".repeat(32)].join("-");
 const API_DIR = fileURLToPath(new URL("..", import.meta.url));
@@ -44,7 +44,9 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
       PATH: process.env.PATH ?? "",
       HOME: process.env.HOME ?? "",
       DATABASE_URL: url.href,
+      JWT_VERIFIER: "hs256",
       JWT_SECRET: SECRET,
+      SESSION_CHECK: "local-stub",
       PORT: String(port),
       ...extraEnv,
     },
@@ -66,6 +68,12 @@ async function startApi(extraEnv: Record<string, string> = {}): Promise<Running>
       await once(child, "exit");
     },
   };
+}
+
+/** A live owner of tenant A, with a token signed for the child's real clock. */
+async function memberToken(): Promise<string> {
+  const member = await signedInMember(database, fixture, fixture.a.tenantId, "owner");
+  return signDevToken(SECRET, member, { now: () => new Date() }, 600);
 }
 
 /**
@@ -98,7 +106,7 @@ describe("API entry point", () => {
       expect(api.exited(), api.output()).toBeNull();
       expect(api.output()).toContain("57P01");
 
-      const token = await signDevToken(SECRET, { tenantId: fixture.a.tenantId, actorId: randomUUID() }, { now: () => new Date() }, 600);
+      const token = await memberToken();
       const response = await fetch(`http://127.0.0.1:${api.port}/v1/booking/resources`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -118,7 +126,7 @@ describe("API entry point", () => {
     // Hold the API's only connection: lock a row it needs, then make it wait on that lock.
     const holder = await database.pool.connect();
     try {
-      const token = await signDevToken(SECRET, { tenantId: fixture.a.tenantId, actorId: randomUUID() }, { now: () => new Date() }, 600);
+      const token = await memberToken();
       await holder.query("BEGIN");
       await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
       const headers = { Authorization: `Bearer ${token}` };

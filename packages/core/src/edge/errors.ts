@@ -12,6 +12,31 @@ export interface MappedError {
   readonly body: ApiErrorBody;
 }
 
+/**
+ * The caller could not be authenticated: a missing, forged or expired token, or a Supabase
+ * session that has ended. Maps to 401 Unauthorized. Its message is always one of the fixed
+ * strings written in core (never token, request or database text), so it may reach the caller.
+ */
+export class Unauthenticated extends Error {
+  constructor(message = "Invalid or missing access token") {
+    super(message);
+    this.name = "Unauthenticated";
+  }
+}
+
+/**
+ * Supabase Auth could not answer: the session check, or the signing keys (JWKS) a token is
+ * verified against, timed out, failed or came back malformed. Maps to 503 Unavailable, never
+ * 401, so a caller retries and the dashboard keeps the browser's session cookies through an
+ * outage. Its message is fixed text written in core.
+ */
+export class AuthUnavailable extends Error {
+  constructor(message = "Supabase Auth did not answer the session check", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "AuthUnavailable";
+  }
+}
+
 export function apiErrorBody(code: ApiErrorCode, message: string, details: Record<string, JsonValue> = {}): ApiErrorBody {
   return { error: { code, message, details } };
 }
@@ -26,7 +51,7 @@ export function validationError(message: string, issues: readonly { path: readon
 /** Documented conflict reasons; anything else leaves the server as the generic "conflict". */
 const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
-  "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch",
+  "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
 ]);
 
 /** One fixed message per code, so database or handler text never reaches a response. */
@@ -55,9 +80,12 @@ const mapped = (status: ApiErrorStatus, code: ApiErrorCode, details: Record<stri
 
 /** Map any thrown value to one HTTP status and the shared error body. Unknown errors become 500. */
 export function mapError(error: unknown): MappedError {
+  if (error instanceof Unauthenticated) return { status: 401, body: apiErrorBody("Unauthorized", error.message) };
   // Nothing committed, or with "commit_unknown" perhaps committed: either way the caller
   // retries later, a write with its original idempotency key, which replays a commit that happened.
   if (error instanceof DatabaseUnavailable) return mapped(503, "Unavailable");
+  // Supabase Auth could not say whether the token or its session is good: retry later.
+  if (error instanceof AuthUnavailable) return mapped(503, "Unavailable");
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":

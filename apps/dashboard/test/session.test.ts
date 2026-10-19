@@ -1,60 +1,68 @@
 import { describe, expect, it } from "vitest";
-import { readSession, sessionForRequest, sessionResponse } from "../src/lib/server/session";
-import { SESSION_COOKIE } from "../src/lib/server/pilot-gate";
-import { GATE, sessionCookieHeader } from "./helpers/gate";
+import { sessionForRequest } from "../src/lib/server/session";
+import { PILOT_COOKIE } from "../src/lib/server/supabase";
+import { createLiveHarness, forwardedClaims, ORIGIN, setCookies, signInThroughLink } from "./helpers/live";
 
-const NOW = new Date("2026-10-18T12:00:00.000Z");
-const jwt = (claims: object) => `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.sig`;
-const claims = { sub: "user-1", exp: NOW.getTime() / 1000 + 60, app_metadata: { tenant_id: "tenant-1" } };
-
-describe("readSession", () => {
-  it("names the tenant and user of the server's token", async () => {
-    const result = readSession(jwt(claims), NOW);
-    expect(result).toEqual({ status: "signed_in", identity: { tenantId: "tenant-1", userId: "user-1" } });
-    const response = sessionResponse(result);
-    expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toEqual({ tenantId: "tenant-1", userId: "user-1" });
-  });
-
-  it("is signed out for an expired, tenantless or garbled token", () => {
-    expect(readSession(jwt({ ...claims, exp: NOW.getTime() / 1000 }), NOW)).toEqual({ status: "signed_out" });
-    expect(readSession(jwt({ sub: "user-1" }), NOW)).toEqual({ status: "signed_out" });
-    expect(readSession("not-a-jwt", NOW)).toEqual({ status: "signed_out" });
-    expect(sessionResponse({ status: "signed_out" }).status).toBe(401);
-  });
-
-  it("is unconfigured with no token, so demo builds never claim a live tenant", () => {
-    expect(readSession(undefined, NOW)).toEqual({ status: "unconfigured" });
-    expect(readSession("  ", NOW)).toEqual({ status: "unconfigured" });
-    expect(sessionResponse({ status: "unconfigured" }).status).toBe(503);
-  });
-});
+const request = (cookie?: string) => new Request(`${ORIGIN}/api/session`, { headers: cookie ? { Cookie: cookie } : {} });
 
 describe("GET /api/session", () => {
-  const live = { ZS_API_URL: "http://localhost:8787", ZS_API_TOKEN: jwt(claims), DASHBOARD_ACCESS_CODE: GATE.accessCode, DASHBOARD_SESSION_SECRET: GATE.sessionSecret };
-  const request = (cookie?: string) => new Request("http://127.0.0.1:3218/api/session", { headers: cookie ? { Cookie: cookie } : {} });
-
-  it("names the tenant only to a caller with a valid pilot session", async () => {
-    const response = sessionForRequest(request(sessionCookieHeader(GATE, NOW)), live, NOW);
+  it("names the business, person and role the API's /v1/me reports for the person's own token", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    const response = await sessionForRequest(request(jar.header()), harness.setup);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ tenantId: "tenant-1", userId: "user-1" });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ tenantId: harness.tenantId, userId: harness.owner.id, role: "owner" });
+    expect(harness.apiCalls.map((call) => call.url)).toEqual(["http://api.internal:8787/v1/me"]);
+    expect(forwardedClaims(harness.apiCalls[0]!).sub).toBe(harness.owner.id);
   });
 
-  it("is signed out with no cookie, and expired with a stale or forged one", async () => {
-    const none = sessionForRequest(request(), live, NOW);
+  it("is signed out with no cookie, and expired with the retired pilot cookie, which it expires", async () => {
+    const harness = createLiveHarness();
+    const none = await sessionForRequest(request(), harness.setup);
     expect(none.status).toBe(401);
     expect(await none.json()).toEqual({ error: "signed_out" });
-    const stale = sessionForRequest(request(sessionCookieHeader(GATE, new Date(NOW.getTime() - (GATE.ttlSeconds + 1) * 1000))), live, NOW);
-    expect(stale.status).toBe(401);
-    expect(await stale.json()).toEqual({ error: "expired" });
-    const forged = sessionForRequest(request(`${SESSION_COOKIE}=v1.9999999999.abc.def`), live, NOW);
-    expect(forged.status).toBe(401);
+    const pilot = await sessionForRequest(request(`${PILOT_COOKIE}=v1.9999999999.abc.def`), harness.setup);
+    expect(pilot.status).toBe(401);
+    expect(await pilot.json()).toEqual({ error: "expired" });
+    expect(setCookies(pilot).get(PILOT_COOKIE)?.value).toBeNull();
+    expect(harness.apiCalls).toHaveLength(0);
   });
 
-  it("refuses to serve live mode without the gate's settings, and is unconfigured in demo mode", async () => {
-    const unset = sessionForRequest(request(sessionCookieHeader(GATE, NOW)), { ZS_API_URL: live.ZS_API_URL, ZS_API_TOKEN: live.ZS_API_TOKEN }, NOW);
+  it("is expired, and drops the cookies, once the session was signed out elsewhere", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    await harness.store.endSession([...harness.store.sessions.keys()][0]!);
+    const response = await sessionForRequest(request(jar.header()), harness.setup);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "expired" });
+    expect([...setCookies(response).values()].every((cookie) => cookie.value === null)).toBe(true);
+  });
+
+  it("says no_access for a signed-in person who is not a member", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    harness.api = async () => Response.json({ error: { code: "Forbidden", message: "Forbidden", details: {} } }, { status: 403 });
+    const response = await sessionForRequest(request(jar.header()), harness.setup);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "no_access" });
+  });
+
+  it("is unavailable when the API is down or answers nonsense", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    harness.api = async () => { throw new TypeError("fetch failed"); };
+    expect((await sessionForRequest(request(jar.header()), harness.setup)).status).toBe(502);
+    harness.api = async () => Response.json({ tenantId: "x" });
+    expect((await sessionForRequest(request(jar.header()), harness.setup)).status).toBe(502);
+  });
+
+  it("is unconfigured in demo mode and misconfigured without the Supabase settings", async () => {
+    const demo = await sessionForRequest(request(), null);
+    expect(demo.status).toBe(503);
+    expect(await demo.json()).toEqual({ error: "unconfigured" });
+    const unset = await sessionForRequest(request(), { ok: false, problem: "no Supabase URL" });
     expect(unset.status).toBe(503);
     expect(await unset.json()).toEqual({ error: "misconfigured" });
-    expect(sessionForRequest(request(), {}, NOW).status).toBe(503);
   });
 });

@@ -35,3 +35,13 @@ export function hostingModeGuard(builtMode: string | undefined, env: Record<stri
     headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
   });
 }
+
+/**
+ * A route handler behind the guard. The /api routes run it themselves because src/proxy.ts
+ * skips them: a proxy in front of a route makes Next buffer the whole request body first, so
+ * the routes' own body limits could not answer before the body arrived.
+ */
+export function withHostingModeGuard<Args extends unknown[]>(handler: (...args: Args) => Response | Promise<Response>) {
+  return (...args: Args): Response | Promise<Response> =>
+    hostingModeGuard(process.env.NEXT_PUBLIC_API_MODE, process.env) ?? handler(...args);
+}

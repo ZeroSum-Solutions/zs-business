@@ -8,6 +8,7 @@ import { clock, SECRET } from "./helpers.js";
 // No database: these routes never open a session.
 const app = createApp({
   verifier: createHs256Verifier(SECRET, { clock }),
+  sessionCheck: { isLive: () => Promise.reject(new Error("unused")) },
   clock,
   db: { tenant: () => Promise.reject(new Error("unused")) },
   generateId: randomUUID,

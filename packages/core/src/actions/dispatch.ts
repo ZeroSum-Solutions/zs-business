@@ -33,6 +33,11 @@ export interface DispatchContext<Config = DispatchConfig> {
     tx: Transaction,
     reference: ApprovalReference,
   ) => Promise<ActionBinding | null>;
+  /**
+   * Optional: runs first in the action's transaction, before the idempotency lock and the
+   * replay lookup, and throws to refuse (for example a caller who is no longer a member).
+   */
+  readonly authorize?: (tx: Transaction, binding: ActionBinding) => Promise<void>;
 }
 export interface HandlerResult {
   result: JsonValue;
@@ -125,6 +130,7 @@ export function createDispatcher<Config = DispatchConfig>(
     };
     return ctx.db
       .tenant(binding.tenantId, async (tx) => {
+        if (ctx.authorize) await ctx.authorize(tx, binding);
         // Lock before lookup: concurrent same-key callers see the committed winner at READ COMMITTED.
         await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [
           `${binding.tenantId}:${key}`,

@@ -15,11 +15,14 @@ psql postgres://postgres@127.0.0.1:55432/postgres -c 'CREATE DATABASE zs_dev'
 DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api db:migrate
 
 # 3. Make a local env file with a real secret; the API and seed refuse the placeholder.
+#    The example env sets JWT_VERIFIER=hs256, as local tokens are HS256.
 sed "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" apps/api/.env.example > apps/api/.env
 set -a; . apps/api/.env; set +a
 
-# 4. Seed the demo jeweler and print a 7-day dev JWT. It also runs migrations and makes sure
-#    the unprivileged zs_runtime login exists. JWT_SECRET must match the API's.
+# 4. Seed the demo jeweler and print a 7-day dev JWT. It also runs migrations, makes sure
+#    the unprivileged zs_runtime login exists, installs the local auth stub (auth.users,
+#    auth.sessions), adds the owner (owner@example.com) as a member and starts a session for
+#    the token. JWT_SECRET must match the API's.
 DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api seed:demo
 
 # 5. Start the API as the runtime role. The example env sets JWT_MAX_TTL_SECONDS=604800 so the
@@ -37,15 +40,62 @@ Demo tenant: "Halden & Rowe Fine Jewelry" (invented), with a showroom calendar a
 repair-intake calendar (America/New_York), 12 contacts, a pipeline (Inquiry, Consultation,
 Design, Deposit, Delivered), 8 deals and 6 bookings.
 
+## Provision the first owner
+
+The API refuses every request from a user without a `tenant_members` row, and only owners
+invite. A tenant that existed before `20261019090000_members_and_sessions.sql` (the hosted
+pilot tenant) therefore has nobody who can act or invite. The database holds no
+tenant-to-email data, so the migration cannot backfill an owner; the owner of the
+deployment names the person with this owner-run step (`src/provision-owner.ts`):
+
+```sh
+# Report what would change, then roll back.
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api \
+  db:provision-owner --tenant <tenant uuid> --email owner@example.com --dry-run
+# Apply. --receipt must not exist yet: it is reserved before any database work and always
+# records the outcome (result, failed phase, redacted error, committed true/false/"unknown").
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api \
+  db:provision-owner --tenant <tenant uuid> --email owner@example.com --apply --receipt owner-receipt.json
+```
+
+One service_role transaction under the tenant's exclusive membership lock. The email is
+trimmed and lowercased (the members schema). Without a member for that email it adds an
+owner, bound to the Supabase user with that email when one exists, else pending: create the
+user (or let them sign up) and run it again to bind. With a member for that email it binds a
+pending row, and promotes staff to owner only when the tenant has no active (bound) owner;
+otherwise it refuses, since owners change roles in the app. It refuses an unknown tenant, a
+row bound to a different user, and a user already bound to another member of the tenant. A
+second run reports `unchanged`. A dry run of a new owner shows a member id that the real run
+replaces. Output and receipts hold ids, names and role facts only.
+
+Every token must carry the tenant in `app_metadata.tenant_id`, which only the server can set.
+Before its transaction commits, the step sets that claim on the bound user (keeping other
+`app_metadata` keys) and refuses a user whose claim already names another tenant. The user
+signs in again to get a token with the claim. If setting the claim fails, the row rolls back
+and a re-run starts over; a claim that is gone from an existing row is set again (`claimed`).
+Runs for the same Supabase user take a per-user advisory lock before the tenant's lock and
+re-read the claim under it, so two runs for two tenants cannot both bind one user: the second
+is refused. An `--apply` run reads both the row and the claim back.
+
+Locally the Supabase user is looked up, and given the claim, in the auth stub's `auth.users`.
+Hosted, `db:hosted-provision-owner` (`src/hosted-provision.ts`) runs the same step with the
+Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
+
 ## Environment
 
 | Variable | Meaning |
 |---|---|
 | `DATABASE_URL` | API: the runtime LOGIN role (`zs_runtime`); the API refuses to start as a superuser or BYPASSRLS role. Scripts: the local admin URL. |
-| `JWT_SECRET` | HS256 secret for Supabase-style access tokens (32+ characters). The `.env.example` placeholder is refused. |
+| `JWT_VERIFIER` | Required: how access tokens are verified. `hs256` (the legacy Supabase JWT secret, needs `JWT_SECRET`) or `jwks` (asymmetric Supabase signing keys, ES256/RS256, needs `JWT_JWKS_URL`). Anything else, or none, is refused. |
+| `JWT_SECRET` | `hs256` only, and `seed:demo`: HS256 secret for Supabase-style access tokens (32+ characters). The `.env.example` placeholder is refused. |
+| `JWT_JWKS_URL` | `jwks` only: the project's JWKS, `https://<project>.supabase.co/auth/v1/.well-known/jwks.json`. Must be https; plain http only on `127.0.0.1`, `[::1]` or `localhost` (local tests). |
 | `JWT_ISSUER` | Optional. When set, tokens must carry this `iss`. |
 | `JWT_MAX_TTL_SECONDS` | Longest accepted token lifetime (`exp` minus `iat`), default 3600. Local dev sets 604800 so the 7-day seed token works for seed and dashboard e2e; production keeps the default. |
 | `JWT_CLOCK_SKEW_SECONDS` | How far a token's `iat` may lie ahead of the API's clock, 0 to 300, default 60. |
+| `SESSION_CHECK` | Required: how a token's session is checked. `supabase` (every hosted deploy) asks Supabase Auth and needs `SUPABASE_URL` and `SUPABASE_ANON_KEY`. `local-stub` asks the loopback auth stub and is refused unless `DATABASE_URL` is on loopback. |
+| `SUPABASE_URL` | `supabase` only: `https://<project>.supabase.co`. Must be https; plain http only on loopback. |
+| `SUPABASE_ANON_KEY` | `supabase` only: the project's anon (publishable) key, sent as `apikey`. |
+| `SESSION_CACHE_SECONDS` | `supabase` only: how long a live answer is reused, 0 to 30, default 5. A sign-out is refused within this long. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
@@ -66,9 +116,49 @@ the runtime login before it serves.
 `iat`. A token whose `iat` is more than `JWT_CLOCK_SKEW_SECONDS` ahead of the clock is refused,
 and its lifetime (`exp` minus `iat`) must be at most `JWT_MAX_TTL_SECONDS`. Within the skew, a
 full-lifetime token from an issuer whose clock runs slightly ahead is still accepted.
-`sub` is the actor and `app_metadata.tenant_id` is the tenant. HS256
-uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing keys pass
-`createJwksVerifier(createRemoteJWKSet(new URL(".../auth/v1/.well-known/jwks.json")), { clock })`.
+`sub` is the actor, `app_metadata.tenant_id` is the tenant the token claims and `session_id`
+(required) is the Supabase Auth session.
+
+Then, on every request:
+
+1. **Live session.** The session check must say the token's Supabase session is still live.
+   Otherwise 401 `Unauthorized`. Supabase deletes the session on sign-out, so a token is
+   refused after sign-out, not at its `exp`. With `SESSION_CHECK=supabase` the API calls
+   Supabase Auth `GET /auth/v1/user` with the caller's own token and the anon key: 200 with
+   the token's user (not banned, not deleted) is live; 401, 403 or 404 is ended. Any other
+   answer, a timeout or a network error fails closed with 503 `Unavailable`, never 401, so the
+   dashboard keeps its cookies through an outage. Only live answers are cached, for
+   `SESSION_CACHE_SECONDS` (default 5, at most 30, never past the token's `exp`), keyed by a
+   hash of the token. Hosted Supabase keeps `auth.*` to itself, so no migration grants on it
+   and the runtime role never reads it. `SESSION_CHECK=local-stub` asks
+   `zs_local_auth.session_is_live` from the loopback auth stub (`@zs/db/local-auth`) that tests
+   and `seed:demo` install; its tables have RLS on and no policies, as on hosted Supabase.
+2. **Membership.** In one transaction, `tenant_members` must hold an active row for `sub` in
+   the claimed tenant. Otherwise 403 `Forbidden`, answered like another tenant's row. A
+   removed member is refused on the next request, including a replay of an earlier
+   idempotency key: the check runs before the replay lookup.
+3. **Role.** The member's role must allow the route. `owner` may do everything: members,
+   billing, plan and publish. `staff` may use the calendar, customers and inbox drafts
+   (`ROLE_PERMISSIONS` in `@zs/contracts`). Otherwise 403.
+
+Member writes hold an exclusive per-tenant advisory lock and every other request a shared
+one, so a role change or removal is never interleaved with a request it affects.
+
+The signing method is explicit config, never inferred from the token: `JWT_VERIFIER=hs256`
+accepts only HS256 tokens signed with `JWT_SECRET`; `JWT_VERIFIER=jwks` accepts only ES256 or
+RS256 tokens signed by a key in `JWT_JWKS_URL` (fetched and cached by `jose`'s
+`createRemoteJWKSet`), so an HS256 token is refused there and an ES256 token under `hs256`.
+When the JWKS cannot be fetched (a timeout, a network error, a non-200 answer or a body that
+is not a JWKS) the API answers 503 `Unavailable` with `Retry-After`, not 401: the token was
+never judged, so the dashboard keeps its cookies. 401 stays for bad signatures, unknown keys
+and bad claims.
+`parseServerEnv` parses the `JWT_*` variables with `jwtEnvSchema` from `@zs/core` and `main.ts`
+builds the verifier with `createVerifierFromConfig(env.jwt, clock)`.
+
+The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above live in
+`@zs/core` (`edge/auth.ts`, `edge/session-check.ts`, and
+`authenticate(deps, verifier, sessionCheck, token)` in `edge/authenticate.ts`), so the MCP server runs exactly the same checks on every tool call.
+`src/auth.ts` re-exports them.
 
 ## Routes (`/v1`, JSON)
 
@@ -87,13 +177,22 @@ uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing k
 | `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals, most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
 | `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
+| `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
+| `GET /v1/members` | `{ items: Member[] }`, owners only |
+| `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
+| `POST /v1/members/:id/role` `{ role }` | 200 member; 409 `last_owner` when it would leave no owner; owners only |
+| `DELETE /v1/members/:id` | 200 removed member; 409 `last_owner`; owners only |
+
+Staff cannot invite, remove or change roles, including their own. An invite is a pending row
+with no `user_id`; the runtime role cannot set `user_id` (binding an invite to a signed-up
+user is M2b's invite worker).
 
 A page is `{ items, limit, offset, nextOffset, nextCursor }`. Pass `nextCursor` back as
 `cursor` for the next page: it names the last row returned, so rows added or moved ahead of
 it while you page are neither repeated nor skipped, which `offset` cannot promise. A cursor
 belongs to one list and sort; it is not combined with `offset`.
 
-Every `POST` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
+Every `POST` and `DELETE` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
 the same key returns the stored result with the original status; reusing a key with a
 different body, or on another endpoint, is 409 `idempotency_key_reused`. Keys are per tenant.
 Target IDs derive from the tenant and the key.
@@ -103,7 +202,8 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `Unauthorized` 401, `Forbidden` 403 (another tenant's row or an unknown ID, answered alike),
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
-`concurrent_update`, `split_identity`, `identity_mismatch`; anything else is `conflict`),
+`concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`;
+anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.
 
@@ -194,20 +294,33 @@ against the pinned Supabase Root 2021 CA.
    rehearsing an upgrade from a partial set. Receipts go outside the repo.
 3. **Seed (fake data only).** `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432)
    and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
-   migrate and prints ids and counts only.
-4. **Tokens.** Until M2a auth lands, the dashboard calls the API with one static owner token
-   (`ZS_API_TOKEN`), HS256, issuer `https://api.zerosumsolutions.com/pilot`, at most 30 days
-   (the API's `JWT_MAX_TTL_SECONDS=2592000`). The mint script refuses to print to a
-   terminal. Mint into a shell variable first, so a failed mint never
-   writes an empty value, and use `pnpm -s` so no pnpm banner lands in it:
+   migrate and prints ids and counts only. The seed writes through the action path as its own
+   owner member, whose user id names no Supabase user, and removes that member when it is
+   done (the action history keeps the record). It takes no arguments and never calls
+   Supabase Auth or writes a real person's membership: the tenant has no member until step 4
+   runs. The summary prints the tenant id and, under `nextSteps`, the exact step 4 commands
+   for it (dry run, backup, then apply with a receipt).
+4. **Owner.** There is no static token: every person signs in through the dashboard with
+   Supabase Auth (an email link), and the API checks each token's session with Supabase Auth
+   (`SESSION_CHECK=supabase`). A tenant needs an owner first ("Provision the first owner").
+   With `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432) and
+   `SUPABASE_SERVICE_ROLE_KEY` (the project's service_role or `sb_secret_` key; a JWT key
+   must name `ZS_TARGET_REF` in its `ref` claim):
    ```sh
-   T=$(JWT_SECRET=… JWT_ISSUER=… ZS_TOKEN_TENANT_ID=… ZS_TOKEN_SUBJECT=… ZS_TOKEN_TTL_SECONDS=2592000 \
-     mise exec -- pnpm -s --filter @zs/api token:mint) && [ -n "$T" ] && \
-     printf '%s' "$T" | zsvault edit <id> --yes --value-stdin; unset T
+   mise exec -- pnpm --filter @zs/api db:hosted-provision-owner --tenant <uuid> --email <addr> --dry-run
+   mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/<ref>-<date>.dump
+   mise exec -- pnpm --filter @zs/api db:hosted-provision-owner --tenant <uuid> --email <addr> \
+     --apply --backup ~/Backups/zs-business/<ref>-<date>.dump --receipt <file.json>
    ```
-   For a new entry use `zsvault add <id> --type plain_secret --yes --value-stdin`.
-   To rotate, mint a new token, set it as the dashboard's `ZS_API_TOKEN` for that target, and
-   redeploy the dashboard. Rotating `JWT_SECRET` invalidates every token at once.
+   The user is found by exact email, and given `app_metadata.tenant_id`, through the Auth
+   admin API at `https://<ref>.supabase.co` (never `auth.users`); a user whose claim names
+   another tenant is refused. Signups are disabled, so create the user first (Supabase
+   dashboard > Authentication > Add user), or run it once to leave a pending owner and again
+   to bind. `--apply` takes the same guards as `db:hosted-migrate`: the receipt is reserved
+   before any Auth or database call, the backup must pass the same manifest and archive
+   checks (this project, under two hours old, the live ledger and every table), and the
+   receipt records every outcome (`failedPhase`: `dry-run`, `backup-check`, `apply` or
+   `verify`) with ids and role facts only; errors are redacted, and the key is never printed.
 5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
    upload), with `VERCEL_TOKEN` in the environment:
    ```sh
@@ -219,9 +332,10 @@ against the pinned Supabase Root 2021 CA.
    The API builds with `pnpm build:vercel` (`scripts/build-vercel.mjs`): esbuild bundles
    `src/vercel.ts` into one Node 24 function under `.vercel/output` (Build Output API).
    API env per target: `DATABASE_URL` (zs_runtime, port 6543), `DATABASE_CA_CERT`,
-   `DATABASE_POOL_MAX=3`, `JWT_SECRET`, `JWT_ISSUER`, `JWT_MAX_TTL_SECONDS=2592000`.
-   Dashboard env per target: `ZS_API_URL`, `ZS_API_TOKEN`, `DASHBOARD_ACCESS_CODE`,
-   `DASHBOARD_SESSION_SECRET`, `DASHBOARD_TRUST_PROXY=1`. Both set
+   `DATABASE_POOL_MAX=3`, `JWT_VERIFIER` with `JWT_SECRET` or `JWT_JWKS_URL`, `JWT_ISSUER`
+   (`https://<ref>.supabase.co/auth/v1`), `SESSION_CHECK=supabase`, `SUPABASE_URL`,
+   `SUPABASE_ANON_KEY`. Dashboard env per target: `ZS_API_URL`, `SUPABASE_URL`,
+   `SUPABASE_ANON_KEY`, `DASHBOARD_TRUST_PROXY=1`. Both set
    `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel uses the pinned pnpm.
 6. **Check.** `pnpm --filter @zs/api check:hosted` runs the negative checks against one
    project and its deploys and exits 1 on any failure: unprivileged runtime login, migrator
@@ -238,10 +352,27 @@ against the pinned Supabase Root 2021 CA.
    none of it, and must have run on a backend a committed and a throwing transaction used
    first, by `pg_backend_pid()`, or the probe fails with "no handoff observed"), an
    abandoned-transaction probe (below), no failed session cleanup in any scoped transaction (counted through `createScopedDatabase`'s
-   `onResetFailure`), bad tokens 401, and the Data API reading nothing (only an explicit denial
-   or an empty result passes; an outage fails). Write probes always roll back, and the
-   temporary Auth user's deletion is checked too. Its header lists the
-   environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication on preview.
+   `onResetFailure`), and real Supabase sessions over HTTP. It creates two temporary Auth
+   users (synthetic `example.com` addresses): A, a `staff` member of tenant A (a temporary
+   `tenant_members` row written through `SERVICE_DATABASE_URL`), and B, who claims a random
+   tenant and is a member of nothing. Both sign in with a password. A reads tenant A's
+   records and `/v1/me`. B gets 403 on every call, also for tenant A's ids. A missing token,
+   a wrong issuer, a forged signature, a token minted with `JWT_SECRET` that names no live
+   session, and a signed-out session all get 401. The Data API check reads the table list
+   from `supabase/migrations/` and from the catalog (`public` and `zs_internal`). As `anon`
+   and as user A it first calls an RPC that does not exist: PostgREST checks the token first,
+   so only "no such function" (404 `PGRST202`) or "schema not exposed" (406 `PGRST106`) shows
+   the Data API accepted it. Then neither may call `record_action_and_event` (sent with
+   `Content-Profile` and `Accept-Profile` `public` and every argument), and for every table
+   `/rest/v1` must refuse SELECT, INSERT, UPDATE and DELETE. Only these denials pass: 42501
+   permission denied (401 or 403), `PGRST106` (406), `PGRST205` or `42P01` table not exposed
+   (404), and, for reads, updates and deletes, 200 with no rows. Rejected credentials (401, or
+   `PGRST300` to `PGRST303`) fail, since they prove nothing about authorization, and so do
+   an outage, an accepted write or a migration table missing from the catalog
+   (`src/data-api-probe.ts`). No probe can change a row. Write probes in SQL always roll
+   back. The removal of the temporary member and of both users is checked too. Its header
+   lists the environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication
+   on preview.
 
    The abandoned-transaction probe ("abandoned in-flight transactions leave no session state
    on reused backends", `abandonedTransactionProbe` in `src/hosted-probes.ts`) covers what the
@@ -277,8 +408,8 @@ against the pinned Supabase Root 2021 CA.
    backend ends with its connection, so the local test sees `inconclusive`; simulated
    poolers in `test/hosted-probes.test.ts` cover the clean and contaminated cases. The hub
    (Devin's Mac) runs `check:hosted` against the Supabase preview branch, with
-   `ZS_TARGET_REF` and both database URLs set to that branch; cloud sessions and CI never
-   run it.
+   `ZS_TARGET_REF` and the three database URLs set to that branch; cloud sessions and CI
+   never run it.
 
 Hosted settings that the scripts do not manage:
 - The Data API (PostgREST) exposes only `graphql_public`; tenant tables are not reachable
@@ -291,4 +422,4 @@ Hosted settings that the scripts do not manage:
   clients, which present a bearer token). Dashboard previews are protected; pass the
   `x-vercel-protection-bypass` header for automated checks.
 - The dashboard's sign-in attempt limiter is in memory, so on Vercel each serverless
-  instance counts on its own; the pilot access code must stay long and random.
+  instance counts on its own; Supabase Auth's own email rate limit still bounds the links sent.

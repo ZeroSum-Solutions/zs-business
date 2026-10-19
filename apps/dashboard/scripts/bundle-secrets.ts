@@ -2,8 +2,10 @@
  * Fails when the browser-facing build output holds a bearer token or a secret value.
  * Scans <distDir>/static and the prerendered pages and RSC payloads under
  * <distDir>/server/app, which are sent to browsers as they are. Looks for anything shaped
- * like a JWT, and for the exact values of ZS_API_TOKEN, JWT_SECRET and every
- * newline-separated value in ZS_BUNDLE_SECRETS. Reports file names only, never the value.
+ * like a JWT, and for the exact values of SUPABASE_ANON_KEY, ZS_API_TOKEN, JWT_SECRET and
+ * every newline-separated value in ZS_BUNDLE_SECRETS. The anon key is not a secret in
+ * Supabase's model, but this dashboard keeps it on the server, so finding it in the bundle
+ * means server code leaked into the browser. Reports file names only, never the value.
  *
  * Run: node scripts/bundle-secrets.ts [distDir]   (the build script runs it on .next)
  */
@@ -44,7 +46,7 @@ export function publicBuildFiles(distDir: string): string[] {
 }
 
 export function secretValues(env: Record<string, string | undefined> = process.env): string[] {
-  const values = [env.ZS_API_TOKEN, env.JWT_SECRET, env.DASHBOARD_ACCESS_CODE, env.DASHBOARD_SESSION_SECRET, ...(env.ZS_BUNDLE_SECRETS ?? "").split("\n")];
+  const values = [env.SUPABASE_ANON_KEY, env.ZS_API_TOKEN, env.JWT_SECRET, ...(env.ZS_BUNDLE_SECRETS ?? "").split("\n")];
   // Very short values would match by chance; real tokens and secrets are long.
   return values.map((value) => value?.trim() ?? "").filter((value) => value.length >= 16);
 }

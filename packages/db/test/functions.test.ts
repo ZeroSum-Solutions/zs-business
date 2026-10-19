@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
 import type { Transaction } from "../src/scoped.js";
+import { expectedOwner } from "./owners.js";
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -31,7 +32,7 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
       EXISTS(SELECT 1 FROM pg_roles l WHERE l.rolcanlogin AND NOT l.rolsuper AND pg_has_role(l.oid, r.oid, 'MEMBER')
         AND EXISTS(SELECT 1 FROM pg_roles s WHERE s.rolname = ANY($1::text[]) AND pg_has_role(l.oid, s.oid, 'MEMBER'))) AS runtime_can_assume
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
-    WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname !~ '^pg_(toast|temp)'
+    WHERE n.nspname NOT IN ('pg_catalog','information_schema','zs_local_auth') AND n.nspname !~ '^pg_(toast|temp)'
       AND NOT EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')
     ORDER BY 1`, [runtimeRoles])).rows;
 }
@@ -79,7 +80,7 @@ it("owns every function by a NOLOGIN role no runtime login can assume", async ()
   expect(rows.length).toBeGreaterThanOrEqual(5);
   for (const row of rows) {
     expect(row).toMatchObject({
-      owner: row.definer ? "zs_dispatcher" : "zs_function_owner",
+      owner: expectedOwner(row),
       owner_unsafe: false,
       runtime_can_assume: false,
     });
