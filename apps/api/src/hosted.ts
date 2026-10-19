@@ -59,3 +59,13 @@ export function hostedPool(target: HostedDatabaseTarget, max = 2): Pool {
 export function describeHosted(target: HostedDatabaseTarget): { projectRef: string; role: string; host: string; port: string } {
   return { projectRef: target.projectRef, role: target.role, host: target.host, port: target.port };
 }
+
+/**
+ * For receipts, logs and errors: hides connection strings (with or without credentials)
+ * and password=... settings, so an error that quotes its input never leaks a secret.
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/\b(postgres(?:ql)?|socket):\/\/[^\s"'`]*/gi, "$1://[redacted]")
+    .replace(/\b(password|PGPASSWORD)\s*=\s*('[^']*'|"[^"]*"|\S+)/gi, "$1=[redacted]");
+}

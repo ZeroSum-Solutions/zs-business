@@ -104,7 +104,7 @@ owner-run from the repo root. Credentials reach the scripts only through the env
 for example `zsvault run --env NAME=<vault id> -- <command>`, never argv or a file in the repo.
 Hosted URLs use the Supavisor pooler `aws-0-us-east-1.pooler.supabase.com`, user
 `<role>.<ref>`, database `postgres`, and no query string:
-port 5432 (session mode) for roles, migrations, seed and backups; port 6543 (transaction
+port 5432 (session mode) for roles, migrations, seed and backups (`db:hosted-backup` refuses 6543); port 6543 (transaction
 mode) for the API. The scripts check the host, role and ref (`src/hosted.ts`) and verify TLS
 against the pinned Supabase Root 2021 CA.
 
@@ -124,25 +124,39 @@ against the pinned Supabase Root 2021 CA.
    BYPASSRLS or REPLICATION. A rerun with new passwords rotates both; then update
    `DATABASE_URL` in Vercel and redeploy the API. Every psql and pg_dump call uses
    `sslmode=verify-full` with the pinned CA.
-2. **Back up, dry-run, apply.** Take a `pg_dump -Fc` of `public`, `zs_internal` and
-   `extensions` into `~/Backups/zs-business/`, then, with `ZS_TARGET_REF` and
+2. **Back up, dry-run, apply.** Back up with the wrapper, which binds the archive to the
+   project. With `ZS_TARGET_REF` and `SERVICE_DATABASE_URL` (postgres, port 5432):
+   ```sh
+   mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/<ref>-<date>.dump
+   ```
+   It runs `pg_dump -Fc` of `public`, `zs_internal` and `extensions` (`PG_DUMP` or `PATH`;
+   credentials only in pg_dump's own environment, `sslmode=verify-full` with the pinned CA),
+   reads the migration ledger before and after (it must not move), and writes
+   `<dump>.manifest.json`: project ref, archive name, size, sha256, start time and the full
+   ledger with checksums. Neither file may exist yet. Then, with `ZS_TARGET_REF` and
    `MIGRATOR_DATABASE_URL` (zs_migrator, port 5432):
    ```sh
    mise exec -- pnpm --filter @zs/api db:hosted-migrate --dry-run
    mise exec -- pnpm --filter @zs/api db:hosted-migrate --apply --backup <dump> --receipt <file.json>
    ```
-   `--apply` dry-runs first. It refuses a backup that is not a custom-format archive
-   pg_restore can read end to end, that is older than two hours, that lacks the definition
-   or data of any table now in `public` or `zs_internal`, or (for an upgrade) whose
-   migration ledger differs from the database's; `pg_restore` comes from `PG_RESTORE` or
-   `PATH`. It reserves the receipt file before anything commits (an existing file is
-   refused), and the apply rolls back unless it runs exactly the migrations and checksums the
-   dry run reported. The receipt holds migration names, checksums, the login's attributes and
-   the backup's size, sha256 and creation time, never credentials. If the receipt cannot be
-   written, the script prints it to stderr. A failed apply still leaves its receipt, with
-   `result: "failed"` and `committed` read back from the ledger (`true`, `false` or
-   `"unknown"`); use a new receipt name for the retry. `--migrations <dir>` points at another
-   directory, for rehearsing an upgrade from a partial set. Receipts go outside the repo.
+   `--apply` first reserves the receipt file (an existing file or a missing folder is refused
+   before any database work), then checks the login, dry-runs, and checks the backup. It
+   refuses a backup without its manifest, a manifest for another project than
+   `ZS_TARGET_REF` (a preview dump with the same tables and ledger fails here), a sha256 or
+   size that differs from the file, a manifest or archive older than two hours, a manifest
+   ledger that differs from the live one by name or checksum, an archive pg_restore cannot
+   read end to end, one that lacks the definition or data of any table now in `public` or
+   `zs_internal`, or (for an upgrade) one whose own ledger differs; `pg_restore` comes from
+   `PG_RESTORE` or `PATH`. The apply rolls back unless it runs exactly the migrations and
+   checksums the dry run reported. Every outcome lands in the receipt: `result`
+   (`committed` or `failed`), `failedPhase` (`login-check`, `dry-run`, `backup-check`,
+   `apply` or `ledger-check`), the error with connection strings and passwords redacted,
+   and `committed`: `false` for any failure before the apply, otherwise read back from the
+   ledger (`true`, `false` or `"unknown"`). It also holds migration names, checksums, the
+   login's attributes and the backup's size, sha256, creation time and manifest facts, never
+   credentials. If the receipt cannot be written, the script prints it to stderr. Use a new
+   receipt name for a retry. `--migrations <dir>` points at another directory, for
+   rehearsing an upgrade from a partial set. Receipts go outside the repo.
 3. **Seed (fake data only).** `ZS_TARGET_REF`, `SERVICE_DATABASE_URL` (postgres, port 5432)
    and `RUNTIME_DATABASE_URL` (zs_runtime): `pnpm --filter @zs/api seed:hosted`. It does not
    migrate and prints ids and counts only.
