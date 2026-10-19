@@ -64,7 +64,7 @@ describe("Supabase session check", () => {
     expect(await setup([user({ deleted_at: "2026-10-18T00:00:00Z" })]).check.isLive(input())).toBe(false);
   });
 
-  it("fails closed with AuthUnavailable (500, never 401) when Supabase Auth cannot answer", async () => {
+  it("fails closed with AuthUnavailable (503, never 401) when Supabase Auth cannot answer", async () => {
     const cases: Parameters<typeof fakeAuth>[] = [
       [new TypeError("fetch failed")],
       [new Response("bad gateway", { status: 502 })],
@@ -75,7 +75,7 @@ describe("Supabase session check", () => {
     for (const answers of cases) {
       const error = await setup(answers).check.isLive(input()).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(AuthUnavailable);
-      expect(mapError(error)).toMatchObject({ status: 500, body: { error: { code: "Internal" } } });
+      expect(mapError(error)).toMatchObject({ status: 503, body: { error: { code: "Unavailable" } } });
     }
   });
 

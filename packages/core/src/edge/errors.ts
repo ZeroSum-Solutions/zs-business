@@ -24,6 +24,19 @@ export class Unauthenticated extends Error {
   }
 }
 
+/**
+ * Supabase Auth could not answer: the session check, or the signing keys (JWKS) a token is
+ * verified against, timed out, failed or came back malformed. Maps to 503 Unavailable, never
+ * 401, so a caller retries and the dashboard keeps the browser's session cookies through an
+ * outage. Its message is fixed text written in core.
+ */
+export class AuthUnavailable extends Error {
+  constructor(message = "Supabase Auth did not answer the session check", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "AuthUnavailable";
+  }
+}
+
 export function apiErrorBody(code: ApiErrorCode, message: string, details: Record<string, JsonValue> = {}): ApiErrorBody {
   return { error: { code, message, details } };
 }
@@ -71,6 +84,8 @@ export function mapError(error: unknown): MappedError {
   // Nothing committed, or with "commit_unknown" perhaps committed: either way the caller
   // retries later, a write with its original idempotency key, which replays a commit that happened.
   if (error instanceof DatabaseUnavailable) return mapped(503, "Unavailable");
+  // Supabase Auth could not say whether the token or its session is good: retry later.
+  if (error instanceof AuthUnavailable) return mapped(503, "Unavailable");
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":

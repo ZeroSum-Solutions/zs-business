@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
+import { createRemoteJWKSet, customFetch, exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { apiErrorBodySchema } from "@zs/contracts";
-import { createLocalStubSessionCheck } from "@zs/core";
+import { AuthUnavailable, createLocalStubSessionCheck } from "@zs/core";
 import { createApp } from "../src/app.js";
-import { createHs256Verifier, createVerifierFromConfig } from "../src/auth.js";
+import { createHs256Verifier, createJwksVerifier, createVerifierFromConfig } from "../src/auth.js";
 import { parseServerEnv } from "../src/config.js";
 import { signDevToken } from "../src/dev-token.js";
 import { call, clock, createApiHarness, NOW, ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
@@ -161,7 +161,11 @@ describe("signing method chosen by config, end to end", () => {
     signingKey = pair.privateKey;
     otherKey = (await generateKeyPair("ES256")).privateKey;
     const jwk = { ...(await exportJWK(pair.publicKey)), kid: "key-1", alg: "ES256", use: "sig" };
-    jwks = createServer((_request, response) => {
+    jwks = createServer((request, response) => {
+      if (request.url?.startsWith("/broken/")) {
+        response.writeHead(500, { "Content-Type": "text/plain" }).end("upstream error");
+        return;
+      }
       response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ keys: [jwk] }));
     });
     await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
@@ -178,7 +182,7 @@ describe("signing method chosen by config, end to end", () => {
     .setIssuedAt(nowSeconds).setExpirationTime(nowSeconds + 600).sign(key);
 
   /** The app main.ts builds from this environment. */
-  const appFor = (env: Record<string, string>) => createApp({
+  const appFor = (env: Record<string, string>, onError?: (error: unknown) => void) => createApp({
     verifier: createVerifierFromConfig(parseServerEnv({
       DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", SESSION_CHECK: "local-stub", ...env,
     }).jwt, clock),
@@ -187,6 +191,7 @@ describe("signing method chosen by config, end to end", () => {
     db: h.database.db,
     generateId: randomUUID,
     config: { allowedOrigins: [] },
+    ...(onError ? { onError } : {}),
   });
 
   it("JWT_VERIFIER=jwks accepts an ES256 token from the JWKS and refuses another key's or an HS256 token", async () => {
@@ -196,6 +201,38 @@ describe("signing method chosen by config, end to end", () => {
     });
     expect401(await call(app, "GET", "/v1/crm/contacts", { token: await es256(otherKey) }));
     expect401(await call(app, "GET", "/v1/crm/contacts", { token: h.a.token }));
+  });
+
+  it("JWT_VERIFIER=jwks answers 503 with Retry-After, not 401, when the JWKS answers 500, and reports it", async () => {
+    const reported: unknown[] = [];
+    const brokenUrl = jwksUrl.replace("/auth/v1/", "/broken/auth/v1/");
+    const app = appFor({ JWT_VERIFIER: "jwks", JWT_JWKS_URL: brokenUrl }, (error) => reported.push(error));
+    const response = await call(app, "GET", "/v1/crm/contacts", { token: await es256(signingKey) });
+    expect(response.status).toBe(503);
+    expect(apiErrorBodySchema.parse(response.body).error.code).toBe("Unavailable");
+    expect(response.headers.get("Retry-After")).toBe("1");
+    expect(response.headers.get("WWW-Authenticate")).toBeNull();
+    expect(reported).toHaveLength(1);
+    expect(reported[0]).toBeInstanceOf(AuthUnavailable);
+  });
+
+  it("a JWKS fetch that times out answers 503, and a token from a reachable JWKS still gets 401 for a bad key", async () => {
+    const hanging: typeof fetch = (_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+    });
+    const verifier = createJwksVerifier(
+      createRemoteJWKSet(new URL(jwksUrl), { [customFetch]: hanging, timeoutDuration: 50 }),
+      { clock },
+    );
+    const app = createApp({
+      verifier, sessionCheck: createLocalStubSessionCheck(h.database.db, clock), clock, db: h.database.db,
+      generateId: randomUUID, config: { allowedOrigins: [] },
+    });
+    const timedOut = await call(app, "GET", "/v1/crm/contacts", { token: await es256(signingKey) });
+    expect(timedOut.status).toBe(503);
+    expect(timedOut.headers.get("Retry-After")).toBe("1");
+    const reachable = appFor({ JWT_VERIFIER: "jwks", JWT_JWKS_URL: jwksUrl });
+    expect401(await call(reachable, "GET", "/v1/crm/contacts", { token: await es256(otherKey) }));
   });
 
   it("JWT_VERIFIER=hs256 accepts the HS256 token and refuses an ES256 one", async () => {

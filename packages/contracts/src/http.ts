@@ -155,7 +155,7 @@ export type ResourceSummary = z.infer<typeof resourceSummarySchema>;
 /** One error body for every non-2xx response and every failed MCP tool call. */
 export const apiErrorCodeSchema = z.enum([
   "ValidationFailed", "Unauthorized", "Forbidden", "NotFound", "Conflict", "Internal",
-  /** 503: no database connection in time, or the request deadline passed. Retry later. */
+  /** 503: no database connection in time, the request deadline passed, or Supabase Auth could not answer. Retry later. */
   "Unavailable",
 ]);
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;

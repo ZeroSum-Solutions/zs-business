@@ -14,7 +14,7 @@ const BEARER_TOKEN = /^[A-Za-z0-9_\-.]+$/;
 /**
  * Verify the token against the injected clock (Unauthenticated, 401, when it is missing,
  * forged or expired), then require that its Supabase session is still live (Unauthenticated:
- * sign-out deletes the session; AuthUnavailable, 500, when Supabase Auth cannot tell) and that
+ * sign-out deletes the session; AuthUnavailable, 503, when Supabase Auth cannot tell) and that
  * the user is a member of the tenant the token claims (TenantDenied, 403). Returns the edge
  * session, which re-checks the membership and the role each read or action needs inside its
  * own transaction.

@@ -1,10 +1,10 @@
 // Access token verification shared by the HTTP API and the MCP server. Both verify a
 // Supabase Auth access token with one of these verifiers, then call authenticate() (live
 // session and membership) before any read or write. Clock and config are injected.
-import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
+import { createRemoteJWKSet, errors as joseErrors, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { z } from "zod";
 import { accessTokenClaimsSchema } from "@zs/contracts";
-import { Unauthenticated } from "./errors.js";
+import { AuthUnavailable, Unauthenticated } from "./errors.js";
 import type { Principal } from "./session.js";
 
 export { Unauthenticated };
@@ -17,7 +17,10 @@ export interface VerifiedToken extends Principal {
   readonly expiresAt: number;
 }
 
-/** Verifies a bearer token and returns the principal, or throws Unauthenticated. */
+/**
+ * Verifies a bearer token and returns the principal, or throws Unauthenticated (a bad token)
+ * or AuthUnavailable (the signing keys could not be fetched, so nobody can tell).
+ */
 export interface TokenVerifier {
   verify(token: string): Promise<VerifiedToken>;
 }
@@ -38,6 +41,25 @@ export const DEFAULT_MAX_TOKEN_LIFETIME_SECONDS = 3600;
 export const DEFAULT_CLOCK_SKEW_SECONDS = 60;
 
 type Key = Uint8Array | JWTVerifyGetKey;
+
+/** Key lookups that fail because of the token itself: its kid names no key, or several, or its alg has none. */
+const TOKEN_KEY_ERRORS = [joseErrors.JWKSNoMatchingKey, joseErrors.JWKSMultipleMatchingKeys, joseErrors.JOSENotSupported];
+
+/**
+ * The JWKS resolver, with every failure that is not the token's own turned into
+ * AuthUnavailable: a fetch that timed out (JWKSTimeout) or failed, an answer other than 200,
+ * or a key set that is not valid JSON or not a valid JWKS.
+ */
+function providerFailuresUnavailable(getKey: JWTVerifyGetKey): JWTVerifyGetKey {
+  return async (header, token) => {
+    try {
+      return await getKey(header, token);
+    } catch (error) {
+      if (TOKEN_KEY_ERRORS.some((type) => error instanceof type)) throw error;
+      throw new AuthUnavailable("Supabase Auth's signing keys could not be fetched", { cause: error });
+    }
+  };
+}
 
 /**
  * Verify like a Supabase Auth access token: signature, exp/nbf against the injected clock,
@@ -67,9 +89,11 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
           ...(options.issuer === undefined ? {} : { issuer: options.issuer }),
         };
         payload = (typeof key === "function"
-          ? await jwtVerify(token, key, verifyOptions)
+          ? await jwtVerify(token, providerFailuresUnavailable(key), verifyOptions)
           : await jwtVerify(token, key, verifyOptions)).payload;
-      } catch {
+      } catch (error) {
+        // An outage is not a bad token: 503, so the caller keeps its session and retries.
+        if (error instanceof AuthUnavailable) throw error;
         throw new Unauthenticated();
       }
       if (payload.role !== "authenticated") throw new Unauthenticated("Access token role must be authenticated");

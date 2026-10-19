@@ -124,7 +124,7 @@ Then, on every request:
    refused after sign-out, not at its `exp`. With `SESSION_CHECK=supabase` the API calls
    Supabase Auth `GET /auth/v1/user` with the caller's own token and the anon key: 200 with
    the token's user (not banned, not deleted) is live; 401, 403 or 404 is ended. Any other
-   answer, a timeout or a network error fails closed with 500 `Internal`, never 401, so the
+   answer, a timeout or a network error fails closed with 503 `Unavailable`, never 401, so the
    dashboard keeps its cookies through an outage. Only live answers are cached, for
    `SESSION_CACHE_SECONDS` (default 5, at most 30, never past the token's `exp`), keyed by a
    hash of the token. Hosted Supabase keeps `auth.*` to itself, so no migration grants on it
@@ -146,6 +146,10 @@ The signing method is explicit config, never inferred from the token: `JWT_VERIF
 accepts only HS256 tokens signed with `JWT_SECRET`; `JWT_VERIFIER=jwks` accepts only ES256 or
 RS256 tokens signed by a key in `JWT_JWKS_URL` (fetched and cached by `jose`'s
 `createRemoteJWKSet`), so an HS256 token is refused there and an ES256 token under `hs256`.
+When the JWKS cannot be fetched (a timeout, a network error, a non-200 answer or a body that
+is not a JWKS) the API answers 503 `Unavailable` with `Retry-After`, not 401: the token was
+never judged, so the dashboard keeps its cookies. 401 stays for bad signatures, unknown keys
+and bad claims.
 `parseServerEnv` parses the `JWT_*` variables with `jwtEnvSchema` from `@zs/core` and `main.ts`
 builds the verifier with `createVerifierFromConfig(env.jwt, clock)`.
 

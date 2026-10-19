@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiErrorCode } from "@zs/contracts";
-import { apiErrorBody, authenticate, DatabaseUnavailable, mapError, type Session, type SessionCheck } from "@zs/core";
+import { apiErrorBody, AuthUnavailable, authenticate, DatabaseUnavailable, mapError, type Session, type SessionCheck } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { bookingRoutes } from "./routes/booking.js";
@@ -132,7 +132,8 @@ export function createApp(deps: AppDependencies) {
       return c.json(apiErrorBody(code, error.message || code), error.status, headers);
     }
     const mapped = mapError(error);
-    if (mapped.status === 500) deps.onError?.(error);
+    // An Auth outage answers 503 like a busy pool, but someone should hear about it.
+    if (mapped.status === 500 || error instanceof AuthUnavailable) deps.onError?.(error);
     if (mapped.status === 503) return c.json(mapped.body, 503, { "Retry-After": "1" });
     return c.json(mapped.body, mapped.status);
   });

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
+import { createLocalJWKSet, createRemoteJWKSet, customFetch, exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  AuthUnavailable,
   createJwksVerifier,
   createVerifierFromConfig,
   mapError,
@@ -154,6 +155,54 @@ describe("createJwksVerifier with a local JWKS", () => {
     await expect(verifier.verify(await sign(issuer))).resolves.toEqual({ ...principal, expiresAt: expect.any(Number) });
     await refused(verifier.verify(await sign(impostor)));
     await refused(verifier.verify(await sign(hs256)));
+  });
+});
+
+describe("createJwksVerifier when Supabase Auth's signing keys cannot be fetched", () => {
+  const JWKS_URL = new URL("https://abcd.supabase.co/auth/v1/.well-known/jwks.json");
+  /** A remote JWKS whose every fetch goes through `answer`. */
+  const remote = (answer: (signal: AbortSignal) => Promise<Response>, timeoutDuration = 5_000) => {
+    let fetches = 0;
+    const fetchJwks = (async (_url: string | URL | Request, init?: RequestInit) => {
+      fetches += 1;
+      return answer(init!.signal!);
+    }) as typeof fetch;
+    const verifier = createJwksVerifier(createRemoteJWKSet(JWKS_URL, { [customFetch]: fetchJwks, timeoutDuration }), { clock });
+    return { verifier, fetches: () => fetches };
+  };
+  const unavailable = async (pending: Promise<unknown>) => {
+    const error = await pending.then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AuthUnavailable);
+    // 503, not 401: the dashboard drops its session cookies on a 401.
+    expect(mapError(error)).toEqual({ status: 503, body: { error: { code: "Unavailable", message: "Service unavailable", details: {} } } });
+  };
+
+  it("a JWKS fetch that times out is AuthUnavailable (503), not Unauthenticated", async () => {
+    const hang = (signal: AbortSignal) => new Promise<Response>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason)));
+    const { verifier, fetches } = remote(hang, 20);
+    await unavailable(verifier.verify(await sign(issuer)));
+    expect(fetches()).toBe(1);
+  });
+
+  it("a 5xx, a network failure or a key set that is not JSON or not a JWKS is AuthUnavailable too", async () => {
+    const answers: (() => Promise<Response>)[] = [
+      async () => new Response("upstream error", { status: 500 }),
+      async () => new Response("unavailable", { status: 503 }),
+      async () => { throw new TypeError("fetch failed"); },
+      async () => new Response("<html>bad gateway</html>", { status: 200 }),
+      async () => Response.json({ not: "a key set" }),
+    ];
+    for (const answer of answers) await unavailable(remote(answer).verifier.verify(await sign(issuer)));
+  });
+
+  it("with the keys fetched, a bad token is still Unauthenticated (401)", async () => {
+    const { verifier } = remote(async () => Response.json({ keys: [publicJwk] }));
+    await expect(verifier.verify(await sign(issuer))).resolves.toEqual({ ...principal, expiresAt: expect.any(Number) });
+    // Another key under the listed kid, a kid the set does not list, HS256, and garbage.
+    await refused(verifier.verify(await sign(impostor)));
+    await refused(verifier.verify(await sign({ ...impostor, kid: "unknown-key" })));
+    await refused(verifier.verify(await sign(hs256)));
+    await refused(verifier.verify("not.a.jwt"));
   });
 });
 

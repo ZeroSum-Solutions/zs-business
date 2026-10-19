@@ -7,6 +7,9 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Transaction } from "@zs/db";
 import { formatEnvIssues, secureUrlProblem } from "./auth.js";
+import { AuthUnavailable } from "./errors.js";
+
+export { AuthUnavailable };
 
 export interface SessionCheckInput {
   /** The compact JWT, already verified. */
@@ -21,14 +24,6 @@ export interface SessionCheckInput {
 export interface SessionCheck {
   /** True while the session is live; false once it ended. Throws AuthUnavailable when it cannot tell. */
   isLive(input: SessionCheckInput): Promise<boolean>;
-}
-
-/** Supabase Auth could not answer. The edge fails closed with 500, never 401, so a browser keeps its cookies. */
-export class AuthUnavailable extends Error {
-  constructor() {
-    super("Supabase Auth did not answer the session check");
-    this.name = "AuthUnavailable";
-  }
 }
 
 export interface SupabaseSessionCheckOptions {
