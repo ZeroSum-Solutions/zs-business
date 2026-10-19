@@ -156,7 +156,9 @@ the disclosure (`version`, `text`). `GET /public/v1/pages/:key/slots` takes the 
 slots query (`resourceId`, `from`, `to`, optional `zone`) and returns only free start and
 end instants. No read returns bookings, contacts or intake items.
 
-**P-12. Owner review.** Authenticated owner routes, through the dispatcher:
+**P-12. Owner review.** Authenticated owner routes, through the dispatcher. Under the M2a
+role model they are owner-only: review needs the `intake` permission and the page list
+`publish`; staff get 403 `Forbidden`:
 - `GET /v1/intake/items?status&limit&offset|cursor`: intake items, newest first (keyset `nextCursor` as on every list), with submitted
   details, matched contact IDs, linked contact, consent rows and the booking.
 - `POST /v1/intake/items/:id/link` `{ contactId }`: `possible_match` → `linked`; the

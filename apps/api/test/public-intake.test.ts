@@ -16,6 +16,7 @@ import {
   PREVIOUS_KEY_SECRET,
   provisionPage,
   PUBLIC_BASE_URL,
+  signedInMember,
   type ApiHarness,
   type PageSetup,
   type TenantSetup,
@@ -504,6 +505,26 @@ describe("owner review (P-12)", () => {
     const cross = await call(h.app, "POST", `/v1/intake/items/${itemId}/link`, { token: h.a.token, key: randomUUID(), body: { contactId: foreign.id } });
     expect(cross.status).toBe(403);
     expect((await call(h.app, "GET", "/public/v1/pages/x/items")).status).toBe(404);
+  });
+
+  it("leaves intake review and booking page keys to owners: staff are refused and the item stays open", async () => {
+    const page = await freshPage(h.a);
+    const { itemId, contactId } = await possibleMatch(page, at(16));
+    const staff = await signedInMember(h.database, h.fixture, h.a.tenantId, "staff");
+    const refused = [
+      ["GET", "/v1/intake/items", undefined],
+      ["GET", "/v1/booking/pages", undefined],
+      ["POST", `/v1/intake/items/${itemId}/link`, { contactId }],
+      ["POST", `/v1/intake/items/${itemId}/reject`, {}],
+    ] as const;
+    for (const [method, path, body] of refused) {
+      const response = await call(h.app, method, path, { token: staff.token, ...(body === undefined ? {} : { key: randomUUID(), body }) });
+      expect(response, `${method} ${path}`).toMatchObject({ status: 403, body: { error: { code: "Forbidden" } } });
+    }
+    // Staff still work the calendar, website bookings included.
+    expect((await call(h.app, "GET", `/v1/booking/bookings?resourceId=${page.resourceId}`, { token: staff.token })).status).toBe(200);
+    const items = intakeItemPageSchema.parse((await call(h.app, "GET", "/v1/intake/items?status=possible_match&limit=100", { token: h.a.token })).body);
+    expect(items.items.find((item) => item.id === itemId)).toMatchObject({ status: "possible_match" });
   });
 
   it("pages intake items by cursor, newest first, without repeats or gaps", async () => {
