@@ -40,6 +40,38 @@ Demo tenant: "Halden & Rowe Fine Jewelry" (invented), with a showroom calendar a
 repair-intake calendar (America/New_York), 12 contacts, a pipeline (Inquiry, Consultation,
 Design, Deposit, Delivered), 8 deals and 6 bookings.
 
+## Provision the first owner
+
+The API refuses every request from a user without a `tenant_members` row, and only owners
+invite. A tenant that existed before `20261019090000_members_and_sessions.sql` (the hosted
+pilot tenant) therefore has nobody who can act or invite. The database holds no
+tenant-to-email data, so the migration cannot backfill an owner; the owner of the
+deployment names the person with this owner-run step (`src/provision-owner.ts`):
+
+```sh
+# Report what would change, then roll back.
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api \
+  db:provision-owner --tenant <tenant uuid> --email owner@example.com --dry-run
+# Apply. --receipt must not exist yet: it is reserved before any database work and always
+# records the outcome (result, failed phase, redacted error, committed true/false/"unknown").
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api \
+  db:provision-owner --tenant <tenant uuid> --email owner@example.com --apply --receipt owner-receipt.json
+```
+
+One service_role transaction under the tenant's exclusive membership lock. The email is
+trimmed and lowercased (the members schema). Without a member for that email it adds an
+owner, bound to the Supabase user with that email when one exists, else pending: create the
+user (or let them sign up) and run it again to bind. With a member for that email it binds a
+pending row, and promotes staff to owner only when the tenant has no active (bound) owner;
+otherwise it refuses, since owners change roles in the app. It refuses an unknown tenant, a
+row bound to a different user, and a user already bound to another member of the tenant. A
+second run reports `unchanged`. A dry run of a new owner shows a member id that the real run
+replaces. Output and receipts hold ids, names and role facts only.
+
+Locally the Supabase user is looked up in the auth stub's `auth.users`. The hosted entry point
+(Supabase Auth admin API, `SERVICE_DATABASE_URL`) arrives with the M2b hosting scripts, and
+the hosted seed must then create the demo tenant's owner member too.
+
 ## Environment
 
 | Variable | Meaning |
@@ -51,6 +83,10 @@ Design, Deposit, Delivered), 8 deals and 6 bookings.
 | `JWT_ISSUER` | Optional. When set, tokens must carry this `iss`. |
 | `JWT_MAX_TTL_SECONDS` | Longest accepted token lifetime (`exp` minus `iat`), default 3600. Local dev sets 604800 so the 7-day seed token works for seed and dashboard e2e; production keeps the default. |
 | `JWT_CLOCK_SKEW_SECONDS` | How far a token's `iat` may lie ahead of the API's clock, 0 to 300, default 60. |
+| `SESSION_CHECK` | Required: how a token's session is checked. `supabase` (every hosted deploy) asks Supabase Auth and needs `SUPABASE_URL` and `SUPABASE_ANON_KEY`. `local-stub` asks the loopback auth stub and is refused unless `DATABASE_URL` is on loopback. |
+| `SUPABASE_URL` | `supabase` only: `https://<project>.supabase.co`. Must be https; plain http only on loopback. |
+| `SUPABASE_ANON_KEY` | `supabase` only: the project's anon (publishable) key, sent as `apikey`. |
+| `SESSION_CACHE_SECONDS` | `supabase` only: how long a live answer is reused, 0 to 30, default 5. A sign-out is refused within this long. |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
@@ -68,28 +104,30 @@ full-lifetime token from an issuer whose clock runs slightly ahead is still acce
 `sub` is the actor, `app_metadata.tenant_id` is the tenant the token claims and `session_id`
 (required) is the Supabase Auth session.
 
-Then, on every request, in one transaction:
+Then, on every request:
 
-1. **Live session.** `auth_session_is_live(session_id, sub, now)` must find the row in
-   `auth.sessions` for that user, not past `not_after`, with the user neither banned nor
-   deleted. Otherwise 401 `Unauthorized`. Supabase deletes the row on sign-out, so a token
-   is refused at once after sign-out, not at its `exp`. The function is SECURITY DEFINER,
-   owned by the NOLOGIN role `zs_session_reader`, which alone may read three columns of
-   `auth.sessions` and `auth.users`; the runtime role cannot read `auth.*`.
-2. **Membership.** `tenant_members` must hold an active row for `sub` in the claimed tenant.
-   Otherwise 403 `Forbidden`, answered like another tenant's row. A removed member is
-   refused on the next request, including a replay of an earlier idempotency key: the
-   check runs before the replay lookup.
+1. **Live session.** The session check must say the token's Supabase session is still live.
+   Otherwise 401 `Unauthorized`. Supabase deletes the session on sign-out, so a token is
+   refused after sign-out, not at its `exp`. With `SESSION_CHECK=supabase` the API calls
+   Supabase Auth `GET /auth/v1/user` with the caller's own token and the anon key: 200 with
+   the token's user (not banned, not deleted) is live; 401, 403 or 404 is ended. Any other
+   answer, a timeout or a network error fails closed with 500 `Internal`, never 401, so the
+   dashboard keeps its cookies through an outage. Only live answers are cached, for
+   `SESSION_CACHE_SECONDS` (default 5, at most 30, never past the token's `exp`), keyed by a
+   hash of the token. Hosted Supabase keeps `auth.*` to itself, so no migration grants on it
+   and the runtime role never reads it. `SESSION_CHECK=local-stub` asks
+   `zs_local_auth.session_is_live` from the loopback auth stub (`@zs/db/local-auth`) that tests
+   and `seed:demo` install; its tables have RLS on and no policies, as on hosted Supabase.
+2. **Membership.** In one transaction, `tenant_members` must hold an active row for `sub` in
+   the claimed tenant. Otherwise 403 `Forbidden`, answered like another tenant's row. A
+   removed member is refused on the next request, including a replay of an earlier
+   idempotency key: the check runs before the replay lookup.
 3. **Role.** The member's role must allow the route. `owner` may do everything: members,
    billing, plan and publish. `staff` may use the calendar, customers and inbox drafts
    (`ROLE_PERMISSIONS` in `@zs/contracts`). Otherwise 403.
 
 Member writes hold an exclusive per-tenant advisory lock and every other request a shared
-one, so a role change or removal is never interleaved with a request it affects. Plain
-Postgres has no `auth` schema: tests and `seed:demo` install a loopback-only stub
-(`@zs/db/local-auth`); migrations only grant on it when it exists. On Supabase the role that
-runs migrations needs `GRANT ... WITH GRANT OPTION` on `auth.sessions` and `auth.users`, or
-the migration fails loudly.
+one, so a role change or removal is never interleaved with a request it affects.
 
 The signing method is explicit config, never inferred from the token: `JWT_VERIFIER=hs256`
 accepts only HS256 tokens signed with `JWT_SECRET`; `JWT_VERIFIER=jwks` accepts only ES256 or
@@ -99,8 +137,8 @@ RS256 tokens signed by a key in `JWT_JWKS_URL` (fetched and cached by `jose`'s
 builds the verifier with `createVerifierFromConfig(env.jwt, clock)`.
 
 The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above live in
-`@zs/core` (`edge/auth.ts`, and `authenticate(deps, verifier, token)` in
-`edge/authenticate.ts`), so the MCP server runs exactly the same checks on every tool call.
+`@zs/core` (`edge/auth.ts`, `edge/session-check.ts`, and
+`authenticate(deps, verifier, sessionCheck, token)` in `edge/authenticate.ts`), so the MCP server runs exactly the same checks on every tool call.
 `src/auth.ts` re-exports them.
 
 ## Routes (`/v1`, JSON)

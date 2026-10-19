@@ -35,7 +35,7 @@ export interface TestDatabaseOptions {
   nonSuperuserMigrator?: boolean;
   /**
    * Install the local auth.users / auth.sessions stub after migrating (default true), so
-   * `auth_session_is_live` can answer. False leaves plain Postgres with no auth schema.
+   * `zs_local_auth.session_is_live` can answer. False leaves plain Postgres with no auth schema.
    */
   authStub?: boolean;
 }
@@ -150,7 +150,7 @@ export async function createTestDatabase(
       );
       migratorCreated = true;
       // Dynamic SQL: PostgreSQL 15 cannot parse the 16-only INHERIT and SET grant options.
-      for (const role of ["zs_dispatcher", "zs_function_owner", "zs_session_reader"]) {
+      for (const role of ["zs_dispatcher", "zs_function_owner"]) {
         await admin.query(`DO $$ BEGIN
           IF current_setting('server_version_num')::int >= 160000
             AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}') THEN

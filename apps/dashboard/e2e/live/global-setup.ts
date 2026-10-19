@@ -253,6 +253,12 @@ export default async function globalSetup() {
         JWT_ISSUER: ISSUER,
         JWT_MAX_TTL_SECONDS: String(MAX_TTL_SECONDS),
         JWT_CLOCK_SKEW_SECONDS: String(CLOCK_SKEW_SECONDS),
+        // As hosted: the API asks Supabase Auth (here the fake) whether each token's session is
+        // live. No cache, so a sign-out is refused on the very next request.
+        SESSION_CHECK: "supabase",
+        SUPABASE_URL: auth.url,
+        SUPABASE_ANON_KEY: anonKey,
+        SESSION_CACHE_SECONDS: "0",
         PORT: String(LIVE.apiPort),
       }),
     });

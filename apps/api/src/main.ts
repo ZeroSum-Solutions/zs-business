@@ -5,6 +5,7 @@ import { serve } from "@hono/node-server";
 import { Pool } from "pg";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { createApp } from "./app.js";
+import { createSessionCheckFromConfig } from "@zs/core";
 import { createVerifierFromConfig } from "./auth.js";
 import { parseServerEnv } from "./config.js";
 
@@ -16,10 +17,12 @@ await assertRuntimeLogin(pool).catch(async (error: unknown) => {
   await pool.end();
   throw error;
 });
+const db = createScopedDatabase(pool);
 const app = createApp({
   verifier: createVerifierFromConfig(env.jwt, clock),
+  sessionCheck: createSessionCheckFromConfig(env.sessionCheck, { db, clock }),
   clock,
-  db: createScopedDatabase(pool),
+  db,
   generateId: randomUUID,
   config: { allowedOrigins: env.allowedOrigins },
   onError: (error) => console.error("Unhandled API error", error),

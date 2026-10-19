@@ -89,7 +89,7 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(6);
+    expect(upgraded.functions).toHaveLength(5);
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });
@@ -128,7 +128,6 @@ it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requir
   expect(first).toEqual({
     zs_dispatcher: "CREATE ROLE zs_dispatcher NOLOGIN;",
     zs_function_owner: "CREATE ROLE zs_function_owner NOLOGIN;",
-    zs_session_reader: "CREATE ROLE zs_session_reader NOLOGIN;",
   });
 });
 

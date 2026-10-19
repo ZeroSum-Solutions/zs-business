@@ -32,13 +32,12 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
       EXISTS(SELECT 1 FROM pg_roles l WHERE l.rolcanlogin AND NOT l.rolsuper AND pg_has_role(l.oid, r.oid, 'MEMBER')
         AND EXISTS(SELECT 1 FROM pg_roles s WHERE s.rolname = ANY($1::text[]) AND pg_has_role(l.oid, s.oid, 'MEMBER'))) AS runtime_can_assume
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
-    WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname !~ '^pg_(toast|temp)'
+    WHERE n.nspname NOT IN ('pg_catalog','information_schema','zs_local_auth') AND n.nspname !~ '^pg_(toast|temp)'
       AND NOT EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')
     ORDER BY 1`, [runtimeRoles])).rows;
 }
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
-  "auth_session_is_live(uuid,uuid,timestamp with time zone)": "pg_catalog, pg_temp",
   "booking_overrides_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
@@ -78,7 +77,7 @@ it("the search_path check catches a function without its pinned path", async () 
 
 it("owns every function by a NOLOGIN role no runtime login can assume", async () => {
   const rows = await fixture.service(ourFunctions);
-  expect(rows.length).toBeGreaterThanOrEqual(6);
+  expect(rows.length).toBeGreaterThanOrEqual(5);
   for (const row of rows) {
     expect(row).toMatchObject({
       owner: expectedOwner(row),

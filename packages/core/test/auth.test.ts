@@ -116,7 +116,7 @@ const refused = (promise: Promise<unknown>) => expect(promise).rejects.toBeInsta
 describe("createVerifierFromConfig", () => {
   it("hs256 accepts its HS256 token and refuses ES256 tokens", async () => {
     const verifier = createVerifierFromConfig(parseJwtEnv({ JWT_VERIFIER: "hs256", JWT_SECRET: SECRET }), clock);
-    await expect(verifier.verify(await sign(hs256))).resolves.toEqual(principal);
+    await expect(verifier.verify(await sign(hs256))).resolves.toEqual({ ...principal, expiresAt: expect.any(Number) });
     await refused(verifier.verify(await sign(issuer)));
     await refused(verifier.verify(await sign({ alg: "HS256", key: new TextEncoder().encode(`${SECRET}-other`) })));
   });
@@ -124,7 +124,7 @@ describe("createVerifierFromConfig", () => {
   it("jwks fetches the keys over HTTP, accepts the issuer's ES256 token and refuses others", async () => {
     const verifier = createVerifierFromConfig(parseJwtEnv({ JWT_VERIFIER: "jwks", JWT_JWKS_URL: jwksUrl }), clock);
     const before = jwksRequests;
-    await expect(verifier.verify(await sign(issuer))).resolves.toEqual(principal);
+    await expect(verifier.verify(await sign(issuer))).resolves.toEqual({ ...principal, expiresAt: expect.any(Number) });
     expect(jwksRequests).toBeGreaterThan(before);
     // Signed by another key under the same kid, by a key the JWKS does not list, or with HS256.
     await refused(verifier.verify(await sign(impostor)));
@@ -151,7 +151,7 @@ describe("createVerifierFromConfig", () => {
 describe("createJwksVerifier with a local JWKS", () => {
   it("accepts the listed key's ES256 token and refuses another key's or an HS256 token", async () => {
     const verifier = createJwksVerifier(createLocalJWKSet({ keys: [publicJwk] }), { clock });
-    await expect(verifier.verify(await sign(issuer))).resolves.toEqual(principal);
+    await expect(verifier.verify(await sign(issuer))).resolves.toEqual({ ...principal, expiresAt: expect.any(Number) });
     await refused(verifier.verify(await sign(impostor)));
     await refused(verifier.verify(await sign(hs256)));
   });

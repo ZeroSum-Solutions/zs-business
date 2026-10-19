@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { apiErrorBodySchema } from "@zs/contracts";
+import { createLocalStubSessionCheck } from "@zs/core";
 import { createApp } from "../src/app.js";
 import { createHs256Verifier, createVerifierFromConfig } from "../src/auth.js";
 import { parseServerEnv } from "../src/config.js";
@@ -131,7 +132,7 @@ describe("token claims", () => {
   it("accepts the 7-day dev token when local config raises the limit", async () => {
     const verifier = createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 7 * 24 * 3600 });
     await expect(verifier.verify(await signDevToken(SECRET, h.a, clock)))
-      .resolves.toEqual({ tenantId: h.a.tenantId, actorId: h.a.actorId, sessionId: h.a.sessionId });
+      .resolves.toEqual({ tenantId: h.a.tenantId, actorId: h.a.actorId, sessionId: h.a.sessionId, expiresAt: expect.any(Number) });
     expect(() => createHs256Verifier(SECRET, { clock, maxLifetimeSeconds: 0 })).toThrow(/positive/);
   });
 });
@@ -178,7 +179,10 @@ describe("signing method chosen by config, end to end", () => {
 
   /** The app main.ts builds from this environment. */
   const appFor = (env: Record<string, string>) => createApp({
-    verifier: createVerifierFromConfig(parseServerEnv({ DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", ...env }).jwt, clock),
+    verifier: createVerifierFromConfig(parseServerEnv({
+      DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", SESSION_CHECK: "local-stub", ...env,
+    }).jwt, clock),
+    sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
     clock,
     db: h.database.db,
     generateId: randomUUID,

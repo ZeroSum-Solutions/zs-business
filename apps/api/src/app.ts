@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiErrorCode } from "@zs/contracts";
-import { apiErrorBody, authenticate, mapError, type Session } from "@zs/core";
+import { apiErrorBody, authenticate, mapError, type Session, type SessionCheck } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { bookingRoutes } from "./routes/booking.js";
@@ -16,6 +16,8 @@ export interface AppConfig {
 }
 export interface AppDependencies {
   readonly verifier: TokenVerifier;
+  /** Whether a token's Supabase session is still live (Supabase Auth in production). */
+  readonly sessionCheck: SessionCheck;
   readonly clock: { now(): Date };
   /** Runtime-role scoped database built from the runtime pool. */
   readonly db: ScopedDatabase;
@@ -54,10 +56,10 @@ export function createApp(deps: AppDependencies) {
     const match = /^Bearer ([A-Za-z0-9_\-.]+)$/.exec(header);
     if (!match) throw new Unauthenticated();
     // Verify the token, then require a live Supabase session (sign-out deletes it) and a
-    // membership in the claimed tenant, in one transaction (@zs/core authenticate, shared with
-    // the MCP server). Each read and write then re-checks the membership and its role.
+    // membership in the claimed tenant (@zs/core authenticate, shared with the MCP server).
+    // Each read and write then re-checks the membership and its role.
     c.set("session", await authenticate(
-      { db: deps.db, clock: deps.clock, generateId: deps.generateId }, deps.verifier, match[1]!,
+      { db: deps.db, clock: deps.clock, generateId: deps.generateId }, deps.verifier, deps.sessionCheck, match[1]!,
     ));
     await next();
   });

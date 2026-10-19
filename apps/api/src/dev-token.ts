@@ -8,7 +8,7 @@ import type { VerifiedToken } from "./auth.js";
  */
 export function signDevToken(
   secret: string,
-  token: VerifiedToken,
+  token: Omit<VerifiedToken, "expiresAt">,
   clock: { now(): Date },
   ttlSeconds = 7 * 24 * 3600,
 ): Promise<string> {

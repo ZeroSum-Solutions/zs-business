@@ -13,6 +13,8 @@ export { Unauthenticated };
 export interface VerifiedToken extends Principal {
   /** The token's `session_id`; authenticate() checks it against live sessions on every call. */
   readonly sessionId: string;
+  /** The token's `exp`, in seconds since the epoch. */
+  readonly expiresAt: number;
 }
 
 /** Verifies a bearer token and returns the principal, or throws Unauthenticated. */
@@ -78,7 +80,9 @@ function createVerifier(key: Key, algorithms: string[], options: SupabaseTokenOp
       if (payload.exp! - payload.iat! > maxLifetime) throw new Unauthenticated("Access token lifetime is too long");
       const claims = accessTokenClaimsSchema.safeParse(payload);
       if (!claims.success) throw new Unauthenticated("Access token lacks a user, session or tenant claim");
-      return { actorId: claims.data.sub, tenantId: claims.data.app_metadata.tenant_id, sessionId: claims.data.session_id };
+      return {
+        actorId: claims.data.sub, tenantId: claims.data.app_metadata.tenant_id, sessionId: claims.data.session_id, expiresAt: payload.exp!,
+      };
     },
   };
 }
@@ -108,15 +112,16 @@ export const jwtSecretSchema = z.string()
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
-/** Why a JWKS URL is refused, or null: https, or plain http only on loopback for local tests. */
-function jwksUrlProblem(value: string): string | null {
+/** Why a URL setting is refused, or null: https, or plain http only on loopback for local tests. */
+export function secureUrlProblem(variable: string, value: string): string | null {
   const url = URL.parse(value);
-  if (!url) return "JWT_JWKS_URL must be a URL";
-  if (url.username || url.password) return "JWT_JWKS_URL must not carry credentials";
+  if (!url) return `${variable} must be a URL`;
+  if (url.username || url.password) return `${variable} must not carry credentials`;
   if (url.protocol === "https:") return null;
   if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) return null;
-  return "JWT_JWKS_URL must use https (plain http only on 127.0.0.1, [::1] or localhost)";
+  return `${variable} must use https (plain http only on 127.0.0.1, [::1] or localhost)`;
 }
+const jwksUrlProblem = (value: string) => secureUrlProblem("JWT_JWKS_URL", value);
 
 interface JwtCommonConfig {
   readonly issuer: string | undefined;

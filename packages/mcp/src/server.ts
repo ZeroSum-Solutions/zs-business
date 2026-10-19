@@ -18,7 +18,7 @@ import {
   upsertContactRequestSchema,
   uuidSchema,
 } from "@zs/contracts";
-import { authenticate, mapError, parseInput, type EdgeDependencies, type Session, type TokenVerifier } from "@zs/core";
+import { authenticate, mapError, parseInput, type EdgeDependencies, type Session, type SessionCheck, type TokenVerifier } from "@zs/core";
 
 /** The member's Supabase access token, or a function returning the current one (read per call). */
 export type AccessTokenSource = string | (() => string | Promise<string>);
@@ -26,6 +26,8 @@ export type AccessTokenSource = string | (() => string | Promise<string>);
 export interface McpDependencies extends EdgeDependencies {
   /** The same verifier the HTTP API uses, checking times against `clock`. */
   readonly verifier: TokenVerifier;
+  /** The same session check the HTTP API uses (Supabase Auth in production). */
+  readonly sessionCheck: SessionCheck;
   /** Whose token this server acts with; the tenant and actor come only from it. */
   readonly accessToken: AccessTokenSource;
   readonly name?: string;
@@ -63,7 +65,7 @@ export function createMcpServer(deps: McpDependencies): McpServer {
   const token = deps.accessToken;
   /** Authenticate on every call, so a signed-out, expired or removed member stops at once. */
   const authenticated = async (): Promise<Session> =>
-    authenticate(edge, deps.verifier, typeof token === "string" ? token : await token());
+    authenticate(edge, deps.verifier, deps.sessionCheck, typeof token === "string" ? token : await token());
   const server = new McpServer({ name: deps.name ?? "zs-business", version: deps.version ?? "0.0.0" });
   const calls = new Map<string, (args: unknown) => Promise<CallToolResult>>();
 

@@ -26,7 +26,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createHs256Verifier, type TokenVerifier } from "@zs/core";
+import { createHs256Verifier, createLocalStubSessionCheck, type TokenVerifier } from "@zs/core";
 import { createMcpServer, type AccessTokenSource } from "../src/server.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -82,7 +82,9 @@ async function serve(
   accessToken: AccessTokenSource,
   { at = clock, verifier = createHs256Verifier(SECRET, { clock: at }) }: { at?: { now(): Date }; verifier?: TokenVerifier } = {},
 ): Promise<Client> {
-  const server = createMcpServer({ db: database.db, clock: at, generateId: randomUUID, verifier, accessToken });
+  const server = createMcpServer({
+    db: database.db, clock: at, generateId: randomUUID, verifier, sessionCheck: createLocalStubSessionCheck(database.db, at), accessToken,
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const connected = new Client({ name: "test", version: "0.0.0" });
   await Promise.all([server.connect(serverTransport), connected.connect(clientTransport)]);

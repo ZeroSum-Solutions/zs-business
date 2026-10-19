@@ -12,6 +12,7 @@ export {
   jwtSecretSchema,
   parseJwtEnv,
   PLACEHOLDER_JWT_SECRET,
+  secureUrlProblem,
   type JwtConfig,
   type JwtVerifierMethod,
   type SupabaseTokenOptions,
@@ -19,4 +20,19 @@ export {
   type VerifiedToken,
 } from "./auth.js";
 export { authenticate } from "./authenticate.js";
+export {
+  AuthUnavailable,
+  createLocalStubSessionCheck,
+  createSessionCheckFromConfig,
+  createSupabaseSessionCheck,
+  DEFAULT_SESSION_CACHE_SECONDS,
+  MAX_SESSION_CACHE_SECONDS,
+  parseSessionCheckEnv,
+  SESSION_CHECKS,
+  sessionCheckEnvSchema,
+  type SessionCheck,
+  type SessionCheckConfig,
+  type SessionCheckInput,
+  type SupabaseSessionCheckOptions,
+} from "./session-check.js";
 export { derivedId } from "./ids.js";

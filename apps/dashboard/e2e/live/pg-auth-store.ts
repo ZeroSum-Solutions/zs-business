@@ -1,7 +1,7 @@
 /**
  * The fake GoTrue's users and sessions, kept in the local auth stub (auth.users, auth.sessions)
- * of this run's throwaway database. The API's auth_session_is_live() reads the same rows, so a
- * sign-out through the fake is refused by the API at once, as with real Supabase.
+ * of this run's throwaway database. The API asks the fake's GET /auth/v1/user, which reads
+ * these rows, so a sign-out through the fake is refused by the API at once, as with real Supabase.
  */
 import pg from "pg";
 import type { AuthStore, FakeUser } from "./fake-gotrue";

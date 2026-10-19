@@ -23,7 +23,7 @@ answers `isError: true` with the shared error body, like any other failure.
 
 ```sh
 DATABASE_URL=postgres://zs_runtime@127.0.0.1:55432/zs_dev \
-JWT_VERIFIER=hs256 JWT_SECRET=<the API's secret> \
+JWT_VERIFIER=hs256 JWT_SECRET=<the API's secret> SESSION_CHECK=local-stub \
 ZS_ACCESS_TOKEN=<a member's access token> \
   mise exec -- pnpm --filter @zs/mcp start
 ```
@@ -33,6 +33,7 @@ ZS_ACCESS_TOKEN=<a member's access token> \
 | `DATABASE_URL` | The runtime LOGIN role (`zs_runtime`). |
 | `ZS_ACCESS_TOKEN` | The member's Supabase access token (locally, the dev JWT `seed:demo` prints). |
 | `JWT_VERIFIER`, `JWT_SECRET`, `JWT_JWKS_URL`, `JWT_ISSUER`, `JWT_MAX_TTL_SECONDS`, `JWT_CLOCK_SKEW_SECONDS` | Exactly as for `@zs/api` (see its README); parsed by the same `jwtEnvSchema` from `@zs/core`. |
+| `SESSION_CHECK`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SESSION_CACHE_SECONDS` | Exactly as for `@zs/api`: `supabase` on any hosted project, `local-stub` only with a loopback `DATABASE_URL`. |
 
 A Supabase access token lives one hour by default, so a long-running server needs a fresh
 token: restart it with a new `ZS_ACCESS_TOKEN`, or embed `createMcpServer` with a function

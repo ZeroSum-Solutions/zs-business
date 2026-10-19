@@ -8,6 +8,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
+import { createLocalStubSessionCheck } from "@zs/core";
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
@@ -94,6 +95,8 @@ export async function createApiHarness(): Promise<ApiHarness> {
   const fixture = await createTwoTenantFixture(database);
   const app = createApp({
     verifier: createHs256Verifier(SECRET, { clock }),
+    // The loopback auth stub stands in for Supabase Auth; core's tests cover the Supabase check.
+    sessionCheck: createLocalStubSessionCheck(database.db, clock),
     clock,
     db: database.db,
     generateId: randomUUID,

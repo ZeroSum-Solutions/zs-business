@@ -43,11 +43,3 @@ export async function requireMember(
   if (!access || (permission !== null && !roleCan(access.role, permission))) throw new TenantDenied();
   return access;
 }
-
-/** True when the Supabase session behind a token is live: not signed out, expired or banned. */
-export async function sessionIsLive(tx: Transaction, sessionId: string, userId: string, now: Date): Promise<boolean> {
-  const row = (await tx.query<{ live: boolean }>(
-    "SELECT public.auth_session_is_live($1, $2, $3) AS live", [sessionId, userId, now],
-  )).rows[0];
-  return row?.live === true;
-}

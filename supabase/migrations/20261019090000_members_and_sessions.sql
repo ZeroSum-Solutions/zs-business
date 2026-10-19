@@ -1,7 +1,5 @@
--- M2a auth model: who may act for a tenant, and whether the session behind a token is live.
--- The API maps a token's `sub` to a tenant_members row on every request and refuses a tenant
--- claim without one. It also asks auth_session_is_live() about the token's `session_id`, so a
--- signed-out access token is refused at once instead of at expiry.
+-- M2a auth model: who may act for a tenant. The API maps a token's `sub` to a tenant_members
+-- row on every request and refuses a tenant claim without one.
 
 DO $$ BEGIN
   CREATE TYPE public.member_role AS ENUM ('owner', 'staff');
@@ -49,72 +47,7 @@ GRANT INSERT (tenant_id, id, email, role, invited_by, created_at, updated_at) ON
 GRANT UPDATE (role, updated_at) ON public.tenant_members TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.tenant_members TO service_role;
 
--- Session liveness. auth.sessions lives in Supabase's auth schema, which runtime roles cannot
--- read. A SECURITY DEFINER function owned by a NOLOGIN role that may read three columns of
--- auth.sessions and three of auth.users answers one question: is this session of this user
--- live now? CREATE ROLE names NOLOGIN only (supautils; see 20261017155900).
-DO $$ BEGIN
-  BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zs_session_reader') THEN
-      CREATE ROLE zs_session_reader NOLOGIN;
-    END IF;
-  EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
-  END;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zs_session_reader' AND
-    (rolcanlogin OR rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication))
-    OR EXISTS (SELECT 1 FROM pg_auth_members WHERE member='zs_session_reader'::regrole) THEN
-    RAISE EXCEPTION 'zs_session_reader must be an unprivileged standalone NOLOGIN role';
-  END IF;
-  -- ALTER ... OWNER needs SET ROLE on the new owner (see 20261018090000).
-  IF current_setting('server_version_num')::int >= 160000 THEN
-    IF NOT (pg_has_role(current_user, 'zs_session_reader', 'SET') AND pg_has_role(current_user, 'zs_session_reader', 'USAGE')) THEN
-      EXECUTE format('GRANT zs_session_reader TO %I WITH INHERIT TRUE, SET TRUE', current_user);
-    END IF;
-  ELSIF NOT pg_has_role(current_user, 'zs_session_reader', 'MEMBER') THEN
-    EXECUTE format('GRANT zs_session_reader TO %I', current_user);
-  END IF;
-END $$;
-
--- On hosted Supabase the auth tables exist and the grants are made here; the check makes a
--- migrator without grant option fail loudly instead of leaving a function that always errors.
--- Plain Postgres has no auth schema: nothing is granted, and the function fails closed (the
--- relation does not exist) until a local-only stub is installed (@zs/db/testing installAuthStub).
-DO $$ BEGIN
-  IF to_regclass('auth.sessions') IS NOT NULL AND to_regclass('auth.users') IS NOT NULL THEN
-    GRANT USAGE ON SCHEMA auth TO zs_session_reader;
-    GRANT SELECT (id, user_id, not_after) ON auth.sessions TO zs_session_reader;
-    GRANT SELECT (id, banned_until, deleted_at) ON auth.users TO zs_session_reader;
-    IF NOT (has_column_privilege('zs_session_reader', 'auth.sessions', 'user_id', 'SELECT')
-      AND has_column_privilege('zs_session_reader', 'auth.users', 'banned_until', 'SELECT')) THEN
-      RAISE EXCEPTION 'The migrator could not grant zs_session_reader read access to auth.sessions and auth.users';
-    END IF;
-  END IF;
-END $$;
-
--- PL/pgSQL, so creating it needs no auth schema; every call resolves auth.* at run time.
--- p_now is the API's injected clock.
-CREATE FUNCTION public.auth_session_is_live(p_session uuid, p_user uuid, p_now timestamptz)
-RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-BEGIN
-  IF p_session IS NULL OR p_user IS NULL OR p_now IS NULL THEN
-    RETURN false;
-  END IF;
-  RETURN EXISTS (
-    SELECT 1 FROM auth.sessions s JOIN auth.users u ON u.id = s.user_id
-    WHERE s.id = p_session AND s.user_id = p_user
-      AND (s.not_after IS NULL OR s.not_after > p_now)
-      AND (u.banned_until IS NULL OR u.banned_until <= p_now)
-      AND u.deleted_at IS NULL
-  );
-END $$;
-REVOKE ALL ON FUNCTION public.auth_session_is_live(uuid, uuid, timestamptz) FROM PUBLIC, authenticated, service_role;
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
-    REVOKE ALL ON FUNCTION public.auth_session_is_live(uuid, uuid, timestamptz) FROM anon;
-  END IF;
-END $$;
--- Ownership transfer requires CREATE briefly; the role cannot create replacements afterward.
-GRANT CREATE ON SCHEMA public TO zs_session_reader;
-ALTER FUNCTION public.auth_session_is_live(uuid, uuid, timestamptz) OWNER TO zs_session_reader;
-REVOKE CREATE ON SCHEMA public FROM zs_session_reader;
-GRANT EXECUTE ON FUNCTION public.auth_session_is_live(uuid, uuid, timestamptz) TO authenticated;
+-- Session liveness is not checked here. auth.sessions and auth.users on hosted Supabase belong
+-- to supabase_auth_admin with RLS on and no policies, and the migrator cannot grant on them.
+-- The API asks Supabase Auth instead (GET /auth/v1/user with the caller's token), so this
+-- migration touches nothing in the auth schema.

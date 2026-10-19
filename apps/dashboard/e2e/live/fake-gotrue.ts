@@ -4,8 +4,9 @@
  * link per address is kept and served at GET /__test/last-link?email=. Access tokens are
  * HS256 JWTs shaped like Supabase's (sub, role, aud, iss, iat, exp, session_id, email,
  * app_metadata), so the real API verifies them. Sessions live in an AuthStore: in memory for
- * unit tests, or the local auth.sessions stub for e2e:live, which the API's
- * auth_session_is_live() reads, so sign-out here is seen by the API at once.
+ * unit tests, or the local auth.sessions stub for e2e:live. In e2e:live the API runs with
+ * SESSION_CHECK=supabase against this server's GET /auth/v1/user, so sign-out here is seen by
+ * the API at once, as with real Supabase.
  */
 import { createServer, type Server } from "node:http";
 import { randomBytes, randomUUID } from "node:crypto";
