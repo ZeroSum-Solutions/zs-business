@@ -502,10 +502,12 @@ test("pages a long customer list, searches all of it, and opens a customer it ha
     const url = new URL(route.request().url());
     const search = url.searchParams.get("search") ?? "";
     searches.push(search);
-    const offset = Number(url.searchParams.get("offset") ?? 0);
+    // This stand-in's cursor is a row index; the dashboard only passes it back.
+    const start = Number(url.searchParams.get("cursor") ?? 0);
     const limit = Number(url.searchParams.get("limit") ?? 50);
     const all = Array.from({ length: 2_500 }, (_, index) => fake(index + 1)).filter((item) => item.displayName.includes(search));
-    return route.fulfill({ json: { items: all.slice(offset, offset + limit), limit, offset, nextOffset: offset + limit < all.length ? offset + limit : null } });
+    const more = start + limit < all.length;
+    return route.fulfill({ json: { items: all.slice(start, start + limit), limit, offset: 0, nextOffset: null, nextCursor: more ? String(start + limit) : null } });
   });
   await page.goto("/customers");
   const rows = page.getByRole("main").getByRole("listitem");

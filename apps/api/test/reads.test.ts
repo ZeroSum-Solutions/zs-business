@@ -139,3 +139,101 @@ describe("GET /v1/crm/deals with a contact", () => {
     expect(dealPageSchema.parse((await get(`/v1/crm/deals?contactId=${one.contactId}`, h.b.token)).body).items).toEqual([]);
   });
 });
+
+describe("paging by cursor (W4)", () => {
+  const ids = (page: { items: { id: string }[] }) => page.items.map((item) => item.id);
+
+  it("continues after the last contact shown when a newer one arrives between pages, where an offset repeats one", async () => {
+    const first = contactPageSchema.parse((await get("/v1/crm/contacts?search=customer&limit=5")).body);
+    const before = contactPageSchema.parse((await get("/v1/crm/contacts?search=customer&limit=5&offset=5")).body);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    await h.fixture.service((tx) => tx.query(
+      `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,created_at,updated_at)
+       VALUES ($1, gen_random_uuid(), 'Customer late', 'late@example.com', '2030-01-01', '2030-01-01')`,
+      [h.a.tenantId],
+    ));
+    const byCursor = contactPageSchema.parse((await get(`/v1/crm/contacts?search=customer&limit=5&cursor=${first.nextCursor}`)).body);
+    expect(ids(byCursor)).toEqual(ids(before));
+    expect(byCursor.nextOffset).toBeNull();
+    // The old way: the newcomer pushes the fifth contact onto the second page again.
+    const byOffset = contactPageSchema.parse((await get("/v1/crm/contacts?search=customer&limit=5&offset=5")).body);
+    expect(ids(byOffset)[0]).toBe(ids(first)[4]);
+  });
+
+  it("walks every contact in name order once, past 2,000 rows", async () => {
+    const seen: string[] = [];
+    const names: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const query: string = `/v1/crm/contacts?search=customer&sort=name&limit=100${cursor ? `&cursor=${cursor}` : ""}`;
+      const page = contactPageSchema.parse((await get(query)).body);
+      seen.push(...ids(page));
+      names.push(...page.items.map((item) => (item.displayName ?? "").toLowerCase()));
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen).toHaveLength(HISTORY + 1);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(names).toEqual([...names].sort());
+  });
+
+  it("keeps the deals after the cursor in place when an earlier deal moves to the front", async () => {
+    const made: { contactId: string; dealId: string }[] = [];
+    for (const n of [1, 2, 3, 4]) made.push(await contactAndDeal(h, h.a, `cursor-deal-${n}@example.com`));
+    // Newest first: deal 1, 2, 3, 4.
+    await h.fixture.service((tx) => tx.query(
+      `UPDATE crm_deals SET updated_at = timestamptz '2028-01-01' - (array_position($2::uuid[], id) * interval '1 second')
+        WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+      [h.a.tenantId, made.map((item) => item.dealId)],
+    ));
+    const path = `/v1/crm/deals?pipelineId=${h.a.pipelineId}&limit=2`;
+    const first = dealPageSchema.parse((await get(path)).body);
+    expect(ids(first)).toEqual([made[0]!.dealId, made[1]!.dealId]);
+    // Deal 4 changes, so it now sorts first.
+    await h.fixture.service((tx) => tx.query(
+      "UPDATE crm_deals SET updated_at = timestamptz '2028-06-01' WHERE tenant_id = $1 AND id = $2", [h.a.tenantId, made[3]!.dealId],
+    ));
+    const next = dealPageSchema.parse((await get(`${path}&cursor=${first.nextCursor}`)).body);
+    expect(ids(next)[0]).toBe(made[2]!.dealId);
+    expect(ids(next)).not.toContain(made[1]!.dealId);
+    const byOffset = dealPageSchema.parse((await get(`${path}&offset=2`)).body);
+    expect(ids(byOffset)[0]).toBe(made[1]!.dealId);
+  });
+
+  it("pages a booking range by cursor, the running booking first, to the end", async () => {
+    const path = "/v1/booking/bookings?from=2026-01-01T00:30:00.000Z&to=2026-01-01T05:00:00.000Z&limit=2";
+    const starts: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const page = bookingPageSchema.parse((await get(`${path}${cursor ? `&cursor=${cursor}` : ""}`)).body);
+      starts.push(...page.items.map((item) => item.startsAt));
+      cursor = page.nextCursor;
+      pages += 1;
+    } while (cursor);
+    expect(pages).toBe(3);
+    expect(starts).toEqual([0, 1, 2, 3, 4].map((hour) => `2026-01-01T0${hour}:00:00.000Z`));
+    const open = bookingPageSchema.parse((await get("/v1/booking/bookings?to=2026-01-01T03:00:00.000Z&limit=2")).body);
+    const rest = bookingPageSchema.parse((await get(`/v1/booking/bookings?to=2026-01-01T03:00:00.000Z&limit=2&cursor=${open.nextCursor}`)).body);
+    expect(rest.items.map((item) => item.startsAt)).toEqual(["2026-01-01T02:00:00.000Z"]);
+    expect(rest.nextCursor).toBeNull();
+  });
+
+  it("refuses a cursor from another list, a forged one, and a cursor with an offset", async () => {
+    const contacts = contactPageSchema.parse((await get("/v1/crm/contacts?limit=1")).body);
+    const forged = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    for (const query of [
+      `/v1/crm/deals?cursor=${contacts.nextCursor}`,
+      `/v1/crm/contacts?sort=name&cursor=${contacts.nextCursor}`,
+      `/v1/crm/contacts?cursor=${contacts.nextCursor}&offset=1`,
+      "/v1/crm/contacts?cursor=not-base64-json",
+      `/v1/crm/contacts?cursor=${forged(["contacts.recent", "1; DROP TABLE x", randomUUID()])}`,
+      `/v1/crm/contacts?sort=name&cursor=${forged(["contacts.name", "a\u0000b", randomUUID()])}`,
+      `/v1/crm/contacts?cursor=${forged(["contacts.recent", "1", "not-a-uuid"])}`,
+      "/v1/crm/contacts?cursor=has+plus",
+    ]) {
+      const response = await get(query);
+      expect(response.status, query).toBe(400);
+      expect(apiErrorBodySchema.parse(response.body).error.code).toBe("ValidationFailed");
+    }
+  });
+});

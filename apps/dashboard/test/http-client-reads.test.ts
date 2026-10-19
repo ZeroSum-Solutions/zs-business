@@ -15,8 +15,10 @@ function fakeApi(data: { bookings?: Row[]; contacts?: Row[]; deals?: Row[] }) {
     new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   const page = (rows: Row[], url: URL) => {
     const limit = Number(url.searchParams.get("limit") ?? 50);
-    const offset = Number(url.searchParams.get("offset") ?? 0);
-    return json(200, { items: rows.slice(offset, offset + limit), limit, offset, nextOffset: offset + limit < rows.length ? offset + limit : null });
+    // The fake's cursor is a row index; the client only passes it back.
+    const start = Number(url.searchParams.get("cursor") ?? 0);
+    const more = start + limit < rows.length;
+    return json(200, { items: rows.slice(start, start + limit), limit, offset: 0, nextOffset: null, nextCursor: more ? String(start + limit) : null });
   };
   const api = createHttpClient({
     baseUrl: "https://api.example.test",
@@ -78,7 +80,7 @@ describe("reads past 2,000 rows", () => {
     const { api, requests } = fakeApi({ contacts });
     const found = await api.listContacts({ search: "zelda" });
     expect(found.items.map((item) => item.displayName)).toEqual(["Zelda Quist"]);
-    expect(found.nextOffset).toBeNull();
+    expect(found.nextCursor).toBeNull();
     expect(requests).toHaveLength(1);
     expect(requests[0]?.searchParams.get("search")).toBe("zelda");
     expect(requests[0]?.searchParams.get("sort")).toBe("name");
@@ -88,9 +90,11 @@ describe("reads past 2,000 rows", () => {
     const { api, requests } = fakeApi({ contacts: Array.from({ length: 2_500 }, (_, n) => contact(n, `Customer ${n}`)) });
     const first = await api.listContacts();
     expect(first.items).toHaveLength(50);
-    expect(first.nextOffset).toBe(50);
-    const second = await api.listContacts({ offset: first.nextOffset! });
+    expect(first.nextCursor).toBe("50");
+    const second = await api.listContacts({ cursor: first.nextCursor! });
     expect(second.items[0]?.displayName).toBe("Customer 50");
+    expect(requests[1]?.searchParams.get("cursor")).toBe("50");
+    expect(requests[1]?.searchParams.has("offset")).toBe(false);
     expect(requests).toHaveLength(2);
   });
 

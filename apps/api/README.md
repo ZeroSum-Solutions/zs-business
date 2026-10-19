@@ -75,15 +75,20 @@ uses `createHs256Verifier(secret, { clock })`; for asymmetric Supabase signing k
 | `GET /readyz` | `{ ok: true }`, or 503 when a bounded `SELECT 1` fails. No auth. |
 | `GET /v1/booking/resources` | `{ items: ResourceSummary[] }` |
 | `GET /v1/booking/slots?resourceId&from&to[&zone]` | free slots; `from`/`to` are UTC instants with milliseconds, at most 31 days |
-| `GET /v1/booking/bookings?[resourceId&][from&][to&]limit&offset` | page of bookings in start order; with `from`/`to`, only those overlapping `[from, to)` |
+| `GET /v1/booking/bookings?[resourceId&][from&][to&]limit&(cursor|offset)` | page of bookings in start order; with `from`/`to`, only those overlapping `[from, to)` |
 | `POST /v1/booking/bookings` `{ resourceId, startsAt }` | 201 booking; 409 if the slot is taken |
-| `GET /v1/crm/contacts?[search&][sort&][ids&]limit&offset` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
+| `GET /v1/crm/contacts?[search&][sort&][ids&]limit&(cursor|offset)` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
 | `GET /v1/crm/contacts/:id` | one contact; 404 if unknown or another tenant's |
 | `POST /v1/crm/contacts` `{ displayName?, email?, phone?, mode?, consent? }` | 201 created, 200 matched an existing contact |
 | `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages |
-| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&offset` | page of deals, most recently updated first |
+| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals, most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
 | `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
+
+A page is `{ items, limit, offset, nextOffset, nextCursor }`. Pass `nextCursor` back as
+`cursor` for the next page: it names the last row returned, so rows added or moved ahead of
+it while you page are neither repeated nor skipped, which `offset` cannot promise. A cursor
+belongs to one list and sort; it is not combined with `offset`.
 
 Every `POST` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
 the same key returns the stored result with the original status; reusing a key with a

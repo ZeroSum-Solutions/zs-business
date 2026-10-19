@@ -119,9 +119,9 @@ export function useContacts(search = "") {
   return useInfiniteQuery({
     enabled,
     queryKey: keys.contacts(search),
-    queryFn: ({ pageParam, signal }) => api.listContacts({ ...(search ? { search } : {}), offset: pageParam }, { signal }),
-    initialPageParam: 0,
-    getNextPageParam: (last: Page<ContactRecord>) => last.nextOffset ?? undefined,
+    queryFn: ({ pageParam, signal }) => api.listContacts({ ...(search ? { search } : {}), ...(pageParam ? { cursor: pageParam } : {}) }, { signal }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last: Page<ContactRecord>) => last.nextCursor ?? undefined,
     placeholderData: keepPreviousData,
   });
 }

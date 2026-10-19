@@ -72,4 +72,14 @@ describe("pipeline board", () => {
     expect(html).toContain('data-stage="Received"');
     expect(html).toContain("No deals here.");
   });
+
+  // Audit W4: an empty stage of a list that stopped early may not be empty at all.
+  it("says the list is incomplete beside a stage that shows no deals", () => {
+    const html = render([sales], (client) => {
+      client.setQueryData(keys.deals({ pipelineId: sales.id }), { items: [deal], incomplete: true, loaded: 2000 });
+      client.setQueryData(keys.contactNames([customer.id]), [customer]);
+    });
+    expect(html).toContain("No deals here.");
+    expect(html.replaceAll("<!-- -->", "")).toContain("List incomplete — showing first 2,000.");
+  });
 });

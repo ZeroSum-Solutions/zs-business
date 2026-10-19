@@ -291,9 +291,11 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       const rows = [...contacts.values()]
         .filter((item) => matchesSearch(item, query.search) && (!ids || ids.has(item.id)))
         .sort(byContactName);
-      const offset = query.offset ?? 0;
+      // Like the API's cursor: the next page starts after the last customer shown.
+      const start = query.cursor ? rows.findIndex((item) => item.id === query.cursor) + 1 : 0;
       const limit = query.limit ?? CONTACT_PAGE_SIZE;
-      return { items: clone(rows.slice(offset, offset + limit)), nextOffset: offset + limit < rows.length ? offset + limit : null };
+      const items = rows.slice(start, start + limit);
+      return { items: clone(items), nextCursor: start + limit < rows.length ? items.at(-1)!.id : null };
     },
 
     async getContact(id) {

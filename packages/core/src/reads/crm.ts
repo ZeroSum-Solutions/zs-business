@@ -19,6 +19,7 @@ import {
   type ContactRow,
   type DealRow,
 } from "../crm/rows.js";
+import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros, type CursorKind } from "./cursor.js";
 import { page } from "./page.js";
 
 /** `%`, `_` and the escape character itself match literally inside the search text. */
@@ -43,24 +44,41 @@ async function withConsent(tx: Transaction, tenantId: string, rows: readonly Con
   return rows.map((row) => contactRecord(row, byContact.get(row.id) ?? new Map()));
 }
 
+/** The same expression the index `crm_contacts_tenant_name` holds. */
+const CONTACT_NAME_KEY = "lower(coalesce(display_name, normalized_email, e164_phone))";
+
 /**
- * Contacts, filtered in SQL so a search or an ID list pages through matches only.
- * The name order sorts on the same expression the index `crm_contacts_tenant_name` holds.
+ * Rows after a cursor in `value DESC, id` order (`direction` "desc") or `value, id` order,
+ * spelled out rather than as a row comparison because the two columns can sort in different
+ * directions. `value` is the sort column's SQL; `v` and `id` are the cursor's parameters.
+ */
+const after = (value: string, direction: "asc" | "desc", v: string, id: string) =>
+  `(${value} ${direction === "desc" ? "<" : ">"} ${v} OR (${value} = ${v} AND id > ${id}::uuid))`;
+
+/**
+ * Contacts, filtered in SQL so a search or an ID list pages through matches only. A cursor
+ * continues right after the last contact of the page before.
  */
 export async function listContacts(tx: Transaction, tenantId: string, query: ListContactsQuery): Promise<ContactPage> {
   const search = query.search ? likePattern(query.search) : null;
   const ids = query.ids ? query.ids.toLowerCase().split(",") : null;
-  const order = query.sort === "name"
-    ? "lower(coalesce(display_name, normalized_email, e164_phone)), id"
-    : "created_at DESC, id";
-  const rows = (await tx.query<ContactRow>(
-    `SELECT ${contactColumns} FROM crm_contacts WHERE tenant_id=$1
+  const kind: CursorKind = query.sort === "name" ? "contacts.name" : "contacts.recent";
+  const cursor = decodeCursor(kind, query);
+  const byName = kind === "contacts.name";
+  const order = byName ? `${CONTACT_NAME_KEY}, id` : "created_at DESC, id";
+  const position = !cursor ? "" : byName
+    ? `AND ${after(CONTACT_NAME_KEY, "asc", "$6::text", "$7")}`
+    : `AND ${after("created_at", "desc", microsToTimestamp("$6"), "$7")}`;
+  const rows = (await tx.query<ContactRow & { sort_value: string }>(
+    `SELECT ${contactColumns}, ${byName ? CONTACT_NAME_KEY : timestampToMicros("created_at")} AS sort_value
+       FROM crm_contacts WHERE tenant_id=$1
         AND ($4::text IS NULL OR display_name ILIKE $4 OR normalized_email ILIKE $4 OR e164_phone ILIKE $4)
-        AND ($5::uuid[] IS NULL OR id = ANY($5))
+        AND ($5::uuid[] IS NULL OR id = ANY($5)) ${position}
       ORDER BY ${order} LIMIT $2 OFFSET $3`,
-    [tenantId, query.limit + 1, query.offset, search, ids],
+    [tenantId, query.limit + 1, query.offset, search, ids, ...(cursor ?? [])],
   )).rows;
-  return page(await withConsent(tx, tenantId, rows), query);
+  return page(await withConsent(tx, tenantId, rows), query,
+    (index) => encodeCursor(kind, [rows[index]!.sort_value, rows[index]!.id]));
 }
 
 /** One contact. Another tenant's contact is invisible under RLS, so it is NotFound too. */
@@ -73,14 +91,21 @@ export async function getContact(tx: Transaction, tenantId: string, id: string):
   return contact;
 }
 
+/**
+ * Deals, most recently updated first. A deal that moves while a caller pages jumps to the
+ * front; by cursor the deals behind it keep their place, by offset they shift by one.
+ */
 export async function listDeals(tx: Transaction, tenantId: string, query: ListDealsQuery): Promise<DealPage> {
-  const rows = (await tx.query<DealRow>(
-    `SELECT ${dealColumns} FROM crm_deals WHERE tenant_id=$1 AND ($2::uuid IS NULL OR pipeline_id=$2)
-        AND ($5::uuid IS NULL OR contact_id=$5)
+  const cursor = decodeCursor("deals.recent", query);
+  const position = cursor ? `AND ${after("updated_at", "desc", microsToTimestamp("$6"), "$7")}` : "";
+  const rows = (await tx.query<DealRow & { sort_value: string }>(
+    `SELECT ${dealColumns}, ${timestampToMicros("updated_at")} AS sort_value
+       FROM crm_deals WHERE tenant_id=$1 AND ($2::uuid IS NULL OR pipeline_id=$2)
+        AND ($5::uuid IS NULL OR contact_id=$5) ${position}
       ORDER BY updated_at DESC, id LIMIT $3 OFFSET $4`,
-    [tenantId, query.pipelineId ?? null, query.limit + 1, query.offset, query.contactId ?? null],
+    [tenantId, query.pipelineId ?? null, query.limit + 1, query.offset, query.contactId ?? null, ...(cursor ?? [])],
   )).rows;
-  return page(rows.map(dealRecord), query);
+  return page(rows.map(dealRecord), query, (index) => encodeCursor("deals.recent", [rows[index]!.sort_value, rows[index]!.id]));
 }
 
 export async function listPipelines(tx: Transaction, tenantId: string): Promise<PipelineSummary[]> {

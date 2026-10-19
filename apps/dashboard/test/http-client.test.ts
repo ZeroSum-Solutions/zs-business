@@ -235,14 +235,14 @@ describe("http client", () => {
       createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
     });
     const { api, calls } = client([
-      json(200, { items: [contact(2, "Ash"), contact(3, "Ashby")], limit: 50, offset: 0, nextOffset: 50 }),
+      json(200, { items: [contact(2, "Ash"), contact(3, "Ashby")], limit: 50, offset: 0, nextOffset: null, nextCursor: "next-page" }),
     ]);
     const found = await api.listContacts({ search: "  ash " });
-    expect(found).toEqual({ items: [contact(2, "Ash"), contact(3, "Ashby")], nextOffset: 50 });
-    expect(calls.map((call) => new URL(call.url).search)).toEqual(["?sort=name&search=ash&limit=50&offset=0"]);
+    expect(found).toEqual({ items: [contact(2, "Ash"), contact(3, "Ashby")], nextCursor: "next-page" });
+    expect(calls.map((call) => new URL(call.url).search)).toEqual(["?sort=name&search=ash&limit=50"]);
   });
 
-  it(`walks a filtered list by nextOffset, and marks it incomplete past ${MAX_PAGES} pages`, async () => {
+  it(`walks a filtered list by nextCursor, and marks it incomplete past ${MAX_PAGES} pages`, async () => {
     const page = (offset: number) => json(200, {
       items: [{
         id: `d0a1b2c3-7d3f-4c8a-9b1e-${String(offset + 1).padStart(12, "0")}`, tenantId: TENANT,
@@ -250,13 +250,14 @@ describe("http client", () => {
         stageId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e02", title: `Deal ${offset}`, revision: 1,
         createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
       }],
-      limit: 100, offset, nextOffset: offset + 100,
+      limit: 100, offset: 0, nextOffset: null, nextCursor: `after-${offset + 100}`,
     });
     const { api, calls } = client(Array.from({ length: MAX_PAGES + 5 }, (_, index) => page(index * 100)));
     const list = await api.listDeals({ pipelineId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01" });
     expect(calls).toHaveLength(MAX_PAGES);
     expect(list).toMatchObject({ incomplete: true, loaded: MAX_PAGES });
-    expect(new URL(calls[1]!.url).search).toBe("?pipelineId=2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01&limit=100&offset=100");
+    expect(new URL(calls[0]!.url).search).toBe("?pipelineId=2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01&limit=100");
+    expect(new URL(calls[1]!.url).search).toBe("?pipelineId=2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01&limit=100&cursor=after-100");
   });
 
   it("reads one customer by ID, and says not found without asking for a malformed ID", async () => {

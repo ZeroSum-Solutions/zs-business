@@ -32,10 +32,13 @@ export interface ListResult<T> {
   loaded: number;
 }
 
-/** One page of a list; `nextOffset` is where the next page starts, or null after the last. */
+/**
+ * One page of a list; `nextCursor` is where the next page starts, or null after the last.
+ * It names the last row shown, so rows added ahead of it never push one onto the next page.
+ */
 export interface Page<T> {
   items: T[];
-  nextOffset: number | null;
+  nextCursor: string | null;
 }
 
 /** Lets React Query cancel a read nobody waits for (a superseded search, a left page). */
@@ -78,7 +81,8 @@ export interface ContactListQuery {
   search?: string;
   /** Only these customers (at most 100), such as the ones on a page of deals. */
   ids?: readonly string[];
-  offset?: number;
+  /** The previous page's `nextCursor`. */
+  cursor?: string;
   limit?: number;
 }
 
@@ -119,7 +123,7 @@ export interface BookingApi {
 export interface CrmApi {
   /** Pipelines with stages sorted by position. */
   listPipelines(options?: ReadOptions): Promise<PipelineSummary[]>;
-  /** One page of customers; ask for the next with `offset: nextOffset`. */
+  /** One page of customers; ask for the next with `cursor: nextCursor`. */
   listContacts(query?: ContactListQuery, options?: ReadOptions): Promise<Page<ContactRecord>>;
   /** Throws `not_found` for an unknown customer, or one of another business. */
   getContact(id: string, options?: ReadOptions): Promise<ContactRecord>;

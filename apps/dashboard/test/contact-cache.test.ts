@@ -23,7 +23,7 @@ function Name() {
 
 function render(fill: (client: QueryClient) => void): string {
   const client = new QueryClient();
-  client.setQueryData(keys.contacts(""), { pages: [{ items: [customer], nextOffset: null }], pageParams: [0] });
+  client.setQueryData(keys.contacts(""), { pages: [{ items: [customer], nextCursor: null }], pageParams: [null] });
   fill(client);
   return renderToString(h(ApiProvider, { runtime: createApi({ mode: "demo" }), children: null },
     h(QueryClientProvider, { client }, h(SessionProvider, null, h(Name)))));

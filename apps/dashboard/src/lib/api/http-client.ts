@@ -111,22 +111,23 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
   }
 
   /**
-   * Walk `nextOffset` through a list the API already filtered, until it ends or MAX_PAGES
-   * pages are read; in the second case the result is marked incomplete.
+   * Walk `nextCursor` through a list the API already filtered, until it ends or MAX_PAGES
+   * pages are read; in the second case the result is marked incomplete. A cursor, unlike an
+   * offset, does not repeat or skip a row when another is added or moved between pages.
    */
-  async function listAll<Item, T extends z.ZodType<{ items: Item[]; nextOffset: number | null }>>(
+  async function listAll<Item, T extends z.ZodType<{ items: Item[]; nextCursor: string | null }>>(
     path: string, schema: T, query: Record<string, string | undefined>, signal: AbortSignal | undefined,
   ): Promise<ListResult<z.infer<T>["items"][number]>> {
     const items: z.infer<T>["items"] = [];
-    let offset: number | null = 0;
-    for (let page = 0; offset !== null && page < MAX_PAGES; page += 1) {
+    let cursor: string | null | undefined;
+    for (let page = 0; cursor !== null && page < MAX_PAGES; page += 1) {
       const result: z.infer<T> = await request({
-        method: "GET", path, query: { ...query, limit: PAGE_LIMIT, offset }, schema, signal,
+        method: "GET", path, query: { ...query, limit: PAGE_LIMIT, cursor: cursor ?? undefined }, schema, signal,
       });
       items.push(...result.items);
-      offset = result.nextOffset;
+      cursor = result.nextCursor;
     }
-    return { items, incomplete: offset !== null, loaded: items.length };
+    return { items, incomplete: cursor !== null, loaded: items.length };
   }
 
   const write = <T extends z.ZodType>(path: string, body: unknown, schema: T, options: WriteOptions) =>
@@ -151,7 +152,7 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
       const filters = { resourceId: query.resourceId, from: query.from, to: query.to };
       if (query.limit === undefined) return listAll("/v1/booking/bookings", bookingPageSchema, filters, options.signal);
       const page = await request({
-        method: "GET", path: "/v1/booking/bookings", query: { ...filters, limit: query.limit, offset: 0 },
+        method: "GET", path: "/v1/booking/bookings", query: { ...filters, limit: query.limit },
         schema: bookingPageSchema, signal: options.signal,
       });
       return { items: page.items, incomplete: false, loaded: page.items.length };
@@ -176,12 +177,12 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
           search: query.search?.trim(),
           ids: query.ids?.join(","),
           limit: query.limit ?? CONTACT_PAGE_SIZE,
-          offset: query.offset ?? 0,
+          cursor: query.cursor,
         },
         schema: contactPageSchema,
         signal: options.signal,
       });
-      return { items: page.items, nextOffset: page.nextOffset };
+      return { items: page.items, nextCursor: page.nextCursor };
     },
 
     async getContact(id, options = {}) {
