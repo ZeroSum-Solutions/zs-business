@@ -23,6 +23,8 @@ export interface AuthStore {
   startSession(userId: string): Promise<string>;
   sessionIsLive(sessionId: string): Promise<boolean>;
   endSession(sessionId: string): Promise<void>;
+  /** End every session of the user, except `keep` when given (GoTrue logout scopes global and others). */
+  endUserSessions(userId: string, keep?: string): Promise<void>;
 }
 
 export function memoryAuthStore(users: FakeUser[]): AuthStore & { sessions: Map<string, string> } {
@@ -39,6 +41,9 @@ export function memoryAuthStore(users: FakeUser[]): AuthStore & { sessions: Map<
     sessionIsLive: async (sessionId) => sessions.has(sessionId),
     async endSession(sessionId) {
       sessions.delete(sessionId);
+    },
+    async endUserSessions(userId, keep) {
+      for (const [id, owner] of sessions) if (owner === userId && id !== keep) sessions.delete(id);
     },
   };
 }
@@ -156,8 +161,13 @@ export function createFakeGoTrue(options: FakeGoTrueOptions): FakeGoTrue {
     if (url.pathname === "/auth/v1/logout" && request.method === "POST") {
       const claims = await claimsOf(request);
       if (!claims || !(await options.store.sessionIsLive(claims.session_id))) return gotrueError(404, "session_not_found", "Session not found");
-      await options.store.endSession(claims.session_id);
-      for (const [token, entry] of refreshTokens) if (entry.sessionId === claims.session_id) refreshTokens.delete(token);
+      // Like GoTrue: scope local ends this session, others every other one, global (the default) all.
+      const scope = url.searchParams.get("scope") ?? "global";
+      if (scope === "local") await options.store.endSession(claims.session_id);
+      else await options.store.endUserSessions(claims.sub, scope === "others" ? claims.session_id : undefined);
+      for (const [token, entry] of refreshTokens) {
+        if (!(await options.store.sessionIsLive(entry.sessionId))) refreshTokens.delete(token);
+      }
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/auth/v1/user" && request.method === "GET") {

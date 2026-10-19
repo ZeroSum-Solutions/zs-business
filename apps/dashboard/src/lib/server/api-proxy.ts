@@ -9,6 +9,7 @@
  */
 import type { ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
+import { readBoundedBody, type BodyTiming } from "./body";
 import { reportSetupProblem, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
 import { authFor, lookupSession, type AuthContext } from "./supabase";
@@ -23,6 +24,9 @@ const SINGLE = new Set(["me", "members"]);
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_HEADERS = ["accept", "content-type", "idempotency-key"];
 const MAX_BODY_BYTES = 64 * 1024;
+/** How long a request body may take to arrive. */
+const BODY_DEADLINE_MS = 15_000;
+const BODY_REFUSED = { too_large: 413, timeout: 408, failed: 400 } as const;
 
 function reply(status: number, code: ApiErrorCode): Response {
   return Response.json(demoErrorBody(code), { status, headers: { "Cache-Control": "no-store" } });
@@ -34,7 +38,7 @@ function routeAllowed(path: readonly string[]): boolean {
   return rest.length === 0 ? SINGLE.has(area) : AREAS.has(area);
 }
 
-export async function proxyApiRequest(request: Request, path: readonly string[], setup: LiveSetup | null): Promise<Response> {
+export async function proxyApiRequest(request: Request, path: readonly string[], setup: LiveSetup | null, timing: BodyTiming = {}): Promise<Response> {
   if (!setup) return reply(503, "Internal");
   if (!setup.ok) {
     reportSetupProblem(setup.problem);
@@ -55,12 +59,14 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
     if (value !== null) headers.set(name, value);
   }
 
-  let body: ArrayBuffer | undefined;
+  let body: Uint8Array<ArrayBuffer> | undefined;
   if (request.method === "POST") {
     // A cross-site form can only send simple content types; JSON needs a CORS preflight.
     if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return auth.finish(reply(400, "ValidationFailed"));
-    body = await request.arrayBuffer();
-    if (body.byteLength > MAX_BODY_BYTES) return auth.finish(reply(413, "ValidationFailed"));
+    // Never more than MAX_BODY_BYTES in memory, and never a slow upload held open for long.
+    const read = await readBoundedBody(request, { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
+    if (!read.ok) return auth.finish(reply(BODY_REFUSED[read.reason], "ValidationFailed"));
+    body = read.bytes;
   }
 
   const target = `${config.apiUrl}/${path.join("/")}${new URL(request.url).search}`;

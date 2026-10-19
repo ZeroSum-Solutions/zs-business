@@ -29,6 +29,10 @@ the signed-out state after a 401 and sign-out, and that no cached query outlives
 both viewports and checks 44px targets, `label[for]` targets, visible reasons on disabled
 buttons, focus rings no overflow clips, one visible h1 in an open conversation, and toasts
 that stay 10 seconds and can be dismissed from the keyboard.
+`e2e/body-limits.spec.ts` (desktop only) starts the same build a second time in live mode,
+with an in-process fake Supabase Auth, and sends raw chunked and `Content-Length` uploads
+past the sign-in (2 KiB) and proxy (64 KiB) limits: each gets 413 while still sending, and
+a client that hangs up mid-body leaves the server serving.
 
 `e2e:live` needs the local test cluster at `127.0.0.1:55432` (or `ZS_TEST_DATABASE_URL`,
 loopback only). Its global setup (`e2e/live/global-setup.ts`):
@@ -103,9 +107,13 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST and DELETE
   to `/v1/booking/*`, `/v1/crm/*`, `/v1/me` and `/v1/members*`, only `Accept`,
   `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POSTs, and
-  answers `no-store`. A request whose `Sec-Fetch-Site` is present and not `same-origin` is
-  refused, and so is an `Origin` that is not the request's `Host`. `X-Forwarded-Host`
-  counts instead of `Host` only with `DASHBOARD_TRUST_PROXY=1`.
+  answers `no-store`. A POST body may be 64 KiB and must arrive within 15 seconds; it is
+  read through `src/lib/server/body.ts`, which never holds more than the limit: a larger
+  declared `Content-Length` gets 413 unread, a chunked upload is cancelled as soon as it
+  passes the limit (413), a stalled one at the deadline (408), and a dropped one is 400.
+  A request whose `Sec-Fetch-Site` is present and not `same-origin` is refused, and so is
+  an `Origin` that is not the request's `Host`. `X-Forwarded-Host` counts instead of
+  `Host` only with `DASHBOARD_TRUST_PROXY=1`.
 - Sign-in (`src/lib/server/supabase.ts`, `src/lib/server/sign-in.ts`): Supabase Auth with
   an email link, through `@supabase/ssr` on the server only. Live mode needs `SUPABASE_URL`
   and `SUPABASE_ANON_KEY`; while either is missing, the proxy, `/api/session` and sign-in
@@ -116,10 +124,12 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
     the host the browser used (after the same-origin check), so the Supabase redirect allow
     list must hold only this dashboard's URL. Requests are rate limited in memory, 5 per
     address and 30 in total per 15 minutes by default (`DASHBOARD_SIGN_IN_PER_ADDRESS`,
-    `DASHBOARD_SIGN_IN_GLOBAL`), then 429 with `Retry-After`. Each attempt is reserved
-    before its body is read, so parallel requests cannot outrun the limit; one Supabase
-    could not take is given back. The address comes from the right-most `X-Forwarded-For`
-    entry only with `DASHBOARD_TRUST_PROXY=1`; otherwise every caller shares one key.
+    `DASHBOARD_SIGN_IN_GLOBAL`), then 429 with `Retry-After`. The body may be 2 KiB and must
+    arrive within 10 seconds, read the same bounded way (413 `too_large`, 408 `timeout`).
+    Each attempt is reserved before its body is read, so parallel requests cannot outrun
+    the limit, and a refused body still counts; one Supabase could not take is given back.
+    The address comes from the right-most `X-Forwarded-For` entry only with
+    `DASHBOARD_TRUST_PROXY=1`; otherwise every caller shares one key.
   - `GET /auth/confirm?token_hash=…&type=email&next=…` verifies the link with Supabase and
     sets the session cookies: `zs-auth` (split into `zs-auth.0`, `zs-auth.1`, … when long),
     httpOnly, `SameSite=Strict`, `Path=/`, `Secure` over https. It then redirects to

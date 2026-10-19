@@ -19,6 +19,7 @@
 import { isAuthRetryableFetchError } from "@supabase/supabase-js";
 import { z } from "zod";
 import { safeNextUrl } from "../safe-next";
+import { readBoundedBody, type BodyTiming } from "./body";
 import { isHttps, jsonAnswer, publicOrigin, reportSetupProblem, trustProxyFromEnv, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
 import { clientAddress, type AttemptLimiter } from "./rate-limit";
@@ -29,6 +30,8 @@ const SignInBody = z.object({
   next: z.string().max(512).optional(),
 });
 const MAX_BODY_BYTES = 2048;
+/** A 2 KiB body that takes longer than this is a stalled or deliberately slow client. */
+const BODY_DEADLINE_MS = 10_000;
 const LINK_TYPES = new Set(["email", "magiclink"]);
 
 /** A path on this site, from a `next` value that may point anywhere. */
@@ -37,7 +40,13 @@ function nextPath(next: string | null | undefined): string {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
-export async function requestSignInLink(request: Request, setup: LiveSetup | null, limiter: AttemptLimiter, now: Date = new Date()): Promise<Response> {
+export async function requestSignInLink(
+  request: Request,
+  setup: LiveSetup | null,
+  limiter: AttemptLimiter,
+  now: Date = new Date(),
+  timing: BodyTiming = {},
+): Promise<Response> {
   // Demo mode has nothing to sign in to.
   if (!setup) return jsonAnswer(404, { error: "not_found" });
   if (!setup.ok) {
@@ -55,11 +64,16 @@ export async function requestSignInLink(request: Request, setup: LiveSetup | nul
   const wait = limiter.reserve(address, reservedAt);
   if (wait > 0) return jsonAnswer(429, { error: "rate_limited" }, { "Retry-After": String(wait) });
 
-  const raw = await request.arrayBuffer();
-  if (raw.byteLength > MAX_BODY_BYTES) return jsonAnswer(413, { error: "too_large" });
+  // Read at most MAX_BODY_BYTES; a refused body stays charged, like a malformed one.
+  const raw = await readBoundedBody(request, { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
+  if (!raw.ok) {
+    if (raw.reason === "too_large") return jsonAnswer(413, { error: "too_large" });
+    if (raw.reason === "timeout") return jsonAnswer(408, { error: "timeout" });
+    return jsonAnswer(400, { error: "bad_request" });
+  }
   let parsed: z.infer<typeof SignInBody> | null = null;
   try {
-    const body = SignInBody.safeParse(JSON.parse(new TextDecoder().decode(raw)));
+    const body = SignInBody.safeParse(JSON.parse(new TextDecoder().decode(raw.bytes)));
     parsed = body.success ? body.data : null;
   } catch {
     parsed = null;

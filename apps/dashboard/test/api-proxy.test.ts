@@ -3,6 +3,7 @@ import { proxyApiRequest } from "../src/lib/server/api-proxy";
 import { liveSetupFromEnv } from "../src/lib/server/live-config";
 import { AUTH_COOKIE, PILOT_COOKIE } from "../src/lib/server/supabase";
 import { ANON_KEY, createLiveHarness, forwardedClaims, ORIGIN, setCookies, signInThroughLink, type LiveHarness } from "./helpers/live";
+import { chunkedBody, chunks, manualTimer, settle } from "./helpers/streams";
 
 const contacts = ["v1", "crm", "contacts"];
 
@@ -158,6 +159,60 @@ describe("api proxy", () => {
     const { harness, get } = await signedIn();
     harness.api = async () => { throw new TypeError("fetch failed"); };
     expect((await proxyApiRequest(get("v1/crm/deals"), ["v1", "crm", "deals"], harness.setup)).status).toBe(502);
+  });
+});
+
+describe("api proxy body limits", () => {
+  const streamed = (cookie: string, body: ReadableStream<Uint8Array>, headers: Record<string, string> = {}) =>
+    new Request(`${ORIGIN}/api/v1/crm/contacts`, { method: "POST", body, duplex: "half", headers: { Cookie: cookie, "Content-Type": "application/json", ...headers } } as RequestInit);
+
+  it("cancels an oversize chunked upload past 64 KiB and never calls the API", async () => {
+    const { harness, jar } = await signedIn();
+    // 64 chunks of 4 KiB, 256 KiB in all: the seventeenth takes it past 64 KiB.
+    const { stream, state } = chunkedBody(chunks(64, 4096));
+    const response = await proxyApiRequest(streamed(jar.header(), stream), contacts, harness.setup);
+    expect(response.status).toBe(413);
+    expect(await errorCode(response)).toBe("ValidationFailed");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(state.cancelled).toBe(true);
+    expect(state.served).toBe(17);
+    expect(harness.apiCalls).toHaveLength(0);
+  });
+
+  it("refuses a declared Content-Length over 64 KiB unread, and forwards a body of exactly 64 KiB", async () => {
+    const { harness, jar } = await signedIn();
+    const big = chunkedBody(chunks(64, 4096));
+    expect((await proxyApiRequest(streamed(jar.header(), big.stream, { "Content-Length": String(64 * 1024 + 1) }), contacts, harness.setup)).status).toBe(413);
+    expect(big.state.pulls).toBe(0);
+    const exact = chunkedBody(chunks(16, 4096));
+    expect((await proxyApiRequest(streamed(jar.header(), exact.stream), contacts, harness.setup)).status).toBe(200);
+    expect((harness.apiCalls[0]!.init.body as Uint8Array).byteLength).toBe(64 * 1024);
+  });
+
+  it("still writes refreshed session cookies on a refused body", async () => {
+    // A 60-second token is refreshed on the way in; the 413 must carry the new cookies.
+    const { harness, jar } = await signedIn({ ttlSeconds: 60 });
+    const response = await proxyApiRequest(streamed(jar.header(), chunkedBody(chunks(64, 4096)).stream), contacts, harness.setup);
+    expect(response.status).toBe(413);
+    expect([...setCookies(response).keys()].some((name) => name.startsWith(AUTH_COOKIE))).toBe(true);
+  });
+
+  it("answers 408 to a stalled body and 400 to one that breaks off", async () => {
+    const { harness, jar } = await signedIn();
+    const slow = chunkedBody(chunks(1, 10), "stall");
+    const { timer, start } = manualTimer();
+    const pending = proxyApiRequest(streamed(jar.header(), slow.stream), contacts, harness.setup, { timer: start });
+    // The session lookup comes first; wait until the body is being read.
+    while (slow.state.pulls === 0) await settle();
+    timer.fire();
+    const late = await pending;
+    expect(late.status).toBe(408);
+    expect(await errorCode(late)).toBe("ValidationFailed");
+    expect(timer.started).toEqual([15_000]);
+    expect(slow.state.cancelled).toBe(true);
+    const broken = await proxyApiRequest(streamed(jar.header(), chunkedBody(chunks(1, 10), "fail").stream), contacts, harness.setup);
+    expect(broken.status).toBe(400);
+    expect(harness.apiCalls).toHaveLength(0);
   });
 });
 

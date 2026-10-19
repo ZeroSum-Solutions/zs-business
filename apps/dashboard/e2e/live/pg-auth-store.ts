@@ -36,5 +36,8 @@ export function pgAuthStore(pool: pg.Pool): AuthStore {
     async endSession(sessionId) {
       await pool.query("DELETE FROM auth.sessions WHERE id::text = $1", [sessionId]);
     },
+    async endUserSessions(userId, keep) {
+      await pool.query("DELETE FROM auth.sessions WHERE user_id::text = $1 AND id::text IS DISTINCT FROM $2", [userId, keep ?? null]);
+    },
   };
 }

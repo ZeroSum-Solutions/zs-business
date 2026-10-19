@@ -4,6 +4,7 @@ import { AttemptLimiter, attemptLimitsFromEnv, clientAddress, DIRECT_ADDRESS } f
 import { confirmSignIn, requestSignInLink, signOut } from "../src/lib/server/sign-in";
 import { AUTH_COOKIE, PILOT_COOKIE } from "../src/lib/server/supabase";
 import { createLiveHarness, Jar, linkRequest, ORIGIN, sameOrigin, setCookies, signInThroughLink } from "./helpers/live";
+import { chunkedBody, chunks, manualTimer, settle } from "./helpers/streams";
 
 const NOW = new Date("2026-10-18T12:00:00.000Z");
 const LIMITS = { windowMs: 15 * 60 * 1000, perAddress: 5, global: 30 };
@@ -152,6 +153,19 @@ describe("sign-out", () => {
     expect(replay.status).toBe(401);
   });
 
+  it("ends only this device's session: the same person signed in elsewhere stays signed in", async () => {
+    const harness = createLiveHarness();
+    const phone = await signInThroughLink(harness);
+    const laptop = await signInThroughLink(harness);
+    expect(harness.store.sessions.size).toBe(2);
+    expect((await signOut(signOutRequest(phone.header()), harness.setup)).status).toBe(204);
+    expect(harness.store.sessions.size).toBe(1);
+    const contacts = (jar: Jar) =>
+      proxyApiRequest(new Request(`${ORIGIN}/api/v1/crm/contacts`, { headers: { Cookie: jar.header() } }), ["v1", "crm", "contacts"], harness.setup);
+    expect((await contacts(phone)).status).toBe(401);
+    expect((await contacts(laptop)).status).toBe(200);
+  });
+
   it("clears the cookies even when Supabase cannot be reached, and says so", async () => {
     const harness = createLiveHarness();
     const jar = await signInThroughLink(harness);
@@ -229,5 +243,65 @@ describe("sign-in rate limits", () => {
     expect(attemptLimitsFromEnv({})).toEqual(LIMITS);
     expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "50", DASHBOARD_SIGN_IN_GLOBAL: "200" })).toEqual({ ...LIMITS, perAddress: 50, global: 200 });
     expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "0", DASHBOARD_SIGN_IN_GLOBAL: "lots" })).toEqual(LIMITS);
+  });
+});
+
+describe("sign-in body limits", () => {
+  /** A sign-in request whose body is a stream: chunked, with no Content-Length unless given. */
+  const streamed = (body: ReadableStream<Uint8Array>, headers: Record<string, string> = {}) =>
+    new Request(`${ORIGIN}/api/sign-in`, { method: "POST", body, duplex: "half", headers: { "Content-Type": "application/json", ...sameOrigin(), ...headers } } as RequestInit);
+
+  it("cancels an oversize chunked upload past 2 KiB, and the attempt still counts", async () => {
+    const harness = createLiveHarness();
+    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 1 });
+    // 64 chunks of 512 bytes, 32 KiB in all: the fifth takes it past 2048.
+    const { stream, state } = chunkedBody(chunks(64, 512));
+    const response = await requestSignInLink(streamed(stream), harness.setup, limiter, NOW);
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "too_large" });
+    expect(state.cancelled).toBe(true);
+    expect(state.served).toBe(5);
+    expect(harness.gotrue.calls).toHaveLength(0);
+    expect((await ask("owner@example.com", {}, limiter, harness)).status).toBe(429);
+  });
+
+  it("refuses a declared Content-Length over 2 KiB without reading the body", async () => {
+    const harness = createLiveHarness();
+    const { stream, state } = chunkedBody(chunks(64, 512));
+    const response = await requestSignInLink(streamed(stream, { "Content-Length": "32768" }), harness.setup, new AttemptLimiter(LIMITS), NOW);
+    expect(response.status).toBe(413);
+    expect(state.pulls).toBe(0);
+  });
+
+  it("reserves the attempt before reading, so parallel oversize uploads are all charged", async () => {
+    const harness = createLiveHarness();
+    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 3 });
+    const stalled = Array.from({ length: 5 }, () => chunkedBody([], "stall"));
+    const timers = stalled.map(() => manualTimer());
+    const pending = stalled.map(({ stream }, index) => requestSignInLink(streamed(stream), harness.setup, limiter, NOW, { timer: timers[index]!.start }));
+    await settle();
+    // Three wait for their bodies; the other two were refused before anything was read.
+    expect(stalled.map(({ state }) => state.pulls > 0)).toEqual([true, true, true, false, false]);
+    for (const { timer } of timers) timer.fire();
+    expect((await Promise.all(pending)).map((response) => response.status)).toEqual([408, 408, 408, 429, 429]);
+    expect(stalled.slice(0, 3).every(({ state }) => state.cancelled)).toBe(true);
+  });
+
+  it("answers 408 to a body that misses its deadline and 400 to one that breaks off", async () => {
+    const harness = createLiveHarness();
+    const limiter = new AttemptLimiter({ ...LIMITS, perAddress: 100 });
+    const slow = chunkedBody(chunks(1, 10), "stall");
+    const { timer, start } = manualTimer();
+    const pending = requestSignInLink(streamed(slow.stream), harness.setup, limiter, NOW, { timer: start });
+    await settle();
+    timer.fire();
+    const late = await pending;
+    expect(late.status).toBe(408);
+    expect(await late.json()).toEqual({ error: "timeout" });
+    expect(timer.started).toEqual([10_000]);
+    const broken = await requestSignInLink(streamed(chunkedBody(chunks(1, 10), "fail").stream), harness.setup, limiter, NOW);
+    expect(broken.status).toBe(400);
+    expect(await broken.json()).toEqual({ error: "bad_request" });
+    expect(harness.gotrue.calls).toHaveLength(0);
   });
 });
