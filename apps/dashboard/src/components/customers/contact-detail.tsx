@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import type { ConsentEvidence } from "@/lib/api";
-import { useContact, useDeals, usePipeline } from "@/lib/queries";
+import { useContact, useDeals, usePipelines } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatPhone, initials, relativeTime } from "@/lib/utils";
 
@@ -27,8 +27,10 @@ export function ContactDetail({ id }: { id: string }) {
   const params = useSearchParams();
   const existing = params.get("existing") === "1";
   const contact = useContact(id);
-  const deals = useDeals(id);
-  const pipeline = usePipeline();
+  const deals = useDeals({ contactId: id });
+  const pipelines = usePipelines();
+  const stageName = (pipelineId: string, stageId: string) =>
+    pipelines.data?.find((pipeline) => pipeline.id === pipelineId)?.stages.find((stage) => stage.id === stageId)?.name ?? "Stage";
 
   return (
     <>
@@ -69,7 +71,7 @@ export function ContactDetail({ id }: { id: string }) {
                         <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
                         <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt)}</p>
                       </div>
-                      <Badge tone="accent">{pipeline.data?.stages.find((stage) => stage.id === deal.stageId)?.name ?? "Stage"}</Badge>
+                      <Badge tone="accent">{stageName(deal.pipelineId, deal.stageId)}</Badge>
                     </li>
                   ))}
                 </ul>

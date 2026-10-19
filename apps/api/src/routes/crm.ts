@@ -4,6 +4,7 @@ import { idempotencyKey, jsonBody } from "./request.js";
 
 export const crmRoutes = new Hono<AppEnv>()
   .get("/contacts", async (c) => c.json(await c.var.session.listContacts(c.req.query())))
+  .get("/contacts/:id", async (c) => c.json(await c.var.session.getContact(c.req.param("id"))))
   .post("/contacts", async (c) => {
     const output = await c.var.session.upsertContact(await jsonBody(c), idempotencyKey(c));
     // 201 when this action created the contact, 200 when it matched an existing one.

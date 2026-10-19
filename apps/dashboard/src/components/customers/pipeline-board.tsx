@@ -5,12 +5,12 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Select } from "@/components/ui/input";
-import { ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
+import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { isDealChanged, type DealRecord, type ListResult, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { useKeys, useContacts, useDeals, usePipeline } from "@/lib/queries";
+import { useContactNames, useDeals, useKeys, usePipelines } from "@/lib/queries";
 import { cn, relativeTime, revealOnFocus } from "@/lib/utils";
 
 type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
@@ -45,21 +45,57 @@ function DealCard({ deal, pipeline, contactName, onMove, moving, blockedBy }: {
   );
 }
 
+/**
+ * The deal board for one pipeline. A business may have no pipeline yet, a pipeline whose
+ * stages are not set up, or several pipelines; each gets its own state before any stage is read.
+ */
 export function PipelineBoard() {
+  const pipelines = usePipelines();
+  const [chosen, setChosen] = useState<string | null>(null);
+
+  if (pipelines.isPending) return <LoadingRows rows={5} label="Loading pipeline" />;
+  if (pipelines.isError) return <ErrorNote error={pipelines.error} retry={() => pipelines.refetch()} />;
+  const list = pipelines.data;
+  const pipeline = list.find((item) => item.id === chosen) ?? list[0];
+
+  return (
+    <section aria-labelledby="pipeline-title">
+      <h2 id="pipeline-title" className="sr-only">Pipeline</h2>
+      {list.length > 1 && pipeline ? (
+        <div className="mb-4 max-w-xs">
+          <label htmlFor="pipeline-choice" className="mb-1 block text-sm font-medium text-fg-2">Pipeline</label>
+          <Select id="pipeline-choice" value={pipeline.id} onChange={(event) => setChosen(event.target.value)}>
+            {list.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </Select>
+        </div>
+      ) : null}
+      {!pipeline ? (
+        <EmptyState title="No pipeline yet">Once a pipeline is set up, each deal shows here under its stage.</EmptyState>
+      ) : pipeline.stages.length === 0 ? (
+        <EmptyState title={`${pipeline.name} has no stages yet`}>Its deals show here once the pipeline has stages to move them through.</EmptyState>
+      ) : (
+        // A new key per pipeline: a stage filter or a pending move never carries over.
+        <StageBoard key={pipeline.id} pipeline={pipeline} />
+      )}
+    </section>
+  );
+}
+
+function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
   const toast = useToast();
-  const pipeline = usePipeline();
-  const deals = useDeals();
-  const contacts = useContacts();
+  const dealQuery = useMemo(() => ({ pipelineId: pipeline.id }), [pipeline.id]);
+  const deals = useDeals(dealQuery);
+  const contacts = useContactNames(useMemo(() => deals.data?.items.map((deal) => deal.contactId) ?? [], [deals.data]));
   const [stageFilter, setStageFilter] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   // A deal whose move hit a newer revision while the reload after it failed: its revision
   // on screen is known to be old, so it stays unmovable until a later read succeeds.
   const [reloadNeeded, setReloadNeeded] = useState<{ dealId: string; since: number } | null>(null);
 
-  const names = useMemo(() => new Map(contacts.data?.items.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
+  const names = useMemo(() => new Map(contacts.data?.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
 
   // The intent is (deal, expected revision, target stage): retrying it after a lost answer
   // replays the first attempt instead of failing on the revision that attempt moved on.
@@ -70,14 +106,14 @@ export function PipelineBoard() {
     onSettled: (_updated, error, request) => intents.settle(request, error),
     onSuccess: async (updated) => {
       setStale(false);
-      queryClient.setQueryData<ListResult<DealRecord>>(keys.deals(), (current) => current && {
+      queryClient.setQueryData<ListResult<DealRecord>>(keys.deals(dealQuery), (current) => current && {
         ...current, items: current.items.map((item) => (item.id === updated.id ? updated : item)),
       });
       // Settle on the server's list before saying "Moved", so the next move reads its revision.
       // A refetch that started before this move cannot roll it back: useDeals keeps the
       // higher revision of each deal.
       await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
-      const stage = pipeline.data?.stages.find((item) => item.id === updated.stageId)?.name ?? "the new stage";
+      const stage = pipeline.stages.find((item) => item.id === updated.stageId)?.name ?? "the new stage";
       toast(`Moved to ${stage}.`);
     },
     onError: async (error, request) => {
@@ -92,7 +128,7 @@ export function PipelineBoard() {
       if (!isDealChanged(error)) return;
       // Say "Reloaded" only once a read that started after the conflict has landed, so the
       // fresh revision is on screen and a retry uses it.
-      const state = queryClient.getQueryState(keys.deals());
+      const state = queryClient.getQueryState(keys.deals(dealQuery));
       if (reloaded && state?.status === "success" && state.dataUpdatedAt >= since) {
         setStale(true);
         toast(STALE_DEAL_MESSAGE, "info");
@@ -111,11 +147,11 @@ export function PipelineBoard() {
     toast(STALE_DEAL_MESSAGE, "info");
   }, [reloadNeeded, deals.isFetching, deals.status, deals.dataUpdatedAt, toast]);
 
-  if (pipeline.isPending || deals.isPending) return <LoadingRows rows={5} label="Loading pipeline" />;
-  if (pipeline.isError) return <ErrorNote error={pipeline.error} retry={() => pipeline.refetch()} />;
+  if (deals.isPending) return <LoadingRows rows={5} label="Loading pipeline" />;
   if (deals.isError && !deals.data) return <ErrorNote error={deals.error} retry={() => deals.refetch()} />;
 
-  const stages = pipeline.data.stages;
+  const stages = pipeline.stages;
+  // PipelineBoard renders this only for a pipeline with stages.
   const activeStage = stageFilter ?? stages[0]!.id;
   const moveError = move.isError && !isDealChanged(move.error) ? move.error : null;
   // A failed refresh keeps the last board on screen, with the note above it.
@@ -123,8 +159,7 @@ export function PipelineBoard() {
 
   return (
     // data-fetching lets tests wait out a background refetch before acting as someone else.
-    <section aria-labelledby="pipeline-title" data-fetching={deals.isFetching || undefined}>
-      <h2 id="pipeline-title" className="sr-only">Pipeline</h2>
+    <div data-fetching={deals.isFetching || undefined}>
       {stale ? (
         <div role="alert" className="mb-4 flex items-center gap-3 rounded-md bg-accent/8 p-3 text-sm text-fg">
           <ArrowsClockwise size={20} aria-hidden className="shrink-0 text-accent" />
@@ -180,7 +215,7 @@ export function PipelineBoard() {
                     <DealCard
                       key={deal.id}
                       deal={deal}
-                      pipeline={pipeline.data}
+                      pipeline={pipeline}
                       contactName={names.get(deal.contactId) ?? "Customer"}
                       moving={move.isPending && move.variables?.dealId === deal.id}
                       blockedBy={reloadNeeded?.dealId === deal.id ? "deal-reload-needed" : null}
@@ -193,6 +228,6 @@ export function PipelineBoard() {
           );
         })}
       </div>
-    </section>
+    </div>
   );
 }

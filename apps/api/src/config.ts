@@ -77,6 +77,11 @@ const envSchema = z.object({
   JWT_CLOCK_SKEW_SECONDS: z.coerce.number().int().min(0).max(300).default(60),
   ALLOWED_ORIGINS: z.string().default(""),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  // Longest wait for a pooled connection; node-postgres would otherwise wait forever.
+  DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+  // Longest time one /v1 request may take; keep it under the dashboard proxy's 15 s.
+  REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
@@ -86,6 +91,9 @@ export interface ServerEnv {
   readonly jwtClockSkewSeconds: number;
   readonly allowedOrigins: string[];
   readonly port: number;
+  readonly poolMax: number;
+  readonly connectTimeoutMs: number;
+  readonly requestTimeoutMs: number;
 }
 
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
@@ -101,5 +109,8 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     jwtClockSkewSeconds: parsed.data.JWT_CLOCK_SKEW_SECONDS,
     allowedOrigins: parsed.data.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
     port: parsed.data.PORT,
+    poolMax: parsed.data.DATABASE_POOL_MAX,
+    connectTimeoutMs: parsed.data.DATABASE_CONNECT_TIMEOUT_MS,
+    requestTimeoutMs: parsed.data.REQUEST_TIMEOUT_MS,
   };
 }

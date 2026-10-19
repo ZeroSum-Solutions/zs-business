@@ -4,8 +4,9 @@ import {
   type ApiErrorCode,
   type JsonValue,
 } from "@zs/contracts";
+import { DatabaseUnavailable } from "@zs/db";
 
-export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 500;
+export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 500 | 503;
 export interface MappedError {
   readonly status: ApiErrorStatus;
   readonly body: ApiErrorBody;
@@ -36,6 +37,7 @@ const MESSAGES: Readonly<Record<ApiErrorCode, string>> = {
   NotFound: "Not found",
   Conflict: "Request conflicts with the current state",
   Internal: "Internal error",
+  Unavailable: "Service unavailable",
 };
 
 /** Only documented detail keys leave the server; SQL codes and constraint names stay inside. */
@@ -53,6 +55,9 @@ const mapped = (status: ApiErrorStatus, code: ApiErrorCode, details: Record<stri
 
 /** Map any thrown value to one HTTP status and the shared error body. Unknown errors become 500. */
 export function mapError(error: unknown): MappedError {
+  // Nothing committed, or with "commit_unknown" perhaps committed: either way the caller
+  // retries later, a write with its original idempotency key, which replays a commit that happened.
+  if (error instanceof DatabaseUnavailable) return mapped(503, "Unavailable");
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":
