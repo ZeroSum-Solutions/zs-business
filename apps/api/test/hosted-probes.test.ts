@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
-import { createScopedDatabase, type ScopedDatabase } from "@zs/db";
+import { createScopedDatabase, DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { expectedTransport, poolerTransport, sessionContaminationProbe, transportGate } from "../src/hosted-probes.js";
+import {
+  abandonedTransactionProbe, concurrentTenantProbe, expectedTransport, poolerTransport, sessionContaminationProbe, transportGate,
+} from "../src/hosted-probes.js";
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -113,6 +116,120 @@ describe("hosted session-contamination probe", () => {
       ]);
     } finally {
       await Promise.all(pools.map((once) => once.end()));
+    }
+  });
+});
+
+describe("hosted concurrent-tenant load probe", () => {
+  const CONTACTS = 3;
+  let loadPool: Pool;
+  beforeAll(async () => {
+    await fixture.service(async (tx) => {
+      for (let n = 0; n < CONTACTS; n += 1)
+        await tx.query(
+          `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,e164_phone,created_at,updated_at)
+           VALUES ($1,$2,NULL,$3,NULL,now(),now())`, [fixture.a.tenantId, randomUUID(), `load-${n}@example.test`]);
+    });
+    // The hosted check's runtime pool size.
+    loadPool = new Pool({ connectionString: database.runtimePool.options.connectionString, max: 10 });
+  });
+  afterAll(async () => {
+    await loadPool?.end();
+  });
+  const targets = () => [{ tenantId: fixture.a.tenantId, contacts: CONTACTS }, { tenantId: fixture.b.tenantId, contacts: 0 }] as const;
+
+  it("runs all 200 transactions on a pool of 10 when the queue has room for them", async () => {
+    const failures: unknown[] = [];
+    const result = await concurrentTenantProbe(createScopedDatabase(loadPool, { maxWaiting: 256, onResetFailure: (error) => failures.push(error) }), targets());
+    expect(result.detail).toMatchObject({ total: 200, fulfilled: 200, rejected: {}, bad: [], failures: [] });
+    expect(result.ok).toBe(true);
+    expect(failures).toEqual([]);
+  });
+
+  it("reports refusals by code once every transaction settled, under the default queue bound", async () => {
+    const result = await concurrentTenantProbe(createScopedDatabase(loadPool), targets());
+    expect(result.ok).toBe(false);
+    expect(Object.keys(result.detail.rejected)).toEqual(["busy"]);
+    expect(result.detail.fulfilled + result.detail.rejected.busy!).toBe(200);
+    expect(result.detail.failures).toEqual([`${result.detail.rejected.busy} transactions rejected with busy`]);
+    // allSettled: nothing still holds or waits for a connection when the probe returns.
+    expect(loadPool.waitingCount).toBe(0);
+  });
+
+  it("fails when a tenant sees a contact count it should not", async () => {
+    const [a, b] = targets();
+    const result = await concurrentTenantProbe(createScopedDatabase(loadPool), [{ ...a, contacts: CONTACTS + 1 }, b], { transactions: 10 });
+    expect(result.ok).toBe(false);
+    expect(result.detail.failures).toEqual(["5 transactions saw another tenant's setting or rows"]);
+  });
+});
+
+/**
+ * Like a transaction pooler that, when its client goes away mid-statement, waits the
+ * statement out, rolls back and hands the backend to the next client without resetting it.
+ */
+function rollbackOnlyDatabase(target: Pool): ScopedDatabase {
+  return {
+    async tenant(tenantId, work, options = {}) {
+      const client = await target.connect();
+      await client.query("BEGIN; SET LOCAL ROLE authenticated");
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+      let pending: Promise<unknown> = Promise.resolve();
+      const query = (...args: unknown[]) => {
+        const running = (client.query as (...a: unknown[]) => Promise<unknown>)(...args);
+        pending = running.catch(() => undefined);
+        const { signal } = options;
+        if (!signal) return running;
+        return new Promise((resolve, reject) => {
+          const onAbort = () => reject(new DatabaseUnavailable("aborted"));
+          signal.addEventListener("abort", onAbort, { once: true });
+          running.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+        });
+      };
+      try {
+        const result = await work({ query } as unknown as Transaction);
+        await client.query("COMMIT");
+        client.release();
+        return result;
+      } catch (error) {
+        void pending.then(() => client.query("ROLLBACK")).catch(() => undefined).finally(() => client.release());
+        throw error;
+      }
+    },
+  };
+}
+
+describe("hosted abandoned-transaction probe", () => {
+  const quick = { rounds: 2, abandonedPerRound: 2, readsPerRound: 3, sleepMs: 400, abandonAfterMs: 50, settleMs: 3000 };
+
+  it("passes on createScopedDatabase over direct Postgres, which ends each abandoned backend", async () => {
+    let reported = 0;
+    const result = await abandonedTransactionProbe(createScopedDatabase(pool, { onResetFailure: () => { reported += 1; } }), fixture.b.tenantId, quick);
+    expect(result.detail).toMatchObject({
+      abandoned: 4, outcomes: { aborted: 4 }, reads: 6, applied: { advisory: 4, prepared: 4, custom: 4 },
+      contaminated: { custom: 0, advisory: 0, prepared: 0 }, lockedBy: [], failures: [],
+    });
+    expect(result.detail.backends.abandoned).toHaveLength(4);
+    // Direct Postgres never hands a closed connection's backend to another client.
+    expect(result.detail.reused).toBe(0);
+    expect(result.ok).toBe(true);
+    // Every abandonment after the work began is reported as an uncleaned backend.
+    expect(reported).toBe(4);
+  });
+
+  it("fails when a reused backend keeps an abandoned transaction's session state", async () => {
+    const reusing = new Pool({ connectionString: database.runtimePool.options.connectionString, max: 1 });
+    try {
+      const result = await abandonedTransactionProbe(rollbackOnlyDatabase(reusing), fixture.b.tenantId, { ...quick, settleMs: 200 });
+      expect(result.ok).toBe(false);
+      expect(result.detail.abandoned).toBe(4);
+      expect(result.detail.reused).toBe(6);
+      // ROLLBACK undoes the session setting, but neither the session advisory lock nor PREPARE.
+      expect(result.detail.contaminated).toEqual({ custom: 0, advisory: 6, prepared: 6 });
+      expect(result.detail.lockedBy).toHaveLength(4);
+      expect(result.detail.failures).toContain("6 reads saw leftover advisory state");
+    } finally {
+      await reusing.end();
     }
   });
 });

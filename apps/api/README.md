@@ -227,19 +227,40 @@ against the pinned Supabase Root 2021 CA.
    project and its deploys and exits 1 on any failure: unprivileged runtime login, migrator
    refused at runtime, every SET ROLE / SET SESSION AUTHORIZATION escape refused, forced RLS
    and owner on every tenant table, two-tenant denial in SQL, over HTTP and through the
-   dashboard proxy, 200 concurrent pooled transactions and 120 concurrent HTTP requests with
-   no crossover, the runtime URL on the deployment's transport (default Supavisor
+   dashboard proxy, 200 concurrent pooled transactions (on 10 connections, with `maxWaiting`
+   256 so none is refused `busy`; every one must settle and succeed, and a refusal fails with
+   its code) and 120 concurrent HTTP requests with no crossover, the runtime URL on the deployment's transport (default Supavisor
    transaction mode, port 6543; pass `-- --expect-transport=session` for 5432; any other
    port fails as unsupported), a session-contamination probe (in 20 rounds, committed and
    throwing transactions leave a custom setting, `application_name`, a session advisory
    lock, a temp table, a held cursor and a `LISTEN` behind; later transactions must see
    none of it, and must have run on a backend a committed and a throwing transaction used
-   first, by `pg_backend_pid()`, or the probe fails with "no handoff observed"), no failed
-   session cleanup in any scoped transaction (counted through `createScopedDatabase`'s
+   first, by `pg_backend_pid()`, or the probe fails with "no handoff observed"), an
+   abandoned-transaction probe (below), no failed session cleanup in any scoped transaction (counted through `createScopedDatabase`'s
    `onResetFailure`), bad tokens 401, and the Data API reading nothing (only an explicit denial
    or an empty result passes; an outage fails). Write probes always roll back, and the
    temporary Auth user's deletion is checked too. Its header lists the
    environment it needs; `VERCEL_PROTECTION_BYPASS` passes Vercel Authentication on preview.
+
+   The abandoned-transaction probe ("abandoned in-flight transactions leave no session state
+   on reused backends", `abandonedTransactionProbe` in `src/hosted-probes.ts`) covers what the
+   local tests cannot: what Supavisor's transaction mode does with a backend whose client
+   closed the connection mid-transaction. In 5 rounds, 4 tenant-B transactions each take a
+   session advisory lock, `PREPARE` a statement and set a session setting, start a 1 s
+   `pg_sleep` and are abandoned through their `AbortSignal` after 100 ms, so
+   `createScopedDatabase` closes the connection without cleaning the backend (each is
+   reported through `onResetFailure`, counted by this check and not by the session-reset
+   check). Once the sleeps end, 8 readers per round check their own backend for the lock
+   (`pg_locks`), the statement (`pg_prepared_statements`) and the setting
+   (`current_setting`), and no backend may still hold a probe lock 5 s later. The detail lists
+   the backend pids of abandoned transactions and readers, and `reused` counts readers that
+   ran on a backend abandoned before them, so a pass with `reused: 0` shows only that
+   Supavisor did not hand those backends on. On direct Postgres the backend ends with its
+   connection, so the unit test always sees `reused: 0`. The hub (Devin's Mac) runs `check:hosted`
+   against the Supabase preview branch, with `ZS_TARGET_REF` and both database URLs set to
+   that branch; cloud sessions and CI never run it. **If this check fails, switch
+   the runtime `DATABASE_URL` to session mode (port 5432) and run the checks with
+   `-- --expect-transport=session` until the cause is fixed.**
 
 Hosted settings that the scripts do not manage:
 - The Data API (PostgREST) exposes only `graphql_public`; tenant tables are not reachable

@@ -1,5 +1,6 @@
-import { randomBytes } from "node:crypto";
-import type { ScopedDatabase, Transaction } from "@zs/db";
+import { randomBytes, randomInt } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
 
 export type PoolerMode = "transaction" | "session";
 
@@ -158,6 +159,174 @@ export async function sessionContaminationProbe(db: ScopedDatabase, tenantId: st
       handoffs,
       contaminated,
       wrongTenant,
+      failures,
+    },
+  };
+}
+
+/** A short code for a rejected transaction: the DatabaseUnavailable reason, the SQLSTATE, or the message. */
+export function rejectionCode(error: unknown): string {
+  if (error instanceof DatabaseUnavailable) return error.reason;
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") return error.code;
+  return error instanceof Error ? error.message : String(error);
+}
+
+export interface TenantLoadTarget {
+  tenantId: string;
+  /** Contacts the tenant must see; any other count is a crossover. */
+  contacts: number;
+}
+
+/**
+ * Load probe: `transactions` concurrent scoped transactions, alternately for each target,
+ * each reading its tenant setting and contact counts. Every transaction settles before the
+ * probe returns, so none runs on into a later check. A rejection (for example "busy", when
+ * the database's maxWaiting is smaller than the queue the load builds) fails the probe and is
+ * counted by code.
+ */
+export async function concurrentTenantProbe(
+  db: ScopedDatabase,
+  targets: readonly [TenantLoadTarget, TenantLoadTarget],
+  options: { transactions?: number } = {},
+) {
+  const { transactions = 200 } = options;
+  const settled = await Promise.allSettled(Array.from({ length: transactions }, (_, index) => {
+    const target = targets[index % 2]!;
+    return db.tenant(target.tenantId, async (tx) => {
+      const row = (await tx.query<{ setting: string; contacts: number; foreign: number }>(
+        `SELECT current_setting('app.tenant_id') AS setting, (SELECT count(*)::int FROM crm_contacts) AS contacts,
+                (SELECT count(*)::int FROM crm_contacts WHERE tenant_id <> $1) AS foreign, pg_sleep(random()*0.05)`, [target.tenantId])).rows[0]!;
+      return { tenant: target.tenantId, expected: target.contacts, ...row };
+    });
+  }));
+  const rows = settled.flatMap((outcome) => (outcome.status === "fulfilled" ? [outcome.value] : []));
+  const rejected: Record<string, number> = {};
+  for (const outcome of settled) {
+    if (outcome.status === "rejected") {
+      const code = rejectionCode(outcome.reason);
+      rejected[code] = (rejected[code] ?? 0) + 1;
+    }
+  }
+  const bad = rows.filter((row) => row.setting !== row.tenant || row.foreign !== 0 || row.contacts !== row.expected);
+  const failures = [
+    ...Object.entries(rejected).map(([code, count]) => `${count} transactions rejected with ${code}`),
+    ...(bad.length > 0 ? [`${bad.length} transactions saw another tenant's setting or rows`] : []),
+  ];
+  return {
+    ok: failures.length === 0,
+    detail: { total: transactions, fulfilled: rows.length, rejected, bad: bad.slice(0, 5), failures },
+  };
+}
+
+const ABANDON_MARKER = "zs-abandon-probe-";
+/** First key of the probe's two-key advisory locks, so pg_locks can find them on any backend. */
+const ABANDON_LOCK_SPACE = 7_413_210;
+
+export interface AbandonProbeOptions {
+  rounds?: number;
+  /** Transactions per round abandoned while their statement runs. */
+  abandonedPerRound?: number;
+  readsPerRound?: number;
+  /** How long the abandoned statement runs in Postgres. */
+  sleepMs?: number;
+  /** When, after the statement starts, its caller gives up. */
+  abandonAfterMs?: number;
+  /** How long the backends of abandoned statements may keep the probe's locks once those statements ended. */
+  settleMs?: number;
+}
+
+interface AbandonRead {
+  pid: number;
+  custom: string | null;
+  advisory: number;
+  prepared: number;
+}
+
+/**
+ * Abandoned-transaction probe for a pooled runtime database. Each abandoned transaction dirties
+ * its backend's session state (a session advisory lock, a PREPAREd statement, a session
+ * setting), starts a pg_sleep and is abandoned through its AbortSignal while the sleep runs:
+ * createScopedDatabase then closes the connection without cleaning the backend. What happens
+ * to that backend is the pooler's business: Postgres ends it on a direct connection; behind a
+ * transaction pooler it may be destroyed, or cleaned and given to another client. Once the
+ * sleeps have ended, reader transactions on the same database check their backend: none may
+ * see any marker. No backend at all may still hold a probe lock after settleMs. The probe
+ * records every backend pid it saw, so `reused` tells whether a reader ran on a backend that
+ * an abandoned transaction had used before it.
+ */
+export async function abandonedTransactionProbe(db: ScopedDatabase, tenantId: string, options: AbandonProbeOptions = {}) {
+  const { rounds = 5, abandonedPerRound = 4, readsPerRound = 8, sleepMs = 1000, abandonAfterMs = 100, settleMs = 5000 } = options;
+  const abandonedPids = new Set<number>();
+  const keys: number[] = [];
+  const applied = { advisory: 0, prepared: 0, custom: 0 };
+  const outcomes: Record<string, number> = {};
+  const reads: AbandonRead[] = [];
+  let reused = 0;
+
+  const abandon = async () => {
+    const marker = ABANDON_MARKER + randomBytes(6).toString("hex");
+    const key = randomInt(1, 2 ** 31 - 1);
+    keys.push(key);
+    const controller = new AbortController();
+    let pid = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await db.tenant(tenantId, async (tx) => {
+      pid = (await tx.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      if (await attempt(tx, "SELECT pg_advisory_lock($1::int, $2::int)", [ABANDON_LOCK_SPACE, key])) applied.advisory += 1;
+      if (await attempt(tx, `PREPARE ${marker.replaceAll("-", "_")} AS SELECT 1`)) applied.prepared += 1;
+      if (await attempt(tx, "SELECT set_config('zs.abandon_probe', $1, false)", [marker])) applied.custom += 1;
+      const sleeping = tx.query("SELECT pg_sleep($1)", [sleepMs / 1000]);
+      timer = setTimeout(() => controller.abort(), abandonAfterMs);
+      await sleeping;
+    }, { signal: controller.signal }).then(() => "completed", rejectionCode).finally(() => clearTimeout(timer));
+    outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
+    if (pid) abandonedPids.add(pid);
+  };
+  const read = () => db.tenant(tenantId, async (tx) => (await tx.query<AbandonRead>(
+    `SELECT pg_backend_pid() AS pid, current_setting('zs.abandon_probe', true) AS custom,
+            (SELECT count(*)::int FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid()) AS advisory,
+            (SELECT count(*)::int FROM pg_prepared_statements WHERE name LIKE 'zs\\_abandon\\_probe\\_%') AS prepared,
+            pg_sleep(random() * 0.02)`)).rows[0]!);
+  // Every backend, not only the reader's, still holding a probe lock.
+  const heldLocks = () => db.tenant(tenantId, async (tx) => (await tx.query<{ pid: number }>(
+    `SELECT pid FROM pg_locks WHERE locktype='advisory' AND classid=$1::int::oid AND objsubid=2 AND objid::bigint = ANY($2::bigint[])`,
+    [ABANDON_LOCK_SPACE, keys])).rows.map((row) => row.pid));
+
+  for (let round = 0; round < rounds; round += 1) {
+    await Promise.all(Array.from({ length: abandonedPerRound }, abandon));
+    // Readers start once the abandoned statements have ended, so their backends are free for reuse.
+    await delay(Math.max(0, sleepMs - abandonAfterMs) + 100);
+    const batch = await Promise.all(Array.from({ length: readsPerRound }, read));
+    // A later round may abandon a backend these readers used; only earlier abandonments count.
+    reused += batch.filter((row) => abandonedPids.has(row.pid)).length;
+    reads.push(...batch);
+  }
+  let lockedBy = await heldLocks();
+  for (const giveUp = Date.now() + settleMs; lockedBy.length > 0 && Date.now() < giveUp; lockedBy = await heldLocks()) await delay(100);
+
+  const abandoned = outcomes.aborted ?? 0;
+  const contaminated = {
+    custom: reads.filter((row) => (row.custom ?? "").startsWith(ABANDON_MARKER)).length,
+    advisory: reads.filter((row) => row.advisory > 0).length,
+    prepared: reads.filter((row) => row.prepared > 0).length,
+  };
+  const failures = [
+    ...Object.entries(contaminated).filter(([, count]) => count > 0).map(([kind, count]) => `${count} reads saw leftover ${kind} state`),
+    ...(lockedBy.length > 0 ? [`${lockedBy.length} probe advisory locks still held ${settleMs} ms later, by backends ${[...new Set(lockedBy)].join(", ")}`] : []),
+    ...(abandoned === 0 ? ["no transaction was abandoned in flight"] : []),
+    ...Object.entries(outcomes).filter(([code]) => code !== "aborted").map(([code, count]) => `${count} transactions ended with ${code}, not aborted`),
+  ];
+  return {
+    ok: failures.length === 0,
+    detail: {
+      abandoned,
+      outcomes,
+      reads: reads.length,
+      applied,
+      backends: { abandoned: [...abandonedPids].sort((x, y) => x - y), read: [...new Set(reads.map((row) => row.pid))].sort((x, y) => x - y) },
+      reused,
+      contaminated,
+      lockedBy,
       failures,
     },
   };

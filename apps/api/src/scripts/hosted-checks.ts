@@ -15,7 +15,9 @@ import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { signDevToken } from "../dev-token.js";
-import { expectedTransport, poolerTransport, sessionContaminationProbe, transportGate } from "../hosted-probes.js";
+import {
+  abandonedTransactionProbe, concurrentTenantProbe, expectedTransport, poolerTransport, sessionContaminationProbe, transportGate,
+} from "../hosted-probes.js";
 import { assertHostedDatabaseUrl, hostedPool, redactSecrets } from "../hosted.js";
 
 const env = process.env;
@@ -152,25 +154,24 @@ try {
     return { ok: Object.values(outcome).every((value) => value.startsWith("refused")), detail: outcome };
   });
   await check("pooled runtime connections keep tenants apart under 200 concurrent transactions", async () => {
-    const scoped = createScopedDatabase(runtime, scopedOptions);
-    const jobs = Array.from({ length: 200 }, (_, index) => {
-      const tenant = index % 2 === 0 ? tenantA : tenantB;
-      return scoped.tenant(tenant, async (tx) => {
-        const row = (await tx.query<{ setting: string; contacts: number; foreign: number }>(
-          `SELECT current_setting('app.tenant_id') AS setting, (SELECT count(*)::int FROM crm_contacts) AS contacts,
-                  (SELECT count(*)::int FROM crm_contacts WHERE tenant_id <> $1) AS foreign, pg_sleep(random()*0.05)`, [tenant])).rows[0]!;
-        return { tenant, ...row };
-      });
-    });
-    const rows = await Promise.all(jobs);
-    const bad = rows.filter((row) => row.setting !== row.tenant || row.foreign !== 0 || row.contacts !== (row.tenant === tenantA ? contactsA : 0));
-    return { ok: bad.length === 0, detail: { transport, total: rows.length, bad: bad.slice(0, 5) } };
+    // A load probe, not an admission test: room in the queue for all 200, so that on a pool
+    // of 10 none is refused "busy" by the default bound of 50 waiting.
+    const probe = await concurrentTenantProbe(createScopedDatabase(runtime, { ...scopedOptions, maxWaiting: 256 }),
+      [{ tenantId: tenantA, contacts: contactsA }, { tenantId: tenantB, contacts: 0 }]);
+    return { ok: probe.ok, detail: { transport, ...probe.detail } };
   });
   await check("pooled runtime sessions carry no session state into later transactions", async () => {
     // Tenant B: the probe reads only session state, never rows. Committed and throwing
     // transactions dirty their backend; it fails unless readers reuse those backends.
     const probe = await sessionContaminationProbe(createScopedDatabase(runtime, scopedOptions), tenantB);
     return { ok: probe.ok, detail: { transport, ...probe.detail } };
+  });
+  await check("abandoned in-flight transactions leave no session state on reused backends", async () => {
+    // Tenant B, session state only. Each abandoned transaction is reported through
+    // onResetFailure by design, so it counts here instead of failing the next check.
+    let reported = 0;
+    const probe = await abandonedTransactionProbe(createScopedDatabase(runtime, { onResetFailure: () => { reported += 1; } }), tenantB);
+    return { ok: probe.ok && reported === probe.detail.abandoned, detail: { transport, reported, ...probe.detail } };
   });
   await check("no scoped transaction failed its session reset", async () =>
     ({ ok: resetFailures.length === 0, detail: { transport, failures: resetFailures.length, first: resetFailures.slice(0, 3) } }));
