@@ -11,7 +11,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { idInUse, iso, parseOrFail, pgCode, pgConstraint, tenantVisible } from "../crm/rows.js";
-import { lockMembership } from "./access.js";
+import { lockMembership, requireMember } from "./access.js";
 
 interface MemberRow {
   id: string;
@@ -50,6 +50,14 @@ async function activeOwners(tx: Transaction, tenantId: string): Promise<number> 
   )).rows[0]!.n);
 }
 
+/**
+ * Owners only, checked by the handler too: a dispatcher built without the edge's authorize
+ * hook still cannot change members. The edge already holds the exclusive lock; taking it again
+ * in the same transaction is a no-op.
+ */
+const requireOwner = (tx: Transaction, tenantId: string, actorId: string) =>
+  requireMember(tx, tenantId, actorId, "members", "exclusive");
+
 const lastOwner = () => new Conflict("A business needs at least one owner", { reason: "last_owner" });
 
 /** An existing member of this tenant, under the exclusive membership lock. */
@@ -67,6 +75,7 @@ export const inviteMemberHandler: ActionHandler = {
     return { tenantId: target.tenantId, type: "member", id: target.id };
   },
   async handle({ tx, command, binding, now }) {
+    await requireOwner(tx, binding.tenantId, binding.actorId);
     const { payload } = parseOrFail(inviteMemberCommandSchema, command);
     const taken = await tx.query("SELECT 1 FROM tenant_members WHERE tenant_id=$1 AND email=$2", [binding.tenantId, payload.email]);
     if (taken.rowCount) throw new Conflict("That email is already a member", { reason: "member_exists" });
@@ -91,6 +100,7 @@ export const inviteMemberHandler: ActionHandler = {
 export const changeMemberRoleHandler: ActionHandler = {
   resolveTarget: resolveExistingMember,
   async handle({ tx, command, binding, now }) {
+    await requireOwner(tx, binding.tenantId, binding.actorId);
     const { payload } = parseOrFail(changeMemberRoleCommandSchema, command);
     const member = (await loadMember(tx, binding.tenantId, payload.memberId))!;
     if (member.role === payload.role) return { result: memberRecord(member) };
@@ -106,6 +116,7 @@ export const changeMemberRoleHandler: ActionHandler = {
 export const removeMemberHandler: ActionHandler = {
   resolveTarget: resolveExistingMember,
   async handle({ tx, command, binding }) {
+    await requireOwner(tx, binding.tenantId, binding.actorId);
     const { payload } = parseOrFail(removeMemberCommandSchema, command);
     const member = (await loadMember(tx, binding.tenantId, payload.memberId))!;
     if (member.role === "owner" && member.user_id !== null && (await activeOwners(tx, binding.tenantId)) < 2) throw lastOwner();

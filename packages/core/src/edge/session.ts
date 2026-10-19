@@ -65,7 +65,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...memberHandlers });
 
 /** The permission each action needs. An action missing here is refused. */
-const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
+export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
