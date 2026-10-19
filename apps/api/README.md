@@ -114,8 +114,12 @@ when 50 requests already wait, the next is refused at once. Each `/v1` request h
 (`REQUEST_TIMEOUT_MS`) that also ends when the caller disconnects: its transaction then sends
 no further statement or `COMMIT` and rolls back, and the API answers 503 `Unavailable`. Each
 transaction's statement and lock timeouts are capped at the time left before the deadline, so
-Postgres cancels a statement still running when the deadline passes. A caller that disconnects
-early leaves its running statement to finish within that same cap. Nothing is committed by a
-request that answers 503 before its `COMMIT`; a write whose commit raced the deadline replays
-when the caller retries with the same `Idempotency-Key`. The MCP server uses the same pool
+Postgres cancels a statement still running when the deadline passes. A statement still
+running just after the deadline, or when the caller disconnects, is abandoned: its connection is
+closed rather than reused, and the statement ends within that same cap. The API and MCP send no
+`pg_cancel_backend` (`createScopedDatabase`'s `cancel` stays `"none"`): behind Supavisor's
+transaction pooler the backend that ran a statement may already serve another request. Nothing
+is committed by a request that answers 503 before its `COMMIT`. A `COMMIT` abandoned at the
+deadline (`DatabaseUnavailable("commit_unknown")`) may have applied; like any 503 write, it
+replays its committed result when the caller retries with the same `Idempotency-Key`. The MCP server uses the same pool
 settings (4 connections).

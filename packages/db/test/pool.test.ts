@@ -1,7 +1,8 @@
 import { createServer, connect, type Socket } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkDatabase, createRuntimePool, summarizePoolError } from "../src/pool.js";
-import { createScopedDatabase, DatabaseUnavailable } from "../src/scoped.js";
+import { Pool } from "pg";
+import { cancelClientConfig, createScopedDatabase, DatabaseUnavailable } from "../src/scoped.js";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
 
 let database: TestDatabase;
@@ -149,7 +150,9 @@ describe("runtime pool bounds", () => {
 async function stallingProxy(target: URL) {
   const sockets = new Set<Socket>();
   let stalled = false;
+  let accepted = 0;
   const server = createServer((client) => {
+    accepted += 1;
     const upstream = connect(Number(target.port || 5432), target.hostname);
     for (const socket of [client, upstream]) {
       sockets.add(socket);
@@ -166,6 +169,8 @@ async function stallingProxy(target: URL) {
   return {
     url: url.href,
     stall: () => { stalled = true; },
+    /** Connections opened through the proxy so far. */
+    accepted: () => accepted,
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise((resolve) => server.close(resolve));
@@ -224,9 +229,9 @@ describe("abandoning a statement at the deadline (W3)", () => {
     }
   });
 
-  it("cancels a statement still running when the signal fires, so it stops holding its lock wait", async () => {
+  it("with cancel \"backend\", cancels a statement still running when the signal fires, so it stops holding its lock wait", async () => {
     const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
-    const db = createScopedDatabase(pool);
+    const db = createScopedDatabase(pool, { cancel: "backend" });
     const holder = await database.pool.connect();
     try {
       await holder.query("BEGIN");
@@ -246,6 +251,77 @@ describe("abandoning a statement at the deadline (W3)", () => {
       await holder.query("ROLLBACK").catch(() => undefined);
       holder.release();
       await pool.end();
+    }
+  });
+
+  it("by default sends no cancel, safe behind a transaction pooler: the statement ends at its own timeout", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, onError: () => undefined });
+    const db = createScopedDatabase(pool, { lockTimeoutMs: 1200 });
+    const holder = await database.pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("LOCK TABLE booking_resources IN ACCESS EXCLUSIVE MODE");
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 200);
+      const { ms, outcome } = await elapsed(() => db.tenant(fixture.a.tenantId,
+        (tx) => tx.query("SELECT count(*) FROM booking_resources"), { signal: controller.signal }));
+      expect(outcome).toBeInstanceOf(DatabaseUnavailable);
+      expect((outcome as DatabaseUnavailable).reason).toBe("aborted");
+      expect(ms).toBeLessThan(1000);
+      // The caller has its answer, the backend still waits (no pg_cancel_backend went out)...
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await lockWaiters()).toBe(1);
+      // ...until the lock timeout ends it, while the lock is still held.
+      await expect.poll(lockWaiters, { timeout: 2000, interval: 50 }).toBe(0);
+      await holder.query("ROLLBACK");
+      await expect(db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT 1"))).resolves.toBeDefined();
+    } finally {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      holder.release();
+      await pool.end();
+    }
+  });
+
+  it("with cancel \"backend\", runs at most two cancel connections at once however many statements are abandoned", async () => {
+    const proxy = await stallingProxy(new URL(database.url));
+    const pool = createRuntimePool({ connectionString: proxy.url, max: 10, connectionTimeoutMs: 2000, onError: () => undefined });
+    const db = createScopedDatabase(pool, { cancel: "backend" });
+    try {
+      const controller = new AbortController();
+      let started = 0;
+      let allStarted!: () => void;
+      const ready = new Promise<void>((resolve) => { allStarted = resolve; });
+      const outcomes = Promise.all(Array.from({ length: 10 }, () => db.tenant(fixture.a.tenantId, async (tx) => {
+        await tx.query("SELECT 1");
+        started += 1;
+        if (started === 10) allStarted();
+        await ready;
+        await tx.query("SELECT 2");
+      }, { signal: controller.signal }).catch((error: unknown) => error)));
+      await ready;
+      expect(proxy.accepted()).toBe(10);
+      // Every connection stops answering, cancel connections included, so none of them ends.
+      proxy.stall();
+      // Each transaction sends its second statement, which gets no reply, and is abandoned.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      controller.abort();
+      const errors = await outcomes;
+      expect(errors.every((error) => error instanceof DatabaseUnavailable)).toBe(true);
+      await expect.poll(proxy.accepted, { timeout: 1000, interval: 20 }).toBe(12);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(proxy.accepted()).toBe(12);
+    } finally {
+      await proxy.close();
+      await pool.end().catch(() => undefined);
+    }
+  });
+
+  it("gives the cancel connection the pool's password, which a spread of the pool's options drops", () => {
+    for (const password of ["not-a-real-password", () => "not-a-real-password"]) {
+      const pool = new Pool({ connectionString: runtimeUrl(), password });
+      expect({ ...pool.options }.password).toBeUndefined();
+      expect(cancelClientConfig(pool).password).toBe(password);
+      expect(cancelClientConfig(pool)).toMatchObject({ connectionString: runtimeUrl(), application_name: "zs-cancel" });
     }
   });
 

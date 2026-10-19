@@ -55,7 +55,8 @@ const mapped = (status: ApiErrorStatus, code: ApiErrorCode, details: Record<stri
 
 /** Map any thrown value to one HTTP status and the shared error body. Unknown errors become 500. */
 export function mapError(error: unknown): MappedError {
-  // Nothing committed: the caller retries later, a write with its original idempotency key.
+  // Nothing committed, or with "commit_unknown" perhaps committed: either way the caller
+  // retries later, a write with its original idempotency key, which replays a commit that happened.
   if (error instanceof DatabaseUnavailable) return mapped(503, "Unavailable");
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {

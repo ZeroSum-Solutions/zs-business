@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Client, type Pool, type PoolClient } from "pg";
+import { Client, type ClientConfig, type Pool, type PoolClient } from "pg";
 
 export type Transaction = Pick<PoolClient, "query">;
 export interface TransactionLimits {
@@ -10,6 +10,15 @@ export interface TransactionLimits {
    * DatabaseUnavailable, instead of joining an unbounded queue.
    */
   maxWaiting?: number;
+  /**
+   * What happens to a statement abandoned at the deadline, besides closing its connection.
+   * "none" (the default): nothing more; the statement and lock timeouts, capped at the
+   * caller's time left, end it in Postgres. "backend": also send pg_cancel_backend for the
+   * connection's backend. Only for a direct or session-mode connection: behind a transaction
+   * pooler (Supavisor on port 6543) the backend that ran the statement may by then run
+   * another request's statement, even another tenant's, and the cancel would hit that one.
+   */
+  cancel?: "none" | "backend";
 }
 const limitsSchema = z.strictObject({
   lockTimeoutMs: z.number().int().positive().max(2147483647).default(5000),
@@ -20,20 +29,23 @@ const limitsSchema = z.strictObject({
     .max(2147483647)
     .default(15000),
   maxWaiting: z.number().int().min(0).max(100000).default(50),
+  cancel: z.enum(["none", "backend"]).default("none"),
 });
+type Limits = z.infer<typeof limitsSchema>;
 export interface TransactionOptions {
   /**
    * Ends the caller's interest: a pending checkout gives up (its connection goes straight
    * back), and no further statement or COMMIT is sent; the transaction rolls back. A
-   * statement still running is abandoned: Postgres is asked to cancel it and its connection
-   * is closed, not returned to the pool.
+   * statement still running is abandoned: its connection is closed, not returned to the pool
+   * (see TransactionLimits.cancel), and an abandoned COMMIT is "commit_unknown".
    */
   signal?: AbortSignal;
   /**
    * The caller's time left. Read once a connection is checked out, it caps the statement and
    * lock timeouts, so Postgres itself cancels a statement running at the deadline; read again
    * before every statement, it abandons one still running shortly after the deadline, as the
-   * signal does. Either way the caller gets DatabaseUnavailable("aborted").
+   * signal does. Either way the caller gets DatabaseUnavailable("aborted"), or "commit_unknown"
+   * when the statement abandoned was COMMIT.
    */
   remainingMs?: () => number;
 }
@@ -48,10 +60,12 @@ export interface ScopedDatabase {
 /**
  * No connection in time (pool saturated, queue full, connect timeout or failure), or the
  * caller's deadline passed before the transaction committed. Nothing was committed by this
- * transaction, so the caller may retry; a write retries with its original idempotency key.
+ * transaction, except with "commit_unknown": the deadline passed while COMMIT was in flight,
+ * so the transaction may have committed. Either way the caller may retry, and a write
+ * retries with its original idempotency key, which replays a commit that did happen.
  */
 export class DatabaseUnavailable extends Error {
-  constructor(readonly reason: "busy" | "connect" | "aborted", options?: { cause?: unknown }) {
+  constructor(readonly reason: "busy" | "connect" | "aborted" | "commit_unknown", options?: { cause?: unknown }) {
     super(`Database unavailable (${reason})`, options);
     this.name = "DatabaseUnavailable";
   }
@@ -98,35 +112,76 @@ function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> 
   return Promise.race([promise.then(() => true, () => false), late]).finally(() => clearTimeout(timer));
 }
 
+/** Cancel requests in flight per pool; past the cap an abandoned statement gets none. */
+const cancelsInFlight = new WeakMap<Pool, number>();
+const MAX_CANCELS_IN_FLIGHT = 2;
+
+/**
+ * Settings for a short-lived connection like the pool's own. The pool keeps the password as
+ * a non-enumerable property (it may be a function), so a spread of its options drops it.
+ */
+export function cancelClientConfig(pool: Pool): ClientConfig {
+  return {
+    ...pool.options,
+    password: pool.options.password,
+    connectionTimeoutMillis: CLEANUP_TIMEOUT_MS,
+    query_timeout: CLEANUP_TIMEOUT_MS,
+    application_name: "zs-cancel",
+  };
+}
+
 /**
  * Asks Postgres to stop what a backend is running, from a separate short-lived connection:
  * pg_cancel_backend works on the login's own sessions. Best effort and never awaited; the
- * abandoned connection is closed either way.
+ * abandoned connection is closed either way. At most MAX_CANCELS_IN_FLIGHT per pool run at
+ * once, so repeated aborts cannot open connections without bound; a skipped cancel only
+ * leaves the statement to its (deadline-capped) timeout.
  */
 function cancelBackend(pool: Pool, pid: number | undefined): void {
-  if (!pid) return;
-  const client = new Client({ ...pool.options, connectionTimeoutMillis: CLEANUP_TIMEOUT_MS, query_timeout: CLEANUP_TIMEOUT_MS });
+  const inFlight = cancelsInFlight.get(pool) ?? 0;
+  if (!pid || inFlight >= MAX_CANCELS_IN_FLIGHT) return;
+  cancelsInFlight.set(pool, inFlight + 1);
+  const client = new Client(cancelClientConfig(pool));
   client.on("error", () => undefined);
   void client.connect()
     .then(() => client.query("SELECT pg_cancel_backend($1)", [pid]))
     .catch(() => undefined)
-    .finally(() => client.end().catch(() => undefined));
+    .finally(() => {
+      cancelsInFlight.set(pool, (cancelsInFlight.get(pool) ?? 1) - 1);
+      void client.end().catch(() => undefined);
+    });
 }
 
 /** Whether the transaction gave up on a statement still running on its connection. */
 interface Abandonment { abandoned: boolean }
 
+/** The transaction's view of the connection, and how it sends COMMIT through the same gate. */
+interface Guarded {
+  tx: Transaction;
+  commit(): Promise<unknown>;
+}
+
 /**
- * The transaction's view of the connection. Once the caller's signal fires, or its time left
- * (read again before every statement) runs out, no statement starts. A statement still running
- * then is abandoned: the caller gets DatabaseUnavailable("aborted") at once, Postgres is asked
- * to cancel it, and the connection is closed rather than reused, since its reply may never come.
+ * Once the caller's signal fires, or its time left (read again before every statement) runs
+ * out, no statement starts. A statement still running then is abandoned: the caller gets
+ * DatabaseUnavailable at once and the connection is closed rather than reused, since its
+ * reply may never come. Closing it rolls back whatever the transaction had not committed, so
+ * the reason is "aborted", except for an abandoned COMMIT, which Postgres may already have
+ * applied: "commit_unknown". With cancel "backend", Postgres is also asked to stop the
+ * statement; otherwise the deadline-capped statement timeout ends it.
  */
-function guarded(pool: Pool, client: PoolClient, options: TransactionOptions, state: Abandonment): Transaction {
+function guarded(
+  pool: Pool,
+  client: PoolClient,
+  cancel: Limits["cancel"],
+  options: TransactionOptions,
+  state: Abandonment,
+): Guarded {
   const { signal, remainingMs } = options;
-  if (!signal && !remainingMs) return client;
-  const query = (...args: unknown[]) => {
+  if (!signal && !remainingMs) return { tx: client, commit: () => client.query("COMMIT") };
+  const run = (outcome: "aborted" | "commit_unknown", ...args: unknown[]) => {
     const left = remainingMs ? remainingMs() : Number.POSITIVE_INFINITY;
+    // Nothing sent yet, so nothing can have committed.
     if (signal?.aborted || left <= 0) return Promise.reject(new DatabaseUnavailable("aborted"));
     const running = Promise.resolve((client.query as (...a: unknown[]) => unknown)(...args));
     return new Promise((resolve, reject) => {
@@ -138,15 +193,18 @@ function guarded(pool: Pool, client: PoolClient, options: TransactionOptions, st
       function abandon() {
         settle();
         state.abandoned = true;
-        cancelBackend(pool, (client as PoolClient & { processID?: number }).processID);
-        reject(new DatabaseUnavailable("aborted"));
+        if (cancel === "backend") cancelBackend(pool, (client as PoolClient & { processID?: number }).processID);
+        reject(new DatabaseUnavailable(outcome));
       }
       signal?.addEventListener("abort", abandon, { once: true });
       if (Number.isFinite(left)) timer = setTimeout(abandon, left + DEADLINE_GRACE_MS);
       running.then((value) => { settle(); resolve(value); }, (error: unknown) => { settle(); reject(error); });
     });
   };
-  return { query: query as PoolClient["query"] };
+  return {
+    tx: { query: ((...args: unknown[]) => run("aborted", ...args)) as PoolClient["query"] },
+    commit: () => run("commit_unknown", "COMMIT"),
+  };
 }
 
 /** Only an unprivileged LOGIN whose sole membership is authenticated may serve tenant reads. */
@@ -176,7 +234,7 @@ async function transaction<T>(
   const cutShort = new Set<string>();
   const state: Abandonment = { abandoned: false };
   // Every statement, setup and COMMIT included, goes through the deadline gate.
-  const tx = guarded(pool, client, options, state);
+  const { tx, commit } = guarded(pool, client, limits.cancel, options, state);
   let discard = false;
   try {
     // Postgres takes whole milliseconds and treats 0 as no limit.
@@ -202,9 +260,9 @@ async function transaction<T>(
       [`${cap(limits.lockTimeoutMs)}ms`, `${cap(limits.statementTimeoutMs)}ms`, role, tenantId ?? ""],
     );
     const result = await work(tx);
-    // A COMMIT abandoned at the deadline may still have committed; a write retried with its
-    // idempotency key replays it.
-    await tx.query("COMMIT");
+    // A COMMIT abandoned at the deadline may still have committed: DatabaseUnavailable
+    // ("commit_unknown"). A write retried with its idempotency key replays it.
+    await commit();
     return result;
   } catch (error) {
     // An abandoned statement still occupies the connection: closing it rolls back instead.
