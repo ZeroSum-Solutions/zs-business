@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool, type PoolClient } from "pg";
-import { createScopedDatabase, type Transaction } from "../src/scoped.js";
+import { createScopedDatabase, DatabaseUnavailable, type Transaction } from "../src/scoped.js";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
 
 let database: TestDatabase;
@@ -150,6 +150,50 @@ describe("scoped transaction session reset", () => {
       })).rejects.toMatchObject({ code: "23505" });
       expect(failures).toEqual([]);
       expect(await borrow<Record<string, unknown>>(pool, SESSION_STATE)).toMatchObject(CLEAN);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  // The deadline gate refuses every statement once time is up; the recovery statements on the
+  // error path must still reach the backend, or a pooled backend keeps the work's session state.
+  it("cleans the backend when the deadline passes during the work, without the post-transaction reset", async () => {
+    const pool = interceptedPool(async () => ({ rows: [] }));
+    const failures: unknown[] = [];
+    try {
+      const scoped = createScopedDatabase(pool, { onResetFailure: (error) => failures.push(error) });
+      let left = 10_000;
+      let first = 0;
+      const outcome = await scoped.tenant(fixture.a.tenantId, async (tx) => {
+        first = await dirty(tx, fixture.b.tenantId);
+        left = 0;
+        await tx.query("select 1");
+      }, { remainingMs: () => left }).catch((error: unknown) => error);
+      expect(outcome).toBeInstanceOf(DatabaseUnavailable);
+      expect((outcome as DatabaseUnavailable).reason).toBe("aborted");
+      expect(failures).toEqual([]);
+      expect(await borrow<Record<string, unknown>>(pool, SESSION_STATE)).toMatchObject({ pid: first, ...CLEAN });
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("reports and discards a statement abandoned after the work began, since nothing could clean its backend", async () => {
+    const pool = interceptedPool(async () => ({ rows: [] }));
+    const failures: unknown[] = [];
+    try {
+      const scoped = createScopedDatabase(pool, { onResetFailure: (error) => failures.push(error) });
+      const controller = new AbortController();
+      let first = 0;
+      const outcome = await scoped.tenant(fixture.a.tenantId, async (tx) => {
+        first = await dirty(tx, fixture.b.tenantId);
+        setTimeout(() => controller.abort(), 100);
+        await tx.query("select pg_sleep(1)");
+      }, { signal: controller.signal }).catch((error: unknown) => error);
+      expect(outcome).toBeInstanceOf(DatabaseUnavailable);
+      expect((outcome as DatabaseUnavailable).reason).toBe("aborted");
+      expect(failures).toEqual([outcome]);
+      expect(await pid(pool)).not.toBe(first);
     } finally {
       await pool.end();
     }
