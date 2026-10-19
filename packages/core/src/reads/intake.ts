@@ -8,6 +8,7 @@ import type {
   PublicPage,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "./cursor.js";
 import { page } from "./page.js";
 
 interface IntakeRow {
@@ -100,14 +101,21 @@ export async function loadIntakeItem(tx: Transaction, tenantId: string, id: stri
   return itemRecord(row, (await consentFor(tx, tenantId, [row.id])).get(row.id));
 }
 
+/** Newest first. A cursor continues right after the last item of the page before. */
 export async function listIntakeItems(tx: Transaction, tenantId: string, query: ListIntakeItemsQuery): Promise<IntakeItemPage> {
-  const rows = (await tx.query<IntakeRow>(
-    `${ITEM_SELECT} WHERE i.tenant_id=$1 AND ($2::text IS NULL OR i.status=$2)
+  const cursor = decodeCursor("intake.recent", query);
+  const position = cursor
+    ? `AND (i.created_at < ${microsToTimestamp("$5")} OR (i.created_at = ${microsToTimestamp("$5")} AND i.id > $6::uuid))`
+    : "";
+  const rows = (await tx.query<IntakeRow & { sort_value: string }>(
+    `${ITEM_SELECT.replace("i.reviewed_at, i.created_at,", `i.reviewed_at, i.created_at, ${timestampToMicros("i.created_at")} AS sort_value,`)}
+      WHERE i.tenant_id=$1 AND ($2::text IS NULL OR i.status=$2) ${position}
       ORDER BY i.created_at DESC, i.id LIMIT $3 OFFSET $4`,
-    [tenantId, query.status ?? null, query.limit + 1, query.offset],
+    [tenantId, query.status ?? null, query.limit + 1, query.offset, ...(cursor ?? [])],
   )).rows;
   const consent = await consentFor(tx, tenantId, rows.map((row) => row.id));
-  return page(rows.map((row) => itemRecord(row, consent.get(row.id))), query);
+  return page(rows.map((row) => itemRecord(row, consent.get(row.id))), query,
+    (index) => encodeCursor("intake.recent", [rows[index]!.sort_value, rows[index]!.id]));
 }
 
 export interface PublishedPageRow {

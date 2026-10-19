@@ -107,7 +107,7 @@ describe("demo adapter: CRM", () => {
     expect(result.contact.phone).toBe("+16465550177");
     const found = await api.listContacts({ search: "benzaq" });
     expect(found.items.map((item) => item.id)).toEqual([result.contact.id]);
-    expect(found.incomplete).toBe(false);
+    expect(found.nextCursor).toBeNull();
   });
 
   it("rejects a contact with no email or phone", async () => {
@@ -158,9 +158,9 @@ describe("demo adapter: lost responses", () => {
     const second = await api.createBooking({ resourceId: SHOWROOM_ID, startsAt }, { idempotencyKey: "k2" }).catch((caught: unknown) => caught);
     expect(isSlotTaken(second)).toBe(true);
     expect(api.writeLog()).toEqual([
-      { operation: "booking.create", idempotencyKey: "k1", outcome: "applied" },
-      { operation: "booking.create", idempotencyKey: "k1", outcome: "replayed" },
-      { operation: "booking.create", idempotencyKey: "k2", outcome: "rejected" },
+      { operation: "booking.create", idempotencyKey: "k1", payload: { resourceId: SHOWROOM_ID, startsAt }, outcome: "applied" },
+      { operation: "booking.create", idempotencyKey: "k1", payload: { resourceId: SHOWROOM_ID, startsAt }, outcome: "replayed" },
+      { operation: "booking.create", idempotencyKey: "k2", payload: { resourceId: SHOWROOM_ID, startsAt }, outcome: "rejected" },
     ]);
   });
 

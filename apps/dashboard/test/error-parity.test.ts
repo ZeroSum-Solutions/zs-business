@@ -12,7 +12,7 @@ import {
   upsertContactRequestSchema,
   type ApiErrorCode,
 } from "@zs/contracts";
-import { mapError, validationError } from "@zs/core";
+import { DatabaseUnavailable, mapError, validationError } from "@zs/core";
 import { createDemoAdapter } from "../src/lib/api/demo/adapter";
 import { DEMO_PIPELINE, SHOWROOM_ID } from "../src/lib/api/demo/seed";
 import { API_ERRORS, ApiError, demoErrorBody } from "../src/lib/api/errors";
@@ -59,6 +59,7 @@ describe("error bodies match the API", () => {
     ["NotFound", new NotFound("Booking resource not found")],
     ["Conflict", new Conflict("Requested slot is unavailable", { reason: "slot_unavailable" })],
     ["Internal", new Error("boom")],
+    ["Unavailable", new DatabaseUnavailable("busy")],
   ])("%s carries core's fixed message and status", (code, thrown) => {
     const mapped = mapError(thrown);
     expect(mapped.status).toBe(API_ERRORS[code].status);

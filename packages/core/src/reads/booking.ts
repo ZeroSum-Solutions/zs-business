@@ -14,6 +14,7 @@ import type { Transaction } from "@zs/db";
 import { loadBusy, loadResource } from "../booking/create.js";
 import { compileRules, evaluateSlots } from "../booking/slots.js";
 import { MINUTE_MS, offsetAt } from "../booking/time-zone.js";
+import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "./cursor.js";
 import { page } from "./page.js";
 
 interface BookingRow {
@@ -60,20 +61,71 @@ const bookingSummary = (row: SummaryRow): BookingSummary => ({
     : { contactId: row.customer_contact_id, name: row.customer_name, status: row.intake_status },
 });
 
+const bookingColumns = `id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
+            buffer_before_minutes, buffer_after_minutes, created_at, source, intake_item_id`;
+
+/**
+ * Bookings overlapping [from, to) when given, in start order, so a day or week is one short
+ * read however much history comes before it. A cursor continues after the last booking of
+ * the page before.
+ *
+ * Under RLS the planner only turns leakproof operators into index conditions, and range
+ * overlap (`&&`) is not one, so the overlap test is split into btree ranges on starts_at:
+ * the bookings starting inside the range, plus, per resource, the latest one starting before
+ * `from` if it is still running. The occupied-range exclusion constraint keeps one resource's
+ * bookings apart, so no earlier booking can still be running at `from`. If cancelled bookings
+ * ever stop taking part in that constraint, both parts must filter to confirmed ones.
+ */
 export async function listBookings(tx: Transaction, tenantId: string, query: ListBookingsQuery): Promise<BookingPage> {
-  const rows = (await tx.query<SummaryRow>(
-    `SELECT b.id, b.tenant_id, b.resource_id, b.starts_at, b.ends_at, b.occupied_starts_at, b.occupied_ends_at,
-            b.buffer_before_minutes, b.buffer_after_minutes, b.created_at, b.source, b.intake_item_id,
-            i.status AS intake_status, i.contact_id AS customer_contact_id,
-            coalesce(c.display_name, i.submitted_name) AS customer_name
-       FROM bookings b
-       LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id
-       LEFT JOIN crm_contacts c ON c.tenant_id = i.tenant_id AND c.id = i.contact_id
-      WHERE b.tenant_id=$1 AND ($2::uuid IS NULL OR b.resource_id=$2)
-      ORDER BY b.starts_at, b.id LIMIT $3 OFFSET $4`,
-    [tenantId, query.resourceId ?? null, query.limit + 1, query.offset],
-  )).rows;
-  return page(rows.map(bookingSummary), query);
+  const cursor = decodeCursor("bookings.start", query);
+  // `start`/`id` name the cursor's parameters; `alias` qualifies the columns inside a join.
+  const position = (start: string, id: string, alias = "") => cursor
+    ? `AND (${alias}starts_at > ${microsToTimestamp(start)} OR (${alias}starts_at = ${microsToTimestamp(start)} AND ${alias}id > ${id}::uuid))`
+    : "";
+  const columns = `${bookingColumns}, ${timestampToMicros("starts_at")} AS sort_value`;
+  const scope = [tenantId, query.resourceId ?? null, query.limit + 1, query.offset];
+  const cursorParams = cursor ? [...cursor] : [];
+  type Row = SummaryRow & { sort_value: string };
+  const toPage = (rows: Row[]) =>
+    page(rows.map(bookingSummary), query, (index) => encodeCursor("bookings.start", [rows[index]!.sort_value, rows[index]!.id]));
+  // P-12: name each page's website customers after the page is chosen, so the join never
+  // changes which bookings are on it.
+  const withCustomers = (hits: string) => `SELECT b.*, i.status AS intake_status, i.contact_id AS customer_contact_id,
+          coalesce(c.display_name, i.submitted_name) AS customer_name
+     FROM (${hits}) b
+     LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id
+     LEFT JOIN crm_contacts c ON c.tenant_id = i.tenant_id AND c.id = i.contact_id
+    ORDER BY b.starts_at, b.id`;
+  if (query.from === undefined) {
+    // $5 is the end of the range, so the cursor's parameters follow it.
+    const rows = (await tx.query<Row>(
+      withCustomers(`SELECT ${columns} FROM bookings
+        WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2) AND ($5::timestamptz IS NULL OR starts_at < $5)
+          ${position("$6", "$7")}
+        ORDER BY starts_at, id LIMIT $3 OFFSET $4`),
+      [...scope, query.to ?? null, ...cursorParams],
+    )).rows;
+    return toPage(rows);
+  }
+  // With a range, $5/$6 are its bounds, so the cursor's parameters are $7/$8.
+  const sql = `SELECT ${columns} FROM (
+          SELECT running.* FROM booking_resources r
+          CROSS JOIN LATERAL (
+            SELECT ${bookingColumns} FROM bookings b
+             WHERE b.tenant_id=r.tenant_id AND b.resource_id=r.id AND b.starts_at < $5::timestamptz
+             ORDER BY b.starts_at DESC LIMIT 1) running
+           WHERE r.tenant_id=$1 AND ($2::uuid IS NULL OR r.id=$2) AND running.ends_at > $5::timestamptz
+             ${position("$7", "$8", "running.")}
+          UNION ALL
+          SELECT ${bookingColumns} FROM bookings
+           WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2)
+             AND starts_at >= $5::timestamptz AND ($6::timestamptz IS NULL OR starts_at < $6)
+             ${position("$7", "$8")}
+           ORDER BY starts_at, id LIMIT $3::int + $4::int
+        ) hits
+        ORDER BY starts_at, id LIMIT $3 OFFSET $4`;
+  const rows = (await tx.query<Row>(withCustomers(sql), [...scope, query.from, query.to ?? null, ...cursorParams])).rows;
+  return toPage(rows);
 }
 
 export async function listResources(tx: Transaction, tenantId: string): Promise<ResourceSummary[]> {

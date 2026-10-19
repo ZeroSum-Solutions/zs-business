@@ -5,6 +5,7 @@ import {
   intakeItemOutputSchema,
   intakeItemPageSchema,
   contactPageSchema,
+  contactRecordSchema,
   createBookingOutputSchema,
   createOrFindContactOutputSchema,
   dealPageSchema,
@@ -12,14 +13,14 @@ import {
   pipelineSummarySchema,
   resourceSummarySchema,
   slotsResponseSchema,
+  uuidSchema,
   type CreateBookingRequest,
   type LinkIntakeItemRequest,
   type MoveDealStageRequest,
 } from "@zs/contracts";
-import { ApiError, contactBeyondList, contactNotFound, defaultMessage, errorFromBody } from "./errors";
+import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError } from "./errors";
 import {
-  byContactName,
-  matchesSearch,
+  CONTACT_PAGE_SIZE,
   toUpsertContactRequest,
   type BookingApi,
   type CrmApi,
@@ -45,6 +46,7 @@ interface RequestSpec<T extends z.ZodType> {
   body?: unknown;
   idempotencyKey?: string;
   schema: T;
+  signal?: AbortSignal | undefined;
 }
 
 const resourceListSchema = z.object({ items: z.array(resourceSummarySchema) });
@@ -53,7 +55,10 @@ const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema
 
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
-/** Stop after this many pages; the pilot has well under 2,000 rows per list. */
+/**
+ * Stop after this many pages of one filtered list: a calendar day or week, or one customer's
+ * or pipeline's deals. The API filters first, so older rows never count against the cap.
+ */
 export const MAX_PAGES = 20;
 
 export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi & IntakeApi {
@@ -85,8 +90,11 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
         // Business data never goes to the HTTP cache, in the browser or in Next's fetch cache.
         cache: "no-store",
         ...(spec.body !== undefined ? { body: JSON.stringify(spec.body) } : {}),
+        ...(spec.signal ? { signal: spec.signal } : {}),
       });
-    } catch {
+    } catch (error) {
+      // A read the caller gave up on is not an outage; React Query drops it.
+      if (spec.signal?.aborted) throw error;
       throw new ApiError("network", defaultMessage("network"));
     }
 
@@ -109,49 +117,51 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
   }
 
   /**
-   * Walk `nextOffset` until the list ends or MAX_PAGES pages are read; in the second case
-   * the result is marked incomplete. Filters the routes do not offer run on the result.
+   * Walk `nextCursor` through a list the API already filtered, until it ends or MAX_PAGES
+   * pages are read; in the second case the result is marked incomplete. A cursor, unlike an
+   * offset, does not repeat or skip a row when another is added or moved between pages.
    */
-  async function listAll<Item, T extends z.ZodType<{ items: Item[]; nextOffset: number | null }>>(
-    path: string, schema: T, query: Record<string, string | undefined> = {},
+  async function listAll<Item, T extends z.ZodType<{ items: Item[]; nextCursor: string | null }>>(
+    path: string, schema: T, query: Record<string, string | undefined>, signal: AbortSignal | undefined,
   ): Promise<ListResult<z.infer<T>["items"][number]>> {
     const items: z.infer<T>["items"] = [];
-    let offset: number | null = 0;
-    for (let page = 0; offset !== null && page < MAX_PAGES; page += 1) {
+    let cursor: string | null | undefined;
+    for (let page = 0; cursor !== null && page < MAX_PAGES; page += 1) {
       const result: z.infer<T> = await request({
-        method: "GET", path, query: { ...query, limit: PAGE_LIMIT, offset }, schema,
+        method: "GET", path, query: { ...query, limit: PAGE_LIMIT, cursor: cursor ?? undefined }, schema, signal,
       });
       items.push(...result.items);
-      offset = result.nextOffset;
+      cursor = result.nextCursor;
     }
-    return { items, incomplete: offset !== null, loaded: items.length };
+    return { items, incomplete: cursor !== null, loaded: items.length };
   }
 
   const write = <T extends z.ZodType>(path: string, body: unknown, schema: T, options: WriteOptions) =>
     request({ method: "POST", path, body, idempotencyKey: options?.idempotencyKey, schema });
 
   return {
-    async listResources() {
-      return (await request({ method: "GET", path: "/v1/booking/resources", schema: resourceListSchema })).items;
+    async listResources(options = {}) {
+      return (await request({ method: "GET", path: "/v1/booking/resources", schema: resourceListSchema, signal: options.signal })).items;
     },
 
-    getSlots(query) {
+    getSlots(query, options = {}) {
       return request({
         method: "GET",
         path: "/v1/booking/slots",
         query: { resourceId: query.resourceId, from: query.from, to: query.to, zone: query.zone },
         schema: slotsResponseSchema,
+        signal: options.signal,
       });
     },
 
-    async listBookings(query = {}) {
-      const list = await listAll("/v1/booking/bookings", bookingPageSchema, { resourceId: query.resourceId });
-      const fromMs = query.from ? Date.parse(query.from) : -Infinity;
-      const toMs = query.to ? Date.parse(query.to) : Infinity;
-      const items = list.items
-        .filter((row) => Date.parse(row.endsAt) > fromMs && Date.parse(row.startsAt) < toMs)
-        .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
-      return { ...list, items };
+    async listBookings(query = {}, options = {}) {
+      const filters = { resourceId: query.resourceId, from: query.from, to: query.to };
+      if (query.limit === undefined) return listAll("/v1/booking/bookings", bookingPageSchema, filters, options.signal);
+      const page = await request({
+        method: "GET", path: "/v1/booking/bookings", query: { ...filters, limit: query.limit },
+        schema: bookingPageSchema, signal: options.signal,
+      });
+      return { items: page.items, incomplete: false, loaded: page.items.length };
     },
 
     async createBooking(input, options) {
@@ -159,35 +169,44 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
       return (await write("/v1/booking/bookings", body, createBookingOutputSchema, options)).result;
     },
 
-    async listPipelines() {
-      const { items } = await request({ method: "GET", path: "/v1/crm/pipelines", schema: pipelineListSchema });
+    async listPipelines(options = {}) {
+      const { items } = await request({ method: "GET", path: "/v1/crm/pipelines", schema: pipelineListSchema, signal: options.signal });
       return items.map((pipeline) => ({ ...pipeline, stages: [...pipeline.stages].sort((a, b) => a.position - b.position) }));
     },
 
-    async listContacts(query = {}) {
-      const list = await listAll("/v1/crm/contacts", contactPageSchema);
-      return { ...list, items: list.items.filter((row) => matchesSearch(row, query.search)).sort(byContactName) };
+    async listContacts(query = {}, options = {}) {
+      const page = await request({
+        method: "GET",
+        path: "/v1/crm/contacts",
+        query: {
+          sort: "name",
+          search: query.search?.trim(),
+          ids: query.ids?.join(","),
+          limit: query.limit ?? CONTACT_PAGE_SIZE,
+          cursor: query.cursor,
+        },
+        schema: contactPageSchema,
+        signal: options.signal,
+      });
+      return { items: page.items, nextCursor: page.nextCursor };
     },
 
-    async getContact(id) {
-      // There is no single-contact route; the list is small and already cached per page.
-      const list = await listAll("/v1/crm/contacts", contactPageSchema);
-      const contact = list.items.find((item) => item.id === id);
-      if (contact) return contact;
-      // Past the cap the customer may exist after all: say so instead of "not found".
-      throw list.incomplete ? contactBeyondList(list.loaded) : contactNotFound();
+    async getContact(id, options = {}) {
+      // A malformed ID in the address bar is an unknown customer, not a bad request.
+      if (!uuidSchema.safeParse(id).success) throw contactNotFound();
+      try {
+        return await request({ method: "GET", path: `/v1/crm/contacts/${encodeURIComponent(id)}`, schema: contactRecordSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? contactNotFound() : error;
+      }
     },
 
     async createOrFindContact(input, options) {
       return (await write("/v1/crm/contacts", toUpsertContactRequest(input), createOrFindContactOutputSchema, options)).result;
     },
 
-    async listDeals(query = {}) {
-      const list = await listAll("/v1/crm/deals", dealPageSchema);
-      const items = list.items
-        .filter((row) => !query.contactId || row.contactId === query.contactId)
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      return { ...list, items };
+    listDeals(query = {}, options = {}) {
+      return listAll("/v1/crm/deals", dealPageSchema, { contactId: query.contactId, pipelineId: query.pipelineId }, options.signal);
     },
 
     async moveDealStage(input, options) {
@@ -200,8 +219,8 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
       return (await write(path, body, moveDealStageOutputSchema, options)).result;
     },
 
-    listIntakeItems(query = {}) {
-      return listAll("/v1/intake/items", intakeItemPageSchema, { status: query.status });
+    listIntakeItems(query = {}, options = {}) {
+      return listAll("/v1/intake/items", intakeItemPageSchema, { status: query.status }, options.signal);
     },
 
     async linkIntakeItem(input, options) {

@@ -506,6 +506,27 @@ describe("owner review (P-12)", () => {
     expect((await call(h.app, "GET", "/public/v1/pages/x/items")).status).toBe(404);
   });
 
+  it("pages intake items by cursor, newest first, without repeats or gaps", async () => {
+    const page = await freshPage(h.a);
+    for (const hour of [9, 10, 11]) await possibleMatch(page, at(hour));
+    const list = async (query: string) => intakeItemPageSchema.parse(
+      (await call(h.app, "GET", `/v1/intake/items?${query}`, { token: h.a.token })).body);
+    const all = await list("limit=100");
+    expect(all.items.length).toBeGreaterThanOrEqual(3);
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const next = await list(`limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+      if (cursor) expect(next.nextOffset).toBeNull();
+      seen.push(...next.items.map((item) => item.id));
+      cursor = next.nextCursor;
+    } while (cursor !== null);
+    expect(seen).toEqual(all.items.map((item) => item.id));
+    const first = await list("limit=2");
+    for (const query of [`cursor=${first.nextCursor}&offset=2`, "cursor=bm90LWEtY3Vyc29y"])
+      expect((await call(h.app, "GET", `/v1/intake/items?${query}`, { token: h.a.token })).status).toBe(400);
+  });
+
   it("shows website bookings with their customer in the bookings list", async () => {
     const page = await freshPage(h.a);
     const response = await book(page.key, visitor(page.resourceId, { name: "Ines Rowe", startsAt: at(14) }));

@@ -2,6 +2,7 @@
 
 import { Globe } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ErrorNote } from "@/components/ui/states";
@@ -9,7 +10,7 @@ import { useToast } from "@/components/ui/toast";
 import { isApiError, type ContactRecord, type IntakeItemRecord } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { useContacts, useIntakeItems, useKeys, useResources } from "@/lib/queries";
+import { useContactNames, useIntakeItems, useKeys, useResources } from "@/lib/queries";
 import { formatDay, formatTime } from "@/lib/time";
 import { formatPhone } from "@/lib/utils";
 
@@ -27,7 +28,9 @@ export function WebsiteRequests() {
   const toast = useToast();
   const intents = useIntentKey();
   const items = useIntakeItems("possible_match");
-  const contacts = useContacts();
+  // Only the customers these requests name, however long the customer list is.
+  const matched = useMemo(() => items.data?.items.flatMap((item) => item.matchedContactIds) ?? [], [items.data]);
+  const contacts = useContactNames(matched);
   const resources = useResources();
 
   const review = useMutation({
@@ -44,7 +47,7 @@ export function WebsiteRequests() {
       void queryClient.invalidateQueries({ queryKey: keys.contactsAll });
     },
     onSuccess: (item, input) => {
-      const name = input.kind === "link" ? contactName(contacts.data?.items, input.contactId) : null;
+      const name = input.kind === "link" ? contactName(contacts.data, input.contactId) : null;
       toast(input.kind === "link" ? `Linked the booking to ${name ?? "the customer"}.` : `Kept ${item.submitted.name} apart from your customers.`);
     },
     onError: (error) => {
@@ -90,7 +93,7 @@ export function WebsiteRequests() {
               {item.submitted.notes ? <p className="mt-1 text-sm text-muted">“{item.submitted.notes}”</p> : null}
               <div className="mt-3 flex flex-wrap gap-2">
                 {item.matchedContactIds.map((contactId) => {
-                  const name = contactName(contacts.data?.items, contactId) ?? "this customer";
+                  const name = contactName(contacts.data, contactId) ?? "this customer";
                   return (
                     <Button
                       key={contactId}

@@ -228,49 +228,62 @@ describe("http client", () => {
     expect(JSON.parse(String(calls[0]?.init.body)).phone).toBe("+16465550177");
   });
 
-  it("walks list pages by nextOffset and filters search in the client", async () => {
+  it("sends the search to the API and reads one page of customers in name order", async () => {
     const contact = (n: number, name: string) => ({
       id: `5e0c1a2b-7d3f-4c8a-9b1e-${String(n).padStart(12, "0")}`, tenantId: TENANT, displayName: name,
       email: `${name.toLowerCase()}@example.com`, phone: null, consent: { email: null, sms: null },
       createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
     });
     const { api, calls } = client([
-      json(200, { items: [contact(1, "Wren"), contact(2, "Ash")], limit: 100, offset: 0, nextOffset: 100 }),
-      json(200, { items: [contact(3, "Ashby")], limit: 100, offset: 100, nextOffset: null }),
+      json(200, { items: [contact(2, "Ash"), contact(3, "Ashby")], limit: 50, offset: 0, nextOffset: null, nextCursor: "next-page" }),
     ]);
-    const found = await api.listContacts({ search: "ash" });
-    expect(found.items.map((item) => item.displayName)).toEqual(["Ash", "Ashby"]);
-    expect(found).toMatchObject({ incomplete: false, loaded: 3 });
-    expect(calls.map((call) => new URL(call.url).search)).toEqual(["?limit=100&offset=0", "?limit=100&offset=100"]);
+    const found = await api.listContacts({ search: "  ash " });
+    expect(found).toEqual({ items: [contact(2, "Ash"), contact(3, "Ashby")], nextCursor: "next-page" });
+    expect(calls.map((call) => new URL(call.url).search)).toEqual(["?sort=name&search=ash&limit=50"]);
   });
 
-  it(`marks a list incomplete when it runs past ${MAX_PAGES} pages, and stops there`, async () => {
+  it(`walks a filtered list by nextCursor, and marks it incomplete past ${MAX_PAGES} pages`, async () => {
     const page = (offset: number) => json(200, {
       items: [{
-        id: `5e0c1a2b-7d3f-4c8a-9b1e-${String(offset + 1).padStart(12, "0")}`, tenantId: TENANT, displayName: `Customer ${offset}`,
-        email: null, phone: "+16465550100", consent: { email: null, sms: null },
+        id: `d0a1b2c3-7d3f-4c8a-9b1e-${String(offset + 1).padStart(12, "0")}`, tenantId: TENANT,
+        contactId: "5e0c1a2b-7d3f-4c8a-9b1e-000000000001", pipelineId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01",
+        stageId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e02", title: `Deal ${offset}`, revision: 1,
         createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
       }],
-      limit: 100, offset, nextOffset: offset + 100,
+      limit: 100, offset: 0, nextOffset: null, nextCursor: `after-${offset + 100}`,
     });
-    const pages = () => Array.from({ length: MAX_PAGES }, (_, index) => page(index * 100));
-    const { api, calls } = client([...pages(), ...pages(), ...pages()]);
-    const list = await api.listContacts();
+    const { api, calls } = client(Array.from({ length: MAX_PAGES + 5 }, (_, index) => page(index * 100)));
+    const list = await api.listDeals({ pipelineId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01" });
     expect(calls).toHaveLength(MAX_PAGES);
     expect(list).toMatchObject({ incomplete: true, loaded: MAX_PAGES });
-
-    // A contact past the cap may exist, so the lookup says that instead of "not found".
-    const missing = await api.getContact("5e0c1a2b-7d3f-4c8a-9b1e-999999999999").catch((caught: unknown) => caught) as ApiError;
-    expect(missing.kind).toBe("incomplete");
-    expect(missing.code).toBe("ListIncomplete");
-    expect(missing.message).toContain(`first ${MAX_PAGES}`);
-    // Within the cap it is found as before.
-    expect((await api.getContact("5e0c1a2b-7d3f-4c8a-9b1e-000000000101")).displayName).toBe("Customer 100");
+    expect(new URL(calls[0]!.url).search).toBe("?pipelineId=2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01&limit=100");
+    expect(new URL(calls[1]!.url).search).toBe("?pipelineId=2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01&limit=100&cursor=after-100");
   });
 
-  it("says not found for a contact missing from a complete list", async () => {
-    const { api } = client([json(200, { items: [], limit: 100, offset: 0, nextOffset: null })]);
-    await expect(api.getContact("5e0c1a2b-7d3f-4c8a-9b1e-999999999999")).rejects.toMatchObject({ kind: "not_found", code: "NotFound" });
+  it("reads one customer by ID, and says not found without asking for a malformed ID", async () => {
+    const { api, calls } = client([json(404, { error: { code: "NotFound", message: "Not found", details: {} } })]);
+    await expect(api.getContact("5e0c1a2b-7d3f-4c8a-9b1e-999999999999")).rejects.toMatchObject({
+      kind: "not_found", code: "NotFound", message: "We could not find that customer.",
+    });
+    expect(new URL(calls[0]!.url).pathname).toBe("/v1/crm/contacts/5e0c1a2b-7d3f-4c8a-9b1e-999999999999");
+    await expect(api.getContact("not-a-customer")).rejects.toMatchObject({ kind: "not_found" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("passes the caller's signal to fetch, and lets a cancelled read reject as a cancellation", async () => {
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const api = createHttpClient({
+      baseUrl: "https://api.example.test",
+      fetch: (_input, init) => {
+        seen = init?.signal ?? undefined;
+        return new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError"))));
+      },
+    });
+    const read = api.listContacts({ search: "ash" }, { signal: controller.signal });
+    controller.abort();
+    await expect(read).rejects.toMatchObject({ name: "AbortError" });
+    expect(seen).toBe(controller.signal);
   });
 
   it("reads resources and pipelines from the API, stages in position order", async () => {
@@ -317,12 +330,12 @@ describe("http client through the dashboard proxy", () => {
     const linked = { ...item, status: "linked", contactId: item.matchedContactIds[0], reviewedAt: "2026-10-18T13:00:00.000Z" };
     const envelope = { actionId: ACTION, result: linked };
     const { api, calls } = client([
-      json(200, { items: [item], limit: 100, offset: 0, nextOffset: null }),
+      json(200, { items: [item], limit: 100, offset: 0, nextOffset: null, nextCursor: null }),
       json(200, envelope),
       json(200, { ...envelope, result: { ...linked, status: "rejected", contactId: null } }),
     ]);
     expect((await api.listIntakeItems({ status: "possible_match" })).items).toHaveLength(1);
-    expect(calls[0]!.url).toBe("https://api.example.test/v1/intake/items?status=possible_match&limit=100&offset=0");
+    expect(calls[0]!.url).toBe("https://api.example.test/v1/intake/items?status=possible_match&limit=100");
     await api.linkIntakeItem({ itemId: item.id, contactId: item.matchedContactIds[0]! }, key());
     expect(calls[1]!.url).toBe(`https://api.example.test/v1/intake/items/${item.id}/link`);
     expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ contactId: item.matchedContactIds[0] });

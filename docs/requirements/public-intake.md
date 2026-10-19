@@ -151,7 +151,7 @@ slots query (`resourceId`, `from`, `to`, optional `zone`) and returns only free 
 end instants. No read returns bookings, contacts or intake items.
 
 **P-12. Owner review.** Authenticated owner routes, through the dispatcher:
-- `GET /v1/intake/items?status&limit&offset`: intake items, newest first, with submitted
+- `GET /v1/intake/items?status&limit&offset|cursor`: intake items, newest first (keyset `nextCursor` as on every list), with submitted
   details, matched contact IDs, linked contact, consent rows and the booking.
 - `POST /v1/intake/items/:id/link` `{ contactId }`: `possible_match` → `linked`; the
   contact must belong to the tenant; applies P-8 fill-only consent.

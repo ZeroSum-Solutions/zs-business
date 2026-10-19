@@ -2,7 +2,7 @@ import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
 import { bookingInstantSchema, bookingRecordSchema, bookingTimeZoneSchema } from "./booking.js";
 import { contactEmailInputSchema, contactPhoneSchema, crmInstantSchema } from "./crm.js";
-import { pageSchema } from "./page.js";
+import { pageQuerySchema, pageSchema } from "./page.js";
 import { isPostgresText } from "./json.js";
 
 // M3a public intake boundary (docs/requirements/public-intake.md). Root re-exports this
@@ -156,10 +156,8 @@ export type IntakeItemRecord = z.infer<typeof intakeItemRecordSchema>;
 export const intakeItemPageSchema = pageSchema(intakeItemRecordSchema);
 export type IntakeItemPage = z.infer<typeof intakeItemPageSchema>;
 
-export const listIntakeItemsQuerySchema = z.strictObject({
+export const listIntakeItemsQuerySchema = pageQuerySchema.extend({
   status: intakeStatusSchema.optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  offset: z.coerce.number().int().min(0).max(100000).default(0),
 });
 export type ListIntakeItemsQuery = z.infer<typeof listIntakeItemsQuerySchema>;
 

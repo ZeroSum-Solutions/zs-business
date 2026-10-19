@@ -9,9 +9,9 @@ import {
   NotFound,
   listBookingsQuerySchema,
   listIntakeItemsQuerySchema,
+  listContactsQuerySchema,
   listDealsQuerySchema,
   moveDealStageRequestSchema,
-  pageQuerySchema,
   rejectIntakeItemRequestSchema,
   slotsQuerySchema,
   upsertContactRequestSchema,
@@ -28,7 +28,7 @@ import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
-import { listContacts, listDeals, listPipelines } from "../reads/crm.js";
+import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { derivedId } from "./ids.js";
 import { validationError } from "./errors.js";
@@ -152,8 +152,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return read((tx) => listBookings(tx, tenantId, parsed));
     },
     listContacts: (query: unknown) => {
-      const parsed = parseInput(pageQuerySchema, query, "query");
+      const parsed = parseInput(listContactsQuerySchema, query, "query");
       return read((tx) => listContacts(tx, tenantId, parsed));
+    },
+    getContact: (contactId: unknown) => {
+      const id = parseInput(uuidSchema, contactId, "contact ID");
+      return read((tx) => getContact(tx, tenantId, id));
     },
     listDeals: (query: unknown) => {
       const parsed = parseInput(listDealsQuerySchema, query, "query");

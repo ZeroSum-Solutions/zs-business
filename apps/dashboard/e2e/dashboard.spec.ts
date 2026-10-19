@@ -152,3 +152,35 @@ test("cancels the plan in two clicks", async ({ page }, info) => {
   await expect(page.getByText("Ends soon")).toBeVisible();
   await shot(page, "16-plan-cancelled", info.project.name);
 });
+
+test("shows the pipeline setup states, and switches between several pipelines", async ({ page }) => {
+  const id = (n: number) => `2a4c6e80-1b3d-4f5a-9c7e-${String(n).padStart(12, "0")}`;
+  const setPipelines = (pipelines: unknown[]) => page.evaluate(async (next) => {
+    window.__zsDemo!.setPipelines(next as never);
+    await window.__zsQueryClient!.invalidateQueries();
+  }, pipelines);
+  await page.goto("/customers?view=pipeline");
+  await expect(page.locator("[data-deal-id]").first()).toBeVisible();
+  const board = page.getByRole("main");
+
+  await setPipelines([]);
+  await expect(board.getByText("No pipeline yet")).toBeVisible();
+  await expect(page.locator("[data-deal-id]")).toHaveCount(0);
+
+  await setPipelines([{ id: id(1), name: "Sales", stages: [] }]);
+  await expect(board.getByText("Sales has no stages yet")).toBeVisible();
+  // The section is labelled "Pipeline" too, so look for the picker by its role.
+  await expect(page.getByRole("combobox", { name: "Pipeline", exact: true })).toHaveCount(0);
+
+  await setPipelines([
+    { id: id(1), name: "Sales", stages: [{ id: id(11), name: "Inquiry", position: 0 }] },
+    { id: id(2), name: "Repairs", stages: [{ id: id(21), name: "Received", position: 0 }, { id: id(22), name: "Returned", position: 1 }] },
+  ]);
+  const choice = page.getByRole("combobox", { name: "Pipeline", exact: true });
+  await expect(choice).toHaveValue(id(1));
+  await expect(page.locator('[data-stage="Inquiry"]')).toBeAttached();
+  await choice.selectOption({ label: "Repairs" });
+  await expect(page.locator('[data-stage="Received"]')).toBeAttached();
+  await expect(page.locator('[data-stage="Returned"]')).toBeAttached();
+  await expect(page.locator('[data-stage="Inquiry"]')).toHaveCount(0);
+});

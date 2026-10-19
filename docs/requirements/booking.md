@@ -1,8 +1,12 @@
 # F1: booking authority
 
-Status: frozen requirements and interfaces; feature logic is not implemented.
-Rules below describe the required implementation. Public examples cover a small part
-of this contract. They do not replace the separate acceptance suite.
+Status: implemented. The numbered rules below are the contract the code and tests
+follow. The slot calculation (`getAvailableSlots`), the `booking.create` handler, the
+`createBooking` wrapper, the schema and the migrations ship in this repository. At the
+time of writing, `pnpm --filter @zs/core test:booking` runs 81 tests in four files
+(public examples, slot calculation, handler acceptance and the real Postgres seam), and
+all pass. The public examples cover a small part of the contract; the acceptance tests
+cover the rest.
 
 ## Evidence and decisions
 
@@ -168,15 +172,16 @@ is a trusted server capability, constructed as
 `command => sharedDispatch(serverContext, command)`, where `sharedDispatch` comes
 from the unchanged `createDispatcher(handlers)`. That bound server context owns
 actor, tenant, database, clock, configuration, ID generation and approval resolution.
-Do not accept this context from HTTP/MCP input. The future feature wrapper uses
+Do not accept this context from HTTP/MCP input. The feature wrapper (`createBooking`) uses
 `createBookingCommandSchema.safeParse(command)` and forwards its `data` to dispatch
 exactly once. Invalid input raises `ValidationFailed` without reaching dispatch.
 Validate the returned envelope with `createBookingOutputSchema.safeParse`; a parse
 failure raises `ValidationFailed`. Return the parsed `{actionId,result:BookingRecord}`
 on success. The shared dispatcher raises `ValidationFailed` for a non-finite clock;
-the wrapper propagates every dispatcher error unchanged. The public
-stub throws `NotImplemented`; it does not register handlers. Implementers later
-supply handlers at the composition root.
+the wrapper propagates every dispatcher error unchanged. `bookingHandlers`
+registers the `booking.create` handler (B-27); a composition root passes it to
+`createDispatcher`. Dispatching an action type that no handler registers still raises
+`NotImplemented`.
 
 **B-19. Desired, authoritative recheck.** A shown slot is advisory. The existing
 `resolveTarget(tx,target)` receives no payload. It must verify the tenant creation
@@ -240,18 +245,20 @@ so no adapter can announce success before durable state exists.
 same stored action ID and result. Preserve the dispatcher's `IdempotencyConflict`,
 `BindingMismatch`, `TenantDenied`, `ValidationFailed` and `Conflict` semantics.
 SQL `23P01` must remain `Conflict` with `details.postgresCode` and constraint name
-when supplied. `NotImplemented` is the stub/unregistered-action signal. Unexpected
+when supplied. `NotImplemented` is the unregistered-action signal. Unexpected
 infrastructure failures propagate as errors; never turn them into empty slots or
 success. TypeScript does not encode checked throws; exported error aliases describe
 the typed domain errors, not every possible transport/database outage.
 
-**B-24. Desired, storage ownership.** Add schema only in
-`packages/db/src/schema/booking.ts` and SQL in `supabase/migrations/*_booking.sql`.
-No migration or feature table ships in this scaffold. Required tables/columns:
+**B-24. Desired, storage ownership.** The schema lives in
+`packages/db/src/schema/booking.ts` and the SQL in
+`supabase/migrations/20261017170000_booking.sql`; migration
+`20261018120000_booking_multi_resource.sql` (M1) later changed `booking_resources`
+(see the table). Required tables/columns:
 
 | Table | Required columns and constraints |
 | --- | --- |
-| `booking_resources` | `tenant_id`, `id`, `time_zone`, `weekly` JSONB, `overrides` JSONB, `slot_length_minutes`, `slot_step_minutes`, `buffer_before_minutes`, `buffer_after_minutes`, `minimum_notice_minutes`, `booking_horizon_minutes`; PK `(tenant_id,id)`, unique `tenant_id`, FK to tenant, schema-equivalent config validation |
+| `booking_resources` | `tenant_id`, `id`, `time_zone`, `weekly` JSONB, `overrides` JSONB, `slot_length_minutes`, `slot_step_minutes`, `buffer_before_minutes`, `buffer_after_minutes`, `minimum_notice_minutes`, `booking_horizon_minutes`; PK `(tenant_id,id)`, FK to tenant, schema-equivalent config validation; M1 dropped the original one-per-tenant unique constraint on `tenant_id` and added a nullable `name` (1 to 200 characters) that B-28 inserts may omit |
 | `bookings` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `occupied_starts_at`, `occupied_ends_at`, `buffer_before_minutes`, `buffer_after_minutes`, `status`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive appointment range, saved buffer bounds and exact occupied-bound checks, confirmed status only |
 | `booking_external_blocks` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `source`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive range, nonempty source |
 
@@ -270,30 +277,31 @@ on the transaction's tenant. Parent/child FKs include `tenant_id`; grant the run
 role only needed operations. Add two-tenant read/write denial tests using actual
 `zs_runtime` credentials. Service-role-only tests cannot establish isolation.
 
-**B-26. Desired, verification boundary.** Keep baseline `test` green by excluding
-the public feature folders; feature scripts run normal tests, without skips,
-`todo`, expected-failure flags or no-test success. Public slot fixtures assert exact
-outputs for alignment/notice, buffers/overrides, and both DST transitions. The write
-example checks the bound-dispatcher boundary using a scripted dispatcher response.
-A sixth test in `packages/core/test/booking/integration.test.ts` uses the B-27/B-28
-seam with the real `@zs/db/testing` database, two-tenant fixture and `zs_runtime`
-scoped database. It seeds a resource with service-role SQL and checks the committed
-booking. Setup runs inside the bound dispatch callback so the current wrapper stub
-fails with `NotImplemented` before accessing the absent feature tables. This is a
-template, not the acceptance set. The implementer's real Postgres acceptance must
-also cover cross-tenant denial, invalid zones, midnight buffers, exact horizon and
-notice edges, stale availability, exclusion races, retries and rollback. Hidden
-tests will check requirements beyond the public examples.
+**B-26. Desired, verification boundary.** Baseline `test` excludes the feature
+folders (`test/booking`, `test/crm`); `test:booking` runs the booking folder with
+normal tests, without skips, `todo`, expected-failure flags or no-test success. Public
+slot fixtures assert exact outputs for alignment/notice, buffers/overrides, and both
+DST transitions. The write example checks the bound-dispatcher boundary using a
+scripted dispatcher response. `packages/core/test/booking/integration.test.ts` uses
+the B-27/B-28 seam with the real `@zs/db/testing` database, two-tenant fixture and
+`zs_runtime` scoped database. It seeds a resource with service-role SQL, dispatches
+through the registered handler and checks the committed booking. That test is a
+template, not the acceptance set. Real Postgres acceptance lives in
+`packages/core/test/booking/create.test.ts` (handler behavior) and
+`packages/core/test/booking/slots.test.ts` (slot calculation), and the isolation
+suite in `packages/db/test/isolation.test.ts`. These must keep covering cross-tenant denial,
+invalid zones, midnight buffers, exact horizon and notice edges, stale availability,
+exclusion races, retries and rollback. Separate hidden tests may check requirements
+beyond the public examples.
 
 **B-27. Desired, handler export and composition.**
 `packages/core/src/booking/index.ts` exports
 `bookingHandlers: Readonly<Record<string, ActionHandler>>`, keyed by the action
 type `booking.create`. `ActionHandler` uses the default `DispatchConfig`; handlers
-require no config keys because all feature settings live in tables. The scaffold
-exports `{}` without registering a handler, so direct dispatch of an unregistered
-action raises the shared dispatcher's `NotImplemented`. When implemented, the map
+require no config keys because all feature settings live in tables. The map
 contains exactly the key `booking.create` and no other key, so it is disjoint from
-`crmHandlers`. Export `bookingHandlers`
+`crmHandlers`. Direct dispatch of an unregistered action still raises the shared
+dispatcher's `NotImplemented`. Export `bookingHandlers`
 through `packages/core/src/index.ts` as well. A server composes both features with
 `const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers })`.
 It supplies a trusted `DispatchContext` named `ctx`, with `db` set to the runtime
@@ -347,5 +355,5 @@ The root contracts/core indexes export the feature surface.
 Fixtures in `packages/core/fixtures/public/booking/`:
 `alignment-notice.json`, `buffers-override.json`, `dst-gap.json`, `dst-overlap.json`,
 and `create-booking.json`. They contain synthetic IDs and data only. Five public
-tests consume these examples; a sixth is the SQL integration template. All
-currently fail with `NotImplemented`.
+tests consume these examples; a sixth is the SQL integration template. All six pass
+at the time of writing.
