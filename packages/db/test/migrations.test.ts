@@ -26,7 +26,7 @@ const shipped: Record<string, string> = {
   "20261018090000_function_hardening.sql": "104a8c4f9dd25a76eadd4500e92f524535967d153a6b4863ff623e7a6466dca2",
   "20261018120000_booking_multi_resource.sql": "715a1a92788f566562c6cff962583a3ca7de2bce8f2d4789c483699641a6ba14",
   // Frozen ahead of landing (REVIEW r1 on #9): any later intake change ships as a new migration.
-  "20261018200000_public_intake.sql": "33ed637933c8bcd7e40966b858cafa532ffd5043515c5f16211af88f98bc2ddd",
+  "20261018200000_public_intake.sql": "f12f58728477ebd84b3be851eaf65544138b64248572970b2097c086a00b0180",
 };
 /** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
 const beforeHardening = Object.keys(shipped).filter((name) =>

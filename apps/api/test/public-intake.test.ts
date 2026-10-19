@@ -258,10 +258,14 @@ describe("same reply for new and known people (P-6, P-7)", () => {
     // The unticked SMS box records nothing: no evidence, not a denial.
     expect(await provenance()).toEqual(recorded);
     // New words under the same version would rewrite what earlier visitors agreed to.
-    const edit = (version: string) => h.fixture.service((tx) => tx.query(
-      "UPDATE booking_pages SET disclosure_text='Different words', disclosure_version=$3 WHERE tenant_id=$1 AND id=$2",
-      [h.a.tenantId, page.pageId, version]));
-    await expect(edit(shown.version)).rejects.toThrow(/needs a new disclosure version/);
+    const edit = (version: string, text = "Different words") => h.fixture.service((tx) => tx.query(
+      "UPDATE booking_pages SET disclosure_text=$4, disclosure_version=$3 WHERE tenant_id=$1 AND id=$2",
+      [h.a.tenantId, page.pageId, version, text]));
+    await expect(edit(shown.version)).rejects.toThrow(/already names other text/);
+    await edit("v2");
+    // Going back to v1 with new words is the same rewrite in two steps; v1's own words are fine.
+    await expect(edit(shown.version, "Third words")).rejects.toThrow(/already names other text/);
+    await edit(shown.version, shown.text);
     await edit("v2");
     expect(await provenance()).toEqual(recorded);
     // A visitor still holding the old version is asked to read the new words.

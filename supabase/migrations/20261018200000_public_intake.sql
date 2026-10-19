@@ -16,22 +16,39 @@ CREATE TABLE public.booking_pages (
   PRIMARY KEY (tenant_id, id)
 );
 
--- P-8: a disclosure version names one text. Changing the text without a new version would
--- let consent given against version N be read as agreement to words the visitor never saw,
--- so the text is immutable per version.
+-- P-8: a disclosure version names one text, for the life of the page. Every version a page
+-- has shown is kept with its text; re-using a version with other words (v1 -> v2 -> v1 with
+-- new text) would let consent given against v1 be read as agreement to words never shown.
+CREATE TABLE public.booking_page_disclosures (
+  tenant_id uuid NOT NULL REFERENCES public.tenants(tenant_id),
+  page_id uuid NOT NULL,
+  version text NOT NULL CONSTRAINT booking_page_disclosures_version_length CHECK (char_length(version) BETWEEN 1 AND 50),
+  text text NOT NULL CONSTRAINT booking_page_disclosures_text_length CHECK (char_length(text) BETWEEN 1 AND 2000),
+  PRIMARY KEY (tenant_id, page_id, version),
+  FOREIGN KEY (tenant_id, page_id) REFERENCES public.booking_pages(tenant_id, id)
+);
+
+-- AFTER, so the page row exists for the history FK. Invoker rights: page writes are
+-- service-role setup today, and a page-editing action will need the same grants.
 CREATE FUNCTION public.booking_pages_disclosure_versioned() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  recorded text;
 BEGIN
-  IF NEW.disclosure_text IS DISTINCT FROM OLD.disclosure_text
-     AND NEW.disclosure_version IS NOT DISTINCT FROM OLD.disclosure_version THEN
-    RAISE EXCEPTION 'A changed disclosure text needs a new disclosure version'
+  SELECT d.text INTO recorded FROM public.booking_page_disclosures d
+   WHERE d.tenant_id = NEW.tenant_id AND d.page_id = NEW.id AND d.version = NEW.disclosure_version;
+  IF NOT FOUND THEN
+    INSERT INTO public.booking_page_disclosures (tenant_id, page_id, version, text)
+    VALUES (NEW.tenant_id, NEW.id, NEW.disclosure_version, NEW.disclosure_text);
+  ELSIF recorded IS DISTINCT FROM NEW.disclosure_text THEN
+    RAISE EXCEPTION 'Disclosure version % already names other text; use a new version', NEW.disclosure_version
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'booking_pages',
         COLUMN = 'disclosure_text', CONSTRAINT = 'booking_pages_disclosure_versioned';
   END IF;
-  RETURN NEW;
+  RETURN NULL;
 END $$;
 CREATE TRIGGER booking_pages_disclosure_versioned
-  BEFORE UPDATE OF disclosure_text, disclosure_version ON public.booking_pages
+  AFTER INSERT OR UPDATE OF disclosure_text, disclosure_version ON public.booking_pages
   FOR EACH ROW EXECUTE FUNCTION public.booking_pages_disclosure_versioned();
 REVOKE ALL ON FUNCTION public.booking_pages_disclosure_versioned() FROM PUBLIC;
 DO $$ BEGIN
@@ -121,7 +138,7 @@ CREATE INDEX bookings_tenant_intake_item ON public.bookings (tenant_id, intake_i
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['booking_pages','booking_page_resources','intake_items','intake_item_consent'] LOOP
+  FOREACH t IN ARRAY ARRAY['booking_pages','booking_page_disclosures','booking_page_resources','intake_items','intake_item_consent'] LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', t);
     EXECUTE format($p$CREATE POLICY tenant_scope ON public.%I TO authenticated
@@ -136,6 +153,6 @@ BEGIN
 END $$;
 
 -- Runtime: read pages, record intake, and change only the review columns of an item.
-GRANT SELECT ON public.booking_pages, public.booking_page_resources TO authenticated;
+GRANT SELECT ON public.booking_pages, public.booking_page_disclosures, public.booking_page_resources TO authenticated;
 GRANT SELECT, INSERT ON public.intake_items, public.intake_item_consent TO authenticated;
 GRANT UPDATE (status, contact_id, reviewed_at, reviewed_by) ON public.intake_items TO authenticated;
