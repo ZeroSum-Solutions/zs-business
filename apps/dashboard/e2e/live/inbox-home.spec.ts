@@ -187,9 +187,13 @@ test("sets a deal's value and lead source, and reloads after someone else change
   expect(touched.status()).toBe(200);
   await dialog.getByLabel("Value").fill("6100");
   await dialog.getByRole("button", { name: "Save details" }).click();
-  await expect(dialog.getByRole("alert")).toHaveText("Someone changed this deal since you opened it. Reloaded: check the details and save again.");
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "Someone changed this deal since you opened it. Reloaded: your changes are kept and theirs fill the rest. Check the details and save again.");
+  // The value edit stays; the lead source the other person saved is not overwritten.
+  await expect(dialog.getByLabel("Value")).toHaveValue("6100");
+  await expect(dialog.getByLabel("Lead source")).toHaveValue("phone");
   await dialog.getByRole("button", { name: "Save details" }).click();
   await expect(dialog).toBeHidden();
   await expect(card.getByTestId("deal-value")).toHaveText("$6,100");
-  await expect(card.getByTestId("deal-source")).toHaveText("From Referral");
+  await expect(card.getByTestId("deal-source")).toHaveText("From Phone");
 });
