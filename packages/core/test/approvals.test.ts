@@ -5,8 +5,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Conflict, NotFound, TenantDenied, ValidationFailed, type ActionCommand, type MemberRole } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
+  ACTION_PERMISSIONS,
   approvalForAction,
   approvalHandlers,
+  approvalPolicy,
   approvedDispatch,
   bookingHandlers,
   checkApproval,
@@ -110,7 +112,7 @@ describe("request (A-5)", () => {
 
   it("refuses actions that cannot be approved, and actions the requester may not ask for", async () => {
     const session = sessionFor(owner.userId);
-    for (const actionType of ["approval.approve", "approval.request", "booking.public_request", "wallet.topup.create", "nope.never"])
+    for (const actionType of ["approval.approve", "approval.request", "booking.public_request", "calendar.google.connect", "wallet.topup.create", "nope.never"])
       await expect(session.requestApproval({ action: { ...bookingAction(), actionType }, summary: "x" }, randomUUID()))
         .rejects.toBeInstanceOf(ValidationFailed);
     // member.invite needs "members"; staff hold calendar, customers and inbox drafts.
@@ -119,6 +121,26 @@ describe("request (A-5)", () => {
     }, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
     await expect(sessionFor(randomUUID()).requestApproval({ action: bookingAction(), summary: "x" }, randomUUID()))
       .rejects.toBeInstanceOf(TenantDenied);
+  });
+
+  it("never lets calendar.google.connect be requested, even past the edge check (G-2)", async () => {
+    expect(approvalPolicy("calendar.google.connect", ACTION_PERMISSIONS)).toBeNull();
+    // The disconnect action keeps its ordinary policy.
+    expect(approvalPolicy("calendar.google.disconnect", ACTION_PERMISSIONS)).toEqual({ request: "publish", required: false });
+    const connectionId = randomUUID();
+    const action = {
+      actionType: "calendar.google.connect", target: { type: "calendar_connection", id: connectionId },
+      payload: { connectionId, resourceId, accountEmail: null, scope: "x", refreshTokenSealed: "zsg1.a.b.c" },
+    };
+    await expect(sessionFor(owner.userId).requestApproval({ action, summary: "Connect" }, randomUUID())).rejects.toBeInstanceOf(ValidationFailed);
+    // A dispatcher whose authorize lets everything through still meets the handler's refusal.
+    const approvalId = randomUUID();
+    await expect(directDispatch(deps(), tenantId, owner.userId, async () => {})({
+      actionType: "approval.request", target: { tenantId, type: "approval", id: approvalId },
+      approvalReference: { tenantId, id: randomUUID() }, idempotencyKey: randomUUID(),
+      payload: { approvalId, action, summary: "Connect", expiresInMinutes: 60 },
+    })).rejects.toBeInstanceOf(ValidationFailed);
+    expect(await count("SELECT count(*) AS n FROM approvals WHERE tenant_id=$1 AND action_type='calendar.google.connect'", [tenantId])).toBe(0);
   });
 
   it("refuses site actions at the edge and in the handler: their publish path runs around the handler", async () => {

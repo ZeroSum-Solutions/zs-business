@@ -24,6 +24,7 @@ import { activepiecesRoutes } from "./routes/activepieces.js";
 import { followUpRoutes } from "./routes/agents.js";
 import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
+import { calendarRoutes } from "./routes/calendar.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { homeRoutes } from "./routes/home.js";
@@ -36,6 +37,7 @@ import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
 import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-webhook.js";
+import { googleCalendarRoutes, type GoogleCalendarConfig } from "./public/google-calendar.js";
 import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
@@ -75,6 +77,12 @@ export interface AppDependencies {
   readonly stripe?: StripeClient;
   /** Signed Stripe events into the billing inbox (stripe.md S-3); absent means the route is off. */
   readonly stripeWebhook?: StripeWebhookConfig;
+  /**
+   * Google Calendar busy sync (google-calendar.md G-1, G-2, G-8): connecting, the OAuth callback
+   * and the push webhook. Absent means POST /v1/calendar/google/connect is 404 and both anonymous
+   * routes are off.
+   */
+  readonly googleCalendar?: GoogleCalendarConfig;
   /** Twilio status callbacks and inbound STOP/START/HELP texts (twilio.md T-6, T-8); absent means off. */
   readonly twilioWebhook?: TwilioWebhookConfig;
   /**
@@ -161,6 +169,7 @@ export function createApp(deps: AppDependencies) {
   app.use("/v1/*", deadline);
   app.use("/public/v1/*", deadline);
   app.use("/webhooks/*", deadline);
+  app.use("/oauth/*", deadline);
   app.use(`${ACTIVEPIECES_INBOUND_PREFIX}/*`, deadline);
 
   const edge = {
@@ -171,6 +180,13 @@ export function createApp(deps: AppDependencies) {
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
     ...(deps.stripe ? { billing: { stripe: deps.stripe } } : {}),
+    ...(deps.googleCalendar ? {
+      calendar: {
+        google: deps.googleCalendar.google,
+        stateSecrets: deps.googleCalendar.stateSecrets,
+        tokenPublicKey: deps.googleCalendar.tokenPublicKey,
+      },
+    } : {}),
     ...(deps.sites ? { sites: deps.sites } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
@@ -187,6 +203,7 @@ export function createApp(deps: AppDependencies) {
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
   if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
+  if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
 
@@ -214,6 +231,7 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
+  app.route("/v1", calendarRoutes);
   if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
@@ -236,8 +254,14 @@ export function createApp(deps: AppDependencies) {
     // An Auth outage answers 503 like a busy pool, but someone should hear about it.
     if (mapped.status === 500 || error instanceof AuthUnavailable) deps.onError?.(error);
     // A public route's own no-store header is not set when the deadline answers for it.
-    if (mapped.status === 503)
-      return c.json(mapped.body, 503, { "Retry-After": "1", ...(c.req.path.startsWith("/public/") ? { "Cache-Control": "no-store" } : {}) });
+    if (mapped.status === 503) {
+      const path = c.req.path;
+      return c.json(mapped.body, 503, {
+        "Retry-After": "1",
+        ...(path.startsWith("/public/") || path.startsWith("/oauth/") ? { "Cache-Control": "no-store" } : {}),
+        ...(path.startsWith("/oauth/") ? { "Referrer-Policy": "no-referrer" } : {}),
+      });
+    }
     return c.json(mapped.body, mapped.status);
   });
   return app;
@@ -247,6 +271,7 @@ export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/r
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
+export type { GoogleCalendarConfig } from "./public/google-calendar.js";
 export type { TwilioWebhookConfig } from "./public/twilio-webhook.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createPostgresRateLimiter } from "./public/postgres-limiter.js";

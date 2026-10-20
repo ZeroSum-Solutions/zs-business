@@ -5,6 +5,7 @@ export {
   createSession,
   directDispatch,
   memberAuthorize,
+  memberDispatch,
   PAYLOAD_PERMISSION_ACTIONS,
   parseInput,
   trimTrailingSlashes,
@@ -27,6 +28,14 @@ export {
   type EmailFeedbackOutcome,
   type EmailFeedbackSession,
 } from "./email-feedback-session.js";
+export {
+  createOAuthCallbackSession,
+  googleConnectIdempotencyKey,
+  type OAuthCallbackInput,
+  type OAuthCallbackOutcome,
+  type OAuthCallbackReason,
+  type OAuthCallbackSession,
+} from "./oauth-callback-session.js";
 export {
   createSmsStatusSession,
   createTwilioInboundSession,
