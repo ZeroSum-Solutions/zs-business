@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { parseServerEnv, PLACEHOLDER_BOOKING_KEY_SECRET, PLACEHOLDER_JWT_SECRET, PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../src/config.js";
-import { KEY_SECRET, PREVIOUS_KEY_SECRET, PREVIOUS_UNSUBSCRIBE_SECRET, SECRET, UNSUBSCRIBE_SECRET } from "./helpers.js";
+import {
+  KEY_SECRET,
+  PREVIOUS_KEY_SECRET,
+  PREVIOUS_RESEND_WEBHOOK_SECRET,
+  PREVIOUS_UNSUBSCRIBE_SECRET,
+  RESEND_WEBHOOK_SECRET,
+  SECRET,
+  UNSUBSCRIBE_SECRET,
+} from "./helpers.js";
 
 const LOCAL = { DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", SESSION_CHECK: "local-stub" };
 const base = { ...LOCAL, JWT_VERIFIER: "hs256", JWT_SECRET: SECRET };
@@ -114,6 +122,37 @@ describe("parseServerEnv", () => {
       expect(() => parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_SECRET: UNSUBSCRIBE_SECRET, UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: secret }))
         .toThrow(/UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET/);
     }
+  });
+
+  it("keeps the Resend webhook off until its secret is set", () => {
+    expect(parseServerEnv(base).resendWebhook).toBeNull();
+    expect(parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_SECRET: UNSUBSCRIBE_SECRET }).resendWebhook).toBeNull();
+    expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_PREVIOUS_SECRET: PREVIOUS_RESEND_WEBHOOK_SECRET }))
+      .toThrow(/RESEND_WEBHOOK_PREVIOUS_SECRET needs RESEND_WEBHOOK_SECRET/);
+  });
+
+  it("reads the Resend webhook secrets", () => {
+    expect(parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET }).resendWebhook).toEqual({
+      secrets: { current: RESEND_WEBHOOK_SECRET },
+    });
+    const env = parseServerEnv({
+      ...base, RESEND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_PREVIOUS_SECRET: PREVIOUS_RESEND_WEBHOOK_SECRET,
+    });
+    expect(env.resendWebhook).toEqual({ secrets: { current: RESEND_WEBHOOK_SECRET, previous: PREVIOUS_RESEND_WEBHOOK_SECRET } });
+    // It turns no other public route on.
+    expect(env.publicIntake).toBeNull();
+    expect(env.unsubscribe).toBeNull();
+  });
+
+  it("refuses a malformed Resend webhook secret, naming the variable", () => {
+    const short = "whsec_" + Buffer.from("too-short").toString("base64");
+    for (const secret of ["", RESEND_WEBHOOK_SECRET.slice("whsec_".length), "whsec_", "whsec_not base64!", short, `${RESEND_WEBHOOK_SECRET} `]) {
+      expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: secret }), secret).toThrow(/RESEND_WEBHOOK_SECRET/);
+      expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: RESEND_WEBHOOK_SECRET, RESEND_WEBHOOK_PREVIOUS_SECRET: secret }), secret)
+        .toThrow(/RESEND_WEBHOOK_PREVIOUS_SECRET/);
+    }
+    expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: short })).toThrow(/too short/);
+    expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: "sk_live_x" })).toThrow(/whsec_/);
   });
 
   it("takes the client address source from explicit settings only", () => {
