@@ -609,8 +609,9 @@ against the pinned Supabase Root 2021 CA.
    The API builds with `pnpm build:vercel` (`scripts/build-vercel.mjs`): esbuild bundles
    `src/vercel.ts` into one Node 24 function under `.vercel/output` (Build Output API).
    API env per target: `DATABASE_URL` (zs_runtime, port 6543), `DATABASE_CA_CERT`,
-   `DATABASE_POOL_MAX=3`, `JWT_VERIFIER` with `JWT_SECRET` or `JWT_JWKS_URL`, `JWT_ISSUER`
-   (`https://<ref>.supabase.co/auth/v1`), `SESSION_CHECK=supabase`, `SUPABASE_URL`,
+   `DATABASE_POOL_MAX=3`, `JWT_VERIFIER=jwks` with `JWT_JWKS_URL`
+   (`https://<ref>.supabase.co/auth/v1/.well-known/jwks.json`; both projects sign with ES256, so
+   `hs256` refuses every session), `JWT_ISSUER` (`https://<ref>.supabase.co/auth/v1`), `SESSION_CHECK=supabase`, `SUPABASE_URL`,
    `SUPABASE_ANON_KEY`, and for public booking `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BASE_URL`
    and `PUBLIC_CLIENT_IP_HEADER=x-vercel-forwarded-for`. The bundle carries `static/` for the
    booking page. The public rate limits count in Postgres (`PUBLIC_RATE_LIMIT_STORE` unset
@@ -688,7 +689,11 @@ against the pinned Supabase Root 2021 CA.
      abandonments did not happen as planned. Nothing is proven, so in transaction mode the
      check fails. Rerun with more rounds, for example
      `pnpm --filter @zs/api check:hosted -- --abandon-rounds=40` (1 to 200; default 10). If
-     reuse never shows, switch to session mode as above. In session mode an inconclusive
+     reuse never shows, switch to session mode as above. On the Micro projects that does not
+     work: in session mode 120 concurrent API requests ran out of pooler slots and got 500
+     (2026-10-20), while 200 rounds (800 abandoned transactions) in transaction mode never
+     reused an abandoned backend. Both projects stay in transaction mode with this check
+     inconclusive until the probe or the pooler setup changes. In session mode an inconclusive
      result passes when the only reason is `reused: 0`.
 
    The check's `verdict` field states the result and the next step. On direct Postgres the
