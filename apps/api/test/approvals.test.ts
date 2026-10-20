@@ -39,7 +39,7 @@ function bookingAction() {
 }
 const request = (token: string, body: unknown, key: string | null = randomUUID()) =>
   call(h.app, "POST", "/v1/approvals", { token, body, ...(key === null ? {} : { key }) });
-const decide = (token: string, id: string, verb: "approve" | "reject" | "revoke", body: unknown = {}, key = randomUUID()) =>
+const decide = (token: string, id: string, verb: "approve" | "reject" | "revoke", body: unknown = {}, key: string = randomUUID()) =>
   call(h.app, "POST", `/v1/approvals/${id}/${verb}`, { token, key, body });
 async function requested(token: string) {
   const action = bookingAction();
@@ -125,13 +125,23 @@ describe("approval routes", () => {
     expect(otherList.items.map((item) => item.id)).not.toContain(approval.id);
   });
 
-  it("requires an Idempotency-Key on writes", async () => {
+  it("requires an Idempotency-Key on writes, and refuses the reserved run key", async () => {
     const missing = await request(staff.token, { action: bookingAction(), summary: "x" }, null);
     expect(missing.status).toBe(400);
     expect(errorOf(missing).code).toBe("ValidationFailed");
     const { approval } = await requested(staff.token);
     const decision = await call(h.app, "POST", `/v1/approvals/${approval.id}/approve`, { token: h.a.token, body: {} });
     expect(decision.status).toBe(400);
+    // A-7: approval:<id> is the run's own key.
+    for (const response of [
+      await decide(h.a.token, approval.id, "approve", {}, `approval:${approval.id}`),
+      await call(h.app, "POST", "/v1/crm/contacts", { token: staff.token, key: `approval:${approval.id}`, body: { displayName: "Ada" } }),
+    ]) {
+      expect(response.status).toBe(400);
+      expect(errorOf(response).code).toBe("ValidationFailed");
+    }
+    const approved = await decide(h.a.token, approval.id, "approve");
+    expect(approved.status).toBe(200);
   });
 });
 

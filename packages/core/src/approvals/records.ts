@@ -103,18 +103,20 @@ export function approvedBinding(row: ApprovalRow): ActionBinding | null {
 
 /**
  * A-7 resolveApproval for a stored approval: under a shared row lock, the binding when the
- * approval is approved and unexpired. Its actor is the decider, so the dispatcher's binding
- * comparison refuses anyone else (BindingMismatch), as it refuses another target or payload.
+ * approval is approved and unexpired when the lock is granted. Its actor is the decider, so the
+ * dispatcher's binding comparison refuses anyone else (BindingMismatch), as it refuses another
+ * target or payload.
  */
 export async function resolveStoredApproval(
   tx: Transaction,
   tenantId: string,
   approvalId: string,
-  now: Date,
+  now: () => Date,
 ): Promise<ActionBinding> {
   const row = await loadApproval(tx, tenantId, approvalId, "share");
   if (!row) throw new TenantDenied();
-  const current = standing(row, now);
+  // Read the clock once the lock is held: a wait on a decision or revocation counts toward expiry.
+  const current = standing(row, now());
   if (current === "expired") throw new Conflict("The approval has expired", { reason: "approval_expired" });
   const binding = approvedBinding(row);
   if (current !== "approved" || !binding) throw new Conflict("The approval is not approved", { reason: "approval_not_approved" });
