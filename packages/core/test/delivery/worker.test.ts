@@ -2,7 +2,14 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { MESSAGE_SEND_REQUESTED } from "@zs/contracts";
-import { createFakeProvider, verifyUnsubscribeToken, type DeliveryProvider, type DeliveryReport } from "../../src/index.js";
+import type { Transaction } from "@zs/db";
+import {
+  createFakeProvider,
+  isPermanentIngestError,
+  verifyUnsubscribeToken,
+  type DeliveryProvider,
+  type DeliveryReport,
+} from "../../src/index.js";
 import { createDeliveryHarness, PRICES, UNSUBSCRIBE_SECRET, type DeliveryHarness } from "./helpers.js";
 
 let h: DeliveryHarness;
@@ -294,6 +301,138 @@ describe("worker faults", () => {
     // An operator settles it once, through a worker whose hook works again.
     await h.worker().settleUnknown({ tenantId: tenant, deliveryId: dead.id, outcome: "sent", providerMessageId: "checked-by-operator" });
     expect(await h.wallet(tenant)).toEqual({ balance: before.balance - 2 * PRICES.email, reserved: before.reserved });
+  });
+});
+
+describe("hub review r1", () => {
+  const setEmail = (contactId: string, email: string | null) => h.service((tx) => tx.query(
+    "UPDATE crm_contacts SET normalized_email=$3 WHERE tenant_id=$1 AND id=$2", [tenant, contactId, email]));
+
+  it.each(["max_attempts", "consent withdrawn", "window closed"] as const)(
+    "a failed retry after an uncertain attempt keeps the outcome unknown, so %s still asks the provider", async (path) => {
+      await h.credit(tenant, 50);
+      const before = await h.wallet(tenant);
+      const contactId = await h.contact(tenant, { consent: { email: "granted" } });
+      const { messageId } = await h.enqueue(tenant, { contactId, purpose: "marketing" });
+      const worker = h.worker({ maxAttempts: path === "max_attempts" ? 2 : 4 });
+      // The provider accepts attempt 1 but the reply is lost; attempt 2 is refused at the edge.
+      h.provider.queue("lose-reply", "edge-fail");
+      await worker.runOnce();
+      h.clock.advance(1_000);
+      await worker.runOnce();
+      expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "uncertain", outcome_unknown: true, attempts: 2 });
+      expect(await h.wallet(tenant)).toEqual({ balance: before.balance, reserved: before.reserved + PRICES.email });
+      if (path === "consent withdrawn")
+        await h.service((tx) => tx.query(
+          "UPDATE crm_contact_consent SET status='denied' WHERE tenant_id=$1 AND contact_id=$2", [tenant, contactId]));
+      h.clock.advance(path === "window closed" ? 24 * 60 * 60 * 1000 : 2_000);
+      const calls = h.provider.calls.length;
+      await worker.runOnce();
+      expect(h.provider.calls.length).toBe(calls);
+      expect(h.provider.lookups).toHaveLength(1);
+      expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "sent", outcome_unknown: false });
+      expect(await captures(tenant)).toBe(1);
+      expect(await h.wallet(tenant)).toEqual({ balance: before.balance - PRICES.email, reserved: before.reserved });
+    });
+
+  it("a failed attempt with no uncertain one before it still releases and retries", async () => {
+    await h.credit(tenant, 50);
+    const before = await h.wallet(tenant);
+    const { messageId } = await h.enqueue(tenant, { contactId: await h.contact(tenant) });
+    h.provider.queue("fail");
+    await h.worker().runOnce();
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "pending", outcome_unknown: false });
+    expect(await h.wallet(tenant)).toEqual(before);
+  });
+
+  it("leaves a valid event unprocessed after a passing database error, and drops only a permanent one", async () => {
+    const contactId = await h.contact(tenant);
+    const transient = await h.enqueue(tenant, { contactId });
+    let failWith: string | null = "55P03";
+    const flaky = <T>(work: (tx: Transaction) => Promise<T>) => h.service((tx) => work(new Proxy(tx, {
+      get(target, key, receiver) {
+        if (key !== "query") {
+          const value = Reflect.get(target, key, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string, params?: unknown[]) => {
+          if (failWith && sql.includes("INSERT INTO message_deliveries")) {
+            const code = failWith;
+            failWith = null;
+            return Promise.reject(Object.assign(new Error(`simulated ${code}`), { code }));
+          }
+          return target.query(sql, params as never);
+        };
+      },
+    })));
+    const reports: DeliveryReport[] = [];
+    const { createDeliveryWorker } = await import("../../src/index.js");
+    const worker = createDeliveryWorker({
+      service: flaky, providers: { email: h.provider, sms: h.provider }, approvals: h.approvals.port,
+      clock: h.clock, generateId: randomUUID, config: h.worker().config, report: (event) => reports.push(event),
+    });
+    expect(await worker.ingest()).toMatchObject({ ingested: 0, invalid: 0, deferred: 1 });
+    expect(reports).toMatchObject([{ kind: "ingest_deferred", error: "simulated 55P03" }]);
+    expect(await h.rows("SELECT 1 FROM outbox WHERE tenant_id=$1 AND processed_at IS NULL", [tenant])).toHaveLength(1);
+    expect(await worker.ingest()).toMatchObject({ ingested: 1, deferred: 0 });
+    expect(await h.delivery(tenant, transient.messageId)).toMatchObject({ status: "pending" });
+    failWith = "23514";
+    await h.enqueue(tenant, { contactId });
+    expect(await worker.ingest()).toMatchObject({ ingested: 0, invalid: 1, deferred: 0 });
+    expect(await h.rows("SELECT 1 FROM outbox WHERE tenant_id=$1 AND processed_at IS NULL", [tenant])).toHaveLength(0);
+  });
+
+  it.each([["23505", true], ["22001", true], ["55P03", false], ["57014", false], ["40P01", false], ["40001", false], [undefined, false]])(
+    "isPermanentIngestError(%s) is %s", (code, permanent) => {
+      expect(isPermanentIngestError(code === undefined ? new Error("connection reset") : Object.assign(new Error("x"), { code })))
+        .toBe(permanent);
+    });
+
+  it("stores and sends the largest legal email body, 20000 control characters", async () => {
+    await h.credit(tenant, 50);
+    const { messageId } = await h.enqueue(tenant, { contactId: await h.contact(tenant), body: "\u0001".repeat(20_000) });
+    await h.worker().runOnce();
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "sent" });
+  });
+
+  it("after a definite failure, the next attempt goes to the contact's current address, or blocks if it was cleared", async () => {
+    await h.credit(tenant, 50);
+    const moved = await h.contact(tenant);
+    const cleared = await h.contact(tenant, { phone: "+15555550150" });
+    const worker = h.worker();
+    const a = await h.enqueue(tenant, { contactId: moved });
+    h.provider.queue("fail");
+    await worker.runOnce();
+    const b = await h.enqueue(tenant, { contactId: cleared });
+    h.provider.queue("fail");
+    await worker.runOnce();
+    const corrected = `fixed-${randomUUID().slice(0, 8)}@haldenrowe.example`;
+    await setEmail(moved, corrected);
+    await setEmail(cleared, null);
+    h.clock.advance(5_000);
+    await worker.runOnce();
+    const sent = await h.delivery(tenant, a.messageId);
+    expect(sent).toMatchObject({ status: "sent", recipient_address: corrected });
+    expect(h.provider.delivered.filter((item) => item.request.deliveryId === sent.id).map((item) => item.request.to)).toEqual([corrected]);
+    expect(await h.delivery(tenant, b.messageId)).toMatchObject({ status: "blocked", final_reason: "no_address" });
+  });
+
+  it("never repeats an unknown send to a changed address; it asks the provider", async () => {
+    await h.credit(tenant, 50);
+    const before = await h.wallet(tenant);
+    const contactId = await h.contact(tenant);
+    const { messageId } = await h.enqueue(tenant, { contactId });
+    const worker = h.worker();
+    h.provider.queue("timeout");
+    await worker.runOnce();
+    await setEmail(contactId, `new-${randomUUID().slice(0, 8)}@haldenrowe.example`);
+    const calls = h.provider.calls.length;
+    h.clock.advance(5_000);
+    await worker.runOnce();
+    expect(h.provider.calls.length).toBe(calls);
+    expect(h.provider.lookups).toHaveLength(1);
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "blocked", final_reason: "address_changed", outcome_unknown: false });
+    expect(await h.wallet(tenant)).toEqual(before);
   });
 });
 

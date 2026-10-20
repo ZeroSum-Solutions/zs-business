@@ -28,7 +28,7 @@ const onSchema = z.object({
     .refine((value) => value !== PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET, "UNSUBSCRIBE_TOKEN_SECRET is still the .env.example placeholder"),
   // Absolute https URL of the API's unsubscribe route, e.g. https://api.example.com/public/v1/unsubscribe
   DELIVERY_UNSUBSCRIBE_BASE_URL: z.url({ protocol: /^https$/ }),
-  // One cron run stops starting work this long after it began; it must fit the function's limit.
+  // One run stops starting work this long after it began; the cron entry allows at most 20 s.
   DELIVERY_RUN_BUDGET_MS: int(1_000, 600_000).default(20_000),
   DELIVERY_CLAIM_LIMIT: int(1, 50).default(2),
   DELIVERY_PROVIDER_TIMEOUT_MS: int(1_000, 60_000).default(5_000),
@@ -54,6 +54,27 @@ export interface DeliveryEnv {
   readonly runner: DeliveryRunnerEnv | null;
   /** Null when CRON_SECRET is unset: the cron route answers 404. */
   readonly cronSecret: string | null;
+}
+
+/**
+ * R-9: database time one pass may add to its provider waits: a step's prepare and record
+ * transactions, and the pass's ingest and claim.
+ */
+export const DELIVERY_STEP_DB_MS = 500;
+export const DELIVERY_PASS_DB_MS = 1_000;
+/** The longest a pass of `claimLimit` deliveries is assumed to take before one has been measured. */
+export const deliveryPassEstimateMs = (claimLimit: number, providerTimeoutMs: number) =>
+  claimLimit * (providerTimeoutMs + DELIVERY_STEP_DB_MS) + DELIVERY_PASS_DB_MS;
+/**
+ * R-9: the cron function's budget limit. Vercel stops the function at 30 s (build-vercel.mjs
+ * `maxDuration`); the rest is room for a pass that runs past its estimate.
+ */
+export const DELIVERY_CRON_BUDGET_LIMIT_MS = 20_000;
+
+/** R-9: the cron entry refuses a budget its Vercel function could not finish. */
+export function assertDeliveryCronFits(runner: DeliveryRunnerEnv | null): void {
+  if (runner !== null && runner.budgetMs > DELIVERY_CRON_BUDGET_LIMIT_MS)
+    throw new Error(`Invalid environment: DELIVERY_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
 
 const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
@@ -82,9 +103,9 @@ export function parseDeliveryEnv(env: Readonly<Record<string, string | undefined
   // URL options (sslmode, ssl) would replace the pinned TLS settings.
   if ((!loopback || data.DATABASE_CA_CERT !== undefined) && data.DELIVERY_DATABASE_URL.includes("?"))
     throw new Error("Invalid environment: DELIVERY_DATABASE_URL must not carry a query string");
-  // A run must be able to finish its last provider call inside the budget.
-  if (data.DELIVERY_CLAIM_LIMIT * data.DELIVERY_PROVIDER_TIMEOUT_MS > data.DELIVERY_RUN_BUDGET_MS)
-    throw new Error("Invalid environment: DELIVERY_CLAIM_LIMIT × DELIVERY_PROVIDER_TIMEOUT_MS must fit in DELIVERY_RUN_BUDGET_MS");
+  // A run must be able to finish one whole pass, database time included, inside the budget.
+  if (deliveryPassEstimateMs(data.DELIVERY_CLAIM_LIMIT, data.DELIVERY_PROVIDER_TIMEOUT_MS) > data.DELIVERY_RUN_BUDGET_MS)
+    throw new Error(`Invalid environment: DELIVERY_CLAIM_LIMIT × (DELIVERY_PROVIDER_TIMEOUT_MS + ${DELIVERY_STEP_DB_MS} ms) + ${DELIVERY_PASS_DB_MS} ms must fit in DELIVERY_RUN_BUDGET_MS`);
   return {
     cronSecret: cron.data ?? null,
     runner: {
