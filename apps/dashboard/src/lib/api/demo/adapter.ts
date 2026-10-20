@@ -80,7 +80,8 @@ export interface DemoAdapterOptions {
 /** Hooks that act as a second person using the business, to show conflicts. */
 export interface DemoControls {
   bookAsSomeoneElse(resourceId: string, startsAt: string): BookingRecord;
-  editDealElsewhere(dealId: string): DealRecord;
+  /** Saves the deal as someone else: a new revision, with any details given. */
+  editDealElsewhere(dealId: string, details?: Partial<Pick<DealSummary, "value" | "leadSource">>): DealRecord;
   /**
    * The next write is saved, but its response is lost: the caller sees a network error.
    * With `goOffline` the connection stays down afterwards, until `setOffline(false)`.
@@ -675,10 +676,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       return toRecord(insertBooking(resourceOrThrow(resourceId), startsAt, newId(), "Booked by phone"));
     },
 
-    editDealElsewhere(dealId) {
+    editDealElsewhere(dealId, details = {}) {
       const deal = deals.get(dealId);
       if (!deal) throw demoError("Forbidden");
-      const updated: DealSummary = { ...deal, revision: deal.revision + 1, updatedAt: nowIso() };
+      const updated: DealSummary = { ...deal, ...details, revision: deal.revision + 1, updatedAt: nowIso() };
       deals.set(updated.id, updated);
       return toDealRecord(clone(updated));
     },

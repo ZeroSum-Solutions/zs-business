@@ -1,6 +1,7 @@
 // The HTTP client reads and writes the M3c routes with the contract schemas (inbox-home.md I-8, H-1, H-3).
 import { describe, expect, it } from "vitest";
 import { createHttpClient } from "../src/lib/api/http-client";
+import { isReplyConflict } from "../src/lib/api/errors";
 
 const TENANT = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70";
 const CONTACT = "5e0c1a2b-7d3f-4c8a-9b1e-000000000001";
@@ -116,12 +117,21 @@ describe("http client: inbox", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("maps not_draft and no_email to plain copy", async () => {
-    const { api } = client([conflict({ reason: "not_draft", status: "approved" }), conflict({ reason: "no_email" })]);
+  it("maps not_draft, no_email and approved_by_other to plain copy", async () => {
+    const other = "0b5a7f2e-3c1d-4e8f-9a6b-1c2d3e4f5a6b";
+    const { api } = client([
+      conflict({ reason: "not_draft", status: "approved" }), conflict({ reason: "no_email" }), conflict({ reason: "approved_by_other", approvedBy: other }),
+    ]);
     await expect(api.approveReply(REPLY, key(4))).rejects.toMatchObject({
       kind: "conflict", reason: "not_draft", details: { status: "approved" }, message: "This reply is no longer a draft. Someone approved or discarded it first.",
     });
     await expect(api.approveReply(REPLY, key(5))).rejects.toMatchObject({ kind: "conflict", reason: "no_email", message: expect.stringMatching(/no email address/) });
+    const finishing = await api.approveReply(REPLY, key(6)).catch((error: unknown) => error);
+    expect(finishing).toMatchObject({
+      kind: "conflict", reason: "approved_by_other", details: { approvedBy: other },
+      message: "Another owner already approved this reply. They finish sending it, or revoke their approval first.",
+    });
+    expect(isReplyConflict(finishing)).toBe(true);
   });
 });
 
