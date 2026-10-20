@@ -225,7 +225,7 @@ function operations(session: Session): Record<string, { permission: Permission |
     getFollowUpRun: { permission: "inbox.drafts", run: async () => {
       const runId = randomUUID();
       await fixture.service((tx) => tx.query(
-        "INSERT INTO agent_runs (tenant_id,id,started_at,finished_at,status) VALUES ($1,$2,$3,$3,'completed')", [tenant.tenantId, runId, NOW]));
+        "INSERT INTO agent_runs (tenant_id,id,started_at,finished_at,status,max_decisions) VALUES ($1,$2,$3,$3,'completed',3)", [tenant.tenantId, runId, NOW]));
       return session.getFollowUpRun(runId);
     } },
   };
