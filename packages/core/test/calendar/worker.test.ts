@@ -384,6 +384,30 @@ describe("disconnect cleanup (G-9)", () => {
     expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).status).toBe("disconnected");
   });
 
+  it("keeps a grant another live connection shares: the reconnect of the resource, or the same account elsewhere", async () => {
+    const { w, worker } = await connectedWithChannel();
+    // The owner reconnected the same resource: the new row is active, the old one disconnecting.
+    await disconnect(w);
+    const replacement = await h.connection(w.resource, w.google.account(), START);
+    w.google.reset();
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.count("revoke")).toBe(0);
+    expect(await h.blocks(w.resource.tenantId, w.connectionId)).toEqual([]);
+    expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).status).toBe("disconnected");
+    expect((await h.connectionRow(w.resource.tenantId, replacement)).status).toBe("active");
+
+    // The same Google account connected in another tenant keeps its grant too.
+    const shared = "shared@haldenrowe.example";
+    const other = await h.resource(await h.tenant());
+    await h.connection(other, w.google.account(), START, { email: shared });
+    const tenantId = await h.tenant();
+    const leaving = await h.connection(await h.resource(tenantId), w.google.account(), START, { email: shared.toUpperCase(), status: "disconnecting" });
+    w.google.reset();
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.count("revoke")).toBe(0);
+    expect((await h.connectionRow(tenantId, leaving)).status).toBe("disconnected");
+  });
+
   it("an already revoked grant or an unreadable token still cleans up", async () => {
     const { w, worker } = await connectedWithChannel();
     w.google.revokeGrant(w.token);

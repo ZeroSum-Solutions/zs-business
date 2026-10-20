@@ -311,7 +311,19 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       } catch { /* ignored (G-9) */ }
     }
     let revoke = "skipped";
-    if (refreshToken !== null) {
+    // Google revokes a whole grant (one Google account and this client), not one refresh token,
+    // so a revoke would also end a live connection on the same account: the reconnect that
+    // replaced this row, or another resource or tenant. Then the grant stays, and only this row
+    // lets go of its token.
+    const shared = refreshToken !== null && (await deps.service((tx) => tx.query(
+      `SELECT 1 FROM calendar_connections other
+        WHERE other.status IN ('active', 'reauthorize') AND NOT (other.tenant_id=$1 AND other.id=$2)
+          AND ((other.tenant_id=$1 AND other.resource_id=$3)
+            OR lower(other.account_email) = (SELECT lower(account_email) FROM calendar_connections WHERE tenant_id=$1 AND id=$2))
+        LIMIT 1`,
+      [row.tenant_id, row.id, row.resource_id]))).rowCount === 1;
+    if (shared) revoke = "shared_grant";
+    else if (refreshToken !== null) {
       try {
         await call((signal) => deps.google.revoke(refreshToken, { signal }));
         revoke = "revoked";
