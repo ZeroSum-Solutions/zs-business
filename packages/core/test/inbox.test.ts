@@ -9,8 +9,8 @@ import { ActionError, THREAD_ENTRY_LIMIT, type MemberRole, type ThreadSummary } 
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createPublicSession } from "../src/edge/public-session.js";
 import { mapError } from "../src/edge/errors.js";
-import { createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
-import { settleReplyDelivery } from "../src/index.js";
+import { createSession, directDispatch, memberAuthorize, type EdgeDependencies, type Session } from "../src/edge/session.js";
+import { approvalForAction, settleReplyDelivery } from "../src/index.js";
 
 /** The injected clock; every write helper moves it one minute forward first. */
 let now = Date.parse("2026-10-19T08:00:00.000Z");
@@ -550,5 +550,98 @@ describe("settleReplyDelivery (I-6, I-9)", () => {
       "UPDATE inbox_replies SET body='changed' WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, approved.result.id],
     ))).rejects.toMatchObject({ code: "42501" });
     expect(await replyRow(approved.result.id)).toMatchObject({ status: "approved", settled_at: null });
+  });
+});
+
+describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", () => {
+  /** The proposals to send one reply, oldest first. */
+  async function proposals(replyId: string) {
+    return (await fixture.service((tx) => tx.query<{
+      id: string; status: string; requested_by: string; decided_by: string | null; revoked_by: string | null; payload: unknown;
+    }>(
+      `SELECT id, status, requested_by, decided_by, revoked_by, payload FROM approvals
+        WHERE tenant_id=$1 AND action_type='inbox.reply.send' AND target_type='inbox_reply' AND target_id=$2 ORDER BY requested_at, id`,
+      [fixture.a.tenantId, replyId],
+    ))).rows;
+  }
+
+  it("a draft proposes its send once; approving decides it and runs the send under that approval", async () => {
+    const customer = await contact(a, { displayName: "Vera Moss", email: "vera@example.com" });
+    const staffSession = sessionFor(staff.userId);
+    const key = randomUUID();
+    const drafted = await draft(staffSession, customer, "Your order is in.", key);
+    expect(await draft(staffSession, customer, "Your order is in.", key)).toEqual(drafted);
+    const [proposal, ...more] = await proposals(drafted.result.id);
+    expect(more).toEqual([]);
+    expect(proposal).toMatchObject({ status: "pending", requested_by: staff.userId, payload: { replyId: drafted.result.id } });
+    // Staff see their own proposal through the M3b reads; only an owner decides it.
+    expect((await staffSession.getApproval(proposal!.id)).summary).toBe(`Send the reply "${DEFAULT_SUBJECT}"`);
+    expect((await rejection(staffSession.approveApproval(proposal!.id, {}, randomUUID()))).code).toBe("TenantDenied");
+
+    tick();
+    const approveKey = randomUUID();
+    const sent = await a.approveReply(drafted.result.id, {}, approveKey);
+    expect(sent.result).toMatchObject({ status: "approved", approvedBy: { userId: owner.userId } });
+    expect(await proposals(drafted.result.id)).toEqual([expect.objectContaining({ id: proposal!.id, status: "approved", decided_by: owner.userId })]);
+    // The delivery worker's re-check (A-10) finds the stored, approved record behind the send.
+    const check = await fixture.service((tx) => approvalForAction(tx, fixture.a.tenantId, sent.actionId, new Date(now)));
+    expect(check).toMatchObject({ kind: "stored", standing: "approved", approval: { id: proposal!.id, executedActionId: sent.actionId } });
+    // The same key replays the result; a new key is a not_draft conflict; one event either way.
+    expect(await a.approveReply(drafted.result.id, {}, approveKey)).toEqual(sent);
+    expect((await rejection(a.approveReply(drafted.result.id, {}, randomUUID()))).details).toMatchObject({ reason: "not_draft" });
+    expect(await approvedEvents(drafted.result.id)).toHaveLength(1);
+  });
+
+  it("never runs the send directly from a member session, even an owner's", async () => {
+    const customer = await contact(a, { displayName: "Wren Ash", email: "wren@example.com" });
+    const drafted = await draft(a, customer, "Direct?");
+    const key = randomUUID();
+    const run = directDispatch(deps(), fixture.a.tenantId, owner.userId, memberAuthorize(fixture.a.tenantId, owner.userId));
+    const error = await rejection(run({
+      actionType: "inbox.reply.send", target: { tenantId: fixture.a.tenantId, type: "inbox_reply", id: drafted.result.id },
+      payload: { replyId: drafted.result.id }, approvalReference: { tenantId: fixture.a.tenantId, id: randomUUID() }, idempotencyKey: key,
+    }));
+    expect(error.code).toBe("TenantDenied");
+    expect(await replyRow(drafted.result.id)).toMatchObject({ status: "draft" });
+    expect(await approvedEvents(drafted.result.id)).toHaveLength(0);
+  });
+
+  it("discarding withdraws the open proposal: staff their own, owners anyone's", async () => {
+    const customer = await contact(a, { displayName: "Xan Bell", email: "xan@example.com" });
+    const staffSession = sessionFor(staff.userId);
+    const own = await draft(staffSession, customer, "Mine to drop");
+    await discard(staffSession, own.result.id);
+    expect(await proposals(own.result.id)).toEqual([expect.objectContaining({ status: "revoked", revoked_by: staff.userId })]);
+    const theirs = await draft(staffSession, customer, "The owner drops this one");
+    await discard(a, theirs.result.id);
+    expect(await proposals(theirs.result.id)).toEqual([expect.objectContaining({ status: "revoked", revoked_by: owner.userId })]);
+    // Staff discarding an owner's draft leave the owner's proposal alone (A-8); it can never run.
+    const owners = await draft(a, customer, "Owner draft");
+    await discard(staffSession, owners.result.id);
+    expect(await proposals(owners.result.id)).toEqual([expect.objectContaining({ status: "pending" })]);
+    expect((await rejection(approve(a, owners.result.id))).details).toMatchObject({ reason: "not_draft", status: "discarded" });
+  });
+
+  it("proposes again when the proposal was withdrawn or expired, then approves the new one", async () => {
+    const customer = await contact(a, { displayName: "Yara Penn", email: "yara@example.com" });
+    const withdrawn = await draft(a, customer, "Withdrawn first");
+    const [first] = await proposals(withdrawn.result.id);
+    tick();
+    await a.revokeApproval(first!.id, {}, randomUUID());
+    await approve(a, withdrawn.result.id);
+    expect((await proposals(withdrawn.result.id)).map((row) => row.status)).toEqual(["revoked", "approved"]);
+
+    const stale = await draft(a, customer, "Waited too long");
+    now += 7 * 24 * 60 * 60_000;
+    await approve(a, stale.result.id);
+    expect((await proposals(stale.result.id)).map((row) => row.status)).toEqual(["pending", "approved"]);
+    expect(await approvedEvents(stale.result.id)).toHaveLength(1);
+  });
+
+  it("a reply with no address is refused before the decision, so its proposal stays pending", async () => {
+    const phoneOnly = await contact(a, { displayName: "Zed Hart", phone: "+15555550188" });
+    const drafted = await draft(a, phoneOnly, "No address");
+    expect((await rejection(approve(a, drafted.result.id))).details).toMatchObject({ reason: "no_email" });
+    expect(await proposals(drafted.result.id)).toEqual([expect.objectContaining({ status: "pending", decided_by: null })]);
   });
 });

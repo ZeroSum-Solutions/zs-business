@@ -48,12 +48,13 @@ export const draftReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
 export type DraftReplyCommand = z.infer<typeof draftReplyCommandSchema>;
 
 export const replyRefInputSchema = z.strictObject({ replyId: idSchema });
-export const approveReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
-  actionType: z.literal("inbox.reply.approve"),
+/** I-6: runs only through an owner's stored approval (approvals.md A-7), never directly. */
+export const sendReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("inbox.reply.send"),
   target: targetSchema.extend({ type: z.literal("inbox_reply") }),
   payload: replyRefInputSchema,
 }).refine((command) => command.target.id === command.payload.replyId, "Target must equal the reply"));
-export type ApproveReplyCommand = z.infer<typeof approveReplyCommandSchema>;
+export type SendReplyCommand = z.infer<typeof sendReplyCommandSchema>;
 export const discardReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("inbox.reply.discard"),
   target: targetSchema.extend({ type: z.literal("inbox_reply") }),

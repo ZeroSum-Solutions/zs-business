@@ -148,8 +148,8 @@ Then, on every request:
 3. **Role.** The member's role must allow the route. `owner` may do everything: members,
    billing, plan, publish (booking page keys and embed snippets) and intake (website request
    review). `staff` may use the calendar, customers and inbox drafts (`ROLE_PERMISSIONS` in
-   `@zs/contracts`); approving replies (`inbox.approve`) and Home results (`reports`) are
-   owners only. Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
+   `@zs/contracts`); deciding approvals, which sends replies (`approve`), and Home results
+   (`reports`) are owners only. Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
    booking page key names the tenant, and they may run the one public action only.
 
 Member writes hold an exclusive per-tenant advisory lock and every other request a shared
@@ -191,9 +191,9 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `POST /v1/crm/deals/:id/details` `{ expectedRevision, value, leadSource }` | 200 `DealSummary`, revision + 1; 409 `stale_revision` with `currentRevision`. `value` is null or `{ amountMinor, currency }` (ISO 4217); `leadSource` null or `website`, `referral`, `phone`, `email`, `walk_in`, `social`, `ads`, `other`. Owners and staff |
 | `GET /v1/inbox/threads?limit&(cursor|offset)` | page of `ThreadSummary`, latest activity first: one `customer` thread (`c_<contactId>`) per contact with a website request or a reply that is not discarded, one `visitor` thread (`v_<intakeItemId>`) per request not linked to a contact. Owners and staff |
 | `GET /v1/inbox/threads/:threadId` | the summary plus `phone`, `entries` (requests and replies, oldest first, the latest 200) and `olderEntries`; 400 for a malformed ID, 404 for an unknown or another tenant's thread. Owners and staff |
-| `POST /v1/inbox/replies` `{ contactId, body, subject? }` | 201 draft reply (body 1..5000 characters, subject one line 1..200, default "Message from <business name>"); 403 for another tenant's contact. Owners and staff |
-| `POST /v1/inbox/replies/:id/approve` `{}` | 200 approved reply, and one outbox event `message.send_requested` with the exact subject and text; 409 `not_draft` (with `status`) or `no_email`. Owners only. Nothing is sent here (M3d) |
-| `POST /v1/inbox/replies/:id/discard` `{}` | 200 discarded reply; 409 `not_draft` (with `status`). Owners and staff |
+| `POST /v1/inbox/replies` `{ contactId, body, subject? }` | 201 draft reply (body 1..5000 characters, subject one line 1..200, default "Message from <business name>"), plus a pending approval to send it (`inbox.reply.send`, see `/v1/approvals`); 403 for another tenant's contact. Owners and staff |
+| `POST /v1/inbox/replies/:id/approve` `{}` | 200 approved reply: approves the reply's open approval (proposing a new one if it expired or was withdrawn) and runs the send as this owner, writing one outbox event `message.send_requested` with the exact subject and text; 409 `not_draft` (with `status`) or `no_email`. Owners only. Nothing is sent here (M3d) |
+| `POST /v1/inbox/replies/:id/discard` `{}` | 200 discarded reply, and its pending approval withdrawn where the caller may; 409 `not_draft` (with `status`). Owners and staff |
 | `GET /v1/home/results?[zone&][weekStart]` | `HomeResults`: leads, bookings, won deals and revenue by source, this week so far against the same span of last week; `zone` an IANA zone (default `UTC`), `weekStart` `monday` (default) or `sunday`; both ranges as UTC instants from the injected clock. Owners only |
 | `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
 | `GET /v1/members` | `{ items: Member[] }`, owners only |

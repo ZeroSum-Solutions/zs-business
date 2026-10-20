@@ -53,6 +53,7 @@ const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
   "disclosure_changed", "already_reviewed", "not_draft", "no_email",
+  "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);

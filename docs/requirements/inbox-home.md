@@ -1,7 +1,9 @@
 # M3c: Inbox v1 and Home
 
-Status: contract for M3c (2026-10-20), revision 1. Code follows this file; a change to a
-numbered rule needs a new revision of this file first.
+Status: contract for M3c (2026-10-20), revision 2. Code follows this file; a change to a
+numbered rule needs a new revision of this file first. Revision 2 sends replies through M3b's
+approval records (`approvals.md`): I-5..I-8, H-6 and H-8 changed, and `inbox.approve` gave way
+to M3b's `approve`.
 
 Scope: the owner's Inbox (one thread per customer, built from what people send through the
 website forms and the bookings they make, plus the business's replies) and Home (leads,
@@ -11,6 +13,7 @@ and suppression are M3d. Inbound email, SMS and other channels are M5.
 
 ## Evidence and decisions
 
+- Approvals: `approvals.md` A-5..A-10 (M3b). A send is a stored, owner-approved action.
 - Plan (approved 2026-10-18), "M3c": Inbox v1 (one thread per customer from form and booking
   messages; replies drafted, sent only after approval) and Home (leads, bookings, revenue by
   source, this week vs last; adds deal value, lead source, won date).
@@ -59,28 +62,45 @@ an earlier step. So an approval of a reply ID is an approval of those exact word
 trimmed, 1..5000 characters; the subject is trimmed, one line, 1..200 characters, and the handler
 fills "Message from <business name>" when the request leaves it out. The contact must belong to the tenant (`TenantDenied`
 otherwise). Visitor threads take no replies: the owner links the request first (I-1). Several
-drafts may wait on one thread.
+drafts may wait on one thread. After the draft commits, the edge proposes its send
+(`approval.request`, A-5) for `inbox.reply.send` with target the reply and payload
+`{ replyId }`, requested by the drafter, summary `Send the reply "<subject>"`, default expiry.
+Both steps take keys derived from the caller's key, so a retry replays both. Since the reply is
+fixed (I-4), approving its ID approves its exact words, which the inbox shows beside the
+proposal (A-12).
 
-**I-6. Approve.** `inbox.reply.approve` `{ replyId }`, permission `inbox.approve` (owners
-only). In one dispatcher transaction, with the reply row locked:
-- the reply must be a `draft`, else 409 `Conflict` with `reason: "not_draft"` and its
-  `status`;
-- the contact must have a real email address (not a `.invalid` placeholder), else 409
-  `reason: "no_email"`;
-- the approval is recorded through the approval interface (M3b) when it is wired in;
-  until then the action row is the record (actor, time, and the direct approval binding);
-- the reply becomes `approved` with `approved_by` and `approved_at`, and the action writes
-  one outbox event `message.send_requested` in the delivery worker's shape:
-  `{ messageId: replyId, contactId, channel: "email", purpose: "transactional", subject, body }`,
-  carrying the exact approved words, since the payload is what gets sent and priced.
+**I-6. Approve and send.** `inbox.reply.send` `{ replyId }` is in `APPROVAL_POLICIES` with
+`{ request: "inbox.drafts", required: true }`, so no member session runs it directly; it runs
+only under a stored approval that an owner (`approve`) decided, as that owner (A-6, A-7).
+`POST /v1/inbox/replies/:id/approve` (the edge `approveReply`, `approve` permission) does this
+in steps:
+- it reads the reply and its newest unexpired `pending` or `approved` proposal. A reply that is
+  no longer a draft is 409 `not_draft` with its `status`, unless the same key already approved
+  it (a retry, which replays). A draft whose customer has no real email address (null or a
+  `.invalid` placeholder) is 409 `no_email` before anything is decided;
+- with no open proposal (withdrawn or expired) it proposes the send again under a key derived
+  from the caller's key; a pending proposal is then approved (A-6) with the caller's key;
+- it runs the approved send (A-7). If that run fails, the approval stays `approved`; another
+  call retries the run on the same approval.
+The send, in one dispatcher transaction with the reply row locked, requires a `draft` (409
+`not_draft`) and a real email address (409 `no_email`), then makes the reply `approved` with
+`approved_by` (the deciding owner) and `approved_at`, and writes one outbox event
+`message.send_requested` in the delivery worker's shape:
+`{ messageId: replyId, contactId, channel: "email", purpose: "transactional", subject, body }`,
+carrying the exact approved words, since the payload is what gets sent and priced. The
+action row carries the stored approval as its approval reference, so `approvalForAction`
+(A-10) finds it.
 Nothing in M3c sends. The delivery worker (M3d) reads the event, takes the address from the
-contact at delivery time, re-checks approval, consent and suppression, and settles the reply
+contact at delivery time, re-checks the approval (A-10), consent and suppression, and settles the reply
 once through its settle hook, `settleReplyDelivery(tx, tenantId, messageId, outcome, at)`
 (`approved` to `sent` or `failed`; a no-op for any other message or a settled reply).
 
 **I-7. Discard.** `inbox.reply.discard` `{ replyId }`, permission `inbox.drafts`. Only a
-`draft` can be discarded (409 `not_draft` otherwise). An approved reply cannot be withdrawn
-here; M3d decides what stopping a queued send means.
+`draft` can be discarded (409 `not_draft` otherwise). The edge then revokes the reply's open
+proposal (A-8) where the caller may: owners any, staff only their own pending one, under a key
+derived from the caller's key. A proposal left pending can never run, since the send requires
+a draft. An approved reply cannot be withdrawn here; M3d decides what stopping a queued send
+means (revoking its approval stops delivery, A-8, A-10).
 
 **I-8. Routes.** Owner routes under `/v1/inbox`, through the edge session:
 - `GET /v1/inbox/threads?limit&offset|cursor`: thread summaries, latest activity first, keyset
@@ -92,7 +112,9 @@ here; M3d decides what stopping a queued send means.
 - `GET /v1/inbox/threads/:threadId`: the summary plus `entries` and `olderEntries`.
 - `POST /v1/inbox/replies` `{ contactId, body }` (draft), `POST /v1/inbox/replies/:id/approve`
   `{}`, `POST /v1/inbox/replies/:id/discard` `{}`; each takes `Idempotency-Key`.
-Reads need `inbox.drafts`. MCP exposes the same reads and writes as tools.
+Reads need `inbox.drafts`; approve needs `approve`. MCP exposes the same reads, draft and
+discard as tools, but no tool approves: deciding stays with an owner in the dashboard or API
+(approvals.md, MCP tools).
 
 **I-9. Storage.** Migration `20261020200000_inbox_home.sql`:
 
@@ -142,7 +164,7 @@ Each figure is `{ thisWeek, lastWeek }`.
 **H-5. Who sees Home results.** Results need `reports` (owners only). Staff keep the rest of
 Home (next appointments).
 
-**H-6. Permissions.** M2a gains `inbox.approve` and `reports`, both owners only. Staff keep
+**H-6. Permissions.** M2a gains `reports` (this file) and `approve` (M3b), both owners only. Staff keep
 `calendar`, `customers` and `inbox.drafts`.
 
 **H-7. Storage.** Same migration as I-9: `crm_stages.outcome`; `crm_deals.value_minor`,
@@ -153,7 +175,9 @@ contact. All new columns are nullable or defaulted, so the B-28 and C-24 seeds k
 **H-8. Tests.** Real Postgres under `zs_runtime`: two-tenant denial on `inbox_replies`
 (catalog test plus direct cross-tenant reads and writes), the guard refusing text changes and
 backward moves for the service role, draft/approve/discard happy paths and conflicts, staff
-refused approve, the outbox event on approve and none on draft or discard, a visitor request
+refused approve, the outbox event on approve and none on draft or discard, the send refused
+directly and run only under the owner's stored approval, the proposal withdrawn on discard and
+proposed again once withdrawn or expired, a visitor request
 kept out of a matched contact's thread until linked, Home results with a fixed clock across a
 DST week, won date on move in and out of a won stage, and set-details revision conflicts.
 Dashboard e2e: a website booking shows in Calendar, Customers, Inbox and Home.
