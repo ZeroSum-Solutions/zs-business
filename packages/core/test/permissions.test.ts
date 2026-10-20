@@ -1,14 +1,18 @@
 // M2a owner/staff matrix, enforced in core: every action and read the edge session offers,
 // run as an owner, a staff member and a signed-in stranger under the runtime role. M3 intake
 // review is owner-only; the public principal runs the one public action and nothing else.
+// M3b: owners decide approvals; source records need their subject's permission.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ROLE_PERMISSIONS, TenantDenied, roleCan, type MemberRole, type Permission } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createPublicSession } from "../src/edge/public-session.js";
-import { ACTION_PERMISSIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
+import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
-import { bookingHandlers, createDispatcher, crmHandlers, intakeHandlers, memberHandlers, type DispatchContext } from "../src/index.js";
+import {
+  approvalHandlers, bookingHandlers, createDispatcher, crmHandlers, dealDetailsHandlers, inboxHandlers, intakeHandlers, memberHandlers,
+  sourceHandlers, type DispatchContext,
+} from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
 const clock = { now: () => new Date(NOW) };
@@ -21,11 +25,17 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
+  "crm.deal.set-details": "customers",
+  "inbox.reply.draft": "inbox.drafts",
+  "inbox.reply.discard": "inbox.drafts",
+  "inbox.reply.send": "inbox.drafts",
   "intake.item.link": "intake",
   "intake.item.reject": "intake",
   "member.invite": "members",
   "member.change-role": "members",
   "member.remove": "members",
+  "approval.approve": "approve",
+  "approval.reject": "approve",
 };
 
 interface Tenant {
@@ -127,6 +137,11 @@ afterAll(async () => { await database?.close(); });
 /** Monday 09:00-17:00 UTC: each booking takes the next free hour. */
 let hour = 9;
 
+/** A draft by the owner, for steps any caller may then try on it. */
+async function ownerDraft(): Promise<string> {
+  return (await sessionFor(tenant.ownerId).draftReply({ contactId: tenant.contactId, body: "Thanks, see you soon." }, randomUUID())).result.id;
+}
+
 /** One call per session operation. Each builds fresh inputs, so it can run for any caller. */
 function operations(session: Session): Record<string, { permission: Permission | null; run: () => Promise<unknown> }> {
   return {
@@ -137,6 +152,21 @@ function operations(session: Session): Record<string, { permission: Permission |
       const contact = await sessionFor(tenant.ownerId).upsertContact({ email: `${randomUUID()}@example.com` }, randomUUID());
       return session.createDeal({ contactId: contact.result.contact.id, pipelineId: tenant.pipelineId, stageId: tenant.stages[0], title: "Band" }, randomUUID());
     } },
+    setDealDetails: { permission: "customers", run: async () => {
+      const deals = await sessionFor(tenant.ownerId).listDeals({ limit: 100 });
+      const current = deals.items.find((deal) => deal.id === tenant.dealId)!;
+      return session.setDealDetails(tenant.dealId,
+        { expectedRevision: current.revision, value: { amountMinor: 1_000, currency: "USD" }, leadSource: "referral" }, randomUUID());
+    } },
+    draftReply: { permission: "inbox.drafts", run: () => session.draftReply({ contactId: tenant.contactId, body: "Hello from the shop" }, randomUUID()) },
+    approveReply: { permission: "approve", run: async () => session.approveReply(await ownerDraft(), {}, randomUUID()) },
+    discardReply: { permission: "inbox.drafts", run: async () => session.discardReply(await ownerDraft(), {}, randomUUID()) },
+    listThreads: { permission: "inbox.drafts", run: () => session.listThreads({}) },
+    getThread: { permission: "inbox.drafts", run: async () => {
+      await ownerDraft();
+      return session.getThread(`c_${tenant.contactId}`);
+    } },
+    homeResults: { permission: "reports", run: () => session.homeResults({ zone: "America/New_York" }) },
     moveDealStage: { permission: "customers", run: async () => {
       const deals = await sessionFor(tenant.ownerId).listDeals({ limit: 100 });
       const current = deals.items.find((deal) => deal.id === tenant.dealId)!;
@@ -167,22 +197,53 @@ function operations(session: Session): Record<string, { permission: Permission |
     listIntakeItems: { permission: "intake", run: () => session.listIntakeItems({}) },
     listBookingPages: { permission: "publish", run: () => session.listBookingPages() },
     me: { permission: null, run: () => session.me() },
+    // M3b approvals: anyone may request what they may do; owners decide (approvals.md A-5, A-6).
+    requestApproval: { permission: "calendar", run: () => session.requestApproval({ action: proposal(), summary: "Book" }, randomUUID()) },
+    approveApproval: { permission: "approve", run: async () => session.approveApproval(await ownerProposal(true), {}, randomUUID()) },
+    rejectApproval: { permission: "approve", run: async () => session.rejectApproval(await ownerProposal(), {}, randomUUID()) },
+    revokeApproval: { permission: "approve", run: async () => session.revokeApproval(await ownerProposal(), {}, randomUUID()) },
+    listApprovals: { permission: null, run: () => session.listApprovals({}) },
+    // Another member's approval reads as NotFound to staff (A-11, approvals.test.ts); their own is visible.
+    getApproval: { permission: "calendar", run: async () =>
+      session.getApproval((await session.requestApproval({ action: proposal(), summary: "Mine" }, randomUUID())).result.id) },
+    observeSource: { permission: "customers", run: () => session.observeSource(
+      { subject: { type: "contact", id: tenant.contactId }, source: "owner" }, randomUUID()) },
+    listSources: { permission: "customers", run: () => session.listSources({ subjectType: "contact", subjectId: tenant.contactId }) },
   };
+}
+
+/** A booking proposal; only one that will run needs a free hour (`next`). */
+function proposal(next = false) {
+  const bookingId = randomUUID();
+  const startsAt = next ? `2026-10-19T${String(hour++).padStart(2, "0")}:00:00.000Z` : "2026-10-19T09:00:00.000Z";
+  return { actionType: "booking.create", target: { type: "booking", id: bookingId }, payload: { bookingId, resourceId: tenant.resourceId, startsAt } };
+}
+/** A pending approval the tenant's owner asked for; only approvers may see or decide it. */
+async function ownerProposal(next = false): Promise<string> {
+  return (await sessionFor(tenant.ownerId).requestApproval({ action: proposal(next), summary: "Book" }, randomUUID())).result.id;
 }
 
 describe("permission map", () => {
   it("names a permission for every registered action, and only those", () => {
     // The public request is the one action no member session may run (public-intake.md P-1).
-    const registered = Object.keys({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers })
-      .filter((action) => action !== PUBLIC_REQUEST_ACTION).sort();
+    // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
+    const registered = Object.keys({
+      ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
+      ...approvalHandlers, ...sourceHandlers,
+    })
+      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action)).sort();
+    expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);
     expect(Object.keys(ACTION_PERMISSIONS)).not.toContain(PUBLIC_REQUEST_ACTION);
     expect({ ...ACTION_PERMISSIONS }).toEqual(EXPECTED_ACTIONS);
   });
 
-  it("leaves members, billing, plan, publish and intake review to owners", () => {
+  it("leaves members, billing, plan, publish, intake review, approving and reports to owners", () => {
     expect(ROLE_PERMISSIONS.staff).toEqual(["calendar", "customers", "inbox.drafts"]);
-    for (const permission of ["members", "billing", "plan", "publish", "intake"] as const) expect(roleCan("staff", permission)).toBe(false);
+    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports"] as const) {
+      expect(roleCan("staff", permission)).toBe(false);
+      expect(roleCan("owner", permission)).toBe(true);
+    }
   });
 });
 

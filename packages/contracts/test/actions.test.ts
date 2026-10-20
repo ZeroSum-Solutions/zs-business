@@ -57,10 +57,12 @@ describe("Postgres JSON boundary", () => {
 });
 
 describe("idempotencyKeySchema", () => {
-  it("refuses the prefixes the server builds for public, unsubscribe, inbound SMS and email feedback actions", () => {
+  it("refuses the prefixes the server builds for public, unsubscribe, inbound SMS, email feedback, approved runs and inbox steps", () => {
     expect(idempotencyKeySchema.safeParse("booking-42").success).toBe(true);
     expect(idempotencyKeySchema.safeParse("republic:1").success).toBe(true);
-    for (const key of ["public:page:1", "unsubscribe:2d6c", "Unsubscribe:2d6c", "sms-inbound:SM1", "email-feedback:msg_1", "EMAIL-FEEDBACK:msg_1"])
+    expect(idempotencyKeySchema.safeParse("disapproval:1").success).toBe(true);
+    for (const key of ["public:page:1", "unsubscribe:2d6c", "Unsubscribe:2d6c", "sms-inbound:SM1", "email-feedback:msg_1", "EMAIL-FEEDBACK:msg_1",
+      "approval:4f1c2a9e-0b7d-4c43-9a51-3e8f6d2b7c10", "APPROVAL:x", "inbox:propose:1", "Inbox:withdraw:1"])
       expect(idempotencyKeySchema.safeParse(key).success, key).toBe(false);
   });
 });

@@ -1,26 +1,8 @@
 /**
- * Read models for areas that have no HTTP route yet (results, wallet, inbox, site,
- * agents, connections, plan). TODO(api): move each to a route as it is built.
+ * Read models for areas that have no HTTP route yet (wallet and usage, the connections
+ * checklist, site, agents, connections, plan). TODO(api): move each to a route as it is built.
+ * Inbox and Home results moved to `InboxApi` and `HomeApi` (inbox-home.md).
  */
-
-export interface WeekCompare {
-  thisWeek: number;
-  lastWeek: number;
-}
-
-export interface RevenueSource {
-  source: string;
-  thisWeek: number;
-  lastWeek: number;
-}
-
-export interface Results {
-  currency: string;
-  leads: WeekCompare;
-  bookings: WeekCompare;
-  revenue: WeekCompare;
-  revenueBySource: RevenueSource[];
-}
 
 export interface UsageLine {
   id: string;
@@ -48,30 +30,6 @@ export interface ChecklistItem {
   detail: string;
   status: ChecklistStatus;
   actionLabel: string | null;
-}
-
-export type Channel = "sms" | "email" | "instagram" | "webchat";
-
-export interface ThreadSummary {
-  id: string;
-  contactName: string;
-  channel: Channel;
-  preview: string;
-  updatedAt: string;
-  unread: boolean;
-  needsReply: boolean;
-}
-
-export interface Message {
-  id: string;
-  from: "customer" | "business" | "agent";
-  author: string;
-  body: string;
-  sentAt: string;
-}
-
-export interface Thread extends ThreadSummary {
-  messages: Message[];
 }
 
 export interface SiteSlot {
@@ -131,11 +89,8 @@ export interface Plan {
 }
 
 export interface WorkspaceApi {
-  getResults(): Promise<Results>;
   getUsage(): Promise<Usage>;
   getChecklist(): Promise<ChecklistItem[]>;
-  listThreads(): Promise<ThreadSummary[]>;
-  getThread(id: string): Promise<Thread>;
   listSitePages(): Promise<SitePage[]>;
   listAgents(): Promise<Agent[]>;
   listApprovals(): Promise<ApprovalItem[]>;

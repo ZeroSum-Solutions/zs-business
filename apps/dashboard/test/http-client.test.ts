@@ -249,6 +249,7 @@ describe("http client", () => {
         contactId: "5e0c1a2b-7d3f-4c8a-9b1e-000000000001", pipelineId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01",
         stageId: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e02", title: `Deal ${offset}`, revision: 1,
         createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
+        value: null, leadSource: null, wonAt: null,
       }],
       limit: 100, offset: 0, nextOffset: null, nextCursor: `after-${offset + 100}`,
     });
@@ -292,8 +293,8 @@ describe("http client", () => {
       json(200, { items: [{
         id: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e01", name: "Commissions",
         stages: [
-          { id: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e03", name: "Consultation", position: 2 },
-          { id: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e02", name: "Inquiry", position: 1 },
+          { id: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e03", name: "Consultation", position: 2, outcome: "open" },
+          { id: "2a4c6e80-1b3d-4f5a-9c7e-0d2f4a6c8e02", name: "Inquiry", position: 1, outcome: "open" },
         ],
       }] }),
     ]);

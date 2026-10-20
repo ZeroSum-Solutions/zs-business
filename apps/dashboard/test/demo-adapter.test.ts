@@ -187,8 +187,9 @@ describe("demo adapter: website intake", () => {
   it("shows website bookings in the calendar with their customer", async () => {
     const api = adapter();
     const website = (await api.listBookings()).items.filter((booking) => booking.source === "website");
-    expect(website).toHaveLength(3);
-    expect(website.map((booking) => booking.customer?.status).sort()).toEqual(["new_contact", "possible_match", "possible_match"]);
+    expect(website).toHaveLength(5);
+    expect(website.map((booking) => booking.customer?.status).sort()).toEqual(["linked", "linked", "new_contact", "possible_match", "possible_match"]);
+    expect(website.find((booking) => booking.customer?.status === "linked" && booking.customer.name === "Noor Haddad")).toBeDefined();
     expect(website.find((booking) => booking.customer?.status === "new_contact")?.customer?.name).toBe("Linnea Castellanos");
   });
 

@@ -38,7 +38,9 @@ only on the first run, from that day's free slots.
 
 Demo tenant: "Halden & Rowe Fine Jewelry" (invented), with a showroom calendar and a
 repair-intake calendar (America/New_York), 12 contacts, a pipeline (Inquiry, Consultation,
-Design, Deposit, Delivered), 8 deals and 6 bookings.
+Design, Deposit, Delivered; Delivered has outcome `won`), 8 deals (four with a USD value and a
+lead source; the delivered one is won on the seed's clock) and 6 bookings. A rerun also sets
+the won stage's outcome on a database seeded before stage outcomes existed.
 
 ## Provision the first owner
 
@@ -150,7 +152,8 @@ Then, on every request:
 3. **Role.** The member's role must allow the route. `owner` may do everything: members,
    billing, plan, publish (booking page keys and embed snippets) and intake (website request
    review). `staff` may use the calendar, customers and inbox drafts (`ROLE_PERMISSIONS` in
-   `@zs/contracts`). Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
+   `@zs/contracts`); deciding approvals, which sends replies (`approve`), and Home results
+   (`reports`) are owners only. Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
    booking page key names the tenant, and they may run the one public action only. Likewise a
    signed unsubscribe token names the tenant and delivery, and may record one suppression only.
 
@@ -186,10 +189,17 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/crm/contacts?[search&][sort&][ids&]limit&(cursor|offset)` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
 | `GET /v1/crm/contacts/:id` | one contact; 404 if unknown or another tenant's |
 | `POST /v1/crm/contacts` `{ displayName?, email?, phone?, mode?, consent? }` | 201 created, 200 matched an existing contact |
-| `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages |
-| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals, most recently updated first |
+| `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages, each with its `outcome` (`open`, `won`, `lost`) |
+| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals (`DealSummary`: the deal plus `value` `{ amountMinor, currency }` or null, `leadSource`, `wonAt`), most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
-| `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
+| `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision`. Entering a `won` stage sets `wonAt` to the write's time; leaving it clears it |
+| `POST /v1/crm/deals/:id/details` `{ expectedRevision, value, leadSource }` | 200 `DealSummary`, revision + 1; 409 `stale_revision` with `currentRevision`. `value` is null or `{ amountMinor, currency }` (ISO 4217); `leadSource` null or `website`, `referral`, `phone`, `email`, `walk_in`, `social`, `ads`, `other`. Owners and staff |
+| `GET /v1/inbox/threads?limit&(cursor|offset)` | page of `ThreadSummary`, latest activity first: one `customer` thread (`c_<contactId>`) per contact with a website request or a reply that is not discarded, one `visitor` thread (`v_<intakeItemId>`) per request not linked to a contact. Owners and staff |
+| `GET /v1/inbox/threads/:threadId` | the summary plus `phone`, `entries` (requests and replies, oldest first, the latest 200) and `olderEntries`; 400 for a malformed ID, 404 for an unknown or another tenant's thread. Owners and staff |
+| `POST /v1/inbox/replies` `{ contactId, body, subject? }` | 201 draft reply (body 1..5000 characters, subject one line 1..200, default "Message from <business name>"), plus a pending approval to send it (`inbox.reply.send`, see `/v1/approvals`); 403 for another tenant's contact. Owners and staff |
+| `POST /v1/inbox/replies/:id/approve` `{}` | 200 approved reply: approves the reply's open approval (proposing a new one if it expired or was withdrawn) and runs the send as this owner, writing one outbox event `message.send_requested` with the exact subject and text; 409 `not_draft` (with `status`) or `no_email`. Owners only. Nothing is sent here (M3d) |
+| `POST /v1/inbox/replies/:id/discard` `{}` | 200 discarded reply, and its pending approval withdrawn where the caller may; 409 `not_draft` (with `status`). Owners and staff |
+| `GET /v1/home/results?[zone&][weekStart]` | `HomeResults`: leads, bookings, won deals and revenue by source, this week so far against the same span of last week; `zone` an IANA zone (default `UTC`), `weekStart` `monday` (default) or `sunday`; both ranges as UTC instants from the injected clock. Owners only |
 | `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
 | `GET /v1/members` | `{ items: Member[] }`, owners only |
 | `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
@@ -216,7 +226,8 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `Unauthorized` 401, `Forbidden` 403 (another tenant's row or an unknown ID, answered alike),
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
-`concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`;
+`concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
+`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`;
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.

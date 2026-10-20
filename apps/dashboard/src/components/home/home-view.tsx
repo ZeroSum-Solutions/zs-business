@@ -6,17 +6,24 @@ import { useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { SampleBadge, useSampleOnly } from "@/components/ui/sample";
+import { SampleBadge } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader, Skeleton } from "@/components/ui/states";
-import type { WeekCompare } from "@/lib/api";
-import { useBookings, useChecklist, useResources, useResults, useUsage } from "@/lib/queries";
+import { bookingCustomerName, type HomeResults } from "@/lib/api";
+import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
+import { useBookings, useChecklist, useDisplayZone, useResources, useResults, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
-import { formatDay, formatTime } from "@/lib/time";
-import { cn, formatMoney, formatNumber, weekChange } from "@/lib/utils";
+import { READ_RESULTS, useCan } from "@/lib/session";
+import { formatDay, formatRange, formatTime } from "@/lib/time";
+import { cn, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
+
+interface WeekCompare {
+  thisWeek: number;
+  lastWeek: number;
+}
 
 function Change({ value }: { value: WeekCompare }) {
   const change = weekChange(value.thisWeek, value.lastWeek);
-  if (change === null) return <span className="text-xs text-meta">No data last week</span>;
+  if (change === null) return <span className="text-xs text-meta">None in the same span last week</span>;
   const up = change >= 0;
   const Icon = up ? ArrowUpRight : ArrowDownRight;
   return (
@@ -28,60 +35,115 @@ function Change({ value }: { value: WeekCompare }) {
   );
 }
 
-function StatTile({ label, value, compare }: { label: string; value: string; compare: WeekCompare }) {
+function StatTile({ id, label, compare, bySource }: {
+  id: string;
+  label: string;
+  compare: WeekCompare;
+  bySource: { source: keyof typeof ORIGIN_LABELS; thisWeek: number; lastWeek: number }[];
+}) {
   return (
-    <Card className="flex flex-col gap-1">
-      <p className="text-sm text-muted">{label}</p>
-      <p className="tabular text-2xl font-semibold tracking-display text-fg">{value}</p>
+    <Card className="flex flex-col gap-1" aria-labelledby={`${id}-title`} data-testid={`tile-${id}`}>
+      <h2 id={`${id}-title`} className="text-sm font-normal text-muted">{label}</h2>
+      <p className="tabular text-2xl font-semibold tracking-display text-fg" data-testid="tile-value">{formatNumber(compare.thisWeek)}</p>
       <Change value={compare} />
-      <p className="tabular text-xs text-meta">Last week {formatNumber(compare.lastWeek)}</p>
+      <p className="tabular text-xs text-meta">Same time last week {formatNumber(compare.lastWeek)}</p>
+      <ul className="mt-2 space-y-0.5 border-t border-border-soft pt-2 text-xs" aria-label={`${label} by source`}>
+        {bySource.map((item) => (
+          <li key={item.source} className="flex justify-between gap-2" data-source={item.source}>
+            <span className="text-fg-2">{ORIGIN_LABELS[item.source]}</span>
+            <span className="tabular text-fg">{formatNumber(item.thisWeek)} <span className="text-meta">/ {formatNumber(item.lastWeek)}</span></span>
+          </li>
+        ))}
+      </ul>
     </Card>
   );
 }
 
+function RevenueCard({ data }: { data: HomeResults }) {
+  const [main, ...others] = data.revenue;
+  const won = data.wonDeals;
+  const maxSource = main ? Math.max(...main.bySource.map((item) => Math.max(item.thisWeek, item.lastWeek)), 1) : 1;
+  return (
+    <Card className="lg:col-span-7 lg:row-span-2" aria-labelledby="revenue-title">
+      <CardHeader>
+        <div>
+          <CardTitle id="revenue-title">Revenue this week</CardTitle>
+          {main ? (
+            <>
+              <p className="tabular mt-2 text-3xl font-semibold tracking-display text-fg" data-testid="revenue-value">{formatMinor(main.thisWeek, main.currency)}</p>
+              <div className="mt-1"><Change value={main} /></div>
+              <p className="tabular mt-1 text-xs text-meta">Same time last week {formatMinor(main.lastWeek, main.currency)}. {formatNumber(won.thisWeek)} won this week, {formatNumber(won.lastWeek)} last week.</p>
+            </>
+          ) : null}
+        </div>
+      </CardHeader>
+      {!main ? (
+        <EmptyState title={won.thisWeek + won.lastWeek === 0 ? "No deals won yet this week" : "Won deals have no value yet"}>
+          {won.thisWeek + won.lastWeek === 0
+            ? "Revenue shows here once a deal with a value moves to a won stage."
+            : `${formatNumber(won.thisWeek)} won this week and ${formatNumber(won.lastWeek)} last week. Add a value on the pipeline board to count them.`}
+        </EmptyState>
+      ) : (
+        <>
+          <h3 className="mb-3 text-sm font-medium text-fg-2">By lead source</h3>
+          <ul className="space-y-3">
+            {main.bySource.map((item) => (
+              <li key={item.source} data-source={item.source}>
+                <div className="flex items-baseline justify-between gap-3 text-sm">
+                  <span className="text-fg-2">{revenueSourceLabel(item.source)}</span>
+                  <span className="tabular font-medium text-fg">{formatMinor(item.thisWeek, main.currency)}</span>
+                </div>
+                <div className="mt-1.5 space-y-1" aria-hidden>
+                  <div className="h-1.5 rounded-pill bg-accent" style={{ width: `${(item.thisWeek / maxSource) * 100}%` }} />
+                  <div className="h-1 rounded-pill bg-border-strong/50" style={{ width: `${(item.lastWeek / maxSource) * 100}%` }} />
+                </div>
+                <p className="sr-only">Same time last week {formatMinor(item.lastWeek, main.currency)}</p>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-4 flex items-center gap-4 text-xs text-meta">
+            <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1.5 w-4 rounded-pill bg-accent" />This week</span>
+            <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1 w-4 rounded-pill bg-border-strong/50" />Last week</span>
+          </p>
+          {others.length > 0 ? (
+            <div className="mt-4 border-t border-border-soft pt-3">
+              <h3 className="text-sm font-medium text-fg-2">Other currencies</h3>
+              <ul className="mt-1 space-y-1 text-sm">
+                {others.map((item) => (
+                  <li key={item.currency} className="flex justify-between gap-3">
+                    <span className="text-fg-2">{item.currency}</span>
+                    <span className="tabular text-fg">{formatMinor(item.thisWeek, item.currency)} <span className="text-xs text-meta">last week {formatMinor(item.lastWeek, item.currency)}</span></span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </>
+      )}
+    </Card>
+  );
+}
+
+/** H-3..H-5: owners only. Weeks start on Monday in the business's calendar zone. */
 function ResultsSection() {
-  const results = useResults();
-  const sampleOnly = useSampleOnly();
+  const resources = useResources();
+  const zone = useDisplayZone();
+  // Wait for the calendars, so the weeks are asked once, in the zone they are shown in.
+  const query = useMemo(() => (resources.isPending ? null : { zone, weekStart: "monday" as const }), [resources.isPending, zone]);
+  const results = useResults(query);
   if (results.isPending) return <div className="grid grid-cols-2 gap-3 lg:col-span-12"><Skeleton className="h-32" /><Skeleton className="h-32" /></div>;
   if (results.isError) return <div className="lg:col-span-12"><ErrorNote error={results.error} retry={() => results.refetch()} /></div>;
   const data = results.data;
-  const maxSource = Math.max(...data.revenueBySource.map((item) => Math.max(item.thisWeek, item.lastWeek)), 1);
   return (
     <>
-      <div className="grid grid-cols-2 gap-3 lg:col-span-5 lg:grid-cols-1 xl:grid-cols-2 lg:content-start">
-        {sampleOnly ? <p className="col-span-2 flex items-center gap-2 text-xs text-muted lg:col-span-1 xl:col-span-2"><SampleBadge />Results tiles show sample numbers.</p> : null}
-        <StatTile label="New leads" value={formatNumber(data.leads.thisWeek)} compare={data.leads} />
-        <StatTile label="Bookings" value={formatNumber(data.bookings.thisWeek)} compare={data.bookings} />
+      <p className="text-xs text-muted lg:col-span-12" data-testid="results-ranges">
+        This week: {formatRange(data.thisWeek.from, data.thisWeek.to, data.zone)}. Compared with the same span of last week: {formatRange(data.lastWeek.from, data.lastWeek.to, data.zone)}. Times in {data.zone.replaceAll("_", " ")}.
+      </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:col-span-5 lg:grid-cols-1 xl:grid-cols-2 lg:content-start">
+        <StatTile id="leads" label="New leads" compare={data.leads} bySource={data.leads.bySource} />
+        <StatTile id="bookings" label="Bookings" compare={data.bookings} bySource={data.bookings.bySource} />
       </div>
-      <Card className="lg:col-span-7 lg:row-span-2" aria-labelledby="revenue-title">
-        <CardHeader>
-          <div>
-            <div className="flex flex-wrap items-center gap-2"><CardTitle id="revenue-title">Revenue this week</CardTitle><SampleBadge /></div>
-            <p className="tabular mt-2 text-3xl font-semibold tracking-display text-fg">{formatMoney(data.revenue.thisWeek, data.currency)}</p>
-            <div className="mt-1"><Change value={data.revenue} /></div>
-          </div>
-        </CardHeader>
-        <h3 className="mb-3 text-sm font-medium text-fg-2">By source</h3>
-        <ul className="space-y-3">
-          {data.revenueBySource.map((item) => (
-            <li key={item.source}>
-              <div className="flex items-baseline justify-between gap-3 text-sm">
-                <span className="text-fg-2">{item.source}</span>
-                <span className="tabular font-medium text-fg">{formatMoney(item.thisWeek, data.currency)}</span>
-              </div>
-              <div className="mt-1.5 space-y-1" aria-hidden>
-                <div className="h-1.5 rounded-pill bg-accent" style={{ width: `${(item.thisWeek / maxSource) * 100}%` }} />
-                <div className="h-1 rounded-pill bg-border-strong/50" style={{ width: `${(item.lastWeek / maxSource) * 100}%` }} />
-              </div>
-              <p className="sr-only">Last week {formatMoney(item.lastWeek, data.currency)}</p>
-            </li>
-          ))}
-        </ul>
-        <p className="mt-4 flex items-center gap-4 text-xs text-meta">
-          <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1.5 w-4 rounded-pill bg-accent" />This week</span>
-          <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1 w-4 rounded-pill bg-border-strong/50" />Last week</span>
-        </p>
-      </Card>
+      <RevenueCard data={data} />
     </>
   );
 }
@@ -198,8 +260,8 @@ function NextAppointments() {
                   <p className="text-xs text-meta">{formatDay(booking.startsAt, zone)}</p>
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-fg">{booking.title ?? "Appointment"}</p>
-                  <p className="truncate text-sm text-muted">{booking.contactName ?? "No customer linked"}</p>
+                  <p className="truncate text-sm font-medium text-fg">{booking.title ?? (booking.source === "website" ? "Website booking" : "Appointment")}</p>
+                  <p className="truncate text-sm text-muted">{bookingCustomerName(booking) ?? "No customer linked"}</p>
                 </div>
                 {resource ? <Badge tone={resource.id === resources.data?.[0]?.id ? "accent" : "neutral"}>{resourceLabel(resource)}</Badge> : null}
               </li>
@@ -212,11 +274,13 @@ function NextAppointments() {
 }
 
 export function HomeView() {
+  // Staff have no `reports`: they neither see nor ask for results (H-5).
+  const reports = useCan(READ_RESULTS);
   return (
     <>
-      <PageHeader title="This week" description="Results for Halden & Rowe, compared with last week." />
+      <PageHeader title="This week" description={reports ? "Results for Halden & Rowe, compared with the same time last week." : "Your next appointments at Halden & Rowe."} />
       <div className="grid grid-cols-1 gap-3 lg:grid-flow-dense lg:grid-cols-12 lg:gap-4">
-        <ResultsSection />
+        {reports ? <ResultsSection /> : null}
         <NextAppointments />
         <UsageCard />
         <ChecklistCard />

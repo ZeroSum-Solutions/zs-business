@@ -99,7 +99,8 @@ async function provision(database: TestDatabase, fixture: TwoTenantFixture, tena
     );
     await tx.query("INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,'Sales')", [tenantId, pipelineId]);
     await tx.query(
-      "INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position) VALUES ($1,$2,$3,'New',0),($1,$4,$3,'Won',1)",
+      `INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome)
+       VALUES ($1,$2,$3,'New',0,'open'),($1,$4,$3,'Won',1,'won')`,
       [tenantId, stages[0], pipelineId, stages[1]],
     );
   });

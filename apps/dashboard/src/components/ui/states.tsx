@@ -16,7 +16,7 @@ export function LoadingRows({ rows = 3, label = "Loading" }: { rows?: number; la
   );
 }
 
-export function ErrorNote({ error, retry, message: override }: { error: unknown; retry?: () => void; message?: string }) {
+export function ErrorNote({ error, retry, message: override }: { error: unknown; retry?: (() => void) | undefined; message?: string | undefined }) {
   const message = override ?? (isApiError(error) ? error.message : "Something went wrong. Try again.");
   // Retrying cannot fix an ended session; offer the way back in instead.
   const signedOut = isApiError(error) && error.kind === "unauthorized";

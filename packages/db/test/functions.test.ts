@@ -38,12 +38,16 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
 }
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
+  "approvals_transition()": "pg_catalog, pg_temp",
   "booking_overrides_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_pages_disclosure_versioned()": "pg_catalog, pg_temp",
   "booking_page_disclosures_append_only()": "pg_catalog, pg_temp",
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_windows_valid(jsonb)": "pg_catalog, pg_temp",
+  // M3c (20261020200000_inbox_home.sql): the won-date and reply-guard triggers.
+  "crm_deals_won_at()": "pg_catalog, pg_temp",
+  "inbox_replies_guard()": "pg_catalog, pg_temp",
   "record_action_and_event(uuid,uuid,uuid,text,jsonb,jsonb,jsonb,text,jsonb,timestamp with time zone,uuid,text,jsonb)":
     "pg_catalog, pg_temp",
 };
