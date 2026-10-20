@@ -4,9 +4,9 @@ import {
   contactRecordSchema,
   createOrFindContactInputSchema,
   createDealInputSchema,
-  dealRecordSchema,
   moveDealStageInputSchema,
 } from "./crm.js";
+import { dealSummarySchema, stageOutcomeSchema } from "./home.js";
 import { bookingSummarySchema } from "./intake.js";
 import { isPostgresText, jsonValueSchema } from "./json.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
@@ -17,11 +17,12 @@ const idSchema = z.uuid().toLowerCase();
 /** M1 edge boundary: request, response and error shapes shared by the HTTP API and MCP tools. */
 /**
  * Key prefixes only the server writes: `approval:<id>` runs a stored approval once
- * (approvals.md A-7, A-14), and public intake, unsubscribe and inbound SMS key the actions no
- * member runs. Keys are unique per tenant, so a member key with one of them could take the
- * server's key first and turn its run into a conflict.
+ * (approvals.md A-7, A-14); public intake, unsubscribe and inbound SMS key the actions no
+ * member runs; and `inbox:<step>:<id>` keys a step of a reply write (inbox-home.md I-5..I-7).
+ * Keys are unique per tenant, so a member key with one of them could take the server's key
+ * first and turn its run into a conflict.
  */
-export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "public:", "unsubscribe:", "sms-inbound:"] as const);
+export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "public:", "unsubscribe:", "sms-inbound:", "inbox:"] as const);
 export const idempotencyKeySchema = z.string().min(1).max(200)
   .refine(isPostgresText, "Text is not valid in Postgres")
   .refine((key) => !SERVER_IDEMPOTENCY_PREFIXES.some((prefix) => key.toLowerCase().startsWith(prefix)),
@@ -124,7 +125,8 @@ export type SlotsResponse = z.infer<typeof slotsResponseSchema>;
 export { pageQuerySchema, pageSchema, type PageQuery } from "./page.js";
 export const contactPageSchema = pageSchema(contactRecordSchema);
 export type ContactPage = z.infer<typeof contactPageSchema>;
-export const dealPageSchema = pageSchema(dealRecordSchema);
+/** Deals as lists show them: each record plus value, lead source and won date (inbox-home.md H-1). */
+export const dealPageSchema = pageSchema(dealSummarySchema);
 export type DealPage = z.infer<typeof dealPageSchema>;
 /** Bookings as the owner's lists show them: each record plus its source and customer (public-intake.md P-12). */
 export const bookingPageSchema = pageSchema(bookingSummarySchema);
@@ -133,7 +135,7 @@ export type BookingPage = z.infer<typeof bookingPageSchema>;
 export const pipelineSummarySchema = z.strictObject({
   id: idSchema,
   name: z.string(),
-  stages: z.array(z.strictObject({ id: idSchema, name: z.string(), position: z.number().int() })),
+  stages: z.array(z.strictObject({ id: idSchema, name: z.string(), position: z.number().int(), outcome: stageOutcomeSchema })),
 });
 export type PipelineSummary = z.infer<typeof pipelineSummarySchema>;
 export const resourceSummarySchema = z.strictObject({

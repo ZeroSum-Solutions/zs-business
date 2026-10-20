@@ -22,16 +22,17 @@ function Brand() {
   );
 }
 
+/** Threads on the first page that wait for a reply or a review (inbox-home.md I-8). */
 function useInboxCount(): number {
   const threads = useThreads();
   // Signed out, the cache is empty and the count must not linger.
   if (useTenantId() === null) return 0;
-  return threads.data?.filter((thread) => thread.unread).length ?? 0;
+  return threads.data?.pages[0]?.items.filter((thread) => thread.needsReply || thread.needsReview).length ?? 0;
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const unread = useInboxCount();
+  const waiting = useInboxCount();
   const { mode } = useApiRuntime();
 
   // Sign-in stands alone: no navigation into areas the visitor cannot open yet.
@@ -69,8 +70,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                   >
                     <item.icon size={20} weight={active ? "fill" : "regular"} aria-hidden />
                     <span className="flex-1">{item.label}</span>
-                    {item.href === "/inbox" && unread > 0 ? (
-                      <span className="tabular rounded-pill bg-accent px-1.5 text-xs font-semibold text-accent-on" aria-label={`${unread} unread`}>{unread}</span>
+                    {item.href === "/inbox" && waiting > 0 ? (
+                      <span className="tabular rounded-pill bg-accent px-1.5 text-xs font-semibold text-accent-on" aria-label={`${waiting} need attention`}>{waiting}</span>
                     ) : null}
                   </Link>
                 </li>
@@ -111,9 +112,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                 >
                   <span className="relative">
                     <item.icon size={24} weight={active ? "fill" : "regular"} aria-hidden />
-                    {item.href === "/inbox" && unread > 0 ? (
-                      <span className="absolute -top-1 -right-2 min-w-4 rounded-pill bg-accent px-1 text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${unread} unread`}>
-                        {unread}
+                    {item.href === "/inbox" && waiting > 0 ? (
+                      <span className="absolute -top-1 -right-2 min-w-4 rounded-pill bg-accent px-1 text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${waiting} need attention`}>
+                        {waiting}
                       </span>
                     ) : null}
                   </span>

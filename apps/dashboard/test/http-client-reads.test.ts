@@ -110,6 +110,7 @@ describe("reads past 2,000 rows", () => {
     const deal = (n: number, contactId: string): Row => ({
       id: id("d0a1b2c3", n), tenantId: TENANT, contactId, pipelineId: id("2a4c6e80", 1), stageId: id("2a4c6e80", 2),
       title: `Deal ${n}`, revision: 1, createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",
+      value: null, leadSource: null, wonAt: null,
     });
     const mine = id("5e0c1a2b", 1);
     const { api, requests } = fakeApi({ deals: [...Array.from({ length: 2_100 }, (_, n) => deal(n, id("5e0c1a2b", 2))), deal(9_999, mine)] });

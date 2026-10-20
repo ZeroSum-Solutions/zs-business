@@ -38,7 +38,9 @@ only on the first run, from that day's free slots.
 
 Demo tenant: "Halden & Rowe Fine Jewelry" (invented), with a showroom calendar and a
 repair-intake calendar (America/New_York), 12 contacts, a pipeline (Inquiry, Consultation,
-Design, Deposit, Delivered), 8 deals and 6 bookings.
+Design, Deposit, Delivered; Delivered has outcome `won`), 8 deals (four with a USD value and a
+lead source; the delivered one is won on the seed's clock) and 6 bookings. A rerun also sets
+the won stage's outcome on a database seeded before stage outcomes existed.
 
 ## Provision the first owner
 
@@ -114,7 +116,8 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `R2_ENDPOINT` | `r2` only: `https://<account-id>.r2.cloudflarestorage.com`. https only. |
 | `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
-| `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets. |
+| `PUBLIC_RATE_LIMIT_STORE` | Where the public booking and unsubscribe limits count. `postgres` (default): `public.rate_limit_buckets`, shared by every API instance on the database. `memory`: this process only, refused unless `DATABASE_URL` is a loopback host. |
+| `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets of the `PUBLIC_RATE_LIMIT_STORE` store. |
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
@@ -153,7 +156,8 @@ Then, on every request:
 3. **Role.** The member's role must allow the route. `owner` may do everything: members,
    billing, plan, publish (booking page keys and embed snippets) and intake (website request
    review). `staff` may use the calendar, customers and inbox drafts (`ROLE_PERMISSIONS` in
-   `@zs/contracts`). Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
+   `@zs/contracts`); deciding approvals, which sends replies (`approve`), and Home results
+   (`reports`) are owners only. Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
    booking page key names the tenant, and they may run the one public action only. Likewise a
    signed unsubscribe token names the tenant and delivery, and may record one suppression only.
 
@@ -189,10 +193,17 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/crm/contacts?[search&][sort&][ids&]limit&(cursor|offset)` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
 | `GET /v1/crm/contacts/:id` | one contact; 404 if unknown or another tenant's |
 | `POST /v1/crm/contacts` `{ displayName?, email?, phone?, mode?, consent? }` | 201 created, 200 matched an existing contact |
-| `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages |
-| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals, most recently updated first |
+| `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages, each with its `outcome` (`open`, `won`, `lost`) |
+| `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals (`DealSummary`: the deal plus `value` `{ amountMinor, currency }` or null, `leadSource`, `wonAt`), most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
-| `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision` |
+| `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision`. Entering a `won` stage sets `wonAt` to the write's time; leaving it clears it |
+| `POST /v1/crm/deals/:id/details` `{ expectedRevision, value, leadSource }` | 200 `DealSummary`, revision + 1; 409 `stale_revision` with `currentRevision`. `value` is null or `{ amountMinor, currency }` (ISO 4217); `leadSource` null or `website`, `referral`, `phone`, `email`, `walk_in`, `social`, `ads`, `other`. Owners and staff |
+| `GET /v1/inbox/threads?limit&(cursor|offset)` | page of `ThreadSummary`, latest activity first: one `customer` thread (`c_<contactId>`) per contact with a website request or a reply that is not discarded, one `visitor` thread (`v_<intakeItemId>`) per request not linked to a contact. Owners and staff |
+| `GET /v1/inbox/threads/:threadId` | the summary plus `phone`, `entries` (requests and replies, oldest first, the latest 200) and `olderEntries`; 400 for a malformed ID, 404 for an unknown or another tenant's thread. Owners and staff |
+| `POST /v1/inbox/replies` `{ contactId, body, subject? }` | 201 draft reply (body 1..5000 characters, subject one line 1..200, default "Message from <business name>"), plus a pending approval to send it (`inbox.reply.send`, see `/v1/approvals`); 403 for another tenant's contact. Owners and staff |
+| `POST /v1/inbox/replies/:id/approve` `{}` | 200 approved reply: approves the reply's open approval (proposing a new one if it expired or was withdrawn) and runs the send as this owner, writing one outbox event `message.send_requested` with the exact subject and text; a same-key retry replays. 409 `not_draft` (with `status`), `no_email`, or `approved_by_other` (with `approvedBy`) when another owner approved it and must finish the send. Owners only. Nothing is sent here (M3d) |
+| `POST /v1/inbox/replies/:id/discard` `{}` | 200 discarded reply, and its pending approval withdrawn where the caller may; 409 `not_draft` (with `status`). Owners and staff |
+| `GET /v1/home/results?[zone&][weekStart]` | `HomeResults`: leads, bookings, won deals and revenue by source, this week so far against the same span of last week; `zone` an IANA zone (default `UTC`), `weekStart` `monday` (default) or `sunday`; both ranges as UTC instants from the injected clock. Owners only |
 | `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
 | `GET /v1/members` | `{ items: Member[] }`, owners only |
 | `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
@@ -228,7 +239,7 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
-`stale_release`, `host_in_use`;
+`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`;
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.
@@ -444,8 +455,14 @@ against the pinned Supabase Root 2021 CA.
    (`https://<ref>.supabase.co/auth/v1`), `SESSION_CHECK=supabase`, `SUPABASE_URL`,
    `SUPABASE_ANON_KEY`, and for public booking `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BASE_URL`
    and `PUBLIC_CLIENT_IP_HEADER=x-vercel-forwarded-for`. The bundle carries `static/` for the
-   booking page. Hosted: keep public intake disabled (leave `PUBLIC_BOOKING_KEY_SECRET` unset)
-   until a shared limiter is configured; the public rate limits are counted per function instance.
+   booking page. The public rate limits count in Postgres (`PUBLIC_RATE_LIMIT_STORE` unset
+   means `postgres`; `memory` refuses to start on a hosted database), so every function
+   instance shares them. To turn hosted public intake on: apply migration
+   `20261020400000_public_rate_limits.sql` with `db:hosted-migrate` (step 2; it creates the
+   NOLOGIN role `zs_rate_limiter`, which `zs_migrator` may now belong to), deploy the API, then
+   set `PUBLIC_BOOKING_KEY_SECRET` (`openssl rand -hex 32`), `PUBLIC_BASE_URL` and
+   `PUBLIC_CLIENT_IP_HEADER=x-vercel-forwarded-for` and deploy again. A deploy with the secret
+   set but without the migration answers 500 on every public request.
    Dashboard env per target: `ZS_API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
    `DASHBOARD_TRUST_PROXY=1`. Both set
    `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel uses the pinned pnpm.

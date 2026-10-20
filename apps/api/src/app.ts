@@ -12,6 +12,8 @@ import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
+import { homeRoutes } from "./routes/home.js";
+import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
 import { siteRoutes } from "./routes/sites.js";
@@ -60,7 +62,10 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
  * statement after the signal fires, and no statement or lock wait outlasts the time left.
  */
 function withDeadline(db: ScopedDatabase, signal: AbortSignal, remainingMs: () => number): ScopedDatabase {
-  return { tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }) };
+  return {
+    tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }),
+    withoutTenant: (work, options) => db.withoutTenant(work, { signal, remainingMs, ...options }),
+  };
 }
 
 const unavailable = (signal: AbortSignal) => new Promise<never>((_, reject) => {
@@ -156,6 +161,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/booking", bookingRoutes);
   app.route("/v1/crm", crmRoutes);
   app.route("/v1/intake", intakeRoutes);
+  app.route("/v1/inbox", inboxRoutes);
+  app.route("/v1/home", homeRoutes);
   // Off without a site store: /v1/sites is then an unknown route (404), like the session's check.
   if (deps.sites) app.route("/v1/sites", siteRoutes);
   app.route("/v1", billingRoutes);
@@ -190,4 +197,5 @@ export type App = ReturnType<typeof createApp>;
 export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
+export { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";

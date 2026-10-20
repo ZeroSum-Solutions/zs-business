@@ -17,6 +17,8 @@ const ONE_CLICK = "List-Unsubscribe=One-Click";
 let h: ApiHarness;
 beforeAll(async () => {
   h = await createApiHarness({
+    // P-10: counted in the shared Postgres table, as every server counts by default.
+    limiterStore: "postgres",
     unsubscribe: {
       tokenSecrets: { current: UNSUBSCRIBE_SECRET, previous: PREVIOUS_UNSUBSCRIBE_SECRET },
       clientIp: { header: "x-real-ip" },
@@ -232,6 +234,10 @@ describe("abuse limits", () => {
       const other = await sentDelivery(h.a);
       expect((await oneClick(other.token, mailboxProvider)).status).toBe(200);
     }
+    // The charges live in the shared table, so every API instance sees them.
+    const buckets = await h.fixture.service(async (tx) =>
+      Number((await tx.query<{ n: string }>("SELECT count(*) AS n FROM rate_limit_buckets WHERE count > 0")).rows[0]!.n));
+    expect(buckets).toBeGreaterThanOrEqual(7);
   });
 });
 

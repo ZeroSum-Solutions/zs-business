@@ -1,6 +1,7 @@
-// public-intake.md P-10: fixed-window counters in process memory. A request names every bucket
-// it touches; all are checked before any is charged, so a refused request consumes nothing.
-// A multi-instance deploy (M2b) swaps this for a shared store behind the same interface.
+// public-intake.md P-10: fixed-window counters. A request names every bucket it touches; all
+// are checked before any is charged, so a refused request consumes nothing. The in-memory
+// limiter counts per process; a multi-instance deploy uses the shared Postgres one
+// (postgres-limiter.ts) behind the same interface.
 
 export interface RateLimit {
   readonly limit: number;
@@ -22,9 +23,17 @@ export interface Charge {
   readonly rule: RateLimit;
 }
 export type TakeResult = { readonly ok: true } | { readonly ok: false; readonly retryAfterSeconds: number };
-export interface RateLimiter {
-  take(charges: readonly Charge[]): TakeResult;
+/** The request's deadline, for a limiter that waits on a shared store. */
+export interface TakeOptions {
+  readonly signal?: AbortSignal;
+  readonly remainingMs?: () => number;
 }
+export interface RateLimiter {
+  take(charges: readonly Charge[], options?: TakeOptions): Promise<TakeResult>;
+}
+
+/** Whole seconds a refused caller waits, at least one. */
+export const retryAfterSeconds = (retryAfterMs: number) => Math.max(1, Math.ceil(retryAfterMs / 1000));
 
 /** Above this many buckets, expired ones are swept before the next charge. */
 const SWEEP_AT = 10_000;
@@ -34,7 +43,7 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
   const live = (bucket: { windowStart: number; windowMs: number } | undefined, now: number) =>
     bucket !== undefined && now - bucket.windowStart < bucket.windowMs;
   return {
-    take(charges) {
+    async take(charges) {
       const now = clock.now().getTime();
       if (buckets.size > SWEEP_AT)
         for (const [key, bucket] of buckets) if (!live(bucket, now)) buckets.delete(key);
@@ -44,7 +53,7 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
         if (live(bucket, now) && bucket!.count >= rule.limit)
           retryAfterMs = Math.max(retryAfterMs, bucket!.windowStart + bucket!.windowMs - now);
       }
-      if (retryAfterMs > 0) return { ok: false, retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)) };
+      if (retryAfterMs > 0) return { ok: false, retryAfterSeconds: retryAfterSeconds(retryAfterMs) };
       for (const { key, rule } of charges) {
         const bucket = buckets.get(key);
         if (live(bucket, now)) bucket!.count += 1;

@@ -48,3 +48,24 @@ export function formatPhone(phone: string | null): string | null {
 export function revealOnFocus(event: { currentTarget: HTMLElement }) {
   event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
+
+/** Digits after the decimal point for a currency (2 for USD, 0 for JPY). */
+export function currencyDigits(currency: string): number {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency }).resolvedOptions().maximumFractionDigits ?? 2;
+  } catch {
+    return 2;
+  }
+}
+
+/** An amount in minor units (cents for USD); whole amounts drop the cents: "$6,400", "$12.50". */
+export function formatMinor(amountMinor: number, currency: string): string {
+  const digits = currencyDigits(currency);
+  const scale = 10 ** digits;
+  const whole = amountMinor % scale === 0;
+  try {
+    return formatMoney(amountMinor / scale, currency, whole ? 0 : digits);
+  } catch {
+    return `${(amountMinor / scale).toFixed(whole ? 0 : digits)} ${currency}`;
+  }
+}

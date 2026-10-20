@@ -7,8 +7,9 @@ import {
   dealPageSchema,
   moveDealStageOutputSchema,
   pipelineSummarySchema,
+  setDealDetailsOutputSchema,
 } from "@zs/contracts";
-import { call, contactAndDeal, createApiHarness, type ApiHarness } from "./helpers.js";
+import { call, contactAndDeal, createApiHarness, NOW, signedInMember, type ApiHarness } from "./helpers.js";
 
 let h: ApiHarness;
 beforeAll(async () => { h = await createApiHarness(); });
@@ -72,6 +73,21 @@ describe("deal stage moves", () => {
     expect(apiErrorBodySchema.parse(stale.body).error.details).toEqual({ reason: "stale_revision", currentRevision: 2 });
   });
 
+  it("stamps the won date from the injected clock on entering a won stage and clears it on leaving (H-2)", async () => {
+    const { contactId, dealId } = await contactAndDeal(h, h.a, "won@example.com");
+    const listed = async () => dealPageSchema.parse((await call(h.app, "GET", `/v1/crm/deals?contactId=${contactId}`, {
+      token: h.a.token,
+    })).body).items.find((deal) => deal.id === dealId)!;
+    expect(await listed()).toMatchObject({ stageId: h.a.stages[0], value: null, leadSource: null, wonAt: null });
+    const move = (stageId: string, expectedRevision: number) => call(h.app, "POST", `/v1/crm/deals/${dealId}/stage`, {
+      token: h.a.token, key: randomUUID(), body: { pipelineId: h.a.pipelineId, stageId, expectedRevision },
+    });
+    expect((await move(h.a.stages[1], 1)).status).toBe(200);
+    expect(await listed()).toMatchObject({ stageId: h.a.stages[1], revision: 2, wonAt: NOW });
+    expect((await move(h.a.stages[0], 2)).status).toBe(200);
+    expect(await listed()).toMatchObject({ stageId: h.a.stages[0], revision: 3, wonAt: null });
+  });
+
   it("replays a deal create with its original 201", async () => {
     const { contactId } = await contactAndDeal(h, h.a, "deal-replay@example.com");
     const key = randomUUID();
@@ -89,14 +105,84 @@ describe("deal stage moves", () => {
     expect(response.status).toBe(400);
   });
 
-  it("lists deals and pipelines with stages", async () => {
+  it("lists deals with their details and pipelines with stages and outcomes", async () => {
+    const { contactId, dealId } = await contactAndDeal(h, h.a, "listed@example.com");
     const deals = dealPageSchema.parse((await call(h.app, "GET", `/v1/crm/deals?pipelineId=${h.a.pipelineId}`, { token: h.a.token })).body);
-    expect(deals.items.length).toBeGreaterThan(0);
+    expect(deals.items.find((deal) => deal.id === dealId)).toEqual({
+      id: dealId, tenantId: h.a.tenantId, contactId, pipelineId: h.a.pipelineId, stageId: h.a.stages[0], title: "Ring",
+      revision: 1, createdAt: NOW, updatedAt: NOW, value: null, leadSource: null, wonAt: null,
+    });
     const pipelines = (await call(h.app, "GET", "/v1/crm/pipelines", { token: h.a.token })).body.items;
     expect(pipelines.map((item: unknown) => pipelineSummarySchema.parse(item))).toEqual([
       { id: h.a.pipelineId, name: "Sales", stages: [
-        { id: h.a.stages[0], name: "New", position: 0 }, { id: h.a.stages[1], name: "Won", position: 1 },
+        { id: h.a.stages[0], name: "New", position: 0, outcome: "open" },
+        { id: h.a.stages[1], name: "Won", position: 1, outcome: "won" },
       ] },
     ]);
+  });
+});
+
+describe("deal details (H-1)", () => {
+  const setDetails = (dealId: string, body: unknown, token = h.a.token, key: string = randomUUID()) =>
+    call(h.app, "POST", `/v1/crm/deals/${dealId}/details`, { token, key, body });
+  const usd = (amountMinor: number) => ({ amountMinor, currency: "USD" });
+
+  it("sets value and lead source, bumps the revision, and lists them", async () => {
+    const { contactId, dealId } = await contactAndDeal(h, h.a, "details@example.com");
+    const key = randomUUID();
+    const body = { expectedRevision: 1, value: usd(125000), leadSource: "website" };
+    const set = await setDetails(dealId, body, h.a.token, key);
+    expect(set.status).toBe(200);
+    const result = setDealDetailsOutputSchema.parse(set.body).result;
+    expect(result).toMatchObject({ id: dealId, revision: 2, updatedAt: NOW, value: usd(125000), leadSource: "website", wonAt: null });
+    // A replay returns the stored result; reusing the key with another body is refused.
+    expect((await setDetails(dealId, body, h.a.token, key)).body).toEqual(set.body);
+    const reused = await setDetails(dealId, { ...body, leadSource: "phone" }, h.a.token, key);
+    expect(reused.status).toBe(409);
+    expect(apiErrorBodySchema.parse(reused.body).error.details).toEqual({ reason: "idempotency_key_reused" });
+    const listed = dealPageSchema.parse((await call(h.app, "GET", `/v1/crm/deals?contactId=${contactId}`, { token: h.a.token })).body);
+    expect(listed.items).toEqual([result]);
+    // Clearing both is allowed.
+    const cleared = await setDetails(dealId, { expectedRevision: 2, value: null, leadSource: null });
+    expect(setDealDetailsOutputSchema.parse(cleared.body).result).toMatchObject({ revision: 3, value: null, leadSource: null });
+  });
+
+  it("answers a stale revision with 409 stale_revision and the current revision", async () => {
+    const { dealId } = await contactAndDeal(h, h.a, "details-stale@example.com");
+    expect((await setDetails(dealId, { expectedRevision: 1, value: usd(5000), leadSource: "referral" })).status).toBe(200);
+    const stale = await setDetails(dealId, { expectedRevision: 1, value: usd(9000), leadSource: "referral" });
+    expect(stale.status).toBe(409);
+    expect(apiErrorBodySchema.parse(stale.body).error).toMatchObject({
+      code: "Conflict", details: { reason: "stale_revision", currentRevision: 2 },
+    });
+    // A stage move uses the same revision, so it sees the details write too.
+    const move = await call(h.app, "POST", `/v1/crm/deals/${dealId}/stage`, {
+      token: h.a.token, key: randomUUID(), body: { pipelineId: h.a.pipelineId, stageId: h.a.stages[1], expectedRevision: 1 },
+    });
+    expect(apiErrorBodySchema.parse(move.body).error.details).toEqual({ reason: "stale_revision", currentRevision: 2 });
+  });
+
+  it("lets staff set details (customers), refuses another tenant, and validates input", async () => {
+    const { dealId } = await contactAndDeal(h, h.a, "details-staff@example.com");
+    const staff = await signedInMember(h.database, h.fixture, h.a.tenantId, "staff");
+    expect((await setDetails(dealId, { expectedRevision: 1, value: usd(100), leadSource: "phone" }, staff.token)).status).toBe(200);
+    const foreign = await setDetails(dealId, { expectedRevision: 2, value: usd(1), leadSource: "ads" }, h.b.token);
+    expect(foreign.status).toBe(403);
+    expect(apiErrorBodySchema.parse(foreign.body).error.code).toBe("Forbidden");
+    for (const body of [
+      { expectedRevision: 2, value: { amountMinor: 1, currency: "usd" }, leadSource: null },
+      { expectedRevision: 2, value: { amountMinor: -1, currency: "USD" }, leadSource: null },
+      { expectedRevision: 2, value: null, leadSource: "billboard" },
+      { expectedRevision: 2, value: null },
+    ]) {
+      const bad = await setDetails(dealId, body);
+      expect(bad.status, JSON.stringify(body)).toBe(400);
+      expect(apiErrorBodySchema.parse(bad.body).error.code).toBe("ValidationFailed");
+    }
+    expect((await setDetails("nope", { expectedRevision: 2, value: null, leadSource: null })).status).toBe(400);
+    const missingKey = await call(h.app, "POST", `/v1/crm/deals/${dealId}/details`, {
+      token: h.a.token, body: { expectedRevision: 2, value: null, leadSource: null },
+    });
+    expect(missingKey.status).toBe(400);
   });
 });

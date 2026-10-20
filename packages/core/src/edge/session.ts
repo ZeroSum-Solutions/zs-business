@@ -7,11 +7,13 @@
 import {
   ROLE_PERMISSIONS,
   ValidationFailed,
+  Conflict,
   approvalOutputSchema,
   changeMemberRoleRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
   decideApprovalRequestSchema,
+  draftReplyRequestSchema,
   idempotencyKeySchema,
   inviteMemberRequestSchema,
   linkIntakeItemRequestSchema,
@@ -25,14 +27,20 @@ import {
   listContactsQuerySchema,
   listDealsQuerySchema,
   listSourcesQuerySchema,
+  listThreadsQuerySchema,
   moveDealStageRequestSchema,
   observeSourceOutputSchema,
   observeSourceRequestSchema,
   rejectIntakeItemRequestSchema,
+  replyOutputSchema,
+  replyStepRequestSchema,
   requestApprovalInputSchema,
   requestApprovalRequestSchema,
+  resultsQuerySchema,
   roleCan,
+  setDealDetailsRequestSchema,
   slotsQuerySchema,
+  threadIdSchema,
   upsertContactRequestSchema,
   uuidSchema,
   type ActionBinding,
@@ -49,6 +57,8 @@ import {
   type MemberOutput,
   type ObserveSourceOutput,
   type Permission,
+  type ReplyOutput,
+  type ReplyRecord,
   type RemoveMemberOutput,
   activateSiteReleaseRequestSchema,
   createSiteRequestSchema,
@@ -68,10 +78,14 @@ import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loa
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
+import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
+import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
+import { homeResults } from "../reads/home.js";
+import { getThread, listThreads, loadReply } from "../reads/inbox.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
@@ -127,8 +141,8 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 }
 
 const dispatch = createDispatcher({
-  ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers, ...approvalHandlers, ...sourceHandlers,
-  ...suppressionHandlers, ...siteHandlers,
+  ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...siteHandlers,
 });
 
 /**
@@ -141,6 +155,12 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
+  "crm.deal.set-details": "customers",
+  "inbox.reply.draft": "inbox.drafts",
+  "inbox.reply.discard": "inbox.drafts",
+  // inbox-home.md I-6: also `required` in APPROVAL_POLICIES, so only an owner's approval runs it.
+  "inbox.reply.send": "inbox.drafts",
+  "inbox.reply.resume": "approve",
   "intake.item.link": "intake",
   "intake.item.reject": "intake",
   "member.invite": "members",
@@ -298,8 +318,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  const envelope = <Type extends "booking" | "contact" | "deal" | "intake_item" | "member" | "approval" | "site">(rawKey: unknown, type: Type, targetId?: string) => {
-    const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
+  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "site";
+  const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
+    keyedEnvelope(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
+  /** The envelope for a key the server built itself, such as a reserved `inbox:` step key. */
+  const keyedEnvelope = <Type extends EnvelopeType>(idempotencyKey: string, type: Type, targetId?: string) => {
     // An approval record's ID must differ from the request's own direct approval ID below:
     // the actions_tenant_approval index allows one action per approval ID (approvals.md A-7).
     const id = targetId ?? derivedId(tenantId, idempotencyKey, type === "approval" ? "approval-record" : type);
@@ -315,6 +338,22 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       await requireMember(tx, tenantId, actorId, permission);
       return work(tx);
     });
+  /**
+   * inbox-home.md I-6: a key for one step of a reply write, derived so a retry replays that step.
+   * `inbox:` is a reserved prefix (SERVER_IDEMPOTENCY_PREFIXES), so no caller can take it first.
+   */
+  const stepKey = (key: string, step: string) => `inbox:${step}:${derivedId(tenantId, key, step)}`;
+  /** I-6, approvals.md A-5: propose sending one drafted reply, for an owner to approve. */
+  const proposeSend = async (reply: ReplyRecord, key: string) => {
+    const { id, ...rest } = keyedEnvelope(key, "approval");
+    const request = requestApprovalRequestSchema.parse({
+      action: { actionType: SEND_REPLY_ACTION, target: { type: "inbox_reply", id: reply.id }, payload: { replyId: reply.id } },
+      summary: `Send the reply "${reply.subject}"`,
+    });
+    return parseInput(approvalOutputSchema,
+      await run({ actionType: "approval.request", ...rest, payload: { approvalId: id, ...request } }), "result").result;
+  };
+  const notDraft = (status: string) => new Conflict("The reply is no longer a draft", { reason: "not_draft", status });
 
   /**
    * Project committed state to the edge, re-checking the caller's permission in that read. It
@@ -364,6 +403,94 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const request = parseInput(moveDealStageRequestSchema, body);
       const { id: _id, ...rest } = envelope(key, "deal", id);
       return moveDealStage({ actionType: "crm.deal.move-stage", ...rest, payload: { dealId: id, ...request } }, writeContext);
+    },
+
+    async setDealDetails(dealId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, dealId, "deal ID");
+      const request = parseInput(setDealDetailsRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "deal", id);
+      return setDealDetails({ actionType: "crm.deal.set-details", ...rest, payload: { dealId: id, ...request } }, writeContext);
+    },
+
+    /** I-5: draft, then propose sending it (approvals.md A-5). A retry replays both steps. */
+    async draftReply(body: unknown, key: unknown): Promise<ReplyOutput> {
+      const request = parseInput(draftReplyRequestSchema, body);
+      const { id, ...rest } = envelope(key, "inbox_reply");
+      const draft = await draftReply({ actionType: "inbox.reply.draft", ...rest, payload: { replyId: id, ...request } }, writeContext);
+      await proposeSend(draft.result, stepKey(rest.idempotencyKey, "propose"));
+      return draft;
+    },
+    /**
+     * I-6: an owner approves the reply's open proposal (proposing again first when it expired or
+     * was withdrawn), then runs the send as that owner (approvals.md A-6, A-7). A reply with no
+     * address is refused before anything is decided, so its proposal stays pending. A proposal
+     * this owner approved under another call (whose run failed) is resumed under this call's key;
+     * one another owner approved is theirs to finish. A retry with the same key replays.
+     */
+    async approveReply(replyId: unknown, body: unknown, key: unknown): Promise<ReplyOutput> {
+      const id = parseInput(uuidSchema, replyId, "reply ID");
+      parseInput(replyStepRequestSchema, body);
+      const idempotencyKey = parseInput(idempotencyKeySchema, key, "Idempotency-Key");
+      const now = new Date(readClock(deps.clock));
+      const { reply, open, bound } = await read("approve", async (tx) => {
+        const reply = await loadReply(tx, tenantId, id);
+        if (reply?.status === "draft") await requireEmail(tx, tenantId, reply.contactId);
+        const open = await openSendApproval(tx, tenantId, id, now);
+        // Whether this key already approved or resumed this very proposal: a retry of that call.
+        const bound = open !== null && (await tx.query(
+          `SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2 AND action_type IN ('approval.approve', $3)
+              AND payload->>'approvalId' = $4`,
+          [tenantId, idempotencyKey, RESUME_REPLY_ACTION, open.id],
+        )).rowCount === 1;
+        return { reply, open, bound };
+      });
+      if (!reply) throw new TenantDenied();
+      const retry = bound && open?.status === "approved";
+      // Once the reply has left draft, only a retry of the call that sent it replays.
+      if (reply.status !== "draft" && !retry) throw notDraft(reply.status);
+      let approvalId = open?.id;
+      if (!retry && open?.status === "approved") {
+        // Only the deciding owner runs an approved action (A-7).
+        if (open.decidedBy !== actorId)
+          throw new Conflict("Another owner approved this reply", { reason: "approved_by_other", approvedBy: open.decidedBy });
+        const { id: _id, ...rest } = envelope(idempotencyKey, "inbox_reply", id);
+        await run({ actionType: RESUME_REPLY_ACTION, ...rest, payload: { replyId: id, approvalId: open.id } });
+      } else if (!retry) {
+        approvalId ??= (await proposeSend(reply, stepKey(idempotencyKey, "propose"))).id;
+        const { id: _id, ...rest } = envelope(idempotencyKey, "approval", approvalId);
+        await run({ actionType: "approval.approve", ...rest, payload: { approvalId } });
+      }
+      return parseInput(replyOutputSchema, await runApproved(approvalId!), "result");
+    },
+    /** I-7: discard the draft, then withdraw its open proposal where this member may (A-8). */
+    async discardReply(replyId: unknown, body: unknown, key: unknown): Promise<ReplyOutput> {
+      const id = parseInput(uuidSchema, replyId, "reply ID");
+      parseInput(replyStepRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "inbox_reply", id);
+      const discarded = await discardReply({ actionType: "inbox.reply.discard", ...rest, payload: { replyId: id } }, writeContext);
+      const now = new Date(readClock(deps.clock));
+      const { access, open } = await deps.db.tenant(tenantId, async (tx) => ({
+        access: await requireMember(tx, tenantId, actorId, "inbox.drafts"), open: await openSendApproval(tx, tenantId, id, now),
+      }));
+      if (open && (roleCan(access.role, "approve") || (open.status === "pending" && open.requestedBy === actorId))) {
+        const { id: _approval, ...step } = keyedEnvelope(stepKey(rest.idempotencyKey, "withdraw"), "approval", open.id);
+        await run({ actionType: "approval.revoke", ...step, payload: { approvalId: open.id } });
+      }
+      return discarded;
+    },
+    listThreads: (query: unknown) => {
+      const parsed = parseInput(listThreadsQuerySchema, query, "query");
+      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed));
+    },
+    getThread: (threadId: unknown) => {
+      const id = parseInput(threadIdSchema, threadId, "thread ID");
+      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id));
+    },
+    /** H-3: the clock is read once, here, so both weeks come from the same instant. */
+    homeResults: (query: unknown) => {
+      const parsed = parseInput(resultsQuerySchema, query, "query");
+      const now = readClock(deps.clock);
+      return read("reports", (tx) => homeResults(tx, tenantId, parsed, now));
     },
 
     listBookings: (query: unknown) => {

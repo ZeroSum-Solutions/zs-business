@@ -56,7 +56,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zs_migrator'
       AND (NOT rolcanlogin OR rolsuper OR rolbypassrls OR rolcreatedb OR rolreplication OR NOT rolcreaterole))
     OR EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid
-      WHERE m.member = 'zs_migrator'::regrole AND r.rolname NOT IN ('zs_dispatcher', 'zs_function_owner')) THEN
+      WHERE m.member = 'zs_migrator'::regrole AND r.rolname NOT IN ('zs_dispatcher', 'zs_function_owner', 'zs_rate_limiter')) THEN
     RAISE EXCEPTION 'zs_migrator must be a LOGIN CREATEROLE role without superuser, BYPASSRLS or other memberships';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zs_runtime'
