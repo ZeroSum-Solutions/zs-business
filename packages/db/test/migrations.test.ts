@@ -43,6 +43,8 @@ const shipped: Record<string, string> = {
   "20261020400000_public_rate_limits.sql": "a67ceae100ca08b7346c4668300e9a3fdcf89a51eb98134285d60809b033e333",
   // M4b site releases (#17).
   "20261020700000_site_releases.sql": "74d642bd382324eb07556c4e7c238be307aea7bbd7453d933f894e52fd94a51b",
+  // M5 Activepieces (#24).
+  "20261020640000_activepieces.sql": "500ead2a2d04a2bab161a792598ee37dbc85af0e97e1aebaecfb9e0333559879",
 };
 /**
  * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is

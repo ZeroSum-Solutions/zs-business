@@ -81,6 +81,9 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         },
       },
     }),
+    ...(env.activepieces === null ? {} : {
+      activepieces: { keySecrets: env.activepieces.keySecrets, urlPolicy: { allowLoopback: env.activepieces.allowLoopback } },
+    }),
     onError: (error) => console.error("Unhandled API error", error),
     ready: () => checkDatabase(pool),
   });

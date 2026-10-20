@@ -105,3 +105,4 @@ export * from "./members.js";
 export * from "./sites.js";
 export * from "./sources.js";
 export * from "./delivery.js";
+export * from "./automation.js";

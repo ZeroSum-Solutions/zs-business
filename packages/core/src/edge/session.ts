@@ -81,6 +81,7 @@ import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
+import { automationHandlers } from "../automation/handlers.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
@@ -142,12 +143,13 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...siteHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...automationHandlers, ...siteHandlers,
 });
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
- * request (public-intake.md P-1) and the suppression actions (delivery.md D-9) are never
+ * request (public-intake.md P-1), the suppression actions (delivery.md D-9) and the
+ * Activepieces actions (activepieces.md W-1, W-11, which authorize themselves) are never
  * reachable from a member session.
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({

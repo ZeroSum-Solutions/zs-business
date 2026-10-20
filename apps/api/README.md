@@ -612,3 +612,25 @@ Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Of
 off, 200 `{ ran: true, passes, ingested, claimed, sent, retried, blocked, dead, errors,
 budgetSpent }` after a run, and 503 when a run fails (the next run picks the work up again).
 It is its own Vercel function; the API function never opens the service login.
+
+## Activepieces (`/v1/integrations/activepieces`, `/integrations/activepieces/v1`, `/cron/activepieces`)
+
+Owner-managed webhooks to Activepieces flows, and tokens a flow uses to propose actions an owner
+approves (docs/requirements/activepieces.md). Off unless `ACTIVEPIECES_KEY_SECRET` is set.
+
+| Variable | Meaning |
+|---|---|
+| `ACTIVEPIECES_KEY_SECRET` | 32+ characters, on the API and the worker. Derives each endpoint's `whsec_` secret and each `zsap1_` token; nothing secret is stored. Unset, the routes are 404. |
+| `ACTIVEPIECES_KEY_PREVIOUS_SECRET` | The old key during a rotation: tokens it signed still work and webhooks carry both signatures. |
+| `ACTIVEPIECES_ALLOW_LOOPBACK` | `on` lets receiver URLs be `http://127.0.0.1`. Refused unless the database is loopback. |
+| `ACTIVEPIECES_WEBHOOK_WORKER` | Kill switch for the worker. `on` sends; anything else, or unset, sends nothing. |
+| `ACTIVEPIECES_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `CRON_SECRET` | Shared with `/cron/delivery`. |
+| `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS`, `ACTIVEPIECES_WORKER_ID` | Optional tuning: 20000, 2, 5000, 8, 15000 (Node worker only) and `activepieces`. Limit × timeout must fit the budget. |
+| `ACTIVEPIECES_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/activepieces`. Unset, there is no cron. |
+
+Owner routes (Bearer member token, `integrations` permission, owners only): `GET|POST /webhooks`,
+`POST /webhooks/:id/update`, `POST /webhooks/:id/rotate`, `GET /webhooks/:id/deliveries`,
+`POST /deliveries/:id/replay`, `GET|POST /tokens`, `POST /tokens/:id/revoke`. Flow routes (Bearer
+`zsap1_…` token): `GET /me`, `POST /proposals` (Idempotency-Key), `GET /proposals/:id`.
+`GET /cron/activepieces` answers like `/cron/delivery`, with `delivered` in place of `sent`.
