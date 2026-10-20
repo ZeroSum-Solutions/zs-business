@@ -523,7 +523,8 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       if (near.complete) listing = { ...listing, near };
     }
 
-    // d. G-8: open or renew the watch channel while the access token is fresh.
+    // d. G-8: open or renew the watch channel while the access token is fresh. Each channel call
+    // is bounded by the run's deadline too (G-10); a channel left open expires on its own.
     let opened: { id: string; resourceId: string; expiresAt: Date } | null = null;
     if (config.webhookUrl && !past(deadline) && (row.channel_expires_at === null
       || row.channel_expires_at.getTime() <= nowMs() + config.channelRenewBeforeMs)) {
@@ -532,10 +533,10 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       try {
         const watched = await call((signal) => deps.google.watch(access, {
           calendarId: row.calendar_id, channelId, address: config.webhookUrl!, token: channelToken(config.channelSecret, channelId),
-        }, { signal }));
+        }, { signal }), deadline);
         if (typeof watched.resourceId !== "string" || watched.resourceId.length < 1 || watched.resourceId.length > 255
           || !Number.isSafeInteger(watched.expiresAt) || watched.expiresAt <= nowMs()) {
-          await stopQuietly(access, channelId, typeof watched.resourceId === "string" ? watched.resourceId : "", counts);
+          await stopQuietly(access, channelId, typeof watched.resourceId === "string" ? watched.resourceId : "", counts, deadline);
           throw new GoogleRequestFailed("google_watch_unusable", false);
         }
         opened = { id: channelId, resourceId: watched.resourceId, expiresAt: new Date(watched.expiresAt) };
@@ -547,7 +548,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
 
     const applied = await apply(row, lease.until, listing, opened);
     if (applied !== "applied") {
-      if (opened) await stopQuietly(access, opened.id, opened.resourceId, counts);
+      if (opened) await stopQuietly(access, opened.id, opened.resourceId, counts, deadline);
       if (applied === "lost") {
         counts.lostLeases += 1;
         report({ kind: "lost_lease", tenantId: row.tenant_id, connectionId: row.id });
@@ -557,16 +558,18 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     if (opened) {
       counts.channelsOpened += 1;
       if (row.channel_id !== null && row.channel_resource_id !== null)
-        await stopQuietly(access, row.channel_id, row.channel_resource_id, counts);
+        await stopQuietly(access, row.channel_id, row.channel_resource_id, counts, deadline);
     }
     counts.synced += 1;
     report({ kind: "synced", tenantId: row.tenant_id, connectionId: row.id, mode: listing.mode, events: listing.events.length, complete: listing.complete });
   }
 
-  async function stopQuietly(access: string, channelId: string, resourceId: string, counts: CalendarRunCounts): Promise<void> {
+  /** Past the run's deadline (when one is given) it does not call Google at all. */
+  async function stopQuietly(access: string, channelId: string, resourceId: string, counts: CalendarRunCounts,
+    deadline?: Date): Promise<void> {
     if (!resourceId) return;
     try {
-      await call((signal) => deps.google.stopChannel(access, { channelId, resourceId }, { signal }));
+      await call((signal) => deps.google.stopChannel(access, { channelId, resourceId }, { signal }), deadline);
       counts.channelsStopped += 1;
     } catch { /* the channel expires on its own */ }
   }

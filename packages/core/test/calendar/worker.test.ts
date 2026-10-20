@@ -585,6 +585,41 @@ describe("push notifications and channels (G-8)", () => {
     expect(w.google.channels.get(row.channel_id)!.stopped).toBe(false);
   });
 
+  it("channel calls end with the run's deadline, and none starts once no time is left (G-10)", async () => {
+    const slow = () => new Promise<void>((resolve) => setTimeout(resolve, 400));
+    const timed = async (work: () => Promise<unknown>) => {
+      const started = Date.now();
+      const result = await work();
+      return { result, ms: Date.now() - started };
+    };
+    // A slow watch: cut at the 100 ms left; the sync still applies.
+    const v = await world();
+    v.google.fail("watch", slow);
+    const watching = await timed(() => h.worker(v.google, v.clock, { webhookUrl: WEBHOOK_URL })
+      .runOnce({ deadline: new Date(v.clock.now().getTime() + 100) }));
+    expect(watching.result).toMatchObject({ synced: 1, channelsOpened: 0, channelFailures: 1 });
+    expect(watching.ms).toBeLessThan(400);
+
+    // Renewal: a slow stop of the old channel is cut the same way.
+    const w = await world();
+    const worker = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL });
+    await worker.runOnce();
+    w.clock.set(START + CHANNEL_TTL_MS - DAY + MINUTE);
+    w.google.reset();
+    w.google.fail("stopChannel", slow);
+    const stopping = await timed(() => worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 100) }));
+    expect(stopping.result).toMatchObject({ synced: 1, channelsOpened: 1, channelsStopped: 0 });
+    expect(stopping.ms).toBeLessThan(400);
+
+    // A watch that uses up the run: the old channel is not stopped at all; it expires on its own.
+    w.clock.set(START + 2 * CHANNEL_TTL_MS - DAY);
+    w.google.reset();
+    w.google.fail("watch", () => { w.clock.advance(MINUTE); });
+    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 1_000) }))
+      .toMatchObject({ synced: 1, channelsOpened: 1, channelsStopped: 0 });
+    expect(w.google.count("stopChannel")).toBe(0);
+  });
+
   it("opens no channel without a webhook URL, and a watch failure does not fail the sync", async () => {
     const w = await world();
     expect(await h.worker(w.google, w.clock).runOnce()).toMatchObject({ synced: 1, channelsOpened: 0 });

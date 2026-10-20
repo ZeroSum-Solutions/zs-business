@@ -1,6 +1,6 @@
 # M5: Google Calendar busy sync
 
-Status: draft contract for M5, provider 3 (2026-10-20), revision 3. Code follows this file; a
+Status: draft contract for M5, provider 3 (2026-10-20), revision 4. Code follows this file; a
 change to a numbered rule needs a new revision of this file first.
 
 Scope: an owner connects one Google Calendar to one booking resource. Busy time on that
@@ -151,8 +151,9 @@ network error retries with backoff; another refusal, or 8 failed attempts, marks
 the error code. Before each insert the worker checks that the push still holds its lease and its
 connection is still `active`, so a disconnect during a batch sends none of the pushes it has not
 started. A worker run stops claiming new work once its deadline passes, so a run ends inside the
-function's time limit: each Google call is bounded by the time the run has left, and a list cut by
-the deadline writes nothing. A connection cut that way after others in the pass goes back with
+function's time limit: each Google call, channel watches and stops (G-8, G-9) included, is bounded
+by the time the run has left, none starts once no time is left, and a list cut by the deadline
+writes nothing. A connection cut that way after others in the pass goes back with
 its lease released and `next_sync_at` unchanged, so the next run takes it first; one cut while
 first in the pass is too slow for a run and backs off as a failed sync (`run_deadline`). The cron
 entry refuses a `CALENDAR_RUN_BUDGET_MS` over 20 s, since Vercel stops its function at 30 s.
@@ -174,7 +175,7 @@ that may `SET ROLE service_role`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_API_BASE_URL`) exist for tests. In Google Cloud: an OAuth client (web), the Calendar API
 enabled, the consent screen with the three scopes, and the webhook domain verified for push.
 
-## Known limits (revision 3)
+## Known limits (revision 4)
 
 - One calendar (`primary`) per resource, one resource per connection.
 - Bookings are only pushed, never updated or deleted in Google (bookings have no cancellation yet).
