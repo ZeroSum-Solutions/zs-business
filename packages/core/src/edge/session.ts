@@ -366,8 +366,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
     /** Compile without storing or recording anything: what a publish of this spec would serve. */
     async previewSite(siteId: unknown, body: unknown): Promise<SitePreview> {
-      const sites = deps.sites;
-      if (!sites) throw new NotFound();
+      const sites = requireSites();
       const id = parseInput(uuidSchema, siteId, "site ID");
       const request = parseInput(publishSiteRequestSchema, body);
       await read("publish", (tx) => getSite(tx, tenantId, id));
