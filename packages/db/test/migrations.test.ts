@@ -43,6 +43,7 @@ const shipped: Record<string, string> = {
   "20261020400000_public_rate_limits.sql": "a67ceae100ca08b7346c4668300e9a3fdcf89a51eb98134285d60809b033e333",
   // M4b site releases (#17).
   "20261020700000_site_releases.sql": "74d642bd382324eb07556c4e7c238be307aea7bbd7453d933f894e52fd94a51b",
+  "20261020710000_site_release_numbers.sql": "7d6d864b54115011989fcd18af88038ef712abc2319189434a6ed3d591efe4ce",
   "20261020800000_followup_agent.sql": "95869333255fb52335210a2641e621a9dc9030ed5ce26d11758eb26a6eb0977a",
   // M5 Activepieces (#24).
   "20261020640000_activepieces.sql": "500ead2a2d04a2bab161a792598ee37dbc85af0e97e1aebaecfb9e0333559879",
