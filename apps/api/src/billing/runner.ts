@@ -47,7 +47,7 @@ export function createBillingRunner(input: {
           budgetSpent = true;
           break;
         }
-        const pass = await worker.runOnce(claimLimit);
+        const pass = await worker.runOnce(claimLimit, { deadline: new Date(started + budgetMs) });
         passes += 1;
         claimed += pass.claimed;
         for (const [outcome, count] of Object.entries(pass.outcomes)) outcomes[outcome] = (outcomes[outcome] ?? 0) + count;

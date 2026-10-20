@@ -21,8 +21,15 @@ export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Objec
 export const isApprovalAction = (actionType: string) => actionType.startsWith("approval.");
 
 /**
+ * Member actions that never run through an approval. stripe.md S-1: a top-up runs only from the
+ * member's top-up route, with the server's terms, and asks Stripe for a Checkout Session after.
+ */
+export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["wallet.topup.create"]);
+
+/**
  * The policy for one action type, or null when it cannot be requested: it has no
- * ACTION_PERMISSIONS entry (so no member may run it) or it is an approval action.
+ * ACTION_PERMISSIONS entry (so no member may run it), it is an approval action, or it is in
+ * NEVER_APPROVED_ACTIONS.
  */
 export function approvalPolicy(
   actionType: string,
@@ -30,6 +37,6 @@ export function approvalPolicy(
   policies: Readonly<Record<string, ApprovalPolicy>> = APPROVAL_POLICIES,
 ): ApprovalPolicy | null {
   const own = Object.hasOwn(actionPermissions, actionType) ? actionPermissions[actionType] : undefined;
-  if (!own || isApprovalAction(actionType)) return null;
+  if (!own || isApprovalAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType)) return null;
   return Object.hasOwn(policies, actionType) ? policies[actionType]! : { request: own, required: false };
 }

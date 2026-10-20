@@ -66,7 +66,8 @@ export interface ScopedDatabase {
   ): Promise<T>;
   /**
    * The runtime role with no tenant set: every tenant policy matches nothing. Only for platform
-   * tables whose own policy allows the runtime a narrow write (stripe_events intake, stripe.md S-3).
+   * tables whose own policy allows the runtime a narrow write (stripe_events intake, stripe.md S-3);
+   * those policies also require `app.platform`, which only this entry point sets.
    */
   platform?<T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions): Promise<T>;
 }
@@ -276,6 +277,7 @@ async function transaction<T>(
   limits = limitsSchema.parse({}),
   options: TransactionOptions = {},
   onResetFailure?: (error: unknown) => void,
+  platform = false,
 ): Promise<T> {
   const { signal } = options;
   const client = await checkout(pool, limits.maxWaiting, signal);
@@ -299,7 +301,9 @@ async function transaction<T>(
     // Three round trips before the work. The first opens the transaction and, for the runtime
     // role, checks the login; the second sets the role, limits and tenant; the third opens
     // the work savepoint. set_config('role') is SET LOCAL ROLE with the same membership
-    // check. All of it is transaction-local.
+    // check. app.platform marks a platform intake (stripe.md S-3): the intake policies require
+    // it, and nothing reaching the runtime role through the Data API can set it. All of it is
+    // transaction-local.
     if (role === "authenticated") {
       const [, login] = (await tx.query(
         `BEGIN ISOLATION LEVEL READ COMMITTED; ${RUNTIME_LOGIN_CHECK}`,
@@ -311,8 +315,8 @@ async function transaction<T>(
     }
     await tx.query(
       `SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true),
-              set_config('role',$3,true),set_config('app.tenant_id',$4,true)`,
-      [`${cap(limits.lockTimeoutMs)}ms`, `${cap(limits.statementTimeoutMs)}ms`, role, tenantId ?? ""],
+              set_config('role',$3,true),set_config('app.tenant_id',$4,true),set_config('app.platform',$5,true)`,
+      [`${cap(limits.lockTimeoutMs)}ms`, `${cap(limits.statementTimeoutMs)}ms`, role, tenantId ?? "", platform ? "on" : ""],
     );
     await tx.query(`SAVEPOINT ${WORK_SAVEPOINT}`);
     stage = "work";
@@ -396,7 +400,7 @@ export function createScopedDatabase(
         onResetFailure,
       ),
     platform: (work, transactionOptions = {}) =>
-      transaction(pool, "authenticated", null, work, limits, transactionOptions, onResetFailure),
+      transaction(pool, "authenticated", null, work, limits, transactionOptions, onResetFailure, true),
   };
 }
 /** Separate privileged entry point for migrations, provisioning, and outbox workers. */
