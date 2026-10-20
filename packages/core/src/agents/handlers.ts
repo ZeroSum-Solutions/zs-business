@@ -246,8 +246,8 @@ export const draftHandler: ActionHandler = {
     if ((await tx.query("SELECT 1 FROM inbox_replies WHERE tenant_id=$1 AND id=$2", [tenantId, payload.replyId])).rowCount)
       throw idInUse("reply");
     await tx.query(
-      `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,subject,body,status,drafted_by,created_at)
-       VALUES ($1,$2,$3,'email',$4,$5,'draft',$6,$7)`,
+      `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,subject,body,drafted_by,created_at)
+       VALUES ($1,$2,$3,'email',$4,$5,$6,$7)`,
       [tenantId, payload.replyId, payload.contactId, payload.subject, payload.body, binding.actorId, now],
     );
     const summary = `Send the follow-up "${payload.subject}"`.slice(0, 500);
