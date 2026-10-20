@@ -28,18 +28,19 @@ export function ConnectionsView() {
       <Suspense fallback={null}>
         <GoogleReturn onNotice={setNotice} />
       </Suspense>
-      <GoogleCalendarCard notice={notice} />
+      <GoogleCalendarCard notice={notice} onNotice={setNotice} />
       <OtherAccounts />
     </>
   );
 }
 
 /**
- * Google sends the owner back here with `?calendar=connected` or `?calendar=error&reason=…`
- * (google-calendar.md G-2). Keep what it said on screen, read the connections again, and take
- * the query off the address so a reload or a shared link does not repeat it.
+ * Google sends the owner back here with `?calendar=confirm` when a grant waits for the owner to
+ * confirm its account, or `?calendar=error&reason=…` (google-calendar.md G-2). Keep what it said
+ * on screen, read the waiting grant and the connections again, and take the query off the address
+ * so a reload or a shared link does not repeat it. `?calendar=connected` is still understood.
  */
-function GoogleReturn({ onNotice }: { onNotice: (notice: ReturnNotice) => void }) {
+function GoogleReturn({ onNotice }: { onNotice: (notice: ReturnNotice | null) => void }) {
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -58,7 +59,9 @@ function GoogleReturn({ onNotice }: { onNotice: (notice: ReturnNotice) => void }
     if (handled.current === search) return;
     handled.current = search;
     const notice = returnNotice(outcome, reason);
-    if (notice) onNotice(notice);
+    // A confirm return clears an older notice: the card asks about the waiting grant instead.
+    if (notice || outcome === "confirm") onNotice(notice);
+    void queryClient.invalidateQueries({ queryKey: keys.calendarPending });
     void queryClient.invalidateQueries({ queryKey: keys.calendarConnections });
     // Busy times from a new connection change which times are open.
     if (outcome === "connected") void queryClient.invalidateQueries({ queryKey: keys.slotsAll });

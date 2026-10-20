@@ -1,15 +1,20 @@
 // google-calendar.md G-1, G-2: the dashboard binds a connect flow to the browser that started it.
 // The start goes through the proxy, which keeps a random key in an httpOnly cookie and sends the API
-// only its SHA-256; the callback route hands the API Google's answer and that cookie's key.
+// only its SHA-256; the callback route hands the API Google's answer and that cookie's key, and
+// keeps the grant the API staged in a Strict cookie that only the owner's confirmation spends.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { proxyApiRequest } from "../src/lib/server/api-proxy";
-import { CONNECT_COOKIE, completeGoogleConnect } from "../src/lib/server/calendar-connect";
-import { API_URL, createLiveHarness, ORIGIN, setCookies, signInThroughLink, type UpstreamCall } from "./helpers/live";
+import { CONNECT_COOKIE, GRANT_COOKIE, completeGoogleConnect, discardPendingGrant } from "../src/lib/server/calendar-connect";
+import { signOut } from "../src/lib/server/sign-in";
+import { AUTH_COOKIE } from "../src/lib/server/supabase";
+import { API_URL, createLiveHarness, ORIGIN, sameOrigin, setCookies, signInThroughLink, type UpstreamCall } from "./helpers/live";
 
 const CONNECT = ["v1", "calendar", "google", "connect"];
 const RESOURCE = "6f1d2b6e-8a4b-4c1e-9d55-0d6c1f2a3b4c";
 const AUTHORIZE_URL = "https://accounts.google.test/o/oauth2/v2/auth?state=s";
+/** A staged grant as the API signs it (made up: only its form matters here). */
+const GRANT = `zgg1.${"g".repeat(120)}.${"t".repeat(43)}`;
 const sha256 = (value: string) => createHash("sha256").update(value).digest("base64url");
 const sentBody = (call: UpstreamCall) => JSON.parse(new TextDecoder().decode(call.init.body as ArrayBuffer)) as Record<string, unknown>;
 
@@ -161,5 +166,123 @@ describe("the callback route", () => {
 
   it("is not found in demo mode", async () => {
     expect((await completeGoogleConnect(callbackRequest("?state=s"), null)).status).toBe(404);
+  });
+
+  it("keeps a staged grant in a Strict httpOnly cookie under /api, never in the address, and asks the page to confirm", async () => {
+    const harness = createLiveHarness();
+    harness.api = async () => new Response(null, { status: 303, headers: { Location: "https://app.test/x?calendar=confirm", "x-zs-pending-grant": GRANT } });
+    const response = await completeGoogleConnect(callbackRequest("?state=s&code=c"), harness.setup);
+    expect(landsOn(response)).toEqual({ calendar: "confirm" });
+    const cookie = setCookies(response).get(GRANT_COOKIE)!;
+    expect(cookie.value).toBe(GRANT);
+    expect(cookie.header).toMatch(/; Path=\/api(;|$)/);
+    expect(cookie.header).toMatch(/; Max-Age=600(;|$)/);
+    expect(cookie.header).toMatch(/; HttpOnly/);
+    expect(cookie.header).toMatch(/; SameSite=Strict/);
+    expect(response.headers.get("location")).not.toContain("zgg1");
+    // A confirm without a well-formed grant is nothing this page can use.
+    for (const grant of [null, "zgg1.x", `zgs1.${"g".repeat(10)}.${"t".repeat(43)}`]) {
+      harness.api = async () => new Response(null, { status: 303, headers: { Location: "https://app.test/x?calendar=confirm", ...(grant === null ? {} : { "x-zs-pending-grant": grant }) } });
+      const refused = await completeGoogleConnect(callbackRequest("?state=s&code=c"), harness.setup);
+      expect(landsOn(refused), String(grant)).toEqual({ calendar: "error", reason: "unavailable" });
+      expect(setCookies(refused).has(GRANT_COOKIE)).toBe(false);
+    }
+  });
+});
+
+describe("the staged grant (proxy, discard, sign-out)", () => {
+  const PENDING = ["v1", "calendar", "google", "pending"];
+  const CONFIRM = ["v1", "calendar", "google", "confirm"];
+  async function withGrant() {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    jar.values.set(GRANT_COOKIE, GRANT);
+    jar.values.set(CONNECT_COOKIE, "k".repeat(43));
+    const pending = (cookie = jar.header(), headers: Record<string, string> = {}) =>
+      proxyApiRequest(new Request(`${ORIGIN}/api/v1/calendar/google/pending`, { headers: { Cookie: cookie, ...headers } }), PENDING, harness.setup);
+    const confirm = (cookie = jar.header()) => proxyApiRequest(new Request(`${ORIGIN}/api/v1/calendar/google/confirm`, {
+      method: "POST", body: "{}", headers: { Cookie: cookie, "Content-Type": "application/json", Origin: ORIGIN },
+    }), CONFIRM, harness.setup);
+    return { harness, jar, pending, confirm };
+  }
+  const sentGrant = (call: UpstreamCall) => new Headers(call.init.headers).get("x-zs-pending-grant");
+
+  it("sends the API the grant from this browser's cookie only, never one the caller sent", async () => {
+    const { harness, jar, pending } = await withGrant();
+    harness.api = async () => Response.json({ resourceId: RESOURCE, accountEmail: "owner@calendar.test", expiresAt: "2026-10-20T09:10:00.000Z" });
+    const shown = await pending();
+    expect(shown.status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.url).toBe(`${API_URL}/v1/calendar/google/pending`);
+    expect(sentGrant(harness.apiCalls.at(-1)!)).toBe(GRANT);
+    expect(setCookies(shown).has(GRANT_COOKIE)).toBe(false);
+    jar.values.delete(GRANT_COOKIE);
+    await pending(jar.header(), { "x-zs-pending-grant": GRANT });
+    expect(sentGrant(harness.apiCalls.at(-1)!)).toBeNull();
+    // Nor on any other route.
+    jar.values.set(GRANT_COOKIE, GRANT);
+    await proxyApiRequest(new Request(`${ORIGIN}/api/v1/calendar/connections`, { headers: { Cookie: jar.header() } }), ["v1", "calendar", "connections"], harness.setup);
+    expect(sentGrant(harness.apiCalls.at(-1)!)).toBeNull();
+  });
+
+  it("drops the cookie once the API connected it or says it is gone, foreign or stale, and keeps it through an outage", async () => {
+    const { harness, confirm, pending } = await withGrant();
+    for (const [status, spent] of [[200, true], [404, true], [409, true], [403, true], [502, false], [503, false]] as const) {
+      harness.api = async () => (status === 200
+        ? Response.json({ id: RESOURCE })
+        : Response.json({ error: { code: "X", message: "x", details: {} } }, { status }));
+      const answer = await confirm();
+      expect(answer.status).toBe(status);
+      expect(sentGrant(harness.apiCalls.at(-1)!)).toBe(GRANT);
+      expect(setCookies(answer).get(GRANT_COOKIE)?.value, String(status)).toBe(spent ? null : undefined);
+    }
+    harness.api = async () => { throw new TypeError("fetch failed"); };
+    expect(setCookies(await confirm()).has(GRANT_COOKIE)).toBe(false);
+    // Reading a grant the API no longer knows drops it too; a 200 read keeps it.
+    harness.api = async () => Response.json({ error: { code: "NotFound", message: "x", details: {} } }, { status: 404 });
+    expect(setCookies(await pending()).get(GRANT_COOKIE)?.value).toBeNull();
+  });
+
+  it("discards on a same-origin DELETE, and refuses other sites, other methods and demo mode", async () => {
+    const { harness, jar } = await withGrant();
+    const discard = (init: RequestInit, setup: Parameters<typeof discardPendingGrant>[1] = harness.setup) =>
+      discardPendingGrant(new Request(`${ORIGIN}/api/calendar/google/pending`, init), setup);
+    const done = discard({ method: "DELETE", headers: { Cookie: jar.header(), ...sameOrigin() } });
+    expect(done.status).toBe(204);
+    expect(done.headers.get("cache-control")).toBe("no-store");
+    const cookie = setCookies(done).get(GRANT_COOKIE)!;
+    expect(cookie.value).toBeNull();
+    expect(cookie.header).toMatch(/; Path=\/api(;|$)/);
+    // Repeating it, or with no grant at all, answers the same.
+    expect(discard({ method: "DELETE", headers: sameOrigin() }).status).toBe(204);
+    expect(discard({ method: "DELETE", headers: sameOrigin() }, { ok: false, problem: "unset" }).status).toBe(204);
+    expect(discard({ method: "DELETE", headers: { Cookie: jar.header(), ...sameOrigin({ Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" }) } }).status).toBe(403);
+    expect(discard({ method: "GET", headers: sameOrigin() }).status).toBe(405);
+    expect(discard({ method: "DELETE", headers: sameOrigin() }, null).status).toBe(404);
+  });
+
+  it("drops both calendar cookies on sign-out and when the API refuses the session", async () => {
+    const { harness, jar } = await withGrant();
+    const out = await signOut(new Request(`${ORIGIN}/api/sign-out`, { method: "POST", headers: { Cookie: jar.header(), ...sameOrigin() } }), harness.setup);
+    expect(out.status).toBe(204);
+    for (const name of [GRANT_COOKIE, CONNECT_COOKIE]) {
+      const cookie = setCookies(out).get(name)!;
+      expect(cookie.value, name).toBeNull();
+      // Expired at the path it was set on, or the browser keeps it.
+      expect(cookie.header).toMatch(/; Path=\/api(;|$)/);
+    }
+    // Without live settings, a browser with no session still loses them.
+    const unset = await signOut(new Request(`${ORIGIN}/api/sign-out`, {
+      method: "POST", headers: { Cookie: `${GRANT_COOKIE}=${GRANT}; ${CONNECT_COOKIE}=${"k".repeat(43)}`, ...sameOrigin() },
+    }), { ok: false, problem: "unset" });
+    expect(unset.status).toBe(204);
+    expect([...setCookies(unset).keys()].sort()).toEqual([CONNECT_COOKIE, GRANT_COOKIE].sort());
+
+    const again = await withGrant();
+    again.harness.api = async () => Response.json({ error: { code: "Unauthorized", message: "x", details: {} } }, { status: 401 });
+    const refused = await again.pending();
+    expect(refused.status).toBe(401);
+    expect(setCookies(refused).get(GRANT_COOKIE)?.value).toBeNull();
+    expect(setCookies(refused).get(CONNECT_COOKIE)?.value).toBeNull();
+    expect([...setCookies(refused).keys()].some((name) => name.startsWith(AUTH_COOKIE))).toBe(true);
   });
 });

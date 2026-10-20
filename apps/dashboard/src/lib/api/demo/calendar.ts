@@ -1,14 +1,16 @@
 /**
- * The demo adapter's Google Calendar connections (google-calendar.md G-1, G-4, G-5). It keeps the
- * rules the API enforces: anyone with `calendar` lists them, only owners (`publish`) connect and
- * disconnect, a connect key names one connection, and each resource has at most one connection
- * that is `active` or `reauthorize`. There is no Google here: a connect finishes at once, as if
- * the owner had allowed access with a made-up account, and the answer sends the page straight
- * back to the Connections page. The "worker" runs on the next list once a short delay passed: it
- * finishes cleaning up a disconnect and makes a new connection's first sync.
+ * The demo adapter's Google Calendar connections (google-calendar.md G-1, G-2, G-4, G-5). It keeps
+ * the rules the API enforces: anyone with `calendar` lists them, only owners (`publish`) connect
+ * and disconnect, a connect key names one connection, and each resource has at most one connection
+ * that is `active` or `reauthorize`. There is no Google here: a connect stages a grant at once, as
+ * if the owner had allowed access with a made-up account, and the answer sends the page straight
+ * back to the Connections page, where the owner confirms that account. The staged grant stands in
+ * for the dashboard's pending cookie: one per adapter, as one per browser. The "worker" runs on
+ * the next list once a short delay passed: it finishes cleaning up a disconnect and makes a new
+ * connection's first sync.
  */
 import type { z } from "zod";
-import { connectGoogleCalendarRequestSchema, uuidSchema, type CalendarConnection } from "@zs/contracts";
+import { connectGoogleCalendarRequestSchema, uuidSchema, type CalendarConnection, type PendingGoogleConnect } from "@zs/contracts";
 import { demoError } from "../errors";
 import type { CalendarSyncApi, WriteOptions } from "../types";
 import type { DemoActor } from "./agents";
@@ -19,6 +21,8 @@ export interface DemoCalendarControls {
   setGoogleCalendarConfigured(configured: boolean): void;
   /** Google stops honouring a connection's grant: it needs the owner to connect again (G-9). */
   loseCalendarGrant(resourceId: string): void;
+  /** The grant waiting for the owner's confirm runs out now, as if its ten minutes passed (G-2). */
+  expirePendingGrant(): void;
 }
 
 export interface DemoCalendarContext {
@@ -35,6 +39,17 @@ export interface DemoCalendarContext {
 export const DEMO_GOOGLE_ACCOUNT = DEMO_OWNER.email!;
 /** How long the demo worker takes to clean up a disconnect, or to make a first sync. */
 export const DEMO_CALENDAR_WORKER_MS = 1500;
+/** How long a staged grant waits for the owner to confirm it. */
+export const DEMO_PENDING_GRANT_MS = 10 * 60_000;
+
+/** A grant "Google" gave, waiting for the owner who started the connect (G-2). */
+interface StagedGrant {
+  connectionId: string;
+  resourceId: string;
+  accountEmail: string | null;
+  expiresAtMs: number;
+  stagedBy: string;
+}
 
 const clone = <T>(value: T): T => structuredClone(value);
 /** The browser's part of the connect body; in live mode the dashboard's server adds what binds the flow to the browser. */
@@ -53,6 +68,7 @@ export function createDemoCalendar(ctx: DemoCalendarContext): CalendarSyncApi & 
   /** A connect key names one connection (G-1). */
   const connectionByKey = new Map<string, string>();
   let configured = true;
+  let staged: StagedGrant | null = null;
 
   /** `publish` (owners only); anything else is TenantDenied, a 403. */
   const requireOwner = () => {
@@ -75,6 +91,12 @@ export function createDemoCalendar(ctx: DemoCalendarContext): CalendarSyncApi & 
     }
   }
 
+  /** The staged grant while it is unexpired and the member asking staged it. */
+  const stagedForActor = () => {
+    if (staged && ctx.now().getTime() >= staged.expiresAtMs) staged = null;
+    return staged && staged.stagedBy === ctx.actor().userId ? staged : null;
+  };
+
   /** The resource's one connection that is `active` or `reauthorize`, if any (G-4). */
   const current = (resourceId: string) =>
     [...connections.values()].find((item) => item.resourceId === resourceId && (item.status === "active" || item.status === "reauthorize"));
@@ -83,7 +105,8 @@ export function createDemoCalendar(ctx: DemoCalendarContext): CalendarSyncApi & 
     async listCalendarConnections() {
       await ctx.wait();
       runWorker();
-      return clone([...connections.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)));
+      // The API's order: newest first, then by ID.
+      return clone([...connections.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)));
     },
 
     async startGoogleConnect(resourceId, options) {
@@ -95,25 +118,62 @@ export function createDemoCalendar(ctx: DemoCalendarContext): CalendarSyncApi & 
       const request = ctx.parse(browserConnectSchema, { resourceId });
       requireOwner();
       if (!ctx.resources.some((resource) => resource.id === request.resourceId)) throw demoError("Forbidden");
-      const authorizeUrl = `${pageOrigin()}/account/connections?calendar=connected`;
-      const known = connectionByKey.get(key);
-      if (known) {
-        const found = connections.get(known)!;
-        if (found.resourceId !== request.resourceId || found.status !== "active") throw demoError("Conflict", { reason: "idempotency_key_reused" });
-        return { authorizeUrl };
+      // The key names one connection: reused for another resource, or after that connection
+      // retired, it is a 409.
+      const connectionId = connectionByKey.get(key) ?? ctx.newId();
+      const found = connections.get(connectionId);
+      if (found && (found.resourceId !== request.resourceId || found.status !== "active")) throw demoError("Conflict", { reason: "idempotency_key_reused" });
+      connectionByKey.set(key, connectionId);
+      // What the callback does once Google answers (G-2): it stages the grant for this browser,
+      // replacing any older one, and connects nothing until the owner confirms the account.
+      staged = {
+        connectionId, resourceId: request.resourceId, accountEmail: DEMO_GOOGLE_ACCOUNT,
+        expiresAtMs: ctx.now().getTime() + DEMO_PENDING_GRANT_MS, stagedBy: ctx.actor().userId,
+      };
+      return { authorizeUrl: `${pageOrigin()}/account/connections?calendar=confirm` };
+    },
+
+    async getPendingGoogleConnect() {
+      await ctx.wait();
+      requireOwner();
+      const grant = stagedForActor();
+      if (!grant) return null;
+      const pending: PendingGoogleConnect = {
+        resourceId: grant.resourceId, accountEmail: grant.accountEmail, expiresAt: new Date(grant.expiresAtMs).toISOString(),
+      };
+      return pending;
+    },
+
+    async confirmGoogleConnect() {
+      await ctx.wait();
+      const grant = stagedForActor();
+      // Like the API's cookie, the grant is spent by any answer the server gives.
+      staged = null;
+      requireOwner();
+      if (!grant) throw demoError("NotFound");
+      // A repeat answers the connection it made; one that retired since is a conflict.
+      const found = connections.get(grant.connectionId);
+      if (found) {
+        if (found.resourceId === grant.resourceId && found.status === "active") return clone(found);
+        throw demoError("Conflict", { reason: "conflict" });
       }
-      // What the callback's connect action does once Google answers (G-2, G-4): the older
-      // connection of the resource goes to the worker for cleanup, the new one starts active.
-      const older = current(request.resourceId);
+      if (!ctx.resources.some((resource) => resource.id === grant.resourceId)) throw demoError("Conflict", { reason: "conflict" });
+      // The connect action (G-2, G-4): the older connection of the resource goes to the worker
+      // for cleanup, the new one starts active.
+      const older = current(grant.resourceId);
       if (older) setStatus(older, "disconnecting");
       const connection: CalendarConnection = {
-        id: ctx.newId(), provider: "google", resourceId: request.resourceId, calendarId: "primary", accountEmail: DEMO_GOOGLE_ACCOUNT,
+        id: grant.connectionId, provider: "google", resourceId: grant.resourceId, calendarId: "primary", accountEmail: grant.accountEmail,
         status: "active", lastSyncedAt: null, lastError: null, createdAt: ctx.now().toISOString(),
       };
       connections.set(connection.id, connection);
       changedAt.set(connection.id, ctx.now().getTime());
-      connectionByKey.set(key, connection.id);
-      return { authorizeUrl };
+      return clone(connection);
+    },
+
+    async discardGoogleConnect() {
+      await ctx.wait();
+      staged = null;
     },
 
     disconnectCalendar(connectionId, options) {
@@ -130,6 +190,10 @@ export function createDemoCalendar(ctx: DemoCalendarContext): CalendarSyncApi & 
 
     setGoogleCalendarConfigured(value) {
       configured = value;
+    },
+
+    expirePendingGrant() {
+      if (staged) staged.expiresAtMs = ctx.now().getTime();
     },
 
     loseCalendarGrant(resourceId) {

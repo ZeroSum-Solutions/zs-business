@@ -1,5 +1,5 @@
 // The HTTP client reads and writes the Google Calendar routes with the contract schemas
-// (google-calendar.md G-1, G-5).
+// (google-calendar.md G-1, G-2, G-5).
 import { describe, expect, it } from "vitest";
 import { createHttpClient } from "../src/lib/api/http-client";
 
@@ -75,6 +75,57 @@ describe("http client: Google Calendar", () => {
     expect(calls[0]!.init.method).toBe("POST");
     expect(headers(calls[0])["Idempotency-Key"]).toBe(key(6).idempotencyKey);
     expect(body(calls[0])).toEqual({});
+  });
+
+  it("reads the waiting grant from GET /v1/calendar/google/pending, and a 404 as none", async () => {
+    const pending = { resourceId: RESOURCE, accountEmail: "owner@haldenrowe.example", expiresAt: "2026-10-20T13:10:00.000Z" };
+    const { api, calls } = client([json(200, pending), apiError(404, "NotFound"), json(200, { ...pending, accountEmail: null })]);
+    expect(await api.getPendingGoogleConnect()).toEqual(pending);
+    expect(calls[0]!.url.pathname).toBe("/api/v1/calendar/google/pending");
+    expect(calls[0]!.init.method).toBe("GET");
+    expect(calls[0]!.init.cache).toBe("no-store");
+    expect(await api.getPendingGoogleConnect()).toBeNull();
+    expect(await api.getPendingGoogleConnect()).toEqual({ ...pending, accountEmail: null });
+  });
+
+  it("passes on a staff member's 403 and a grant out of contract shape", async () => {
+    const { api } = client([apiError(403, "Forbidden"), json(200, { resourceId: RESOURCE, accountEmail: null, expiresAt: "soon" })]);
+    await expect(api.getPendingGoogleConnect()).rejects.toMatchObject({ kind: "forbidden", status: 403 });
+    await expect(api.getPendingGoogleConnect()).rejects.toMatchObject({ kind: "invalid_response" });
+  });
+
+  it("confirms with POST /v1/calendar/google/confirm, an empty body and no key, answering the connection", async () => {
+    const { api, calls } = client([json(200, connection)]);
+    expect(await api.confirmGoogleConnect()).toEqual(connection);
+    expect(calls[0]!.url.pathname).toBe("/api/v1/calendar/google/confirm");
+    expect(calls[0]!.init.method).toBe("POST");
+    expect(body(calls[0])).toEqual({});
+    // The server keys it by the staged grant.
+    expect(headers(calls[0])).not.toHaveProperty("Idempotency-Key");
+  });
+
+  it("passes on a confirm with nothing waiting (404), from staff (403) or for a retired connection (409)", async () => {
+    const { api } = client([apiError(404, "NotFound"), apiError(403, "Forbidden"), apiError(409, "Conflict", { reason: "conflict" })]);
+    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "not_found", status: 404 });
+    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "forbidden", status: 403 });
+    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "conflict", status: 409, reason: "conflict" });
+  });
+
+  it("cancels with DELETE on the dashboard's own /api/calendar/google/pending, reading the 204 without a body", async () => {
+    const { api, calls } = client([new Response(null, { status: 204 }), apiError(403, "Forbidden"), json(200, { ok: true })]);
+    await expect(api.discardGoogleConnect()).resolves.toBeUndefined();
+    expect(calls[0]!.url.pathname).toBe("/api/calendar/google/pending");
+    expect(calls[0]!.init.method).toBe("DELETE");
+    expect(calls[0]!.init.body).toBeUndefined();
+    expect(headers(calls[0])).not.toHaveProperty("Idempotency-Key");
+    await expect(api.discardGoogleConnect()).rejects.toMatchObject({ kind: "forbidden", status: 403 });
+    // Anything but an empty answer is not what the route says.
+    await expect(api.discardGoogleConnect()).rejects.toMatchObject({ kind: "invalid_response" });
+  });
+
+  it("still reads a 204 on a route that answers a body as an unexpected answer", async () => {
+    const { api } = client([new Response(null, { status: 204 })]);
+    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "invalid_response", status: 204 });
   });
 
   it("refuses a write without a caller-owned key and sends nothing", async () => {

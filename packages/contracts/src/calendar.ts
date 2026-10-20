@@ -21,6 +21,21 @@ export const connectGoogleCalendarRequestSchema = z.strictObject({
 export type ConnectGoogleCalendarRequest = z.infer<typeof connectGoogleCalendarRequestSchema>;
 /** G-2: the header the dashboard's callback route uses to hand the API the browser's key. */
 export const CONNECT_BROWSER_KEY_HEADER = "x-zs-browser-key";
+/**
+ * G-2: the header carrying a staged grant: the API's callback answers with it, and the dashboard
+ * sends it back (from its Strict cookie) to read and to confirm the grant.
+ */
+export const PENDING_GRANT_HEADER = "x-zs-pending-grant";
+/** A staged grant as the API signs it: at most 3500 characters (MAX_PENDING_GRANT_LENGTH in core). */
+export const PENDING_GRANT_PATTERN = /^zgg1\.[A-Za-z0-9_-]{1,3451}\.[A-Za-z0-9_-]{43}$/;
+
+/** G-2: a grant Google gave that waits for the owner to confirm the account it names. */
+export const pendingGoogleConnectSchema = z.strictObject({
+  resourceId: idSchema,
+  accountEmail: z.string().nullable(),
+  expiresAt: instantSchema,
+});
+export type PendingGoogleConnect = z.infer<typeof pendingGoogleConnectSchema>;
 export const connectGoogleCalendarResponseSchema = z.strictObject({
   authorizeUrl: z.url({ protocol: /^https?$/ }),
 });

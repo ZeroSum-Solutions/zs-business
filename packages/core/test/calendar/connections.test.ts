@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   CALENDAR_GOOGLE_CONNECT_ACTION,
+  Conflict,
   NotFound,
   TenantDenied,
   ValidationFailed,
@@ -20,6 +21,7 @@ import {
   derivedId,
   generateSealKeyPair,
   googleConnectIdempotencyKey,
+  listCalendarConnections,
   memberDispatch,
   openRefreshToken,
   parseSealPrivateKey,
@@ -27,7 +29,9 @@ import {
   pkceChallenge,
   pkceVerifier,
   sealRefreshToken,
+  signPendingGrant,
   verifyConnectState,
+  type PendingGrant,
   type EdgeDependencies,
   type GoogleClient,
 } from "../../src/index.js";
@@ -260,6 +264,25 @@ describe("listCalendarConnections and startGoogleConnect", () => {
     expect(staff.items.map((c) => c.id).sort()).toEqual(mine.map((c) => c.id).sort());
   });
 
+  it("lists every live connection however many retired ones there are, and only the newest retired ones", async () => {
+    const tenantId = tenants.b.tenantId;
+    const live = connectCommand(tenantId, await addResource(tenantId));
+    await connectAs(tenantId, tenants.b.ownerId, live);
+    const retired: string[] = [];
+    for (let n = 0; n < 3; n++) {
+      const id = randomUUID();
+      retired.push(id);
+      await fixture.service((tx) => tx.query(
+        `INSERT INTO calendar_connections (tenant_id,id,resource_id,status,created_by,next_sync_at,created_at,updated_at)
+         VALUES ($1,$2,$3,'disconnected',$4,$5,$5,$5)`,
+        [tenantId, id, tenants.b.resourceId, tenants.b.ownerId, new Date(Date.parse(NOW) + (n + 1) * 60_000).toISOString()]));
+    }
+    // The live one is older than every retired one, and still listed with a history of one.
+    const ids = (await fixture.service((tx) => listCalendarConnections(tx, tenantId, 1))).map((c) => c.id);
+    expect(ids).toContain(live.target.id);
+    expect(ids.filter((id) => retired.includes(id))).toEqual([retired[2]]);
+  });
+
   it("signs a state naming the member, resource and derived connection, with a matching PKCE challenge", async () => {
     const { tenantId, ownerId, resourceId } = tenants.a;
     const key = randomUUID();
@@ -279,6 +302,75 @@ describe("listCalendarConnections and startGoogleConnect", () => {
     await expect(session.startGoogleConnect({ resourceId: tenants.b.resourceId, browserBinding: BINDING }, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
     await expect(createSession(deps(false), { tenantId: tenants.a.tenantId, actorId: tenants.a.ownerId })
       .startGoogleConnect({ resourceId: tenants.a.resourceId, browserBinding: BINDING }, randomUUID())).rejects.toBeInstanceOf(NotFound);
+  });
+});
+
+describe("a grant the callback staged (G-2)", () => {
+  /** What the callback signs once Google answered for `actorId`'s flow. */
+  function staged(tenantId: string, actorId: string, resourceId: string, overrides: Partial<PendingGrant> = {}) {
+    const connectionId = overrides.connectionId ?? randomUUID();
+    const grant: PendingGrant = {
+      tenantId, actorId, resourceId, connectionId, accountEmail: "someone@calendar.test", scope: "openid email https://www.googleapis.com/auth/calendar.events",
+      refreshTokenSealed: sealRefreshToken(publicKey, { tenantId, connectionId }, "1//staged"), expiresAt: Date.parse(NOW) + 60_000, ...overrides,
+    };
+    return { connectionId, token: signPendingGrant(STATE_SECRET, grant)! };
+  }
+  const as = (tenantId: string, actorId: string, withCalendar = true) => createSession(deps(withCalendar), { tenantId, actorId });
+
+  it("shows the owner the Google account it names and connects nothing until they confirm", async () => {
+    const { tenantId, ownerId } = tenants.a;
+    const resourceId = await addResource(tenantId);
+    const { connectionId, token } = staged(tenantId, ownerId, resourceId);
+    expect(await as(tenantId, ownerId).pendingGoogleConnect(token)).toEqual({
+      resourceId, accountEmail: "someone@calendar.test", expiresAt: new Date(Date.parse(NOW) + 60_000).toISOString(),
+    });
+    expect(await storedRow(tenantId, connectionId)).toBeUndefined();
+
+    const connected = await as(tenantId, ownerId).confirmGoogleConnect(token);
+    expect(connected).toMatchObject({ id: connectionId, resourceId, accountEmail: "someone@calendar.test", status: "active" });
+    const row = (await storedRow(tenantId, connectionId))!;
+    expect(row).toMatchObject({ status: "active", created_by: ownerId });
+    expect(openRefreshToken(privateKey, { tenantId, connectionId }, row.refresh_token_sealed!)).toBe("1//staged");
+    // A repeat (a lost answer, a double click) answers the same connection.
+    expect(await as(tenantId, ownerId).confirmGoogleConnect(token)).toEqual(connected);
+  });
+
+  it("is nothing to anyone but the member it names, in their tenant, before it expires", async () => {
+    const { tenantId, ownerId } = tenants.a;
+    const resourceId = await addResource(tenantId);
+    const otherOwner = await addMember(tenantId, "owner");
+    const { connectionId, token } = staged(tenantId, ownerId, resourceId);
+    for (const session of [as(tenantId, otherOwner), as(tenants.b.tenantId, tenants.b.ownerId), as(tenantId, ownerId, false)]) {
+      await expect(session.pendingGoogleConnect(token)).rejects.toBeInstanceOf(NotFound);
+      await expect(session.confirmGoogleConnect(token)).rejects.toBeInstanceOf(NotFound);
+    }
+    // Staff and outsiders are refused before the grant is read.
+    for (const session of [as(tenantId, tenants.a.staffId), as(tenantId, randomUUID())])
+      await expect(session.confirmGoogleConnect(token)).rejects.toBeInstanceOf(TenantDenied);
+    const expired = staged(tenantId, ownerId, resourceId, { expiresAt: Date.parse(NOW) });
+    const forged = staged(tenantId, ownerId, resourceId).token.replace(/.$/, (c) => (c === "A" ? "B" : "A"));
+    for (const bad of [expired.token, forged, undefined, "zgg1.x.y", 42]) {
+      await expect(as(tenantId, ownerId).pendingGoogleConnect(bad)).rejects.toBeInstanceOf(NotFound);
+      await expect(as(tenantId, ownerId).confirmGoogleConnect(bad)).rejects.toBeInstanceOf(NotFound);
+    }
+    expect(await storedRow(tenantId, connectionId)).toBeUndefined();
+    expect(await storedRow(tenantId, expired.connectionId)).toBeUndefined();
+  });
+
+  it("answers a conflict once the connection it names changed, and never revives a retired one", async () => {
+    const { tenantId, ownerId } = tenants.a;
+    const resourceId = await addResource(tenantId);
+    const first = staged(tenantId, ownerId, resourceId);
+    await as(tenantId, ownerId).confirmGoogleConnect(first.token);
+    await as(tenantId, ownerId).disconnectCalendar(first.connectionId, randomUUID());
+    await expect(as(tenantId, ownerId).confirmGoogleConnect(first.token)).rejects.toBeInstanceOf(Conflict);
+    expect((await storedRow(tenantId, first.connectionId))!.status).toBe("disconnecting");
+    // A second grant for the same connection (Google answered twice) cannot replace the first one's token.
+    const again = staged(tenantId, ownerId, resourceId);
+    await as(tenantId, ownerId).confirmGoogleConnect(again.token);
+    const twin = staged(tenantId, ownerId, resourceId, { connectionId: again.connectionId, refreshTokenSealed: sealRefreshToken(publicKey, { tenantId, connectionId: again.connectionId }, "1//other") });
+    expect((await as(tenantId, ownerId).confirmGoogleConnect(twin.token)).id).toBe(again.connectionId);
+    expect(openRefreshToken(privateKey, { tenantId, connectionId: again.connectionId }, (await storedRow(tenantId, again.connectionId))!.refresh_token_sealed!)).toBe("1//staged");
   });
 });
 

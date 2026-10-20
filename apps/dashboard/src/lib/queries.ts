@@ -71,6 +71,8 @@ export const keys = {
   connections: ["ws", "connections"] as const,
   /** Google Calendar connections, every resource's (google-calendar.md G-5). */
   calendarConnections: ["calendarSync", "connections"] as const,
+  /** The Google grant waiting in this browser for the owner to confirm (G-2). */
+  calendarPending: ["calendarSync", "pending"] as const,
   plan: ["ws", "plan"] as const,
 };
 
@@ -433,6 +435,23 @@ export function useCalendarConnections() {
     queryKey: keys.calendarConnections,
     queryFn: ({ signal }) => api.listCalendarConnections({ signal }),
     refetchInterval: (query) => (calendarWorkPending(query.state.data) ? CALENDAR_POLL_MS : false),
+  });
+}
+
+/**
+ * The Google grant waiting in this browser for the owner to confirm, or null. Owners only (the
+ * API refuses staff). Read afresh whenever the page opens and never kept after it closes, so an
+ * old answer never offers a grant that is gone.
+ */
+export function usePendingGoogleConnect(canManage: boolean) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && canManage,
+    queryKey: keys.calendarPending,
+    queryFn: ({ signal }) => api.getPendingGoogleConnect({ signal }),
+    staleTime: 0,
+    gcTime: 0,
   });
 }
 

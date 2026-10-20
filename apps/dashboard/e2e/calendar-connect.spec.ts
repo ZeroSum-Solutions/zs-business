@@ -1,14 +1,19 @@
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { shot, viewportShot } from "./helpers";
 
 // Google Calendar on the Connections page, on the demo adapter (google-calendar.md G-1, G-2,
 // G-5). The demo has no Google: a connect "allows" a made-up account at once and lands back on
-// this page with ?calendar=connected, as the real callback does.
+// this page with ?calendar=confirm, as the real callback does, and nothing connects until the
+// owner confirms that account.
 
 const card = (page: Page) => page.getByRole("region", { name: "Google Calendar" });
 const row = (page: Page, name: string) => card(page).getByRole("listitem", { name });
+const confirmPanel = (page: Page) => card(page).getByRole("region", { name: "Confirm Google account" });
 const SHOWROOM = "Showroom appointments";
 const REPAIR = "Repair intake";
+const ACCOUNT = "mara@haldenrowe.example";
+const CONNECTED = "Google Calendar connected. Busy times start blocking slots after the first sync.";
 
 async function openConnections(page: Page, search = "") {
   await page.goto(`/account/connections${search}`);
@@ -16,10 +21,20 @@ async function openConnections(page: Page, search = "") {
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
 }
 
-async function connect(page: Page, name: string) {
-  await row(page, name).getByRole("button", { name: `Connect ${name}` }).click();
-  await expect(card(page).getByTestId("gcal-return")).toHaveText("Google Calendar connected. Busy times start blocking slots after the first sync.");
+/** Starts a connect from the row's button and waits for the account to confirm. */
+async function startConnect(page: Page, name: string, button = `Connect ${name}`) {
+  await row(page, name).getByRole("button", { name: button }).click();
+  const panel = confirmPanel(page);
+  await expect(panel.getByRole("heading", { level: 3 })).toHaveText(`Connect ${ACCOUNT} to ${name}?`);
   await expect(page).toHaveURL(/\/account\/connections$/);
+  return panel;
+}
+
+async function connect(page: Page, name: string, button?: string) {
+  const panel = await startConnect(page, name, button);
+  await panel.getByRole("button", { name: "Connect calendar" }).click();
+  await expect(panel).toBeHidden();
+  await expect(card(page).getByTestId("gcal-return")).toHaveText(CONNECTED);
   await expect(row(page, name).getByTestId("gcal-status")).toHaveText("Connected");
 }
 
@@ -36,11 +51,25 @@ test("lists each booking calendar as live data, with the sample accounts below",
   await expect(page.getByRole("main").getByRole("heading", { name: "Google Calendar" })).toHaveCount(1);
 });
 
-test("an owner connects a calendar and sees the account and its first sync", async ({ page }, info) => {
+test("an owner confirms the Google account, then sees it and its first sync", async ({ page }, info) => {
   await openConnections(page);
-  await connect(page, SHOWROOM);
+  const panel = await startConnect(page, SHOWROOM);
+  await expect(panel).toHaveAttribute("data-testid", "gcal-confirm");
+  await expect(panel).toHaveAccessibleDescription("Check that this is your Google account. If you did not just connect a calendar, choose Cancel.");
+  // Nothing is connected while the owner decides, and the return says nothing by itself.
+  await expect(row(page, SHOWROOM).getByTestId("gcal-status")).toHaveText("Not connected");
+  await expect(card(page).getByTestId("gcal-return")).toHaveCount(0);
+  const axe = await new AxeBuilder({ page }).include('[data-testid="gcal-confirm"]').analyze();
+  expect(axe.violations.map((violation) => violation.id)).toEqual([]);
+  if (info.project.name === "phone") await viewportShot(page, "33-calendar-confirm", info.project.name);
+
+  await panel.getByRole("button", { name: "Connect calendar" }).click();
+  await expect(panel).toBeHidden();
   const showroom = row(page, SHOWROOM);
-  await expect(card(page).getByRole("status")).toHaveText(/^Google Calendar connected\./);
+  await expect(card(page).getByRole("status")).toHaveText(CONNECTED);
+  // Focus follows what the panel said instead of falling back to the page.
+  await expect(card(page).getByTestId("gcal-return")).toBeFocused();
+  await expect(showroom.getByTestId("gcal-status")).toHaveText("Connected");
   await expect(showroom.getByTestId("gcal-account")).toHaveText("mara@haldenrowe.example");
   await expect(showroom.getByTestId("gcal-synced")).toHaveText("Waiting for the first sync");
   await expect(showroom.getByRole("button", { name: `Disconnect ${SHOWROOM}` })).toBeEnabled();
@@ -49,6 +78,49 @@ test("an owner connects a calendar and sees the account and its first sync", asy
   await expect(showroom.getByTestId("gcal-synced")).toHaveText("Last synced just now", { timeout: 15_000 });
   await expect(row(page, REPAIR).getByTestId("gcal-status")).toHaveText("Not connected");
   await shot(page, "30-calendar-connected", info.project.name);
+});
+
+test("Cancel connects nothing and says so", async ({ page }) => {
+  await openConnections(page);
+  const panel = await startConnect(page, REPAIR);
+  await panel.getByRole("button", { name: "Cancel" }).click();
+  await expect(panel).toBeHidden();
+  await expect(card(page).getByRole("status")).toHaveText("Nothing was connected.");
+  await expect(card(page).getByTestId("gcal-return")).toBeFocused();
+  await expect(row(page, REPAIR).getByTestId("gcal-status")).toHaveText("Not connected");
+  await expect(row(page, REPAIR).getByRole("button", { name: `Connect ${REPAIR}` })).toBeEnabled();
+  // The grant is gone: a fresh read of the page does not ask again.
+  await page.evaluate(() => window.__zsQueryClient!.invalidateQueries());
+  await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  await expect(confirmPanel(page)).toHaveCount(0);
+  expect(await page.evaluate(() => window.__zsDemo!.writeLog().filter((write) => write.operation.startsWith("calendar.")).length)).toBe(0);
+});
+
+test("a confirm after the request expired says so and connects nothing", async ({ page }) => {
+  await openConnections(page);
+  const panel = await startConnect(page, SHOWROOM);
+  await page.evaluate(() => window.__zsDemo!.expirePendingGrant());
+  await panel.getByRole("button", { name: "Connect calendar" }).click();
+  await expect(panel).toBeHidden();
+  await expect(card(page).getByRole("alert")).toHaveText("That connection request expired. Connect again.");
+  await expect(row(page, SHOWROOM).getByTestId("gcal-status")).toHaveText("Not connected");
+});
+
+test("a later connection never opens with the disconnect dialog up", async ({ page }) => {
+  await openConnections(page);
+  await connect(page, REPAIR);
+  const repair = row(page, REPAIR);
+  await repair.getByRole("button", { name: `Disconnect ${REPAIR}` }).click();
+  const dialog = page.getByRole("dialog", { name: "Disconnect Google Calendar?" });
+  // The disconnect lands but its answer is lost: the list then says what happened.
+  await page.evaluate(() => window.__zsDemo!.loseNextResponse());
+  await dialog.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(repair.getByTestId("gcal-status")).toHaveText("Disconnecting");
+  await expect(dialog).toBeHidden();
+  await expect(repair.getByTestId("gcal-status")).toHaveText("Not connected", { timeout: 15_000 });
+  await connect(page, REPAIR);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(repair.getByRole("button", { name: `Disconnect ${REPAIR}` })).toBeEnabled();
 });
 
 test("disconnecting asks first, then shows Disconnecting until the worker finishes", async ({ page }, info) => {
@@ -90,8 +162,7 @@ test("a calendar that lost Google's access offers Reconnect", async ({ page }) =
   const showroom = row(page, SHOWROOM);
   await expect(showroom.getByTestId("gcal-status")).toHaveText("Reconnect needed");
   await expect(showroom.getByTestId("gcal-warning")).toContainText("Google access ended.");
-  await showroom.getByRole("button", { name: `Reconnect ${SHOWROOM}` }).click();
-  await expect(showroom.getByTestId("gcal-status")).toHaveText("Connected");
+  await connect(page, SHOWROOM, `Reconnect ${SHOWROOM}`);
   await expect(showroom.getByTestId("gcal-synced")).toHaveText("Waiting for the first sync");
 });
 

@@ -1,10 +1,12 @@
 // M5 Google Calendar connections through the real app (docs/requirements/google-calendar.md G-1,
 // G-2, G-3, G-5): the consent URL, the OAuth callback against the in-process fake Google (real
-// client, real PKCE), the sealed token, and the owner's list and disconnect. No network.
+// client, real PKCE), the staged grant and the owner's confirmation, the sealed token, and the
+// owner's list and disconnect. No network.
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   apiErrorBodySchema, calendarConnectionListSchema, calendarConnectionSchema, CONNECT_BROWSER_KEY_HEADER, connectGoogleCalendarResponseSchema,
+  PENDING_GRANT_HEADER, PENDING_GRANT_PATTERN,
 } from "@zs/contracts";
 import {
   browserBindingFor, DatabaseUnavailable, derivedId, openRefreshToken, pkceChallenge, pkceVerifier, signConnectState, verifyConnectState,
@@ -91,6 +93,24 @@ function landing(response: Awaited<ReturnType<typeof callback>>) {
   expect(location.searchParams.get("tab")).toBe("google");
   for (const name of ["code", "state"]) expect(location.searchParams.has(name)).toBe(false);
   return Object.fromEntries([...location.searchParams].filter(([name]) => name !== "tab"));
+}
+
+/** The grant a callback staged (G-2): the redirect asks for a confirmation, and the token rides in a header, never the address. */
+function stagedGrant(response: Awaited<ReturnType<typeof callback>>): string {
+  expect(landing(response)).toEqual({ calendar: "confirm" });
+  const grant = response.headers.get(PENDING_GRANT_HEADER)!;
+  expect(grant).toMatch(PENDING_GRANT_PATTERN);
+  expect(response.headers.get("location")).not.toContain(grant.slice(5, 40));
+  return grant;
+}
+const grantHeader = (grant: string | null) => (grant === null ? {} : { [PENDING_GRANT_HEADER]: grant });
+const readPending = (token: string | undefined, grant: string | null, target = app) =>
+  call(target, "GET", "/v1/calendar/google/pending", { ...(token === undefined ? {} : { token }), headers: grantHeader(grant) });
+const confirmGrant = (token: string | undefined, grant: string | null, target = app) =>
+  call(target, "POST", "/v1/calendar/google/confirm", { ...(token === undefined ? {} : { token }), headers: grantHeader(grant) });
+/** The callback in the starting browser, then the member's confirmation on the Connections page. */
+async function connectThrough(query: Record<string, string>, member: Pick<MemberSetup, "token"> = h.a, target = app) {
+  return confirmGrant(member.token, stagedGrant(await callback(query, target)), target);
 }
 
 interface Row { id: string; status: string; resource_id: string; created_by: string; refresh_token_sealed: string | null; account_email: string | null; scope: string }
@@ -180,14 +200,22 @@ describe("POST /v1/calendar/google/connect (G-1)", () => {
 });
 
 describe("GET /oauth/google/callback (G-2, G-3)", () => {
-  it("connects: an active connection whose sealed token opens only with the worker's key for its own row", async () => {
+  it("stages the grant, shows its account, and connects on the owner's confirmation: a sealed token only the worker's key opens for its own row", async () => {
     const resourceId = await newResource(h.a.tenantId);
     const flow = await consentFor(h.a, resourceId);
     google.setConsent({ email: "studio@calendar.test" });
     const back = await consent(flow.authorizeUrl);
     expect(back.get("state")).toBe(flow.state);
-    const response = await callback({ state: back.get("state")!, code: back.get("code")!, scope: "ignored" });
-    expect(landing(response)).toEqual({ calendar: "connected" });
+    const staged = stagedGrant(await callback({ state: back.get("state")!, code: back.get("code")!, scope: "ignored" }));
+    // Nothing is stored until the owner confirms the account the page shows.
+    expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    const shown = await readPending(h.a.token, staged);
+    expect(shown).toMatchObject({ status: 200, body: { resourceId, accountEmail: "studio@calendar.test", expiresAt: new Date(now + 10 * 60_000).toISOString() } });
+    expect(shown.headers.get("cache-control")).toBe("no-store");
+    expect(JSON.stringify(shown.body)).not.toContain("zsg1.");
+    const confirmed = await confirmGrant(h.a.token, staged);
+    expect(confirmed.status).toBe(200);
+    expect(calendarConnectionSchema.parse(confirmed.body)).toMatchObject({ id: flow.connectionId, resourceId, status: "active" });
 
     const stored = (await row(h.a.tenantId, flow.connectionId))!;
     expect(stored).toMatchObject({
@@ -200,6 +228,9 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     expect(openRefreshToken(TOKEN_PRIVATE_KEY, context, stored.refresh_token_sealed!)).toBe(grant.refreshToken);
     expect(openRefreshToken(TOKEN_PRIVATE_KEY, { ...context, connectionId: randomUUID() }, stored.refresh_token_sealed!)).toBeNull();
     expect(openRefreshToken(TOKEN_PRIVATE_KEY, { ...context, tenantId: h.b.tenantId }, stored.refresh_token_sealed!)).toBeNull();
+    // The staged grant carried the token sealed only, and no access token.
+    const stagedBody = Buffer.from(staged.split(".")[1]!, "base64url").toString("utf8");
+    for (const secret of [grant.refreshToken, ...grant.accessTokens]) expect(stagedBody).not.toContain(secret);
     // The exchange sent the verifier derived for this connection.
     const exchange = google.requestsTo("token").at(-1)!;
     expect(exchange.form).toMatchObject({
@@ -216,9 +247,11 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     for (const accessToken of grant.accessTokens) expect(JSON.stringify(action[0])).not.toContain(accessToken);
     expect(JSON.stringify(action[0]!.result)).not.toContain("zsg1.");
 
-    // A reload replays: still connected, one row, and the spent code is not sent again.
+    // A repeated confirmation, and a reload of the callback, replay: still connected, one row, and
+    // the spent code is not sent again.
     expect(revoked()).not.toContain(grant.refreshToken);
     const calls = tokenCalls();
+    expect(await confirmGrant(h.a.token, staged)).toMatchObject({ status: 200, body: confirmed.body });
     expect(landing(await callback({ state: back.get("state")!, code: back.get("code")! }))).toEqual({ calendar: "connected" });
     expect(tokenCalls()).toBe(calls);
     expect((await rows(h.a.tenantId)).filter((found) => found.id === flow.connectionId)).toHaveLength(1);
@@ -269,7 +302,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     expect(tokenCalls()).toBe(calls);
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
     // The starting browser still finishes with the unspent code; another browser's reload learns nothing.
-    expect(landing(await callback(query))).toEqual({ calendar: "connected" });
+    stagedGrant(await callback(query));
     expect(landing(await callback(query, app, newBrowserKey()))).toEqual({ calendar: "error", reason: "browser_mismatch" });
     expect(onError).not.toHaveBeenCalled();
   });
@@ -284,7 +317,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     const rotated = calendarApp(h, {
       clock, googleCalendar: googleConfig(fakeClient(google), { stateSecrets: { current: STATE_SECRET, previous: PREVIOUS_STATE_SECRET } }),
     });
-    expect(landing(await callback({ state: back.get("state")!, code: back.get("code")! }, rotated))).toEqual({ calendar: "connected" });
+    expect((await connectThrough({ state: back.get("state")!, code: back.get("code")! }, h.a, rotated)).status).toBe(200);
     expect(google.requestsTo("token").at(-1)!.form.code_verifier).toBe(pkceVerifier(PREVIOUS_STATE_SECRET, derivedId(h.a.tenantId, key, "calendar_connection")));
   });
 
@@ -320,8 +353,8 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
     // Nothing was issued, so nothing is revoked.
     expect(revoked()).toHaveLength(revokes);
-    // The code itself was never spent, so the owner's next try with it still connects.
-    expect(await reason({ code: good })).toEqual({ calendar: "connected" });
+    // The code itself was never spent, so the owner's next try with it still gets a grant.
+    expect(await reason({ code: good })).toEqual({ calendar: "confirm" });
     expect(onError).not.toHaveBeenCalled();
   });
 
@@ -348,7 +381,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     for (const email of [noRefreshEmail, narrowEmail, readonlyEmail]) expect(grantOf(email).revoked, email).toBe(false);
   });
 
-  it("answers forbidden when the member is demoted during the exchange, revoking nothing", async () => {
+  it("lets no member demoted during the exchange confirm the grant it staged, revoking nothing", async () => {
     const owner = await signedInMember(h.database, h.fixture, h.a.tenantId, "owner");
     const flow = await consentFor(owner, await newResource(h.a.tenantId));
     const email = uniqueEmail("demoted");
@@ -359,13 +392,15 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     await exchange.arrived;
     await h.fixture.service((tx) => tx.query("UPDATE tenant_members SET role='staff' WHERE tenant_id=$1 AND id=$2", [h.a.tenantId, owner.memberId]));
     exchange.release();
-    expect(landing(await pending)).toEqual({ calendar: "error", reason: "forbidden" });
+    const staged = stagedGrant(await pending);
+    expect((await readPending(owner.token, staged)).status).toBe(403);
+    expect((await confirmGrant(owner.token, staged)).status).toBe(403);
     expect(revoked()).toHaveLength(revokes);
     expect(grantOf(email).revoked).toBe(false);
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
   });
 
-  it("when a second tab connected during the exchange: connected while it is active, else conflict; nothing revoked", async () => {
+  it("when a second tab connected during the exchange: confirming answers its connection while it is active, else conflict; nothing revoked", async () => {
     for (const status of ["active", "disconnecting"] as const) {
       const flow = await consentFor(h.a, await newResource(h.a.tenantId));
       const challenge = flow.query.get("code_challenge")!;
@@ -377,12 +412,15 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
       const pending = callback({ state: flow.state, code: slowCode });
       await exchange.arrived;
       const fastCode = google.registerCode({ codeChallenge: challenge, redirectUri: REDIRECT_URL, email: fast });
-      expect(landing(await callback({ state: flow.state, code: fastCode }))).toEqual({ calendar: "connected" });
+      expect((await connectThrough({ state: flow.state, code: fastCode })).status).toBe(200);
       if (status !== "active")
         await h.fixture.service((tx) => tx.query("UPDATE calendar_connections SET status=$3 WHERE tenant_id=$1 AND id=$2",
           [h.a.tenantId, flow.connectionId, status]));
       exchange.release();
-      expect(landing(await pending), status).toEqual(status === "active" ? { calendar: "connected" } : { calendar: "error", reason: "conflict" });
+      const answer = await confirmGrant(h.a.token, stagedGrant(await pending));
+      expect(answer.status, status).toBe(status === "active" ? 200 : 409);
+      if (status === "active") expect(answer.body).toMatchObject({ id: flow.connectionId, accountEmail: fast });
+      else expect(answer.body).toMatchObject({ error: { code: "Conflict", details: { reason: "conflict" } } });
       // Revoking at Google could end the winning tab's grant too, so neither grant is revoked.
       expect(revoked()).toHaveLength(revokes);
       expect(grantOf(slow).revoked).toBe(false);
@@ -398,7 +436,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     const flow = await consentFor(h.a, await newResource(h.a.tenantId));
     const back = await consent(flow.authorizeUrl);
     const reload = async () => landing(await callback({ state: back.get("state")!, code: back.get("code")! }));
-    expect(await reload()).toEqual({ calendar: "connected" });
+    expect((await connectThrough({ state: back.get("state")!, code: back.get("code")! })).status).toBe(200);
     const calls = tokenCalls();
     const revokes = revoked().length;
     expect(await reload()).toEqual({ calendar: "connected" });
@@ -427,7 +465,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     const flow = await consentFor(h.a, first, key);
     const stale = await consentFor(h.a, other, key);
     const back = await consent(flow.authorizeUrl);
-    expect(landing(await callback({ state: back.get("state")!, code: back.get("code")! }))).toEqual({ calendar: "connected" });
+    expect((await connectThrough({ state: back.get("state")!, code: back.get("code")! })).status).toBe(200);
     // Once the key's connection exists, the key starts no flow for another resource.
     const reused = await startConnect(h.a.token, other, key);
     expect(reused.status).toBe(409);
@@ -467,7 +505,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     const connect = async () => {
       const flow = await consentFor(h.a, resourceId);
       const back = await consent(flow.authorizeUrl);
-      expect(landing(await callback({ state: back.get("state")!, code: back.get("code")! }))).toEqual({ calendar: "connected" });
+      expect((await connectThrough({ state: back.get("state")!, code: back.get("code")! })).status).toBe(200);
       return flow.connectionId;
     };
     const first = await connect();
@@ -495,11 +533,55 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
   });
 });
 
+describe("GET /v1/calendar/google/pending and POST /v1/calendar/google/confirm (G-2)", () => {
+  it("a callback URL someone else finished and relayed to the owner connects nothing: the owner sees the other account first", async () => {
+    // The owner starts; someone else finishes the consent URL with their own Google account and
+    // sends the owner the callback URL, which the owner's browser (holding the key) opens.
+    const flow = await consentFor(h.a, await newResource(h.a.tenantId));
+    const intruder = uniqueEmail("intruder");
+    const code = google.registerCode({ codeChallenge: flow.query.get("code_challenge")!, redirectUri: REDIRECT_URL, email: intruder });
+    const staged = stagedGrant(await callback({ state: flow.state, code }));
+    expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    expect((await readPending(h.a.token, staged)).body).toMatchObject({ accountEmail: intruder });
+    // Only the member who started may read or confirm it; another owner, staff, another tenant and
+    // an anonymous caller learn nothing.
+    const otherOwner = await signedInMember(h.database, h.fixture, h.a.tenantId, "owner");
+    const staff = await signedInMember(h.database, h.fixture, h.a.tenantId, "staff");
+    for (const [token, status] of [[otherOwner.token, 404], [h.b.token, 404], [staff.token, 403], [undefined, 401]] as const) {
+      expect((await readPending(token, staged)).status, String(status)).toBe(status);
+      expect((await confirmGrant(token, staged)).status, String(status)).toBe(status);
+    }
+    expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    // Discarding it is the dashboard dropping its cookie; the grant simply expires.
+    now += 10 * 60_000;
+    expect((await readPending(h.a.token, staged)).status).toBe(404);
+    expect((await confirmGrant(h.a.token, staged)).status).toBe(404);
+    expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    expect(grantOf(intruder).revoked).toBe(false);
+  });
+
+  it("answers 404 for no grant, a malformed, forged or OAuth-state token, and without Google config", async () => {
+    const flow = await consentFor(h.a, await newResource(h.a.tenantId));
+    const staged = stagedGrant(await callback({ state: flow.state, code: (await consent(flow.authorizeUrl)).get("code")! }));
+    const [, body, tag] = staged.split(".");
+    for (const grant of [null, "", "zgg1.x.y", `zgg1.${body}.${tag!.slice(0, -1)}${tag!.endsWith("A") ? "B" : "A"}`, flow.state, `${staged}x`]) {
+      const shown = await readPending(h.a.token, grant);
+      expect(shown.status, String(grant)).toBe(404);
+      expect(apiErrorBodySchema.parse(shown.body).error.code).toBe("NotFound");
+      expect((await confirmGrant(h.a.token, grant)).status, String(grant)).toBe(404);
+    }
+    const off = calendarApp(h, { clock });
+    expect((await readPending(h.a.token, staged, off)).status).toBe(404);
+    expect((await confirmGrant(h.a.token, staged, off)).status).toBe(404);
+    expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+  });
+});
+
 describe("GET /v1/calendar/connections and POST /v1/calendar/connections/:id/disconnect (G-5)", () => {
   async function connected(member: Pick<MemberSetup, "token" | "tenantId">): Promise<string> {
     const flow = await consentFor(member, await newResource(member.tenantId));
     const back = await consent(flow.authorizeUrl);
-    expect(landing(await callback({ state: back.get("state")!, code: back.get("code")! }))).toEqual({ calendar: "connected" });
+    expect((await connectThrough({ state: back.get("state")!, code: back.get("code")! }, member)).status).toBe(200);
     return flow.connectionId;
   }
   const disconnect = (token: string, id: string, key: string | null = randomUUID()) =>

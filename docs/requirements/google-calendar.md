@@ -1,7 +1,7 @@
 # M5: Google Calendar busy sync
 
-Status: draft contract for M5, provider 3 (2026-10-20), revision 5 (the browser binding and the
-dashboard connect screen). Code follows this file; a
+Status: draft contract for M5, provider 3 (2026-10-20), revision 6 (the callback stages Google's
+grant and the owner confirms it; revision 5 added the browser binding and the connect screen). Code follows this file; a
 change to a numbered rule needs a new revision of this file first.
 
 Scope: an owner connects one Google Calendar to one booking resource. Busy time on that
@@ -70,17 +70,34 @@ the `X-Zs-Browser-Key` header, and sends the owner to `/account/connections` wit
 read from the API's answer (never the API's address). A missing, forged or expired `state`
 answers 400 (no redirect: nothing proves where the caller came from); the dashboard shows it as
 `reason=invalid_state`, and anything it cannot read (an outage, Google off) as `reason=unavailable`.
-Otherwise the API redirects (303) to `GOOGLE_RETURN_URL` with `calendar=connected` or
-`calendar=error&reason=…`. First, before Google's own answer is read: `browser_mismatch` when the
+Otherwise the API redirects (303) to `GOOGLE_RETURN_URL` with `calendar=confirm`,
+`calendar=connected` or `calendar=error&reason=…`. First, before Google's own answer is read: `browser_mismatch` when the
 browser key is missing or its SHA-256 differs from the state's binding (constant-time), so a
 consent URL finished in any other browser connects nothing and learns nothing. Then
 `denied` when Google sent `error`, `exchange_failed` when the code exchange fails, `no_refresh_token`
-when Google sent none, `scope_missing` when the granted scope lacks calendar events. On success it
-runs `calendar.google.connect` through the dispatcher as the member the state names, under the
-reserved key `oauth-google:<connection id>`, so that member must still be an owner and a reload
-replays the stored result. The action refuses any other key, so it never runs through an approval
-or with a payload the callback did not build. A reload counts as `connected` only while that
-connection is `active`; any other existing row answers `reason=conflict`. When the callback fails
+when Google sent none, `scope_missing` when the granted scope lacks calendar events. Before the
+exchange, a connection that already exists answers `connected` while it is `active` (a reload)
+and `reason=conflict` otherwise, and a member who is no longer an owner answers `reason=forbidden`.
+On success the callback connects nothing: the navigation carries no session, so it cannot tell the
+owner's own consent from a callback URL someone else finished with their own Google account and
+relayed to the owner. It stages the grant instead (`calendar=confirm`): a token
+`zgg1.<body>.<HMAC-SHA-256 tag>` signed by the state secret (domain-separated from the state, so
+neither reads as the other), naming the tenant, the member, the resource, the connection ID, the
+Google account email, the scope, the sealed refresh token (G-3) and an expiry 10 minutes ahead, at
+most 3500 characters. It travels in the `X-Zs-Pending-Grant` response header, never in the
+address; the dashboard keeps it in an httpOnly, `SameSite=Strict` cookie (`zs-calendar-grant`,
+path `/api`, 10 minutes). The Connections page reads it with `GET /v1/calendar/google/pending`
+(answers `{ resourceId, accountEmail, expiresAt }`) and shows the owner which Google account will
+be connected to which calendar. `POST /v1/calendar/google/confirm` (no `Idempotency-Key`) runs
+`calendar.google.connect` through the dispatcher as the signed-in member, under the reserved key
+`oauth-google:<connection id>`, so a repeat replays. Both take the grant from the header the
+dashboard's proxy sets from the cookie, need `publish`, and answer 404 for a grant that is
+missing, forged, expired, or names another member or tenant. The confirm answers the connection
+while it is `active` for the grant's resource and 409 (`reason=conflict`) otherwise. The proxy
+drops the cookie once the confirm answered 2xx, 403, 404 or 409, and after a 404 read; Cancel on
+the page drops it with the dashboard's own `DELETE /api/calendar/google/pending`. Sign-out, and a
+session the API refuses, drop both calendar cookies. The action refuses any other key, so it never
+runs through an approval or with a payload the server did not build. When the callback fails
 after the code exchange it stores nothing and does not revoke: Google revokes a whole grant, so a
 revoke could end another live connection on the same Google account, and the callback cannot see
 other tenants' rows. The refresh token is sealed (G-3) before the action sees it. The access
@@ -108,7 +125,8 @@ change by the runtime role.
 **G-5. Disconnecting.** `POST /v1/calendar/connections/:id/disconnect` with an `Idempotency-Key`,
 owners only, runs `calendar.google.disconnect`: an `active` or `reauthorize` connection becomes
 `disconnecting`; a `disconnecting` or `disconnected` one is answered as it is. `GET
-/v1/calendar/connections` lists the tenant's connections (`calendar`), never a token.
+/v1/calendar/connections` lists the tenant's connections (`calendar`), never a token: every one
+not `disconnected`, and the newest 100 `disconnected` ones.
 
 **G-6. Sync.** The calendar worker (service role) claims due connections (`active`,
 `next_sync_at <= now`, not leased) with `FOR UPDATE SKIP LOCKED` and leases each, then works
@@ -188,7 +206,7 @@ that may `SET ROLE service_role`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_API_BASE_URL`) exist for tests. In Google Cloud: an OAuth client (web), the Calendar API
 enabled, the consent screen with the three scopes, and the webhook domain verified for push.
 
-## Known limits (revision 5)
+## Known limits (revision 6)
 
 - One calendar (`primary`) per resource, one resource per connection.
 - Bookings are only pushed, never updated or deleted in Google (bookings have no cancellation yet).
@@ -196,6 +214,12 @@ enabled, the consent screen with the three scopes, and the webhook domain verifi
 - The flow must finish in the browser that started it. A phone that opens Google's consent in
   another app or browser (not the one the dashboard runs in) lands on `browser_mismatch`; the
   owner starts again from that browser.
+- Two tabs of one browser that start a flow at the same moment, before either has the key cookie,
+  each mint a key; the cookie keeps the last one, so the other tab's flow lands on
+  `browser_mismatch` and the owner starts it again. A tab that starts after the cookie is set
+  shares its key.
+- A browser holds one staged grant: a second consent finished before the first is confirmed
+  replaces it.
 - A disconnect followed by a reconnect of the same account within one worker revoke call can lose
   the new grant; the new row then shows `reauthorize` and the owner connects again.
 - Vercel environment variables are project-wide: in one project the API function can also read

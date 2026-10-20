@@ -12,7 +12,7 @@ import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
   AGENT_ACTIONS, agentHandlers, approvalHandlers, bookingHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
-  plainSiteCompiler, sealRefreshToken, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
+  plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
 } from "../src/index.js";
 
@@ -178,7 +178,7 @@ async function ownerDraft(): Promise<string> {
 }
 
 /** One call per session operation. Each builds fresh inputs, so it can run for any caller. */
-function operations(session: Session): Record<string, { permission: Permission | null; run: () => Promise<unknown> }> {
+function operations(session: Session, actorId: string = randomUUID()): Record<string, { permission: Permission | null; run: () => Promise<unknown> }> {
   return {
     createBooking: { permission: "calendar", run: () => session.createBooking(
       { resourceId: tenant.resourceId, startsAt: `2026-10-19T${String(hour++).padStart(2, "0")}:00:00.000Z` }, randomUUID()) },
@@ -263,6 +263,9 @@ function operations(session: Session): Record<string, { permission: Permission |
     listCalendarConnections: { permission: "calendar", run: () => session.listCalendarConnections() },
     startGoogleConnect: { permission: "publish", run: () => session.startGoogleConnect({ resourceId: tenant.resourceId, browserBinding: "b".repeat(43) }, randomUUID()) },
     disconnectCalendar: { permission: "publish", run: async () => session.disconnectCalendar(await calendarConnection(), randomUUID()) },
+    // G-2: the owner reads and confirms a grant the callback staged for them.
+    pendingGoogleConnect: { permission: "publish", run: async () => session.pendingGoogleConnect(stagedGrant(actorId, await freshResource())) },
+    confirmGoogleConnect: { permission: "publish", run: async () => session.confirmGoogleConnect(stagedGrant(actorId, await freshResource())) },
     // M6 follow-up agent: owners set it up and resume it; anyone who drafts may read it or stop it (agents.md G-11).
     getFollowUpStatus: { permission: "inbox.drafts", run: () => session.getFollowUpStatus() },
     updateFollowUpSettings: { permission: "agents", run: async () => {
@@ -281,15 +284,30 @@ function operations(session: Session): Record<string, { permission: Permission |
   };
 }
 
+/** A booking resource of its own, so each calendar connection has a free one. */
+async function freshResource(): Promise<string> {
+  const resourceId = randomUUID();
+  await fixture.service((tx) => tx.query(
+    `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+       buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+     VALUES ($1,$2,'UTC','[]'::jsonb,'[]'::jsonb,60,30,0,0,0,20160)`, [tenant.tenantId, resourceId]));
+  return resourceId;
+}
+
+/** A grant the OAuth callback staged for `actorId` (G-2). */
+function stagedGrant(actorId: string, resourceId: string): string {
+  const connectionId = randomUUID();
+  return signPendingGrant(calendar.stateSecrets.current, {
+    tenantId: tenant.tenantId, actorId, resourceId, connectionId, accountEmail: "owner@calendar.test", scope: "https://www.googleapis.com/auth/calendar",
+    refreshTokenSealed: sealRefreshToken(tokenPublicKey, { tenantId: tenant.tenantId, connectionId }, "1//refresh"), expiresAt: Date.parse(NOW) + 60_000,
+  })!;
+}
+
 /** An active connection on its own resource, as the OAuth callback's connect action leaves it. */
 async function calendarConnection(): Promise<string> {
   const id = randomUUID();
-  const resourceId = randomUUID();
+  const resourceId = await freshResource();
   await fixture.service(async (tx) => {
-    await tx.query(
-      `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
-         buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
-       VALUES ($1,$2,'UTC','[]'::jsonb,'[]'::jsonb,60,30,0,0,0,20160)`, [tenant.tenantId, resourceId]);
     await tx.query(
       `INSERT INTO calendar_connections (tenant_id,id,resource_id,status,refresh_token_sealed,created_by,next_sync_at,created_at,updated_at)
        VALUES ($1,$2,$3,'active',$4,$5,$6,$6,$6)`,
@@ -348,7 +366,7 @@ describe("every session operation, per role", () => {
     it(`${role}: allowed exactly where the role grants the permission`, async () => {
       const { userId } = await addMember(tenant.tenantId, role);
       const session = sessionFor(userId);
-      for (const [name, operation] of Object.entries(operations(session))) {
+      for (const [name, operation] of Object.entries(operations(session, userId))) {
         const allowed = operation.permission === null || roleCan(role, operation.permission);
         if (allowed) await expect(operation.run(), `${role} ${name}`).resolves.toBeDefined();
         else await expect(operation.run(), `${role} ${name}`).rejects.toBeInstanceOf(TenantDenied);
@@ -364,7 +382,7 @@ describe("every session operation, per role", () => {
   it("refuses a caller with no membership, and a member of another tenant, everything", async () => {
     const outsiders = [randomUUID(), (await addMember(fixture.b.tenantId, "owner")).userId];
     for (const actorId of outsiders) {
-      for (const [name, operation] of Object.entries(operations(sessionFor(actorId))))
+      for (const [name, operation] of Object.entries(operations(sessionFor(actorId), actorId)))
         await expect(operation.run(), name).rejects.toBeInstanceOf(TenantDenied);
       expect(await actionRows(tenant.tenantId, actorId)).toBe(0);
     }

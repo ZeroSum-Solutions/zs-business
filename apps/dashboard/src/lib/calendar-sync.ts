@@ -1,5 +1,6 @@
 import type { Permission } from "@zs/contracts";
 import { isApiError, type CalendarConnection } from "./api";
+import { isDefinitive } from "./intent-key";
 
 /**
  * Connecting and disconnecting a calendar decides what the public pages offer, so the API
@@ -22,7 +23,7 @@ export function currentConnection(items: readonly CalendarConnection[], resource
 }
 
 export interface ReturnNotice {
-  tone: "success" | "error";
+  tone: "success" | "info" | "error";
   message: string;
 }
 
@@ -41,13 +42,45 @@ export const RETURN_REASONS: Readonly<Record<string, string>> = {
 
 export const CONNECTED_MESSAGE = "Google Calendar connected. Busy times start blocking slots after the first sync.";
 const UNKNOWN_RETURN = "Google Calendar could not be connected. Try again from this page.";
+export const CONFIRM_EXPIRED_MESSAGE = "That connection request expired. Connect again.";
+export const CANCELLED_MESSAGE = "Nothing was connected.";
 
-/** What `?calendar=connected` or `?calendar=error&reason=…` on the return URL means; null for neither. */
+/**
+ * What `?calendar=connected` or `?calendar=error&reason=…` on the return URL means; null for
+ * neither. `?calendar=confirm` says nothing by itself: the waiting grant, read from the server,
+ * is what the page asks the owner to confirm.
+ */
 export function returnNotice(outcome: string | null, reason: string | null): ReturnNotice | null {
   if (outcome === "connected") return { tone: "success", message: CONNECTED_MESSAGE };
   // Own keys only: the reason comes from the address bar.
   if (outcome === "error") return { tone: "error", message: reason !== null && Object.hasOwn(RETURN_REASONS, reason) ? RETURN_REASONS[reason]! : UNKNOWN_RETURN };
   return null;
+}
+
+/**
+ * What a confirm the server answered for good says (G-2): nothing waits any more (404), the
+ * connection or its calendar changed (409), or not an owner (403). Null for a lost answer, which
+ * leaves the grant waiting, so the owner can try again.
+ */
+export function confirmErrorNotice(error: unknown): ReturnNotice | null {
+  if (!isDefinitive(error)) return null;
+  const message = isApiError(error, "not_found") ? CONFIRM_EXPIRED_MESSAGE
+    : isApiError(error, "conflict") ? RETURN_REASONS.conflict!
+    : isApiError(error, "forbidden") ? RETURN_REASONS.forbidden!
+    : isApiError(error) ? error.message : UNKNOWN_RETURN;
+  return { tone: "error", message };
+}
+
+/**
+ * Whether busy times may block other slots now: a sync finished, or a connection moved to another
+ * status or left the list. A new connection blocks nothing until its first sync.
+ */
+export function busyTimesChanged(before: readonly CalendarConnection[], after: readonly CalendarConnection[]): boolean {
+  const now = new Map(after.map((item) => [item.id, item]));
+  return before.some((item) => {
+    const next = now.get(item.id);
+    return !next || next.status !== item.status || next.lastSyncedAt !== item.lastSyncedAt;
+  });
 }
 
 /** A connect the server refused before Google: no Google settings (404), or not an owner (403). */

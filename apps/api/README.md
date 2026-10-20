@@ -232,8 +232,10 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
 | `GET /v1/wallet/top-ups` | `{ items: TopUp[] }`, newest first, at most 20; owners only |
 | `POST /v1/wallet/top-ups` | `{ amount }` in minor units with `Idempotency-Key`: 201 `{ topup, checkoutUrl }` (stripe.md S-1, S-2). The same key replays the same top-up and Checkout Session. 409 `topup_closed` once the top-up is no longer pending or 25 minutes old; 409 `wallet_currency` when the wallet already holds another currency; 503 when Stripe is unreachable or busy (retry with the same key); 404 when Stripe is not configured. Owners only |
-| `GET /v1/calendar/connections` | `{ items: CalendarConnection[] }`, newest first, at most 100: `{ id, provider, resourceId, calendarId, accountEmail, status, lastSyncedAt, lastError, createdAt }`, never a token (google-calendar.md G-5). Owners and staff |
+| `GET /v1/calendar/connections` | `{ items: CalendarConnection[] }`, newest first: every connection not `disconnected`, and the newest 100 `disconnected` ones: `{ id, provider, resourceId, calendarId, accountEmail, status, lastSyncedAt, lastError, createdAt }`, never a token (google-calendar.md G-5). Owners and staff |
 | `POST /v1/calendar/google/connect` `{ resourceId, browserBinding }` | With `Idempotency-Key`: 200 `{ authorizeUrl }`, `Cache-Control: no-store` (G-1). Changes nothing: send the browser there. `browserBinding` is the SHA-256 (base64url) of the key the dashboard keeps in the browser's cookie; the dashboard's proxy sets it. The connection ID derives from the tenant and the key; the URL carries a signed state (10 minutes, bound to that browser) and a PKCE challenge. 409 `idempotency_key_reused` once the key's connection exists for another resource or is no longer active; 403 for another tenant's resource; 404 when Google is not configured. Owners only (`publish`) |
+| `GET /v1/calendar/google/pending` | 200 `{ resourceId, accountEmail, expiresAt }`, `Cache-Control: no-store`: the grant the OAuth callback staged, from the `X-Zs-Pending-Grant` header the dashboard's proxy sets from its `zs-calendar-grant` cookie (G-2). 404 for a missing, forged or expired grant, one that names another member or tenant, or when Google is not configured. Owners only |
+| `POST /v1/calendar/google/confirm` | No `Idempotency-Key`: 200 `CalendarConnection`. Connects the staged grant (same header) by running `calendar.google.connect` as the signed-in member under the reserved key `oauth-google:<connection id>`, so a repeat replays (G-2). 409 `reason=conflict` when that connection exists but is no longer `active` for the grant's resource; 404 as for `pending`. Owners only |
 | `POST /v1/calendar/connections/:id/disconnect` | With `Idempotency-Key`: 200 `{ actionId, result: CalendarConnection }` (G-5). `active` or `reauthorize` becomes `disconnecting` (the calendar runner revokes the grant and removes its blocks); `disconnecting` and `disconnected` answer as they are. 404 for an unknown or another tenant's connection. Owners only |
 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
@@ -414,21 +416,24 @@ comes from the signed `state` (tenant, member, resource, connection ID, browser 
 expiry; current or previous `GOOGLE_STATE_SECRET`) and that key, whose SHA-256 must be the state's
 binding. With a valid state and key it exchanges the code with the PKCE verifier
 derived for that connection, seals the refresh token with `GOOGLE_TOKEN_PUBLIC_KEY` for that
-tenant and connection, drops the access token, and runs `calendar.google.connect` as the member
-the state names, under the reserved key `oauth-google:<connection id>`. That member must still be
-an owner. Connecting a resource that already has a connection moves the old one to
-`disconnecting`. Every answer is `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+tenant and connection, drops the access token, and stages the grant: a signed token (state secret,
+10 minutes) in the `X-Zs-Pending-Grant` header, never in the address. It connects nothing; the
+owner confirms the Google account it names on the Connections page (`POST
+/v1/calendar/google/confirm`), since a callback URL can be finished by someone else and relayed.
+Connecting a resource that already has a connection moves the old one to `disconnecting`. Every
+answer is `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 
 | Answer | When |
 |---|---|
 | 400 `ValidationFailed` | Missing, forged, tampered or expired `state`. No redirect: nothing proves where the caller came from. |
-| 303 to `GOOGLE_RETURN_URL?calendar=connected` | Connected, or a reload of a callback that already connected (the code is not sent again). |
+| 303 to `GOOGLE_RETURN_URL?calendar=confirm` | Google granted; the grant is staged in `X-Zs-Pending-Grant` for the owner to confirm. |
+| 303 to `GOOGLE_RETURN_URL?calendar=connected` | A reload of a callback whose connection is active (the code is not sent again). |
 | 303 to `…?calendar=error&reason=browser_mismatch` | No browser key, or not the one the state was bound to: the flow was finished in another browser. Checked before anything else, Google's `error` included. |
 | `reason=denied` | Google sent `error` (the owner declined). |
 | `reason=exchange_failed` | No code, or Google refused or did not answer the exchange. |
 | `reason=no_refresh_token`, `reason=scope_missing` | Google granted no refresh token, or not `calendar.events`. Nothing is stored. |
 | `reason=forbidden` | The member is no longer an owner of the tenant, or the resource is gone. Checked before the code is spent. |
-| `reason=conflict` | Another connect for the same resource committed at the same moment. |
+| `reason=conflict` | The connection already exists but is no longer active for this resource. |
 | 503 `Unavailable` | The database did not answer. |
 
 ## Google Calendar webhook (`/webhooks/google/calendar`, no auth)

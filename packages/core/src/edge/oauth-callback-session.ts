@@ -2,29 +2,23 @@
 // request is anonymous; what it may do comes from the signed state alone: the tenant, the member
 // who asked, the resource and the connection ID. It goes on only for the browser that started the
 // flow: the dashboard passes the key from that browser's cookie, which must hash to the state's
-// binding. The connect action then runs through the member
-// write path as that member, so a member who is no longer an owner is refused, under the reserved
-// key `oauth-google:<connection ID>`. The refresh token is sealed before the action sees it; the
-// access token is dropped.
-import {
-  BindingMismatch,
-  CALENDAR_GOOGLE_CONNECT_ACTION,
-  Conflict,
-  IdempotencyConflict,
-  NotFound,
-  TenantDenied,
-} from "@zs/contracts";
+// binding. Even then it connects nothing: a callback URL someone else finished with their own
+// Google account and relayed to the owner arrives the same way. It exchanges the code, seals the
+// refresh token (the access token is dropped) and stages the grant (pending-grant.ts); the owner
+// connects it from the dashboard with their session, seeing the Google account it names
+// (session.ts confirmGoogleConnect).
+import { NotFound, TenantDenied } from "@zs/contracts";
 import { readClock } from "../booking/slots.js";
 import { getCalendarConnection, googleConnectIdempotencyKey } from "../calendar/connections.js";
 import { GOOGLE_EVENTS_SCOPE } from "../calendar/google.js";
-import { browserKeyMatches, pkceVerifier, verifyConnectState, type OAuthState } from "../calendar/oauth-state.js";
+import { browserKeyMatches, pkceVerifier, verifyConnectState } from "../calendar/oauth-state.js";
+import { PENDING_GRANT_LIFETIME_MS, signPendingGrant } from "../calendar/pending-grant.js";
 import { sealRefreshToken } from "../calendar/seal.js";
 import { GoogleRequestFailed, type GoogleTokenGrant } from "../calendar/types.js";
 import { requireMember } from "../members/access.js";
-import { derivedId } from "./ids.js";
-import { memberDispatch, type EdgeDependencies } from "./session.js";
+import type { EdgeDependencies } from "./session.js";
 
-/** G-2: the redirect's `reason` when the connection was not made. */
+/** G-2: the redirect's `reason` when no grant was staged. */
 export type OAuthCallbackReason =
   | "browser_mismatch" | "denied" | "exchange_failed" | "no_refresh_token" | "scope_missing" | "forbidden" | "conflict";
 
@@ -39,7 +33,10 @@ export interface OAuthCallbackInput {
 export type OAuthCallbackOutcome =
   /** No valid state: nothing proves where the caller came from, so no redirect. */
   | { readonly ok: false; readonly status: 400 }
+  /** A reload after the owner connected this flow's connection. */
   | { readonly ok: true; readonly connected: true; readonly tenantId: string; readonly connectionId: string }
+  /** The grant waits for the owner's confirmation (pending-grant.ts). */
+  | { readonly ok: true; readonly connected: false; readonly pendingGrant: string }
   | { readonly ok: true; readonly connected: false; readonly reason: OAuthCallbackReason };
 
 export { googleConnectIdempotencyKey };
@@ -113,44 +110,15 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
       } catch {
         return fail("exchange_failed");
       }
-      return connect(state, {
+      const pendingGrant = signPendingGrant(signer, {
+        tenantId, actorId, resourceId: state.resourceId, connectionId,
         accountEmail: grant.email !== null && grant.email.length >= 3 && grant.email.length <= 254 ? grant.email : null,
         scope: grant.scope.slice(0, 2000),
         refreshTokenSealed,
-      }, { connected, fail, existing });
+        expiresAt: now.getTime() + PENDING_GRANT_LIFETIME_MS,
+      });
+      return pendingGrant === null ? fail("exchange_failed") : { ok: true, connected: false, pendingGrant };
     },
   };
-
-  async function connect(
-    state: OAuthState,
-    grant: { accountEmail: string | null; scope: string; refreshTokenSealed: string },
-    outcomes: {
-      connected: OAuthCallbackOutcome;
-      fail: (reason: OAuthCallbackReason) => OAuthCallbackOutcome;
-      existing: () => Promise<Existing>;
-    },
-  ): Promise<OAuthCallbackOutcome> {
-    const { tenantId, actorId, connectionId, resourceId } = state;
-    const idempotencyKey = googleConnectIdempotencyKey(connectionId);
-    const run = memberDispatch(deps, { tenantId, actorId });
-    try {
-      await run({
-        actionType: CALENDAR_GOOGLE_CONNECT_ACTION,
-        target: { tenantId, type: "calendar_connection", id: connectionId },
-        approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
-        idempotencyKey,
-        payload: { connectionId, resourceId, ...grant },
-      });
-      return outcomes.connected;
-    } catch (error) {
-      // The member lost the owner role, or the resource is gone, since the state was signed.
-      if (error instanceof TenantDenied) return outcomes.fail("forbidden");
-      // Another request for this connection committed first, with its own sealing of the grant.
-      if (error instanceof IdempotencyConflict || error instanceof BindingMismatch)
-        return (await outcomes.existing().catch((): Existing => "none")) === "active" ? outcomes.connected : outcomes.fail("conflict");
-      if (error instanceof Conflict) return outcomes.fail("conflict");
-      throw error;
-    }
-  }
 }
 export type OAuthCallbackSession = ReturnType<typeof createOAuthCallbackSession>;

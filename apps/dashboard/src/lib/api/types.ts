@@ -22,6 +22,7 @@ import type {
   IntakeItemRecord,
   IntakeStatus,
   LeadSource,
+  PendingGoogleConnect,
   PipelineSummary,
   ReplyEntry,
   ReplyRecord,
@@ -67,6 +68,7 @@ export type {
   IntakeItemRecord,
   IntakeStatus,
   LeadSource,
+  PendingGoogleConnect,
   PipelineSummary,
   ReplyEntry,
   ReplyRecord,
@@ -354,10 +356,10 @@ export interface SitesApi {
 }
 
 /**
- * Google Calendar busy sync (google-calendar.md G-1, G-5). Members with `calendar` read the
+ * Google Calendar busy sync (google-calendar.md G-1, G-2, G-5). Members with `calendar` read the
  * connections; owners (`publish`) connect and disconnect. A connect changes nothing on the
- * server: it answers the Google consent URL, and the connection is made when Google sends the
- * owner back.
+ * server: it answers the Google consent URL. When Google sends the owner back, the grant waits
+ * in this browser until the owner confirms the Google account it names on the Connections page.
  */
 export interface CalendarSyncApi {
   /** Every connection of the business, retired ones included, never a token. */
@@ -367,6 +369,16 @@ export interface CalendarSyncApi {
    * has no Google settings. It writes nothing, so each attempt takes a fresh key.
    */
   startGoogleConnect(resourceId: string, options: WriteOptions): Promise<{ authorizeUrl: string }>;
+  /** The grant Google gave this browser that waits for the owner, or null when there is none. */
+  getPendingGoogleConnect(options?: ReadOptions): Promise<PendingGoogleConnect | null>;
+  /**
+   * Connects the waiting grant. Throws `not_found` when it is gone or expired, and `conflict`
+   * when its connection was retired or its calendar changed. Safe to repeat: the server keys it
+   * by the grant, so it takes no key from the caller.
+   */
+  confirmGoogleConnect(): Promise<CalendarConnection>;
+  /** Drops the waiting grant; nothing is connected. */
+  discardGoogleConnect(): Promise<void>;
   /** Hands the connection to the worker to clean up; a retired one answers as it is. */
   disconnectCalendar(connectionId: string, options: WriteOptions): Promise<CalendarConnection>;
 }

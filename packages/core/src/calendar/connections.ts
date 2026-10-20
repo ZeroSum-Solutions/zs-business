@@ -59,11 +59,19 @@ export async function getCalendarConnection(tx: Transaction, tenantId: string, c
   return row ? connectionFromRow(row) : null;
 }
 
-/** G-5: the tenant's connections, newest first. */
-export async function listCalendarConnections(tx: Transaction, tenantId: string, limit = 100): Promise<CalendarConnection[]> {
+/**
+ * G-5: the tenant's connections, newest first: every one that is not yet `disconnected` (at most
+ * one live row per resource, plus those being cleaned up), and only the newest `historyLimit`
+ * disconnected ones, so reconnect churn on one resource never hides another's live row.
+ */
+export async function listCalendarConnections(tx: Transaction, tenantId: string, historyLimit = 100): Promise<CalendarConnection[]> {
   return (await tx.query<ConnectionRow>(
-    `SELECT ${CONNECTION_COLUMNS} FROM calendar_connections WHERE tenant_id=$1 ORDER BY created_at DESC, id LIMIT $2`,
-    [tenantId, limit])).rows.map(connectionFromRow);
+    `(SELECT ${CONNECTION_COLUMNS} FROM calendar_connections WHERE tenant_id=$1 AND status <> 'disconnected')
+     UNION ALL
+     (SELECT ${CONNECTION_COLUMNS} FROM calendar_connections WHERE tenant_id=$1 AND status = 'disconnected'
+       ORDER BY created_at DESC, id LIMIT $2)
+     ORDER BY created_at DESC, id`,
+    [tenantId, historyLimit])).rows.map(connectionFromRow);
 }
 
 async function resolveConnectionTarget(tx: Transaction, target: Target): Promise<Target | null> {

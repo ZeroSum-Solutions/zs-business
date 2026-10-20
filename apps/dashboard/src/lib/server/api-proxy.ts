@@ -7,12 +7,13 @@
  * approval, source, inbox, home, agent, site and calendar routes and /v1/me are forwarded (for
  * example /v1/approvals/:id/approve, /v1/inbox/threads and PUT /v1/agents/followup/settings), only
  * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
- * Google Calendar connection also binds the flow to this browser (calendar-connect.ts).
+ * Google Calendar connection also binds the flow to this browser, and reading or confirming a
+ * staged grant sends the API the grant this browser holds (calendar-connect.ts).
  */
-import type { ApiErrorCode } from "@zs/contracts";
+import { PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
 import { readBoundedBody, type BodyTiming } from "./body";
-import { bindConnectStart, isConnectStart } from "./calendar-connect";
+import { bindConnectStart, expiredGrantCookie, isConnectStart, pendingGrantOf, readsPendingGrant } from "./calendar-connect";
 import { reportSetupProblem, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
 import { authFor, lookupSession, type AuthContext } from "./supabase";
@@ -63,6 +64,10 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
+  // Only from this browser's cookie; a caller's own header never gets through (REQUEST_HEADERS).
+  const readsGrant = readsPendingGrant(request.method, path);
+  const grant = readsGrant ? pendingGrantOf(request) : undefined;
+  if (grant !== undefined) headers.set(PENDING_GRANT_HEADER, grant);
 
   let body: Uint8Array<ArrayBuffer> | undefined;
   if (WITH_BODY.has(request.method)) {
@@ -97,6 +102,10 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
   const response = await relay(upstream, auth);
   // The browser keeps its key only for a flow the API started.
   if (setCookie && upstream.ok) response.headers.append("Set-Cookie", setCookie);
+  // A grant that connected, or that the API says is gone, foreign or no longer usable, is spent.
+  // An outage or a lost answer keeps it, so the owner can try again.
+  if (grant !== undefined && (upstream.ok && request.method === "POST" || [403, 404, 409].includes(upstream.status)))
+    response.headers.append("Set-Cookie", expiredGrantCookie(request, config.trustProxy));
   return response;
 }
 

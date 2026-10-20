@@ -3,7 +3,17 @@
 import { describe, expect, it } from "vitest";
 import type { CalendarConnection } from "@zs/contracts";
 import { ApiError } from "../src/lib/api/errors";
-import { connectErrorMessage, CONNECTED_MESSAGE, currentConnection, RETURN_REASONS, returnNotice } from "../src/lib/calendar-sync";
+import {
+  busyTimesChanged,
+  CANCELLED_MESSAGE,
+  CONFIRM_EXPIRED_MESSAGE,
+  confirmErrorNotice,
+  connectErrorMessage,
+  CONNECTED_MESSAGE,
+  currentConnection,
+  RETURN_REASONS,
+  returnNotice,
+} from "../src/lib/calendar-sync";
 
 const RESOURCE = "3c1e5a7b-9d2f-4e6a-8b1c-000000000001";
 const OTHER = "3c1e5a7b-9d2f-4e6a-8b1c-000000000002";
@@ -43,6 +53,47 @@ describe("returnNotice", () => {
     expect(returnNotice("error", "toString")).toMatchObject({ tone: "error", message: expect.stringMatching(/could not be connected/) });
     expect(returnNotice(null, null)).toBeNull();
     expect(returnNotice("maybe", null)).toBeNull();
+  });
+
+  it("says nothing on a confirm return: the waiting grant is what the page asks about", () => {
+    expect(returnNotice("confirm", null)).toBeNull();
+    expect(returnNotice("confirm", "denied")).toBeNull();
+  });
+});
+
+describe("confirmErrorNotice", () => {
+  it("explains each answer the server gave for good, in plain words", () => {
+    expect(confirmErrorNotice(new ApiError("not_found", "x", 404))).toEqual({ tone: "error", message: CONFIRM_EXPIRED_MESSAGE });
+    expect(CONFIRM_EXPIRED_MESSAGE).toBe("That connection request expired. Connect again.");
+    expect(confirmErrorNotice(new ApiError("conflict", "x", 409, "Conflict", { reason: "conflict" }))).toEqual({ tone: "error", message: RETURN_REASONS.conflict });
+    expect(confirmErrorNotice(new ApiError("forbidden", "x", 403))).toEqual({ tone: "error", message: RETURN_REASONS.forbidden });
+    expect(confirmErrorNotice(new ApiError("validation", "Some details need another look.", 400))).toEqual({ tone: "error", message: "Some details need another look." });
+  });
+
+  it("leaves a lost answer to the panel, where the owner can try again", () => {
+    expect(confirmErrorNotice(new ApiError("network", "You look offline."))).toBeNull();
+    expect(confirmErrorNotice(new ApiError("server", "x", 503))).toBeNull();
+    expect(confirmErrorNotice(new ApiError("invalid_response", "x", 200))).toBeNull();
+    expect(confirmErrorNotice(new Error("boom"))).toBeNull();
+    expect(CANCELLED_MESSAGE).toBe("Nothing was connected.");
+  });
+});
+
+describe("busyTimesChanged", () => {
+  it("is true when a sync lands, a status moves or a row leaves the list", () => {
+    const active = row("active", "2026-10-01T00:00:00.000Z");
+    const synced = { ...active, lastSyncedAt: "2026-10-20T12:00:00.000Z" };
+    expect(busyTimesChanged([active], [synced])).toBe(true);
+    expect(busyTimesChanged([synced], [{ ...synced, status: "disconnecting" }])).toBe(true);
+    expect(busyTimesChanged([{ ...synced, status: "disconnecting" }], [{ ...synced, status: "disconnected" }])).toBe(true);
+    expect(busyTimesChanged([synced], [])).toBe(true);
+  });
+
+  it("is false when nothing that blocks slots changed, or a new connection has not synced yet", () => {
+    const synced = { ...row("active", "2026-10-01T00:00:00.000Z"), lastSyncedAt: "2026-10-20T12:00:00.000Z" };
+    expect(busyTimesChanged([synced], [{ ...synced }])).toBe(false);
+    expect(busyTimesChanged([synced], [row("active", "2026-10-02T00:00:00.000Z", OTHER), synced])).toBe(false);
+    expect(busyTimesChanged([], [synced])).toBe(false);
   });
 });
 
