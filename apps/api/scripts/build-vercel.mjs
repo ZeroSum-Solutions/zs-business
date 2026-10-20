@@ -1,18 +1,24 @@
 // Bundles src/vercel.ts into one ESM file and writes Vercel's Build Output API layout
-// (.vercel/output): every path routes to the one Node function. Workspace packages ship
+// (.vercel/output): /cron/delivery routes to the delivery function, /cron/activepieces to the
+// Activepieces webhook function, every other path to the API function. Workspace packages ship
 // TypeScript with NodeNext ".js" specifiers, which Vercel's own Node builder does not map,
 // so the bundle is made here. Run from apps/api: `pnpm build:vercel`.
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import process from "node:process";
 import { build } from "esbuild";
 
 const output = new URL("../.vercel/output/", import.meta.url);
 const fn = new URL("functions/index.func/", output);
+const cronFn = new URL("functions/cron/delivery.func/", output);
+const activepiecesFn = new URL("functions/cron/activepieces.func/", output);
 await rm(output, { recursive: true, force: true });
 await mkdir(fn, { recursive: true });
+await mkdir(cronFn, { recursive: true });
+await mkdir(activepiecesFn, { recursive: true });
 
-await build({
-  entryPoints: [new URL("../src/vercel.ts", import.meta.url).pathname],
-  outfile: new URL("index.mjs", fn).pathname,
+const bundle = (entry, outfile) => build({
+  entryPoints: [new URL(entry, import.meta.url).pathname],
+  outfile: new URL("index.mjs", outfile).pathname,
   bundle: true,
   platform: "node",
   format: "esm",
@@ -36,6 +42,13 @@ await build({
   logLevel: "warning",
 });
 
+await bundle("../src/vercel.ts", fn);
+// resend.md R-9: the delivery cron is its own function, so the API's code never opens the
+// service database login.
+await bundle("../src/vercel-delivery.ts", cronFn);
+// activepieces.md W-14: the webhook worker holds the service login too, so it is its own function.
+await bundle("../src/vercel-activepieces.ts", activepiecesFn);
+
 // The hosted booking page and widget read these at start-up (src/public/assets.ts).
 await cp(new URL("../static/", import.meta.url), new URL("static/", fn), { recursive: true });
 await writeFile(new URL(".vc-config.json", fn), JSON.stringify({
@@ -46,8 +59,38 @@ await writeFile(new URL(".vc-config.json", fn), JSON.stringify({
   maxDuration: 30,
 }, null, 2));
 await writeFile(new URL("package.json", fn), JSON.stringify({ type: "module" }));
+for (const cron of [cronFn, activepiecesFn]) {
+  await writeFile(new URL(".vc-config.json", cron), JSON.stringify({
+    runtime: "nodejs24.x",
+    handler: "index.mjs",
+    launcherType: "Nodejs",
+    shouldAddHelpers: false,
+    maxDuration: 30,
+  }, null, 2));
+  await writeFile(new URL("package.json", cron), JSON.stringify({ type: "module" }));
+}
+// No schedule unless the build sets one (for example "*/5 * * * *"), so a deploy never starts
+// sending by itself; DELIVERY_WORKER=on is the second switch, at run time.
+const cronSchedule = (name) => {
+  const value = process.env[name];
+  if (value !== undefined && !/^[0-9*/,-]+( [0-9*/,-]+){4}$/.test(value))
+    throw new Error(`${name} must be a five-field cron expression`);
+  return value;
+};
+const schedule = cronSchedule("DELIVERY_CRON_SCHEDULE");
+// Same for webhooks: ACTIVEPIECES_CRON_SCHEDULE here, ACTIVEPIECES_WEBHOOK_WORKER=on at run time.
+const activepiecesSchedule = cronSchedule("ACTIVEPIECES_CRON_SCHEDULE");
+const crons = [
+  ...(schedule ? [{ path: "/cron/delivery", schedule }] : []),
+  ...(activepiecesSchedule ? [{ path: "/cron/activepieces", schedule: activepiecesSchedule }] : []),
+];
 await writeFile(new URL("config.json", output), JSON.stringify({
   version: 3,
-  routes: [{ src: "/(.*)", dest: "/index" }],
+  routes: [
+    { src: "/cron/delivery", dest: "/cron/delivery" },
+    { src: "/cron/activepieces", dest: "/cron/activepieces" },
+    { src: "/(.*)", dest: "/index" },
+  ],
+  ...(crons.length > 0 ? { crons } : {}),
 }, null, 2));
 console.log("Wrote apps/api/.vercel/output");
