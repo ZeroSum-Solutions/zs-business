@@ -617,11 +617,13 @@ describe("hosted page and widget assets (P-14)", () => {
   });
 });
 
-describe("abuse limits (P-10)", () => {
+// The same suite against both stores: callers see identical limits (P-10 revision 6).
+describe.each(["memory", "postgres"] as const)("abuse limits (P-10), counted in %s", (limiterStore) => {
   let limited: ApiHarness;
   let now = Date.parse(NOW);
   beforeAll(async () => {
     limited = await createApiHarness({
+      limiterStore,
       clock: { now: () => new Date(now) },
       publicIntake: {
         clientIp: { trustedProxies: ["10.0.0.0/8"] },

@@ -35,7 +35,7 @@ async function checkLogin(pool: HostedMigrateDeps["pool"]): Promise<Login> {
   )).rows[0];
   if (!login || login.session_user !== "zs_migrator" || login.rolsuper || login.rolbypassrls)
     throw new Error("Refusing to run: the migrator login must be zs_migrator without superuser or BYPASSRLS");
-  if (login.member_of.some((role) => !["zs_dispatcher", "zs_function_owner"].includes(role)))
+  if (login.member_of.some((role) => !["zs_dispatcher", "zs_function_owner", "zs_rate_limiter"].includes(role)))
     throw new Error("Refusing to run: zs_migrator belongs to an unexpected role");
   return login;
 }

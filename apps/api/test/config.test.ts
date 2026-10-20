@@ -67,6 +67,7 @@ describe("parseServerEnv", () => {
   it("reads the public booking settings with safe defaults", () => {
     expect(parseServerEnv({ ...base, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PORT: "8798" }).publicIntake).toEqual({
       keySecrets: { current: KEY_SECRET }, publicBaseUrl: "http://localhost:8798", clientIp: {}, limitOverrides: {},
+      limiterStore: "postgres",
     });
     expect(parseServerEnv({
       ...base, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PUBLIC_BOOKING_KEY_PREVIOUS_SECRET: PREVIOUS_KEY_SECRET,
@@ -74,6 +75,7 @@ describe("parseServerEnv", () => {
     }).publicIntake).toEqual({
       keySecrets: { current: KEY_SECRET, previous: PREVIOUS_KEY_SECRET },
       publicBaseUrl: "https://book.example.com", clientIp: { header: "x-vercel-forwarded-for" }, limitOverrides: { addressWrites: 5 },
+      limiterStore: "postgres",
     });
   });
 
@@ -127,6 +129,16 @@ describe("parseServerEnv", () => {
   const remote = { ...base, SESSION_CHECK: "supabase", SUPABASE_URL: "https://abcd.supabase.co", SUPABASE_ANON_KEY: "anon" };
   const ca = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
   const hosted = "postgres://zs_runtime.ref:pw@aws-0-us-east-1.pooler.supabase.com:6543/postgres";
+
+  // P-10: per-process counters would let every serverless instance grant the full limit.
+  it("counts public limits in Postgres by default, and in memory only on a loopback database", () => {
+    const intake = (env: Record<string, string>) => parseServerEnv({ ...remote, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, ...env }).publicIntake;
+    expect(intake({ DATABASE_URL: hosted, DATABASE_CA_CERT: ca })?.limiterStore).toBe("postgres");
+    expect(intake({ PUBLIC_RATE_LIMIT_STORE: "memory" })?.limiterStore).toBe("memory");
+    expect(() => intake({ DATABASE_URL: hosted, DATABASE_CA_CERT: ca, PUBLIC_RATE_LIMIT_STORE: "memory" }))
+      .toThrow(/PUBLIC_RATE_LIMIT_STORE: memory needs a loopback DATABASE_URL/);
+    for (const value of ["", "redis", "Postgres"]) expect(() => intake({ PUBLIC_RATE_LIMIT_STORE: value })).toThrow(/PUBLIC_RATE_LIMIT_STORE/);
+  });
 
   it("reads the CA and pool size for a hosted database", () => {
     expect(parseServerEnv({ ...remote, DATABASE_URL: hosted, DATABASE_CA_CERT: ca, DATABASE_POOL_MAX: "3" }))

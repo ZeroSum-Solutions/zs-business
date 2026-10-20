@@ -6,7 +6,8 @@ version; P-9 checks the slot before identity work; P-10 names the client address
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
 Revision 4 (review r4): P-14 puts public requests under the request deadline and answers a
 busy idempotency key with a retryable 503. Revision 5 (review r5): P-10 keeps public intake
-off in hosted deploys until a shared limiter exists.
+off in hosted deploys until a shared limiter exists. Revision 6 (2026-10-20): P-10 counts in
+one Postgres table shared by every API instance, so hosted public intake may be turned on.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -131,14 +132,24 @@ Then the identity locks, the intake writes, and the insert under
 order cannot deadlock. Two conflicting public requests: one commits, the
 other gets 409 `slot_unavailable` or `overlap` and leaves no row behind.
 
-**P-10. Abuse limits.** In the API process, before any database work:
+**P-10. Abuse limits.** Before the request's own database work, body parsing and bot check:
 - per client address: 10 requests per 10 minutes for writes, 300 per 10 minutes for reads;
 - per tenant: 200 writes per hour across all its pages;
 - 429 `RateLimited` with `Retry-After`; a refused request consumes nothing else. The numbers
   are server configuration with these defaults.
-The counters live in each API process, so on Vercel every function instance counts on its
-own. Hosted: keep public intake disabled (no `PUBLIC_BOOKING_KEY_SECRET`) until a shared,
-atomic limiter is configured behind the same interface.
+Each bucket is a fixed window that opens at its first charge. A request names every bucket it
+touches, and one atomic step checks them all and charges all or none, so concurrent requests
+never pass a limit and a refused request charges no bucket. The counters live in Postgres
+(`public.rate_limit_buckets`, migration 20261020400000), shared by every API instance on the
+database, so the limits hold however many Vercel function instances serve. The table holds
+the SHA-256 of each bucket name, never a client address; the runtime role cannot read or write
+it and charges only through the `SECURITY DEFINER` function `public.rate_limit_take`, owned by
+the NOLOGIN role `zs_rate_limiter`. The API passes its own clock (instances whose clocks
+differ by a few seconds move a window edge by that much), and each charge sweeps at most 32
+expired buckets, so the table stays bounded by the live windows. The charge runs in its
+own runtime transaction under the request deadline; if the database cannot answer, the request
+gets 503 and is not served. `PUBLIC_RATE_LIMIT_STORE=memory` counts in the process instead and
+is refused unless `DATABASE_URL` is a loopback host.
 The client address is the socket address, unless the deployment names another source:
 `PUBLIC_CLIENT_IP_HEADER`, a header the host overwrites (on Vercel `x-vercel-forwarded-for`
 or `x-real-ip`, only when the API is reachable through the host alone); or
@@ -147,8 +158,9 @@ past trusted hops, and only when the socket peer is one of them. Addresses are
 canonicalized (port, brackets and zone dropped; IPv4-mapped IPv6 as IPv4), and IPv6
 addresses share a bucket per /64. `TRUST_PROXY=1` is refused at startup. Bodies over 8 KiB answer 413. A non-empty honeypot answers 400.
 `BotCheck` is an injected hook `(input: { token, address }) => Promise<boolean>`; the
-default accepts every request, and a `false` answers 400. The limiter is in memory per
-process; a multi-instance deploy (M2b) needs a shared store behind the same interface.
+default accepts every request, and a `false` answers 400. The limiter is a port
+(`RateLimiter` in `apps/api/src/public/limiter.ts`), so another shared store can replace
+Postgres behind the same interface.
 
 **P-11. Public reads.** `GET /public/v1/pages/:key` returns the business name, page title
 and description, the linked resources (`id`, `name`, `timeZone`, `slotLengthMinutes`) and

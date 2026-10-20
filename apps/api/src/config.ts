@@ -38,6 +38,9 @@ const envSchema = z.object({
   PUBLIC_RATE_ADDRESS_WRITES: rateLimit,
   PUBLIC_RATE_ADDRESS_READS: rateLimit,
   PUBLIC_RATE_TENANT_WRITES: rateLimit,
+  // P-10: where the public limits count. postgres (default): one shared table for every
+  // instance. memory: per process, loopback databases only (local runs and tests).
+  PUBLIC_RATE_LIMIT_STORE: z.enum(["postgres", "memory"]).default("postgres"),
   // PEM of the CA that signs the database's TLS certificate (hosted Supabase: the Supabase
   // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Required for any
   // host other than loopback; only a loopback database may use plain TCP.
@@ -65,6 +68,9 @@ const envSchema = z.object({
   // would drop the CA check or TLS itself, so a remote or verified URL carries no query string.
   if ((!loopback || env.DATABASE_CA_CERT !== undefined) && env.DATABASE_URL.includes("?"))
     issue("DATABASE_URL", "must not carry a query string when it is not a loopback host or DATABASE_CA_CERT is set");
+  // Per-process counters let every serverless instance grant the full limit again.
+  if (env.PUBLIC_RATE_LIMIT_STORE === "memory" && !loopback)
+    issue("PUBLIC_RATE_LIMIT_STORE", "memory needs a loopback DATABASE_URL; hosted deploys count in Postgres");
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
@@ -86,6 +92,8 @@ export interface PublicIntakeEnv {
   readonly clientIp: ClientIpConfig;
   /** Per-window counts that override the P-10 defaults; windows stay fixed. */
   readonly limitOverrides: { readonly addressWrites?: number; readonly addressReads?: number; readonly tenantWrites?: number };
+  /** Where the limits count: one Postgres table shared by every instance, or this process. */
+  readonly limiterStore: "postgres" | "memory";
 }
 
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
@@ -145,6 +153,7 @@ function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | n
     publicBaseUrl: trimTrailingSlashes(data.PUBLIC_BASE_URL ?? `http://localhost:${data.PORT}`),
     clientIp: parseClientIp(data),
     limitOverrides,
+    limiterStore: data.PUBLIC_RATE_LIMIT_STORE,
   };
 }
 

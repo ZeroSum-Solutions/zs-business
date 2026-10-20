@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
 import { createSessionCheckFromConfig } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits } from "./app.js";
+import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
 import type { ServerEnv } from "./config.js";
 
@@ -37,6 +38,8 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
     clientIp: env.publicIntake.clientIp,
     limits: Object.fromEntries(Object.entries(env.publicIntake.limitOverrides).map(([name, limit]) =>
       [name, { ...DEFAULT_RATE_LIMITS[name as keyof RateLimits], limit }])),
+    // P-10: shared by every instance on this database; "memory" (loopback only) counts per process.
+    ...(env.publicIntake.limiterStore === "postgres" ? { limiter: createPostgresRateLimiter(db, clock) } : {}),
   };
   const app = createApp({
     verifier: createVerifierFromConfig(env.jwt, clock),

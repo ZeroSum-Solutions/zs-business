@@ -9,7 +9,7 @@ import {
   type TwoTenantFixture,
 } from "@zs/db/testing";
 import { createLocalStubSessionCheck, signBookingKey } from "@zs/core";
-import { createApp, createHs256Verifier, type App, type PublicIntakeConfig } from "../src/app.js";
+import { createApp, createHs256Verifier, createPostgresRateLimiter, type App, type PublicIntakeConfig } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
 /** Synthetic HS256 key, built at runtime so secret scanners do not flag a literal. */
@@ -97,6 +97,8 @@ async function provision(database: TestDatabase, fixture: TwoTenantFixture, tena
 export interface HarnessOptions {
   /** Turns the public booking routes on; secrets and base URL default to the test values. */
   publicIntake?: Partial<PublicIntakeConfig>;
+  /** Where the public limits count; "postgres" builds the shared limiter on the harness database. */
+  limiterStore?: "memory" | "postgres";
   clock?: { now(): Date };
 }
 
@@ -113,7 +115,12 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     generateId: randomUUID,
     config: { allowedOrigins: [ORIGIN] },
     ...(options.publicIntake
-      ? { publicIntake: { keySecrets: { current: KEY_SECRET }, publicBaseUrl: PUBLIC_BASE_URL, ...options.publicIntake } }
+      ? { publicIntake: {
+        keySecrets: { current: KEY_SECRET },
+        publicBaseUrl: PUBLIC_BASE_URL,
+        ...(options.limiterStore === "postgres" ? { limiter: createPostgresRateLimiter(database.db, appClock) } : {}),
+        ...options.publicIntake,
+      } }
       : {}),
   });
   return {

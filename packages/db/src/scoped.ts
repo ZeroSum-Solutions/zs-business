@@ -64,6 +64,12 @@ export interface ScopedDatabase {
     work: (tx: Transaction) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T>;
+  /**
+   * The same runtime transaction with no tenant set, so RLS hides every tenant row. Only for
+   * state that belongs to no tenant and is reached through a function that guards it, such
+   * as the public rate limiter's public.rate_limit_take.
+   */
+  withoutTenant<T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions): Promise<T>;
 }
 
 /**
@@ -390,6 +396,8 @@ export function createScopedDatabase(
         transactionOptions,
         onResetFailure,
       ),
+    withoutTenant: (work, transactionOptions = {}) =>
+      transaction(pool, "authenticated", null, work, limits, transactionOptions, onResetFailure),
   };
 }
 /** Separate privileged entry point for migrations, provisioning, and outbox workers. */
