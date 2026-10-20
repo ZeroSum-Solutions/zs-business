@@ -6,6 +6,7 @@ import {
   startFollowUpRunRequestSchema,
   TenantDenied,
   uuidSchema,
+  ValidationFailed,
   type FollowUpRunDetail,
 } from "@zs/contracts";
 import { agentActorId } from "../agents/controls.js";
@@ -29,6 +30,8 @@ export interface FollowUpAgentConfig {
 }
 
 export function createFollowUpAgent(deps: EdgeDependencies, agent: FollowUpAgentConfig) {
+  if (!Number.isInteger(agent.maxCandidatesPerRun) || agent.maxCandidatesPerRun < 1 || agent.maxCandidatesPerRun > 1000)
+    throw new ValidationFailed("maxCandidatesPerRun must be an integer from 1 to 1000");
   const run = (tenantId: string, key: string, requestedBy: string | null) => {
     const tenant = uuidSchema.parse(tenantId);
     return runFollowUps({

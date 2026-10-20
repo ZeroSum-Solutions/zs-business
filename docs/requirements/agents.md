@@ -120,6 +120,8 @@ test.
 - `POST /runs` (`agents`): runs the agent once now for the caller's tenant, when the server has
   a model configured (404 otherwise).
 - `GET /runs` (`inbox.drafts`): newest first, keyset cursor; `GET /runs/:id` with its decisions.
+MCP offers the status, the runs and `stop_followup_agent`; no tool changes settings, resumes or
+runs the agent.
 
 **G-12. Approval stays human.** An agent draft is approved with the Inbox approve route or the
 approvals route by an owner, who becomes the send's actor (A-6, A-7). Staff cannot approve. The

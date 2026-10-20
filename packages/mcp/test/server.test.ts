@@ -10,6 +10,9 @@ import {
   approvalPageSchema,
   approvalRecordSchema,
   bookingPageSchema,
+  followUpRunPageSchema,
+  followUpStatusOutputSchema,
+  followUpStatusSchema,
   homeResultsSchema,
   MESSAGE_SEND_REQUESTED,
   replyOutputSchema,
@@ -154,10 +157,12 @@ describe("MCP tools over an in-memory transport", () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
       "create_booking", "create_deal", "discard_reply", "draft_reply", "find_slots", "get_approval", "get_contact",
-      "get_thread", "home_results", "list_approvals", "list_bookings", "list_contacts", "list_deals", "list_pipelines",
-      "list_resources", "list_sources", "list_threads", "move_deal_stage", "observe_source", "request_approval",
-      "set_deal_details", "upsert_contact",
+      "get_followup_agent", "get_followup_run", "get_thread", "home_results", "list_approvals", "list_bookings", "list_contacts",
+      "list_deals", "list_followup_runs", "list_pipelines", "list_resources", "list_sources", "list_threads", "move_deal_stage",
+      "observe_source", "request_approval", "set_deal_details", "stop_followup_agent", "upsert_contact",
     ]);
+    // Only an owner turns the agent on, resumes it or runs it (agents.md G-11).
+    expect(names.filter((name) => /resume|settings|run_followup/.test(name))).toEqual([]);
     // Deciding stays with the owner in the dashboard or API: an agent cannot approve its own proposal.
     expect(names.filter((name) => /approve|reject|revoke/.test(name))).toEqual([]);
   });
@@ -557,6 +562,19 @@ describe("authorization on every tool call, like the HTTP API", () => {
       expect(approvalPageSchema.parse(await succeeds(mcp, "list_approvals", {})).items
         .find((approval) => approval.target.id === reply.id)).toMatchObject({ status: "revoked" });
     });
+  });
+
+  it("lets staff read and stop the follow-up agent, for their own tenant only", async () => {
+    const staff = await signedInMember(fixture.a.tenantId, "staff");
+    await using(await serve(staff.token), async (mcp) => {
+      expect(followUpStatusSchema.parse(await succeeds(mcp, "get_followup_agent"))).toMatchObject({ killed: null, canDraft: false });
+      const stopped = followUpStatusOutputSchema.parse(await succeeds(mcp, "stop_followup_agent", { idempotencyKey: "staff-kill-1", note: "Pause" })).result;
+      expect(stopped).toMatchObject({ killed: { by: staff.actorId, note: "Pause" }, canDraft: false });
+      expect(followUpRunPageSchema.parse(await succeeds(mcp, "list_followup_runs")).items).toEqual([]);
+      expect(await errorCode(mcp, "get_followup_run", { runId: randomUUID() })).toBe("NotFound");
+      expect(await errorCode(mcp, "stop_followup_agent", { idempotencyKey: "agent:start:x" })).toBe("ValidationFailed");
+    });
+    expect(followUpStatusSchema.parse((await callTool(other, "get_followup_agent")).value).killed).toBeNull();
   });
 
   it("refuses a signed-in non-member even for calendar work", async () => {
