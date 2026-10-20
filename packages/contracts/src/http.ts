@@ -14,12 +14,6 @@ import { pageQuerySchema, pageSchema } from "./page.js";
 // The root module re-exports this one, so shared root schemas are not initialized yet here.
 const idSchema = z.uuid().toLowerCase();
 
-/**
- * Key prefixes only the server writes: `approval:<id>` runs a stored approval once
- * (approvals.md A-7, A-14). Keys are unique per tenant, so a member key with one of them could
- * take the run's key first and leave the approval unable to run.
- */
-export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:"] as const);
 /** M1 edge boundary: request, response and error shapes shared by the HTTP API and MCP tools. */
 /**
  * Key prefixes the server builds for actions no member runs (public intake, unsubscribe,
