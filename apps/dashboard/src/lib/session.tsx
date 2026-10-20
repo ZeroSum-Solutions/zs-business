@@ -2,6 +2,7 @@
 
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { roleCan, type Permission } from "@zs/contracts";
 import { z } from "zod";
 import { isApiError } from "./api";
 import { DEMO_TENANT_ID } from "./api/demo/seed";
@@ -175,4 +176,21 @@ export function useSession(): SessionValue {
 export function useTenantId(): string | null {
   const { session } = useSession();
   return session.status === "signed_in" ? session.tenantId : null;
+}
+
+/**
+ * The permission that approves an inbox reply (owners only). The one place its name lives:
+ * M3b renames it to "approve".
+ */
+export const APPROVE_REPLIES: Permission = "inbox.approve";
+/** The permission that reads Home results (owners only). */
+export const READ_RESULTS: Permission = "reports";
+
+/**
+ * Whether the signed-in member's role allows `permission` (M2a `ROLE_PERMISSIONS`). The API
+ * checks every request itself; this only keeps the screen from offering what it would refuse.
+ */
+export function useCan(permission: Permission): boolean {
+  const { session } = useSession();
+  return session.status === "signed_in" && roleCan(session.role, permission);
 }

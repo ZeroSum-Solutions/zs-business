@@ -138,15 +138,17 @@ describe("api proxy", () => {
     expect((await proxyApiRequest(request(behindProxy), contacts, trusted)).status).toBe(200);
   });
 
-  it("forwards only the booking, CRM, member and /me routes, with GET, POST and DELETE", async () => {
+  it("forwards only the booking, CRM, member, inbox, home and /me routes, with GET, POST and DELETE", async () => {
     const { harness, jar, get } = await signedIn();
-    for (const path of [["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"], ["v1", "me", "x"]]) {
+    for (const path of [["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"], ["v1", "me", "x"], ["v1", "inbox"], ["v1", "home"]]) {
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(404);
     }
     const put = new Request(`${ORIGIN}/api/v1/crm/deals`, { method: "PUT", headers: { Cookie: jar.header() } });
     expect((await proxyApiRequest(put, ["v1", "crm", "deals"], harness.setup)).status).toBe(404);
     expect(harness.apiCalls).toHaveLength(0);
-    for (const path of [["v1", "me"], ["v1", "members"]]) expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status).toBe(200);
+    for (const path of [["v1", "me"], ["v1", "members"], ["v1", "inbox", "threads"], ["v1", "inbox", "threads", "c_x"], ["v1", "home", "results"]]) {
+      expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
+    }
     const remove = new Request(`${ORIGIN}/api/v1/members/m-1`, { method: "DELETE", headers: { Cookie: jar.header(), "Idempotency-Key": "k" } });
     expect((await proxyApiRequest(remove, ["v1", "members", "m-1"], harness.setup)).status).toBe(200);
     expect(harness.apiCalls.at(-1)!.init.method).toBe("DELETE");

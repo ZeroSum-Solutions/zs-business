@@ -101,6 +101,8 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   already_reviewed: "This website request was already reviewed.",
   last_owner: "A business needs at least one owner. Make someone else an owner first.",
   member_exists: "That email is already on the team.",
+  not_draft: "This reply is no longer a draft. Someone approved or discarded it first.",
+  no_email: "This customer has no email address yet. Add one in Customers, then approve the reply.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -180,6 +182,21 @@ export function demoValidationError(issues: readonly { path: readonly PropertyKe
   return demoError("ValidationFailed", {
     issues: issues.map((issue) => ({ path: issue.path.map(String).join("."), message: issue.message })),
   });
+}
+
+/**
+ * A reply step that hit a reply someone else already moved on (`not_draft`), or a customer
+ * with no address to send to (`no_email`) (inbox-home.md I-6, I-7).
+ */
+export const REPLY_CONFLICT_REASONS: ReadonlySet<string> = new Set(["not_draft", "no_email"]);
+
+export function isReplyConflict(error: unknown): error is ApiError {
+  return isApiError(error, "conflict") && error.reason !== null && REPLY_CONFLICT_REASONS.has(error.reason);
+}
+
+/** Both clients raise this for an unknown or malformed thread ID, or a visitor thread that was linked. */
+export function threadNotFound(): ApiError {
+  return new ApiError("not_found", "We could not find that conversation. It may have moved to the customer's thread.", 404, "NotFound");
 }
 
 /** Both clients raise this for an unknown customer, or one the signed-in business cannot see. */
