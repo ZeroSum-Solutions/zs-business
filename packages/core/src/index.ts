@@ -42,6 +42,7 @@ export {
 } from "./approvals/index.js";
 export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandlers } from "./sources/index.js";
 export * from "./delivery/index.js";
+export * from "./automation/index.js";
 export {
   captureReservation,
   creditWallet,
