@@ -48,6 +48,17 @@ export const draftReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
 export type DraftReplyCommand = z.infer<typeof draftReplyCommandSchema>;
 
 export const replyRefInputSchema = z.strictObject({ replyId: idSchema });
+/**
+ * I-6: binds an owner's call to a send they approved under another call whose run failed, so
+ * a retry with the same key replays. It changes nothing.
+ */
+export const resumeReplyInputSchema = z.strictObject({ replyId: idSchema, approvalId: idSchema });
+export const resumeReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("inbox.reply.resume"),
+  target: targetSchema.extend({ type: z.literal("inbox_reply") }),
+  payload: resumeReplyInputSchema,
+}).refine((command) => command.target.id === command.payload.replyId, "Target must equal the reply"));
+export type ResumeReplyCommand = z.infer<typeof resumeReplyCommandSchema>;
 /** I-6: runs only through an owner's stored approval (approvals.md A-7), never directly. */
 export const sendReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("inbox.reply.send"),
@@ -84,22 +95,6 @@ export const replyRecordSchema = z.strictObject({
 export type ReplyRecord = z.infer<typeof replyRecordSchema>;
 export const replyOutputSchema = z.lazy(() => actionResultSchema.extend({ result: replyRecordSchema }));
 export type ReplyOutput = z.infer<typeof replyOutputSchema>;
-
-/**
- * I-6: the one outbox event an approval writes, in the delivery worker's (M3d) shape: the
- * payload carries the exact approved subject and text, since it is what gets sent and priced.
- * `messageId` is the reply ID; the worker takes the address from the contact at delivery time.
- */
-export { MESSAGE_SEND_REQUESTED } from "./delivery.js";
-export const replySendRequestedSchema = z.strictObject({
-  messageId: idSchema,
-  contactId: idSchema,
-  channel: z.literal("email"),
-  purpose: z.literal("transactional"),
-  subject: z.string(),
-  body: z.string(),
-});
-export type ReplySendRequested = z.infer<typeof replySendRequestedSchema>;
 
 /** HTTP and MCP bodies; the edge mints replyId from the idempotency key. */
 /** Without a subject the server writes "Message from <business name>". */

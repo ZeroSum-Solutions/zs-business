@@ -30,6 +30,7 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "inbox.reply.draft": "inbox.drafts",
   "inbox.reply.discard": "inbox.drafts",
   "inbox.reply.send": "inbox.drafts",
+  "inbox.reply.resume": "approve",
   "intake.item.link": "intake",
   "intake.item.reject": "intake",
   "member.invite": "members",

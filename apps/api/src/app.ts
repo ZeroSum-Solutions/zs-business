@@ -6,8 +6,8 @@ import type { ApiErrorCode } from "@zs/contracts";
 import { apiErrorBody, AuthUnavailable, authenticate, DatabaseUnavailable, mapError, type Session, type SessionCheck, type StripeClient } from "@zs/core";
 import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
-import { approvalRoutes } from "./routes/approvals.js";
 import { billingRoutes } from "./routes/billing.js";
+import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
@@ -186,9 +186,9 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/intake", intakeRoutes);
   app.route("/v1/inbox", inboxRoutes);
   app.route("/v1/home", homeRoutes);
+  app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
-  app.route("/v1", billingRoutes);
   app.route("/v1", calendarRoutes);
   app.route("/v1", memberRoutes);
 

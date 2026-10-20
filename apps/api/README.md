@@ -201,7 +201,7 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/inbox/threads?limit&(cursor|offset)` | page of `ThreadSummary`, latest activity first: one `customer` thread (`c_<contactId>`) per contact with a website request or a reply that is not discarded, one `visitor` thread (`v_<intakeItemId>`) per request not linked to a contact. Owners and staff |
 | `GET /v1/inbox/threads/:threadId` | the summary plus `phone`, `entries` (requests and replies, oldest first, the latest 200) and `olderEntries`; 400 for a malformed ID, 404 for an unknown or another tenant's thread. Owners and staff |
 | `POST /v1/inbox/replies` `{ contactId, body, subject? }` | 201 draft reply (body 1..5000 characters, subject one line 1..200, default "Message from <business name>"), plus a pending approval to send it (`inbox.reply.send`, see `/v1/approvals`); 403 for another tenant's contact. Owners and staff |
-| `POST /v1/inbox/replies/:id/approve` `{}` | 200 approved reply: approves the reply's open approval (proposing a new one if it expired or was withdrawn) and runs the send as this owner, writing one outbox event `message.send_requested` with the exact subject and text; 409 `not_draft` (with `status`) or `no_email`. Owners only. Nothing is sent here (M3d) |
+| `POST /v1/inbox/replies/:id/approve` `{}` | 200 approved reply: approves the reply's open approval (proposing a new one if it expired or was withdrawn) and runs the send as this owner, writing one outbox event `message.send_requested` with the exact subject and text; a same-key retry replays. 409 `not_draft` (with `status`), `no_email`, or `approved_by_other` (with `approvedBy`) when another owner approved it and must finish the send. Owners only. Nothing is sent here (M3d) |
 | `POST /v1/inbox/replies/:id/discard` `{}` | 200 discarded reply, and its pending approval withdrawn where the caller may; 409 `not_draft` (with `status`). Owners and staff |
 | `GET /v1/home/results?[zone&][weekStart]` | `HomeResults`: leads, bookings, won deals and revenue by source, this week so far against the same span of last week; `zone` an IANA zone (default `UTC`), `weekStart` `monday` (default) or `sunday`; both ranges as UTC instants from the injected clock. Owners only |
 | `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
@@ -236,7 +236,7 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
-`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`;
+`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`);
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.
