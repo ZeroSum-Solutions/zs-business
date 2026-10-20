@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Transaction } from "@zs/db";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { WALLET_TOPUP_CREATE_ACTION } from "@zs/contracts";
-import { CHECKOUT_LIFETIME_MS, CHECKOUT_RETRY_LIMIT_MS, createSession, directDispatch, memberAuthorize } from "../../src/index.js";
+import { CHECKOUT_LIFETIME_MS, CHECKOUT_RETRY_LIMIT_MS, createSession, directDispatch, memberAuthorize, StripeRequestFailed } from "../../src/index.js";
 import { createBillingHarness, stripeId, type BillingHarness } from "./helpers.js";
 
 let b: BillingHarness;
@@ -194,6 +194,23 @@ describe("the server's top-up terms (S-1)", () => {
     // A tenant with no wallet yet may start in the configured currency.
     const fresh = await b.tenant();
     expect((await (await sessionWith(fresh, { currency: "eur" })).createTopUp({ amount: 1_000 }, `topup-${randomUUID()}`)).topup.currency).toBe("eur");
+  });
+
+  it("checks the wallet's currency again before a replay asks Stripe for Checkout", async () => {
+    const tenantId = await b.tenant();
+    const key = `topup-${randomUUID()}`;
+    // The USD top-up commits, but Stripe is busy.
+    const busy = createSession({ ...b.deps(), billing: { stripe: { ...b.stripe.client,
+      createCheckoutSession: () => Promise.reject(new StripeRequestFailed("stripe_503", true)) } } },
+    { tenantId, actorId: await b.owner(tenantId) });
+    await expect(busy.createTopUp({ amount: 1_000 }, key)).rejects.toBeTruthy();
+    expect(await topupCount(tenantId)).toBe(1);
+    // Meanwhile the wallet comes into being in another currency.
+    await b.h.service((tx) => tx.query("INSERT INTO wallets (tenant_id, currency, updated_at) VALUES ($1,'eur',now())", [tenantId]));
+    b.stripe.calls.length = 0;
+    await expect((await b.session(tenantId)).createTopUp({ amount: 1_000 }, key))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "wallet_currency" } });
+    expect(b.stripe.calls).toEqual([]);
   });
 
   it("cannot be run without the session's top-up route: no terms, no row", async () => {

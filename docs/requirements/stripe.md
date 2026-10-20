@@ -1,6 +1,6 @@
 # M5: Stripe wallet top-ups
 
-Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 2. Code follows this file;
+Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 3. Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: owners add money to the M3d prepaid wallet (`delivery.md` D-4) through Stripe Checkout,
@@ -40,7 +40,8 @@ reach the handler as dispatch config from this route, so a caller cannot choose 
 after they change replays the stored result, and the action cannot run from anywhere else (an
 approval cannot propose it; without the route's config it is 404). A wallet's currency is fixed
 by its first credit, so a top-up in another currency is refused (409 `wallet_currency`) before
-Stripe is asked. Off (404) without Stripe config.
+Stripe is asked, on every request: a retry that replays the stored top-up is checked against the
+wallet as it is now, since the wallet may have come into being in another currency meanwhile. Off (404) without Stripe config.
 
 **S-2. The Checkout Session.** After the action commits, the route asks Stripe for a session
 with `Idempotency-Key: zst-<topup id>`: one line item of the amount, `client_reference_id` and
@@ -90,8 +91,10 @@ smaller total changes nothing. `charge.dispute.funds_withdrawn` debits the dispu
 (`balance - reserved`) and records the rest as `owed` on the wallet: the balance never goes
 below zero and held reservations stay covered. While a wallet owes anything it reserves nothing
 (D-5 gains `owed = 0`), so no send is paid from money that was taken back. Every later credit,
-and every billing worker pass, first repays `owed` from what is available (a pass skips a wallet
-another transaction holds, and reports and skips one whose repayment fails). Each debit or
+and every billing worker pass, first repays `owed` from what is available. A pass sweeps owing
+wallets before it applies events, each in its own transaction, at most 100 and only until the
+run's deadline; it skips a wallet another transaction holds, and reports and skips one whose
+repayment fails. Each debit or
 reinstatement is recorded once in `wallet_billing_events` by its Stripe reference (refund
 total, dispute ID and direction), so repeats and reordering are safe.
 
@@ -104,7 +107,7 @@ worker names `tenant_id` in every statement.
 `CRON_SECRET` check as `/cron/delivery`; `pnpm billing:worker` is the Node loop. The kill switch
 is `BILLING_WORKER=on`. The build adds a Vercel cron only when `BILLING_CRON_SCHEDULE` is set.
 A run stops starting passes once `BILLING_RUN_BUDGET_MS` is spent, and each pass stops claiming
-events at that deadline (each event commits on its own); the cron entry refuses a
+events, and its repay sweep stops, at that deadline (each event and each repayment commits on its own); the cron entry refuses a
 budget over 20 s, since Vercel stops its function at 30 s (the Node loop may run longer).
 
 **S-9. Configuration the Mac sets.** API function: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
@@ -115,7 +118,7 @@ budget over 20 s, since Vercel stops its function at 30 s (the Node loop may run
 `BILLING_DATABASE_URL` (a login that may `SET ROLE service_role`). In Stripe: a webhook
 endpoint at `https://<api host>/webhooks/stripe` for the events listed above.
 
-## Known limits (revision 2)
+## Known limits (revision 3)
 
 - One currency, the wallet's. Taxes and receipts are Stripe's defaults.
 - The wallet summary does not show `owed` yet; the dashboard reads a strict shape.

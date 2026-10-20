@@ -22,6 +22,9 @@ export interface BillingWorkerDeps {
   readonly report?: (event: { readonly eventId: string; readonly type: string; readonly outcome: string }) => void;
 }
 
+/** Owing wallets one pass repays at most. */
+const REPAY_SWEEP_LIMIT = 100;
+
 /** What one event did. `wait` leaves it unprocessed for a later pass. */
 export type BillingOutcome =
   | "credited" | "already_credited" | "mismatch" | "failed" | "expired" | "refund_debited" | "refund_seen"
@@ -226,16 +229,47 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
   }
 
   /**
-   * One pass: applies up to `limit` due events oldest first, each in its own transaction, so a
-   * pass holds a top-up's and a wallet's locks only while it applies that one event and two
-   * parallel passes cannot wait on each other's rows.
+   * S-6: money that came back (a released reservation) repays what a wallet owes. Each wallet
+   * repays in its own transaction, so what is repaid commits even if the pass ends early. A
+   * wallet another transaction holds is left for a later pass, and one that fails is reported
+   * and skipped, so no wallet holds up the others.
+   */
+  async function repaySweep(at: Date, late: () => boolean): Promise<void> {
+    let after = "00000000-0000-0000-0000-000000000000";
+    for (let count = 0; count < REPAY_SWEEP_LIMIT && !late(); count += 1) {
+      let repaid: string | null;
+      try {
+        repaid = await deps.service(async (tx) => {
+          const wallet = (await tx.query<{ tenant_id: string }>(
+            `SELECT tenant_id FROM wallets WHERE owed > 0 AND balance > reserved AND tenant_id > $1::uuid
+              ORDER BY tenant_id LIMIT 1 FOR UPDATE SKIP LOCKED`, [after])).rows[0];
+          if (!wallet) return null;
+          after = wallet.tenant_id;
+          await repayOwed(tx, { tenantId: wallet.tenant_id, ledgerId: deps.generateId(), now: at });
+          return wallet.tenant_id;
+        });
+      } catch {
+        deps.report?.({ eventId: `repay:${after}`, type: "wallet.repay", outcome: "error" });
+        continue;
+      }
+      if (repaid === null) break;
+      deps.report?.({ eventId: `repay:${repaid}`, type: "wallet.repay", outcome: "repaid" });
+    }
+  }
+
+  /**
+   * One pass: first the repay sweep, so a busy backlog of events cannot keep owing wallets
+   * blocked, then up to `limit` due events oldest first, each in its own transaction, so a pass
+   * holds a top-up's and a wallet's locks only while it applies that one event and two parallel
+   * passes cannot wait on each other's rows. S-8: past the run's deadline the pass ends; what it
+   * did is already committed.
    */
   async function runOnce(limit = 50, options: { readonly deadline?: Date } = {}): Promise<{ claimed: number; outcomes: Record<string, number> }> {
     const at = now();
     const outcomes: Record<string, number> = {};
     let claimed = 0;
-    // S-8: past the run's deadline the pass ends; what it applied is already committed.
     const late = () => options.deadline !== undefined && now().getTime() >= options.deadline.getTime();
+    await repaySweep(at, late);
     while (claimed < limit && !late()) {
       const applied = await applyNext(at);
       if (applied === null) break;
@@ -243,23 +277,6 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
       outcomes[applied.outcome] = (outcomes[applied.outcome] ?? 0) + 1;
       deps.report?.({ eventId: applied.id, type: applied.type, outcome: applied.outcome });
     }
-    // S-6: money that came back (a released reservation) repays what a wallet owes. A wallet
-    // another transaction holds is left for a later pass, and one that fails is reported and
-    // skipped, so no wallet holds up the others.
-    await deps.service(async (tx) => {
-      const owing = (await tx.query<{ tenant_id: string }>(
-        "SELECT tenant_id FROM wallets WHERE owed > 0 AND balance > reserved ORDER BY tenant_id LIMIT 100 FOR UPDATE SKIP LOCKED")).rows;
-      for (const wallet of owing) {
-        await tx.query("SAVEPOINT billing_repay");
-        try {
-          await repayOwed(tx, { tenantId: wallet.tenant_id, ledgerId: deps.generateId(), now: at });
-          await tx.query("RELEASE SAVEPOINT billing_repay");
-        } catch {
-          await tx.query("ROLLBACK TO SAVEPOINT billing_repay");
-          deps.report?.({ eventId: `repay:${wallet.tenant_id}`, type: "wallet.repay", outcome: "error" });
-        }
-      }
-    });
     return { claimed, outcomes };
   }
 

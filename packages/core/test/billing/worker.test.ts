@@ -516,6 +516,36 @@ describe("tenancy and concurrency", () => {
     expect(await b.wallet(locked)).toEqual({ balance: 0, reserved: 0, owed: 0 });
   });
 
+  it("the repay sweep stops at the deadline and keeps the repayments it made", async () => {
+    /** A wallet that owes 700 with nothing reserved, so the next sweep can repay it. */
+    const owing = async () => {
+      const tenantId = await tenant();
+      const t = await b.paidTopUp(tenantId, 1_000);
+      const [held] = await b.deliveryIds(tenantId, 1);
+      const hold = await reserve(tenantId, held!, 700);
+      await send(b.event("charge.refunded", b.charge(t, 1_000)));
+      await b.worker().runOnce();
+      return { tenantId, reservationId: hold!.id };
+    };
+    const wallets = [await owing(), await owing(), await owing(), await owing()];
+    for (const { tenantId, reservationId } of wallets)
+      await b.h.service((tx) => releaseReservation(tx, { tenantId, reservationId, now: b.h.clock.now() }));
+    const mine = new Set(wallets.map((wallet) => wallet.tenantId));
+    // Each of these repays takes 4 seconds; the deadline falls during the third.
+    const slow = createBillingWorker({
+      service: b.h.service, clock: b.h.clock, generateId: randomUUID,
+      report: (event) => { if (event.type === "wallet.repay" && mine.has(event.eventId.slice("repay:".length))) b.h.clock.advance(4_000); },
+    });
+    await slow.runOnce(50, { deadline: new Date(b.h.clock.now().getTime() + 10_000) });
+    const states = await Promise.all(wallets.map(({ tenantId }) => b.wallet(tenantId)));
+    expect(states.filter((state) => state.owed === 0)).toHaveLength(3);
+    expect(states.filter((state) => state.owed === 700)).toEqual([{ balance: 700, reserved: 0, owed: 700 }]);
+    // The next pass repays the last one.
+    await b.worker().runOnce();
+    expect(await Promise.all(wallets.map(({ tenantId }) => b.wallet(tenantId))))
+      .toEqual(wallets.map(() => ({ balance: 0, reserved: 0, owed: 0 })));
+  });
+
   it("a pass stops claiming at its deadline and keeps what it applied", async () => {
     const tenantId = await tenant();
     const events: string[] = [];

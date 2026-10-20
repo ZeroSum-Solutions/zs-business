@@ -95,7 +95,7 @@ import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
 import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
-import { getTopUp, listTopUps, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
+import { getTopUpForCheckout, listTopUps, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
 import { calendarHandlers, getCalendarConnection, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
 import { OAUTH_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signOAuthState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
@@ -556,7 +556,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return startTopUp({
         command: { actionType: WALLET_TOPUP_CREATE_ACTION, ...rest, payload: { topupId: id, amount: request.amount } },
         dispatch: directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), terms),
-        read: (topupId) => read("billing", (tx) => getTopUp(tx, tenantId, topupId)),
+        read: (topupId) => read("billing", (tx) => getTopUpForCheckout(tx, tenantId, topupId)),
         stripe: billing.stripe,
         tenantId,
         now: new Date(readClock(deps.clock)),
