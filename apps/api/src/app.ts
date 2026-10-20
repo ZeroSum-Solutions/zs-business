@@ -10,12 +10,16 @@ import {
   createFollowUpAgent,
   DatabaseUnavailable,
   mapError,
+  type AutomationEdgeConfig,
   type FollowUpAgentConfig,
   type Session,
   type SessionCheck,
 } from "@zs/core";
+import type { SiteObjectStore } from "@zs/contracts";
 import type { ScopedDatabase } from "@zs/db";
+import type { SiteCompiler } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
+import { activepiecesRoutes } from "./routes/activepieces.js";
 import { followUpRoutes } from "./routes/agents.js";
 import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
@@ -25,7 +29,9 @@ import { homeRoutes } from "./routes/home.js";
 import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
+import { siteRoutes } from "./routes/sites.js";
 import { sourceRoutes } from "./routes/sources.js";
+import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public/activepieces.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
@@ -51,6 +57,8 @@ export interface AppDependencies {
   readonly config: AppConfig;
   /** Public booking pages and the widget (public-intake.md); absent means the routes are off. */
   readonly publicIntake?: PublicIntakeConfig;
+  /** Site publishing (M4b): where releases are stored and how specs compile; absent means /v1/sites is off. */
+  readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler; readonly syncTimeoutMs?: number };
   /** One-click email unsubscribe (delivery.md D-9); absent means the routes are off. */
   readonly unsubscribe?: UnsubscribeConfig;
   /**
@@ -60,6 +68,11 @@ export interface AppDependencies {
   readonly followUp?: FollowUpAgentConfig;
   /** Resend email events, bounces and complaints feeding suppression (resend.md R-7, R-8); absent means off. */
   readonly resendWebhook?: ResendWebhookConfig;
+  /**
+   * Activepieces webhooks and automation tokens (activepieces.md); absent means the owner routes
+   * under /v1/integrations/activepieces and the flow routes under /integrations/activepieces are off.
+   */
+  readonly activepieces?: AutomationEdgeConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -136,6 +149,7 @@ export function createApp(deps: AppDependencies) {
   app.use("/v1/*", deadline);
   app.use("/public/v1/*", deadline);
   app.use("/webhooks/*", deadline);
+  app.use(`${ACTIVEPIECES_INBOUND_PREFIX}/*`, deadline);
 
   const edge = {
     db: deps.db,
@@ -144,10 +158,13 @@ export function createApp(deps: AppDependencies) {
     ...(deps.publicIntake
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
+    ...(deps.sites ? { sites: deps.sites } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
-  const requestEdge = (c: Context<AppEnv>) =>
-    ({ ...edge, db: withDeadline(edge.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime()) });
+  const requestEdge = (c: Context<AppEnv>) => {
+    const timeLeft = () => c.var.deadline - deps.clock.now().getTime();
+    return { ...edge, db: withDeadline(edge.db, c.var.signal, timeLeft), timeLeft };
+  };
   // Anonymous routes sit outside /v1, so the owner auth middleware never runs for them.
   if (deps.publicIntake) {
     const routes = publicRoutes(edge, deps.publicIntake, requestEdge);
@@ -156,6 +173,7 @@ export function createApp(deps: AppDependencies) {
   }
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
+  if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -176,9 +194,12 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/intake", intakeRoutes);
   app.route("/v1/inbox", inboxRoutes);
   app.route("/v1/home", homeRoutes);
+  // Off without a site store: /v1/sites is then an unknown route (404), like the session's check.
+  if (deps.sites) app.route("/v1/sites", siteRoutes);
   app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
+  if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
   app.route("/v1", memberRoutes);

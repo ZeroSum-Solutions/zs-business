@@ -69,6 +69,15 @@ import {
   type ReplyOutput,
   type ReplyRecord,
   type RemoveMemberOutput,
+  activateSiteReleaseRequestSchema,
+  createSiteRequestSchema,
+  publishSiteRequestSchema,
+  type SiteList,
+  type SiteReleaseList,
+  type SiteReleaseResponse,
+  type SiteSyncResponse,
+  type SiteEdgeStatus,
+  type SiteObjectStore,
   type WalletSummary,
   type SourceList,
 } from "@zs/contracts";
@@ -82,6 +91,7 @@ import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
+import { automationHandlers } from "../automation/handlers.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
@@ -90,10 +100,14 @@ import { getThread, listThreads, loadReply } from "../reads/inbox.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
+import {
+  activateSiteRelease, createSite, getRelease, getSite, listReleases, listSites, publishSiteRelease, siteHandlers,
+  storeReleaseFiles, syncSiteEdge, verifyCompiledSite, type ProjectOptions, type SiteCompiler,
+} from "../sites/index.js";
 import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
 import { derivedId } from "./ids.js";
-import { validationError } from "./errors.js";
+import { SiteStoreUnavailable, validationError } from "./errors.js";
 
 export interface EdgeDependencies {
   /** Runtime-role scoped database; never a service or superuser pool. */
@@ -102,6 +116,25 @@ export interface EdgeDependencies {
   readonly generateId: () => string;
   /** Signs public booking keys for the owner's page list (public-intake.md P-2, P-12). */
   readonly bookingKeys?: { readonly secret: string; readonly publicBaseUrl: string };
+  /**
+   * Site publishing (M4b): the object store releases go to and the compiler; absent means off.
+   * `syncTimeoutMs` caps the edge projection after a committed write (default 5 s).
+   */
+  readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler; readonly syncTimeoutMs?: number };
+  /** Milliseconds left before the request's deadline, when it has one. */
+  readonly timeLeft?: () => number;
+}
+
+/** The edge projection's default time, and the time kept back to send the answer. */
+const SITE_SYNC_TIMEOUT_MS = 5_000;
+const SITE_SYNC_MARGIN_MS = 1_000;
+
+/** `work`'s status, or `pending` once `ms` pass. The projection may finish later; it is safe to. */
+function withinBudget(work: Promise<SiteEdgeStatus>, ms: number): Promise<SiteEdgeStatus> {
+  if (ms <= 0) return Promise.resolve("pending");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<SiteEdgeStatus>((resolve) => { timer = setTimeout(() => resolve("pending"), ms); });
+  return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
 /** A verified caller. Never built from request bodies or tool input. */
 export interface Principal {
@@ -120,13 +153,14 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...agentHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...automationHandlers, ...siteHandlers, ...agentHandlers,
 });
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
- * request (public-intake.md P-1), the suppression actions (delivery.md D-9) and the agent's own
- * run actions (agents.md G-1) are never reachable from a member session.
+ * request (public-intake.md P-1), the suppression actions (delivery.md D-9), the Activepieces
+ * actions (activepieces.md W-1, W-11, which authorize themselves) and the agent's own run actions
+ * (agents.md G-1) are never reachable from a member session.
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
@@ -144,6 +178,9 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "member.invite": "members",
   "member.change-role": "members",
   "member.remove": "members",
+  "site.create": "publish",
+  "site.release.publish": "publish",
+  "site.release.activate": "publish",
   "approval.approve": "approve",
   "approval.reject": "approve",
   // agents.md G-2, G-3: owners change settings and resume; any member may stop the agent.
@@ -295,7 +332,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval";
+  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "site";
   const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
     keyedEnvelope(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
   /** The envelope for a key the server built itself, such as a reserved `inbox:` step key. */
@@ -341,6 +378,27 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     };
   };
 
+
+  /**
+   * Project committed state to the edge, re-checking the caller's permission in that read. It
+   * gets its own time, short of the request's deadline: past it the answer is `pending`, and the
+   * request still answers before its deadline would turn a committed write into a 503.
+   */
+  const syncSite = (sites: NonNullable<EdgeDependencies["sites"]>, siteId: string, options?: ProjectOptions) => {
+    const budget = Math.min(sites.syncTimeoutMs ?? SITE_SYNC_TIMEOUT_MS, (deps.timeLeft?.() ?? Infinity) - SITE_SYNC_MARGIN_MS);
+    if (budget <= 0) return Promise.resolve<SiteEdgeStatus>("pending");
+    const work = syncSiteEdge(deps.db, sites.store, tenantId, siteId, async (tx) => { await requireMember(tx, tenantId, actorId, "publish"); }, options);
+    work.catch(() => undefined);
+    return withinBudget(work, budget);
+  };
+  /** After a committed write the answer is that write's result: a failed projection is only `pending`. */
+  const syncAfterWrite = (sites: NonNullable<EdgeDependencies["sites"]>, siteId: string, options?: ProjectOptions) =>
+    syncSite(sites, siteId, options).catch(() => "pending" as const);
+  /** Sites are off without a store: every site route is then unknown. */
+  const requireSites = () => {
+    if (!deps.sites) throw new NotFound();
+    return deps.sites;
+  };
 
   return {
     principal: { tenantId, actorId } as Principal,
@@ -509,6 +567,83 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const parsed = parseInput(slotsQuerySchema, query, "query");
       const now = new Date(readClock(deps.clock));
       return read("calendar", (tx) => findSlots(tx, tenantId, parsed, now));
+    },
+
+    // M4b sites: every read and write needs the publish permission (owners).
+    listSites: async (): Promise<SiteList> => {
+      requireSites();
+      return { items: await read("publish", (tx) => listSites(tx, tenantId)) };
+    },
+    getSite: (siteId: unknown) => {
+      requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      return read("publish", (tx) => getSite(tx, tenantId, id));
+    },
+    listSiteReleases: async (siteId: unknown): Promise<SiteReleaseList> => {
+      requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      return { items: await read("publish", (tx) => listReleases(tx, tenantId, id)) };
+    },
+    getSiteRelease: (siteId: unknown, releaseId: unknown) => {
+      requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const release = parseInput(uuidSchema, releaseId, "release ID");
+      return read("publish", (tx) => getRelease(tx, tenantId, id, release));
+    },
+    async createSite(body: unknown, key: unknown) {
+      requireSites();
+      const request = parseInput(createSiteRequestSchema, body);
+      const { id, ...rest } = envelope(key, "site");
+      return createSite({ actionType: "site.create", ...rest, target: { tenantId, type: "site", id }, payload: { siteId: id, ...request } }, writeContext);
+    },
+    /**
+     * Compile the spec, store its files, record the release and make it live, then move the
+     * edge. Retried with its key, it compiles the same files and replays the recorded result
+     * without touching the store, so a retry after a lost answer works during a store outage.
+     */
+    async publishSite(siteId: unknown, body: unknown, key: unknown): Promise<SiteReleaseResponse> {
+      const sites = requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const request = parseInput(publishSiteRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "site", id);
+      // Permission and ownership first, so nobody else's request stores bytes under this tenant.
+      const recorded = await read("publish", async (tx) => {
+        await getSite(tx, tenantId, id);
+        return (await tx.query("SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, rest.idempotencyKey])).rowCount === 1;
+      });
+      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      // A recorded key replays (or is refused as reused) in dispatch; its files were stored then.
+      const verifiedBlobs = recorded ? undefined : await storeReleaseFiles(sites.store, tenantId, release).catch((cause: unknown) => {
+        throw new SiteStoreUnavailable({ cause });
+      });
+      const output = await publishSiteRelease({
+        actionType: "site.release.publish", ...rest, target: { tenantId, type: "site", id },
+        payload: {
+          siteId: id, releaseId: derivedId(tenantId, rest.idempotencyKey, "site_release"), spec: request.spec,
+          entry: release.entry, digest: release.digest, files: [...release.files],
+        },
+      }, writeContext);
+      return { ...output, edge: await syncAfterWrite(sites, id, verifiedBlobs ? { verifiedBlobs } : {}) };
+    },
+    /** Make an earlier (or later) release live again: the rollback. */
+    async activateSiteRelease(siteId: unknown, releaseId: unknown, body: unknown, key: unknown): Promise<SiteReleaseResponse> {
+      const sites = requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const release = parseInput(uuidSchema, releaseId, "release ID");
+      const request = parseInput(activateSiteReleaseRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "site", id);
+      const output = await activateSiteRelease({
+        actionType: "site.release.activate", ...rest, target: { tenantId, type: "site", id },
+        payload: { siteId: id, releaseId: release, expectedCurrentReleaseId: request.expectedCurrentReleaseId },
+      }, writeContext);
+      return { ...output, edge: await syncAfterWrite(sites, id) };
+    },
+    /** Retry the edge projection after a `pending` answer. */
+    async syncSite(siteId: unknown): Promise<SiteSyncResponse> {
+      const sites = requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const site = await read("publish", (tx) => getSite(tx, tenantId, id));
+      return { site, edge: await syncSite(sites, id) };
     },
 
     /** The caller's own membership; any member may ask. */
