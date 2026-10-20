@@ -67,7 +67,9 @@ otherwise). Visitor threads take no replies: the owner links the request first (
 drafts may wait on one thread. After the draft commits, the edge proposes its send
 (`approval.request`, A-5) for `inbox.reply.send` with target the reply and payload
 `{ replyId }`, requested by the drafter, summary `Send the reply "<subject>"`, default expiry.
-Both steps take keys derived from the caller's key, so a retry replays both. Since the reply is
+Both steps take keys derived from the caller's key, so a retry replays both. Derived step
+keys start `inbox:`, a prefix reserved for the server (`SERVER_IDEMPOTENCY_PREFIXES`), so no
+caller can take one first. Since the reply is
 fixed (I-4), approving its ID approves its exact words, which the inbox shows beside the
 proposal (A-12).
 

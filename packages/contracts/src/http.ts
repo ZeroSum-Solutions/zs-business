@@ -16,10 +16,11 @@ const idSchema = z.uuid().toLowerCase();
 
 /**
  * Key prefixes only the server writes: `approval:<id>` runs a stored approval once
- * (approvals.md A-7, A-14). Keys are unique per tenant, so a member key with one of them could
- * take the run's key first and leave the approval unable to run.
+ * (approvals.md A-7, A-14), and `inbox:<step>:<id>` keys a step of a reply write
+ * (inbox-home.md I-5..I-7). Keys are unique per tenant, so a member key with one of them could
+ * take the server's key first and leave the step unable to run.
  */
-export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:"] as const);
+export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "inbox:"] as const);
 /** M1 edge boundary: request, response and error shapes shared by the HTTP API and MCP tools. */
 export const idempotencyKeySchema = z.string().min(1).max(200)
   .refine(isPostgresText, "Text is not valid in Postgres")

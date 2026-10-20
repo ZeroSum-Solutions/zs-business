@@ -592,6 +592,12 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     expect(await approvedEvents(drafted.result.id)).toHaveLength(1);
   });
 
+  it("reserves the inbox: key prefix for the server's own reply steps", async () => {
+    const customer = await contact(a, { displayName: "Cass Dunn", email: "cass@example.com" });
+    for (const key of ["inbox:propose:x", "INBOX:withdraw:y"])
+      expect((await rejection(() => a.draftReply({ contactId: customer, body: "Hi" }, key))).code).toBe("ValidationFailed");
+  });
+
   it("never runs the send directly from a member session, even an owner's", async () => {
     const customer = await contact(a, { displayName: "Wren Ash", email: "wren@example.com" });
     const drafted = await draft(a, customer, "Direct?");
