@@ -102,7 +102,9 @@ action row carries the stored approval as its approval reference, so `approvalFo
 Nothing in M3c sends. The delivery worker (M3d) reads the event, takes the address from the
 contact at delivery time, re-checks the approval (A-10), consent and suppression, and settles the reply
 once through its settle hook, `settleReplyDelivery(tx, tenantId, messageId, outcome, at)`
-(`approved` to `sent` or `failed`; a no-op for any other message or a settled reply).
+(`approved` to `sent` or `failed`; a no-op for any other message or a settled reply). Whatever
+runs the worker passes it as `onSettled`, with `approvalsFromRecords(approvalForAction, clock)`
+as the approval port.
 
 **I-7. Discard.** `inbox.reply.discard` `{ replyId }`, permission `inbox.drafts`. Only a
 `draft` can be discarded (409 `not_draft` otherwise). The edge then revokes the reply's open

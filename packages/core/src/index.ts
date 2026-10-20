@@ -29,6 +29,17 @@ export {
 } from "./intake/index.js";
 export { listBookingPages, listIntakeItems } from "./reads/intake.js";
 export { findMembership, listMembers, lockMembership, memberHandlers, requireMember, type MemberAccess } from "./members/index.js";
+export * from "./delivery/index.js";
+export {
+  captureReservation,
+  creditWallet,
+  getWallet,
+  heldReservation,
+  releaseReservation,
+  reserveFunds,
+  type CreditInput,
+  type Reservation,
+} from "./wallet/index.js";
 export {
   APPROVAL_POLICIES,
   approvalForAction,

@@ -10,7 +10,14 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import { createPublicSession } from "../src/edge/public-session.js";
 import { mapError } from "../src/edge/errors.js";
 import { createSession, directDispatch, memberAuthorize, type EdgeDependencies, type Session } from "../src/edge/session.js";
-import { approvalForAction, settleReplyDelivery } from "../src/index.js";
+import {
+  approvalForAction,
+  approvalsFromRecords,
+  createDeliveryWorker,
+  createFakeProvider,
+  creditWallet,
+  settleReplyDelivery,
+} from "../src/index.js";
 
 /** The injected clock; every write helper moves it one minute forward first. */
 let now = Date.parse("2026-10-19T08:00:00.000Z");
@@ -696,5 +703,53 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     const drafted = await draft(a, phoneOnly, "No address");
     expect((await rejection(approve(a, drafted.result.id))).details).toMatchObject({ reason: "no_email" });
     expect(await proposals(drafted.result.id)).toEqual([expect.objectContaining({ status: "pending", decided_by: null })]);
+  });
+});
+
+describe("delivery through M3d (I-6, I-9, delivery.md D-1, D-6)", () => {
+  it("the worker sends the approved words under the approval record and settles the reply; no funds fail it", async () => {
+    const provider = createFakeProvider({ clock });
+    const worker = createDeliveryWorker({
+      service: fixture.service,
+      providers: { email: provider, sms: provider },
+      approvals: approvalsFromRecords(approvalForAction, clock),
+      clock,
+      generateId: randomUUID,
+      config: {
+        workerId: "inbox-test-worker", leaseMs: 60_000, providerTimeoutMs: 5_000, maxAttempts: 2,
+        backoffBaseMs: 1_000, backoffMaxMs: 60_000, dedupeMarginMs: 60_000,
+        pricing: { currency: "usd", email: 2, smsSegment: 3 },
+        unsubscribe: { secret: "inbox-test-unsubscribe-secret-0123456789", baseUrl: "https://api.example.test/public/v1/unsubscribe" },
+      },
+      onSettled: async (tx, tenantId, messageId, outcome, at) => { await settleReplyDelivery(tx, tenantId, messageId, outcome, at); },
+    });
+    await fixture.service((tx) => creditWallet(tx, {
+      tenantId: fixture.a.tenantId, ledgerId: randomUUID(), amount: 1_000, idempotencyKey: `credit:${randomUUID()}`, now: clock.now(),
+    }));
+    const customer = await contact(a, { displayName: "Ines Calloway", email: "ines.calloway@example.com" });
+    const drafted = await draft(a, customer, "Your ring is ready to collect.", randomUUID(), "Ready to collect");
+    await approve(a, drafted.result.id);
+    // Tenant B has no funds: its approved reply waits, then ends as failed rather than stuck.
+    const otherCustomer = (await b.upsertContact({ displayName: "Bram Ostby", email: "bram@example.com" }, randomUUID())).result.contact.id;
+    tick();
+    const poor = await b.draftReply({ contactId: otherCustomer, body: "Your quote is attached." }, randomUUID());
+    tick();
+    await b.approveReply(poor.result.id, {}, randomUUID());
+
+    tick();
+    await worker.runOnce({ ingestLimit: 1_000, claimLimit: 1_000 });
+    const sent = provider.delivered.filter((item) => item.request.to === "ines.calloway@example.com");
+    // The worker appends its unsubscribe footer (D-5) below the approved text.
+    expect(sent.map((item) => [item.request.tenantId, item.request.subject, item.request.text.split("\n\n--\n")[0]]))
+      .toEqual([[fixture.a.tenantId, "Ready to collect", "Your ring is ready to collect."]]);
+    expect(await replyRow(drafted.result.id)).toMatchObject({ status: "sent", settled_at: clock.now() });
+    expect(provider.delivered.some((item) => item.request.to === "bram@example.com")).toBe(false);
+    const poorStatus = async () => (await fixture.service((tx) => tx.query<{ status: string }>(
+      "SELECT status FROM inbox_replies WHERE tenant_id=$1 AND id=$2", [fixture.b.tenantId, poor.result.id]))).rows[0]?.status;
+    expect(await poorStatus()).toBe("approved");
+    now += 60_000;
+    await worker.runOnce({ ingestLimit: 1_000, claimLimit: 1_000 });
+    expect(await poorStatus()).toBe("failed");
+    expect(provider.delivered.some((item) => item.request.to === "bram@example.com")).toBe(false);
   });
 });

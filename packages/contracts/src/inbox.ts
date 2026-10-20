@@ -96,22 +96,6 @@ export type ReplyRecord = z.infer<typeof replyRecordSchema>;
 export const replyOutputSchema = z.lazy(() => actionResultSchema.extend({ result: replyRecordSchema }));
 export type ReplyOutput = z.infer<typeof replyOutputSchema>;
 
-/**
- * I-6: the one outbox event an approval writes, in the delivery worker's (M3d) shape: the
- * payload carries the exact approved subject and text, since it is what gets sent and priced.
- * `messageId` is the reply ID; the worker takes the address from the contact at delivery time.
- */
-export const MESSAGE_SEND_REQUESTED = "message.send_requested";
-export const replySendRequestedSchema = z.strictObject({
-  messageId: idSchema,
-  contactId: idSchema,
-  channel: z.literal("email"),
-  purpose: z.literal("transactional"),
-  subject: z.string(),
-  body: z.string(),
-});
-export type ReplySendRequested = z.infer<typeof replySendRequestedSchema>;
-
 /** HTTP and MCP bodies; the edge mints replyId from the idempotency key. */
 /** Without a subject the server writes "Message from <business name>". */
 export const draftReplyRequestSchema = z.strictObject({

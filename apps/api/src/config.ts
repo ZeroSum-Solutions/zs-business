@@ -13,9 +13,13 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 
 /** The .env.example value for the booking key secret; a server that still uses it must not start. */
 export const PLACEHOLDER_BOOKING_KEY_SECRET = "replace-with-a-booking-key-secret-of-32-or-more-chars";
-const bookingKeySecretSchema = z.string()
-  .min(32, "booking key secrets must be at least 32 characters")
-  .refine((value) => value !== PLACEHOLDER_BOOKING_KEY_SECRET, "booking key secret is still the .env.example placeholder");
+/** The .env.example value for the unsubscribe token secret; refused like the booking placeholder. */
+export const PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET = "replace-with-an-unsubscribe-token-secret-of-32-or-more-chars";
+const signingSecretSchema = (what: string, placeholder: string) => z.string()
+  .min(32, `${what} secrets must be at least 32 characters`)
+  .refine((value) => value !== placeholder, `${what} secret is still the .env.example placeholder`);
+const bookingKeySecretSchema = signingSecretSchema("booking key", PLACEHOLDER_BOOKING_KEY_SECRET);
+const unsubscribeTokenSecretSchema = signingSecretSchema("unsubscribe token", PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET);
 /** Headers that hosting platforms overwrite, so a caller cannot choose the value. */
 export const CLIENT_IP_HEADERS = ["x-vercel-forwarded-for", "x-real-ip", "cf-connecting-ip", "fly-client-ip"] as const;
 const rateLimit = z.coerce.number().int().min(1).max(1_000_000).optional();
@@ -38,6 +42,11 @@ const envSchema = z.object({
   PUBLIC_RATE_ADDRESS_WRITES: rateLimit,
   PUBLIC_RATE_ADDRESS_READS: rateLimit,
   PUBLIC_RATE_TENANT_WRITES: rateLimit,
+  // delivery.md D-9: verifies the List-Unsubscribe tokens in outgoing email (the delivery worker
+  // signs them with the same secret). Unset turns the public unsubscribe routes off.
+  UNSUBSCRIBE_TOKEN_SECRET: unsubscribeTokenSecretSchema.optional(),
+  // The previous secret keeps verifying links in mail sent before a rotation.
+  UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: unsubscribeTokenSecretSchema.optional(),
   // PEM of the CA that signs the database's TLS certificate (hosted Supabase: the Supabase
   // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Required for any
   // host other than loopback; only a loopback database may use plain TCP.
@@ -79,6 +88,7 @@ export interface ServerEnv {
   readonly connectTimeoutMs: number;
   readonly requestTimeoutMs: number;
   readonly publicIntake: PublicIntakeEnv | null;
+  readonly unsubscribe: UnsubscribeEnv | null;
 }
 export interface PublicIntakeEnv {
   readonly keySecrets: { readonly current: string; readonly previous?: string };
@@ -86,6 +96,13 @@ export interface PublicIntakeEnv {
   readonly clientIp: ClientIpConfig;
   /** Per-window counts that override the P-10 defaults; windows stay fixed. */
   readonly limitOverrides: { readonly addressWrites?: number; readonly addressReads?: number; readonly tenantWrites?: number };
+}
+
+export interface UnsubscribeEnv {
+  readonly tokenSecrets: { readonly current: string; readonly previous?: string };
+  readonly clientIp: ClientIpConfig;
+  /** PUBLIC_RATE_ADDRESS_* overrides; the unsubscribe routes count in their own buckets. */
+  readonly limitOverrides: { readonly addressWrites?: number; readonly addressReads?: number };
 }
 
 /** Parse an environment object passed in by an entry point; this module never reads process.env. */
@@ -110,6 +127,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     connectTimeoutMs: parsed.data.DATABASE_CONNECT_TIMEOUT_MS,
     requestTimeoutMs: parsed.data.REQUEST_TIMEOUT_MS,
     publicIntake: parsePublicIntake(parsed.data),
+    unsubscribe: parseUnsubscribe(parsed.data),
   };
 }
 
@@ -143,6 +161,26 @@ function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | n
       ...(data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET === undefined ? {} : { previous: data.PUBLIC_BOOKING_KEY_PREVIOUS_SECRET }),
     },
     publicBaseUrl: trimTrailingSlashes(data.PUBLIC_BASE_URL ?? `http://localhost:${data.PORT}`),
+    clientIp: parseClientIp(data),
+    limitOverrides,
+  };
+}
+
+function parseUnsubscribe(data: z.infer<typeof envSchema>): UnsubscribeEnv | null {
+  if (data.UNSUBSCRIBE_TOKEN_SECRET === undefined) {
+    if (data.UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET !== undefined)
+      throw new Error("Invalid environment: UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET needs UNSUBSCRIBE_TOKEN_SECRET");
+    return null;
+  }
+  const limitOverrides = Object.fromEntries(Object.entries({
+    addressWrites: data.PUBLIC_RATE_ADDRESS_WRITES,
+    addressReads: data.PUBLIC_RATE_ADDRESS_READS,
+  }).filter(([, value]) => value !== undefined));
+  return {
+    tokenSecrets: {
+      current: data.UNSUBSCRIBE_TOKEN_SECRET,
+      ...(data.UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET === undefined ? {} : { previous: data.UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET }),
+    },
     clientIp: parseClientIp(data),
     limitOverrides,
   };

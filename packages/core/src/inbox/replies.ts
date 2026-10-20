@@ -12,7 +12,7 @@ import {
   uuidSchema,
   TenantDenied,
   ValidationFailed,
-  type ReplySendRequested,
+  type MessageSendRequested,
   type ReplyRecord,
   type ReplyStatus,
   type Target,
@@ -106,7 +106,8 @@ export const sendReplyHandler: ActionHandler = {
       "UPDATE inbox_replies SET status='approved', approved_by=$3, approved_at=$4 WHERE tenant_id=$1 AND id=$2",
       [tenantId, payload.replyId, binding.actorId, now],
     );
-    const event: ReplySendRequested = {
+    // I-6, delivery.md D-1: the exact approved words; the worker resolves the address.
+    const event: MessageSendRequested = {
       messageId: payload.replyId, contactId: draft.contact_id, channel: "email", purpose: "transactional",
       subject: draft.subject, body: draft.body,
     };
