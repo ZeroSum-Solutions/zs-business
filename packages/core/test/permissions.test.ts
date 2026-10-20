@@ -191,6 +191,7 @@ function operations(session: Session): Record<string, { permission: Permission |
     listDeals: { permission: "customers", run: () => session.listDeals({}) },
     listPipelines: { permission: "customers", run: () => session.listPipelines() },
     listMembers: { permission: "members", run: () => session.listMembers() },
+    getWallet: { permission: "billing", run: () => session.getWallet() },
     linkIntakeItem: { permission: "intake", run: async () => session.linkIntakeItem(await intakeItem(), { contactId: tenant.contactId }, randomUUID()) },
     rejectIntakeItem: { permission: "intake", run: async () => session.rejectIntakeItem(await intakeItem(), {}, randomUUID()) },
     listIntakeItems: { permission: "intake", run: () => session.listIntakeItems({}) },

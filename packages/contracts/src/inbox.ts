@@ -90,7 +90,7 @@ export type ReplyOutput = z.infer<typeof replyOutputSchema>;
  * payload carries the exact approved subject and text, since it is what gets sent and priced.
  * `messageId` is the reply ID; the worker takes the address from the contact at delivery time.
  */
-export const MESSAGE_SEND_REQUESTED = "message.send_requested";
+export { MESSAGE_SEND_REQUESTED } from "./delivery.js";
 export const replySendRequestedSchema = z.strictObject({
   messageId: idSchema,
   contactId: idSchema,

@@ -41,3 +41,14 @@ export {
   type ApprovalPolicy,
 } from "./approvals/index.js";
 export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandlers } from "./sources/index.js";
+export * from "./delivery/index.js";
+export {
+  captureReservation,
+  creditWallet,
+  getWallet,
+  heldReservation,
+  releaseReservation,
+  reserveFunds,
+  type CreditInput,
+  type Reservation,
+} from "./wallet/index.js";
