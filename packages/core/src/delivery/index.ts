@@ -1,6 +1,7 @@
 export {
   createDeliveryWorker,
   deliveryWorkerConfigSchema,
+  isPermanentIngestError,
   type Claim,
   type DeliveryReport,
   type DeliveryWorker,
@@ -47,6 +48,7 @@ export {
   type ResendConfig,
 } from "./resend.js";
 export {
+  RESEND_SUPPRESSION_EVENT_TYPES,
   RESEND_WEBHOOK_TOLERANCE_MS,
   resendEmailEventSchema,
   resendSuppressionReason,
