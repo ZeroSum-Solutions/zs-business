@@ -278,6 +278,9 @@ describe("MCP tools over an in-memory transport", () => {
         "SELECT action_type FROM actions WHERE tenant_id=$1 AND actor_id=$2", [staff.tenantId, staff.actorId],
       ));
       expect(rows.rows.map((row) => row.action_type)).toEqual(["approval.request"]);
+      // approvals.md A-7: the run key approval:<id> is the server's, never a tool's.
+      const reserved = await callTool(mcp, "upsert_contact", { idempotencyKey: `approval:${approval.id}`, displayName: "Ada" });
+      expect(reserved.isError).toBe(true);
     } finally {
       await mcp.close();
     }
