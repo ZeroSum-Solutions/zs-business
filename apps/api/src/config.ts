@@ -44,6 +44,9 @@ const envSchema = z.object({
   PUBLIC_RATE_ADDRESS_WRITES: rateLimit,
   PUBLIC_RATE_ADDRESS_READS: rateLimit,
   PUBLIC_RATE_TENANT_WRITES: rateLimit,
+  // P-10: where the public booking and unsubscribe limits count. postgres (default): one shared
+  // table for every instance. memory: per process, loopback databases only (local runs and tests).
+  PUBLIC_RATE_LIMIT_STORE: z.enum(["postgres", "memory"]).default("postgres"),
   // delivery.md D-9: verifies the List-Unsubscribe tokens in outgoing email (the delivery worker
   // signs them with the same secret). Unset turns the public unsubscribe routes off.
   UNSUBSCRIBE_TOKEN_SECRET: unsubscribeTokenSecretSchema.optional(),
@@ -80,6 +83,9 @@ const envSchema = z.object({
   // would drop the CA check or TLS itself, so a remote or verified URL carries no query string.
   if ((!loopback || env.DATABASE_CA_CERT !== undefined) && env.DATABASE_URL.includes("?"))
     issue("DATABASE_URL", "must not carry a query string when it is not a loopback host or DATABASE_CA_CERT is set");
+  // Per-process counters let every serverless instance grant the full limit again.
+  if (env.PUBLIC_RATE_LIMIT_STORE === "memory" && !loopback)
+    issue("PUBLIC_RATE_LIMIT_STORE", "memory needs a loopback DATABASE_URL; hosted deploys count in Postgres");
 });
 export interface ServerEnv {
   readonly databaseUrl: string;
@@ -93,6 +99,8 @@ export interface ServerEnv {
   readonly databasePoolMax: number;
   readonly connectTimeoutMs: number;
   readonly requestTimeoutMs: number;
+  /** P-10: where the public route limits count: one Postgres table shared by every instance, or this process. */
+  readonly rateLimitStore: "postgres" | "memory";
   readonly publicIntake: PublicIntakeEnv | null;
   readonly unsubscribe: UnsubscribeEnv | null;
   readonly resendWebhook: ResendWebhookEnv | null;
@@ -140,6 +148,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     databasePoolMax: parsed.data.DATABASE_POOL_MAX,
     connectTimeoutMs: parsed.data.DATABASE_CONNECT_TIMEOUT_MS,
     requestTimeoutMs: parsed.data.REQUEST_TIMEOUT_MS,
+    rateLimitStore: parsed.data.PUBLIC_RATE_LIMIT_STORE,
     publicIntake: parsePublicIntake(parsed.data),
     unsubscribe: parseUnsubscribe(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),

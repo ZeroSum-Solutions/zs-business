@@ -22,7 +22,10 @@ export interface PublicIntakeConfig {
   /** Where the caller's address comes from (P-10); by default the socket address. */
   readonly clientIp?: ClientIpConfig;
   readonly limits?: Partial<RateLimits>;
-  /** Defaults to an in-memory limiter on the app clock. */
+  /**
+   * Defaults to an in-memory limiter on the app clock. Servers built from the environment
+   * use the shared Postgres limiter unless PUBLIC_RATE_LIMIT_STORE=memory (P-10).
+   */
   readonly limiter?: RateLimiter;
   readonly botCheck?: BotCheck;
 }
@@ -53,8 +56,11 @@ export function publicRoutes(
   const botCheck = config.botCheck ?? allowAllBots;
   const clientAddress = createClientAddress(config.clientIp);
 
-  /** Charge the address (and, for a valid key, the tenant) before any database work. */
-  const admit = (c: Context<AppEnv>, kind: "read" | "write") => {
+  /**
+   * Charge the address (and, for a valid key, the tenant) before any other database work,
+   * within the request's deadline.
+   */
+  const admit = async (c: Context<AppEnv>, kind: "read" | "write") => {
     const socket = (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress;
     const address = clientAddress(socket, (name) => c.req.header(name));
     const ref = verifyBookingKey(config.keySecrets, c.req.param("key") ?? "");
@@ -63,7 +69,10 @@ export function publicRoutes(
       ? { key: `address-write:${bucket}`, rule: limits.addressWrites }
       : { key: `address-read:${bucket}`, rule: limits.addressReads }];
     if (ref && kind === "write") charges.push({ key: `tenant-write:${ref.tenantId}`, rule: limits.tenantWrites });
-    const taken = limiter.take(charges);
+    const taken = await limiter.take(charges, {
+      signal: c.var.signal,
+      remainingMs: () => c.var.deadline - edge.clock.now().getTime(),
+    });
     if (!taken.ok) throw new RateLimited(taken.retryAfterSeconds);
     // P-4: a forged key looks exactly like an unpublished page.
     if (!ref) throw new NotFound();
@@ -79,10 +88,10 @@ export function publicRoutes(
       maxSize: PUBLIC_BODY_LIMIT,
       onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413),
     }))
-    .get("/pages/:key", async (c) => c.json(await admit(c, "read").session.getPage()))
-    .get("/pages/:key/slots", async (c) => c.json(await admit(c, "read").session.findSlots(c.req.query())))
+    .get("/pages/:key", async (c) => c.json(await (await admit(c, "read")).session.getPage()))
+    .get("/pages/:key/slots", async (c) => c.json(await (await admit(c, "read")).session.findSlots(c.req.query())))
     .post("/pages/:key/requests", async (c) => {
-      const { address, session } = admit(c, "write");
+      const { address, session } = await admit(c, "write");
       const body = await jsonBody(c);
       const token = typeof body === "object" && body !== null && "botToken" in body && typeof body.botToken === "string"
         ? body.botToken : null;

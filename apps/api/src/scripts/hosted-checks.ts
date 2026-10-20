@@ -134,7 +134,7 @@ try {
     return { ok: refused };
   });
   await check("runtime cannot SET ROLE to owners or privileged roles", async () => {
-    const targets = ["zs_migrator", "zs_dispatcher", "zs_function_owner", "postgres", "service_role", "anon", "authenticator", "supabase_admin"];
+    const targets = ["zs_migrator", "zs_dispatcher", "zs_function_owner", "zs_rate_limiter", "postgres", "service_role", "anon", "authenticator", "supabase_admin"];
     const outcome: Record<string, string> = {};
     const client = await runtime.connect();
     try {

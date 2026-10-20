@@ -39,6 +39,8 @@ const shipped: Record<string, string> = {
   "20261020200000_inbox_home.sql": "58201a2358a7da916f36d547f170551536bada26c7be55c4751a1572f266b1fa",
   // M3d wallet and delivery (#14).
   "20261020300000_wallet_and_delivery.sql": "6604e6ffea01774b25b497c0a01e02d4e04e6183cc98dc12dd52bc6feb4d4bd7",
+  // Shared public rate limiter (#16).
+  "20261020400000_public_rate_limits.sql": "a67ceae100ca08b7346c4668300e9a3fdcf89a51eb98134285d60809b033e333",
 };
 /**
  * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is
@@ -158,6 +160,7 @@ it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requir
   expect(first).toEqual({
     zs_dispatcher: "CREATE ROLE zs_dispatcher NOLOGIN;",
     zs_function_owner: "CREATE ROLE zs_function_owner NOLOGIN;",
+    zs_rate_limiter: "CREATE ROLE zs_rate_limiter NOLOGIN;",
   });
 });
 
