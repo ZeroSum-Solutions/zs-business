@@ -238,9 +238,9 @@ describe("permission map", () => {
     expect({ ...ACTION_PERMISSIONS }).toEqual(EXPECTED_ACTIONS);
   });
 
-  it("leaves members, billing, plan, publish, intake review, approving and reports to owners", () => {
+  it("leaves members, billing, plan, publish, intake review, approving, reports and integrations to owners", () => {
     expect(ROLE_PERMISSIONS.staff).toEqual(["calendar", "customers", "inbox.drafts"]);
-    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports"] as const) {
+    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations"] as const) {
       expect(roleCan("staff", permission)).toBe(false);
       expect(roleCan("owner", permission)).toBe(true);
     }
