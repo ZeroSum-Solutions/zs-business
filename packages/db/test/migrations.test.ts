@@ -45,6 +45,10 @@ const shipped: Record<string, string> = {
   "20261020700000_site_releases.sql": "74d642bd382324eb07556c4e7c238be307aea7bbd7453d933f894e52fd94a51b",
   // M5 Activepieces (#24).
   "20261020640000_activepieces.sql": "500ead2a2d04a2bab161a792598ee37dbc85af0e97e1aebaecfb9e0333559879",
+  // M5 Twilio SMS (#22).
+  "20261020620000_twilio_sms.sql": "42e1bcc3da20188caa7441dadaa4eb3151a04fe127e7e2b13642448b0d4def0f",
+  // M5 Stripe top-ups (#21).
+  "20261020610000_stripe_topups.sql": "9b3022d4b0a94970f2288cf77604e073d66b34e4efacbb9060295b0838a34224",
 };
 /**
  * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is

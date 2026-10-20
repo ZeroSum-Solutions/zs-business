@@ -1,6 +1,20 @@
 import { parse } from "pg-connection-string";
 import { z } from "zod";
-import { formatEnvIssues, jwtEnvSchema, parseStripeEnv, resendWebhookSecretSchema, sessionCheckEnvSchema, trimTrailingSlashes, type JwtConfig, type SessionCheckConfig, type StripeEnv } from "@zs/core";
+import {
+  formatEnvIssues,
+  jwtEnvSchema,
+  parseStripeEnv,
+  resendWebhookSecretSchema,
+  secureUrlProblem,
+  sessionCheckEnvSchema,
+  trimTrailingSlashes,
+  twilioAccountSidSchema,
+  twilioAuthTokenSchema,
+  type JwtConfig,
+  type KeywordReplies,
+  type SessionCheckConfig,
+  type StripeEnv,
+} from "@zs/core";
 import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 
@@ -59,6 +73,15 @@ const envSchema = z.object({
   // POST /webhooks/resend off. The previous secret keeps verifying during a rotation.
   RESEND_WEBHOOK_SECRET: resendWebhookSecretSchema.optional(),
   RESEND_WEBHOOK_PREVIOUS_SECRET: resendWebhookSecretSchema.optional(),
+  // twilio.md T-6, T-9: the account's auth token verifies X-Twilio-Signature. Unset turns the
+  // /webhooks/twilio routes off. The previous token keeps verifying during a rotation.
+  TWILIO_AUTH_TOKEN: twilioAuthTokenSchema.optional(),
+  TWILIO_PREVIOUS_AUTH_TOKEN: twilioAuthTokenSchema.optional(),
+  TWILIO_ACCOUNT_SID: twilioAccountSidSchema.optional(),
+  // The API's public origin as Twilio calls it; signatures cover this URL, not the Host header.
+  TWILIO_WEBHOOK_BASE_URL: z.string().optional(),
+  // T-8: `provider` (Twilio's own opt-out replies) or `app` (this API answers in TwiML).
+  TWILIO_KEYWORD_REPLIES: z.enum(["provider", "app"]).default("provider"),
   // activepieces.md W-14: derives webhook signing secrets and automation tokens. Unset turns the
   // /v1/integrations/activepieces and /integrations/activepieces routes off. The previous secret
   // keeps tokens and signatures valid during a rotation.
@@ -131,12 +154,19 @@ export interface ServerEnv {
   readonly resendWebhook: ResendWebhookEnv | null;
   /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
   readonly stripe: StripeEnv | null;
+  readonly twilioWebhook: TwilioWebhookEnv | null;
   readonly activepieces: ActivepiecesEnv | null;
 }
 export interface ActivepiecesEnv {
   readonly keySecrets: { readonly current: string; readonly previous?: string };
   /** True only on a loopback database: receiver URLs may then point at 127.0.0.1 over http. */
   readonly allowLoopback: boolean;
+}
+export interface TwilioWebhookEnv {
+  readonly tokens: { readonly current: string; readonly previous?: string };
+  readonly accountSid: string;
+  readonly webhookBaseUrl: string;
+  readonly keywordReplies: KeywordReplies;
 }
 export interface ResendWebhookEnv {
   readonly secrets: { readonly current: string; readonly previous?: string };
@@ -189,6 +219,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     unsubscribe: parseUnsubscribe(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
+    twilioWebhook: parseTwilioWebhook(parsed.data),
     activepieces: parseActivepieces(parsed.data),
   };
 }
@@ -298,6 +329,29 @@ function parseResendWebhook(data: z.infer<typeof envSchema>): ResendWebhookEnv |
       current: data.RESEND_WEBHOOK_SECRET,
       ...(data.RESEND_WEBHOOK_PREVIOUS_SECRET === undefined ? {} : { previous: data.RESEND_WEBHOOK_PREVIOUS_SECRET }),
     },
+  };
+}
+
+function parseTwilioWebhook(data: z.infer<typeof envSchema>): TwilioWebhookEnv | null {
+  if (data.TWILIO_AUTH_TOKEN === undefined) {
+    if (data.TWILIO_PREVIOUS_AUTH_TOKEN !== undefined)
+      throw new Error("Invalid environment: TWILIO_PREVIOUS_AUTH_TOKEN needs TWILIO_AUTH_TOKEN");
+    return null;
+  }
+  if (data.TWILIO_ACCOUNT_SID === undefined) throw new Error("Invalid environment: TWILIO_AUTH_TOKEN needs TWILIO_ACCOUNT_SID");
+  if (data.TWILIO_WEBHOOK_BASE_URL === undefined) throw new Error("Invalid environment: TWILIO_AUTH_TOKEN needs TWILIO_WEBHOOK_BASE_URL");
+  const problem = secureUrlProblem("TWILIO_WEBHOOK_BASE_URL", data.TWILIO_WEBHOOK_BASE_URL);
+  const url = URL.parse(data.TWILIO_WEBHOOK_BASE_URL);
+  if (problem) throw new Error(`Invalid environment: ${problem}`);
+  if (url && (url.search || url.hash)) throw new Error("Invalid environment: TWILIO_WEBHOOK_BASE_URL must not carry a query or fragment");
+  return {
+    tokens: {
+      current: data.TWILIO_AUTH_TOKEN,
+      ...(data.TWILIO_PREVIOUS_AUTH_TOKEN === undefined ? {} : { previous: data.TWILIO_PREVIOUS_AUTH_TOKEN }),
+    },
+    accountSid: data.TWILIO_ACCOUNT_SID,
+    webhookBaseUrl: trimTrailingSlashes(data.TWILIO_WEBHOOK_BASE_URL),
+    keywordReplies: data.TWILIO_KEYWORD_REPLIES,
   };
 }
 

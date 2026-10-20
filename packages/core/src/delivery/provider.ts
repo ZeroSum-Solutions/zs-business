@@ -33,13 +33,27 @@ export type ProviderLookupOutcome =
   | { readonly status: "not_found" }
   | { readonly status: "unknown"; readonly code: string };
 
+export interface ProviderLookupOptions {
+  readonly signal: AbortSignal;
+  readonly tenantId: string;
+  readonly deliveryId: string;
+}
+
 export interface DeliveryProvider {
   readonly name: string;
-  /** How long the provider drops a repeat of one idempotency key. */
+  /**
+   * How long the provider drops a repeat of one idempotency key. 0 means it drops none (D-8,
+   * revision 4): the worker never sends again after an unknown outcome and settles it by lookup.
+   */
   readonly dedupeWindowMs: number;
+  /**
+   * Only for a provider without dedupe: how long after the first attempt an unknown outcome
+   * keeps waiting for evidence through `lookup` before it is a dead letter `outcome_unknown`.
+   */
+  readonly outcomeWaitMs?: number;
   send(request: ProviderSendRequest, options: { readonly signal: AbortSignal }): Promise<ProviderSendOutcome>;
   /** Optional: what the provider knows about a key. `not_found` must mean it never accepted it. */
-  lookup?(idempotencyKey: string, options: { readonly signal: AbortSignal }): Promise<ProviderLookupOutcome>;
+  lookup?(idempotencyKey: string, options: ProviderLookupOptions): Promise<ProviderLookupOutcome>;
 }
 
 export type ApprovalStanding = "approved" | "revoked" | "missing";

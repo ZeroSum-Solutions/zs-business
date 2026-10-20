@@ -123,6 +123,11 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `RESEND_WEBHOOK_PREVIOUS_SECRET` | Optional, during a rotation: events signed with it still verify. Needs `RESEND_WEBHOOK_SECRET`. |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_LIVEMODE`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL` | Stripe wallet top-ups (stripe.md S-9), all or none. None set: top-ups and `POST /webhooks/stripe` are off. A secret or restricted key (`sk_`/`rk_`), the endpoint's `whsec_` secret, `true` or `false` matching the key's mode, and https return URLs. |
 | `STRIPE_WEBHOOK_PREVIOUS_SECRET`, `STRIPE_CURRENCY`, `STRIPE_TOPUP_MIN`, `STRIPE_TOPUP_MAX`, `STRIPE_API_VERSION`, `STRIPE_BASE_URL` | Optional: a rotation secret, `usd`, 500 and 50000 minor units, the account's default API version, `https://api.stripe.com`. |
+| `TWILIO_AUTH_TOKEN` | The Twilio account's auth token (32 hex), which verifies `X-Twilio-Signature`. Unset, the `/webhooks/twilio` routes are off. Needs `TWILIO_ACCOUNT_SID` and `TWILIO_WEBHOOK_BASE_URL`. |
+| `TWILIO_PREVIOUS_AUTH_TOKEN` | Optional, during a rotation (Twilio's secondary token): webhooks signed with it still verify. |
+| `TWILIO_ACCOUNT_SID` | Every Twilio webhook must name this account. |
+| `TWILIO_WEBHOOK_BASE_URL` | The API's public https origin as Twilio calls it. Signatures are checked over this URL plus the path, never the `Host` header. |
+| `TWILIO_KEYWORD_REPLIES` | `provider` (default): Twilio's own opt-out handling answers STOP, START and HELP. `app`: this API answers them in TwiML (twilio.md T-8). |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
 environment or the system clock. Everything else gets them through `createApp(deps)`.
@@ -388,6 +393,22 @@ its ID in `stripe_events`. It moves no money: the billing runner does (below).
 | 503 `Unavailable` | The database did not answer; Stripe delivers it again. |
 | 200 `{"received":true,"stored":…}` | Stored, already stored, or from the other mode (dropped). |
 
+## Twilio webhooks (`/webhooks/twilio/...`, no auth)
+
+Twilio posts SMS status callbacks and inbound texts here (twilio.md T-5..T-8). On only when
+`TWILIO_AUTH_TOKEN` is set. The routes check `X-Twilio-Signature` (HMAC-SHA1 over
+`TWILIO_WEBHOOK_BASE_URL` plus the path and query, then the form fields sorted by name) and the
+`AccountSid` before they parse anything else or touch the database. Bodies are capped at 64 KiB.
+
+| Route | Effect |
+|---|---|
+| `POST /webhooks/twilio/status/<tenant>/<delivery>` | The delivery worker sets this as each message's `StatusCallback`. A status for that tenant's SMS delivery, sent by `twilio` to the callback's `To`, is recorded once per message and status (`sms_status_events`). That record is what settles a send whose reply was lost (no second send). Error 21610 also suppresses the number as `stop`. Answers JSON. |
+| `POST /webhooks/twilio/inbound/<tenant>` | Set as the messaging webhook of the tenant's number (`sms_numbers`). A text that is exactly STOP (and the other stop words), START or HELP changes the suppression list (delivery.md D-9) and answers TwiML: empty with `TWILIO_KEYWORD_REPLIES=provider`, the tenant's reply with `app`. Other texts change nothing. |
+
+Both answer 401 for a missing or wrong signature or another account, and 200 for anything
+signed (with `{"handled":false,"reason":…}` or an empty `<Response/>` when nothing applies), so
+Twilio does not retry. Database errors are 503, so it does.
+
 ## Database pool and request limits
 
 `createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from
@@ -628,6 +649,8 @@ Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Of
 | `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY` | What one email and one SMS segment take from the wallet, in minor units (`usd` by default). |
 | `UNSUBSCRIBE_TOKEN_SECRET`, `DELIVERY_UNSUBSCRIBE_BASE_URL` | Signs the List-Unsubscribe links; the same secret as the API. The URL is the https address of `/public/v1/unsubscribe`. |
 | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | The Resend sender (R-6). `RESEND_FROM` must be on a domain verified in Resend. |
+| `SMS_PROVIDER` | `twilio` sends SMS through Twilio (twilio.md T-9); unset or `none` refuses SMS as `sms_provider_not_configured`. |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET` (or `TWILIO_AUTH_TOKEN`), `TWILIO_WEBHOOK_BASE_URL`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | With `SMS_PROVIDER=twilio`. Each tenant sends from its own number in `sms_numbers`. The status callback URL is built from `TWILIO_WEBHOOK_BASE_URL`. An outcome with no status callback waits `TWILIO_OUTCOME_WAIT_MS` (24 h) before it is a dead letter for an operator. |
 | `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × (timeout + 500 ms) + 1 s must fit the budget; the cron function allows at most 20000. |
 | `DELIVERY_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/delivery`, for example `*/5 * * * *`. Unset, there is no cron. |
 

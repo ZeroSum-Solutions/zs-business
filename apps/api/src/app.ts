@@ -33,6 +33,7 @@ import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
 import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-webhook.js";
+import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
 export interface AppConfig {
@@ -66,6 +67,8 @@ export interface AppDependencies {
   readonly stripe?: StripeClient;
   /** Signed Stripe events into the billing inbox (stripe.md S-3); absent means the route is off. */
   readonly stripeWebhook?: StripeWebhookConfig;
+  /** Twilio status callbacks and inbound STOP/START/HELP texts (twilio.md T-6, T-8); absent means off. */
+  readonly twilioWebhook?: TwilioWebhookConfig;
   /**
    * Activepieces webhooks and automation tokens (activepieces.md); absent means the owner routes
    * under /v1/integrations/activepieces and the flow routes under /integrations/activepieces are off.
@@ -176,6 +179,7 @@ export function createApp(deps: AppDependencies) {
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
   if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
+  if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
 
   app.use("/v1/*", bodyLimit({
@@ -233,6 +237,7 @@ export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/r
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
+export type { TwilioWebhookConfig } from "./public/twilio-webhook.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";
