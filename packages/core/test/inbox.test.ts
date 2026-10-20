@@ -638,6 +638,53 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     expect(await approvedEvents(stale.result.id)).toHaveLength(1);
   });
 
+  /** An owner approves through the approvals route while the customer has no address, so the run fails after the decision. */
+  async function approvedButUnsent(session: Session, contactId: string, body: string) {
+    const drafted = await draft(a, contactId, body);
+    const [proposal] = await proposals(drafted.result.id);
+    tick();
+    const error = await rejection(session.approveApproval(proposal!.id, {}, randomUUID()));
+    expect(error.details).toMatchObject({ reason: "no_email" });
+    expect(await proposals(drafted.result.id)).toEqual([expect.objectContaining({ status: "approved" })]);
+    return { replyId: drafted.result.id, approvalId: proposal!.id };
+  }
+  const giveEmail = (contactId: string, email: string) => fixture.service((tx) => tx.query(
+    "UPDATE crm_contacts SET normalized_email=$3 WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, contactId, email]));
+
+  it("a new call finishes a send whose run failed after approval, and a retry of that call replays", async () => {
+    const customer = await contact(a, { displayName: "Abel Kerr", phone: "+15555550191" });
+    const { replyId, approvalId } = await approvedButUnsent(a, customer, "Ready when you are.");
+    await giveEmail(customer, "abel@example.com");
+    tick();
+    const key = randomUUID();
+    const sent = await a.approveReply(replyId, {}, key);
+    expect(sent.result).toMatchObject({ status: "approved", approvedBy: { userId: owner.userId } });
+    const check = await fixture.service((tx) => approvalForAction(tx, fixture.a.tenantId, sent.actionId, new Date(now)));
+    expect(check).toMatchObject({ kind: "stored", approval: { id: approvalId } });
+    // The same key replays the send (I-6); a new key is not_draft; one event in all.
+    expect(await a.approveReply(replyId, {}, key)).toEqual(sent);
+    expect((await rejection(a.approveReply(replyId, {}, randomUUID()))).details).toMatchObject({ reason: "not_draft", status: "approved" });
+    expect(await approvedEvents(replyId)).toHaveLength(1);
+    // A key bound to one reply's send is refused for another reply's.
+    const other = await approvedButUnsent(a, await contact(a, { displayName: "Abel's office", phone: "+15555550193" }), "A second note.");
+    expect((await rejection(a.approveReply(other.replyId, {}, key))).code).toBe("Conflict");
+    expect(await replyRow(other.replyId)).toMatchObject({ status: "draft" });
+  });
+
+  it("a proposal another owner approved is theirs to finish; the conflict names them", async () => {
+    const second = await addMember(fixture.a.tenantId, "owner");
+    const secondSession = sessionFor(second.userId);
+    const customer = await contact(a, { displayName: "Bea Lowe", phone: "+15555550192" });
+    const { replyId } = await approvedButUnsent(a, customer, "Your fitting is set.");
+    await giveEmail(customer, "bea@example.com");
+    const error = await rejection(approve(secondSession, replyId));
+    expect(error).toMatchObject({ code: "Conflict", details: { reason: "approved_by_other", approvedBy: owner.userId } });
+    expect(mapError(error).body.error.details).toEqual({ reason: "approved_by_other", approvedBy: owner.userId });
+    expect(await replyRow(replyId)).toMatchObject({ status: "draft" });
+    await approve(a, replyId);
+    expect(await replyRow(replyId)).toMatchObject({ status: "approved" });
+  });
+
   it("a reply with no address is refused before the decision, so its proposal stays pending", async () => {
     const phoneOnly = await contact(a, { displayName: "Zed Hart", phone: "+15555550188" });
     const drafted = await draft(a, phoneOnly, "No address");

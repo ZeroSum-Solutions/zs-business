@@ -1,9 +1,11 @@
 # M3c: Inbox v1 and Home
 
-Status: contract for M3c (2026-10-20), revision 2. Code follows this file; a change to a
+Status: contract for M3c (2026-10-20), revision 3. Code follows this file; a change to a
 numbered rule needs a new revision of this file first. Revision 2 sends replies through M3b's
 approval records (`approvals.md`): I-5..I-8, H-6 and H-8 changed, and `inbox.approve` gave way
-to M3b's `approve`.
+to M3b's `approve`. Revision 3 (hub review): I-4 keeps each step's record through later steps,
+I-6 binds a resumed send to the caller's key and leaves another owner's approval to them, and
+I-9 limits runtime inserts to drafts.
 
 Scope: the owner's Inbox (one thread per customer, built from what people send through the
 website forms and the bookings they make, plus the business's replies) and Home (leads,
@@ -54,8 +56,8 @@ whether older ones exist.
 **I-4. Replies are fixed once drafted.** `inbox_replies` keeps the subject, text, customer, channel,
 author and draft time unchanged for every role, the table owner included
 (`inbox_replies_guard`). Status only moves forward: `draft` to `approved` or `discarded`;
-`approved` to `sent` or `failed`. Each step records its actor and time and never rewrites
-an earlier step. So an approval of a reply ID is an approval of those exact words.
+`approved` to `sent` or `failed`. Each step records its actor and time, and no later step
+(settling included) rewrites it. So an approval of a reply ID is an approval of those exact words.
 
 **I-5. Draft.** `inbox.reply.draft` `{ replyId, contactId, subject, body }`, permission
 `inbox.drafts` (owners and staff). `replyId` derives from the idempotency key. The body is
@@ -76,12 +78,17 @@ only under a stored approval that an owner (`approve`) decided, as that owner (A
 in steps:
 - it reads the reply and its newest unexpired `pending` or `approved` proposal. A reply that is
   no longer a draft is 409 `not_draft` with its `status`, unless the same key already approved
-  it (a retry, which replays). A draft whose customer has no real email address (null or a
-  `.invalid` placeholder) is 409 `no_email` before anything is decided;
+  or resumed that proposal (a retry, which replays). A draft whose customer has no real email
+  address (null or a `.invalid` placeholder) is 409 `no_email` before anything is decided;
 - with no open proposal (withdrawn or expired) it proposes the send again under a key derived
   from the caller's key; a pending proposal is then approved (A-6) with the caller's key;
-- it runs the approved send (A-7). If that run fails, the approval stays `approved`; another
-  call retries the run on the same approval.
+- an `approved` proposal not bound to the caller's key is one whose run failed under another
+  call. If this owner decided it, `inbox.reply.resume` `{ replyId, approvalId }` (permission
+  `approve`; changes nothing, requires the draft and this owner's approved, unrun proposal)
+  binds the caller's key to it, so a retry of this call replays. If another owner decided it,
+  409 `approved_by_other` with `approvedBy`: only the decider runs an approved action (A-7),
+  so that owner finishes the send, or an owner revokes the approval (A-8) and approves again;
+- it runs the approved send (A-7). If that run fails, the approval stays `approved`.
 The send, in one dispatcher transaction with the reply row locked, requires a `draft` (409
 `not_draft`) and a real email address (409 `no_email`), then makes the reply `approved` with
 `approved_by` (the deciding owner) and `approved_at`, and writes one outbox event
@@ -122,8 +129,10 @@ discard as tools, but no tool approves: deciding stays with an owner in the dash
 |---|---|
 | `inbox_replies` | `tenant_id`, `id`, `contact_id`, `channel` (`email`), `subject` (1..200), `body` (1..5000), `status`, `drafted_by`, `created_at`, `approved_by`, `approved_at`, `discarded_by`, `discarded_at`, `settled_at`; PK `(tenant_id,id)`; tenant FK and FK to the contact with the tenant; checks tie each status to its step columns; `inbox_replies_guard` (I-4) |
 
-Forced RLS with the shared `tenant_scope` policy. Runtime may SELECT and INSERT, and UPDATE
-only `status`, `approved_by`, `approved_at`, `discarded_by`, `discarded_at`. Only the service
+Forced RLS with the shared `tenant_scope` policy. Runtime may SELECT, INSERT only the draft
+columns (`tenant_id`, `id`, `contact_id`, `channel`, `subject`, `body`, `drafted_by`,
+`created_at`; `status` defaults to `draft`), and UPDATE only `status`, `approved_by`,
+`approved_at`, `discarded_by`, `discarded_at`. Only the service
 role records `sent`/`failed` (`settled_at`), so a member session cannot claim a send.
 
 ## Home

@@ -48,6 +48,17 @@ export const draftReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
 export type DraftReplyCommand = z.infer<typeof draftReplyCommandSchema>;
 
 export const replyRefInputSchema = z.strictObject({ replyId: idSchema });
+/**
+ * I-6: binds an owner's call to a send they approved under another call whose run failed, so
+ * a retry with the same key replays. It changes nothing.
+ */
+export const resumeReplyInputSchema = z.strictObject({ replyId: idSchema, approvalId: idSchema });
+export const resumeReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("inbox.reply.resume"),
+  target: targetSchema.extend({ type: z.literal("inbox_reply") }),
+  payload: resumeReplyInputSchema,
+}).refine((command) => command.target.id === command.payload.replyId, "Target must equal the reply"));
+export type ResumeReplyCommand = z.infer<typeof resumeReplyCommandSchema>;
 /** I-6: runs only through an owner's stored approval (approvals.md A-7), never directly. */
 export const sendReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("inbox.reply.send"),

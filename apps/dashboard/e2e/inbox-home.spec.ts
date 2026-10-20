@@ -171,12 +171,26 @@ test("sets a deal's value and lead source, and reloads when someone else changed
   await expect(page.locator("[data-fetching]")).toHaveCount(0);
   const dealId = await studs.getAttribute("data-deal-id");
   await studs.getByRole("button", { name: /^Edit details of/ }).click();
-  await page.evaluate((id) => window.__zsDemo!.editDealElsewhere(id!), dealId);
+  const leadSource = await dialog.getByLabel("Lead source").inputValue();
+  const before = await page.evaluate((id) => window.__zsDemo!.editDealElsewhere(id!, { leadSource: "ads" }), dealId);
   await dialog.getByLabel("Value").fill("6500");
   await dialog.getByRole("button", { name: "Save details" }).click();
-  await expect(dialog.getByRole("alert")).toHaveText("Someone changed this deal since you opened it. Reloaded: check the details and save again.");
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "Someone changed this deal since you opened it. Reloaded: your changes are kept and theirs fill the rest. Check the details and save again.");
+  // The edit stays; the field left alone takes the other person's save instead of overwriting it.
+  expect(leadSource).not.toBe("ads");
   await expect(dialog.getByLabel("Value")).toHaveValue("6500");
+  await expect(dialog.getByLabel("Lead source")).toHaveValue("ads");
   await dialog.getByRole("button", { name: "Save details" }).click();
   await expect(dialog).toBeHidden();
   await expect(studs.getByTestId("deal-value")).toHaveText("$6,500");
+  await expect(studs.getByTestId("deal-source")).toHaveText("From Ads");
+  // The stale save sent the revision the dialog opened with, the second the reloaded one.
+  const saves = (await page.evaluate(() => window.__zsDemo!.writeLog()))
+    .filter((write) => write.operation === "crm.deal.set-details" && (write.payload as { dealId: string }).dealId === dealId)
+    .map((write) => write.payload as { expectedRevision: number; leadSource: string | null });
+  expect(saves.slice(-2)).toEqual([
+    expect.objectContaining({ expectedRevision: before.revision - 1, leadSource: leadSource || null }),
+    expect.objectContaining({ expectedRevision: before.revision, leadSource: "ads" }),
+  ]);
 });

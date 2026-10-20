@@ -7,6 +7,7 @@ import {
   draftReplyCommandSchema,
   MAX_SUBJECT_LENGTH,
   MESSAGE_SEND_REQUESTED,
+  resumeReplyCommandSchema,
   sendReplyCommandSchema,
   uuidSchema,
   TenantDenied,
@@ -25,6 +26,7 @@ export const DRAFT_REPLY_ACTION = "inbox.reply.draft";
 /** I-6: required by APPROVAL_POLICIES, so it runs only under an owner's stored approval. */
 export const SEND_REPLY_ACTION = "inbox.reply.send";
 export const DISCARD_REPLY_ACTION = "inbox.reply.discard";
+export const RESUME_REPLY_ACTION = "inbox.reply.resume";
 
 /** A placeholder address (crm_contacts' column default) is no address to reply to. */
 const PLACEHOLDER_EMAIL = /@placeholder\.invalid$/;
@@ -80,8 +82,8 @@ export const draftReplyHandler: ActionHandler = {
       "SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows[0]!.name}`.slice(0, MAX_SUBJECT_LENGTH);
     try {
       await tx.query(
-        `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,subject,body,status,drafted_by,created_at)
-         VALUES ($1,$2,$3,'email',$4,$5,'draft',$6,$7)`,
+        `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,subject,body,drafted_by,created_at)
+         VALUES ($1,$2,$3,'email',$4,$5,$6,$7)`,
         [tenantId, payload.replyId, payload.contactId, subject, payload.body, binding.actorId, now],
       );
     } catch (error) {
@@ -109,6 +111,31 @@ export const sendReplyHandler: ActionHandler = {
       subject: draft.subject, body: draft.body,
     };
     return { ...(await replyResult(tx, tenantId, payload.replyId)), event: { type: MESSAGE_SEND_REQUESTED, payload: { ...event } } };
+  },
+};
+
+/**
+ * I-6: records an owner's new call to finish a send they already approved (its earlier run
+ * failed), so this call's key is bound to that approval. The send itself runs after, under the
+ * approval's own key. Requires the reply to be a draft and the approval to be this owner's,
+ * approved and not yet run.
+ */
+export const resumeReplyHandler: ActionHandler = {
+  resolveTarget: resolveReply,
+  async handle({ tx, command, binding }) {
+    const { payload } = parseOrFail(resumeReplyCommandSchema, command);
+    const tenantId = binding.tenantId;
+    await lockDraft(tx, tenantId, payload.replyId);
+    const approval = (await tx.query<{ status: string; decided_by: string | null; executed: boolean }>(
+      `SELECT a.status, a.decided_by, EXISTS (
+          SELECT 1 FROM actions x WHERE x.tenant_id = a.tenant_id AND (x.approval_reference->>'id')::uuid = a.id) AS executed
+         FROM approvals a
+        WHERE a.tenant_id=$1 AND a.id=$2 AND a.action_type=$3 AND a.target_type='inbox_reply' AND a.target_id=$4`,
+      [tenantId, payload.approvalId, SEND_REPLY_ACTION, payload.replyId],
+    )).rows[0];
+    if (!approval || approval.status !== "approved" || approval.decided_by !== binding.actorId || approval.executed)
+      throw new Conflict("The approval is not approved", { reason: "approval_not_approved" });
+    return replyResult(tx, tenantId, payload.replyId);
   },
 };
 

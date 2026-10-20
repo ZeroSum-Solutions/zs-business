@@ -105,10 +105,17 @@ BEGIN
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'inbox_replies',
         CONSTRAINT = 'inbox_replies_guard';
   END IF;
-  IF NEW.status = OLD.status AND (
+  -- A step that happened keeps its actor and time through every later step; no step changes
+  -- without a status change.
+  IF (OLD.approved_at IS NOT NULL
+        AND (NEW.approved_by IS DISTINCT FROM OLD.approved_by OR NEW.approved_at IS DISTINCT FROM OLD.approved_at))
+    OR (OLD.discarded_at IS NOT NULL
+        AND (NEW.discarded_by IS DISTINCT FROM OLD.discarded_by OR NEW.discarded_at IS DISTINCT FROM OLD.discarded_at))
+    OR (OLD.settled_at IS NOT NULL AND NEW.settled_at IS DISTINCT FROM OLD.settled_at)
+    OR (NEW.status = OLD.status AND (
        NEW.approved_by IS DISTINCT FROM OLD.approved_by OR NEW.approved_at IS DISTINCT FROM OLD.approved_at
     OR NEW.discarded_by IS DISTINCT FROM OLD.discarded_by OR NEW.discarded_at IS DISTINCT FROM OLD.discarded_at
-    OR NEW.settled_at IS DISTINCT FROM OLD.settled_at) THEN
+    OR NEW.settled_at IS DISTINCT FROM OLD.settled_at)) THEN
     RAISE EXCEPTION 'A reply keeps the record of each step it took'
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'inbox_replies',
         CONSTRAINT = 'inbox_replies_guard';
@@ -144,9 +151,13 @@ DO $$ BEGIN
     REVOKE ALL ON public.inbox_replies FROM anon;
   END IF;
 END $$;
--- Runtime drafts, approves and discards through the dispatcher. Only the delivery worker,
--- with the service role, records sent or failed (settled_at), so runtime cannot claim a send.
-GRANT SELECT, INSERT ON public.inbox_replies TO authenticated;
+-- Runtime drafts, approves and discards through the dispatcher. It inserts the draft columns
+-- only, so every new row starts as a draft with no steps (status defaults to draft). Only the
+-- delivery worker, with the service role, records sent or failed (settled_at), so runtime
+-- cannot claim a send.
+GRANT SELECT ON public.inbox_replies TO authenticated;
+GRANT INSERT (tenant_id, id, contact_id, channel, subject, body, drafted_by, created_at)
+  ON public.inbox_replies TO authenticated;
 GRANT UPDATE (status, approved_by, approved_at, discarded_by, discarded_at) ON public.inbox_replies TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.inbox_replies TO service_role;
 

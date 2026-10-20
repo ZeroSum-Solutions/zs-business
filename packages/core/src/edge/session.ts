@@ -68,7 +68,7 @@ import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
-import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, SEND_REPLY_ACTION } from "../inbox/index.js";
+import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
@@ -123,6 +123,7 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "inbox.reply.discard": "inbox.drafts",
   // inbox-home.md I-6: also `required` in APPROVAL_POLICIES, so only an owner's approval runs it.
   "inbox.reply.send": "inbox.drafts",
+  "inbox.reply.resume": "approve",
   "intake.item.link": "intake",
   "intake.item.reject": "intake",
   "member.invite": "members",
@@ -354,29 +355,40 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
     /**
      * I-6: an owner approves the reply's open proposal (proposing again first when it expired or
-     * was withdrawn), then runs the send as that owner (approvals.md A-6, A-7). A retry with the
-     * same key replays; after a failed run a new key retries the run on the same approval. A reply
-     * with no address is refused before anything is decided, so its proposal stays pending.
+     * was withdrawn), then runs the send as that owner (approvals.md A-6, A-7). A reply with no
+     * address is refused before anything is decided, so its proposal stays pending. A proposal
+     * this owner approved under another call (whose run failed) is resumed under this call's key;
+     * one another owner approved is theirs to finish. A retry with the same key replays.
      */
     async approveReply(replyId: unknown, body: unknown, key: unknown): Promise<ReplyOutput> {
       const id = parseInput(uuidSchema, replyId, "reply ID");
       parseInput(replyStepRequestSchema, body);
       const idempotencyKey = parseInput(idempotencyKeySchema, key, "Idempotency-Key");
       const now = new Date(readClock(deps.clock));
-      const { reply, open, decided } = await read("approve", async (tx) => {
+      const { reply, open, bound } = await read("approve", async (tx) => {
         const reply = await loadReply(tx, tenantId, id);
         if (reply?.status === "draft") await requireEmail(tx, tenantId, reply.contactId);
-        // Whether this key already decided an approval: a retry of a call that went through.
-        const decided = (await tx.query(
-          "SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2 AND action_type='approval.approve'", [tenantId, idempotencyKey],
+        const open = await openSendApproval(tx, tenantId, id, now);
+        // Whether this key already approved or resumed this very proposal: a retry of that call.
+        const bound = open !== null && (await tx.query(
+          `SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2 AND action_type IN ('approval.approve', $3)
+              AND payload->>'approvalId' = $4`,
+          [tenantId, idempotencyKey, RESUME_REPLY_ACTION, open.id],
         )).rowCount === 1;
-        return { reply, open: await openSendApproval(tx, tenantId, id, now), decided };
+        return { reply, open, bound };
       });
       if (!reply) throw new TenantDenied();
+      const retry = bound && open?.status === "approved";
       // Once the reply has left draft, only a retry of the call that sent it replays.
-      if (reply.status !== "draft" && !(decided && open?.status === "approved")) throw notDraft(reply.status);
+      if (reply.status !== "draft" && !retry) throw notDraft(reply.status);
       let approvalId = open?.id;
-      if (open?.status !== "approved") {
+      if (!retry && open?.status === "approved") {
+        // Only the deciding owner runs an approved action (A-7).
+        if (open.decidedBy !== actorId)
+          throw new Conflict("Another owner approved this reply", { reason: "approved_by_other", approvedBy: open.decidedBy });
+        const { id: _id, ...rest } = envelope(idempotencyKey, "inbox_reply", id);
+        await run({ actionType: RESUME_REPLY_ACTION, ...rest, payload: { replyId: id, approvalId: open.id } });
+      } else if (!retry) {
         approvalId ??= (await proposeSend(reply, stepKey(idempotencyKey, "propose"))).id;
         const { id: _id, ...rest } = envelope(idempotencyKey, "approval", approvalId);
         await run({ actionType: "approval.approve", ...rest, payload: { approvalId } });
