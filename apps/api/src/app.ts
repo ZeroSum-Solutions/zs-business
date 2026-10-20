@@ -16,6 +16,7 @@ import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
 import { sourceRoutes } from "./routes/sources.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
+import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
 export interface AppConfig {
@@ -41,6 +42,8 @@ export interface AppDependencies {
   readonly publicIntake?: PublicIntakeConfig;
   /** One-click email unsubscribe (delivery.md D-9); absent means the routes are off. */
   readonly unsubscribe?: UnsubscribeConfig;
+  /** Resend email events, bounces and complaints feeding suppression (resend.md R-7, R-8); absent means off. */
+  readonly resendWebhook?: ResendWebhookConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -116,6 +119,7 @@ export function createApp(deps: AppDependencies) {
   };
   app.use("/v1/*", deadline);
   app.use("/public/v1/*", deadline);
+  app.use("/webhooks/*", deadline);
 
   const edge = {
     db: deps.db,
@@ -135,6 +139,7 @@ export function createApp(deps: AppDependencies) {
     app.route("/", routes.site);
   }
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
+  if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -186,6 +191,7 @@ export function createApp(deps: AppDependencies) {
 export type App = ReturnType<typeof createApp>;
 export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
+export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";

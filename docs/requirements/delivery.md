@@ -118,7 +118,8 @@ messaged, with a reason (`unsubscribe`, `stop`, `bounce`, `complaint`, `manual`)
 through the dispatcher with a server-built principal per tenant, like the public intake
 (P-3). One row per address keeps its first reason, except that a lasting reason (`unsubscribe`,
 `bounce`, `complaint`, `manual`) replaces `stop`. Member and MCP idempotency keys may not use the
-prefixes the server builds for these actions (`public:`, `unsubscribe:`, `sms-inbound:`), so a
+prefixes the server builds for these actions (`public:`, `unsubscribe:`, `sms-inbound:`,
+`email-feedback:`), so a
 member cannot take a recipient's key first:
 - Email: every email carries a `List-Unsubscribe` URL and `List-Unsubscribe-Post:
   List-Unsubscribe=One-Click` (RFC 8058). The URL holds an unsubscribe token: `zsu1_` and
@@ -134,6 +135,8 @@ member cannot take a recipient's key first:
   space and punctuation ignored) suppresses the sender's number with reason `stop` and gets
   one confirmation reply. `START`, `UNSTOP` or `YES` lifts a `stop` suppression only.
   `HELP` or `INFO` gets the help reply. Every SMS carries the opt-out line.
+- Email bounces and complaints: a signed provider event suppresses the address its delivery
+  went to with reason `bounce` or `complaint` (`resend.md` R-8).
 
 **D-10. Tenancy.** Every table has `tenant_id`, forced RLS and the tenant policy, and is in the
 catalog isolation test. The worker runs as the service role (the outbox processing entry
@@ -143,6 +146,6 @@ point) and names `tenant_id` in every statement.
 
 - Claims are ordered by due time across tenants, with no per-tenant fairness yet.
 - Backoff has no jitter: core has no randomness source, and none is injected yet.
-- Top-ups, provider adapters, inbound SMS webhooks and bounce or complaint feedback arrive with
-  M5. `creditWallet`, `createInboundSmsSession` and service-role suppression inserts are the
-  seams they will call.
+- Top-ups, the SMS provider and inbound SMS webhooks arrive with M5. The email provider is
+  Resend (`resend.md`). `creditWallet` and `createInboundSmsSession` are the seams they will
+  call.
