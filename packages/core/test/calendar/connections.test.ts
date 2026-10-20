@@ -26,7 +26,7 @@ import {
   pkceChallenge,
   pkceVerifier,
   sealRefreshToken,
-  verifyOAuthState,
+  verifyConnectState,
   type EdgeDependencies,
   type GoogleClient,
 } from "../../src/index.js";
@@ -263,7 +263,7 @@ describe("listCalendarConnections and startGoogleConnect", () => {
     const { authorizeUrl } = await createSession(deps(), { tenantId, actorId: ownerId }).startGoogleConnect({ resourceId }, key);
     const query = new URL(authorizeUrl).searchParams;
     const connectionId = derivedId(tenantId, key, "calendar_connection");
-    expect(verifyOAuthState({ current: STATE_SECRET }, query.get("state")!, clock.now())).toEqual({
+    expect(verifyConnectState({ current: STATE_SECRET }, query.get("state")!, clock.now())).toEqual({
       tenantId, actorId: ownerId, resourceId, connectionId, expiresAt: Date.parse(NOW) + 10 * 60_000,
     });
     expect(query.get("code_challenge")).toBe(pkceChallenge(pkceVerifier(STATE_SECRET, connectionId)));

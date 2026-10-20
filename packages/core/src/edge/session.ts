@@ -112,7 +112,7 @@ import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } fro
 import { getTopUpForCheckout, listTopUps, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
 import { calendarHandlers, getCalendarConnection, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
-import { OAUTH_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signOAuthState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
+import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
 import type { GoogleClient } from "../calendar/types.js";
 import { derivedId } from "./ids.js";
 import { SiteStoreUnavailable, validationError } from "./errors.js";
@@ -723,8 +723,8 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
           throw new IdempotencyConflict("Idempotency key belongs to another calendar connection");
       });
       const secret = calendar.stateSecrets.current;
-      const state = signOAuthState(secret, {
-        tenantId, actorId, resourceId: request.resourceId, connectionId, expiresAt: now + OAUTH_STATE_LIFETIME_MS,
+      const state = signConnectState(secret, {
+        tenantId, actorId, resourceId: request.resourceId, connectionId, expiresAt: now + CONNECT_STATE_LIFETIME_MS,
       });
       return parseInput(connectGoogleCalendarResponseSchema, {
         authorizeUrl: calendar.google.authorizeUrl({ state, codeChallenge: pkceChallenge(pkceVerifier(secret, connectionId)) }),

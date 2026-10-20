@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiErrorBodySchema, calendarConnectionListSchema, calendarConnectionSchema, connectGoogleCalendarResponseSchema } from "@zs/contracts";
-import { DatabaseUnavailable, derivedId, openRefreshToken, pkceChallenge, pkceVerifier, signOAuthState, verifyOAuthState } from "@zs/core";
+import { DatabaseUnavailable, derivedId, openRefreshToken, pkceChallenge, pkceVerifier, signConnectState, verifyConnectState } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { call, createApiHarness, NOW, signedInMember, type ApiHarness, type MemberSetup } from "./helpers.js";
 import {
@@ -126,11 +126,11 @@ describe("POST /v1/calendar/google/connect (G-1)", () => {
       code_challenge_method: "S256",
     });
     const connectionId = derivedId(h.a.tenantId, key, "calendar_connection");
-    expect(verifyOAuthState({ current: STATE_SECRET }, query.get("state")!, clock.now())).toEqual({
+    expect(verifyConnectState({ current: STATE_SECRET }, query.get("state")!, clock.now())).toEqual({
       tenantId: h.a.tenantId, actorId: h.a.actorId, resourceId, connectionId, expiresAt: now + 10 * 60_000,
     });
     // Signed by the current secret only: another secret does not verify it.
-    expect(verifyOAuthState({ current: PREVIOUS_STATE_SECRET }, query.get("state")!, clock.now())).toBeNull();
+    expect(verifyConnectState({ current: PREVIOUS_STATE_SECRET }, query.get("state")!, clock.now())).toBeNull();
     expect(query.get("code_challenge")).toBe(pkceChallenge(pkceVerifier(STATE_SECRET, connectionId)));
     expect(await rows(h.a.tenantId)).toEqual(before);
 
@@ -222,7 +222,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
 
   it("answers 400 JSON, never a redirect, for a missing, forged, tampered or expired state", async () => {
     const flow = await consentFor(h.a, await newResource(h.a.tenantId));
-    const forged = signOAuthState(["forged", "x".repeat(40)].join("-"), verifyOAuthState({ current: STATE_SECRET }, flow.state, clock.now())!);
+    const forged = signConnectState(["forged", "x".repeat(40)].join("-"), verifyConnectState({ current: STATE_SECRET }, flow.state, clock.now())!);
     const [body, tag] = flow.state.slice("zgs1.".length).split(".");
     const tampered = `zgs1.${body!.slice(0, -2)}AA.${tag}`;
     const calls = tokenCalls();

@@ -4,12 +4,12 @@ import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   channelToken,
-  OAUTH_STATE_LIFETIME_MS,
+  CONNECT_STATE_LIFETIME_MS,
   pkceChallenge,
   pkceVerifier,
-  signOAuthState,
+  signConnectState,
   verifyChannelToken,
-  verifyOAuthState,
+  verifyConnectState,
   type OAuthState,
 } from "../../src/index.js";
 
@@ -17,7 +17,7 @@ const NOW = Date.parse("2026-10-20T09:00:00.000Z");
 const secret = () => randomBytes(32).toString("hex");
 const state = (over: Partial<OAuthState> = {}): OAuthState => ({
   tenantId: randomUUID(), actorId: randomUUID(), resourceId: randomUUID(), connectionId: randomUUID(),
-  expiresAt: NOW + OAUTH_STATE_LIFETIME_MS, ...over,
+  expiresAt: NOW + CONNECT_STATE_LIFETIME_MS, ...over,
 });
 const at = (ms: number) => new Date(ms);
 
@@ -25,44 +25,44 @@ describe("the OAuth state (G-1, G-2)", () => {
   it("signs and verifies, lower-casing the IDs", () => {
     const key = secret();
     const input = state({ tenantId: randomUUID().toUpperCase() });
-    const token = signOAuthState(key, input);
+    const token = signConnectState(key, input);
     expect(token).toMatch(/^zgs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
     expect(token.length).toBeLessThanOrEqual(600);
-    expect(verifyOAuthState({ current: key }, token, at(NOW))).toEqual({ ...input, tenantId: input.tenantId.toLowerCase() });
+    expect(verifyConnectState({ current: key }, token, at(NOW))).toEqual({ ...input, tenantId: input.tenantId.toLowerCase() });
   });
 
   it("verifies through a rotation with the previous secret, and not with an unknown one", () => {
     const [old, next] = [secret(), secret()];
     const input = state();
-    const token = signOAuthState(old, input);
-    expect(verifyOAuthState({ current: next, previous: old }, token, at(NOW))).toEqual(input);
-    expect(verifyOAuthState({ current: next }, token, at(NOW))).toBeNull();
-    expect(verifyOAuthState({ current: next, previous: secret() }, token, at(NOW))).toBeNull();
-    expect(verifyOAuthState({ current: old, previous: undefined }, token, at(NOW))).toEqual(input);
+    const token = signConnectState(old, input);
+    expect(verifyConnectState({ current: next, previous: old }, token, at(NOW))).toEqual(input);
+    expect(verifyConnectState({ current: next }, token, at(NOW))).toBeNull();
+    expect(verifyConnectState({ current: next, previous: secret() }, token, at(NOW))).toBeNull();
+    expect(verifyConnectState({ current: old, previous: undefined }, token, at(NOW))).toEqual(input);
   });
 
   it("is valid up to the millisecond before expiry, not at it", () => {
     const key = secret();
     const input = state({ expiresAt: NOW + 1000 });
-    const token = signOAuthState(key, input);
-    expect(verifyOAuthState({ current: key }, token, at(NOW + 999))).toEqual(input);
-    expect(verifyOAuthState({ current: key }, token, at(NOW + 1000))).toBeNull();
-    expect(verifyOAuthState({ current: key }, token, at(NOW + 1001))).toBeNull();
+    const token = signConnectState(key, input);
+    expect(verifyConnectState({ current: key }, token, at(NOW + 999))).toEqual(input);
+    expect(verifyConnectState({ current: key }, token, at(NOW + 1000))).toBeNull();
+    expect(verifyConnectState({ current: key }, token, at(NOW + 1001))).toBeNull();
   });
 
   it("refuses any change to the body or the tag, including non-canonical spellings of the tag", () => {
     const key = secret();
-    const token = signOAuthState(key, state());
+    const token = signConnectState(key, state());
     const [prefix, body, tag] = token.split(".") as [string, string, string];
     const swap = (text: string, index: number) => {
       const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
       return [...alphabet].filter((char) => char !== text[index]).map((char) => `${text.slice(0, index)}${char}${text.slice(index + 1)}`);
     };
     for (const index of [0, Math.floor(body.length / 2), body.length - 1])
-      for (const changed of swap(body, index).slice(0, 8)) expect(verifyOAuthState({ current: key }, `${prefix}.${changed}.${tag}`, at(NOW))).toBeNull();
+      for (const changed of swap(body, index).slice(0, 8)) expect(verifyConnectState({ current: key }, `${prefix}.${changed}.${tag}`, at(NOW))).toBeNull();
     // Every other last character: some decode to the same 32 bytes (the low bits are padding).
-    for (const changed of swap(tag, 42)) expect(verifyOAuthState({ current: key }, `${prefix}.${body}.${changed}`, at(NOW)), changed).toBeNull();
-    for (const changed of swap(tag, 0).slice(0, 8)) expect(verifyOAuthState({ current: key }, `${prefix}.${body}.${changed}`, at(NOW))).toBeNull();
+    for (const changed of swap(tag, 42)) expect(verifyConnectState({ current: key }, `${prefix}.${body}.${changed}`, at(NOW)), changed).toBeNull();
+    for (const changed of swap(tag, 0).slice(0, 8)) expect(verifyConnectState({ current: key }, `${prefix}.${body}.${changed}`, at(NOW))).toBeNull();
   });
 
   it("refuses a validly signed body that is not five lower-case UUIDs and a safe integer", () => {
@@ -72,7 +72,7 @@ describe("the OAuth state (G-1, G-2)", () => {
       return `zgs1.${body}.${createHmac("sha256", key).update(`zgs1.${body}`).digest().toString("base64url")}`;
     };
     const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
-    expect(verifyOAuthState({ current: key }, forge([...ids, NOW + 1000]), at(NOW))).not.toBeNull();
+    expect(verifyConnectState({ current: key }, forge([...ids, NOW + 1000]), at(NOW))).not.toBeNull();
     const bad: unknown[] = [
       [...ids],
       [...ids, NOW + 1000, "extra"],
@@ -86,12 +86,12 @@ describe("the OAuth state (G-1, G-2)", () => {
       "not json",
       "null",
     ];
-    for (const fields of bad) expect(verifyOAuthState({ current: key }, forge(fields), at(NOW)), JSON.stringify(fields)).toBeNull();
+    for (const fields of bad) expect(verifyConnectState({ current: key }, forge(fields), at(NOW)), JSON.stringify(fields)).toBeNull();
   });
 
   it("refuses malformed tokens", () => {
     const key = secret();
-    const token = signOAuthState(key, state());
+    const token = signConnectState(key, state());
     const [, body, tag] = token.split(".") as [string, string, string];
     const malformed = [
       "",
@@ -108,7 +108,7 @@ describe("the OAuth state (G-1, G-2)", () => {
       `zgs1.${"A".repeat(600)}.${tag}`,
       ` ${token}`,
     ];
-    for (const value of malformed) expect(verifyOAuthState({ current: key }, value, at(NOW)), value.slice(0, 30)).toBeNull();
+    for (const value of malformed) expect(verifyConnectState({ current: key }, value, at(NOW)), value.slice(0, 30)).toBeNull();
   });
 });
 

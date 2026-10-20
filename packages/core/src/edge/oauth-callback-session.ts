@@ -15,7 +15,7 @@ import {
 import { readClock } from "../booking/slots.js";
 import { getCalendarConnection, googleConnectIdempotencyKey } from "../calendar/connections.js";
 import { GOOGLE_EVENTS_SCOPE } from "../calendar/google.js";
-import { pkceVerifier, verifyOAuthState, type OAuthState } from "../calendar/oauth-state.js";
+import { pkceVerifier, verifyConnectState, type OAuthState } from "../calendar/oauth-state.js";
 import { sealRefreshToken } from "../calendar/seal.js";
 import { GoogleRequestFailed, type GoogleTokenGrant } from "../calendar/types.js";
 import { requireMember } from "../members/access.js";
@@ -51,10 +51,10 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
       if (!calendar) throw new NotFound();
       const now = new Date(readClock(deps.clock));
       const token = input.state ?? "";
-      const state = verifyOAuthState(calendar.stateSecrets, token, now);
+      const state = verifyConnectState(calendar.stateSecrets, token, now);
       if (!state) return { ok: false, status: 400 };
       // The verifier derives from the secret that signed this state, which may be the previous one.
-      const signer = verifyOAuthState({ current: calendar.stateSecrets.current }, token, now) !== null
+      const signer = verifyConnectState({ current: calendar.stateSecrets.current }, token, now) !== null
         ? calendar.stateSecrets.current
         : calendar.stateSecrets.previous!;
       const { tenantId, actorId, connectionId } = state;

@@ -4,7 +4,7 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 const PREFIX = "zgs1.";
-export const OAUTH_STATE_LIFETIME_MS = 10 * 60 * 1000;
+export const CONNECT_STATE_LIFETIME_MS = 10 * 60 * 1000;
 
 export interface OAuthStateSecrets {
   /** Signs new states and verifies. */
@@ -24,7 +24,7 @@ export interface OAuthState {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const tag = (secret: string, body: string) => createHmac("sha256", secret).update(`${PREFIX}${body}`).digest();
 
-export function signOAuthState(secret: string, state: OAuthState): string {
+export function signConnectState(secret: string, state: OAuthState): string {
   const body = Buffer.from(JSON.stringify([
     state.tenantId.toLowerCase(), state.actorId.toLowerCase(), state.resourceId.toLowerCase(),
     state.connectionId.toLowerCase(), state.expiresAt,
@@ -33,7 +33,7 @@ export function signOAuthState(secret: string, state: OAuthState): string {
 }
 
 /** The state, or null when it is malformed, not signed by a known secret, or expired. */
-export function verifyOAuthState(secrets: OAuthStateSecrets, token: string, now: Date): OAuthState | null {
+export function verifyConnectState(secrets: OAuthStateSecrets, token: string, now: Date): OAuthState | null {
   if (token.length > 600 || !token.startsWith(PREFIX)) return null;
   const parts = token.slice(PREFIX.length).split(".");
   if (parts.length !== 2 || !/^[A-Za-z0-9_-]+$/.test(parts[0]!) || !/^[A-Za-z0-9_-]{43}$/.test(parts[1]!)) return null;
