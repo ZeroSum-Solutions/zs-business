@@ -237,3 +237,13 @@ describe("paging by cursor (W4)", () => {
     }
   });
 });
+
+describe("/v1/sites without a site store", () => {
+  it("is an unknown route, and writes nothing", async () => {
+    expect((await call(h.app, "GET", "/v1/sites", { token: h.a.token })).status).toBe(404);
+    const create = await call(h.app, "POST", "/v1/sites", { token: h.a.token, key: randomUUID(), body: { name: "Main site" } });
+    expect(create.status).toBe(404);
+    const rows = await h.fixture.service(async (tx) => (await tx.query("SELECT 1 FROM sites WHERE tenant_id=$1", [h.a.tenantId])).rowCount);
+    expect(rows).toBe(0);
+  });
+});

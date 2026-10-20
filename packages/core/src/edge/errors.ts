@@ -37,6 +37,17 @@ export class AuthUnavailable extends Error {
   }
 }
 
+/**
+ * The site object store (R2) failed before anything was committed, so nothing changed and a
+ * retry with the same key is safe. Maps to 503 Unavailable. Its message is fixed text.
+ */
+export class SiteStoreUnavailable extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super("The site store did not answer", options);
+    this.name = "SiteStoreUnavailable";
+  }
+}
+
 export function apiErrorBody(code: ApiErrorCode, message: string, details: Record<string, JsonValue> = {}): ApiErrorBody {
   return { error: { code, message, details } };
 }
@@ -88,6 +99,8 @@ export function mapError(error: unknown): MappedError {
   if (error instanceof DatabaseUnavailable) return mapped(503, "Unavailable");
   // Supabase Auth could not say whether the token or its session is good: retry later.
   if (error instanceof AuthUnavailable) return mapped(503, "Unavailable");
+  // The release's files could not be stored, and the publish was not recorded: retry later.
+  if (error instanceof SiteStoreUnavailable) return mapped(503, "Unavailable");
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":

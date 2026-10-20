@@ -4,7 +4,7 @@ import {
   siteObjectKeys,
   siteReleaseManifestSchema,
   type SiteFile,
-  type SiteHostPointer,
+  type SiteHostLivePointer,
   type SiteObjectReader,
   type SiteReleaseManifest,
 } from "@zs/contracts";
@@ -66,6 +66,11 @@ function plain(status: number, text: string, extra: Record<string, string> = {})
 const notFound = () => plain(404, "Not found");
 const badGateway = () => plain(502, "Bad gateway");
 
+/** A 308 keeps the method. Its target depends on the live release, so it is never cached. */
+function redirect(location: string): Response {
+  return new Response(null, { status: 308, headers: { location, "cache-control": "no-store", ...SECURITY_HEADERS } });
+}
+
 /** Serve the request from the live release of its host. Uses web-standard APIs only. */
 export async function serveSite(request: Request, store: SiteObjectReader, options: ServeSiteOptions = {}): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") return plain(405, "Method not allowed", { allow: "GET, HEAD" });
@@ -78,17 +83,21 @@ export async function serveSite(request: Request, store: SiteObjectReader, optio
   const route = parsePath(url.pathname);
   if (route === "malformed") return plain(400, "Bad request");
 
-  // The one pointer read of this request. No object: no site here (404). An object that does
-  // not parse or names another host is a broken projection, not a missing site (502).
+  // The one pointer read of this request. No object, or a retired one (the host was detached):
+  // no site here (404). An object that does not parse or names another host is a broken
+  // projection, not a missing site (502).
   const pointerObject = await store.get(siteObjectKeys.host(host));
   if (!pointerObject) return notFound();
   const pointer = parseJson(pointerObject.body, siteHostPointerSchema);
   if (!pointer || pointer.host !== host) return badGateway();
+  if ("retired" in pointer) return notFound();
 
   const release = await loadManifest(store, pointer, options.manifestCache);
   if (!release) return badGateway();
 
   const file = route === "invalid" ? undefined : resolveFile(release, route);
+  // Same-origin path and query only. parsePath refused empty segments, so it cannot start "//".
+  if (file === "add-slash") return redirect(`${url.pathname}/${url.search}`);
   if (file) return serveFile(request, store, pointer, file, 200);
   const page = release.files.get("404.html");
   return page ? serveFile(request, store, pointer, page, 404) : notFound();
@@ -125,16 +134,21 @@ function parsePath(pathname: string): Route {
   return { segments, directory };
 }
 
-/** "/" → entry; "/a/b/" → a/b/index.html; "/a/b" → a/b, else a/b.html, else a/b/index.html. */
-function resolveFile(release: CachedManifest, route: Exclude<Route, "invalid" | "malformed">): SiteFile | undefined {
+/**
+ * "/" → entry; "/a/b/" → a/b/index.html; "/a/b" → a/b, else a/b.html, else "add-slash" when
+ * a/b/index.html exists, so relative links in that page resolve under "/a/b/".
+ */
+function resolveFile(release: CachedManifest, route: Exclude<Route, "invalid" | "malformed">): SiteFile | "add-slash" | undefined {
   if (route.segments.length === 0) return release.files.get(release.manifest.entry);
   const path = route.segments.join("/");
   if (route.directory) return release.files.get(`${path}/index.html`);
-  return release.files.get(path) ?? release.files.get(`${path}.html`) ?? release.files.get(`${path}/index.html`);
+  const file = release.files.get(path) ?? release.files.get(`${path}.html`);
+  if (file) return file;
+  return release.files.has(`${path}/index.html`) ? "add-slash" : undefined;
 }
 
 /** The pointer's manifest, checked against the pointer on every request; null when unusable. */
-async function loadManifest(store: SiteObjectReader, pointer: SiteHostPointer, cache: ManifestCache | undefined): Promise<CachedManifest | null> {
+async function loadManifest(store: SiteObjectReader, pointer: SiteHostLivePointer, cache: ManifestCache | undefined): Promise<CachedManifest | null> {
   const key = siteObjectKeys.manifest(pointer.tenantId, pointer.releaseId);
   let release = cache?.get(key);
   if (!release) {
@@ -151,10 +165,11 @@ async function loadManifest(store: SiteObjectReader, pointer: SiteHostPointer, c
   return release;
 }
 
-async function serveFile(request: Request, store: SiteObjectReader, pointer: SiteHostPointer, file: SiteFile, status: 200 | 404): Promise<Response> {
-  const etag = `"${file.sha256}"`;
-  const headers: Record<string, string> = { "cache-control": FILE_CACHE_CONTROL, ...SECURITY_HEADERS };
-  // The etag names the bytes, which the manifest already holds: a match needs no blob read.
+async function serveFile(request: Request, store: SiteObjectReader, pointer: SiteHostLivePointer, file: SiteFile, status: 200 | 404): Promise<Response> {
+  // The etag names the bytes and the media type, both from the manifest: a match needs no blob
+  // read, and a release that keeps the bytes but changes the type does not revalidate the old copy.
+  const etag = `"${file.sha256}-${fnv1a(file.mediaType)}"`;
+  const headers: Record<string, string> = { "cache-control": FILE_CACHE_CONTROL, "content-type": file.mediaType, ...SECURITY_HEADERS };
   if (status === 200) {
     headers.etag = etag;
     if (matchesEtag(request.headers.get("if-none-match"), etag)) return new Response(null, { status: 304, headers });
@@ -162,7 +177,6 @@ async function serveFile(request: Request, store: SiteObjectReader, pointer: Sit
   // HEAD reads the blob too, so it answers with the same status a GET would.
   const blob = await store.get(siteObjectKeys.blob(pointer.tenantId, file.sha256));
   if (!blob || blob.body.byteLength !== file.bytes) return badGateway();
-  headers["content-type"] = file.mediaType;
   headers["content-length"] = String(file.bytes);
   const body = request.method === "HEAD" ? null : new Uint8Array(blob.body);
   return new Response(body, { status, headers });
@@ -175,6 +189,13 @@ function matchesEtag(header: string | null, etag: string): boolean {
     const value = tag.trim();
     return value === "*" || value.replace(/^W\//, "") === etag;
   });
+}
+
+/** 32-bit FNV-1a over the UTF-8 bytes, as 8 hex digits. Sync and stable; not a security hash. */
+function fnv1a(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(text)) hash = Math.imul(hash ^ byte, 0x01000193);
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function parseJson<T>(body: Uint8Array, schema: z.ZodType<T>): T | null {

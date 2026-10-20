@@ -100,7 +100,7 @@ export interface HarnessOptions {
   publicIntake?: Partial<PublicIntakeConfig>;
   clock?: { now(): Date };
   /** Turns the /v1/sites routes on over this store and compiler. */
-  sites?: { store: SiteObjectStore; compiler: SiteCompiler };
+  sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
 }
 
 export async function createApiHarness(options: HarnessOptions = {}): Promise<ApiHarness> {

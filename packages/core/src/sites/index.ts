@@ -18,8 +18,8 @@ export { siteHandlers } from "./handlers.js";
 export { plainSiteCompiler, verifyCompiledSite, type CompiledSite, type CompiledSiteFile, type SiteCompiler, type VerifiedRelease } from "./compiler.js";
 export { createMemorySiteStore, type MemorySiteStore } from "./memory-store.js";
 export { storeReleaseFiles } from "./publish.js";
-export { loadSiteEdgeState, projectSiteEdge, retractHostPointer, syncSiteEdge, type SiteEdgeState } from "./sync.js";
-export { attachSiteHost, detachSiteHost, type SiteHostInput } from "./hosts.js";
+export { loadSiteEdgeState, projectSiteEdge, retractHostPointer, syncSiteEdge, type ProjectOptions, type SiteEdgeState } from "./sync.js";
+export { attachSiteHost, detachSiteHost, type DetachedHost, type SiteHostInput } from "./hosts.js";
 export { findSite, getRelease, getSite, listReleases, listSites } from "./reads.js";
 
 interface SiteWriteContext {

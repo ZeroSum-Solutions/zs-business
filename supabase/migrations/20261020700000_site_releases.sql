@@ -73,6 +73,11 @@ CREATE TABLE public.site_activations (
   FOREIGN KEY (tenant_id, site_id, release_id) REFERENCES public.site_releases(tenant_id, site_id, id)
 );
 
+-- Each attach and each detach of a host takes the next number. The edge pointer for a host
+-- carries the number it was written under, and a pointer never replaces one with a higher
+-- number, so a slow sync from a site that has since lost the host cannot take it back.
+CREATE SEQUENCE public.site_host_assignment_seq AS bigint;
+
 -- Host names a site answers on. A host belongs to one site in the whole system, so hosts are
 -- attached by the service role after the Mac verifies the domain; runtime only reads them.
 CREATE TABLE public.site_hosts (
@@ -84,6 +89,7 @@ CREATE TABLE public.site_hosts (
       char_length(host) <= 253
       AND host ~ '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'),
   site_id uuid NOT NULL,
+  assignment bigint NOT NULL DEFAULT nextval('public.site_host_assignment_seq') CHECK (assignment >= 1),
   created_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, host),
   CONSTRAINT site_hosts_host_unique UNIQUE (host),
@@ -136,6 +142,14 @@ BEGIN
   END LOOP;
 END $$;
 REVOKE UPDATE, DELETE ON public.site_releases, public.site_release_files, public.site_activations FROM service_role;
+-- Attach and detach take assignment numbers from the sequence; only the service role may.
+REVOKE ALL ON SEQUENCE public.site_host_assignment_seq FROM PUBLIC, authenticated, service_role;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
+    REVOKE ALL ON SEQUENCE public.site_host_assignment_seq FROM anon;
+  END IF;
+END $$;
+GRANT USAGE ON SEQUENCE public.site_host_assignment_seq TO service_role;
 
 -- Runtime: create sites and rename them, record releases, and move the pointer. Hosts are read-only.
 GRANT SELECT, INSERT ON public.sites, public.site_releases, public.site_release_files, public.site_pointers, public.site_activations TO authenticated;

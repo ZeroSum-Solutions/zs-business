@@ -21,15 +21,22 @@ digest only, so one tenant's host can never read another tenant's objects.
 
 - `/` serves the manifest's entry file.
 - `/a/b/` serves `a/b/index.html`.
-- `/a/b` serves `a/b`, else `a/b.html`, else `a/b/index.html`.
+- `/a/b` serves `a/b`, else `a/b.html`. When neither exists but `a/b/index.html` does, it
+  answers 308 to `/a/b/` (query string kept), so relative links in that page resolve under
+  the directory.
 - An unknown path serves the release's `404.html` with status 404, or a plain 404.
 
 ## Status codes
 
-- 200: a file. It carries `etag` (the quoted SHA-256), `cache-control: public, max-age=0,
-  must-revalidate`, `x-content-type-options: nosniff` and
-  `referrer-policy: strict-origin-when-cross-origin`.
-- 304: `If-None-Match` matches the file's etag. The blob is not read.
+- 200: a file. It carries `content-type` (the manifest's media type), `etag`,
+  `cache-control: public, max-age=0, must-revalidate`, `x-content-type-options: nosniff` and
+  `referrer-policy: strict-origin-when-cross-origin`. The etag is
+  `"<sha256>-<fnv1a>"`: the file's SHA-256, then a 32-bit FNV-1a of its media type as 8 hex
+  digits, so a release that keeps the bytes but changes the type does not revalidate old copies.
+- 304: `If-None-Match` matches the file's etag. It carries the 200's headers, `content-type`
+  included, except `content-length`, and no body. The blob is not read.
+- 308: a directory requested without its trailing slash. `location` is the same path with `/`
+  added and the query string kept; `cache-control: no-store`, no body. The blob is not read.
 - 400: the path has malformed percent-encoding.
 - 404: the host is not a valid DNS name, has no pointer, or the path is unknown. Paths with
   empty, `.` or `..` segments, or segments that decode to a slash, are unknown.

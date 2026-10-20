@@ -109,7 +109,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `PUBLIC_CLIENT_IP_HEADER` | Optional: a header the host overwrites on every request (Vercel: `x-vercel-forwarded-for`), used for the per-address limits. Only when the API is reachable through that host alone. |
 | `PUBLIC_TRUSTED_PROXIES` | Optional, instead of the header: comma-separated CIDRs whose `X-Forwarded-For` entries count. |
 | `PUBLIC_RATE_ADDRESS_WRITES`, `PUBLIC_RATE_ADDRESS_READS`, `PUBLIC_RATE_TENANT_WRITES` | Optional overrides of the public rate limits. |
-| `SITES_STORE` | Optional: turns site publishing on. `r2` stores releases in Cloudflare R2 (needs the four `R2_*` variables); `memory` keeps them in the process, loopback `DATABASE_URL` only. Unset, publishing answers 404. |
+| `SITES_STORE` | Optional: turns site publishing on. `r2` stores releases in Cloudflare R2 (needs the four `R2_*` variables); `memory` keeps them in the process, loopback `DATABASE_URL` only. Unset, every `/v1/sites` route answers 404 and nothing is written. |
 | `SITE_COMPILER` | `plain` (the default and only value): the built-in compiler for `{ kind: "plain" }` specs. The Mish publisher is passed to `createServer` in code, not named here. |
 | `R2_ENDPOINT` | `r2` only: `https://<account-id>.r2.cloudflarestorage.com`. https only. |
 | `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
@@ -224,7 +224,7 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
-`stale_release`;
+`stale_release`, `host_in_use`;
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.
@@ -240,24 +240,35 @@ Worker (`apps/site-worker`) serves each host's live release from R2.
    recomputes every SHA-256 and the release digest, and refuses unsafe paths, over 500 files,
    10 MB a file or 50 MB a release. Only owners get this far, and the check runs before any
    bytes are stored.
-2. **Store.** Each file is stored once at `t/<tenant>/blobs/<sha256>`. Blobs never change.
+2. **Store.** Each file is stored once at `t/<tenant>/blobs/<sha256>`, up to 12 checks or
+   uploads at a time. Blobs never change. If the store fails here nothing is recorded and the
+   answer is 503 `Unavailable`. A retry with a key that already committed skips this step and
+   replays the recorded result, so it works while the store is down.
 3. **Record and go live.** One dispatched action (`site.release.publish`) records the release,
    its files and the spec, and moves the site pointer (`site_pointers`, one row update, version
    +1) in the same transaction as the action record and its outbox event.
 4. **Project to the edge.** After the commit the API writes the release manifest
    (`t/<tenant>/releases/<release>/manifest.json`, once) and each host's pointer
-   (`hosts/<host>`). A pointer moves only to a higher version, by compare-and-set on the R2
-   etag, so a slow or repeated sync never brings back an older release. If this step fails the
-   answer still says what committed, with `edge: "pending"`; the Worker keeps serving the
-   previous release until `POST /v1/sites/:id/sync` (or a later publish) succeeds.
+   (`hosts/<host>`). No pointer moves until the manifest is in the store. Pointers move by
+   compare-and-set on the R2 etag and are ordered by the host's assignment number
+   (`site_hosts.assignment`, from `site_host_assignment_seq`), then by version. So a slow or
+   repeated sync never brings back an older release, and a sync from a site that has since
+   lost the host never takes it back. This step gets at most 5 seconds, and always leaves a
+   second before the request deadline. If it fails or runs out of time, the answer still says
+   what committed, with `edge: "pending"`. The Worker keeps serving the previous release until
+   `POST /v1/sites/:id/sync` (or a later publish) succeeds.
 
 Rollback is `POST /v1/sites/:id/releases/:releaseId/activate` with the release the caller
 saw as live. It moves the pointer the same way. `site_activations` keeps who made which
 release live, and releases, their files and activations are append-only for every role.
 
 Host names are attached by the service role only (`attachSiteHost` in `@zs/core`), since a
-host belongs to one site in the whole system and must be verified first. Detaching is
-`detachSiteHost`, then `retractHostPointer` to stop the Worker serving it.
+host belongs to one site in the whole system and must be verified first. Every attach and
+detach takes the next assignment number. Detaching is `detachSiteHost`, which returns the
+normalized host and the detach's number. After its commit, `retractHostPointer` writes a
+retired pointer under that number, and the Worker answers 404 for it. A pointer written later
+for the host's next site has a higher number and replaces it. A late sync or retraction from
+the old site has a lower one and changes nothing. Retraction is safe to repeat.
 
 ### What the Mac sets up
 

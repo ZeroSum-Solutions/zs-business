@@ -37,7 +37,7 @@ export interface AppDependencies {
   /** Public booking pages and the widget (public-intake.md); absent means the routes are off. */
   readonly publicIntake?: PublicIntakeConfig;
   /** Site publishing (M4b): where releases are stored and how specs compile; absent means /v1/sites is off. */
-  readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler };
+  readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler; readonly syncTimeoutMs?: number };
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -121,8 +121,10 @@ export function createApp(deps: AppDependencies) {
     ...(deps.sites ? { sites: deps.sites } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
-  const requestEdge = (c: Context<AppEnv>) =>
-    ({ ...edge, db: withDeadline(edge.db, c.var.signal, () => c.var.deadline - deps.clock.now().getTime()) });
+  const requestEdge = (c: Context<AppEnv>) => {
+    const timeLeft = () => c.var.deadline - deps.clock.now().getTime();
+    return { ...edge, db: withDeadline(edge.db, c.var.signal, timeLeft), timeLeft };
+  };
   // Anonymous routes sit outside /v1, so the owner auth middleware never runs for them.
   if (deps.publicIntake) {
     const routes = publicRoutes(edge, deps.publicIntake, requestEdge);
@@ -147,7 +149,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/booking", bookingRoutes);
   app.route("/v1/crm", crmRoutes);
   app.route("/v1/intake", intakeRoutes);
-  app.route("/v1/sites", siteRoutes);
+  // Off without a site store: /v1/sites is then an unknown route (404), like the session's check.
+  if (deps.sites) app.route("/v1/sites", siteRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));

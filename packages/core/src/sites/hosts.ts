@@ -1,11 +1,15 @@
 // Host names, attached and detached by the service role only: a host belongs to one site in
 // the whole system, so it is attached after the Mac has verified the domain (DNS, and Cloudflare
 // Custom Hostnames for a tenant's own domain). Runtime sessions can only read hosts.
+//
+// Every attach and detach takes the next `site_host_assignment_seq` number. Edge pointers carry
+// it, and a pointer never replaces one with a higher number (sync.ts), so the order in which
+// the database gave a host out is the order the edge honours, however late a sync runs.
 import { Conflict, NotFound, siteHostSchema } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { validationError } from "../edge/errors.js";
 
-function parseHost(value: string): string {
+export function parseHost(value: string): string {
   const parsed = siteHostSchema.safeParse(value);
   if (!parsed.success) throw validationError("Invalid host", parsed.error.issues);
   return parsed.data;
@@ -41,11 +45,27 @@ export async function attachSiteHost(tx: Transaction, input: SiteHostInput, now:
   return host;
 }
 
-/** Detach a host in a service-role transaction. Answers whether a row was removed. */
-export async function detachSiteHost(tx: Transaction, input: SiteHostInput): Promise<boolean> {
+/** What a detach hands to `retractHostPointer` once its transaction commits. */
+export interface DetachedHost {
+  /** The normalized host name. */
+  readonly host: string;
+  /** The detach's own number, above the assignment it ended. */
+  readonly assignment: number;
+}
+
+/**
+ * Detach a host in a service-role transaction. Answers null when the site did not hold it.
+ * After commit, pass the answer to `retractHostPointer` so the edge stops serving the host.
+ */
+export async function detachSiteHost(tx: Transaction, input: SiteHostInput): Promise<DetachedHost | null> {
   const host = parseHost(input.host);
-  const removed = await tx.query(
-    "DELETE FROM site_hosts WHERE tenant_id=$1 AND site_id=$2 AND host=$3", [input.tenantId, input.siteId, host],
+  // Lock the row, then number the detach, then delete: an attach waiting on this row takes
+  // its number after the commit, so it is always above the detach's.
+  const held = await tx.query(
+    "SELECT 1 FROM site_hosts WHERE tenant_id=$1 AND site_id=$2 AND host=$3 FOR UPDATE", [input.tenantId, input.siteId, host],
   );
-  return removed.rowCount === 1;
+  if (held.rowCount !== 1) return null;
+  const numbered = await tx.query<{ assignment: string }>("SELECT nextval('public.site_host_assignment_seq') AS assignment");
+  await tx.query("DELETE FROM site_hosts WHERE tenant_id=$1 AND site_id=$2 AND host=$3", [input.tenantId, input.siteId, host]);
+  return { host, assignment: Number(numbered.rows[0]!.assignment) };
 }
