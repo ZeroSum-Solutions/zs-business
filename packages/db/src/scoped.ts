@@ -70,6 +70,12 @@ export interface ScopedDatabase {
    * those policies also require `app.platform`, which only this entry point sets.
    */
   platform?<T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions): Promise<T>;
+  /**
+   * The same runtime transaction with no tenant set, so RLS hides every tenant row. Only for
+   * state that belongs to no tenant and is reached through a function that guards it, such
+   * as the public rate limiter's public.rate_limit_take.
+   */
+  withoutTenant<T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions): Promise<T>;
 }
 
 /**
@@ -281,6 +287,16 @@ async function transaction<T>(
 ): Promise<T> {
   const { signal } = options;
   const client = await checkout(pool, limits.maxWaiting, signal);
+  // pg-pool listens for a client's "error" only while it is idle. A backend lost while this
+  // transaction holds the client (a restart, failover or terminated backend) emits it now,
+  // and unheard it would end the process. The error is kept: a statement sent after the loss
+  // rejects only with node-postgres's code-less "not queryable", and the caller gets
+  // DatabaseUnavailable with the loss as its cause either way. The client is discarded.
+  let lost: Error | undefined;
+  const onLost = (error: Error) => { lost ??= error; };
+  // Simulated poolers in the hosted-probe tests hand out clients without an emitter.
+  const listens = typeof client.on === "function";
+  if (listens) client.on("error", onLost);
   // Which timeouts the caller's deadline shortened: only those report a cancellation as the deadline.
   const cutShort = new Set<string>();
   const state: Abandonment = { abandoned: false };
@@ -346,7 +362,7 @@ async function transaction<T>(
       // transaction ends. These recovery statements bypass the deadline gate, like ROLLBACK:
       // the gate refuses every statement once the deadline has passed, which would leave a
       // pooled backend dirty. Each is bounded by CLEANUP_TIMEOUT_MS instead.
-      if (stage === "work") {
+      if (stage === "work" && !lost) {
         try {
           await within(client.query(`ROLLBACK TO SAVEPOINT ${WORK_SAVEPOINT}`), CLEANUP_TIMEOUT_MS);
           await within(client.query(IN_TRANSACTION_CLEANUP), CLEANUP_TIMEOUT_MS);
@@ -360,8 +376,12 @@ async function transaction<T>(
         }
       }
       // A ROLLBACK that does not answer in time closes the connection too.
-      if (!(await settlesWithin(client.query("ROLLBACK"), CLEANUP_TIMEOUT_MS))) discard = true;
+      if (lost || !(await settlesWithin(client.query("ROLLBACK"), CLEANUP_TIMEOUT_MS))) discard = true;
     }
+    // A lost connection rolled back whatever was not committed; a COMMIT in flight may have
+    // applied. Either way the caller may retry, a write with its idempotency key.
+    if (lost && !(error instanceof DatabaseUnavailable))
+      throw new DatabaseUnavailable(stage === "cleanup" ? "commit_unknown" : "connect", { cause: sqlState(error) ? error : lost });
     // A statement (57014 query_canceled) or lock wait (55P03 lock_not_available) that the
     // caller's deadline cut short is the deadline passing, not a fault in the work.
     if (cutShort.has(sqlState(error) ?? "")) throw new DatabaseUnavailable("aborted", { cause: error });
@@ -370,14 +390,15 @@ async function transaction<T>(
     // Belt and braces: on a direct or session-mode connection this reaches the same backend.
     // Work may also set session-scoped state that a commit keeps. A failed or slow reset
     // discards the client.
-    if (!discard) {
+    if (!discard && lost === undefined) {
       try {
         await within(client.query(SESSION_RESET), CLEANUP_TIMEOUT_MS);
       } catch (error) {
         failed(error);
       }
     }
-    client.release(discard);
+    if (listens) client.removeListener("error", onLost);
+    client.release(discard || lost !== undefined);
   }
 }
 
@@ -401,6 +422,8 @@ export function createScopedDatabase(
       ),
     platform: (work, transactionOptions = {}) =>
       transaction(pool, "authenticated", null, work, limits, transactionOptions, onResetFailure, true),
+    withoutTenant: (work, transactionOptions = {}) =>
+      transaction(pool, "authenticated", null, work, limits, transactionOptions, onResetFailure),
   };
 }
 /** Separate privileged entry point for migrations, provisioning, and outbox workers. */

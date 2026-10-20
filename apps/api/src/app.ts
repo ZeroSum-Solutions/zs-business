@@ -68,6 +68,7 @@ function withDeadline(db: ScopedDatabase, signal: AbortSignal, remainingMs: () =
   const platform = db.platform?.bind(db);
   return {
     tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }),
+    withoutTenant: (work, options) => db.withoutTenant(work, { signal, remainingMs, ...options }),
     ...(platform ? { platform: <T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions) =>
       platform(work, { signal, remainingMs, ...options }) } : {}),
   };
@@ -203,4 +204,5 @@ export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
+export { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";

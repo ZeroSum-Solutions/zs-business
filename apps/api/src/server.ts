@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
 import { createSessionCheckFromConfig, createStripeClient } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
+import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
 import type { ServerEnv } from "./config.js";
 
@@ -34,16 +35,22 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
   const limits = (overrides: Readonly<Record<string, number>>): Partial<RateLimits> =>
     Object.fromEntries(Object.entries(overrides).map(([name, limit]) =>
       [name, { ...DEFAULT_RATE_LIMITS[name as keyof RateLimits], limit }]));
+  // P-10: one limiter shared by every instance on this database, for the booking and the
+  // unsubscribe routes (their bucket names do not overlap). "memory" (loopback only) leaves each
+  // route group its own per-process limiter.
+  const shared = env.rateLimitStore === "postgres" ? { limiter: createPostgresRateLimiter(db, clock) } : {};
   const publicIntake: PublicIntakeConfig | undefined = env.publicIntake === null ? undefined : {
     keySecrets: env.publicIntake.keySecrets,
     publicBaseUrl: env.publicIntake.publicBaseUrl,
     clientIp: env.publicIntake.clientIp,
     limits: limits(env.publicIntake.limitOverrides),
+    ...shared,
   };
   const unsubscribe: UnsubscribeConfig | undefined = env.unsubscribe === null ? undefined : {
     tokenSecrets: env.unsubscribe.tokenSecrets,
     clientIp: env.unsubscribe.clientIp,
     limits: limits(env.unsubscribe.limitOverrides),
+    ...shared,
   };
   const app = createApp({
     verifier: createVerifierFromConfig(env.jwt, clock),
