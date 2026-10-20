@@ -101,7 +101,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
-| `REQUEST_TIMEOUT_MS` | Longest time a `/v1` or `/public/v1` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
+| `REQUEST_TIMEOUT_MS` | Longest time a `/v1`, `/public/v1` or `/webhooks` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
 | `DATABASE_CA_CERT` | PEM. When set, the pool verifies the server against it (`rejectUnauthorized`). Required whenever `DATABASE_URL` is not a loopback host (`127.0.0.1`, `::1`, `localhost`), so a hosted API never falls back to plain TCP; only a loopback database runs without TLS. A non-loopback URL, or any URL with a CA, must carry no query string, because pg lets URL ssl options (`sslmode=no-verify`, `ssl=false`, a `host` override) replace the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
 | `DATABASE_POOL_MAX` | Pool size per process, 1 to 50, default 10. Vercel sets 3: each serverless instance has its own pool. |
@@ -119,6 +119,8 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `PUBLIC_RATE_LIMIT_STORE` | Where the public booking and unsubscribe limits count. `postgres` (default): `public.rate_limit_buckets`, shared by every API instance on the database. `memory`: this process only, refused unless `DATABASE_URL` is a loopback host. |
 | `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets of the `PUBLIC_RATE_LIMIT_STORE` store. |
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
+| `RESEND_WEBHOOK_SECRET` | The signing secret of the Resend webhook endpoint, as Resend shows it (`whsec_` then base64, at least 24 bytes). Anything else is refused. Unset, `POST /webhooks/resend` is off. |
+| `RESEND_WEBHOOK_PREVIOUS_SECRET` | Optional, during a rotation: events signed with it still verify. Needs `RESEND_WEBHOOK_SECRET`. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
 environment or the system clock. Everything else gets them through `createApp(deps)`.
@@ -329,6 +331,39 @@ spends one count from the caller's address bucket (reads and writes apart, limit
 are capped at 8 KiB (413). Responses are `Cache-Control: no-store`,
 `Referrer-Policy: no-referrer`, and the page loads nothing from anywhere (CSP
 `default-src 'none'`, its one inline style pinned by hash, no script).
+
+## Resend webhook (`/webhooks/resend`, no auth)
+
+Resend posts email events here (resend.md R-7, R-8). On only when `RESEND_WEBHOOK_SECRET` is
+set. Subscribe the endpoint to `email.bounced`, `email.complained` and `email.suppressed`;
+other email events are acknowledged and change nothing.
+
+The route checks the Standard Webhooks signature (`svix-id`, `svix-timestamp`,
+`svix-signature`, or the `webhook-*` names) over the raw body before it parses anything or
+touches the database. `RESEND_WEBHOOK_PREVIOUS_SECRET` also verifies during a rotation. A
+timestamp more than 5 minutes from the API's clock is refused.
+
+| Event | Effect |
+|---|---|
+| `email.bounced`, permanent (or no bounce type) | Suppresses the address as `bounce`. |
+| `email.bounced`, transient or undetermined | Nothing. |
+| `email.complained` | Suppresses the address as `complaint`. |
+| `email.suppressed` | Suppresses the address as `bounce`. |
+
+The tenant and delivery come from the email's tags (`zs_tenant`, `zs_delivery`), set when the
+delivery worker sent it. They are checked against the `message_deliveries` row under that
+tenant's own scope: the provider must be `resend`, the event's `to` must hold the delivery's
+recipient address, and a recorded Resend ID must equal the event's `email_id`. The address
+suppressed is the delivery's own, with source `resend:<event type>:<delivery id>`. A
+redelivery with the same `svix-id` replays the stored action (one suppression, one action).
+
+| Answer | When |
+|---|---|
+| 401 `Unauthorized` | Missing, wrong or stale signature. One body for all of them. |
+| 400 `ValidationFailed` | Signed, but the body is not JSON. |
+| 413 `ValidationFailed` | Body over 256 KiB. |
+| 200 `{"handled":true}` | The suppression is recorded, or replayed. |
+| 200 `{"handled":false,"reason":…}` | Signed, but nothing to do: an event that suppresses nothing, a shape it does not read, no tags, or no matching delivery. Resend does not retry it. |
 
 ## Database pool and request limits
 
@@ -556,3 +591,24 @@ Hosted settings that the scripts do not manage:
   `x-vercel-protection-bypass` header for automated checks.
 - The dashboard's sign-in attempt limiter is in memory, so on Vercel each serverless
   instance counts on its own; Supabase Auth's own email rate limit still bounds the links sent.
+
+## Delivery runner (`/cron/delivery`, `pnpm delivery:worker`)
+
+Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Off unless
+`DELIVERY_WORKER=on`.
+
+| Variable | Meaning |
+|---|---|
+| `DELIVERY_WORKER` | Kill switch. `on` runs; anything else, or unset, runs nothing. |
+| `CRON_SECRET` | 32+ characters. Vercel Cron sends it as `Authorization: Bearer …`. Unset, the route is 404. |
+| `DELIVERY_DATABASE_URL` | A login that may `SET ROLE service_role` (postgres on hosted Supabase), never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY` | What one email and one SMS segment take from the wallet, in minor units (`usd` by default). |
+| `UNSUBSCRIBE_TOKEN_SECRET`, `DELIVERY_UNSUBSCRIBE_BASE_URL` | Signs the List-Unsubscribe links; the same secret as the API. The URL is the https address of `/public/v1/unsubscribe`. |
+| `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | The Resend sender (R-6). `RESEND_FROM` must be on a domain verified in Resend. |
+| `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × (timeout + 500 ms) + 1 s must fit the budget; the cron function allows at most 20000. |
+| `DELIVERY_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/delivery`, for example `*/5 * * * *`. Unset, there is no cron. |
+
+`GET /cron/delivery` answers 401 without the right bearer, 200 `{ ran: false }` with the switch
+off, 200 `{ ran: true, passes, ingested, claimed, sent, retried, blocked, dead, errors,
+budgetSpent }` after a run, and 503 when a run fails (the next run picks the work up again).
+It is its own Vercel function; the API function never opens the service login.

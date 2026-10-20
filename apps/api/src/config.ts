@@ -1,6 +1,6 @@
 import { parse } from "pg-connection-string";
 import { z } from "zod";
-import { formatEnvIssues, jwtEnvSchema, sessionCheckEnvSchema, trimTrailingSlashes, type JwtConfig, type SessionCheckConfig } from "@zs/core";
+import { formatEnvIssues, jwtEnvSchema, resendWebhookSecretSchema, sessionCheckEnvSchema, trimTrailingSlashes, type JwtConfig, type SessionCheckConfig } from "@zs/core";
 import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 
@@ -50,6 +50,10 @@ const envSchema = z.object({
   UNSUBSCRIBE_TOKEN_SECRET: unsubscribeTokenSecretSchema.optional(),
   // The previous secret keeps verifying links in mail sent before a rotation.
   UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: unsubscribeTokenSecretSchema.optional(),
+  // resend.md R-7: the signing secret of the Resend webhook endpoint (whsec_…). Unset turns
+  // POST /webhooks/resend off. The previous secret keeps verifying during a rotation.
+  RESEND_WEBHOOK_SECRET: resendWebhookSecretSchema.optional(),
+  RESEND_WEBHOOK_PREVIOUS_SECRET: resendWebhookSecretSchema.optional(),
   // PEM of the CA that signs the database's TLS certificate (hosted Supabase: the Supabase
   // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Required for any
   // host other than loopback; only a loopback database may use plain TCP.
@@ -113,6 +117,10 @@ export interface ServerEnv {
   readonly publicIntake: PublicIntakeEnv | null;
   readonly sites: SitesEnv | null;
   readonly unsubscribe: UnsubscribeEnv | null;
+  readonly resendWebhook: ResendWebhookEnv | null;
+}
+export interface ResendWebhookEnv {
+  readonly secrets: { readonly current: string; readonly previous?: string };
 }
 export interface SitesEnv {
   readonly store:
@@ -160,6 +168,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     publicIntake: parsePublicIntake(parsed.data),
     sites: parseSites(parsed.data),
     unsubscribe: parseUnsubscribe(parsed.data),
+    resendWebhook: parseResendWebhook(parsed.data),
   };
 }
 
@@ -227,6 +236,20 @@ function parseUnsubscribe(data: z.infer<typeof envSchema>): UnsubscribeEnv | nul
     },
     clientIp: parseClientIp(data),
     limitOverrides,
+  };
+}
+
+function parseResendWebhook(data: z.infer<typeof envSchema>): ResendWebhookEnv | null {
+  if (data.RESEND_WEBHOOK_SECRET === undefined) {
+    if (data.RESEND_WEBHOOK_PREVIOUS_SECRET !== undefined)
+      throw new Error("Invalid environment: RESEND_WEBHOOK_PREVIOUS_SECRET needs RESEND_WEBHOOK_SECRET");
+    return null;
+  }
+  return {
+    secrets: {
+      current: data.RESEND_WEBHOOK_SECRET,
+      ...(data.RESEND_WEBHOOK_PREVIOUS_SECRET === undefined ? {} : { previous: data.RESEND_WEBHOOK_PREVIOUS_SECRET }),
+    },
   };
 }
 
