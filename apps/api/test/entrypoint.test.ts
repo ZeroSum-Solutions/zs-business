@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { signDevToken } from "../src/dev-token.js";
-import { signedInMember } from "./helpers.js";
+import { KEY_SECRET, signedInMember } from "./helpers.js";
 
 const SECRET = ["entry", "point", "x".repeat(32)].join("-");
 const API_DIR = fileURLToPath(new URL("..", import.meta.url));
@@ -157,6 +157,37 @@ describe("API entry point", () => {
       await holder.query("ROLLBACK").catch(() => undefined);
       holder.release();
       await api.stop();
+    }
+  }, 30_000);
+});
+
+// P-10 revision 6: two API processes stand in for two serverless instances on one database.
+describe("public limits across API instances", () => {
+  /** A write from one address to a forged key: it spends the address's write budget, then 404s. */
+  const write = (api: Running) => fetch(`http://127.0.0.1:${api.port}/public/v1/pages/zsb1_forged/requests`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  }).then((response) => response.status);
+  const twoApis = (env: Record<string, string>) => Promise.all([0, 1].map(() =>
+    startApi({ PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PUBLIC_RATE_ADDRESS_WRITES: "2", ...env })));
+
+  it("counts one budget in Postgres by default, whichever instance serves", async () => {
+    const [first, second] = await twoApis({});
+    try {
+      expect([await write(first!), await write(second!), await write(first!), await write(second!)]).toEqual([404, 404, 429, 429]);
+    } finally {
+      await Promise.all([first!.stop(), second!.stop()]);
+    }
+  }, 30_000);
+
+  it("grants each instance the whole budget again with PUBLIC_RATE_LIMIT_STORE=memory", async () => {
+    // Why hosted deploys refuse memory: the same four writes all pass.
+    const [first, second] = await twoApis({ PUBLIC_RATE_LIMIT_STORE: "memory" });
+    try {
+      expect([await write(first!), await write(second!), await write(first!), await write(second!)]).toEqual([404, 404, 404, 404]);
+      // Logged right after the "listening" line, which may arrive in an earlier chunk.
+      expect(first!.output()).toContain("PUBLIC_RATE_LIMIT_STORE=memory");
+    } finally {
+      await Promise.all([first!.stop(), second!.stop()]);
     }
   }, 30_000);
 });

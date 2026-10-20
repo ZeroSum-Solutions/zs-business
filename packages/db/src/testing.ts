@@ -160,7 +160,7 @@ export async function createTestDatabase(
       );
       migratorCreated = true;
       // Dynamic SQL: PostgreSQL 15 cannot parse the 16-only INHERIT and SET grant options.
-      for (const role of ["zs_dispatcher", "zs_function_owner"]) {
+      for (const role of ["zs_dispatcher", "zs_function_owner", "zs_rate_limiter"]) {
         await admin.query(`DO $$ BEGIN
           IF current_setting('server_version_num')::int >= 160000
             AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${role}') THEN
