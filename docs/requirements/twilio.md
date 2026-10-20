@@ -103,7 +103,9 @@ keys, not by age.
   `<Response/>` and no change. A text that is exactly a keyword (D-9) goes to the inbound SMS
   session (`createInboundSmsSession`), keyed `sms-inbound:<MessageSid>`. Other texts change
   nothing yet.
-Database errors answer 503, so Twilio retries.
+Database errors answer 503, so Twilio retries. That includes a lock wait, serialization failure,
+deadlock or statement timeout (55P03, 40001, 40P01, 57014) that the dispatcher reports as a
+conflict: a 409 would end Twilio's retries and lose the status or the STOP.
 
 **T-7. Numbers.** `sms_numbers` maps one E.164 number to one tenant (unique across tenants),
 with an optional `help_reply` text. Only the service role writes it (`pnpm --filter @zs/api

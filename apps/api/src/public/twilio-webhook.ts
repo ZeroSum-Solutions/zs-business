@@ -11,6 +11,7 @@ import {
   createTwilioInboundSession,
   formFields,
   parseTwilioForm,
+  retryableAsUnavailable,
   TWILIO_WEBHOOK_BODY_LIMIT,
   trimTrailingSlashes,
   twiml,
@@ -41,6 +42,9 @@ export interface TwilioWebhookConfig {
     | { readonly kind: "status"; readonly messageSid: string; readonly outcome: SmsStatusOutcome }
     | { readonly kind: "inbound"; readonly messageSid: string; readonly outcome: InboundTextOutcome }) => void;
 }
+
+/** T-6: a lock wait or deadlock answers 503 (Twilio retries), not a 409 it would drop. */
+const retryable = (error: unknown): never => { throw retryableAsUnavailable(error); };
 
 const xml = (c: Context<AppEnv>, reply: string | null) =>
   c.body(twiml(reply), 200, { "Content-Type": "text/xml; charset=utf-8" });
@@ -83,7 +87,7 @@ export function twilioWebhookRoutes(
       const session = createSmsStatusSession(requestEdge(c), {
         ...(config.providerName === undefined ? {} : { providerName: config.providerName }),
       });
-      const outcome = await session.receive(c.req.param("tenantId"), c.req.param("deliveryId"), callback.data);
+      const outcome = await session.receive(c.req.param("tenantId"), c.req.param("deliveryId"), callback.data).catch(retryable);
       config.report?.({ kind: "status", messageSid: callback.data.MessageSid, outcome });
       return c.json(outcome.handled ? { handled: true } : { handled: false, reason: outcome.reason }, 200);
     })
@@ -95,7 +99,7 @@ export function twilioWebhookRoutes(
       const session = createTwilioInboundSession(requestEdge(c), {
         ...(config.keywordReplies === undefined ? {} : { keywordReplies: config.keywordReplies }),
       });
-      const outcome = await session.receive(c.req.param("tenantId"), message.data);
+      const outcome = await session.receive(c.req.param("tenantId"), message.data).catch(retryable);
       config.report?.({ kind: "inbound", messageSid: message.data.MessageSid, outcome });
       return xml(c, outcome.handled ? outcome.reply : null);
     });

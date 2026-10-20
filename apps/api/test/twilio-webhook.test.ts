@@ -607,6 +607,58 @@ describe("inbound keywords answered by the app (T-8 app)", () => {
   });
 });
 
+describe("database errors answer 503 so Twilio retries (T-6)", () => {
+  /** Makes one table's writes fail with a SQLSTATE for one value of one column, as a lock wait past lock_timeout would. */
+  async function failWrites(table: string, column: string, value: string, sqlstate: string) {
+    const name = `fail_${randomBytes(4).toString("hex")}`;
+    await h.database.pool.query(`CREATE FUNCTION public.${name}() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN
+        IF NEW.${column} = '${value}' THEN RAISE EXCEPTION 'injected' USING ERRCODE = '${sqlstate}'; END IF;
+        RETURN NEW;
+      END $f$`);
+    await h.database.pool.query(`CREATE TRIGGER ${name} BEFORE INSERT OR UPDATE ON public.${table} FOR EACH ROW EXECUTE FUNCTION public.${name}()`);
+    return async () => {
+      await h.database.pool.query(`DROP TRIGGER ${name} ON public.${table}`);
+      await h.database.pool.query(`DROP FUNCTION public.${name}()`);
+    };
+  }
+
+  it.each(["55P03", "40001", "40P01"])("a status callback that hits %s answers 503 and records once on Twilio's retry", async (sqlstate) => {
+    const delivery = await sentDelivery(h.a);
+    const restore = await failWrites("sms_status_events", "provider_message_id", delivery.messageSid, sqlstate);
+    const response = await post(statusPath(delivery.tenantId, delivery.deliveryId), statusForm(delivery));
+    await restore();
+    expect(response.status).toBe(503);
+    expect(JSON.parse(response.text)).toMatchObject({ error: { code: "Unavailable" } });
+    expect(await statusEvents(delivery.tenantId, delivery.deliveryId)).toEqual([]);
+    expect(await postStatus(delivery)).toEqual({ status: 200, body: { handled: true } });
+    expect(await statusEvents(delivery.tenantId, delivery.deliveryId)).toHaveLength(1);
+  });
+
+  it("answers 503 with Retry-After to a STOP that hits a lock wait, and suppresses once on Twilio's retry", async () => {
+    const from = phone();
+    const sid = newSid();
+    const restore = await failWrites("suppressions", "address", from, "55P03");
+    const first = await h.app.request(inboundPath(h.a.tenantId), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Twilio-Signature": signTwilioRequest(TWILIO_AUTH_TOKEN, TWILIO_WEBHOOK_BASE_URL + inboundPath(h.a.tenantId),
+          inboundForm(NUMBER_A, from, "STOP", sid)),
+      },
+      body: inboundForm(NUMBER_A, from, "STOP", sid).toString(),
+    });
+    await restore();
+    expect(first.status).toBe(503);
+    expect(first.headers.get("retry-after")).toBe("1");
+    expect(await suppressionOf(h.a.tenantId, from)).toEqual([]);
+    expect(await postInbound(h.a.tenantId, inboundForm(NUMBER_A, from, "STOP", sid))).toMatchObject({ status: 200, body: EMPTY });
+    expect(await suppressionOf(h.a.tenantId, from)).toEqual([
+      { channel: "sms", address: from, reason: "stop", source: `sms:${sid}` },
+    ]);
+  });
+});
+
 describe("without Twilio configured", () => {
   let off: ApiHarness;
   beforeAll(async () => { off = await createApiHarness(); });

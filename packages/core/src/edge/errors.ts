@@ -85,6 +85,20 @@ function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<s
 const mapped = (status: ApiErrorStatus, code: ApiErrorCode, details: Record<string, JsonValue> = {}): MappedError =>
   ({ status, body: apiErrorBody(code, MESSAGES[code], details) });
 
+/** SQLSTATEs dispatch reports as Conflict that a retry can clear: lock wait, serialization, deadlock, statement timeout. */
+const TRANSIENT_CONFLICTS: ReadonlySet<string> = new Set(["55P03", "40001", "40P01", "57014"]);
+
+/**
+ * A webhook sender retries only a 5xx, so at a webhook a lock wait, serialization failure,
+ * deadlock or statement timeout that dispatch reported as Conflict is DatabaseUnavailable (503):
+ * the sender retries with the same idempotency key. Any other error is returned unchanged.
+ */
+export function retryableAsUnavailable(error: unknown): unknown {
+  return error instanceof ActionError && error.code === "Conflict" && TRANSIENT_CONFLICTS.has(String(error.details.postgresCode))
+    ? new DatabaseUnavailable("busy", { cause: error })
+    : error;
+}
+
 /** Map any thrown value to one HTTP status and the shared error body. Unknown errors become 500. */
 export function mapError(error: unknown): MappedError {
   if (error instanceof Unauthenticated) return { status: 401, body: apiErrorBody("Unauthorized", error.message) };

@@ -38,7 +38,7 @@ export {
   type SmsStatusSession,
   type TwilioInboundSession,
 } from "./sms-session.js";
-export { apiErrorBody, mapError, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
+export { apiErrorBody, mapError, retryableAsUnavailable, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
 export {
   createHs256Verifier,
   createJwksVerifier,
