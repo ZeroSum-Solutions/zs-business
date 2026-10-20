@@ -19,7 +19,8 @@
     "seed:hosted": "tsx src/scripts/hosted-seed.ts",
     "build:vercel": "node scripts/build-vercel.mjs",
     "check:hosted": "tsx src/scripts/hosted-checks.ts",
-    "delivery:worker": "tsx src/scripts/delivery-worker.ts"
+    "delivery:worker": "tsx src/scripts/delivery-worker.ts",
+    "sms:number": "tsx src/scripts/sms-number.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",

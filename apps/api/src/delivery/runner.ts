@@ -1,13 +1,16 @@
 // The process that runs the M3d delivery worker (docs/requirements/resend.md R-9). One run ingests
 // new send events and works through due deliveries until nothing is due or its time budget is
 // spent. Wiring is production's: M3b's approval records behind the approvals port, M3c's reply
-// settle hook, Resend for email. Time, ids, fetch and the database come in as dependencies.
+// settle hook, Resend for email, Twilio for SMS when SMS_PROVIDER=twilio. Time, ids, fetch and the database come in as dependencies.
 import {
   approvalForAction,
   approvalsFromRecords,
   createDeliveryWorker,
   createResendProvider,
+  createTwilioProvider,
   settleReplyDelivery,
+  smsSenderNumber,
+  smsStatusEvidence,
   type DeliveryProvider,
   type DeliveryReport,
   type DeliveryWorker,
@@ -17,7 +20,7 @@ import { asService, type Transaction } from "@zs/db";
 import type { Pool } from "pg";
 import type { DeliveryRunnerEnv } from "./config.js";
 
-/** No SMS provider is wired yet (Twilio comes later in M5); nothing produces SMS in v1. */
+/** SMS without SMS_PROVIDER=twilio; nothing produces SMS in v1. */
 export const smsNotConfigured: DeliveryProvider = {
   name: "sms-not-configured",
   dedupeWindowMs: 24 * 60 * 60 * 1000,
@@ -53,7 +56,13 @@ export function createDeliveryWorkerFromEnv(deps: DeliveryRunnerDeps): DeliveryW
     service,
     providers: {
       email: createResendProvider({ config: deps.env.resend, ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
-      sms: smsNotConfigured,
+      sms: deps.env.twilio === null ? smsNotConfigured : createTwilioProvider({
+        config: deps.env.twilio,
+        // twilio.md T-3, T-5: the tenant's number and the recorded status callbacks, as the service role.
+        senderFor: (tenantId) => service((tx) => smsSenderNumber(tx, tenantId)),
+        findStatus: (input) => service((tx) => smsStatusEvidence(tx, input)),
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      }),
     },
     approvals: approvalsFromRecords(approvalForAction, deps.clock),
     onSettled: async (tx, tenantId, messageId, outcome, at) => { await settleReplyDelivery(tx, tenantId, messageId, outcome, at); },

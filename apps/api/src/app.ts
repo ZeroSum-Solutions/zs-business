@@ -17,6 +17,7 @@ import { memberRoutes } from "./routes/members.js";
 import { sourceRoutes } from "./routes/sources.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
+import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
 export interface AppConfig {
@@ -44,6 +45,8 @@ export interface AppDependencies {
   readonly unsubscribe?: UnsubscribeConfig;
   /** Resend email events, bounces and complaints feeding suppression (resend.md R-7, R-8); absent means off. */
   readonly resendWebhook?: ResendWebhookConfig;
+  /** Twilio status callbacks and inbound STOP/START/HELP texts (twilio.md T-6, T-8); absent means off. */
+  readonly twilioWebhook?: TwilioWebhookConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -137,6 +140,7 @@ export function createApp(deps: AppDependencies) {
   }
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
+  if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -189,5 +193,6 @@ export type App = ReturnType<typeof createApp>;
 export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
+export type { TwilioWebhookConfig } from "./public/twilio-webhook.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";

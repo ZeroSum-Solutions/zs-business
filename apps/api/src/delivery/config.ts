@@ -3,7 +3,7 @@
 // anything but `on` runs nothing and needs no other variable.
 import { parse } from "pg-connection-string";
 import { z } from "zod";
-import { parseResendEnv, type ResendConfig } from "@zs/core";
+import { parseResendEnv, parseTwilioEnv, type ResendConfig, type TwilioConfig } from "@zs/core";
 import { PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../config.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -34,6 +34,8 @@ const onSchema = z.object({
   DELIVERY_PROVIDER_TIMEOUT_MS: int(1_000, 60_000).default(5_000),
   // The Node worker's pause between runs.
   DELIVERY_INTERVAL_MS: int(1_000, 3_600_000).default(15_000),
+  // twilio.md T-9: `twilio` sends SMS through Twilio (TWILIO_* below); anything else refuses SMS.
+  SMS_PROVIDER: z.enum(["none", "twilio"]).default("none"),
 });
 
 export interface DeliveryRunnerEnv {
@@ -43,6 +45,8 @@ export interface DeliveryRunnerEnv {
   readonly pricing: { readonly currency: string; readonly email: number; readonly smsSegment: number };
   readonly unsubscribe: { readonly secret: string; readonly baseUrl: string };
   readonly resend: ResendConfig;
+  /** Null unless SMS_PROVIDER=twilio: SMS is refused as `sms_provider_not_configured`. */
+  readonly twilio: TwilioConfig | null;
   readonly budgetMs: number;
   readonly claimLimit: number;
   readonly providerTimeoutMs: number;
@@ -94,6 +98,7 @@ export function parseDeliveryEnv(env: Readonly<Record<string, string | undefined
       pricing: { currency: data.DELIVERY_CURRENCY, email: data.DELIVERY_PRICE_EMAIL, smsSegment: data.DELIVERY_PRICE_SMS_SEGMENT },
       unsubscribe: { secret: data.UNSUBSCRIBE_TOKEN_SECRET, baseUrl: data.DELIVERY_UNSUBSCRIBE_BASE_URL },
       resend: parseResendEnv(env),
+      twilio: data.SMS_PROVIDER === "twilio" ? parseTwilioEnv(env) : null,
       budgetMs: data.DELIVERY_RUN_BUDGET_MS,
       claimLimit: data.DELIVERY_CLAIM_LIMIT,
       providerTimeoutMs: data.DELIVERY_PROVIDER_TIMEOUT_MS,

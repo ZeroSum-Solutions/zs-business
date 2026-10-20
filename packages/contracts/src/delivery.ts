@@ -127,3 +127,30 @@ export const inboundSmsReplySchema = z.strictObject({
   reply: z.string().nullable(),
 });
 export type InboundSmsReply = z.infer<typeof inboundSmsReplySchema>;
+
+/**
+ * twilio.md T-5, T-6: one signed provider status for one SMS delivery, recorded as evidence that
+ * the provider created the message. Only the server's status-callback principal runs it.
+ */
+export const SMS_STATUS_RECORD_ACTION = "sms.status.record";
+export const smsStatusInputSchema = z.strictObject({
+  deliveryId: idSchema,
+  providerMessageId: z.string().regex(/^(SM|MM)[0-9a-f]{32}$/),
+  /** The provider's status word, lower case (queued, sent, delivered, undelivered, failed, …). */
+  status: z.string().regex(/^[a-z_]{1,40}$/),
+  /** The provider's numeric error code, when it reported one. */
+  errorCode: z.string().regex(/^[0-9]{1,10}$/).nullable(),
+});
+export type SmsStatusInput = z.infer<typeof smsStatusInputSchema>;
+export const smsStatusCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal(SMS_STATUS_RECORD_ACTION),
+  target: targetSchema.extend({ type: z.literal("delivery") }),
+  payload: smsStatusInputSchema,
+}));
+export const smsStatusResultSchema = z.strictObject({
+  deliveryId: idSchema,
+  status: z.string(),
+  /** False when this status of this message was already recorded. */
+  recorded: z.boolean(),
+});
+export type SmsStatusResult = z.infer<typeof smsStatusResultSchema>;

@@ -27,6 +27,17 @@ export {
   type EmailFeedbackOutcome,
   type EmailFeedbackSession,
 } from "./email-feedback-session.js";
+export {
+  createSmsStatusSession,
+  createTwilioInboundSession,
+  smsStatusActorId,
+  tenantSmsReplies,
+  type InboundTextOutcome,
+  type KeywordReplies,
+  type SmsStatusOutcome,
+  type SmsStatusSession,
+  type TwilioInboundSession,
+} from "./sms-session.js";
 export { apiErrorBody, mapError, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
 export {
   createHs256Verifier,

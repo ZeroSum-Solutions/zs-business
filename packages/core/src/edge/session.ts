@@ -70,6 +70,7 @@ import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, SEND_REPLY_ACTION } from "../inbox/index.js";
+import { smsStatusHandlers } from "../delivery/sms-status.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
@@ -109,12 +110,13 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers,
 });
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
- * request (public-intake.md P-1) and the suppression actions (delivery.md D-9) are never
+ * request (public-intake.md P-1), the suppression actions (delivery.md D-9) and the SMS status
+ * record (twilio.md T-6) are never
  * reachable from a member session.
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
