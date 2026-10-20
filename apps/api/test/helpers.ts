@@ -8,7 +8,8 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, signBookingKey, type AutomationEdgeConfig } from "@zs/core";
+import { createLocalStubSessionCheck, signBookingKey, type AutomationEdgeConfig, type SiteCompiler } from "@zs/core";
+import type { SiteObjectStore } from "@zs/contracts";
 import {
   createApp,
   createHs256Verifier,
@@ -122,6 +123,8 @@ export interface HarnessOptions {
   /** Turns the Activepieces routes on; the key defaults to ACTIVEPIECES_KEY_SECRET. */
   activepieces?: Partial<AutomationEdgeConfig>;
   clock?: { now(): Date };
+  /** Turns the /v1/sites routes on over this store and compiler. */
+  sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
 }
 
 export async function createApiHarness(options: HarnessOptions = {}): Promise<ApiHarness> {
@@ -146,6 +149,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
         ...options.publicIntake,
       } }
       : {}),
+    ...(options.sites ? { sites: options.sites } : {}),
     ...(options.unsubscribe
       ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...shared, ...options.unsubscribe } }
       : {}),
