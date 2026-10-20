@@ -16,7 +16,7 @@ import type { ActionHandler } from "../actions/dispatch.js";
 import { idInUse, parseOrFail, pgCode, pgConstraint, tenantVisible } from "../crm/rows.js";
 import { PUBLIC_REQUEST_ACTION } from "../intake/public-request.js";
 import { requireMember } from "../members/access.js";
-import { isApprovalAction } from "./policy.js";
+import { cannotBeApproved } from "./policy.js";
 import { approvalRecord, loadApproval, standing, type ApprovalRow } from "./records.js";
 
 const notPending = () => new Conflict("The approval was already decided", { reason: "approval_not_pending" });
@@ -46,7 +46,7 @@ export const requestApprovalHandler: ActionHandler = {
     await requireMember(tx, binding.tenantId, binding.actorId, null);
     const { payload } = parseOrFail(requestApprovalCommandSchema, command);
     const { action } = payload;
-    if (isApprovalAction(action.actionType) || action.actionType === PUBLIC_REQUEST_ACTION)
+    if (cannotBeApproved(action.actionType) || action.actionType === PUBLIC_REQUEST_ACTION)
       throw new ValidationFailed("That action cannot be approved");
     const expiresAt = new Date(now.getTime() + payload.expiresInMinutes * 60_000);
     await tx.query(

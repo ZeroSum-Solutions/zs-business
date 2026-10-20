@@ -63,6 +63,16 @@ const envSchema = z.object({
   DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
   // Longest time one /v1 request may take; keep it under the dashboard proxy's 15 s.
   REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
+  // M4b site publishing. Unset turns the /v1/sites routes off. `r2`: Cloudflare R2 through its
+  // S3 API (the R2_* variables); `memory`: an in-process store, loopback DATABASE_URL only.
+  SITES_STORE: z.enum(["r2", "memory"]).optional(),
+  // The compiler that turns a site spec into files. `plain` is built in; the Mish publisher
+  // is wired in code (createServer's siteCompiler) when the Mac adds it.
+  SITE_COMPILER: z.enum(["plain"]).default("plain"),
+  R2_ENDPOINT: z.url({ protocol: /^https$/ }).optional(),
+  R2_BUCKET: z.string().min(3).max(63).optional(),
+  R2_ACCESS_KEY_ID: z.string().min(1).optional(),
+  R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
   let host: string;
@@ -75,6 +85,11 @@ const envSchema = z.object({
     return;
   }
   const loopback = LOOPBACK.has(host);
+  if (env.SITES_STORE === "memory" && !loopback)
+    issue("SITES_STORE", "memory is for local runs: it needs a loopback DATABASE_URL");
+  if (env.SITES_STORE === "r2")
+    for (const name of ["R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"] as const)
+      if (env[name] === undefined) issue(name, "is required when SITES_STORE=r2");
   if (!loopback && env.DATABASE_CA_CERT === undefined)
     issue("DATABASE_CA_CERT", "is required when DATABASE_URL is not a loopback host (127.0.0.1, ::1, localhost)");
   // pg lets URL options (ssl, sslmode, also percent-encoded) replace the ssl config, which
@@ -100,11 +115,18 @@ export interface ServerEnv {
   /** P-10: where the public route limits count: one Postgres table shared by every instance, or this process. */
   readonly rateLimitStore: "postgres" | "memory";
   readonly publicIntake: PublicIntakeEnv | null;
+  readonly sites: SitesEnv | null;
   readonly unsubscribe: UnsubscribeEnv | null;
   readonly resendWebhook: ResendWebhookEnv | null;
 }
 export interface ResendWebhookEnv {
   readonly secrets: { readonly current: string; readonly previous?: string };
+}
+export interface SitesEnv {
+  readonly store:
+    | { readonly kind: "memory" }
+    | { readonly kind: "r2"; readonly endpoint: string; readonly bucket: string; readonly accessKeyId: string; readonly secretAccessKey: string };
+  readonly compiler: "plain";
 }
 export interface PublicIntakeEnv {
   readonly keySecrets: { readonly current: string; readonly previous?: string };
@@ -144,8 +166,21 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     requestTimeoutMs: parsed.data.REQUEST_TIMEOUT_MS,
     rateLimitStore: parsed.data.PUBLIC_RATE_LIMIT_STORE,
     publicIntake: parsePublicIntake(parsed.data),
+    sites: parseSites(parsed.data),
     unsubscribe: parseUnsubscribe(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
+  };
+}
+
+function parseSites(data: z.infer<typeof envSchema>): SitesEnv | null {
+  if (data.SITES_STORE === undefined) return null;
+  if (data.SITES_STORE === "memory") return { store: { kind: "memory" }, compiler: data.SITE_COMPILER };
+  return {
+    store: {
+      kind: "r2", endpoint: data.R2_ENDPOINT!, bucket: data.R2_BUCKET!,
+      accessKeyId: data.R2_ACCESS_KEY_ID!, secretAccessKey: data.R2_SECRET_ACCESS_KEY!,
+    },
+    compiler: data.SITE_COMPILER,
   };
 }
 
