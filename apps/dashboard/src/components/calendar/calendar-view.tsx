@@ -1,6 +1,7 @@
 "use client";
 
 import { CaretLeft, CaretRight, Globe, Plus } from "@phosphor-icons/react";
+import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -171,11 +172,16 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
   );
 }
 
+const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
+
 export function CalendarView() {
   const resources = useResources();
-  const [resourceId, setResourceId] = useState<string | null>(null);
+  // `?date=YYYY-MM-DD&calendar=<id>` opens that day, as the Inbox's booking links do.
+  const params = useSearchParams();
+  const linkedDate = params.get("date");
+  const [resourceId, setResourceId] = useState<string | null>(params.get("calendar"));
   const [view, setView] = useState<View>("day");
-  const [dateKey, setDateKey] = useState<string | null>(null);
+  const [dateKey, setDateKey] = useState<string | null>(linkedDate && DATE_KEY.test(linkedDate) && !Number.isNaN(Date.parse(linkedDate)) ? linkedDate : null);
   const [dialog, setDialog] = useState<{ open: boolean; slot: string | null }>({ open: false, slot: null });
 
   if (resources.isPending) return <><PageHeader title="Calendar" /><LoadingRows rows={4} /></>;

@@ -12,16 +12,21 @@ import { z } from "zod";
 import {
   createBookingRequestSchema,
   createDealRequestSchema,
+  draftReplyRequestSchema,
   idempotencyKeySchema,
   listApprovalsQuerySchema,
   listBookingsQuerySchema,
   listContactsQuerySchema,
   listDealsQuerySchema,
   listSourcesQuerySchema,
+  listThreadsQuerySchema,
   moveDealStageRequestSchema,
   observeSourceRequestSchema,
   requestApprovalRequestSchema,
+  resultsQuerySchema,
+  setDealDetailsRequestSchema,
   slotsQuerySchema,
+  threadIdSchema,
   upsertContactRequestSchema,
   uuidSchema,
 } from "@zs/contracts";
@@ -118,6 +123,39 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     inputSchema: keyed({ dealId: uuidSchema, ...moveDealStageRequestSchema.shape }),
     annotations: write,
   }, ({ idempotencyKey, dealId, ...body }, session) => session.moveDealStage(dealId, body, idempotencyKey));
+
+  tool("set_deal_details", {
+    description: "Set a deal's value (minor units with an ISO 4217 currency, or null) and lead source (or null). expectedRevision must match the deal's current revision.",
+    inputSchema: keyed({ dealId: uuidSchema, ...setDealDetailsRequestSchema.shape }),
+    annotations: write,
+  }, ({ idempotencyKey, dealId, ...body }, session) => session.setDealDetails(dealId, body, idempotencyKey));
+
+  tool("draft_reply", {
+    description: "Draft an email reply to a customer (contactId, body, optional one-line subject; without one the server writes \"Message from <business name>\"). Nothing is sent: the draft waits as a pending approval (inbox.reply.send) until an owner approves it in the dashboard or API.",
+    inputSchema: keyed(draftReplyRequestSchema.shape),
+    annotations: write,
+  }, ({ idempotencyKey, ...body }, session) => session.draftReply(body, idempotencyKey));
+
+  tool("discard_reply", {
+    description: "Discard a drafted reply that has not been approved; its pending approval is withdrawn where you may.",
+    inputSchema: keyed({ replyId: uuidSchema }),
+    annotations: write,
+  }, ({ idempotencyKey, replyId }, session) => session.discardReply(replyId, {}, idempotencyKey));
+
+  tool("list_threads", {
+    description: "List inbox threads (one per customer, plus website requests not yet linked to one), latest activity first.",
+    inputSchema: listThreadsQuerySchema, annotations: read,
+  }, (query, session) => session.listThreads(query));
+
+  tool("get_thread", {
+    description: "Read one inbox thread (c_<contactId> or v_<intakeItemId>) with its requests and replies, oldest first.",
+    inputSchema: z.strictObject({ threadId: threadIdSchema }), annotations: read,
+  }, ({ threadId }, session) => session.getThread(threadId));
+
+  tool("home_results", {
+    description: "Leads, bookings and won revenue by source, this week so far against the same span of last week, in an IANA zone. Owners only.",
+    inputSchema: resultsQuerySchema, annotations: read,
+  }, (query, session) => session.homeResults(query));
 
   tool("list_contacts", {
     description: "List contacts, newest first or by name; optionally only those matching a search (name, email or phone) or a list of IDs.",

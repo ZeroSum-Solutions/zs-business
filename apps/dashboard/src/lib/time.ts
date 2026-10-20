@@ -144,3 +144,36 @@ export function formatDay(instant: string | Date, zone: string, style: "short" |
 export function formatDateKey(dateKey: string, style: "short" | "long" = "short"): string {
   return formatDay(`${dateKey}T12:00:00.000Z`, "UTC", style);
 }
+
+export interface InstantRange {
+  /** Inclusive, epoch ms. */
+  from: number;
+  /** Exclusive, epoch ms. */
+  to: number;
+}
+
+/**
+ * This week so far and the same span of last week, as inbox-home.md H-3 defines them: this
+ * week runs from the local start of the current week to the start of the next; last week from
+ * its own local start to the same local moment as `now`, seven days earlier. The demo adapter
+ * uses it to count like the API does.
+ */
+export function weekRanges(now: number, zone: string, weekStart: "monday" | "sunday"): { thisWeek: InstantRange; lastWeek: InstantRange } {
+  const today = zonedDateKey(now, zone);
+  const weekday = weekdayOf(today);
+  const back = weekStart === "monday" ? weekday - 1 : weekday % 7;
+  const start = addDays(today, -back);
+  const thisFrom = startOfZonedDay(start, zone).getTime();
+  const thisTo = startOfZonedDay(addDays(start, 7), zone).getTime();
+  const lastFrom = startOfZonedDay(addDays(start, -7), zone).getTime();
+  const p = zonedParts(now, zone);
+  const [y, m, d] = addDays(today, -7).split("-").map(Number) as [number, number, number];
+  // The same wall clock a week ago, to the millisecond (zonedParts is whole minutes).
+  const lastTo = zonedTimeToUtc(y, m, d, p.minute, zone).getTime() + (now % 60000 + 60000) % 60000;
+  return { thisWeek: { from: thisFrom, to: thisTo }, lastWeek: { from: lastFrom, to: Math.max(lastFrom, lastTo) } };
+}
+
+/** A local range in plain words, `to` exclusive: "Mon, Oct 19, 12:00 AM until Mon, Oct 26, 12:00 AM". */
+export function formatRange(fromIso: string, toIso: string, zone: string): string {
+  return `${formatDay(fromIso, zone)}, ${formatTime(fromIso, zone)} until ${formatDay(toIso, zone)}, ${formatTime(toIso, zone)}`;
+}

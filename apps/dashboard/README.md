@@ -111,7 +111,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   `apps/api`. The API checks the token, that its session is still live in Supabase Auth,
   and the person's membership and role on every request. All settings are server-only; the
   build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST and DELETE
-  to `/v1/booking/*`, `/v1/crm/*`, `/v1/me` and `/v1/members*`, only `Accept`,
+  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/inbox/*`, `/v1/home/*`, `/v1/me` and `/v1/members*`, only `Accept`,
   `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POSTs, and
   answers `no-store`. A POST body may be 64 KiB and must arrive within 15 seconds; it is
   read through `src/lib/server/body.ts`, which never holds more than the limit: a larger
@@ -165,9 +165,10 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   response, page and error shapes all come from `@zs/contracts` (`http.ts`); calendars and
   pipeline stages come from `GET /v1/booking/resources` and `GET /v1/crm/pipelines`.
 - `ZS_API_URL` unset: an in-memory demo adapter serves made-up data for
-  "Halden & Rowe Fine Jewelry", including the booking and deal conflicts. Changes reset
-  on reload. In demo mode `window.__zsDemo` exposes `bookAsSomeoneElse` and
-  `editDealElsewhere` so tests can trigger the conflicts.
+  "Halden & Rowe Fine Jewelry", including the booking and deal conflicts, Inbox threads
+  and Home results counted from its own rows. Changes reset on reload. In demo mode
+  `window.__zsDemo` exposes `bookAsSomeoneElse`, `editDealElsewhere` and
+  `approveReplyElsewhere` so tests can trigger the conflicts.
 - Build and server must agree on the mode. `NEXT_PUBLIC_API_MODE` is baked in at build
   time from `ZS_API_URL`; `src/proxy.ts` compares it with the server's `ZS_API_URL` on every
   page request, and each `/api` route does the same itself (`withHostingModeGuard` in
@@ -230,8 +231,24 @@ pipeline yet", "<name> has no stages yet", or a pipeline picker when there are s
 API bookings carry no
 customer or title, so live mode shows them as "Appointment".
 
-`TODO(api)`: results, usage, inbox, site, agents, connections and plan have no API yet.
-Live mode still reads them from the demo workspace.
+Inbox (`docs/requirements/inbox-home.md` I-1..I-8) reads `/v1/inbox/threads` 30 at a time by
+cursor ("Show more conversations") and one thread with its entries, oldest first. A customer
+thread has a compose box (optional subject, reply text) that saves a draft; owners see "Approve
+and send" on a draft (it is then "Approved and queued": nothing says sent until delivery
+settles it), anyone with `inbox.drafts` sees "Discard", and staff see that a draft waits for an
+owner. A visitor thread (a website request not linked yet) has no compose box and links to
+Customers to review it. `not_draft` and `no_email` conflicts show plain copy and reload the
+thread. A booking in a thread links to its day in Calendar (`/calendar?date=&calendar=`).
+
+Home results come from `/v1/home/results` in the first calendar's time zone (else the
+browser's), weeks starting Monday, and state both ranges in words. Only members with `reports`
+(owners) see or fetch them (`useCan` in `src/lib/session.tsx`); staff keep Next appointments.
+The pipeline board shows each deal's value, lead source and won date, and "Details" sets value,
+currency (USD by default) and lead source with the deal's revision; a stale one reloads the
+deal as a stage move does.
+
+`TODO(api)`: usage, the connections checklist, site, agents, connections and plan have no API
+yet. Live mode still reads them from the demo workspace.
 
 ## Notes
 

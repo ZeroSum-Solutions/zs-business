@@ -52,9 +52,13 @@ export function validationError(message: string, issues: readonly { path: readon
 const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
-  "disclosure_changed", "already_reviewed",
+  "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other",
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
 ]);
+/** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
+const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
+/** I-6: an approved_by_other conflict names the owner who finishes the send. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** One fixed message per code, so database or handler text never reaches a response. */
 const MESSAGES: Readonly<Record<ApiErrorCode, string>> = {
@@ -75,6 +79,10 @@ function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<s
   else if (details.postgresCode === "23P01") safe.reason = "overlap";
   else safe.reason = "concurrent_update";
   if (typeof details.currentRevision === "number") safe.currentRevision = details.currentRevision;
+  if (safe.reason === "not_draft" && typeof details.status === "string" && REPLY_STATUSES.has(details.status))
+    safe.status = details.status;
+  if (safe.reason === "approved_by_other" && typeof details.approvedBy === "string" && UUID.test(details.approvedBy))
+    safe.approvedBy = details.approvedBy;
   return safe;
 }
 

@@ -421,22 +421,24 @@ test("retries a booking whose answer was lost with the same key, and the API rep
 test("labels sample areas and turns off writes that would not reach the API", async ({ page }, info) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
-  // Results, usage and the connections checklist still read the sample workspace.
-  for (const card of ["Revenue this week", "Wallet and usage", "Connections"]) {
+  // Usage and the connections checklist still read the sample workspace; results are live.
+  for (const card of ["Wallet and usage", "Connections"]) {
     await expect(page.getByRole("region", { name: card }).getByTestId("sample-badge")).toBeVisible();
   }
-  await expect(page.getByRole("region", { name: "Next appointments" }).getByTestId("sample-badge")).toHaveCount(0);
+  for (const card of ["Next appointments", "Revenue this week"]) {
+    await expect(page.getByRole("region", { name: card }).getByTestId("sample-badge")).toHaveCount(0);
+  }
   if (info.project.name === "desktop") await expect(page.getByTestId("sample-note")).toHaveText("Some areas show sample data until their API ships.");
 
-  // Bookings and customers are live: no sample marker.
-  for (const path of ["/calendar", "/customers"]) {
+  // Bookings, customers and the Inbox are live: no sample marker.
+  for (const path of ["/calendar", "/customers", "/inbox"]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expect(page.getByRole("main").getByTestId("sample-badge")).toHaveCount(0);
   }
 
   const header = (name: string) => page.getByRole("main").locator("header").filter({ has: page.getByRole("heading", { level: 1, name }) });
-  for (const [path, name] of [["/inbox", "Inbox"], ["/site", "Site"], ["/agents", "Agents"], ["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
+  for (const [path, name] of [["/site", "Site"], ["/agents", "Agents"], ["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
     await page.goto(path);
     await expect(header(name).getByTestId("sample-badge"), name).toBeVisible();
   }
