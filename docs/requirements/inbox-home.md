@@ -119,8 +119,9 @@ by one and sets `updatedAt`. It is registered outside `crmHandlers` (C-23 keeps 
 (default `open`; the migration marks stages named Won/Lost once). A deal entering a won stage
 gets `won_at` equal to that write's `updated_at`, which is the dispatcher's injected clock;
 moving between won stages keeps the first date; leaving the won outcome clears it
-(`crm_deals_won_at` trigger, so create, move and service writes agree). Pipelines show each
-stage's `outcome`.
+(`crm_deals_won_at` trigger, so create, move and service writes agree, and a direct `won_at`
+write is overridden). Changing a stage's `outcome` later does not re-date deals already in it;
+no M3c route changes outcomes. Pipelines show each stage's `outcome`.
 
 **H-3. Weeks.** `GET /v1/home/results?zone&weekStart` takes an IANA zone (default `UTC`) and
 `monday` (default) or `sunday`. The server reads its injected clock once. This week runs from

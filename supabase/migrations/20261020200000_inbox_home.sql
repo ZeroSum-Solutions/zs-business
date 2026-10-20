@@ -33,7 +33,8 @@ ALTER TABLE public.crm_deals ADD COLUMN won_at timestamptz;
 
 -- H-2: won_at follows the stage. Entering a won stage stamps the write's own updated_at (the
 -- dispatcher's injected clock, never the database clock); moving between won stages keeps the
--- first date; leaving the won outcome clears it. A trigger, so every write path agrees.
+-- first date; leaving the won outcome clears it. A trigger, so every write path agrees; it also
+-- fires on a direct won_at write, so no role can set the date by hand.
 CREATE FUNCTION public.crm_deals_won_at() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -51,7 +52,7 @@ BEGIN
   RETURN NEW;
 END $$;
 CREATE TRIGGER crm_deals_won_at
-  BEFORE INSERT OR UPDATE OF stage_id ON public.crm_deals
+  BEFORE INSERT OR UPDATE OF stage_id, won_at ON public.crm_deals
   FOR EACH ROW EXECUTE FUNCTION public.crm_deals_won_at();
 
 -- I-4: replies the business drafts. A reply names one customer; its text, customer and author

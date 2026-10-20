@@ -119,8 +119,12 @@ const threads = (kindParam: string, idParam: string) => `
     FROM threads`;
 
 const threadId = (kind: ThreadKind, id: string) => `${kind === "customer" ? "c" : "v"}_${id}`;
-const clip = (text: string | null) =>
-  text === null ? null : text.length <= PREVIEW_LENGTH ? text : `${text.slice(0, PREVIEW_LENGTH - 1)}…`;
+/** Cuts by code point, so an emoji is never split in half. */
+const clip = (text: string | null) => {
+  if (text === null) return null;
+  const chars = Array.from(text);
+  return chars.length <= PREVIEW_LENGTH ? text : `${chars.slice(0, PREVIEW_LENGTH - 1).join("")}…`;
+};
 
 /** Names, addresses and the latest text for a page of threads, in two queries. */
 async function summaries(tx: Transaction, tenantId: string, rows: readonly ThreadRow[]): Promise<ThreadSummary[]> {
@@ -131,12 +135,12 @@ async function summaries(tx: Transaction, tenantId: string, rows: readonly Threa
   }>(
     `SELECT c.id, c.display_name, c.normalized_email, c.e164_phone,
             (SELECT x.text FROM (
-               SELECT i.notes AS text, i.created_at AS at, i.id FROM intake_items i
+               SELECT i.notes AS text, i.created_at AS at, 0 AS rank, i.id FROM intake_items i
                 WHERE i.tenant_id = c.tenant_id AND i.contact_id = c.id AND i.notes IS NOT NULL
                UNION ALL
-               SELECT r.body, r.created_at, r.id FROM inbox_replies r
+               SELECT r.body, r.created_at, 1, r.id FROM inbox_replies r
                 WHERE r.tenant_id = c.tenant_id AND r.contact_id = c.id AND r.status <> 'discarded'
-             ) x ORDER BY x.at DESC, x.id DESC LIMIT 1) AS preview
+             ) x ORDER BY x.at DESC, x.rank DESC, x.id DESC LIMIT 1) AS preview
        FROM crm_contacts c WHERE c.tenant_id=$1 AND c.id = ANY($2::uuid[])`,
     [tenantId, contactIds],
   )).rows.map((row) => [row.id, row]));
@@ -237,7 +241,10 @@ export async function getThread(tx: Transaction, tenantId: string, id: ThreadId)
         : null,
     })),
     ...replies.map((reply): ThreadEntry => ({ type: "reply", at: reply.created_at.toISOString(), reply: replyRecord(reply) })),
-  ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : entryId(a) < entryId(b) ? 1 : -1));
+  ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1
+    // A reply drafted in the same millisecond as a request answers it, so it is the newer one.
+    : a.type !== b.type ? (a.type === "reply" ? -1 : 1)
+    : entryId(a) < entryId(b) ? 1 : -1));
   const phone = kind === "customer"
     ? (await tx.query<{ e164_phone: string | null }>(
       "SELECT e164_phone FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, key])).rows[0]?.e164_phone ?? null

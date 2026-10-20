@@ -1,9 +1,10 @@
 # @zs/mcp
 
 MCP server (stdio) over `@zs/core`. Tools: `create_booking`, `upsert_contact`,
-`create_deal`, `move_deal_stage` (writes, each needs an `idempotencyKey`) and
-`list_contacts`, `get_contact`, `list_deals`, `list_pipelines`, `list_bookings`, `list_resources`,
-`find_slots` (reads). Inputs use the `@zs/contracts` request schemas. Every result puts one
+`create_deal`, `move_deal_stage`, `set_deal_details`, `draft_reply`, `approve_reply`,
+`discard_reply` (writes, each needs an `idempotencyKey`) and `list_contacts`, `get_contact`,
+`list_deals`, `list_pipelines`, `list_bookings`, `list_resources`, `find_slots`,
+`list_threads`, `get_thread`, `home_results` (reads), mirroring the HTTP routes. Inputs use the `@zs/contracts` request schemas. Every result puts one
 JSON object in both `structuredContent` and `content[0].text`: the same body as the HTTP
 route (list tools return `{ items }`), or on failure `isError: true` with the shared
 `apiErrorBodySchema` body.
@@ -16,7 +17,8 @@ API (`authenticate` in `@zs/core`). On **every** tool call it:
 2. checks the token's Supabase session is still live, so signing out stops it at once (401);
 3. checks the token's user is a member of the tenant the token claims (403 `Forbidden`);
 4. runs the tool through the edge session, which re-checks the membership and the role the
-   read or action needs. The tools are calendar and customer work, which staff may do too.
+   read or action needs. Staff may do the calendar, customer and inbox-draft tools;
+   `approve_reply` and `home_results` are owners only (403 for staff).
 
 The tenant and actor come only from the verified token, never from tool input. A failed check
 answers `isError: true` with the shared error body, like any other failure.

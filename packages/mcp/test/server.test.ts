@@ -7,6 +7,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   apiErrorBodySchema,
   bookingPageSchema,
+  homeResultsSchema,
+  MESSAGE_SEND_REQUESTED,
+  replyOutputSchema,
+  setDealDetailsOutputSchema,
+  threadDetailSchema,
+  threadPageSchema,
   contactPageSchema,
   contactRecordSchema,
   createBookingOutputSchema,
@@ -109,7 +115,8 @@ beforeAll(async () => {
     );
     await tx.query("INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,'Sales')", [fixture.a.tenantId, tenant.pipelineId]);
     await tx.query(
-      "INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position) VALUES ($1,$2,$3,'New',0),($1,$4,$3,'Won',1)",
+      `INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome)
+       VALUES ($1,$2,$3,'New',0,'open'),($1,$4,$3,'Won',1,'won')`,
       [fixture.a.tenantId, tenant.stages[0], tenant.pipelineId, tenant.stages[1]],
     );
   });
@@ -137,8 +144,9 @@ describe("MCP tools over an in-memory transport", () => {
   it("lists every write and read tool", async () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
-      "create_booking", "create_deal", "find_slots", "get_contact", "list_bookings", "list_contacts",
-      "list_deals", "list_pipelines", "list_resources", "move_deal_stage", "upsert_contact",
+      "approve_reply", "create_booking", "create_deal", "discard_reply", "draft_reply", "find_slots", "get_contact",
+      "get_thread", "home_results", "list_bookings", "list_contacts", "list_deals", "list_pipelines", "list_resources",
+      "list_threads", "move_deal_stage", "set_deal_details", "upsert_contact",
     ]);
   });
 
@@ -191,7 +199,9 @@ describe("MCP tools over an in-memory transport", () => {
     expect(deals.items.map((item) => item.id)).toEqual([dealId]);
     expect(bookings.items).toHaveLength(1);
     const pipelines = ((await callTool(client, "list_pipelines")).value as { items: unknown[] }).items;
-    expect(pipelines.map((item) => pipelineSummarySchema.parse(item).id)).toEqual([tenant.pipelineId]);
+    expect(pipelines.map((item) => pipelineSummarySchema.parse(item))).toEqual([{ id: tenant.pipelineId, name: "Sales", stages: [
+      { id: tenant.stages[0], name: "New", position: 0, outcome: "open" }, { id: tenant.stages[1], name: "Won", position: 1, outcome: "won" },
+    ] }]);
     const resources = ((await callTool(client, "list_resources")).value as { items: unknown[] }).items;
     expect(resources.map((item) => resourceSummarySchema.parse(item))).toEqual([
       { id: tenant.resourceId, name: "Showroom", timeZone: "UTC", slotLengthMinutes: 60 },
@@ -211,7 +221,10 @@ describe("MCP tools over an in-memory transport", () => {
     expect(await search({ search: "nobody" })).toEqual([]);
     expect(await search({ ids: contactId, sort: "name" })).toEqual([contactId]);
     const deals = dealPageSchema.parse((await callTool(client, "list_deals", { contactId })).value);
-    expect(deals.items.map((item) => item.id)).toEqual([dealId]);
+    expect(deals.items).toEqual([{
+      id: dealId, tenantId: fixture.a.tenantId, contactId, pipelineId: tenant.pipelineId, stageId: tenant.stages[1], title: "Ring",
+      revision: 2, createdAt: NOW, updatedAt: NOW, value: null, leadSource: null, wonAt: NOW,
+    }]);
     const range = (from: string, to: string) => callTool(client, "list_bookings", { from, to })
       .then((response) => bookingPageSchema.parse(response.value).items.length);
     expect(await range("2026-10-19T09:30:00.000Z", "2026-10-19T09:31:00.000Z")).toBe(1);
@@ -274,6 +287,76 @@ describe("MCP tools over an in-memory transport", () => {
 
   it("reports an unknown tool as a protocol error", async () => {
     await expect(client.callTool({ name: "drop_tables", arguments: {} })).rejects.toThrow(/-32602.*drop_tables not found/);
+  });
+
+  it("set_deal_details sets value and lead source with the deal's revision", async () => {
+    const value = { amountMinor: 480_000, currency: "USD" };
+    const set = await callTool(client, "set_deal_details", { idempotencyKey: "dd-1", dealId, expectedRevision: 2, value, leadSource: "referral" });
+    expect(setDealDetailsOutputSchema.parse(set.value).result).toMatchObject({ id: dealId, revision: 3, value, leadSource: "referral", wonAt: NOW });
+    const stale = await callTool(client, "set_deal_details", { idempotencyKey: "dd-2", dealId, expectedRevision: 2, value: null, leadSource: null });
+    expect(apiErrorBodySchema.parse(stale.value).error).toMatchObject({
+      code: "Conflict", details: { reason: "stale_revision", currentRevision: 3 },
+    });
+    const foreign = await callTool(other, "set_deal_details", { idempotencyKey: "dd-3", dealId, expectedRevision: 3, value: null, leadSource: null });
+    expect(apiErrorBodySchema.parse(foreign.value).error.code).toBe("Forbidden");
+  });
+
+  it("draft_reply, list_threads, get_thread and approve_reply: an approval hands one send request to the outbox", async () => {
+    const drafted = await callTool(client, "draft_reply", { idempotencyKey: "r-1", contactId, subject: "Your ring", body: "Your ring is ready." });
+    const reply = replyOutputSchema.parse(drafted.value).result;
+    expect(reply).toMatchObject({ contactId, subject: "Your ring", body: "Your ring is ready.", status: "draft" });
+    const threads = threadPageSchema.parse((await callTool(client, "list_threads")).value);
+    expect(threads.items).toEqual([{
+      id: `c_${contactId}`, kind: "customer", contactId, intakeItemId: null, name: "Maren", email: "maren@example.com",
+      preview: "Your ring is ready.", lastActivityAt: NOW, needsReply: false, needsReview: false, drafts: 1,
+    }]);
+    const thread = threadDetailSchema.parse((await callTool(client, "get_thread", { threadId: `c_${contactId}` })).value);
+    expect(thread.entries).toEqual([{ type: "reply", at: NOW, reply }]);
+    const approved = replyOutputSchema.parse((await callTool(client, "approve_reply", { idempotencyKey: "ra-1", replyId: reply.id })).value);
+    expect(approved.result).toMatchObject({ id: reply.id, status: "approved", approvedAt: NOW });
+    const again = await callTool(client, "discard_reply", { idempotencyKey: "rd-1", replyId: reply.id });
+    expect(apiErrorBodySchema.parse(again.value).error).toMatchObject({ code: "Conflict", details: { reason: "not_draft", status: "approved" } });
+    const events = await fixture.service((tx) => tx.query<{ payload: unknown }>(
+      "SELECT payload FROM outbox WHERE tenant_id=$1 AND event_type=$2", [fixture.a.tenantId, MESSAGE_SEND_REQUESTED]));
+    expect(events.rows).toEqual([{ payload: {
+      messageId: reply.id, contactId, channel: "email", purpose: "transactional", subject: "Your ring", body: "Your ring is ready.",
+    } }]);
+
+    const second = replyOutputSchema.parse((await callTool(client, "draft_reply", { idempotencyKey: "r-2", contactId, body: "Never mind." })).value).result;
+    expect(second.subject).toBe("Message from Tenant A");
+    expect(replyOutputSchema.parse((await callTool(client, "discard_reply", { idempotencyKey: "rd-2", replyId: second.id })).value).result.status)
+      .toBe("discarded");
+
+    // Another tenant sees no thread and cannot draft to, approve or discard this tenant's replies.
+    expect(threadPageSchema.parse((await callTool(other, "list_threads")).value).items).toEqual([]);
+    expect(apiErrorBodySchema.parse((await callTool(other, "get_thread", { threadId: `c_${contactId}` })).value).error.code).toBe("NotFound");
+    expect(apiErrorBodySchema.parse((await callTool(other, "draft_reply", { idempotencyKey: "x-r", contactId, body: "Hi" })).value).error.code)
+      .toBe("Forbidden");
+    const third = replyOutputSchema.parse((await callTool(client, "draft_reply", { idempotencyKey: "r-3", contactId, body: "Hello again." })).value).result;
+    for (const name of ["approve_reply", "discard_reply"])
+      expect(apiErrorBodySchema.parse((await callTool(other, name, { idempotencyKey: `x-${name}`, replyId: third.id })).value).error.code)
+        .toBe("Forbidden");
+    const bad = await callTool(client, "get_thread", { threadId: "nope" });
+    expect(apiErrorBodySchema.parse(bad.value).error.code).toBe("ValidationFailed");
+  });
+
+  it("home_results counts this week against last week from the injected clock", async () => {
+    const results = homeResultsSchema.parse((await callTool(client, "home_results", { zone: "UTC" })).value);
+    expect(results).toEqual({
+      zone: "UTC", weekStart: "monday",
+      thisWeek: { from: "2026-10-19T00:00:00.000Z", to: "2026-10-26T00:00:00.000Z" },
+      lastWeek: { from: "2026-10-12T00:00:00.000Z", to: "2026-10-12T08:00:00.000Z" },
+      leads: { thisWeek: 1, lastWeek: 0, bySource: [
+        { source: "website", thisWeek: 0, lastWeek: 0 }, { source: "manual", thisWeek: 1, lastWeek: 0 },
+      ] },
+      bookings: { thisWeek: 1, lastWeek: 0, bySource: [
+        { source: "website", thisWeek: 0, lastWeek: 0 }, { source: "owner", thisWeek: 1, lastWeek: 0 },
+      ] },
+      wonDeals: { thisWeek: 1, lastWeek: 0 },
+      revenue: [{ currency: "USD", thisWeek: 480_000, lastWeek: 0, bySource: [{ source: "referral", thisWeek: 480_000, lastWeek: 0 }] }],
+    });
+    const bad = await callTool(client, "home_results", { weekStart: "friday" });
+    expect(apiErrorBodySchema.parse(bad.value).error.code).toBe("ValidationFailed");
   });
 });
 
@@ -373,6 +456,23 @@ describe("authorization on every tool call, like the HTTP API", () => {
         "SELECT action_type FROM actions WHERE tenant_id=$1 AND actor_id=$2 ORDER BY action_type", [staff.tenantId, staff.actorId],
       ));
       expect(actions.rows.map((row) => row.action_type)).toEqual(["booking.create", "crm.contact.create-or-find"]);
+    });
+  });
+
+  it("lets staff draft replies but refuses them approve_reply and home_results", async () => {
+    const staff = await signedInMember(fixture.a.tenantId, "staff");
+    await using(await serve(staff.token), async (mcp) => {
+      const contact = createOrFindContactOutputSchema.parse(await succeeds(mcp, "upsert_contact", {
+        idempotencyKey: "staff-c-2", displayName: "Tobias", email: "tobias@example.com",
+      })).result.contact;
+      const reply = replyOutputSchema.parse(await succeeds(mcp, "draft_reply", {
+        idempotencyKey: "staff-r-1", contactId: contact.id, body: "We have your bands ready.",
+      })).result;
+      expect(reply.draftedBy.userId).toBe(staff.actorId);
+      await succeeds(mcp, "list_threads");
+      expect(await errorCode(mcp, "approve_reply", { idempotencyKey: "staff-ra-1", replyId: reply.id })).toBe("Forbidden");
+      expect(await errorCode(mcp, "home_results")).toBe("Forbidden");
+      await succeeds(mcp, "discard_reply", { idempotencyKey: "staff-rd-1", replyId: reply.id });
     });
   });
 
