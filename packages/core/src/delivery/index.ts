@@ -1,6 +1,7 @@
 export {
   createDeliveryWorker,
   deliveryWorkerConfigSchema,
+  isPermanentIngestError,
   type Claim,
   type DeliveryReport,
   type DeliveryWorker,
