@@ -8,6 +8,7 @@ import {
   changeMemberRoleRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
+  draftReplyRequestSchema,
   idempotencyKeySchema,
   inviteMemberRequestSchema,
   linkIntakeItemRequestSchema,
@@ -19,9 +20,14 @@ import {
   listIntakeItemsQuerySchema,
   listContactsQuerySchema,
   listDealsQuerySchema,
+  listThreadsQuerySchema,
   moveDealStageRequestSchema,
   rejectIntakeItemRequestSchema,
+  replyStepRequestSchema,
+  resultsQuerySchema,
+  setDealDetailsRequestSchema,
   slotsQuerySchema,
+  threadIdSchema,
   upsertContactRequestSchema,
   uuidSchema,
   type ActionBinding,
@@ -39,9 +45,13 @@ import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
+import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
+import { approveReply, discardReply, draftReply, inboxHandlers } from "../inbox/index.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
+import { homeResults } from "../reads/home.js";
+import { getThread, listThreads } from "../reads/inbox.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
@@ -71,7 +81,9 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
   return parsed.data;
 }
 
-const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers });
+const dispatch = createDispatcher({
+  ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
+});
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
@@ -82,6 +94,10 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
+  "crm.deal.set-details": "customers",
+  "inbox.reply.draft": "inbox.drafts",
+  "inbox.reply.discard": "inbox.drafts",
+  "inbox.reply.approve": "inbox.approve",
   "intake.item.link": "intake",
   "intake.item.reject": "intake",
   "member.invite": "members",
@@ -153,7 +169,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  const envelope = <Type extends "booking" | "contact" | "deal" | "intake_item" | "member">(rawKey: unknown, type: Type, targetId?: string) => {
+  const envelope = <Type extends "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member">(rawKey: unknown, type: Type, targetId?: string) => {
     const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
     const id = targetId ?? derivedId(tenantId, idempotencyKey, type);
     return {
@@ -196,6 +212,45 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const request = parseInput(moveDealStageRequestSchema, body);
       const { id: _id, ...rest } = envelope(key, "deal", id);
       return moveDealStage({ actionType: "crm.deal.move-stage", ...rest, payload: { dealId: id, ...request } }, writeContext);
+    },
+
+    async setDealDetails(dealId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, dealId, "deal ID");
+      const request = parseInput(setDealDetailsRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "deal", id);
+      return setDealDetails({ actionType: "crm.deal.set-details", ...rest, payload: { dealId: id, ...request } }, writeContext);
+    },
+
+    async draftReply(body: unknown, key: unknown) {
+      const request = parseInput(draftReplyRequestSchema, body);
+      const { id, ...rest } = envelope(key, "inbox_reply");
+      return draftReply({ actionType: "inbox.reply.draft", ...rest, payload: { replyId: id, ...request } }, writeContext);
+    },
+    async approveReply(replyId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, replyId, "reply ID");
+      parseInput(replyStepRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "inbox_reply", id);
+      return approveReply({ actionType: "inbox.reply.approve", ...rest, payload: { replyId: id } }, writeContext);
+    },
+    async discardReply(replyId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, replyId, "reply ID");
+      parseInput(replyStepRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "inbox_reply", id);
+      return discardReply({ actionType: "inbox.reply.discard", ...rest, payload: { replyId: id } }, writeContext);
+    },
+    listThreads: (query: unknown) => {
+      const parsed = parseInput(listThreadsQuerySchema, query, "query");
+      return read("inbox.drafts", (tx) => listThreads(tx, tenantId, parsed));
+    },
+    getThread: (threadId: unknown) => {
+      const id = parseInput(threadIdSchema, threadId, "thread ID");
+      return read("inbox.drafts", (tx) => getThread(tx, tenantId, id));
+    },
+    /** H-3: the clock is read once, here, so both weeks come from the same instant. */
+    homeResults: (query: unknown) => {
+      const parsed = parseInput(resultsQuerySchema, query, "query");
+      const now = readClock(deps.clock);
+      return read("reports", (tx) => homeResults(tx, tenantId, parsed, now));
     },
 
     listBookings: (query: unknown) => {

@@ -4,6 +4,20 @@ export { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "./c
 export * from "./edge/index.js";
 export { findSlots, listBookings, listResources } from "./reads/booking.js";
 export { listContacts, listDeals, listPipelines } from "./reads/crm.js";
+export { dealDetailsHandlers, setDealDetails, SET_DEAL_DETAILS_ACTION } from "./deals/details.js";
+export {
+  approveReply,
+  createInboxHandlers,
+  directReplyApprovals,
+  discardReply,
+  draftReply,
+  inboxHandlers,
+  settleReplyDelivery,
+  type ReplyApprovals,
+} from "./inbox/index.js";
+export { getThread, listThreads, loadReply } from "./reads/inbox.js";
+export { homeResults } from "./reads/home.js";
+export { firstInstantAtOrAfter, weekRanges } from "./home/week.js";
 export {
   intakeHandlers,
   linkIntakeItem,
