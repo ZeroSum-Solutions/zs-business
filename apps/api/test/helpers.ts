@@ -8,7 +8,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, signBookingKey } from "@zs/core";
+import { createLocalStubSessionCheck, signBookingKey, type AutomationEdgeConfig } from "@zs/core";
 import {
   createApp,
   createHs256Verifier,
@@ -34,6 +34,7 @@ export const UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "u".repeat(32)].join("
 export const PREVIOUS_UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "q".repeat(32)].join("-");
 /** Synthetic Resend webhook secrets in the `whsec_<base64>` shape, built at runtime like SECRET. */
 export const RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "w".repeat(32)].join("-")).toString("base64");
+export const ACTIVEPIECES_KEY_SECRET = ["test", "activepieces", "a".repeat(32)].join("-");
 export const PREVIOUS_RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "r".repeat(32)].join("-")).toString("base64");
 
 /** A signed-in member: an auth user with a live session and a membership row. */
@@ -115,6 +116,8 @@ export interface HarnessOptions {
   unsubscribe?: Partial<UnsubscribeConfig>;
   /** Turns POST /webhooks/resend on; the signing secret defaults to RESEND_WEBHOOK_SECRET. */
   resendWebhook?: Partial<ResendWebhookConfig>;
+  /** Turns the Activepieces routes on; the key defaults to ACTIVEPIECES_KEY_SECRET. */
+  activepieces?: Partial<AutomationEdgeConfig>;
   clock?: { now(): Date };
 }
 
@@ -138,6 +141,9 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
       : {}),
     ...(options.resendWebhook
       ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }
+      : {}),
+    ...(options.activepieces
+      ? { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET }, ...options.activepieces } }
       : {}),
   });
   return {
