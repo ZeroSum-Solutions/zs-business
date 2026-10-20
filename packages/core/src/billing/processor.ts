@@ -1,6 +1,7 @@
 // M5 billing worker (docs/requirements/stripe.md S-4..S-6). Original code. It runs as the service
-// role, claims stored Stripe events with SKIP LOCKED and applies each in its own savepoint. The
-// tenant and top-up always come from our own wallet_topups row, never from the event alone.
+// role, claims stored Stripe events one at a time with SKIP LOCKED and applies each in its own
+// transaction and savepoint. The tenant and top-up always come from our own wallet_topups row,
+// never from the event alone.
 import { z } from "zod";
 import type { Transaction } from "@zs/db";
 import { creditWallet, debitWallet, minorUnits, repayOwed } from "../wallet/index.js";
@@ -191,46 +192,62 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
     }
   }
 
-  /** One pass: claims due events oldest first and applies each once. */
-  async function runOnce(limit = 50): Promise<{ claimed: number; outcomes: Record<string, number> }> {
+  /** One event: claims the oldest due one with SKIP LOCKED and applies it in a savepoint. */
+  async function applyNext(at: Date): Promise<{ type: string; id: string; outcome: BillingOutcome } | null> {
     return deps.service(async (tx) => {
-      const at = now();
-      const events = (await tx.query<{ id: string; type: string; payload: { data?: { object?: unknown } }; attempts: number }>(
+      const event = (await tx.query<{ id: string; type: string; payload: { data?: { object?: unknown } }; attempts: number }>(
         `SELECT id, type, payload, attempts FROM stripe_events WHERE processed_at IS NULL AND next_attempt_at <= $1
-          ORDER BY received_at, id LIMIT $2 FOR UPDATE SKIP LOCKED`, [at, limit])).rows;
-      const outcomes: Record<string, number> = {};
-      for (const event of events) {
-        const object = event.payload?.data?.object;
-        let outcome: BillingOutcome;
-        await tx.query("SAVEPOINT billing_event");
-        try {
-          outcome = object && typeof object === "object" ? await apply(tx, event.type, object as Record<string, unknown>, at) : "ignored";
-          await tx.query("RELEASE SAVEPOINT billing_event");
-        } catch (error) {
-          await tx.query("ROLLBACK TO SAVEPOINT billing_event");
-          outcome = "error";
-          const message = (error instanceof Error ? error.message : "error").replaceAll("\u0000", "").slice(0, 500) || "error";
-          await tx.query("UPDATE stripe_events SET last_error=$2 WHERE id=$1", [event.id, message]);
-        }
-        const attempts = event.attempts + 1;
-        if ((outcome === "wait" || outcome === "error") && attempts < config.maxAttempts) {
-          const delay = Math.min(config.backoffMaxMs, config.backoffBaseMs * 2 ** (attempts - 1));
-          await tx.query("UPDATE stripe_events SET attempts=$2, next_attempt_at=$3 WHERE id=$1",
-            [event.id, attempts, new Date(at.getTime() + delay)]);
-        } else {
-          if (outcome === "wait" || outcome === "error") outcome = "orphaned";
-          await tx.query("UPDATE stripe_events SET attempts=$2, processed_at=$3, outcome=$4 WHERE id=$1",
-            [event.id, attempts, at, outcome]);
-        }
-        outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
-        deps.report?.({ eventId: event.id, type: event.type, outcome });
+          ORDER BY received_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [at])).rows[0];
+      if (!event) return null;
+      const object = event.payload?.data?.object;
+      let outcome: BillingOutcome;
+      await tx.query("SAVEPOINT billing_event");
+      try {
+        outcome = object && typeof object === "object" ? await apply(tx, event.type, object as Record<string, unknown>, at) : "ignored";
+        await tx.query("RELEASE SAVEPOINT billing_event");
+      } catch (error) {
+        await tx.query("ROLLBACK TO SAVEPOINT billing_event");
+        outcome = "error";
+        const message = (error instanceof Error ? error.message : "error").replaceAll("\u0000", "").slice(0, 500) || "error";
+        await tx.query("UPDATE stripe_events SET last_error=$2 WHERE id=$1", [event.id, message]);
       }
-      // S-6: money that came back (a released reservation) repays what a wallet owes.
+      const attempts = event.attempts + 1;
+      if ((outcome === "wait" || outcome === "error") && attempts < config.maxAttempts) {
+        const delay = Math.min(config.backoffMaxMs, config.backoffBaseMs * 2 ** (attempts - 1));
+        await tx.query("UPDATE stripe_events SET attempts=$2, next_attempt_at=$3 WHERE id=$1",
+          [event.id, attempts, new Date(at.getTime() + delay)]);
+      } else {
+        if (outcome === "wait" || outcome === "error") outcome = "orphaned";
+        await tx.query("UPDATE stripe_events SET attempts=$2, processed_at=$3, outcome=$4 WHERE id=$1",
+          [event.id, attempts, at, outcome]);
+      }
+      return { id: event.id, type: event.type, outcome };
+    });
+  }
+
+  /**
+   * One pass: applies up to `limit` due events oldest first, each in its own transaction, so a
+   * pass holds a top-up's and a wallet's locks only while it applies that one event and two
+   * parallel passes cannot wait on each other's rows.
+   */
+  async function runOnce(limit = 50): Promise<{ claimed: number; outcomes: Record<string, number> }> {
+    const at = now();
+    const outcomes: Record<string, number> = {};
+    let claimed = 0;
+    while (claimed < limit) {
+      const applied = await applyNext(at);
+      if (applied === null) break;
+      claimed += 1;
+      outcomes[applied.outcome] = (outcomes[applied.outcome] ?? 0) + 1;
+      deps.report?.({ eventId: applied.id, type: applied.type, outcome: applied.outcome });
+    }
+    // S-6: money that came back (a released reservation) repays what a wallet owes.
+    await deps.service(async (tx) => {
       const owing = (await tx.query<{ tenant_id: string }>(
         "SELECT tenant_id FROM wallets WHERE owed > 0 AND balance > reserved ORDER BY tenant_id LIMIT 100")).rows;
       for (const wallet of owing) await repayOwed(tx, { tenantId: wallet.tenant_id, ledgerId: deps.generateId(), now: at });
-      return { claimed: events.length, outcomes };
     });
+    return { claimed, outcomes };
   }
 
   return { runOnce, config };

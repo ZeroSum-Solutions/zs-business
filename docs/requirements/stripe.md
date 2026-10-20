@@ -59,8 +59,9 @@ answer is 200. Bodies are capped at 256 KiB. Database errors answer 503, so Stri
 and nothing else; only the service role reads it.
 
 **S-4. Processing.** The billing worker (service role) claims unprocessed events oldest first
-(`FOR UPDATE SKIP LOCKED`, due by `next_attempt_at`), applies each in its own savepoint and
-marks it processed with an outcome. The tenant and top-up always come from our own
+one at a time (`FOR UPDATE SKIP LOCKED`, due by `next_attempt_at`), applies each in its own
+transaction and savepoint, and marks it processed with an outcome. One transaction per event
+means parallel passes never hold one top-up's or wallet's lock while waiting on another's. The tenant and top-up always come from our own
 `wallet_topups` row: through `metadata.zs_tenant` and `zs_topup` on a session event (the row
 must exist in that tenant), or through the stored `stripe_payment_intent_id` for charge and
 dispute events. An event whose top-up is not known yet (a refund that arrives before its
