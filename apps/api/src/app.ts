@@ -3,9 +3,20 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiErrorCode } from "@zs/contracts";
-import { apiErrorBody, AuthUnavailable, authenticate, DatabaseUnavailable, mapError, type Session, type SessionCheck } from "@zs/core";
+import {
+  apiErrorBody,
+  AuthUnavailable,
+  authenticate,
+  createFollowUpAgent,
+  DatabaseUnavailable,
+  mapError,
+  type FollowUpAgentConfig,
+  type Session,
+  type SessionCheck,
+} from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
+import { followUpRoutes } from "./routes/agents.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { billingRoutes } from "./routes/billing.js";
 import { bookingRoutes } from "./routes/booking.js";
@@ -41,6 +52,11 @@ export interface AppDependencies {
   readonly publicIntake?: PublicIntakeConfig;
   /** One-click email unsubscribe (delivery.md D-9); absent means the routes are off. */
   readonly unsubscribe?: UnsubscribeConfig;
+  /**
+   * The inquiry follow-up agent's model and limits (agents.md G-9, G-11); absent means
+   * `POST /v1/agents/followup/runs` is off (404). The other agent routes are always on.
+   */
+  readonly followUp?: FollowUpAgentConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -77,7 +93,7 @@ export function createApp(deps: AppDependencies) {
   app.use("*", cors({
     origin: (origin) => (origins.has(origin) ? origin : null),
     allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key"],
-    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     maxAge: 600,
   }));
 
@@ -154,6 +170,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/home", homeRoutes);
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
+  const followUp = deps.followUp;
+  app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
   app.route("/v1", billingRoutes);
   app.route("/v1", memberRoutes);
 

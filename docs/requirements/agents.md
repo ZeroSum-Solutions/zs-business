@@ -127,6 +127,16 @@ runs the agent.
 approvals route by an owner, who becomes the send's actor (A-6, A-7). Staff cannot approve. The
 delivery worker then re-checks the approval, consent and suppression as for every reply (D-6).
 
+## Known limits (revision 1)
+
+- `POST /runs` runs inside one HTTP request and its deadline. If the deadline fires mid-run the
+  caller gets 503 and the run may stay `running`; a retry with the same key continues it. The
+  model port takes no abort signal yet. M5 should size `maxCandidatesPerRun` for its model or
+  run the agent from the scheduler only.
+- A member run checks `agents` in its own transaction just before the run, so a demotion that
+  commits in that gap still lets one run start; its writes are limited to the agent actions.
+- Every run records a skip again for an inquiry that is still suppressed or capped.
+
 ## Tests
 
 `packages/core/test/agents.test.ts` under the runtime role: never sends without an owner's
