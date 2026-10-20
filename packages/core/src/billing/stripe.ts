@@ -262,7 +262,7 @@ export function parseStripeEnv(env: Readonly<Record<string, string | undefined>>
   };
   const checked = stripeConfigSchema.safeParse(client);
   if (!checked.success) throw new Error(`Invalid environment: ${checked.error.issues
-    .map((issue) => `${STRIPE_VARIABLES[String(issue.path[0])] ?? "STRIPE_TOPUP_MIN"}: ${issue.message}`).join("; ")}`);
+    .map((issue) => `${issue.path.length === 0 ? "STRIPE_TOPUP_MIN, STRIPE_TOPUP_MAX" : STRIPE_VARIABLES[String(issue.path[0])] ?? "STRIPE_*"}: ${issue.message}`).join("; ")}`);
   const livemode = data.STRIPE_LIVEMODE === "true";
   if (/^(sk|rk)_live_/.test(data.STRIPE_SECRET_KEY) !== livemode)
     throw new Error("Invalid environment: STRIPE_LIVEMODE does not match the mode of STRIPE_SECRET_KEY");
