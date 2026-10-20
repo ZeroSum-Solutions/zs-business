@@ -15,8 +15,17 @@ import { pageQuerySchema, pageSchema } from "./page.js";
 const idSchema = z.uuid().toLowerCase();
 
 /** M1 edge boundary: request, response and error shapes shared by the HTTP API and MCP tools. */
+/**
+ * Key prefixes only the server writes: `approval:<id>` runs a stored approval once
+ * (approvals.md A-7, A-14), and public intake, unsubscribe and inbound SMS key the actions no
+ * member runs. Keys are unique per tenant, so a member key with one of them could take the
+ * server's key first and turn its run into a conflict.
+ */
+export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "public:", "unsubscribe:", "sms-inbound:"] as const);
 export const idempotencyKeySchema = z.string().min(1).max(200)
-  .refine(isPostgresText, "Text is not valid in Postgres");
+  .refine(isPostgresText, "Text is not valid in Postgres")
+  .refine((key) => !SERVER_IDEMPOTENCY_PREFIXES.some((prefix) => key.toLowerCase().startsWith(prefix)),
+    "Idempotency-Key uses a prefix the server reserves");
 
 /**
  * Supabase Auth access-token claims the edge relies on; other claims pass through.

@@ -1,7 +1,11 @@
 export {
+  ACTION_PERMISSIONS,
+  approvedDispatch,
   bookingPageSnippets,
   createSession,
   directDispatch,
+  memberAuthorize,
+  PAYLOAD_PERMISSION_ACTIONS,
   parseInput,
   trimTrailingSlashes,
   type EdgeDependencies,
@@ -9,6 +13,14 @@ export {
   type Session,
 } from "./session.js";
 export { createPublicSession, publicIntakeActorId, type PublicSession } from "./public-session.js";
+export {
+  createInboundSmsSession,
+  createUnsubscribeSession,
+  DEFAULT_SMS_REPLIES,
+  inboundSmsActorId,
+  unsubscribeActorId,
+  type InboundSmsReplies,
+} from "./delivery-session.js";
 export { apiErrorBody, mapError, SiteStoreUnavailable, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
 export {
   createHs256Verifier,

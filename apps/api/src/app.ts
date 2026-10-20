@@ -8,12 +8,16 @@ import type { SiteObjectStore } from "@zs/contracts";
 import type { ScopedDatabase } from "@zs/db";
 import type { SiteCompiler } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
+import { billingRoutes } from "./routes/billing.js";
+import { approvalRoutes } from "./routes/approvals.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
 import { siteRoutes } from "./routes/sites.js";
+import { sourceRoutes } from "./routes/sources.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
+import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
 export interface AppConfig {
   /** Exact origins allowed to call the API from a browser; empty means no CORS. */
@@ -38,6 +42,8 @@ export interface AppDependencies {
   readonly publicIntake?: PublicIntakeConfig;
   /** Site publishing (M4b): where releases are stored and how specs compile; absent means /v1/sites is off. */
   readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler; readonly syncTimeoutMs?: number };
+  /** One-click email unsubscribe (delivery.md D-9); absent means the routes are off. */
+  readonly unsubscribe?: UnsubscribeConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -131,6 +137,7 @@ export function createApp(deps: AppDependencies) {
     app.route("/public/v1", routes.api);
     app.route("/", routes.site);
   }
+  if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -151,6 +158,9 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/intake", intakeRoutes);
   // Off without a site store: /v1/sites is then an unknown route (404), like the session's check.
   if (deps.sites) app.route("/v1/sites", siteRoutes);
+  app.route("/v1", billingRoutes);
+  app.route("/v1/approvals", approvalRoutes);
+  app.route("/v1/sources", sourceRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
@@ -178,5 +188,6 @@ export function createApp(deps: AppDependencies) {
 }
 export type App = ReturnType<typeof createApp>;
 export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
+export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";
