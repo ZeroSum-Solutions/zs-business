@@ -6,11 +6,13 @@ import { hostedPool, type HostedDatabaseTarget } from "../hosted.js";
 import {
   DEMO_BOOKING_PAGE,
   DEMO_CONTACTS,
+  DEMO_CURRENCY,
   DEMO_DEALS,
   DEMO_OWNER_EMAIL,
   DEMO_RESOURCES,
   DEMO_STAGES,
   DEMO_TENANT_NAME,
+  DEMO_WON_STAGE,
   DEMO_ZONE,
 } from "./demo-data.js";
 
@@ -146,10 +148,14 @@ async function seedTenant(deps: SeedDependencies): Promise<SeedSummary> {
     );
     await tx.query("INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
       [tenantId, pipelineId, "Custom & bridal"]);
+    // Stages have no write action either. The migration marks stages named Won or Lost only once,
+    // over the rows it finds, so the seed states the won stage itself; a rerun over a database
+    // seeded before outcomes existed sets it too. Deals move after this, so the trigger sees it.
     for (const [position, stage] of DEMO_STAGES.entries())
       await tx.query(
-        "INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
-        [tenantId, stageIds.get(stage), pipelineId, stage, position],
+        `INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (tenant_id,id) DO UPDATE SET outcome = EXCLUDED.outcome WHERE crm_stages.outcome <> EXCLUDED.outcome`,
+        [tenantId, stageIds.get(stage), pipelineId, stage, position, stage === DEMO_WON_STAGE ? "won" : "open"],
       );
     // Pages have no write action yet (M3a), so the service role provisions the demo page.
     await tx.query(
@@ -188,10 +194,18 @@ async function seedTenant(deps: SeedDependencies): Promise<SeedSummary> {
       stageId: stageIds.get("Inquiry"),
       title: deal.title,
     }, `seed:deal:${index}`);
+    let revision = created.result.revision;
     if (deal.stage !== "Inquiry")
-      await session.moveDealStage(created.result.id, {
-        pipelineId, stageId: stageIds.get(deal.stage), expectedRevision: created.result.revision,
-      }, `seed:deal-move:${index}`);
+      revision = (await session.moveDealStage(created.result.id, {
+        pipelineId, stageId: stageIds.get(deal.stage), expectedRevision: revision,
+      }, `seed:deal-move:${index}`)).result.revision;
+    // After the move, so the move keeps the payload (and key) it had before details existed.
+    if (deal.details)
+      await session.setDealDetails(created.result.id, {
+        expectedRevision: revision,
+        value: { amountMinor: deal.details.valueMinor, currency: DEMO_CURRENCY },
+        leadSource: deal.details.leadSource,
+      }, `seed:deal-details:${index}`);
   }
 
   // Bookings depend on today's free slots, so only the first run creates them.

@@ -12,12 +12,12 @@ export type MemberRole = z.infer<typeof memberRoleSchema>;
 
 /**
  * What a role may do. Owners may do everything, including members, billing, plan,
- * publishing, website-request review and deciding approvals (approvals.md A-13); staff work
- * the calendar, customers and inbox drafts.
+ * publishing, website-request review, deciding approvals (approvals.md A-13) and the Home
+ * results (inbox-home.md H-5); staff work the calendar, customers and inbox drafts.
  * Only owners invite, remove or change roles. Routes and actions name the permission they need.
  */
 export const permissionSchema = z.enum([
-  "calendar", "customers", "inbox.drafts", "members", "billing", "plan", "publish", "intake", "approve",
+  "calendar", "customers", "inbox.drafts", "members", "billing", "plan", "publish", "intake", "approve", "reports",
 ]);
 export type Permission = z.infer<typeof permissionSchema>;
 export const ROLE_PERMISSIONS: Readonly<Record<MemberRole, readonly Permission[]>> = Object.freeze({

@@ -26,12 +26,14 @@ test.describe("session and cache", () => {
     await page.goto("/customers");
     await expect(page.getByRole("link", { name: /Marguerite Okafor/ })).toBeVisible();
     expect((await cachedKeys(page)).length).toBeGreaterThan(0);
+    // The Inbox tab counts threads that wait for a reply or a review.
+    await expect(page.getByLabel(/need attention/).filter({ visible: true })).toHaveCount(1);
 
     await openAccountMenu(page);
     await page.getByRole("menuitem", { name: "Sign out" }).click();
     await expect(page.getByRole("heading", { level: 1, name: "You are signed out" })).toBeVisible();
     await expect(page.getByRole("link", { name: /Marguerite Okafor/ })).toHaveCount(0);
-    await expect(page.getByLabel(/unread/)).toHaveCount(0);
+    await expect(page.getByLabel(/need attention/)).toHaveCount(0);
     await expect.poll(() => cachedKeys(page)).toEqual([]);
 
     // The cache stays empty when the owner moves around while signed out.

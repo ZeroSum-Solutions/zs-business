@@ -5,7 +5,7 @@ import type { ZsApi } from "./types";
 
 export * from "./errors";
 export type * from "./types";
-export { bookingCustomerName, byContactName, CONTACT_IDS_PER_CALL, CONTACT_PAGE_SIZE, matchesSearch, normalizePhone } from "./types";
+export { bookingCustomerName, byContactName, CONTACT_IDS_PER_CALL, CONTACT_PAGE_SIZE, matchesSearch, normalizePhone, THREAD_PAGE_SIZE } from "./types";
 export type * from "./workspace-types";
 
 /** Where the browser sends API calls in live mode: the same-origin proxy in app/api. */
@@ -35,6 +35,7 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
   }
   // No token here: the proxy adds it on the server.
   const http = createHttpClient({ baseUrl: API_PROXY_PATH });
-  // TODO(api): results, wallet, inbox, site, agents, connections and plan have no routes yet.
+  // TODO(api): wallet and usage, the connections checklist, site, agents, connections and plan
+  // have no routes yet. Inbox and Home results are live (inbox-home.md).
   return { api: { ...createDemoWorkspace(), ...http }, mode: "live", demo: null };
 }

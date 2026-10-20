@@ -56,6 +56,8 @@ export function BookingDialog({
       dropBookedTime(queryClient, keys.slotsAll, record);
       void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
       void queryClient.invalidateQueries({ queryKey: keys.slotsAll });
+      // Home counts bookings taken this week.
+      void queryClient.invalidateQueries({ queryKey: keys.resultsAll });
       const current = generation.isCurrent(attempt.generation);
       // A late answer for a dialog that is now closed can still confirm the booking it made.
       if (current || generation.isClosed()) toast(`Booked ${formatDay(record.startsAt, zone)} at ${formatTime(record.startsAt, zone)}.`);

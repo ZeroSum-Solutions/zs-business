@@ -35,14 +35,18 @@ const shipped: Record<string, string> = {
   // M3b approvals and source records (#12).
   "20261020100000_approvals.sql": "6cc3330683f223a71ace1235d550edfe5142b71b7f2ece4533e0d4c8f4939e87",
   "20261020100100_source_records.sql": "8aa230cd0371b4841c73cef4937b2a79cc57797a2dae870a08bd8625af276b27",
+  // M3c inbox and home (#13).
+  "20261020200000_inbox_home.sql": "58201a2358a7da916f36d547f170551536bada26c7be55c4751a1572f266b1fa",
   // M3d wallet and delivery (#14).
   "20261020300000_wallet_and_delivery.sql": "6604e6ffea01774b25b497c0a01e02d4e04e6183cc98dc12dd52bc6feb4d4bd7",
 };
 /**
  * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is
- * applied after it, since the runner applies every file it has no row for.
+ * applied after it, since the runner applies every file it has no row for. Later migrations
+ * (M3b onward) build on intake, so this state stops at M2a.
  */
-const beforeIntake = Object.keys(shipped).filter((name) => name !== "20261018200000_public_intake.sql");
+const beforeIntake = Object.keys(shipped).filter((name) =>
+  name !== "20261018200000_public_intake.sql" && name <= "20261019090000_members_and_sessions.sql");
 /** Main before M2a members (#8): bookings, contacts and resources exist, members do not. */
 const beforeMembers = beforeIntake.filter((name) => name !== "20261019090000_members_and_sessions.sql");
 /** Main before the read indexes (the audit fixes). */
@@ -115,7 +119,7 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(9);
+    expect(upgraded.functions).toHaveLength(11);
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });

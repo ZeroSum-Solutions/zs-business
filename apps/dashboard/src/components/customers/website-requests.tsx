@@ -45,6 +45,8 @@ export function WebsiteRequests() {
       void queryClient.invalidateQueries({ queryKey: keys.intakeAll });
       void queryClient.invalidateQueries({ queryKey: keys.bookingsAll });
       void queryClient.invalidateQueries({ queryKey: keys.contactsAll });
+      // Linking moves the request into that customer's Inbox thread (inbox-home.md I-1).
+      void queryClient.invalidateQueries({ queryKey: keys.inboxAll });
     },
     onSuccess: (item, input) => {
       const name = input.kind === "link" ? contactName(contacts.data, input.contactId) : null;

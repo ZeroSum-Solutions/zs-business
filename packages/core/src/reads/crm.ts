@@ -8,17 +8,16 @@ import {
   type ListContactsQuery,
   type ListDealsQuery,
   type PipelineSummary,
+  type StageOutcome,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import {
   contactColumns,
   contactRecord,
-  dealColumns,
-  dealRecord,
   type ConsentRow,
   type ContactRow,
-  type DealRow,
 } from "../crm/rows.js";
+import { dealSummary, dealSummaryColumns, type DealSummaryRow } from "../deals/details.js";
 import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros, type CursorKind } from "./cursor.js";
 import { page } from "./page.js";
 
@@ -92,25 +91,28 @@ export async function getContact(tx: Transaction, tenantId: string, id: string):
 }
 
 /**
- * Deals, most recently updated first. A deal that moves while a caller pages jumps to the
+ * Deals with value, lead source and won date (inbox-home.md H-1), most recently updated first. A deal that moves while a caller pages jumps to the
  * front; by cursor the deals behind it keep their place, by offset they shift by one.
  */
 export async function listDeals(tx: Transaction, tenantId: string, query: ListDealsQuery): Promise<DealPage> {
   const cursor = decodeCursor("deals.recent", query);
   const position = cursor ? `AND ${after("updated_at", "desc", microsToTimestamp("$6"), "$7")}` : "";
-  const rows = (await tx.query<DealRow & { sort_value: string }>(
-    `SELECT ${dealColumns}, ${timestampToMicros("updated_at")} AS sort_value
+  const rows = (await tx.query<DealSummaryRow & { sort_value: string }>(
+    `SELECT ${dealSummaryColumns}, ${timestampToMicros("updated_at")} AS sort_value
        FROM crm_deals WHERE tenant_id=$1 AND ($2::uuid IS NULL OR pipeline_id=$2)
         AND ($5::uuid IS NULL OR contact_id=$5) ${position}
       ORDER BY updated_at DESC, id LIMIT $3 OFFSET $4`,
     [tenantId, query.pipelineId ?? null, query.limit + 1, query.offset, query.contactId ?? null, ...(cursor ?? [])],
   )).rows;
-  return page(rows.map(dealRecord), query, (index) => encodeCursor("deals.recent", [rows[index]!.sort_value, rows[index]!.id]));
+  return page(rows.map(dealSummary), query, (index) => encodeCursor("deals.recent", [rows[index]!.sort_value, rows[index]!.id]));
 }
 
 export async function listPipelines(tx: Transaction, tenantId: string): Promise<PipelineSummary[]> {
-  const rows = (await tx.query<{ pipeline_id: string; pipeline_name: string; id: string | null; name: string | null; position: number | null }>(
-    `SELECT p.id AS pipeline_id, p.name AS pipeline_name, s.id, s.name, s.position
+  const rows = (await tx.query<{
+    pipeline_id: string; pipeline_name: string; id: string | null; name: string | null; position: number | null;
+    outcome: StageOutcome | null;
+  }>(
+    `SELECT p.id AS pipeline_id, p.name AS pipeline_name, s.id, s.name, s.position, s.outcome
        FROM crm_pipelines p
        LEFT JOIN crm_stages s ON s.tenant_id = p.tenant_id AND s.pipeline_id = p.id
       WHERE p.tenant_id=$1 ORDER BY p.name, p.id, s.position`,
@@ -119,8 +121,8 @@ export async function listPipelines(tx: Transaction, tenantId: string): Promise<
   const pipelines = new Map<string, PipelineSummary>();
   for (const row of rows) {
     const pipeline = pipelines.get(row.pipeline_id) ?? { id: row.pipeline_id, name: row.pipeline_name, stages: [] };
-    if (row.id !== null && row.name !== null && row.position !== null)
-      pipeline.stages.push({ id: row.id, name: row.name, position: row.position });
+    if (row.id !== null && row.name !== null && row.position !== null && row.outcome !== null)
+      pipeline.stages.push({ id: row.id, name: row.name, position: row.position, outcome: row.outcome });
     pipelines.set(row.pipeline_id, pipeline);
   }
   return [...pipelines.values()];
