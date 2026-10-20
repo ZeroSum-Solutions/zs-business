@@ -14,7 +14,9 @@ import {
   createDealRequestSchema,
   draftReplyRequestSchema,
   idempotencyKeySchema,
+  killFollowUpRequestSchema,
   listApprovalsQuerySchema,
+  listFollowUpRunsQuerySchema,
   listBookingsQuerySchema,
   listContactsQuerySchema,
   listDealsQuerySchema,
@@ -218,6 +220,29 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     description: "List the source records of one subject (contact, deal, booking, booking_resource or intake_item), each with whether it is still fresh.",
     inputSchema: listSourcesQuerySchema, annotations: read,
   }, (query, session) => session.listSources(query));
+
+  // agents.md G-11: the follow-up agent's state and runs, and its stop switch. Settings, resume
+  // and running it stay with an owner in the dashboard or API.
+  tool("get_followup_agent", {
+    description: "Read the inquiry follow-up agent's settings, whether it is stopped (per business or globally) and why it cannot draft now.",
+    inputSchema: z.strictObject({}), annotations: read,
+  }, (_args, session) => session.getFollowUpStatus());
+
+  tool("stop_followup_agent", {
+    description: "Stop the inquiry follow-up agent for this business at once (optional note). No new drafts are written until an owner resumes it.",
+    inputSchema: keyed(killFollowUpRequestSchema.shape),
+    annotations: write,
+  }, ({ idempotencyKey, ...body }, session) => session.killFollowUp(body, idempotencyKey));
+
+  tool("list_followup_runs", {
+    description: "List the follow-up agent's runs, newest first, with how many inquiries each drafted or skipped.",
+    inputSchema: listFollowUpRunsQuerySchema, annotations: read,
+  }, (query, session) => session.listFollowUpRuns(query));
+
+  tool("get_followup_run", {
+    description: "Read one follow-up agent run with every decision it made: the drafted reply and its pending approval, or why it skipped.",
+    inputSchema: z.strictObject({ runId: uuidSchema }), annotations: read,
+  }, ({ runId }, session) => session.getFollowUpRun(runId));
 
   server.server.setRequestHandler(CallToolRequestSchema, (request) => {
     const call = calls.get(request.params.name);

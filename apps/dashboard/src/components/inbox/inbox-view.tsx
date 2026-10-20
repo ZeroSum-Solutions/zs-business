@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, CalendarBlank, Globe, Info, PaperPlaneTilt } from "@phosphor-icons/react";
+import { ArrowLeft, CalendarBlank, Globe, Info, PaperPlaneTilt, Robot } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
@@ -21,7 +21,7 @@ import {
 } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { useDisplayZone, useKeys, useResources, useThread, useThreads } from "@/lib/queries";
+import { useAgentActorId, useDisplayZone, useKeys, useResources, useThread, useThreads } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
 import { APPROVE_REPLIES, useCan } from "@/lib/session";
 import { formatDay, formatTime, zonedDateKey } from "@/lib/time";
@@ -38,7 +38,16 @@ export const REPLY_STATUS: Record<Exclude<ReplyStatus, "discarded">, { label: st
   failed: { label: "Failed", tone: "danger" },
 };
 
-const actorName = (actor: ReplyRecord["draftedBy"] | null) => actor?.email ?? "a former team member";
+/** The follow-up agent's drafts carry its actor ID and no email (agents.md G-1, G-6). */
+export const AGENT_AUTHOR = "the follow-up agent";
+
+/** Who drafted or approved a reply: a member's email, the follow-up agent, or someone no longer on the team. */
+export function actorName(actor: ReplyRecord["draftedBy"] | null, agentId: string | null = null): string {
+  if (actor?.email) return actor.email;
+  if (actor && agentId !== null && actor.userId === agentId) return AGENT_AUTHOR;
+  return "a former team member";
+}
+
 const when = (instant: string, zone: string) => `${formatDay(instant, zone)}, ${formatTime(instant, zone)}`;
 
 function ThreadBadges({ thread }: { thread: ThreadSummary }) {
@@ -131,20 +140,22 @@ function RequestBubble({ entry, zone, resources }: { entry: RequestEntry; zone: 
   );
 }
 
-function ReplyBubble({ reply, zone, children }: { reply: ReplyRecord; zone: string; children?: ReactNode }) {
+export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: ReplyRecord; zone: string; agentId?: string | null; children?: ReactNode }) {
   const status = reply.status === "discarded" ? null : REPLY_STATUS[reply.status];
+  const byAgent = agentId !== null && reply.draftedBy.userId === agentId;
   return (
     <li className="flex flex-col items-end" data-entry="reply" data-reply-id={reply.id} data-status={reply.status}>
       <div className="max-w-[85%] rounded-lg bg-accent/10 px-3.5 py-2.5 text-sm text-fg">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
           <p className="min-w-0 text-xs font-medium break-words text-fg-2"><span className="sr-only">Subject: </span>{reply.subject}</p>
+          {byAgent ? <Badge data-testid="agent-draft"><Robot aria-hidden />Follow-up agent</Badge> : null}
           {/* Announced when it changes, such as a draft becoming approved and queued. */}
           <span aria-live="polite">{status ? <Badge tone={status.tone} data-testid="reply-status">{status.label}</Badge> : null}</span>
         </div>
         <p className="break-words whitespace-pre-wrap">{reply.body}</p>
       </div>
       <p className="mt-1 text-right text-xs text-meta">
-        Drafted by {actorName(reply.draftedBy)}, {when(reply.createdAt, zone)}
+        Drafted by {actorName(reply.draftedBy, agentId)}, {when(reply.createdAt, zone)}
         {reply.approvedAt ? <><br />Approved by {actorName(reply.approvedBy)}, {when(reply.approvedAt, zone)}</> : null}
         {reply.settledAt ? <><br />{reply.status === "failed" ? "Delivery failed" : "Delivered"} {when(reply.settledAt, zone)}</> : null}
       </p>
@@ -163,6 +174,7 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
   const resources = useResources();
   const canApprove = useCan(APPROVE_REPLIES);
   const canDraft = useCan("inbox.drafts");
+  const agentId = useAgentActorId();
   const intents = useIntentKey();
 
   const step = useMutation({
@@ -189,7 +201,7 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
         {thread.entries.map((entry) => entry.type === "request" ? (
           <RequestBubble key={`r-${entry.id}`} entry={entry} zone={zone} resources={resources.data} />
         ) : (
-          <ReplyBubble key={`m-${entry.reply.id}`} reply={entry.reply} zone={zone}>
+          <ReplyBubble key={`m-${entry.reply.id}`} reply={entry.reply} zone={zone} agentId={agentId}>
             {entry.reply.status === "draft" ? (
               <DraftActions
                 reply={entry.reply}

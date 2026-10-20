@@ -12,4 +12,4 @@ const handle = withHostingModeGuard(async (request: Request, context: Context) =
   return proxyApiRequest(request, path, liveSetupFromEnv());
 });
 
-export { handle as GET, handle as POST, handle as DELETE };
+export { handle as GET, handle as POST, handle as PUT, handle as DELETE };

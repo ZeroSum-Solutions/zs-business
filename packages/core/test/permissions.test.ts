@@ -10,9 +10,10 @@ import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  approvalHandlers, bookingHandlers, calendarHandlers, createDispatcher, createMemorySiteStore, crmHandlers, dealDetailsHandlers,
-  generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey, plainSiteCompiler, sealRefreshToken,
-  siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext, type GoogleClient, type StripeClient,
+  AGENT_ACTIONS, agentHandlers, approvalHandlers, bookingHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
+  crmHandlers, dealDetailsHandlers, generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
+  plainSiteCompiler, sealRefreshToken, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
+  type GoogleClient, type StripeClient,
 } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -44,6 +45,9 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "wallet.topup.create": "billing",
   "calendar.google.connect": "publish",
   "calendar.google.disconnect": "publish",
+  "agent.settings.update": "agents",
+  "agent.kill": "inbox.drafts",
+  "agent.resume": "agents",
 };
 
 interface Tenant {
@@ -258,6 +262,21 @@ function operations(session: Session): Record<string, { permission: Permission |
     listCalendarConnections: { permission: "calendar", run: () => session.listCalendarConnections() },
     startGoogleConnect: { permission: "publish", run: () => session.startGoogleConnect({ resourceId: tenant.resourceId }, randomUUID()) },
     disconnectCalendar: { permission: "publish", run: async () => session.disconnectCalendar(await calendarConnection(), randomUUID()) },
+    // M6 follow-up agent: owners set it up and resume it; anyone who drafts may read it or stop it (agents.md G-11).
+    getFollowUpStatus: { permission: "inbox.drafts", run: () => session.getFollowUpStatus() },
+    updateFollowUpSettings: { permission: "agents", run: async () => {
+      const { settings, revision } = await sessionFor(tenant.ownerId).getFollowUpStatus();
+      return session.updateFollowUpSettings({ ...settings, expectedRevision: revision }, randomUUID());
+    } },
+    killFollowUp: { permission: "inbox.drafts", run: () => session.killFollowUp({ note: "Stop" }, randomUUID()) },
+    resumeFollowUp: { permission: "agents", run: () => session.resumeFollowUp({}, randomUUID()) },
+    listFollowUpRuns: { permission: "inbox.drafts", run: () => session.listFollowUpRuns({}) },
+    getFollowUpRun: { permission: "inbox.drafts", run: async () => {
+      const runId = randomUUID();
+      await fixture.service((tx) => tx.query(
+        "INSERT INTO agent_runs (tenant_id,id,started_at,finished_at,status,max_decisions) VALUES ($1,$2,$3,$3,'completed',3)", [tenant.tenantId, runId, NOW]));
+      return session.getFollowUpRun(runId);
+    } },
   };
 }
 
@@ -296,18 +315,21 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers,
     })
-      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action)).sort();
+      // M6: the agent's own run actions belong to the agent principal only (agents.md G-1).
+      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action))
+      .sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);
     expect(Object.keys(ACTION_PERMISSIONS)).not.toContain(PUBLIC_REQUEST_ACTION);
+    for (const action of AGENT_ACTIONS) expect(Object.keys(ACTION_PERMISSIONS)).not.toContain(action);
     expect({ ...ACTION_PERMISSIONS }).toEqual(EXPECTED_ACTIONS);
   });
 
-  it("leaves members, billing, plan, publish, intake review, approving, reports and integrations to owners", () => {
+  it("leaves members, billing, plan, publish, intake review, approving, reports, integrations and agents to owners", () => {
     expect(ROLE_PERMISSIONS.staff).toEqual(["calendar", "customers", "inbox.drafts"]);
-    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations"] as const) {
+    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations", "agents"] as const) {
       expect(roleCan("staff", permission)).toBe(false);
       expect(roleCan("owner", permission)).toBe(true);
     }

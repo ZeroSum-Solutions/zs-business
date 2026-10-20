@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { roleCan, type Permission } from "@zs/contracts";
 import { z } from "zod";
 import { isApiError } from "./api";
+import type { DemoControls } from "./api/demo/adapter";
 import { DEMO_TENANT_ID } from "./api/demo/seed";
 import { useApiRuntime } from "./api/react";
 
@@ -44,7 +45,11 @@ interface SessionValue {
 const SessionContext = createContext<SessionValue | null>(null);
 
 const SessionBody = z.object({ tenantId: z.string().min(1), userId: z.string().min(1), role: z.enum(["owner", "staff"]) });
-const DEMO_SESSION: Session = { status: "signed_in", tenantId: DEMO_TENANT_ID, userId: "demo-owner", role: "owner" };
+/** Demo mode: the seed's business, as whoever the adapter acts as (the owner unless `actAs` says otherwise). */
+function demoSession(demo: DemoControls | null): Session {
+  const actor = demo?.currentActor() ?? { role: "owner" as const, userId: "demo-owner" };
+  return { status: "signed_in", tenantId: DEMO_TENANT_ID, userId: actor.userId, role: actor.role };
+}
 
 declare global {
   interface Window {
@@ -92,10 +97,16 @@ async function fetchSession(): Promise<Session> {
 }
 
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const { mode } = useApiRuntime();
+  const { mode, demo } = useApiRuntime();
   const queryClient = useQueryClient();
-  const [session, setSession] = useState<Session>(mode === "demo" ? DEMO_SESSION : { status: "loading" });
+  const [session, setSession] = useState<Session>(mode === "demo" ? demoSession(demo) : { status: "loading" });
   const [attempt, setAttempt] = useState(0);
+
+  // Demo mode: tests switch between the owner and a staff member (`__zsDemo.actAs`).
+  useEffect(() => {
+    if (mode !== "demo" || !demo) return;
+    return demo.onActorChange(() => setSession((current) => (current.status === "signed_in" ? demoSession(demo) : current)));
+  }, [mode, demo]);
 
   useEffect(() => {
     if (mode === "demo") return;
@@ -185,6 +196,10 @@ export function useTenantId(): string | null {
 export const APPROVE_REPLIES: Permission = "approve";
 /** The permission that reads Home results (owners only). */
 export const READ_RESULTS: Permission = "reports";
+/** Reads the follow-up agent and stops it (agents.md G-3, G-11): owners and staff. */
+export const STOP_AGENTS: Permission = "inbox.drafts";
+/** Changes the follow-up agent's settings, resumes it and runs it now (G-2, G-3): owners only. */
+export const MANAGE_AGENTS: Permission = "agents";
 
 /**
  * Whether the signed-in member's role allows `permission` (M2a `ROLE_PERMISSIONS`). The API

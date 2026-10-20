@@ -205,3 +205,16 @@ export function threadNotFound(): ApiError {
 export function contactNotFound(): ApiError {
   return new ApiError("not_found", "We could not find that customer.", 404, "NotFound");
 }
+
+/**
+ * The follow-up agent's settings moved on under this save (agents.md G-2): another owner saved
+ * first (`stale_revision`), or two first saves met (`concurrent_update`). Reload and save again.
+ */
+export function isSettingsChanged(error: unknown): error is ApiError {
+  return isDealChanged(error);
+}
+
+/** Both clients raise this for an unknown or malformed agent run ID. */
+export function runNotFound(): ApiError {
+  return new ApiError("not_found", "We could not find that run.", 404, "NotFound");
+}

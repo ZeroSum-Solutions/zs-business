@@ -58,3 +58,21 @@ export {
   type CreditInput,
   type Reservation,
 } from "./wallet/index.js";
+export {
+  agentActorId,
+  AGENT_ACTIONS,
+  agentHandlers,
+  createFakeFollowUpModel,
+  dueFollowUpTenants,
+  followUpRunId,
+  inQuietHours,
+  runFollowUps,
+  scheduledRunKey,
+  scheduleSlot,
+  setGlobalAgentSwitch,
+  type DueFollowUpTenants,
+  type FakeFollowUpModel,
+  type FollowUpModel,
+  type FollowUpRunReport,
+} from "./agents/index.js";
+export { agentAuthorize, createFollowUpAgent, type FollowUpAgent, type FollowUpAgentConfig } from "./edge/agent-session.js";

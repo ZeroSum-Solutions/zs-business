@@ -5,7 +5,7 @@ import { validationError } from "../edge/errors.js";
 
 /** Which list and order a cursor belongs to; a cursor from another one is refused. */
 export type CursorKind =
-  | "contacts.recent" | "contacts.name" | "deals.recent" | "bookings.start" | "intake.recent" | "inbox.recent" | "approvals.recent";
+  | "contacts.recent" | "contacts.name" | "deals.recent" | "bookings.start" | "intake.recent" | "inbox.recent" | "approvals.recent" | "agents.runs";
 
 /** The last row's sort value (microseconds since the epoch, or a name key) and its ID. */
 export type CursorKey = readonly [value: string, id: string];
