@@ -273,6 +273,8 @@ export function bookingPageSnippets(publicBaseUrl: string, publicKey: string) {
   };
 }
 
+type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval";
+
 export function createSession(deps: EdgeDependencies, principal: Principal) {
   const tenantId = uuidSchema.parse(principal.tenantId);
   const actorId = uuidSchema.parse(principal.actorId);
@@ -281,8 +283,10 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  const envelope = <Type extends "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval">(rawKey: unknown, type: Type, targetId?: string) => {
-    const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
+  const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
+    keyed(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
+  /** The same for a key the server built, which may use a reserved prefix (SERVER_IDEMPOTENCY_PREFIXES). */
+  const keyed = <Type extends EnvelopeType>(idempotencyKey: string, type: Type, targetId?: string) => {
     // An approval record's ID must differ from the request's own direct approval ID below:
     // the actions_tenant_approval index allows one action per approval ID (approvals.md A-7).
     const id = targetId ?? derivedId(tenantId, idempotencyKey, type === "approval" ? "approval-record" : type);
@@ -302,7 +306,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const stepKey = (key: string, step: string) => `inbox:${step}:${derivedId(tenantId, key, step)}`;
   /** I-6, approvals.md A-5: propose sending one drafted reply, for an owner to approve. */
   const proposeSend = async (reply: ReplyRecord, key: string) => {
-    const { id, ...rest } = envelope(key, "approval");
+    const { id, ...rest } = keyed(key, "approval");
     const request = requestApprovalRequestSchema.parse({
       action: { actionType: SEND_REPLY_ACTION, target: { type: "inbox_reply", id: reply.id }, payload: { replyId: reply.id } },
       summary: `Send the reply "${reply.subject}"`,
@@ -398,7 +402,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         access: await requireMember(tx, tenantId, actorId, "inbox.drafts"), open: await openSendApproval(tx, tenantId, id, now),
       }));
       if (open && (roleCan(access.role, "approve") || (open.status === "pending" && open.requestedBy === actorId))) {
-        const { id: _approval, ...step } = envelope(stepKey(rest.idempotencyKey, "withdraw"), "approval", open.id);
+        const { id: _approval, ...step } = keyed(stepKey(rest.idempotencyKey, "withdraw"), "approval", open.id);
         await run({ actionType: "approval.revoke", ...step, payload: { approvalId: open.id } });
       }
       return discarded;
