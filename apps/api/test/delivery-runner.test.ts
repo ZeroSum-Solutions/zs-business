@@ -16,6 +16,9 @@ import { UNSUBSCRIBE_SECRET } from "./helpers.js";
 /** Synthetic secrets, built at runtime so secret scanners do not flag a literal. */
 const CRON_SECRET = ["test", "cron", "c".repeat(32)].join("-");
 const RESEND_KEY = ["re", "test", "k".repeat(24)].join("_");
+const TWILIO_ACCOUNT = `AC${"c3".repeat(16)}`;
+const TWILIO_KEY_SID = `SK${"d4".repeat(16)}`;
+const TWILIO_KEY_SECRET = ["twilio", "s".repeat(24)].join("-");
 const DB_PASSWORD = ["pw", "d".repeat(20)].join("-");
 const CA_CERT = ["-----BEGIN CERTIFICATE-----", "MIIBtest", "-----END CERTIFICATE-----"].join("\n");
 const UNSUBSCRIBE_BASE = "https://api.example.test/public/v1/unsubscribe";
@@ -66,12 +69,33 @@ describe("parseDeliveryEnv", () => {
         pricing: { currency: "usd", email: 2, smsSegment: 3 },
         unsubscribe: { secret: UNSUBSCRIBE_SECRET, baseUrl: UNSUBSCRIBE_BASE },
         resend: { apiKey: RESEND_KEY, from: ON.RESEND_FROM },
+        twilio: null,
         budgetMs: 20_000,
         claimLimit: 2,
         providerTimeoutMs: 5_000,
         intervalMs: 15_000,
       },
     });
+  });
+
+  it("keeps SMS refused unless SMS_PROVIDER=twilio, and then needs the Twilio sender (twilio.md T-9)", () => {
+    const twilio = {
+      SMS_PROVIDER: "twilio", TWILIO_ACCOUNT_SID: TWILIO_ACCOUNT, TWILIO_API_KEY_SID: TWILIO_KEY_SID,
+      TWILIO_API_KEY_SECRET: TWILIO_KEY_SECRET, TWILIO_WEBHOOK_BASE_URL: "https://api.example.test",
+    };
+    // Twilio variables alone turn nothing on.
+    expect(parseDeliveryEnv({ ...ON, ...twilio, SMS_PROVIDER: "none" }).runner?.twilio).toBeNull();
+    expect(parseDeliveryEnv({ ...ON, TWILIO_ACCOUNT_SID: TWILIO_ACCOUNT }).runner?.twilio).toBeNull();
+    expect(parseDeliveryEnv({ ...ON, ...twilio }).runner?.twilio).toEqual({
+      accountSid: TWILIO_ACCOUNT, apiKeySid: TWILIO_KEY_SID, apiKeySecret: TWILIO_KEY_SECRET, webhookBaseUrl: "https://api.example.test",
+    });
+    expect(errorOf({ ...ON, SMS_PROVIDER: "sms" })).toMatch(/SMS_PROVIDER/);
+    const missing = errorOf({ ...ON, SMS_PROVIDER: "twilio", TWILIO_WEBHOOK_BASE_URL: "https://api.example.test" });
+    expect(missing).toMatch(/TWILIO_ACCOUNT_SID/);
+    expect(errorOf({ ...ON, ...twilio, TWILIO_API_KEY_SECRET: undefined })).toMatch(/TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET/);
+    const plain = errorOf({ ...ON, ...twilio, TWILIO_WEBHOOK_BASE_URL: "http://api.example.test" });
+    expect(plain).toMatch(/TWILIO_WEBHOOK_BASE_URL/);
+    expect(plain).not.toContain(TWILIO_KEY_SECRET);
   });
 
   it.each([

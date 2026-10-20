@@ -379,9 +379,16 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       if (row.outcome_unknown && row.provider !== null && row.provider !== channelProvider.name)
         return { kind: "done", result: await deadLetterHeld(tx, row, "outcome_unknown", "provider_changed", at) };
       const { reason, address } = await recheck(tx, row);
-      // The re-check took time; the window is judged from after it.
+      // D-8, revision 4: a provider that drops no repeats has a window of zero, so an unknown
+      // outcome is never followed by another send; only evidence through lookup settles it.
+      if (row.outcome_unknown && channelProvider.dedupeWindowMs === 0) {
+        const onNotFound: Terminal = reason ? { status: "blocked", reason } : { status: "dead", reason: "dedupe_window_expired" };
+        return { kind: "lookup", onNotFound, channel: row.channel, key: row.idempotency_key, startedAt: at };
+      }
+      // The re-check took time; the window is judged from after it. Without provider dedupe a
+      // send only ever follows a definite answer, so no window applies.
       const checkedAt = now();
-      const windowEnd = row.first_attempt_at
+      const windowEnd = row.first_attempt_at && channelProvider.dedupeWindowMs > 0
         ? row.first_attempt_at.getTime() + channelProvider.dedupeWindowMs - config.dedupeMarginMs
         : Number.POSITIVE_INFINITY;
       // The whole call, to its deadline, must fit inside the provider's dedupe window.
@@ -478,6 +485,16 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
         [row.tenant_id, row.id, attempt, plan.startedAt, outcome.status, outcome.status === "unknown" ? errorText(outcome.code) : null, at]);
       if (outcome.status === "accepted") return markSent(tx, row, outcome.providerMessageId, at);
       if (outcome.status === "not_found") return finish(tx, row, plan.onNotFound, at);
+      // A provider without dedupe waits for evidence (a late status callback) until its wait ends.
+      const channelProvider = provider(row.channel);
+      const waitEnd = row.first_attempt_at && channelProvider.dedupeWindowMs === 0
+        ? row.first_attempt_at.getTime() + (channelProvider.outcomeWaitMs ?? 0) : Number.NEGATIVE_INFINITY;
+      if (at.getTime() < waitEnd) {
+        const lookups = (await tx.query<{ count: number }>(
+          "SELECT count(*)::int AS count FROM message_delivery_attempts WHERE tenant_id=$1 AND delivery_id=$2 AND kind='lookup'",
+          [row.tenant_id, row.id])).rows[0]!.count;
+        return retryLater(tx, row, "uncertain", outcome.code, lookups, at);
+      }
       // No answer: dead letter, with the reservation still held for an operator (D-8).
       return deadLetterHeld(tx, row, "outcome_unknown", outcome.code, at);
     });
@@ -498,7 +515,7 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       const channelProvider = provider(plan.channel);
       const outcome: ProviderLookupOutcome = channelProvider.lookup
         ? await withDeadline<ProviderLookupOutcome>(
-          (signal) => channelProvider.lookup!(plan.key, { signal }),
+          (signal) => channelProvider.lookup!(plan.key, { signal, tenantId: lease.tenantId, deliveryId: lease.deliveryId }),
           (code) => ({ status: "unknown", code }))
         : { status: "unknown", code: "lookup_unsupported" };
       result = await recordLookup(lease, plan, outcome);
