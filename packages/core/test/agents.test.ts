@@ -450,19 +450,24 @@ describe("caps (G-4)", () => {
     const gate = () => { let open!: () => void; return { done: new Promise<void>((resolve) => { open = resolve; }), open: () => open() }; };
     const bReadRun = gate();
     const aDecided = gate();
+    const bCheckedFirst = gate();
+    const aDecidedTwice = gate();
     // B starts once A has started the run; this settles when B does.
     let startSecond!: (run: Promise<unknown>) => void;
     const second = new Promise<unknown>((resolve) => { startSecond = resolve; });
     // B reads the run before A records anything, then picks its inquiries after A's first decision,
-    // with a limit of two still in mind.
+    // with a limit of two still in mind. B then finds A's second inquiry undecided, and A drafts it
+    // before B's checks, so B's skip meets A's decision.
     let bReads = 0;
     const bDb: typeof database.db = {
       ...database.db,
       tenant: async (tenant, work) => {
-        bReads += 1;
-        if (bReads === 2) await aDecided.done;
+        const read = ++bReads;
+        if (read === 2) await aDecided.done;
+        if (read === 4) await aDecidedTwice.done;
         const result = await database.db.tenant(tenant, work);
-        if (bReads === 1) bReadRun.open();
+        if (read === 1) bReadRun.open();
+        if (read === 3) bCheckedFirst.open();
         return result;
       },
     };
@@ -470,11 +475,13 @@ describe("caps (G-4)", () => {
     const aDispatch = async (command: ActionCommand) => {
       const decision = command.actionType === "agent.followup.draft" || command.actionType === "agent.followup.skip";
       if (decision && aDecisions === 0) await bReadRun.done;
+      if (decision && aDecisions === 1) await bCheckedFirst.done;
       // A closes the run only after B is done, so B's stale limit has every chance to overshoot.
       if (command.actionType === "agent.run.finish") await second.catch(() => undefined);
       const result = await real(command);
       if (command.actionType === "agent.run.start") startSecond(run(bDb, real));
       if (decision && ++aDecisions === 1) aDecided.open();
+      if (decision && aDecisions === 2) aDecidedTwice.open();
       return result;
     };
 

@@ -89,11 +89,15 @@ export async function runFollowUps(
     const key = `agent:item:${runId}:${candidate.intakeItemId}`;
     const ids = stepIds(tenantId, key);
     const ref = { followupId: ids.followupId, runId, intakeItemId: candidate.intakeItemId, contactId: candidate.contactId };
-    try {
-      // Another call resuming the same run may have decided it meanwhile.
+    // Another call resuming the same run may have decided this inquiry already.
+    const decidedElsewhere = async () => {
       const done = await read((tx) => loadDecision(tx, tenantId, ids.followupId));
+      return done && { stop: done.reason && isStopReason(done.reason) ? done.reason : null };
+    };
+    try {
+      const done = await decidedElsewhere();
       if (done) {
-        if (done.reason && isStopReason(done.reason)) { stop = done.reason; break; }
+        if (done.stop) { stop = done.stop; break; }
         continue;
       }
       const checked = await read((tx) => precheck(tx, tenantId, candidate, now()));
@@ -107,8 +111,17 @@ export async function runFollowUps(
       });
       if (decision.reason && isStopReason(decision.reason)) { stop = decision.reason; break; }
     } catch (error) {
-      // Another call resuming this run reached its limit or finished it: nothing is left to do.
-      if (error instanceof Conflict && (error.details.reason === "run_limit" || error.details.reason === "run_finished")) break;
+      if (error instanceof Conflict) {
+        // Another call resuming this run reached its limit or finished it: nothing is left to do.
+        if (error.details.reason === "run_limit" || error.details.reason === "run_finished") break;
+        // Or it decided this inquiry between our check and our decision (a skip and a draft
+        // carry different keys but one decision ID).
+        const done = error.details.reason === "id_in_use" ? await decidedElsewhere().catch(() => null) : null;
+        if (done) {
+          if (done.stop) { stop = done.stop; break; }
+          continue;
+        }
+      }
       deps.report?.({ tenantId, runId, intakeItemId: candidate.intakeItemId, error });
       failure ??= { error };
     }
