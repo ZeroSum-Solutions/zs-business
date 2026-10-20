@@ -111,7 +111,8 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `PUBLIC_CLIENT_IP_HEADER` | Optional: a header the host overwrites on every request (Vercel: `x-vercel-forwarded-for`), used for the per-address limits. Only when the API is reachable through that host alone. |
 | `PUBLIC_TRUSTED_PROXIES` | Optional, instead of the header: comma-separated CIDRs whose `X-Forwarded-For` entries count. |
 | `PUBLIC_RATE_ADDRESS_WRITES`, `PUBLIC_RATE_ADDRESS_READS`, `PUBLIC_RATE_TENANT_WRITES` | Optional overrides of the public rate limits. |
-| `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets. |
+| `PUBLIC_RATE_LIMIT_STORE` | Where the public booking and unsubscribe limits count. `postgres` (default): `public.rate_limit_buckets`, shared by every API instance on the database. `memory`: this process only, refused unless `DATABASE_URL` is a loopback host. |
+| `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets of the `PUBLIC_RATE_LIMIT_STORE` store. |
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
@@ -379,8 +380,14 @@ against the pinned Supabase Root 2021 CA.
    (`https://<ref>.supabase.co/auth/v1`), `SESSION_CHECK=supabase`, `SUPABASE_URL`,
    `SUPABASE_ANON_KEY`, and for public booking `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BASE_URL`
    and `PUBLIC_CLIENT_IP_HEADER=x-vercel-forwarded-for`. The bundle carries `static/` for the
-   booking page. Hosted: keep public intake disabled (leave `PUBLIC_BOOKING_KEY_SECRET` unset)
-   until a shared limiter is configured; the public rate limits are counted per function instance.
+   booking page. The public rate limits count in Postgres (`PUBLIC_RATE_LIMIT_STORE` unset
+   means `postgres`; `memory` refuses to start on a hosted database), so every function
+   instance shares them. To turn hosted public intake on: apply migration
+   `20261020400000_public_rate_limits.sql` with `db:hosted-migrate` (step 2; it creates the
+   NOLOGIN role `zs_rate_limiter`, which `zs_migrator` may now belong to), deploy the API, then
+   set `PUBLIC_BOOKING_KEY_SECRET` (`openssl rand -hex 32`), `PUBLIC_BASE_URL` and
+   `PUBLIC_CLIENT_IP_HEADER=x-vercel-forwarded-for` and deploy again. A deploy with the secret
+   set but without the migration answers 500 on every public request.
    Dashboard env per target: `ZS_API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
    `DASHBOARD_TRUST_PROXY=1`. Both set
    `ENABLE_EXPERIMENTAL_COREPACK=1` so Vercel uses the pinned pnpm.

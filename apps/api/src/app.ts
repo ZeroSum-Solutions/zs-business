@@ -57,7 +57,10 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
  * statement after the signal fires, and no statement or lock wait outlasts the time left.
  */
 function withDeadline(db: ScopedDatabase, signal: AbortSignal, remainingMs: () => number): ScopedDatabase {
-  return { tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }) };
+  return {
+    tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }),
+    withoutTenant: (work, options) => db.withoutTenant(work, { signal, remainingMs, ...options }),
+  };
 }
 
 const unavailable = (signal: AbortSignal) => new Promise<never>((_, reject) => {
@@ -184,4 +187,5 @@ export type App = ReturnType<typeof createApp>;
 export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
+export { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";
