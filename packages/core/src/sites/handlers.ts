@@ -91,10 +91,16 @@ export const publishSiteReleaseHandler: ActionHandler = {
     if (await siteReleaseDigest(payload.files) !== payload.digest)
       throw new ValidationFailed("Release digest does not match its files");
     const pointer = await lockSite(tx, tenantId, payload.siteId);
+    // The edit started from this live release (null: from no release). Absent: no check.
+    if (payload.expectedCurrentReleaseId !== undefined && (pointer?.release_id ?? null) !== payload.expectedCurrentReleaseId)
+      throw new Conflict("Another release went live since this edit started", { reason: "stale_release" });
     const totalBytes = payload.files.reduce((sum, file) => sum + file.bytes, 0);
+    // The site lock makes max + 1 safe; the unique key rejects a repeat anyway.
     const inserted = await tx.query(
-      `INSERT INTO site_releases (tenant_id, id, site_id, spec, entry, digest, file_count, total_bytes, created_by, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (tenant_id, id) DO NOTHING`,
+      `INSERT INTO site_releases (tenant_id, id, site_id, number, spec, entry, digest, file_count, total_bytes, created_by, created_at)
+       SELECT $1,$2,$3, coalesce((SELECT max(number) FROM site_releases WHERE tenant_id=$1 AND site_id=$3), 0) + 1,
+         $4,$5,$6,$7,$8,$9,$10
+       ON CONFLICT (tenant_id, id) DO NOTHING`,
       [tenantId, payload.releaseId, payload.siteId, JSON.stringify(payload.spec), payload.entry, payload.digest,
         payload.files.length, totalBytes, binding.actorId, now],
     );

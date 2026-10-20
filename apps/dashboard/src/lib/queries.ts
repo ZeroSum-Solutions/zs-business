@@ -57,7 +57,16 @@ export const keys = {
   agentsAll: ["agents"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
-  sitePages: ["ws", "site"] as const,
+  sites: ["sites", "list"] as const,
+  siteReleases: (siteId: string) => ["sites", "releases", siteId] as const,
+  siteRelease: (siteId: string, releaseId: string) => ["sites", "release", siteId, releaseId] as const,
+  sitesAll: ["sites"] as const,
+  /**
+   * Whether the site shows the release live at one pointer version. Outside "sites", so
+   * refreshing the lists does not re-sync; per version, so an answer about an older version
+   * never stands for a newer one.
+   */
+  siteEdge: (siteId: string, pointerVersion: number) => ["siteEdge", siteId, pointerVersion] as const,
   connections: ["ws", "connections"] as const,
   plan: ["ws", "plan"] as const,
 };
@@ -339,10 +348,59 @@ export function useAgentActorId(): string | null {
   return useQuery({ enabled, queryKey: keys.agentActor, queryFn: () => agentActorId(tenantId!), staleTime: Infinity, gcTime: Infinity }).data ?? null;
 }
 
-export function useSitePages() {
+export function useSites() {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.sitePages, queryFn: () => api.listSitePages() });
+  return useQuery({ enabled, queryKey: keys.sites, queryFn: ({ signal }) => api.listSites({ signal }) });
+}
+
+export function useSiteReleases(siteId: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && siteId !== null,
+    queryKey: keys.siteReleases(siteId ?? "none"),
+    queryFn: ({ signal }) => api.listSiteReleases(siteId!, { signal }),
+  });
+}
+
+/** A release never changes, so it is read once. */
+export function useSiteRelease(siteId: string | null, releaseId: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && siteId !== null && releaseId !== null,
+    queryKey: keys.siteRelease(siteId ?? "none", releaseId ?? "none"),
+    queryFn: ({ signal }) => api.getSiteRelease(siteId!, releaseId!, { signal }),
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * Whether the site itself shows the release live at `pointerVersion`. Asked with a sync the
+ * first time this version is shown (a sync only catches the site up), then set by every
+ * publish, rollback and "Update the site now" under the version their answer names. So a
+ * pending site stays pending across leaving the page, and a version another owner made live
+ * is checked afresh instead of reusing what an earlier version said.
+ */
+export function useSiteEdge(siteId: string | null, pointerVersion: number, enabled = true) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const { keys, enabled: signedIn } = useKeys();
+  return useQuery({
+    enabled: signedIn && enabled && siteId !== null,
+    queryKey: keys.siteEdge(siteId ?? "none", pointerVersion),
+    queryFn: async () => {
+      const answer = await api.syncSite(siteId!);
+      // The pointer may have moved since this page read the site: file the answer under its own version.
+      queryClient.setQueryData(keys.siteEdge(siteId!, answer.site.pointerVersion), answer.edge);
+      // Another release went live since: reload the site, whose new version then reads that answer.
+      if (answer.site.pointerVersion !== pointerVersion) void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
+      return answer.edge;
+    },
+    staleTime: Infinity,
+    retry: false,
+  });
 }
 
 export function useConnections() {

@@ -104,6 +104,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   not_draft: "This reply is no longer a draft. Someone approved or discarded it first.",
   no_email: "This customer has no email address yet. Add one in Customers, then approve the reply.",
   approved_by_other: "Another owner already approved this reply. They finish sending it, or revoke their approval first.",
+  stale_release: "Another version went live since you opened this page.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -129,6 +130,10 @@ export const DEAL_CHANGED_REASONS: ReadonlySet<string> = new Set(["stale_revisio
 
 export function isDealChanged(error: unknown): error is ApiError {
   return isApiError(error, "conflict") && error.reason !== null && DEAL_CHANGED_REASONS.has(error.reason);
+}
+
+export function isStaleRelease(error: unknown): error is ApiError {
+  return isApiError(error, "conflict") && error.reason === "stale_release";
 }
 
 /**

@@ -26,6 +26,13 @@ import type {
   ReplyStatus,
   RequestEntry,
   ResourceSummary,
+  SitePreview,
+  SiteRecord,
+  SiteReleaseDetail,
+  SiteReleaseRecord,
+  SiteReleaseResponse,
+  SiteSpec,
+  SiteSyncResponse,
   SlotsResponse,
   StageOutcome,
   ThreadDetail,
@@ -62,6 +69,13 @@ export type {
   ReplyStatus,
   RequestEntry,
   ResourceSummary,
+  SitePreview,
+  SiteRecord,
+  SiteReleaseDetail,
+  SiteReleaseRecord,
+  SiteReleaseResponse,
+  SiteSpec,
+  SiteSyncResponse,
   SlotsResponse,
   StageOutcome,
   ThreadDetail,
@@ -303,12 +317,44 @@ export const RUN_PAGE_SIZE = 20;
 /** Threads per page of the inbox list. */
 export const THREAD_PAGE_SIZE = 30;
 
+export interface SitePublish {
+  siteId: string;
+  spec: SiteSpec;
+  /** The release live when the edit started (null before the first); another one live now is a `stale_release` conflict. */
+  expectedCurrentReleaseId: string | null;
+}
+
+export interface ReleaseActivation {
+  siteId: string;
+  releaseId: string;
+  /** The release this page showed as live; another one live now is a `stale_release` conflict. */
+  expectedCurrentReleaseId: string | null;
+}
+
+/** The business's website (M4b): immutable releases, one of them live. Owners only. */
+export interface SitesApi {
+  listSites(options?: ReadOptions): Promise<SiteRecord[]>;
+  createSite(name: string, options: WriteOptions): Promise<SiteRecord>;
+  /** Newest first. */
+  listSiteReleases(siteId: string, options?: ReadOptions): Promise<SiteReleaseRecord[]>;
+  /** One release with the spec it was built from. */
+  getSiteRelease(siteId: string, releaseId: string, options?: ReadOptions): Promise<SiteReleaseDetail>;
+  /** What publishing this spec would serve; nothing is stored. */
+  previewSite(siteId: string, spec: SiteSpec): Promise<SitePreview>;
+  /** Builds, stores and makes the spec live. `edge: "pending"` means the site still shows the previous version. */
+  publishSite(input: SitePublish, options: WriteOptions): Promise<SiteReleaseResponse>;
+  /** Rollback, or roll forward again. */
+  activateSiteRelease(input: ReleaseActivation, options: WriteOptions): Promise<SiteReleaseResponse>;
+  /** Pushes the live version to the site again after `edge: "pending"`. */
+  syncSite(siteId: string): Promise<SiteSyncResponse>;
+}
+
 /** Customers per page of the customer list. */
 export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & WorkspaceApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & WorkspaceApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

@@ -113,7 +113,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   `apps/api`. The API checks the token, that its session is still live in Supabase Auth,
   and the person's membership and role on every request. All settings are server-only; the
   build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST, PUT and DELETE
-  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/inbox/*`, `/v1/home/*`, `/v1/agents/*`, `/v1/me` and `/v1/members*`, only `Accept`,
+  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/inbox/*`, `/v1/home/*`, `/v1/agents/*`, `/v1/approvals*`, `/v1/sources*`, `/v1/sites*`, `/v1/me` and `/v1/members*`, only `Accept`,
   `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POST and PUT bodies, and
   answers `no-store`. A POST or PUT body may be 64 KiB and must arrive within 15 seconds; it is
   read through `src/lib/server/body.ts`, which never holds more than the limit: a larger
@@ -183,7 +183,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   names the mismatch, and logs it once at start (`src/instrumentation.ts`). Rebuild with
   the same `ZS_API_URL` setting the server runs with.
 - Live mode labels every area that still reads the demo workspace with a "Sample data"
-  badge, and disables its writes (cancel plan, settings, connections, site edits) with the reason shown as visible text
+  badge, and disables its writes (cancel plan, settings, connections) with the reason shown as visible text
   (`src/components/ui/sample.tsx`). Nothing pretends to save.
 - Errors: the demo adapter parses requests with the same `@zs/contracts` schemas and throws
   the error the HTTP client would build from the API's body: the fixed message per code,
@@ -269,8 +269,39 @@ browser with Web Crypto in `src/lib/agent-actor.ts` and pinned to core in
 `test/agent-actor.test.ts`) reads "Drafted by the follow-up agent" with a "Follow-up agent"
 badge; any other author without an email is "a former team member".
 
-`TODO(api)`: usage, the connections checklist, site, connections and plan have no API
-yet. Live mode still reads them from the demo workspace.
+Site: the Site page reads `/v1/sites` and shows the first site, its live version and
+History. Only owners see it; staff get "Owners publish the website", and a 404 (the API
+runs without `SITES_STORE`) says publishing is not switched on yet. Version numbers are the
+API's `number` (1, 2, 3 per site, never reused), not positions in the list. "Edit site"
+starts from the live version's spec (`{ kind: "plain", title, tagline, sections }`) and
+checks the API's limits before sending: title 120, tagline 200, heading 120 and text 2,000
+characters after trimming, and a publish body of at most 64 KiB in UTF-8, the cap of the
+proxy and the API (`src/components/site/draft.ts`). Preview posts to
+`/v1/sites/:id/preview`, which compiles without saving, and shows the page in an iframe
+with `sandbox=""` (no scripts, forms or same-origin access); a preview whose draft changed
+since is not shown. Publish and "Make live" both send the release that was live when the
+editor or dialog opened (`expectedCurrentReleaseId`): a 409 `stale_release`
+(`isStaleRelease`) means another version went live since, so nothing is replaced. The
+editor keeps the draft and says to reopen it; the rollback dialog closes and History
+reloads. Their intent keys live per site for the life of the tab. A site has at most one
+open publish (in flight, or its answer was lost), held the same way: until it is answered
+for good, the editor reopens it exactly as sent (same spec, same baseline, same key) and
+publishes nothing else, even after leaving the page or a refresh that moved the live
+release. So a retry replays instead of adding a second version. A late answer updates
+the page but never closes a newer opening (`useDialogGeneration`). When the API answers
+`edge: "pending"` the database moved but the site's host pointer did not, so the page says
+the site still shows the previous version and offers "Update the site now"
+(`/v1/sites/:id/sync`). That state is a query per site and pointer version
+(`useSiteEdge`): set by every publish, rollback and sync under the version its answer
+names, and asked once with a sync when a version is first shown, so it survives leaving
+the page and a version another owner made live is checked afresh. Preview and sync change nothing, so they send no
+`Idempotency-Key`. The demo adapter (`src/lib/api/demo/sites.ts`) builds the same plain
+page in the browser and exposes `rollBackElsewhere()`, `setSiteEdgeDown()`,
+`delayNextSiteWrite()` and `loseNextSiteAnswer()` on `window.__zsDemo` for tests.
+`e2e:live` runs the API with `SITES_STORE=memory`.
+
+`TODO(api)`: usage, the connections checklist, connections and plan have no API yet.
+Live mode still reads them from the demo workspace.
 
 ## Notes
 

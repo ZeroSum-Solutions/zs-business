@@ -223,8 +223,9 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/sites` | `{ items: Site[] }`, owners only (as every `/v1/sites` route) |
 | `POST /v1/sites` `{ name }` | 201 site, not yet published |
 | `GET /v1/sites/:id` | one site with its live release, pointer version and hosts |
-| `POST /v1/sites/:id/releases` `{ spec }` | 201 `{ actionId, result: { site, release }, edge }`: compiled, stored and live |
-| `GET /v1/sites/:id/releases` | `{ items: Release[] }`, newest first, up to 100 |
+| `POST /v1/sites/:id/releases` `{ spec, expectedCurrentReleaseId? }` | 201 `{ actionId, result: { site, release }, edge }`: compiled, stored and live; 409 `stale_release` when a baseline is sent and another release is live |
+| `POST /v1/sites/:id/preview` `{ spec }` | what publishing would serve (`entry`, `digest`, `files`, `entryHtml`); stores and records nothing |
+| `GET /v1/sites/:id/releases` | `{ items: Release[] }`, newest first (highest `number`), up to 100 |
 | `GET /v1/sites/:id/releases/:releaseId` | one release with its spec and files |
 | `POST /v1/sites/:id/releases/:releaseId/activate` `{ expectedCurrentReleaseId }` | 200, the rollback; 409 `stale_release` when another release went live since |
 | `POST /v1/sites/:id/sync` | `{ site, edge }`: writes the edge objects again |
@@ -277,7 +278,12 @@ Worker (`apps/site-worker`) serves each host's live release from R2.
    replays the recorded result, so it works while the store is down.
 3. **Record and go live.** One dispatched action (`site.release.publish`) records the release,
    its files and the spec, and moves the site pointer (`site_pointers`, one row update, version
-   +1) in the same transaction as the action record and its outbox event.
+   +1) in the same transaction as the action record and its outbox event. Each release gets
+   the site's next `number` (1, 2, 3, ...) under the site lock; numbers are never reused or
+   renumbered, so a rollback leaves them as they are. An editor may send
+   `expectedCurrentReleaseId`, the live release its edit started from (`null` before the first
+   publish). If another release is live by then, the answer is 409 `stale_release` and nothing
+   is recorded (checked before the store step, and again under the site lock). Without the field the publish goes live whatever is live.
 4. **Project to the edge.** After the commit the API writes the release manifest
    (`t/<tenant>/releases/<release>/manifest.json`, once) and each host's pointer
    (`hosts/<host>`). No pointer moves until the manifest is in the store. Pointers move by

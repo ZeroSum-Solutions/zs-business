@@ -30,7 +30,9 @@ export async function createSite(command: CreateSiteCommand, ctx: SiteWriteConte
   return parseOrFail(siteOutputSchema, await ctx.dispatch(parseOrFail(createSiteCommandSchema, command)));
 }
 export async function publishSiteRelease(command: PublishSiteReleaseCommand, ctx: SiteWriteContext): Promise<SiteReleaseOutput> {
-  return parseOrFail(siteReleaseOutputSchema, await ctx.dispatch(parseOrFail(publishSiteReleaseCommandSchema, command)));
+  // Parsed, an absent baseline is absent rather than undefined, so the payload is plain JSON.
+  const parsed = parseOrFail(publishSiteReleaseCommandSchema, command) as ActionCommand;
+  return parseOrFail(siteReleaseOutputSchema, await ctx.dispatch(parsed));
 }
 export async function activateSiteRelease(command: ActivateSiteReleaseCommand, ctx: SiteWriteContext): Promise<SiteReleaseOutput> {
   return parseOrFail(siteReleaseOutputSchema, await ctx.dispatch(parseOrFail(activateSiteReleaseCommandSchema, command)));

@@ -8,6 +8,7 @@ export const siteRoutes = new Hono<AppEnv>()
   .get("/", async (c) => c.json(await c.var.session.listSites()))
   .post("/", async (c) => c.json(await c.var.session.createSite(await jsonBody(c), idempotencyKey(c)), 201))
   .get("/:id", async (c) => c.json(await c.var.session.getSite(c.req.param("id"))))
+  .post("/:id/preview", async (c) => c.json(await c.var.session.previewSite(c.req.param("id"), await jsonBody(c))))
   .get("/:id/releases", async (c) => c.json(await c.var.session.listSiteReleases(c.req.param("id"))))
   .post("/:id/releases", async (c) =>
     c.json(await c.var.session.publishSite(c.req.param("id"), await jsonBody(c), idempotencyKey(c)), 201))

@@ -3,7 +3,6 @@ import type {
   ChecklistItem,
   Connection,
   Plan,
-  SitePage,
   Usage,
   WorkspaceApi,
 } from "../workspace-types";
@@ -35,48 +34,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     { id: "stripe", label: "Stripe deposits", detail: "Deposits land in your account in 2 days.", status: "ok", actionLabel: null },
   ];
 
-  const pages: SitePage[] = [
-    {
-      id: "home", title: "Home", path: "/", status: "live", updatedAt: ago(60 * 24 * 4),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Fine jewelry, made in our Hudson Street workshop" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Engagement rings, heirloom resets and repairs by the same four hands for twenty-two years." },
-        { id: "cta", label: "Button", kind: "text", value: "Book a showroom visit" },
-        { id: "image", label: "Hero image", kind: "image", value: "Workbench with an oval diamond in a four-prong setting" },
-      ],
-    },
-    {
-      id: "engagement", title: "Engagement", path: "/engagement", status: "live", updatedAt: ago(60 * 24 * 9),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Engagement rings, drawn for one person" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Start with a stone or a sketch. We guide you through design, casting and setting." },
-        { id: "cta", label: "Button", kind: "text", value: "Start a design" },
-      ],
-    },
-    {
-      id: "bespoke", title: "Bespoke", path: "/bespoke", status: "live", updatedAt: ago(60 * 24 * 16),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Commissions" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Signets, pendants and pieces that carry a family story." },
-      ],
-    },
-    {
-      id: "repairs", title: "Repairs", path: "/repairs", status: "draft", updatedAt: ago(60 * 3),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Repairs and restringing" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Book a ten-minute drop-off. Most repairs are ready within a week." },
-        { id: "cta", label: "Button", kind: "text", value: "Book repair intake" },
-      ],
-    },
-    {
-      id: "visit", title: "Visit us", path: "/visit", status: "live", updatedAt: ago(60 * 24 * 30),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Visit the showroom" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Tuesday to Saturday. Appointments are recommended, walk-ins are welcome." },
-      ],
-    },
-  ];
-
   const connections: Connection[] = [
     { id: "gcal", name: "Google Calendar", purpose: "Keeps showroom and repair calendars in sync", status: "connected", detail: "Synced 4 minutes ago" },
     { id: "gmail", name: "Gmail", purpose: "Sends and receives customer email", status: "connected", detail: "hello@haldenrowe.example" },
@@ -105,7 +62,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
   return {
     async getUsage() { await wait(); return structuredClone(usage); },
     async getChecklist() { await wait(); return structuredClone(checklist); },
-    async listSitePages() { await wait(); return structuredClone(pages); },
     async listConnections() { await wait(); return structuredClone(connections); },
     async getPlan() { await wait(); return structuredClone(plan); },
     async cancelPlan() {

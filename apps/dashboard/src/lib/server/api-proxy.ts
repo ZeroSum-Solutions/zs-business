@@ -4,7 +4,7 @@
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
  * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source, inbox, home and agent routes and /v1/me are forwarded (for example
+ * approval, source, inbox, home, agent and site routes and /v1/me are forwarded (for example
  * /v1/approvals/:id/approve, /v1/inbox/threads and PUT /v1/agents/followup/settings), only from
  * this origin: other sites cannot make a signed-in browser spend its session here.
  */
@@ -20,8 +20,8 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents"]);
-const SINGLE = new Set(["me", "members", "approvals", "sources"]);
+const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites"]);
+const SINGLE = new Set(["me", "members", "approvals", "sources", "sites"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
 const WITH_BODY = new Set(["POST", "PUT"]);

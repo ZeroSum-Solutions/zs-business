@@ -1,8 +1,8 @@
 /**
  * Read models for areas that have no HTTP route yet (wallet and usage, the connections
- * checklist, site, connections, plan). TODO(api): move each to a route as it is built.
- * Inbox and Home results moved to `InboxApi` and `HomeApi` (inbox-home.md), and Agents to
- * `AgentsApi` (agents.md).
+ * checklist, connections, plan). TODO(api): move each to a route as it is built.
+ * Inbox and Home results moved to `InboxApi` and `HomeApi` (inbox-home.md), Agents to
+ * `AgentsApi` (agents.md), and the site to `SitesApi`.
  */
 
 export interface UsageLine {
@@ -33,22 +33,6 @@ export interface ChecklistItem {
   actionLabel: string | null;
 }
 
-export interface SiteSlot {
-  id: string;
-  label: string;
-  kind: "text" | "longtext" | "image";
-  value: string;
-}
-
-export interface SitePage {
-  id: string;
-  title: string;
-  path: string;
-  status: "live" | "draft";
-  updatedAt: string;
-  slots: SiteSlot[];
-}
-
 export type ConnectionStatus = "connected" | "needs_reconnect" | "needs_permission" | "verifying";
 
 export interface Connection {
@@ -73,7 +57,6 @@ export interface Plan {
 export interface WorkspaceApi {
   getUsage(): Promise<Usage>;
   getChecklist(): Promise<ChecklistItem[]>;
-  listSitePages(): Promise<SitePage[]>;
   listConnections(): Promise<Connection[]>;
   getPlan(): Promise<Plan>;
   /** Ends the plan at the end of the paid period. */

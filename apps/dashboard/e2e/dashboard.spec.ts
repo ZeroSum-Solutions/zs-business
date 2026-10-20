@@ -46,8 +46,8 @@ test("navigates all six areas and the account pages", async ({ page }, info) => 
   await shot(page, "08-pipeline", info.project.name);
 
   await mainNav(page).getByRole("link", { name: "Site" }).click();
-  await page.getByRole("button", { name: "Edit Home on phone" }).click();
-  await expect(page.getByRole("dialog", { name: "Edit Home" })).toBeVisible();
+  await page.getByRole("button", { name: "Edit site" }).click();
+  await expect(page.getByRole("dialog", { name: "Edit site" })).toBeVisible();
   await expectDialogInset(page);
   await shot(page, "09-site-editor", info.project.name);
   await page.keyboard.press("Escape");
