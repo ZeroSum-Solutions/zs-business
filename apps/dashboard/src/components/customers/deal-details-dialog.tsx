@@ -15,7 +15,7 @@ import { LEAD_SOURCE_LABELS, LEAD_SOURCES } from "@/lib/lead-sources";
 import { useKeys } from "@/lib/queries";
 import { currencyDigits } from "@/lib/utils";
 
-export const STALE_DETAILS_MESSAGE = "Someone changed this deal since you opened it. Reloaded: check the details and save again.";
+export const STALE_DETAILS_MESSAGE = "Someone changed this deal since you opened it. Reloaded: your changes are kept and theirs fill the rest. Check the details and save again.";
 export const DETAILS_RELOAD_FAILED = "Someone changed this deal, but it could not be reloaded. Try again before saving.";
 
 /** "1,250.50" in `currency` to minor units, or null when it is not an amount. Whole numbers and up to the currency's digits only. */
@@ -45,11 +45,30 @@ const isCurrency = (code: string) => {
   }
 };
 
-const initialForm = (deal: DealSummary) => ({
+export interface DetailsForm {
+  amount: string;
+  currency: string;
+  leadSource: string;
+}
+
+export const initialForm = (deal: DealSummary): DetailsForm => ({
   amount: deal.value ? formatAmountInput(deal.value.amountMinor, deal.value.currency) : "",
   currency: deal.value?.currency ?? "USD",
   leadSource: deal.leadSource ?? "",
 });
+
+/**
+ * After a stale save (H-1): each field the owner changed since `base` keeps their edit; every
+ * other field takes the saved value someone else wrote. Value and currency move together.
+ */
+export function rebaseForm(base: DetailsForm, mine: DetailsForm, saved: DetailsForm): DetailsForm {
+  const valueEdited = mine.amount !== base.amount || mine.currency !== base.currency;
+  return {
+    amount: valueEdited ? mine.amount : saved.amount,
+    currency: valueEdited ? mine.currency : saved.currency,
+    leadSource: mine.leadSource !== base.leadSource ? mine.leadSource : saved.leadSource,
+  };
+}
 
 /**
  * Value, currency and lead source for one deal (inbox-home.md H-1). It saves against the
@@ -68,6 +87,10 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
   const intents = useIntentKey();
   const generation = useDialogGeneration(open);
   const [form, setForm] = useState(() => initialForm(deal));
+  // What the form was opened (or last rebased) from: a save sends this revision, never a newer
+  // one a reload brought in, so a change made elsewhere always comes back as stale_revision.
+  const [base, setBase] = useState(() => ({ revision: deal.revision, form: initialForm(deal) }));
+  const [rebasing, setRebasing] = useState(false);
   const [problem, setProblem] = useState<"amount" | "currency" | null>(null);
   const [stale, setStale] = useState<"reloaded" | "failed" | null>(null);
 
@@ -93,7 +116,9 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
       } catch {
         reloaded = false;
       }
-      if (generation.isCurrent(attempt.generation)) setStale(reloaded ? "reloaded" : "failed");
+      if (!generation.isCurrent(attempt.generation)) return;
+      setStale(reloaded ? "reloaded" : "failed");
+      if (reloaded) setRebasing(true);
     },
   });
   const { reset } = save;
@@ -103,10 +128,22 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
     if (!open) return;
     reset();
     setForm(initialForm(deal));
+    setBase({ revision: deal.revision, form: initialForm(deal) });
+    setRebasing(false);
     setProblem(null);
     setStale(null);
     // Only on opening (`deal` is left out on purpose): a reload while open must not wipe what the owner typed.
   }, [open, reset]);
+
+  // After a stale save, once the reloaded deal arrives: keep the owner's edits, take the rest
+  // and the new revision from it. The owner saves again to accept the result.
+  useEffect(() => {
+    if (!open || !rebasing || deal.revision === base.revision) return;
+    const saved = initialForm(deal);
+    setForm((mine) => rebaseForm(base.form, mine, saved));
+    setBase({ revision: deal.revision, form: saved });
+    setRebasing(false);
+  }, [open, rebasing, deal, base]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -121,7 +158,7 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
     setProblem(null);
     setStale(null);
     save.mutate({
-      change: { dealId: deal.id, expectedRevision: deal.revision, value, leadSource: (form.leadSource || null) as LeadSource | null },
+      change: { dealId: deal.id, expectedRevision: base.revision, value, leadSource: (form.leadSource || null) as LeadSource | null },
       generation: generation.current(),
     });
   };
@@ -172,7 +209,10 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
               <ErrorNote
                 error={save.error}
                 message={DETAILS_RELOAD_FAILED}
-                retry={() => void queryClient.invalidateQueries({ queryKey: keys.dealsAll }, { throwOnError: true }).then(() => setStale("reloaded"), () => undefined)}
+                retry={() => void queryClient.invalidateQueries({ queryKey: keys.dealsAll }, { throwOnError: true }).then(() => {
+                  setStale("reloaded");
+                  setRebasing(true);
+                }, () => undefined)}
               />
             </div>
           ) : null}

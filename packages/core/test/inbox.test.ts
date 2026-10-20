@@ -10,7 +10,14 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import { createPublicSession } from "../src/edge/public-session.js";
 import { mapError } from "../src/edge/errors.js";
 import { createSession, directDispatch, memberAuthorize, type EdgeDependencies, type Session } from "../src/edge/session.js";
-import { approvalForAction, settleReplyDelivery } from "../src/index.js";
+import {
+  approvalForAction,
+  approvalsFromRecords,
+  createDeliveryWorker,
+  createFakeProvider,
+  creditWallet,
+  settleReplyDelivery,
+} from "../src/index.js";
 
 /** The injected clock; every write helper moves it one minute forward first. */
 let now = Date.parse("2026-10-19T08:00:00.000Z");
@@ -592,6 +599,12 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     expect(await approvedEvents(drafted.result.id)).toHaveLength(1);
   });
 
+  it("reserves the inbox: key prefix for the server's own reply steps", async () => {
+    const customer = await contact(a, { displayName: "Cass Dunn", email: "cass@example.com" });
+    for (const key of ["inbox:propose:x", "INBOX:withdraw:y"])
+      expect((await rejection(() => a.draftReply({ contactId: customer, body: "Hi" }, key))).code).toBe("ValidationFailed");
+  });
+
   it("never runs the send directly from a member session, even an owner's", async () => {
     const customer = await contact(a, { displayName: "Wren Ash", email: "wren@example.com" });
     const drafted = await draft(a, customer, "Direct?");
@@ -638,10 +651,105 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     expect(await approvedEvents(stale.result.id)).toHaveLength(1);
   });
 
+  /** An owner approves through the approvals route while the customer has no address, so the run fails after the decision. */
+  async function approvedButUnsent(session: Session, contactId: string, body: string) {
+    const drafted = await draft(a, contactId, body);
+    const [proposal] = await proposals(drafted.result.id);
+    tick();
+    const error = await rejection(session.approveApproval(proposal!.id, {}, randomUUID()));
+    expect(error.details).toMatchObject({ reason: "no_email" });
+    expect(await proposals(drafted.result.id)).toEqual([expect.objectContaining({ status: "approved" })]);
+    return { replyId: drafted.result.id, approvalId: proposal!.id };
+  }
+  const giveEmail = (contactId: string, email: string) => fixture.service((tx) => tx.query(
+    "UPDATE crm_contacts SET normalized_email=$3 WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, contactId, email]));
+
+  it("a new call finishes a send whose run failed after approval, and a retry of that call replays", async () => {
+    const customer = await contact(a, { displayName: "Abel Kerr", phone: "+15555550191" });
+    const { replyId, approvalId } = await approvedButUnsent(a, customer, "Ready when you are.");
+    await giveEmail(customer, "abel@example.com");
+    tick();
+    const key = randomUUID();
+    const sent = await a.approveReply(replyId, {}, key);
+    expect(sent.result).toMatchObject({ status: "approved", approvedBy: { userId: owner.userId } });
+    const check = await fixture.service((tx) => approvalForAction(tx, fixture.a.tenantId, sent.actionId, new Date(now)));
+    expect(check).toMatchObject({ kind: "stored", approval: { id: approvalId } });
+    // The same key replays the send (I-6); a new key is not_draft; one event in all.
+    expect(await a.approveReply(replyId, {}, key)).toEqual(sent);
+    expect((await rejection(a.approveReply(replyId, {}, randomUUID()))).details).toMatchObject({ reason: "not_draft", status: "approved" });
+    expect(await approvedEvents(replyId)).toHaveLength(1);
+    // A key bound to one reply's send is refused for another reply's.
+    const other = await approvedButUnsent(a, await contact(a, { displayName: "Abel's office", phone: "+15555550193" }), "A second note.");
+    expect((await rejection(a.approveReply(other.replyId, {}, key))).code).toBe("Conflict");
+    expect(await replyRow(other.replyId)).toMatchObject({ status: "draft" });
+  });
+
+  it("a proposal another owner approved is theirs to finish; the conflict names them", async () => {
+    const second = await addMember(fixture.a.tenantId, "owner");
+    const secondSession = sessionFor(second.userId);
+    const customer = await contact(a, { displayName: "Bea Lowe", phone: "+15555550192" });
+    const { replyId } = await approvedButUnsent(a, customer, "Your fitting is set.");
+    await giveEmail(customer, "bea@example.com");
+    const error = await rejection(approve(secondSession, replyId));
+    expect(error).toMatchObject({ code: "Conflict", details: { reason: "approved_by_other", approvedBy: owner.userId } });
+    expect(mapError(error).body.error.details).toEqual({ reason: "approved_by_other", approvedBy: owner.userId });
+    expect(await replyRow(replyId)).toMatchObject({ status: "draft" });
+    await approve(a, replyId);
+    expect(await replyRow(replyId)).toMatchObject({ status: "approved" });
+  });
+
   it("a reply with no address is refused before the decision, so its proposal stays pending", async () => {
     const phoneOnly = await contact(a, { displayName: "Zed Hart", phone: "+15555550188" });
     const drafted = await draft(a, phoneOnly, "No address");
     expect((await rejection(approve(a, drafted.result.id))).details).toMatchObject({ reason: "no_email" });
     expect(await proposals(drafted.result.id)).toEqual([expect.objectContaining({ status: "pending", decided_by: null })]);
+  });
+});
+
+describe("delivery through M3d (I-6, I-9, delivery.md D-1, D-6)", () => {
+  it("the worker sends the approved words under the approval record and settles the reply; no funds fail it", async () => {
+    const provider = createFakeProvider({ clock });
+    const worker = createDeliveryWorker({
+      service: fixture.service,
+      providers: { email: provider, sms: provider },
+      approvals: approvalsFromRecords(approvalForAction, clock),
+      clock,
+      generateId: randomUUID,
+      config: {
+        workerId: "inbox-test-worker", leaseMs: 60_000, providerTimeoutMs: 5_000, maxAttempts: 2,
+        backoffBaseMs: 1_000, backoffMaxMs: 60_000, dedupeMarginMs: 60_000,
+        pricing: { currency: "usd", email: 2, smsSegment: 3 },
+        unsubscribe: { secret: "inbox-test-unsubscribe-secret-0123456789", baseUrl: "https://api.example.test/public/v1/unsubscribe" },
+      },
+      onSettled: async (tx, tenantId, messageId, outcome, at) => { await settleReplyDelivery(tx, tenantId, messageId, outcome, at); },
+    });
+    await fixture.service((tx) => creditWallet(tx, {
+      tenantId: fixture.a.tenantId, ledgerId: randomUUID(), amount: 1_000, idempotencyKey: `credit:${randomUUID()}`, now: clock.now(),
+    }));
+    const customer = await contact(a, { displayName: "Ines Calloway", email: "ines.calloway@example.com" });
+    const drafted = await draft(a, customer, "Your ring is ready to collect.", randomUUID(), "Ready to collect");
+    await approve(a, drafted.result.id);
+    // Tenant B has no funds: its approved reply waits, then ends as failed rather than stuck.
+    const otherCustomer = (await b.upsertContact({ displayName: "Bram Ostby", email: "bram@example.com" }, randomUUID())).result.contact.id;
+    tick();
+    const poor = await b.draftReply({ contactId: otherCustomer, body: "Your quote is attached." }, randomUUID());
+    tick();
+    await b.approveReply(poor.result.id, {}, randomUUID());
+
+    tick();
+    await worker.runOnce({ ingestLimit: 1_000, claimLimit: 1_000 });
+    const sent = provider.delivered.filter((item) => item.request.to === "ines.calloway@example.com");
+    // The worker appends its unsubscribe footer (D-5) below the approved text.
+    expect(sent.map((item) => [item.request.tenantId, item.request.subject, item.request.text.split("\n\n--\n")[0]]))
+      .toEqual([[fixture.a.tenantId, "Ready to collect", "Your ring is ready to collect."]]);
+    expect(await replyRow(drafted.result.id)).toMatchObject({ status: "sent", settled_at: clock.now() });
+    expect(provider.delivered.some((item) => item.request.to === "bram@example.com")).toBe(false);
+    const poorStatus = async () => (await fixture.service((tx) => tx.query<{ status: string }>(
+      "SELECT status FROM inbox_replies WHERE tenant_id=$1 AND id=$2", [fixture.b.tenantId, poor.result.id]))).rows[0]?.status;
+    expect(await poorStatus()).toBe("approved");
+    now += 60_000;
+    await worker.runOnce({ ingestLimit: 1_000, claimLimit: 1_000 });
+    expect(await poorStatus()).toBe("failed");
+    expect(provider.delivered.some((item) => item.request.to === "bram@example.com")).toBe(false);
   });
 });
