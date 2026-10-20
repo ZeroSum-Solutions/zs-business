@@ -2,18 +2,22 @@
  * Made-up demo data for "Halden & Rowe Fine Jewelry". No real people or businesses.
  * Emails use reserved example domains and phones use the fictional 555-01xx range.
  */
-import type {
-  BookingPageSummary,
-  BookingRecord,
-  ContactRecord,
-  DealSummary,
-  IntakeChannel,
-  IntakeItemRecord,
-  LeadSource,
-  PipelineSummary,
-  ReplyActor,
-  ReplyRecord,
-  ResourceSummary,
+import {
+  DEFAULT_FOLLOW_UP_SETTINGS,
+  type BookingPageSummary,
+  type BookingRecord,
+  type ContactRecord,
+  type DealSummary,
+  type FollowUpDecision,
+  type FollowUpRun,
+  type FollowUpSettings,
+  type IntakeChannel,
+  type IntakeItemRecord,
+  type LeadSource,
+  type PipelineSummary,
+  type ReplyActor,
+  type ReplyRecord,
+  type ResourceSummary,
 } from "@zs/contracts";
 import { addDays, weekdayOf, weekRanges, zonedDateKey, zonedTimeToUtc } from "../../time";
 
@@ -111,6 +115,14 @@ const WEBSITE_CONTACT_INDEX = 14;
 /** The members who draft and approve replies in the demo. */
 export const DEMO_OWNER: ReplyActor = { userId: "9a1b3c5d-7e9f-4a1b-8c2d-000000000001", email: "mara@haldenrowe.example" };
 export const DEMO_STAFF: ReplyActor = { userId: "9a1b3c5d-7e9f-4a1b-8c2d-000000000002", email: "jonah@haldenrowe.example" };
+/**
+ * The follow-up agent's actor (agents.md G-1): `agentActorId(DEMO_TENANT_ID)` from core, which
+ * test/agent-actor.test.ts checks. It drafts with no email, as the API reports it.
+ */
+export const DEMO_AGENT_ACTOR_ID = "703cddeb-3f35-8dec-8397-426f06fb05ee";
+export const DEMO_AGENT: ReplyActor = { userId: DEMO_AGENT_ACTOR_ID, email: null };
+/** The subject the demo's stand-in model writes. */
+export const DEMO_FOLLOW_UP_SUBJECT = "Following up on your visit request";
 
 /** [contactIndex, stage, title, value in dollars or null, lead source, won: which week] */
 const DEALS: [number, keyof typeof STAGE_IDS, string, number | null, LeadSource | null, "this" | "last" | null][] = [
@@ -231,15 +243,28 @@ export type DemoBooking = BookingRecord & {
   intakeItemId: string | null;
 };
 
+/** The follow-up agent's settings and its earlier runs (agents.md G-2, G-10). */
+export interface DemoFollowUp {
+  settings: FollowUpSettings;
+  revision: number;
+  updatedAt: string | null;
+  runs: FollowUpRun[];
+  decisions: FollowUpDecision[];
+}
+
 export interface DemoSeed {
   contacts: ContactRecord[];
   deals: DealSummary[];
   bookings: DemoBooking[];
   intakeItems: IntakeItemRecord[];
   replies: ReplyRecord[];
+  followUp: DemoFollowUp;
 }
 
 const replyId = (n: number) => `e7f9a1b3-5c7d-4e9f-8a1b-${String(n).padStart(12, "0")}`;
+const runId = (n: number) => `a6e1c3b5-7d9f-4b1c-8e2a-${String(n).padStart(12, "0")}`;
+const decisionId = (n: number) => `c4d6e8f0-2a4c-4e6a-9b8d-${String(n).padStart(12, "0")}`;
+const approvalId = (n: number) => `f2b4d6e8-0a2c-4e4a-8c6e-${String(n).padStart(12, "0")}`;
 export const DEMO_BUSINESS_SUBJECT = `Message from ${DEMO_BUSINESS}`;
 
 export function buildSeed(now: Date): DemoSeed {
@@ -372,5 +397,58 @@ export function buildSeed(now: Date): DemoSeed {
     };
   });
 
-  return { contacts, deals, bookings, intakeItems, replies };
+  return { contacts, deals, bookings, intakeItems, replies, followUp: buildFollowUp(intakeItems, replies, at) };
+}
+
+/**
+ * Three earlier runs of the follow-up agent. Last week it drafted for Marguerite Okafor's
+ * request; an owner discarded that draft and the team wrote its own reply. This week someone
+ * stopped it once, and an owner's run found only requests the team had answered.
+ */
+function buildFollowUp(intakeItems: IntakeItemRecord[], replies: ReplyRecord[], at: (point: WeekPoint, minutes?: number) => string): DemoFollowUp {
+  const linkedRequest = (contactIndex: number) => intakeItems.find((item) => item.status === "linked" && item.contactId === contactId(contactIndex + 1));
+  const marguerite = linkedRequest(0);
+  const noor = linkedRequest(11);
+  const runs: FollowUpRun[] = [];
+  const decisions: FollowUpDecision[] = [];
+  const addRun = (n: number, startedAt: string, requestedBy: string | null, stopReason: FollowUpRun["stopReason"], made: Omit<FollowUpDecision, "id" | "runId">[]) => {
+    const id = runId(n);
+    made.forEach((decision, index) => decisions.push({ id: decisionId(n * 10 + index), runId: id, ...decision }));
+    const drafted = made.filter((decision) => decision.outcome === "drafted").length;
+    runs.push({
+      // A stopped run closes as it starts; a completed one a minute later.
+      id, agent: "inquiry_followup", requestedBy, startedAt,
+      finishedAt: stopReason ? startedAt : new Date(Date.parse(startedAt) + 60_000).toISOString(),
+      status: stopReason ? "stopped" : "completed", stopReason, considered: made.length, drafted, skipped: made.length - drafted,
+    });
+  };
+
+  if (marguerite) {
+    const startedAt = at(["last", 0.55]);
+    const reply: ReplyRecord = {
+      id: replyId(REPLIES.length + 1), tenantId: DEMO_TENANT_ID, contactId: marguerite.contactId!, channel: "email",
+      subject: DEMO_FOLLOW_UP_SUBJECT, body: "Hi Marguerite, thank you for asking about a thinner halo. We would be glad to show you a few options at your visit.",
+      status: "discarded", draftedBy: DEMO_AGENT, createdAt: startedAt, approvedBy: null, approvedAt: null,
+      discardedAt: at(["last", 0.58]), settledAt: null,
+    };
+    replies.push(reply);
+    addRun(1, startedAt, null, null, [{
+      intakeItemId: marguerite.id, contactId: marguerite.contactId!, outcome: "drafted", reason: null,
+      replyId: reply.id, approvalId: approvalId(1), createdAt: startedAt,
+    }]);
+  }
+  addRun(2, at(["this", 0.7]), null, "tenant_killed", []);
+  const lastRun = at(["this", 0.95]);
+  addRun(3, lastRun, DEMO_OWNER.userId, null, [noor, marguerite].flatMap((item) => item ? [{
+    intakeItemId: item.id, contactId: item.contactId!, outcome: "skipped" as const, reason: "answered" as const,
+    replyId: null, approvalId: null, createdAt: lastRun,
+  }] : []));
+
+  return {
+    settings: { ...DEFAULT_FOLLOW_UP_SETTINGS, enabled: true, timeZone: DEMO_ZONE },
+    revision: 2,
+    updatedAt: at(["last", 0.2]),
+    runs: runs.sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id)),
+    decisions,
+  };
 }

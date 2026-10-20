@@ -8,7 +8,15 @@ import type {
   DealRecord,
   DealSummary,
   DealValue,
+  FollowUpDecision,
+  FollowUpRun,
+  FollowUpRunDetail,
+  FollowUpSettings,
+  FollowUpSkipReason,
+  FollowUpStatus,
+  FollowUpStopReason,
   HomeResults,
+  KillFollowUpRequest,
   IntakeItemRecord,
   IntakeStatus,
   LeadSource,
@@ -23,6 +31,7 @@ import type {
   ThreadDetail,
   ThreadEntry,
   ThreadSummary,
+  UpdateFollowUpSettingsRequest,
   UpsertContactRequest,
   WeekStart,
 } from "@zs/contracts";
@@ -36,6 +45,13 @@ export type {
   DealRecord,
   DealSummary,
   DealValue,
+  FollowUpDecision,
+  FollowUpRun,
+  FollowUpRunDetail,
+  FollowUpSettings,
+  FollowUpSkipReason,
+  FollowUpStatus,
+  FollowUpStopReason,
   HomeResults,
   IntakeItemRecord,
   IntakeStatus,
@@ -51,6 +67,7 @@ export type {
   ThreadDetail,
   ThreadEntry,
   ThreadSummary,
+  UpdateFollowUpSettingsRequest,
   WeekStart,
 };
 
@@ -253,6 +270,36 @@ export interface HomeApi {
   getResults(query: HomeResultsQuery, options?: ReadOptions): Promise<HomeResults>;
 }
 
+export interface FollowUpRunQuery {
+  /** The previous page's `nextCursor`. */
+  cursor?: string;
+  limit?: number;
+}
+
+/**
+ * The inquiry follow-up agent (agents.md G-11). Members with `inbox.drafts` read it and may
+ * stop it; owners (`agents`) change its settings, resume it and run it now. It only drafts:
+ * every draft waits in the Inbox for an owner's approval.
+ */
+export interface AgentsApi {
+  getFollowUpStatus(options?: ReadOptions): Promise<FollowUpStatus>;
+  /** Replaces the settings. A conflict with reason `stale_revision` when someone saved since `expectedRevision`. */
+  updateFollowUpSettings(input: UpdateFollowUpSettingsRequest, options: WriteOptions): Promise<FollowUpStatus>;
+  /** Stops new drafts at once. A switch already engaged keeps its first time and note. */
+  killFollowUp(input: KillFollowUpRequest, options: WriteOptions): Promise<FollowUpStatus>;
+  /** Owners only. */
+  resumeFollowUp(options: WriteOptions): Promise<FollowUpStatus>;
+  /** Owners only. Throws `not_found` when the server has no model configured. */
+  startFollowUpRun(options: WriteOptions): Promise<FollowUpRunDetail>;
+  /** Newest first, one page at a time. */
+  listFollowUpRuns(query?: FollowUpRunQuery, options?: ReadOptions): Promise<Page<FollowUpRun>>;
+  /** Throws `not_found` for an unknown or malformed run ID. */
+  getFollowUpRun(id: string, options?: ReadOptions): Promise<FollowUpRunDetail>;
+}
+
+/** Runs per page of the Agents page's run list. */
+export const RUN_PAGE_SIZE = 20;
+
 /** Threads per page of the inbox list. */
 export const THREAD_PAGE_SIZE = 30;
 
@@ -261,7 +308,7 @@ export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & WorkspaceApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & WorkspaceApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

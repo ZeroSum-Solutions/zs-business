@@ -1,114 +1,535 @@
 "use client";
 
-import { CheckCircle, PauseCircle, PlayCircle, WarningCircle } from "@phosphor-icons/react";
-import { useState } from "react";
+import { CheckCircle, MinusCircle, Play, Prohibit, Robot, ShieldCheck } from "@phosphor-icons/react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
+import { useMemo, useState, type FormEvent } from "react";
+import type { FollowUpRunDetail, FollowUpStatus, KillFollowUpRequest, UpdateFollowUpSettingsRequest } from "@zs/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { DisabledReason, NOT_AVAILABLE, useSampleOnly } from "@/components/ui/sample";
-import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
+import { Input, Label, Select } from "@/components/ui/input";
+import { DisabledReason } from "@/components/ui/sample";
+import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import type { AgentStatus } from "@/lib/api";
-import { useAgents, useApprovals } from "@/lib/queries";
-import { cn, relativeTime } from "@/lib/utils";
+import { isApiError, isSettingsChanged, type FollowUpRun } from "@/lib/api";
+import { useApi } from "@/lib/api/react";
+import {
+  agentState,
+  blockedSentence,
+  FIELD_HINTS,
+  quietHoursLabel,
+  readSettingsForm,
+  RUN_STATUS,
+  SKIP_REASONS,
+  STOP_REASONS,
+  timeZoneChoices,
+  toSettingsForm,
+  type SettingsField,
+  type SettingsForm,
+} from "@/lib/agents";
+import { useIntentKey } from "@/lib/intent-key";
+import { useContactNames, useDisplayZone, useFollowUpRun, useFollowUpRuns, useFollowUpStatus, useKeys } from "@/lib/queries";
+import { MANAGE_AGENTS, useCan, useSession } from "@/lib/session";
+import { formatDay, formatTime } from "@/lib/time";
+import { cn } from "@/lib/utils";
 
-const STATUS: Record<AgentStatus, { label: string; tone: "success" | "neutral" | "warn"; icon: typeof PlayCircle }> = {
-  running: { label: "Running", tone: "success", icon: PlayCircle },
-  paused: { label: "Paused", tone: "neutral", icon: PauseCircle },
-  needs_approval: { label: "Needs approval", tone: "warn", icon: WarningCircle },
-};
+const linkClass = "inline-flex min-h-11 items-center font-medium text-accent underline-offset-4 hover:underline";
+const when = (instant: string, zone: string) => `${formatDay(instant, zone)}, ${formatTime(instant, zone)}`;
+const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+
+export const STOPPED_MESSAGE = "Agent stopped. It drafts nothing until an owner resumes it.";
+export const STALE_SETTINGS_MESSAGE = "Someone else saved these settings while you were editing. The latest settings are loaded below. Check them and save again.";
+
+function useSignedInUserId(): string | null {
+  const { session } = useSession();
+  return session.status === "signed_in" ? session.userId : null;
+}
 
 export function AgentsView() {
-  const agents = useAgents();
-  const approvals = useApprovals();
-  const toast = useToast();
-  const sampleOnly = useSampleOnly();
-  // UI-only for now: the kill switch does not reach a server yet, so live mode turns it off.
-  const [allPaused, setAllPaused] = useState(false);
-  const [decided, setDecided] = useState<Record<string, "approved" | "rejected">>({});
-  const pending = approvals.data?.filter((item) => !decided[item.id]) ?? [];
-
   return (
     <>
-      <PageHeader title="Agents" description="Helpers that work for you. Anything that speaks for the business waits for your approval." sample />
-      {sampleOnly ? <div className="mb-4"><DisabledReason id="agents-unavailable">{NOT_AVAILABLE}</DisabledReason></div> : null}
-
-      <Card className={cn("mb-4 flex items-center gap-4", allPaused && "shadow-[inset_0_0_0_1px_var(--danger)]")}>
-        <div className="min-w-0 flex-1">
-          <h2 id="kill-label" className="text-base font-semibold">Pause all agents</h2>
-          <p id="kill-state" className="text-sm text-muted">{allPaused ? "All agents are paused. Nothing is sent until you turn this off." : "Stops every agent at once. Turn it off to resume."}</p>
+      <PageHeader title="Agents" description="Helpers that work for you. Nothing they write reaches a customer until an owner approves it." />
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_420px]">
+        <div className="grid min-w-0 gap-4">
+          <FollowUpCard />
+          <RunsCard />
         </div>
-        <Switch
-          aria-labelledby="kill-label"
-          aria-describedby={sampleOnly ? "agents-unavailable" : undefined}
-          disabled={sampleOnly}
-          checked={allPaused}
-          onCheckedChange={(checked) => {
-            setAllPaused(checked);
-            toast(checked ? "All agents paused." : "Agents resumed.", checked ? "info" : "success");
-          }}
-        />
-      </Card>
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_420px]">
-        <Card aria-labelledby="agents-title">
-          <CardHeader><CardTitle id="agents-title">Your agents</CardTitle></CardHeader>
-          {agents.isPending ? <LoadingRows rows={4} /> : agents.isError ? <ErrorNote error={agents.error} retry={() => agents.refetch()} /> : (
-            <ul className="divide-y divide-border-soft">
-              {agents.data.map((agent) => {
-                const status = allPaused ? STATUS.paused : STATUS[agent.status];
-                return (
-                  <li key={agent.id} className="flex items-start gap-3 py-4 first:pt-0 last:pb-0">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-sm font-semibold">{agent.name}</h3>
-                        <Badge tone={status.tone}><status.icon aria-hidden />{status.label}</Badge>
-                      </div>
-                      <p className="mt-0.5 text-sm text-muted">{agent.description}</p>
-                      <p className="mt-1 text-xs text-meta">Last ran {relativeTime(agent.lastRun)}. {agent.actionsThisWeek} actions this week.</p>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </Card>
-
-        <Card aria-labelledby="approvals-title">
-          <CardHeader>
-            <div>
-              <CardTitle id="approvals-title">Needs approval</CardTitle>
-              <CardDescription>{pending.length === 0 ? "You are all caught up." : `${pending.length} waiting for you`}</CardDescription>
-            </div>
-          </CardHeader>
-          {approvals.isPending ? <LoadingRows rows={2} /> : approvals.isError ? <ErrorNote error={approvals.error} retry={() => approvals.refetch()} /> : pending.length === 0 ? (
-            <p className="flex items-center gap-2 text-sm text-muted"><CheckCircle size={20} aria-hidden className="text-success" />Nothing waiting.</p>
-          ) : (
-            <ul className="space-y-3">
-              {pending.map((item) => (
-                <li key={item.id} className="rounded-md bg-surface-warm p-3">
-                  <p className="text-sm font-medium text-fg">{item.summary}</p>
-                  <blockquote className="mt-2 border-l-2 border-border-strong pl-3 text-sm text-fg-2">{item.draft}</blockquote>
-                  <p className="mt-2 text-xs text-meta">Drafted {relativeTime(item.createdAt)}</p>
-                  <div className="mt-3 flex gap-2">
-                    <Button
-                      disabled={allPaused || sampleOnly}
-                      aria-describedby={sampleOnly ? "agents-unavailable" : allPaused ? "kill-state" : undefined}
-                      onClick={() => { setDecided({ ...decided, [item.id]: "approved" }); toast("Approved. It will send shortly."); }}
-                    >
-                      Approve and send
-                    </Button>
-                    <Button variant="ghost" disabled={sampleOnly} aria-describedby={sampleOnly ? "agents-unavailable" : undefined} onClick={() => { setDecided({ ...decided, [item.id]: "rejected" }); toast("Draft discarded.", "info"); }}>
-                      Discard
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
+        <SettingsCard />
       </div>
     </>
+  );
+}
+
+/** The agent's state in words, the stop and resume switches, and Run now (agents.md G-3, G-11). */
+function FollowUpCard() {
+  const status = useFollowUpStatus();
+  return (
+    <Card aria-labelledby="followup-title" data-testid="followup-card">
+      <CardHeader>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Robot size={20} aria-hidden className="text-muted" />
+            <CardTitle id="followup-title">Inquiry follow-up</CardTitle>
+            <span aria-live="polite">
+              {status.data ? <Badge tone={agentState(status.data).tone} data-testid="followup-state">{agentState(status.data).label}</Badge> : null}
+            </span>
+          </div>
+          <CardDescription className="mt-1">
+            {status.data
+              ? `Looks for website booking requests nobody has answered after ${plural(status.data.settings.waitHours, "hour", "hours")} and drafts a follow-up email.`
+              : "Looks for website booking requests nobody has answered and drafts a follow-up email."}
+          </CardDescription>
+        </div>
+      </CardHeader>
+      {status.isPending ? <LoadingRows rows={2} label="Loading the agent" /> : status.isError ? (
+        <ErrorNote error={status.error} retry={() => status.refetch()} />
+      ) : <FollowUpControls status={status.data} />}
+    </Card>
+  );
+}
+
+function FollowUpControls({ status }: { status: FollowUpStatus }) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const { keys } = useKeys();
+  const toast = useToast();
+  const zone = useDisplayZone();
+  const userId = useSignedInUserId();
+  const canManage = useCan(MANAGE_AGENTS);
+  const stopKeys = useIntentKey();
+  const resumeKeys = useIntentKey();
+  const runKeys = useIntentKey();
+  const [note, setNote] = useState("");
+  const [runUnavailable, setRunUnavailable] = useState(false);
+
+  const showStatus = (next: FollowUpStatus) => queryClient.setQueryData(keys.followUp, next);
+  const refreshStatus = () => queryClient.invalidateQueries({ queryKey: keys.followUp });
+
+  const stop = useMutation({
+    mutationFn: (input: KillFollowUpRequest) => api.killFollowUp(input, { idempotencyKey: stopKeys.keyFor(input) }),
+    onSettled: async (_status, error, input) => {
+      stopKeys.settle(input, error);
+      await refreshStatus();
+    },
+    onSuccess: (next) => {
+      showStatus(next);
+      setNote("");
+      toast(STOPPED_MESSAGE, "info");
+    },
+  });
+  const resume = useMutation({
+    mutationFn: () => api.resumeFollowUp({ idempotencyKey: resumeKeys.keyFor("resume") }),
+    onSettled: async (_status, error) => {
+      resumeKeys.settle("resume", error);
+      await refreshStatus();
+    },
+    onSuccess: (next) => {
+      showStatus(next);
+      toast(next.canDraft ? "Agent resumed." : "Agent resumed. It still cannot draft right now; see why above.");
+    },
+  });
+  const run = useMutation({
+    mutationFn: () => api.startFollowUpRun({ idempotencyKey: runKeys.keyFor("run") }),
+    onSettled: async (_run, error) => {
+      runKeys.settle("run", error);
+      await Promise.all([
+        refreshStatus(),
+        queryClient.invalidateQueries({ queryKey: keys.followUpRuns }),
+        queryClient.invalidateQueries({ queryKey: keys.inboxAll }),
+      ]);
+    },
+    onSuccess: (detail) => toast(runToast(detail), detail.status === "stopped" ? "info" : "success"),
+    // agents.md G-11: without a model on the server the route does not exist.
+    onError: (error) => setRunUnavailable(isApiError(error, "not_found")),
+  });
+
+  const submitStop = (event: FormEvent) => {
+    event.preventDefault();
+    const trimmed = note.trim();
+    stop.mutate(trimmed ? { note: trimmed } : {});
+  };
+
+  const blocked = blockedSentence(status);
+  const busy = stop.isPending || resume.isPending;
+  const failure = [stop, resume].find((step) => step.isError)?.error ?? (run.isError && !runUnavailable ? run.error : null);
+
+  return (
+    <div className="space-y-4 text-sm text-fg-2">
+      {status.killed ? (
+        <p data-testid="followup-killed">
+          Stopped by {status.killed.by === userId ? "you" : "a team member"} on {when(status.killed.at, zone)}.
+          {status.killed.note ? <> Note: <q className="break-words">{status.killed.note}</q></> : null}
+        </p>
+      ) : null}
+      <p data-testid="followup-blocked">
+        {blocked ? <><span className="font-medium text-fg">Why it can&apos;t draft right now:</span> {blocked}</> : "It can draft now."}
+      </p>
+
+      <div className="flex items-start gap-3 rounded-md bg-accent/8 p-3" data-testid="approval-note">
+        <ShieldCheck size={20} aria-hidden className="mt-px shrink-0 text-accent" />
+        <div>
+          <p>Agent drafts wait in the Inbox for an owner&apos;s approval. Nothing is sent to a customer without it.</p>
+          <Link href="/inbox" className={linkClass}>Open the Inbox</Link>
+        </div>
+      </div>
+
+      {status.killed ? (
+        <div className="space-y-2">
+          <Button
+            onClick={() => resume.mutate()}
+            disabled={!canManage || busy}
+            aria-busy={resume.isPending}
+            aria-describedby={canManage ? undefined : "resume-reason"}
+          >
+            <Play aria-hidden />Resume
+          </Button>
+          {canManage ? null : <DisabledReason id="resume-reason">Only an owner can resume the agent.</DisabledReason>}
+        </div>
+      ) : (
+        <form className="space-y-2" onSubmit={submitStop} noValidate>
+          <div>
+            <Label htmlFor="stop-note">Note for the team (optional)</Label>
+            <Input id="stop-note" maxLength={500} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why you stopped it" />
+          </div>
+          <Button type="submit" variant="danger-outline" disabled={busy} aria-busy={stop.isPending} aria-describedby="stop-help">
+            <Prohibit aria-hidden />Stop the agent
+          </Button>
+          <p id="stop-help" className="text-xs text-meta">Stops new drafts at once. Drafts already in the Inbox stay there until someone approves or discards them.</p>
+        </form>
+      )}
+
+      {canManage ? (
+        <div className="space-y-2 border-t border-border-soft pt-4">
+          <Button
+            variant="secondary"
+            onClick={() => run.mutate()}
+            disabled={runUnavailable || run.isPending}
+            aria-busy={run.isPending}
+            aria-describedby={runUnavailable ? "run-reason" : "run-help"}
+          >
+            Run now
+          </Button>
+          {runUnavailable ? (
+            <DisabledReason id="run-reason">Run now is not available on this server.</DisabledReason>
+          ) : (
+            <p id="run-help" className="text-xs text-meta">Looks for unanswered requests once, now. Its drafts wait in the Inbox for approval.</p>
+          )}
+        </div>
+      ) : null}
+
+      {failure ? <ErrorNote error={failure} /> : null}
+    </div>
+  );
+}
+
+function runToast(run: FollowUpRunDetail): string {
+  if (run.status === "stopped" && run.stopReason) {
+    return run.considered === 0
+      ? `The agent did not draft: ${STOP_REASONS[run.stopReason]}.`
+      : `Stopped because ${STOP_REASONS[run.stopReason]}. ${runCounts(run)}`;
+  }
+  return run.considered === 0 ? "Run finished. No unanswered requests to follow up." : `Run finished. ${runCounts(run)}`;
+}
+
+/** "Drafted 1 follow-up, skipped 2." */
+export function runCounts(run: Pick<FollowUpRun, "drafted" | "skipped" | "considered">): string {
+  if (run.considered === 0) return "Nothing to follow up.";
+  return `Drafted ${plural(run.drafted, "follow-up", "follow-ups")}, skipped ${run.skipped}.`;
+}
+
+/** Owners edit the settings; staff read them (G-2: `agents` is owners only). */
+function SettingsCard() {
+  const status = useFollowUpStatus();
+  const canManage = useCan(MANAGE_AGENTS);
+  const zone = useDisplayZone();
+  return (
+    <Card aria-labelledby="settings-title">
+      <CardHeader>
+        <div>
+          <CardTitle id="settings-title">Follow-up settings</CardTitle>
+          {status.data ? (
+            <CardDescription data-testid="settings-saved">
+              {status.data.updatedAt ? `Last saved ${when(status.data.updatedAt, zone)}.` : "Not saved yet. These are the defaults."}
+            </CardDescription>
+          ) : null}
+        </div>
+      </CardHeader>
+      {status.isPending ? <LoadingRows rows={4} label="Loading settings" /> : status.isError ? (
+        <ErrorNote error={status.error} retry={() => status.refetch()} />
+      ) : canManage ? (
+        <SettingsFormBody status={status.data} reload={async () => { await status.refetch(); }} />
+      ) : (
+        <SettingsSummary status={status.data} />
+      )}
+    </Card>
+  );
+}
+
+function SettingsSummary({ status }: { status: FollowUpStatus }) {
+  const { settings } = status;
+  const rows: [string, string][] = [
+    ["Drafting", settings.enabled ? "On" : "Off"],
+    ["Drafts per day, at most", String(settings.maxDraftsPerDay)],
+    ["Per customer", `${plural(settings.maxDraftsPerContact, "draft", "drafts")} in ${plural(settings.contactWindowHours, "hour", "hours")}`],
+    ["Wait before following up", plural(settings.waitHours, "hour", "hours")],
+    ["Look back", plural(settings.lookbackDays, "day", "days")],
+    ["Quiet hours", quietHoursLabel(settings)],
+  ];
+  return (
+    <div className="space-y-3">
+      <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-1">
+        {rows.map(([term, value]) => (
+          <div key={term}>
+            <dt className="text-xs text-meta">{term}</dt>
+            <dd className="text-fg">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="text-xs text-muted" data-testid="settings-owner-only">Only an owner can change these settings.</p>
+    </div>
+  );
+}
+
+const NUMBER_FIELDS: { field: SettingsField; id: string; label: string; min: number; max: number }[] = [
+  { field: "maxDraftsPerDay", id: "agent-per-day", label: "Drafts per day, at most", min: 1, max: 200 },
+  { field: "maxDraftsPerContact", id: "agent-per-customer", label: "Drafts per customer, at most", min: 1, max: 10 },
+  { field: "contactWindowHours", id: "agent-window", label: "…within this many hours", min: 1, max: 2160 },
+  { field: "waitHours", id: "agent-wait", label: "Wait before following up (hours)", min: 1, max: 720 },
+  { field: "lookbackDays", id: "agent-lookback", label: "Look back (days)", min: 1, max: 90 },
+];
+/**
+ * Chromium makes a time input's clock button a tab stop of its own that never shows a focus
+ * ring. People type the time (phones open their own picker), so the button is hidden.
+ */
+const TIME_INPUT = "[&::-webkit-calendar-picker-indicator]:hidden";
+const FIELD_IDS: Record<SettingsField, string> = {
+  ...Object.fromEntries(NUMBER_FIELDS.map((item) => [item.field, item.id])) as Record<SettingsField, string>,
+  quietStart: "agent-quiet-start",
+  quietEnd: "agent-quiet-end",
+  timeZone: "agent-zone",
+};
+
+/**
+ * The settings form. Edits keep the revision they started from, so a save made after someone
+ * else's is refused (409 `stale_revision`) and the form reloads the latest settings.
+ */
+function SettingsFormBody({ status, reload }: { status: FollowUpStatus; reload: () => Promise<void> }) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const { keys } = useKeys();
+  const toast = useToast();
+  const intents = useIntentKey();
+  const [draft, setDraft] = useState<{ revision: number; form: SettingsForm } | null>(null);
+  const [invalid, setInvalid] = useState<SettingsField[]>([]);
+  const [stale, setStale] = useState(false);
+  const form = draft?.form ?? toSettingsForm(status.settings);
+  const revision = draft?.revision ?? status.revision;
+  const zones = useMemo(() => timeZoneChoices(form.timeZone), [form.timeZone]);
+
+  const edit = (patch: Partial<SettingsForm>) => setDraft({ revision, form: { ...form, ...patch } });
+
+  const save = useMutation({
+    mutationFn: (input: UpdateFollowUpSettingsRequest) => api.updateFollowUpSettings(input, { idempotencyKey: intents.keyFor(input) }),
+    onSettled: (_status, error, input) => intents.settle(input, error),
+    onSuccess: (next) => {
+      queryClient.setQueryData(keys.followUp, next);
+      setDraft(null);
+      toast("Settings saved.");
+    },
+    onError: async (error) => {
+      if (!isSettingsChanged(error)) return;
+      setStale(true);
+      await reload();
+      setDraft(null);
+    },
+  });
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const read = readSettingsForm(form);
+    if (!read.ok) {
+      setInvalid(read.fields);
+      const first = read.fields[0];
+      if (first) document.getElementById(FIELD_IDS[first])?.focus();
+      return;
+    }
+    setInvalid([]);
+    setStale(false);
+    save.mutate({ ...read.settings, expectedRevision: revision });
+  };
+
+  const hintId = (field: SettingsField) => (field === "quietStart" || field === "quietEnd" ? "agent-quiet-hint" : `${FIELD_IDS[field]}-hint`);
+  const fieldProps = (field: SettingsField) => ({
+    id: FIELD_IDS[field],
+    "aria-invalid": invalid.includes(field) || undefined,
+    "aria-describedby": hintId(field),
+  });
+  const hint = (field: SettingsField, text = FIELD_HINTS[field]) => (
+    <p id={hintId(field)} className={cn("mt-1 text-xs", invalid.includes(field) ? "text-danger" : "text-meta")}>{text}</p>
+  );
+  const quietInvalid = invalid.includes("quietStart") || invalid.includes("quietEnd");
+
+  return (
+    <form className="space-y-4" onSubmit={submit} noValidate aria-labelledby="settings-title">
+      {stale ? <p role="alert" data-testid="settings-stale" className="rounded-md bg-warn/10 p-3 text-sm text-fg-2">{STALE_SETTINGS_MESSAGE}</p> : null}
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <Label htmlFor="agent-enabled" className="mb-0">Draft follow-ups</Label>
+          <p id="agent-enabled-help" className="text-xs text-meta">When off, the agent drafts nothing.</p>
+        </div>
+        <Switch id="agent-enabled" checked={form.enabled} onCheckedChange={(enabled) => edit({ enabled })} aria-describedby="agent-enabled-help" />
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-1">
+        {NUMBER_FIELDS.map(({ field, label, min, max }) => (
+          <div key={field}>
+            <Label htmlFor={FIELD_IDS[field]}>{label}</Label>
+            <Input
+              {...fieldProps(field)}
+              type="number"
+              inputMode="numeric"
+              min={min}
+              max={max}
+              step={1}
+              value={form[field]}
+              onChange={(event) => edit({ [field]: event.target.value })}
+            />
+            {hint(field)}
+          </div>
+        ))}
+      </div>
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium text-fg-2">Quiet hours</legend>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label htmlFor={FIELD_IDS.quietStart} className="font-normal">From</Label>
+            <Input {...fieldProps("quietStart")} type="time" className={TIME_INPUT} value={form.quietStart} onChange={(event) => edit({ quietStart: event.target.value })} />
+          </div>
+          <div>
+            <Label htmlFor={FIELD_IDS.quietEnd} className="font-normal">Until</Label>
+            <Input {...fieldProps("quietEnd")} type="time" className={TIME_INPUT} value={form.quietEnd} onChange={(event) => edit({ quietEnd: event.target.value })} />
+          </div>
+        </div>
+        <p id="agent-quiet-hint" className={cn("text-xs", quietInvalid ? "text-danger" : "text-meta")}>
+          {quietInvalid ? "Enter both times. " : null}No drafts in this window, in the time zone below. The same start and end means no quiet hours.
+        </p>
+      </fieldset>
+      <div>
+        <Label htmlFor={FIELD_IDS.timeZone}>Time zone</Label>
+        <Select {...fieldProps("timeZone")} className="w-full" value={form.timeZone} onChange={(event) => edit({ timeZone: event.target.value })}>
+          {zones.map((zone) => <option key={zone} value={zone}>{zone.replaceAll("_", " ")}</option>)}
+        </Select>
+        {hint("timeZone", "Quiet hours follow this zone.")}
+      </div>
+      {invalid.length > 0 ? <p role="alert" className="text-sm text-danger">Some settings need another look.</p> : null}
+      {save.isError && !isSettingsChanged(save.error) ? <ErrorNote error={save.error} /> : null}
+      <Button type="submit" disabled={save.isPending} aria-busy={save.isPending}>Save settings</Button>
+    </form>
+  );
+}
+
+/** The agent's runs, newest first, each with what it decided for every request it looked at. */
+function RunsCard() {
+  const runs = useFollowUpRuns();
+  const zone = useDisplayZone();
+  const userId = useSignedInUserId();
+  const [open, setOpen] = useState<string | null>(null);
+  const items = runs.data?.pages.flatMap((page) => page.items) ?? [];
+
+  return (
+    <Card aria-labelledby="runs-title">
+      <CardHeader>
+        <div>
+          <CardTitle id="runs-title">Recent runs</CardTitle>
+          <CardDescription>Each time the agent looked for requests to follow up.</CardDescription>
+        </div>
+      </CardHeader>
+      {runs.isPending ? <LoadingRows rows={3} label="Loading runs" /> : runs.isError ? (
+        <ErrorNote error={runs.error} retry={() => runs.refetch()} />
+      ) : items.length === 0 ? (
+        <EmptyState title="No runs yet">When the agent runs, what it drafted and skipped shows here.</EmptyState>
+      ) : (
+        <>
+          <ul className="divide-y divide-border-soft" aria-label="Runs">
+            {items.map((run) => {
+              const state = RUN_STATUS[run.status];
+              const started = when(run.startedAt, zone);
+              const isOpen = open === run.id;
+              return (
+                <li key={run.id} className="py-3 first:pt-0 last:pb-0" data-run-id={run.id} data-status={run.status}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={state.tone}>{state.label}</Badge>
+                    <span className="text-sm font-medium text-fg">Started {started}</span>
+                  </div>
+                  <p className="mt-1 text-sm text-fg-2" data-testid="run-counts">{runCounts(run)}</p>
+                  {run.stopReason ? <p className="text-sm text-muted" data-testid="run-stop">Stopped because {STOP_REASONS[run.stopReason]}.</p> : null}
+                  <p className="text-xs text-meta">
+                    {run.requestedBy === null ? "Scheduled run" : run.requestedBy === userId ? "You started it" : "An owner started it"}
+                  </p>
+                  <Button
+                    variant="ghost"
+                    className="mt-1"
+                    aria-expanded={isOpen}
+                    aria-controls={isOpen ? `run-${run.id}` : undefined}
+                    onClick={() => setOpen(isOpen ? null : run.id)}
+                  >
+                    {isOpen ? "Hide details" : "Show details"}<span className="sr-only"> of the run started {started}</span>
+                  </Button>
+                  {isOpen ? <RunDetail id={run.id} /> : null}
+                </li>
+              );
+            })}
+          </ul>
+          {runs.hasNextPage ? (
+            <Button variant="secondary" className="mt-4" onClick={() => runs.fetchNextPage()} disabled={runs.isFetchingNextPage} aria-busy={runs.isFetchingNextPage}>
+              Show more runs
+            </Button>
+          ) : null}
+        </>
+      )}
+    </Card>
+  );
+}
+
+function RunDetail({ id }: { id: string }) {
+  const run = useFollowUpRun(id);
+  const contactIds = useMemo(() => run.data?.decisions.map((decision) => decision.contactId) ?? [], [run.data]);
+  const names = useContactNames(contactIds);
+  const nameOf = (contactId: string) => {
+    const contact = names.data?.find((item) => item.id === contactId);
+    return contact?.displayName ?? contact?.email ?? "a customer";
+  };
+
+  return (
+    <div id={`run-${id}`} className="mt-1 rounded-md bg-surface-warm p-3 text-sm text-fg-2" data-testid="run-detail">
+      {run.isPending ? <LoadingRows rows={2} label="Loading the run" /> : run.isError ? (
+        <ErrorNote error={run.error} retry={() => run.refetch()} />
+      ) : run.data.decisions.length === 0 ? (
+        <p>It looked at no requests in this run.</p>
+      ) : (
+        <ul className="space-y-2" aria-label="What it decided">
+          {run.data.decisions.map((decision) => (
+            <li key={decision.id} className="flex items-start gap-2" data-outcome={decision.outcome}>
+              {decision.outcome === "drafted" ? (
+                <>
+                  <CheckCircle size={20} aria-hidden className="mt-3 shrink-0 text-success" />
+                  <p>
+                    Drafted a follow-up for{" "}
+                    <Link href={`/inbox/c_${decision.contactId}`} className={linkClass}>{nameOf(decision.contactId)}</Link>.
+                    {" "}It waits in the Inbox for an owner&apos;s approval.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <MinusCircle size={20} aria-hidden className="mt-px shrink-0 text-muted" />
+                  <p>Skipped {nameOf(decision.contactId)}: {decision.reason ? SKIP_REASONS[decision.reason] : "no reason recorded"}.</p>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
