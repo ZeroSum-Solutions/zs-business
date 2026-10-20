@@ -448,7 +448,10 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     const flow = await consentFor(h.a, await newResource(h.a.tenantId));
     const down = calendarApp(h, {
       clock, googleCalendar: googleConfig(fakeClient(google)),
-      db: { tenant: () => Promise.reject(new DatabaseUnavailable("connect")) } as ScopedDatabase,
+      db: {
+        tenant: () => Promise.reject(new DatabaseUnavailable("connect")),
+        withoutTenant: () => Promise.reject(new DatabaseUnavailable("connect")),
+      } satisfies ScopedDatabase,
     });
     const response = await callback({ state: flow.state, code: "4/any" }, down);
     expect(response.status).toBe(503);
