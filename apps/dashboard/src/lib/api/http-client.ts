@@ -9,6 +9,10 @@ import {
   createBookingOutputSchema,
   createOrFindContactOutputSchema,
   dealPageSchema,
+  followUpRunDetailSchema,
+  followUpRunPageSchema,
+  followUpStatusOutputSchema,
+  followUpStatusSchema,
   homeResultsSchema,
   moveDealStageOutputSchema,
   pipelineSummarySchema,
@@ -29,15 +33,19 @@ import {
   uuidSchema,
   type CreateBookingRequest,
   type DraftReplyRequest,
+  type KillFollowUpRequest,
   type LinkIntakeItemRequest,
   type MoveDealStageRequest,
   type SetDealDetailsRequest,
+  type UpdateFollowUpSettingsRequest,
 } from "@zs/contracts";
-import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, threadNotFound } from "./errors";
+import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, runNotFound, threadNotFound } from "./errors";
 import {
   CONTACT_PAGE_SIZE,
+  RUN_PAGE_SIZE,
   THREAD_PAGE_SIZE,
   toUpsertContactRequest,
+  type AgentsApi,
   type BookingApi,
   type CrmApi,
   type HomeApi,
@@ -56,7 +64,7 @@ export interface HttpClientConfig {
   fetch?: typeof fetch;
 }
 
-type Method = "GET" | "POST";
+type Method = "GET" | "POST" | "PUT";
 
 interface RequestSpec<T extends z.ZodType> {
   method: Method;
@@ -82,7 +90,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & SitesApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -159,8 +167,10 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     return { items, incomplete: cursor !== null, loaded: items.length };
   }
 
-  const write = <T extends z.ZodType>(path: string, body: unknown, schema: T, options: WriteOptions) =>
-    request({ method: "POST", path, body, idempotencyKey: options?.idempotencyKey, schema });
+  const write = <T extends z.ZodType>(path: string, body: unknown, schema: T, options: WriteOptions, method: Method = "POST") =>
+    request({ method, path, body, idempotencyKey: options?.idempotencyKey, schema });
+
+  const FOLLOW_UP = "/v1/agents/followup";
 
   return {
     async listResources(options = {}) {
@@ -346,6 +356,59 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     syncSite(siteId) {
       return request({ method: "POST", path: `/v1/sites/${encodeURIComponent(siteId)}/sync`, body: {}, readOnly: true, schema: siteSyncResponseSchema });
+    },
+
+    getFollowUpStatus(options = {}) {
+      return request({ method: "GET", path: FOLLOW_UP, schema: followUpStatusSchema, signal: options.signal });
+    },
+
+    async updateFollowUpSettings(input, options) {
+      const body: UpdateFollowUpSettingsRequest = {
+        enabled: input.enabled,
+        maxDraftsPerDay: input.maxDraftsPerDay,
+        maxDraftsPerContact: input.maxDraftsPerContact,
+        contactWindowHours: input.contactWindowHours,
+        waitHours: input.waitHours,
+        lookbackDays: input.lookbackDays,
+        quietStartMinute: input.quietStartMinute,
+        quietEndMinute: input.quietEndMinute,
+        timeZone: input.timeZone,
+        expectedRevision: input.expectedRevision,
+      };
+      return (await write(`${FOLLOW_UP}/settings`, body, followUpStatusOutputSchema, options, "PUT")).result;
+    },
+
+    async killFollowUp(input, options) {
+      const body: KillFollowUpRequest = input.note === undefined ? {} : { note: input.note };
+      return (await write(`${FOLLOW_UP}/kill`, body, followUpStatusOutputSchema, options)).result;
+    },
+
+    async resumeFollowUp(options) {
+      return (await write(`${FOLLOW_UP}/resume`, {}, followUpStatusOutputSchema, options)).result;
+    },
+
+    startFollowUpRun(options) {
+      return write(`${FOLLOW_UP}/runs`, {}, followUpRunDetailSchema, options);
+    },
+
+    async listFollowUpRuns(query = {}, options = {}) {
+      const page = await request({
+        method: "GET",
+        path: `${FOLLOW_UP}/runs`,
+        query: { limit: query.limit ?? RUN_PAGE_SIZE, cursor: query.cursor },
+        schema: followUpRunPageSchema,
+        signal: options.signal,
+      });
+      return { items: page.items, nextCursor: page.nextCursor };
+    },
+
+    async getFollowUpRun(id, options = {}) {
+      if (!uuidSchema.safeParse(id).success) throw runNotFound();
+      try {
+        return await request({ method: "GET", path: `${FOLLOW_UP}/runs/${encodeURIComponent(id)}`, schema: followUpRunDetailSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? runNotFound() : error;
+      }
     },
   };
 }

@@ -7,9 +7,11 @@ import {
   apiErrorBody,
   AuthUnavailable,
   authenticate,
+  createFollowUpAgent,
   DatabaseUnavailable,
   mapError,
   type AutomationEdgeConfig,
+  type FollowUpAgentConfig,
   type Session,
   type SessionCheck,
   type StripeClient,
@@ -19,6 +21,7 @@ import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import type { SiteCompiler } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
+import { followUpRoutes } from "./routes/agents.js";
 import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
@@ -63,6 +66,11 @@ export interface AppDependencies {
   readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler; readonly syncTimeoutMs?: number };
   /** One-click email unsubscribe (delivery.md D-9); absent means the routes are off. */
   readonly unsubscribe?: UnsubscribeConfig;
+  /**
+   * The inquiry follow-up agent's model and limits (agents.md G-9, G-11); absent means
+   * `POST /v1/agents/followup/runs` is off (404). The other agent routes are always on.
+   */
+  readonly followUp?: FollowUpAgentConfig;
   /** Resend email events, bounces and complaints feeding suppression (resend.md R-7, R-8); absent means off. */
   readonly resendWebhook?: ResendWebhookConfig;
   /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means POST /v1/wallet/top-ups is 404. */
@@ -124,7 +132,7 @@ export function createApp(deps: AppDependencies) {
   app.use("*", cors({
     origin: (origin) => (origins.has(origin) ? origin : null),
     allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key"],
-    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     maxAge: 600,
   }));
 
@@ -225,6 +233,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/sources", sourceRoutes);
   app.route("/v1", calendarRoutes);
   if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
+  const followUp = deps.followUp;
+  app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));

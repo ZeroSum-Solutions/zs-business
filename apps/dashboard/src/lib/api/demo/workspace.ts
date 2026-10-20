@@ -1,7 +1,5 @@
-/** Made-up read-only content for areas without an HTTP route yet (wallet, site, agents, connections, plan). TODO(api). */
+/** Made-up read-only content for areas without an HTTP route yet (wallet, site, connections, plan). TODO(api). */
 import type {
-  Agent,
-  ApprovalItem,
   ChecklistItem,
   Connection,
   Plan,
@@ -36,20 +34,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     { id: "stripe", label: "Stripe deposits", detail: "Deposits land in your account in 2 days.", status: "ok", actionLabel: null },
   ];
 
-  const agents: Agent[] = [
-    { id: "front-desk", name: "Front desk", description: "Answers new messages on text, email, Instagram and web chat.", status: "running", lastRun: ago(6), actionsThisWeek: 87 },
-    { id: "reminders", name: "Appointment reminders", description: "Texts a reminder the day before and asks customers to confirm.", status: "running", lastRun: ago(55), actionsThisWeek: 31 },
-    { id: "follow-up", name: "Lead follow-up", description: "Drafts a follow-up when an inquiry goes quiet for three days.", status: "needs_approval", lastRun: ago(140), actionsThisWeek: 9 },
-    { id: "reviews", name: "Review requests", description: "Asks for a review a week after pickup.", status: "paused", lastRun: ago(60 * 24 * 6), actionsThisWeek: 0 },
-  ];
-
-  const approvals: ApprovalItem[] = [
-    { id: "a-1", agentId: "follow-up", createdAt: ago(140), summary: "Follow up with Yuki Tanabe-Ross about matching bands",
-      draft: "Hi Yuki, it was lovely meeting you both. Would you like to come in to try a few band widths? We have Saturday morning open." },
-    { id: "a-2", agentId: "follow-up", createdAt: ago(200), summary: "Follow up with Celeste Vandermeer about the emerald commission",
-      draft: "Hi Celeste, I've set aside two emeralds that would suit a 3.5 mm band. Happy to show you whenever suits." },
-  ];
-
   const connections: Connection[] = [
     { id: "gcal", name: "Google Calendar", purpose: "Keeps showroom and repair calendars in sync", status: "connected", detail: "Synced 4 minutes ago" },
     { id: "gmail", name: "Gmail", purpose: "Sends and receives customer email", status: "connected", detail: "hello@haldenrowe.example" },
@@ -78,8 +62,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
   return {
     async getUsage() { await wait(); return structuredClone(usage); },
     async getChecklist() { await wait(); return structuredClone(checklist); },
-    async listAgents() { await wait(); return structuredClone(agents); },
-    async listApprovals() { await wait(); return structuredClone(approvals); },
     async listConnections() { await wait(); return structuredClone(connections); },
     async getPlan() { await wait(); return structuredClone(plan); },
     async cancelPlan() {

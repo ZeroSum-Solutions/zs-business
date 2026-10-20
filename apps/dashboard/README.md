@@ -25,6 +25,8 @@ was reopened or closed, and a deal reload that fails after a conflict (`failDeal
 `e2e/offline.spec.ts` runs with service workers allowed: install, go offline, reload,
 still styled and working; `/api` responses are never stored. `e2e/session.spec.ts` covers
 the signed-out state after a 401 and sign-out, and that no cached query outlives either.
+`e2e/agents.spec.ts` covers the follow-up agent: its state and runs, staff stopping it but not
+resuming it, an owner's save and a stale one, and Run now (also on a server without a model).
 `e2e/a11y.spec.ts` runs axe (default rules, no serious or critical issues) on every area at
 both viewports and checks 44px targets, `label[for]` targets, visible reasons on disabled
 buttons, focus rings no overflow clips, one visible h1 in an open conversation, and toasts
@@ -110,10 +112,10 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   signed-in person's own Supabase access token as `Authorization: Bearer` and forwards to
   `apps/api`. The API checks the token, that its session is still live in Supabase Auth,
   and the person's membership and role on every request. All settings are server-only; the
-  build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST and DELETE
-  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/inbox/*`, `/v1/home/*`, `/v1/approvals*`, `/v1/sources*`, `/v1/sites*`, `/v1/me` and `/v1/members*`, only `Accept`,
-  `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POSTs, and
-  answers `no-store`. A POST body may be 64 KiB and must arrive within 15 seconds; it is
+  build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST, PUT and DELETE
+  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/inbox/*`, `/v1/home/*`, `/v1/agents/*`, `/v1/approvals*`, `/v1/sources*`, `/v1/sites*`, `/v1/me` and `/v1/members*`, only `Accept`,
+  `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POST and PUT bodies, and
+  answers `no-store`. A POST or PUT body may be 64 KiB and must arrive within 15 seconds; it is
   read through `src/lib/server/body.ts`, which never holds more than the limit: a larger
   declared `Content-Length` gets 413 unread, a chunked upload is cancelled as soon as it
   passes the limit (413), a stalled one at the deadline (408), and a dropped one is 400.
@@ -167,8 +169,11 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
 - `ZS_API_URL` unset: an in-memory demo adapter serves made-up data for
   "Halden & Rowe Fine Jewelry", including the booking and deal conflicts, Inbox threads
   and Home results counted from its own rows. Changes reset on reload. In demo mode
-  `window.__zsDemo` exposes `bookAsSomeoneElse`, `editDealElsewhere` and
-  `approveReplyElsewhere` so tests can trigger the conflicts.
+  `window.__zsDemo` exposes `bookAsSomeoneElse`, `editDealElsewhere`,
+  `approveReplyElsewhere` and `editAgentSettingsElsewhere` so tests can trigger the conflicts,
+  `actAs("staff" | "owner")` to switch the demo session's role (the agent routes and reply
+  approval then refuse an owner-only step with the API's 403), `setGlobalAgentKill` and
+  `setFollowUpModel(false)` (no model: Run now answers 404).
 - Build and server must agree on the mode. `NEXT_PUBLIC_API_MODE` is baked in at build
   time from `ZS_API_URL`; `src/proxy.ts` compares it with the server's `ZS_API_URL` on every
   page request, and each `/api` route does the same itself (`withHostingModeGuard` in
@@ -178,8 +183,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   names the mismatch, and logs it once at start (`src/instrumentation.ts`). Rebuild with
   the same `ZS_API_URL` setting the server runs with.
 - Live mode labels every area that still reads the demo workspace with a "Sample data"
-  badge, and disables its writes (cancel plan, agent switches and approvals, settings,
-  connections) with the reason shown as visible text
+  badge, and disables its writes (cancel plan, settings, connections) with the reason shown as visible text
   (`src/components/ui/sample.tsx`). Nothing pretends to save.
 - Errors: the demo adapter parses requests with the same `@zs/contracts` schemas and throws
   the error the HTTP client would build from the API's body: the fixed message per code,
@@ -247,6 +251,24 @@ The pipeline board shows each deal's value, lead source and won date, and "Detai
 currency (USD by default) and lead source with the deal's revision; a stale one reloads the
 deal as a stage move does.
 
+Agents (`docs/requirements/agents.md` G-11) reads the inquiry follow-up agent from
+`/v1/agents/followup`: on or off, stopped (by you or a team member, when, and the note), the
+operator's stop for every business, and why it cannot draft right now (`blockedBy`), all in
+words (`src/lib/agents.ts`). The status is read on every visit and each minute while shown.
+Anyone with `inbox.drafts` (owners and staff) may "Stop the agent" (`POST /kill`); only owners
+(`agents`) resume it, change its settings and "Run now". Staff see Resume off with the reason
+on screen, and the settings read-only. The settings form keeps the revision it was opened at
+and saves with `PUT /settings` and `expectedRevision`; a 409 `stale_revision` says someone
+else saved first and reloads the latest settings. Quiet hours are local times in the agent's
+own time zone. A 404 from `POST /runs` means the server has no model, and Run now turns off
+with that reason. Recent runs list newest first ("Show more runs"), each with its decisions:
+a draft links to the customer's Inbox thread (`/inbox/c_<contactId>`), a skip says why. The
+page says that agent drafts wait in the Inbox for an owner's approval. In the Inbox, a reply
+whose author has no email and is the agent's actor (`agentActorId(tenantId)`, derived in the
+browser with Web Crypto in `src/lib/agent-actor.ts` and pinned to core in
+`test/agent-actor.test.ts`) reads "Drafted by the follow-up agent" with a "Follow-up agent"
+badge; any other author without an email is "a former team member".
+
 Site: the Site page reads `/v1/sites` and shows the first site, its live version and
 History. Only owners see it; staff get "Owners publish the website", and a 404 (the API
 runs without `SITES_STORE`) says publishing is not switched on yet. Version numbers are the
@@ -277,7 +299,7 @@ page in the browser and exposes `rollBackElsewhere()`, `setSiteEdgeDown()`,
 `delayNextSiteWrite()` and `loseNextSiteAnswer()` on `window.__zsDemo` for tests.
 `e2e:live` runs the API with `SITES_STORE=memory`.
 
-`TODO(api)`: usage, the connections checklist, agents, connections and plan have no API yet.
+`TODO(api)`: usage, the connections checklist, connections and plan have no API yet.
 Live mode still reads them from the demo workspace.
 
 ## Notes

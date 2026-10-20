@@ -461,6 +461,29 @@ Both answer 401 for a missing or wrong signature or another account, and 200 for
 signed (with `{"handled":false,"reason":…}` or an empty `<Response/>` when nothing applies), so
 Twilio does not retry. Database errors are 503, so it does.
 
+## Scheduled follow-up agent (`GET /cron/followup`, `pnpm followup:worker`)
+
+docs/requirements/agents.md G-13. Off unless `FOLLOWUP_AGENT=on`; off needs no other variable,
+and the cron route then answers 200 without work. Each call lists the tenants whose agent may
+draft now (service role) and runs each one's current slot as its agent principal (runtime
+role), least recently run first, until its time budget is spent. The draft still waits in the
+Inbox for an owner's approval.
+
+| Variable | Meaning |
+|---|---|
+| `FOLLOWUP_AGENT` | `on` or `off` (default). |
+| `CRON_SECRET` | Bearer secret Vercel Cron sends, 32+ characters, shared with the delivery runner. Unset: the route is 404. |
+| `FOLLOWUP_DATABASE_URL` | Runtime login (like `DATABASE_URL`); refused if privileged. |
+| `FOLLOWUP_SERVICE_DATABASE_URL` | A login that may `SET ROLE service_role`, for the due-tenant read. Shares `DATABASE_CA_CERT`. |
+| `FOLLOWUP_MODEL` | Only `fake` today, on loopback databases. A real provider is not wired yet. |
+| `FOLLOWUP_SLOT_MINUTES` | One run per tenant per slot (60). |
+| `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS` | 3, 5000, 20000; candidates × timeout must fit the budget. |
+| `FOLLOWUP_INTERVAL_MS` | The Node worker's pause between runs (300000). |
+| `FOLLOWUP_CRON_SCHEDULE` | Build time: adds the Vercel cron, for example `0 * * * *`. Unset: no cron. |
+
+`pnpm followup:global-switch off "reason"` stops new drafts for every tenant at once (G-3);
+`on` lets them draft again. It uses `FOLLOWUP_SERVICE_DATABASE_URL`.
+
 ## Database pool and request limits
 
 `createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from

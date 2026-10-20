@@ -36,6 +36,7 @@ import {
 import { addDays, localIso, wallTimeInstants, weekdayOf, weekRanges, zonedDateKey } from "../../time";
 import { newId as defaultNewId } from "../../id";
 import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError, threadNotFound } from "../errors";
+import { createDemoAgents, type DemoActor, type DemoAgentControls, type DemoRole } from "./agents";
 import {
   byContactName,
   completeList,
@@ -43,6 +44,7 @@ import {
   matchesSearch,
   THREAD_PAGE_SIZE,
   toUpsertContactRequest,
+  type AgentsApi,
   type BookingApi,
   type BookingView,
   type ContactWriteResult,
@@ -59,6 +61,7 @@ import {
   DEMO_OWNER,
   DEMO_PIPELINE,
   DEMO_RESOURCES,
+  DEMO_STAFF,
   DEMO_TENANT_ID,
   type DemoBooking,
   type DemoResource,
@@ -78,7 +81,16 @@ export interface DemoAdapterOptions {
 }
 
 /** Hooks that act as a second person using the business, to show conflicts. */
-export interface DemoControls {
+export interface DemoControls extends DemoAgentControls {
+  /**
+   * Signs the demo in as the owner or as a staff member. The screen then offers what that role
+   * may do, and the agent routes refuse an owner-only step with the API's 403.
+   */
+  actAs(role: DemoRole): void;
+  /** Who the demo session is now. */
+  currentActor(): DemoActor;
+  /** Called after `actAs`; returns the unsubscribe. */
+  onActorChange(listener: () => void): () => void;
   bookAsSomeoneElse(resourceId: string, startsAt: string): BookingRecord;
   /** Saves the deal as someone else: a new revision, with any details given. */
   editDealElsewhere(dealId: string, details?: Partial<Pick<DealSummary, "value" | "leadSource">>): DealRecord;
@@ -108,7 +120,7 @@ export interface DemoControls {
   approveReplyElsewhere(replyId: string): ReplyRecord;
 }
 
-export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & DemoControls;
+export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & DemoControls;
 
 export interface DemoWrite {
   operation: string;
@@ -151,6 +163,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   let pipelines = clone(options.pipelines ?? [DEMO_PIPELINE]);
   // A copy per adapter: setOpenHours changes this business's calendars only.
   const resources = clone(DEMO_RESOURCES);
+  let actor: DemoActor = { role: "owner", userId: DEMO_OWNER.userId };
+  const actorListeners = new Set<() => void>();
 
   const networkError = () => new ApiError("network", defaultMessage("network"));
   const wait = async () => {
@@ -346,7 +360,22 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     return reply;
   }
 
+  const agents = createDemoAgents({
+    now: () => clock.now(),
+    newId,
+    wait,
+    idempotent,
+    parse,
+    actor: () => actor,
+    contacts,
+    intakeItems,
+    replies,
+    seed: seed.followUp,
+  });
+
   return {
+    ...agents,
+
     async listResources() {
       await wait();
       return resources.map(({ id, name, timeZone, slotLengthMinutes }) => ({ id, name, timeZone, slotLengthMinutes }));
@@ -587,7 +616,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         const reply: ReplyRecord = {
           id: newId(), tenantId: DEMO_TENANT_ID, contactId: request.contactId, channel: "email",
           subject: request.subject ?? DEMO_BUSINESS_SUBJECT, body: request.body, status: "draft",
-          draftedBy: DEMO_OWNER, createdAt: nowIso(), approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+          draftedBy: actor.role === "owner" ? DEMO_OWNER : DEMO_STAFF, createdAt: nowIso(), approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
         };
         replies.set(reply.id, reply);
         return reply;
@@ -596,6 +625,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
     approveReply(replyId, options) {
       return idempotent("inbox.reply.approve", { replyId }, options, () => {
+        // Only owners decide a send (I-6): staff get the API's 403.
+        if (actor.role !== "owner") throw demoError("Forbidden");
         const draft = draftOrThrow(replyId);
         // I-6: email is the only channel, so the customer needs an address. Nothing sends here.
         if (!contacts.get(draft.contactId)?.email) throw demoError("Conflict", { reason: "no_email" });
@@ -724,6 +755,22 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         if (hours) resource.hours[weekday] = [...hours];
         else delete resource.hours[weekday];
       }
+    },
+
+    actAs(role) {
+      actor = { role, userId: (role === "owner" ? DEMO_OWNER : DEMO_STAFF).userId };
+      for (const listener of actorListeners) listener();
+    },
+
+    currentActor() {
+      return { ...actor };
+    },
+
+    onActorChange(listener) {
+      actorListeners.add(listener);
+      return () => {
+        actorListeners.delete(listener);
+      };
     },
   };
 }

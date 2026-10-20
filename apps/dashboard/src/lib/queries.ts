@@ -2,6 +2,7 @@
 
 import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient, type InfiniteData, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
+import { agentActorId } from "./agent-actor";
 import { useApi } from "./api/react";
 import { useTenantId } from "./session";
 import {
@@ -10,6 +11,7 @@ import {
   type ContactRecord,
   type DealListQuery,
   type DealSummary,
+  type FollowUpRun,
   type HomeResultsQuery,
   type IntakeStatus,
   type ListResult,
@@ -45,6 +47,14 @@ export const keys = {
   threads: ["inbox", "threads"] as const,
   thread: (id: string) => ["inbox", "thread", id] as const,
   inboxAll: ["inbox"] as const,
+  /** The follow-up agent's status and settings (agents.md G-11). */
+  followUp: ["agents", "followup", "status"] as const,
+  /** Pages of the agent's runs, newest first. */
+  followUpRuns: ["agents", "followup", "runs"] as const,
+  followUpRun: (id: string) => ["agents", "followup", "run", id] as const,
+  /** The agent's actor ID, derived from the tenant (agents.md G-1). */
+  agentActor: ["agents", "actor"] as const,
+  agentsAll: ["agents"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
@@ -57,8 +67,6 @@ export const keys = {
    * never stands for a newer one.
    */
   siteEdge: (siteId: string, pointerVersion: number) => ["siteEdge", siteId, pointerVersion] as const,
-  agents: ["ws", "agents"] as const,
-  approvals: ["ws", "approvals"] as const,
   connections: ["ws", "connections"] as const,
   plan: ["ws", "plan"] as const,
 };
@@ -293,6 +301,53 @@ export function useThread(id: string | null) {
   });
 }
 
+/**
+ * The follow-up agent's settings, switches and whether it can draft now (agents.md G-11). Read
+ * afresh on every visit and each minute while shown: someone else may stop it, and quiet hours
+ * begin and end on the clock.
+ */
+export function useFollowUpStatus() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.followUp, queryFn: ({ signal }) => api.getFollowUpStatus({ signal }), staleTime: 0, refetchInterval: 60_000,
+  });
+}
+
+/** The agent's runs, newest first, a page at a time by keyset cursor. */
+export function useFollowUpRuns() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useInfiniteQuery({
+    enabled,
+    queryKey: keys.followUpRuns,
+    queryFn: ({ pageParam, signal }) => api.listFollowUpRuns(pageParam ? { cursor: pageParam } : {}, { signal }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last: Page<FollowUpRun>) => last.nextCursor ?? undefined,
+  });
+}
+
+/** One run with its decisions; null reads nothing. */
+export function useFollowUpRun(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    queryKey: keys.followUpRun(id ?? "none"),
+    queryFn: ({ signal }) => api.getFollowUpRun(id!, { signal }),
+    enabled: enabled && id !== null,
+  });
+}
+
+/**
+ * The follow-up agent's actor ID in this business, so the Inbox can name it as a draft's
+ * author. Null until known, or where the page has no Web Crypto.
+ */
+export function useAgentActorId(): string | null {
+  const tenantId = useTenantId();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.agentActor, queryFn: () => agentActorId(tenantId!), staleTime: Infinity, gcTime: Infinity }).data ?? null;
+}
+
 export function useSites() {
   const api = useApi();
   const { keys, enabled } = useKeys();
@@ -346,18 +401,6 @@ export function useSiteEdge(siteId: string | null, pointerVersion: number, enabl
     staleTime: Infinity,
     retry: false,
   });
-}
-
-export function useAgents() {
-  const api = useApi();
-  const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.agents, queryFn: () => api.listAgents() });
-}
-
-export function useApprovals() {
-  const api = useApi();
-  const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.approvals, queryFn: () => api.listApprovals() });
 }
 
 export function useConnections() {

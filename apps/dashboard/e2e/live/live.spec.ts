@@ -430,15 +430,15 @@ test("labels sample areas and turns off writes that would not reach the API", as
   }
   if (info.project.name === "desktop") await expect(page.getByTestId("sample-note")).toHaveText("Some areas show sample data until their API ships.");
 
-  // Bookings, customers, the Inbox and the site are live: no sample marker.
-  for (const path of ["/calendar", "/customers", "/inbox", "/site"]) {
+  // Bookings, customers, the Inbox, Agents and the site are live: no sample marker.
+  for (const path of ["/calendar", "/customers", "/inbox", "/agents", "/site"]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expect(page.getByRole("main").getByTestId("sample-badge")).toHaveCount(0);
   }
 
   const header = (name: string) => page.getByRole("main").locator("header").filter({ has: page.getByRole("heading", { level: 1, name }) });
-  for (const [path, name] of [["/agents", "Agents"], ["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
+  for (const [path, name] of [["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
     await page.goto(path);
     await expect(header(name).getByTestId("sample-badge"), name).toBeVisible();
   }
@@ -449,12 +449,13 @@ test("labels sample areas and turns off writes that would not reach the API", as
   await expect(cancel).toHaveAccessibleDescription(/Not available yet/);
   await expect(page.getByText(/^Not available yet/)).toBeVisible();
 
+  // Agents reads the follow-up agent from the API (agents.md G-11): its state, and that its
+  // drafts wait for an owner's approval.
   await page.goto("/agents");
-  await expect(page.getByRole("switch", { name: "Pause all agents" })).toBeDisabled();
-  for (const button of await page.getByRole("button", { name: /^(Approve and send|Discard)$/ }).all()) {
-    await expect(button).toBeDisabled();
-    await expect(button).toHaveAccessibleDescription(/Not available yet/);
-  }
+  const followUp = page.getByRole("region", { name: "Inquiry follow-up" });
+  await expect(followUp.getByTestId("followup-state")).toBeVisible();
+  await expect(followUp.getByTestId("approval-note")).toContainText("Nothing is sent to a customer without it.");
+  await expect(followUp.getByRole("button", { name: /^(Stop the agent|Resume)$/ })).toBeEnabled();
 
   await page.goto("/account/settings");
   await expect(page.getByRole("button", { name: "Save changes" })).toBeDisabled();

@@ -25,6 +25,11 @@ import {
   createDealRequestSchema,
   decideApprovalRequestSchema,
   draftReplyRequestSchema,
+  followUpStatusOutputSchema,
+  killFollowUpRequestSchema,
+  listFollowUpRunsQuerySchema,
+  resumeFollowUpRequestSchema,
+  updateFollowUpSettingsRequestSchema,
   idempotencyKeySchema,
   inviteMemberRequestSchema,
   linkIntakeItemRequestSchema,
@@ -62,6 +67,10 @@ import {
   type ApprovalPage,
   type ApprovalRecord,
   type ApproveApprovalResponse,
+  type FollowUpRunDetail,
+  type FollowUpRunPage,
+  type FollowUpStatus,
+  type FollowUpStatusOutput,
   type JsonValue,
   type BookingPageSummary,
   type MeResponse,
@@ -89,6 +98,7 @@ import {
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
+import { AGENT_MEMBER_PERMISSIONS, agentHandlers, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
@@ -176,13 +186,15 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
+  ...agentHandlers,
 });
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
  * request (public-intake.md P-1), the suppression actions (delivery.md D-9), the SMS status
- * record (twilio.md T-6) and the Activepieces actions (activepieces.md W-1, W-11, which authorize themselves) are never
- * reachable from a member session.
+ * record (twilio.md T-6), the Activepieces actions (activepieces.md W-1, W-11, which authorize
+ * themselves) and the agent's own run actions (agents.md G-1) are never reachable from a member
+ * session.
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
@@ -210,6 +222,8 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   // google-calendar.md G-1, G-5: a connected calendar decides what the public pages offer.
   "calendar.google.connect": "publish",
   "calendar.google.disconnect": "publish",
+  // agents.md G-2, G-3: owners change settings and resume; any member may stop the agent.
+  ...AGENT_MEMBER_PERMISSIONS,
 });
 
 /** Registered actions whose permission depends on their payload (payloadPermission below). */
@@ -404,6 +418,16 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       await run({ actionType: "approval.request", ...rest, payload: { approvalId: id, ...request } }), "result").result;
   };
   const notDraft = (status: string) => new Conflict("The reply is no longer a draft", { reason: "not_draft", status });
+  /** agents.md G-2: the settings target is the tenant itself. */
+  const agentSettingsEnvelope = (rawKey: unknown) => {
+    const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
+    return {
+      target: { tenantId, type: "agent_settings", id: tenantId },
+      approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
+      idempotencyKey,
+    };
+  };
+
 
   /**
    * Project committed state to the edge, re-checking the caller's permission in that read. It
@@ -835,6 +859,42 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         const row = await loadApproval(tx, tenantId, id);
         if (!row || !(roleCan(access.role, "approve") || row.requested_by === actorId)) throw new NotFound();
         return approvalRecord(row, now);
+      });
+    },
+
+    /** agents.md G-11: the follow-up agent's settings and switches; any member who drafts may read them. */
+    getFollowUpStatus: (): Promise<FollowUpStatus> => {
+      const now = new Date(readClock(deps.clock));
+      return read("inbox.drafts", (tx) => followUpStatus(tx, tenantId, now));
+    },
+    /** G-2: owners replace the settings, compare-and-set on the revision. */
+    async updateFollowUpSettings(body: unknown, key: unknown): Promise<FollowUpStatusOutput> {
+      const request = parseInput(updateFollowUpSettingsRequestSchema, body);
+      return parseInput(followUpStatusOutputSchema,
+        await run({ actionType: "agent.settings.update", ...agentSettingsEnvelope(key), payload: request }), "result");
+    },
+    /** G-3: stop the agent drafting for this tenant at once; staff may too. */
+    async killFollowUp(body: unknown, key: unknown): Promise<FollowUpStatusOutput> {
+      const request = parseInput(killFollowUpRequestSchema, body);
+      return parseInput(followUpStatusOutputSchema,
+        await run({ actionType: "agent.kill", ...agentSettingsEnvelope(key), payload: defined(request) }), "result");
+    },
+    /** G-3: owners let it draft again. */
+    async resumeFollowUp(body: unknown, key: unknown): Promise<FollowUpStatusOutput> {
+      const request = parseInput(resumeFollowUpRequestSchema, body);
+      return parseInput(followUpStatusOutputSchema,
+        await run({ actionType: "agent.resume", ...agentSettingsEnvelope(key), payload: request }), "result");
+    },
+    listFollowUpRuns: (query: unknown): Promise<FollowUpRunPage> => {
+      const parsed = parseInput(listFollowUpRunsQuerySchema, query, "query");
+      return read("inbox.drafts", (tx) => listRuns(tx, tenantId, parsed));
+    },
+    getFollowUpRun: (runId: unknown): Promise<FollowUpRunDetail> => {
+      const id = parseInput(uuidSchema, runId, "run ID");
+      return read("inbox.drafts", async (tx) => {
+        const found = await getRun(tx, tenantId, id);
+        if (!found) throw new NotFound();
+        return found;
       });
     },
 
