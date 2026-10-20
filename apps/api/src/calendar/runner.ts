@@ -1,13 +1,14 @@
 // The process that runs the M5 calendar worker (docs/requirements/google-calendar.md G-6..G-10).
-// One run makes worker passes until a pass moves nothing or the budget is spent; leases make a run
-// cut short safe to pick up on the next schedule. Time, ids and the database come in as dependencies.
+// One run makes worker passes until a pass moves nothing or the budget is spent; each pass gets the
+// budget's end as its deadline and claims no new work after it (G-10). Leases make a run cut short
+// safe to pick up on the next schedule. Time, ids and the database come in as dependencies.
 import { createCalendarWorker, type CalendarWorkerConfig, type CalendarWorkerReport, type GoogleClient } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
 import type { Pool } from "pg";
 
-/** What the runner needs of a worker: one pass, answering how many of each thing it did. */
+/** What the runner needs of a worker: one pass that claims nothing after `deadline`, answering how many of each thing it did. */
 export interface CalendarPassWorker {
-  runOnce(): Promise<object>;
+  runOnce(options: { readonly deadline: Date }): Promise<object>;
 }
 
 export interface CalendarRunSummary {
@@ -50,6 +51,7 @@ export function createCalendarRunner(input: {
   return {
     async run(): Promise<CalendarRunSummary> {
       const started = clock.now().getTime();
+      const deadline = new Date(started + budgetMs);
       const counts: Record<string, number> = {};
       let passes = 0;
       let budgetSpent = false;
@@ -58,7 +60,7 @@ export function createCalendarRunner(input: {
           budgetSpent = true;
           break;
         }
-        const pass = numericCounts(await worker.runOnce());
+        const pass = numericCounts(await worker.runOnce({ deadline }));
         passes += 1;
         for (const [name, count] of pass) counts[name] = (counts[name] ?? 0) + count;
         // A pass that moved nothing means nothing more is due now.

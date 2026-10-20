@@ -9,6 +9,12 @@ export interface BusySpan {
   readonly end: number;
 }
 
+/** The connection's tenant and resource: only events pushed for both are its own (G-7). */
+export interface BusyOwner {
+  readonly tenantId: string;
+  readonly resourceId: string;
+}
+
 /** Event types that never block time (G-7). */
 const FREE_EVENT_TYPES = new Set(["workingLocation", "birthday"]);
 /** Year 1 to year 9999: every instant here has a plain ISO form Postgres reads back exactly. */
@@ -59,17 +65,20 @@ export function localMidnight(timeZone: string, days: number): number {
 /**
  * G-7: the time an event blocks, or null when it blocks nothing. Cancelled, transparent,
  * working-location and birthday events are free, as is an event the calendar's own attendee
- * entry declined, and an event this system pushed (`extendedProperties.private.zs_booking`).
+ * entry declined, and an event this system pushed for `own` (`extendedProperties.private`
+ * `zs_booking`, with `zs_tenant` and `zs_resource` naming the connection's tenant and resource).
+ * An event pushed for another resource or tenant sharing the calendar blocks like any other.
  * A timed event blocks [start, end); an all-day event blocks from midnight of its start date to
  * midnight of its (exclusive) end date in the resource's time zone. Malformed or mixed times,
  * and an end that is not after the start, block nothing.
  */
-export function busySpan(event: GoogleEvent, timeZone: string): BusySpan | null {
+export function busySpan(event: GoogleEvent, timeZone: string, own: BusyOwner): BusySpan | null {
   if (event.status === "cancelled") return null;
   if (event.transparency === "transparent") return null;
   if (event.eventType !== undefined && FREE_EVENT_TYPES.has(event.eventType)) return null;
   if (event.attendees?.some((attendee) => attendee?.self === true && attendee.responseStatus === "declined")) return null;
-  if (event.extendedProperties?.private?.zs_booking !== undefined) return null;
+  const pushed = event.extendedProperties?.private;
+  if (pushed?.zs_booking !== undefined && pushed.zs_tenant === own.tenantId && pushed.zs_resource === own.resourceId) return null;
   const start = event.start;
   const end = event.end;
   if (!start || !end) return null;

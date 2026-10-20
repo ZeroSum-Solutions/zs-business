@@ -79,11 +79,13 @@ describe("createCalendarRunner", () => {
   beforeEach(() => { now = START; });
 
   type Pass = { counts: Record<string, unknown>; takesMs?: number };
-  function stubWorker(passes: Pass[]): { worker: CalendarPassWorker; calls: () => number } {
+  function stubWorker(passes: Pass[]): { worker: CalendarPassWorker; calls: () => number; deadlines: Date[] } {
     let calls = 0;
+    const deadlines: Date[] = [];
     return {
       worker: {
-        async runOnce() {
+        async runOnce({ deadline }) {
+          deadlines.push(deadline);
           const pass = passes[calls++];
           if (!pass) throw new Error("runOnce called more often than the test expected");
           now += pass.takesMs ?? 0;
@@ -91,6 +93,7 @@ describe("createCalendarRunner", () => {
         },
       },
       calls: () => calls,
+      deadlines,
     };
   }
   const idle = { synced: 0, pushed: 0, notifications: 0 };
@@ -125,6 +128,16 @@ describe("createCalendarRunner", () => {
     ]);
     expect(await createCalendarRunner({ worker, clock, budgetMs: 5_000 }).run()).toEqual({ passes: 2, counts: { synced: 2 }, budgetSpent: true });
     expect(calls()).toBe(2);
+  });
+
+  it("gives every pass the end of the budget as its deadline (G-10)", async () => {
+    const { worker, deadlines } = stubWorker([
+      { counts: { synced: 1 }, takesMs: 2_000 },
+      { counts: { synced: 1 }, takesMs: 1_000 },
+      { counts: idle },
+    ]);
+    await createCalendarRunner({ worker, clock, budgetMs: 5_000 }).run();
+    expect(deadlines.map((deadline) => deadline.getTime())).toEqual([START + 5_000, START + 5_000, START + 5_000]);
   });
 
   it("always runs a first pass, even when it alone outlasts the budget", async () => {

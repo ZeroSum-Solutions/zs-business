@@ -13,7 +13,7 @@ import {
   TenantDenied,
 } from "@zs/contracts";
 import { readClock } from "../booking/slots.js";
-import { getCalendarConnection } from "../calendar/connections.js";
+import { getCalendarConnection, googleConnectIdempotencyKey } from "../calendar/connections.js";
 import { GOOGLE_EVENTS_SCOPE } from "../calendar/google.js";
 import { pkceVerifier, verifyOAuthState, type OAuthState } from "../calendar/oauth-state.js";
 import { sealRefreshToken } from "../calendar/seal.js";
@@ -37,8 +37,10 @@ export type OAuthCallbackOutcome =
   | { readonly ok: true; readonly connected: true; readonly tenantId: string; readonly connectionId: string }
   | { readonly ok: true; readonly connected: false; readonly reason: OAuthCallbackReason };
 
-/** G-2: the reserved key the connect action runs under, one per connection. */
-export const googleConnectIdempotencyKey = (connectionId: string) => `oauth-google:${connectionId.toLowerCase()}`;
+export { googleConnectIdempotencyKey };
+
+/** What a reload finds: no row yet, this flow's live connection, or a row that is no longer it. */
+type Existing = "none" | "active" | "other";
 
 const MAX_CODE_LENGTH = 2048;
 
@@ -61,15 +63,20 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
 
       if (input.error !== undefined) return fail("denied");
 
-      /** Whether this flow's connection already exists: a reload, or a second tab that won. */
-      const existing = () => deps.db.tenant(tenantId, async (tx) => {
+      /**
+       * Whether this flow's connection already exists: a reload, or a second tab that won. Only an
+       * active row counts as connected; one since retired or needing reauthorization is a conflict.
+       */
+      const existing = () => deps.db.tenant(tenantId, async (tx): Promise<Existing> => {
         await requireMember(tx, tenantId, actorId, "publish");
-        return (await getCalendarConnection(tx, tenantId, connectionId)) !== null;
+        const found = await getCalendarConnection(tx, tenantId, connectionId);
+        return !found ? "none" : found.status === "active" ? "active" : "other";
       });
       try {
         // Before the code is spent: a member who may no longer connect is refused, and a reload
         // after success answers as the first request did.
-        if (await existing()) return connected;
+        const found = await existing();
+        if (found !== "none") return found === "active" ? connected : fail("conflict");
       } catch (error) {
         if (error instanceof TenantDenied) return fail("forbidden");
         throw error;
@@ -83,8 +90,11 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
       } catch (error) {
         if (!(error instanceof GoogleRequestFailed)) throw error;
         // A code already used by a request that went on to connect.
-        return (await existing().catch(() => false)) ? connected : fail("exchange_failed");
+        const found = await existing().catch((): Existing => "none");
+        return found === "active" ? connected : fail(found === "other" ? "conflict" : "exchange_failed");
       }
+      // A grant that cannot be used is left alone, never revoked: it is stored nowhere, and Google
+      // revokes the whole grant for the user and client, which could end another live connection.
       if (!grant.refreshToken) return fail("no_refresh_token");
       if (!grant.scope.split(/\s+/).includes(GOOGLE_EVENTS_SCOPE)) return fail("scope_missing");
       let refreshTokenSealed: string;
@@ -107,7 +117,7 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
     outcomes: {
       connected: OAuthCallbackOutcome;
       fail: (reason: OAuthCallbackReason) => OAuthCallbackOutcome;
-      existing: () => Promise<boolean>;
+      existing: () => Promise<Existing>;
     },
   ): Promise<OAuthCallbackOutcome> {
     const { tenantId, actorId, connectionId, resourceId } = state;
@@ -127,7 +137,7 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
       if (error instanceof TenantDenied) return outcomes.fail("forbidden");
       // Another request for this connection committed first, with its own sealing of the grant.
       if (error instanceof IdempotencyConflict || error instanceof BindingMismatch)
-        return (await outcomes.existing().catch(() => false)) ? outcomes.connected : outcomes.fail("conflict");
+        return (await outcomes.existing().catch((): Existing => "none")) === "active" ? outcomes.connected : outcomes.fail("conflict");
       if (error instanceof Conflict) return outcomes.fail("conflict");
       throw error;
     }

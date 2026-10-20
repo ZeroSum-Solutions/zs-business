@@ -2,6 +2,7 @@
 // code. Owner intent runs through the dispatcher: the connect action records a grant the callback
 // sealed (G-2, G-3) and retires any older connection of the resource; disconnect hands a
 // connection to the worker for cleanup (G-9). Sync state and the sealed token are the worker's.
+// Connect runs only under the callback's reserved key, never through an approval (G-2).
 import {
   CALENDAR_GOOGLE_CONNECT_ACTION,
   CALENDAR_GOOGLE_DISCONNECT_ACTION,
@@ -44,6 +45,9 @@ export const connectionFromRow = (row: ConnectionRow): CalendarConnection => cal
   createdAt: row.created_at.toISOString(),
 });
 
+/** G-2: the reserved key the connect action runs under, one per connection. */
+export const googleConnectIdempotencyKey = (connectionId: string) => `oauth-google:${connectionId.toLowerCase()}`;
+
 /** Whether the booking resource is this tenant's; RLS hides every other tenant's. */
 export async function resourceInTenant(tx: Transaction, tenantId: string, resourceId: string): Promise<boolean> {
   return (await tx.query("SELECT 1 FROM booking_resources WHERE tenant_id=$1 AND id=$2", [tenantId, resourceId])).rowCount === 1;
@@ -70,15 +74,18 @@ async function resolveConnectionTarget(tx: Transaction, target: Target): Promise
 }
 
 /**
- * G-2, G-4: record the grant the callback sealed. The resource must be the tenant's; an older
- * connection of the resource that still holds a grant is retired to 'disconnecting' first, so
- * the worker revokes it and removes its blocks (G-9).
+ * G-2, G-4: record the grant the callback sealed. Only the callback's reserved key is accepted,
+ * so an approval run (`approval:<id>`) or a hand-built command is refused. The resource must be
+ * the tenant's; an older connection of the resource that still holds a grant is retired to
+ * 'disconnecting' first, so the worker revokes it and removes its blocks (G-9).
  */
 export const connectGoogleCalendarHandler: ActionHandler = {
   resolveTarget: resolveConnectionTarget,
   async handle({ tx, command, binding, now }) {
     const { payload } = parseOrFail(connectGoogleCalendarCommandSchema, command);
     if (command.target.id !== payload.connectionId) throw new ValidationFailed("Target must name the connection");
+    if (command.idempotencyKey !== googleConnectIdempotencyKey(payload.connectionId))
+      throw new ValidationFailed("Calendar connect runs only from the OAuth callback");
     if (!(await resourceInTenant(tx, binding.tenantId, payload.resourceId)))
       throw new TenantDenied("Booking resource is not owned by this tenant");
     if ((await tx.query("SELECT 1 FROM calendar_connections WHERE tenant_id=$1 AND id=$2", [binding.tenantId, payload.connectionId])).rowCount)

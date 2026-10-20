@@ -29,6 +29,9 @@ const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const durationMs = z.number().int().positive().max(366 * DAY);
+/** G-6: a full list runs from 1 day ago to 400 days ahead; after a capped one, a near list to 30 days ahead. */
+const FULL_AHEAD_MS = 400 * DAY;
+const NEAR_AHEAD_MS = 30 * DAY;
 
 export const calendarWorkerConfigSchema = z.strictObject({
   /** GOOGLE_TOKEN_PRIVATE_KEY, parsed (parseSealPrivateKey). */
@@ -151,6 +154,7 @@ interface PushRow {
   tenant_id: string;
   connection_id: string;
   booking_id: string;
+  resource_id: string;
   google_event_id: string;
   attempts: number;
   lease_until: Date;
@@ -166,6 +170,10 @@ interface Listing {
   readonly nextSyncToken: string | null;
   /** False when the page limit ran out before the last page. */
   readonly complete: boolean;
+  /** A full list's window in UTC epoch milliseconds, [start, end); null for an incremental one. */
+  readonly window: { readonly start: number; readonly end: number } | null;
+  /** G-6: after a capped full list, the complete near list that decides the blocks starting in its window. */
+  readonly near?: Listing;
 }
 
 export function createCalendarWorker(deps: CalendarWorkerDeps) {
@@ -177,6 +185,8 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     try { deps.report?.(event); } catch { /* a reporter never stops the worker */ }
   };
   const errorMessage = (error: unknown) => codeText(error instanceof Error ? error.message : "error");
+  /** G-10: once a run's deadline passes it claims no new work. */
+  const past = (deadline?: Date) => deadline !== undefined && nowMs() >= deadline.getTime();
 
   /** One Google call with the configured deadline; anything but a typed failure is retryable. */
   async function call<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -243,7 +253,8 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
   // ---------------------------------------------------------------- a. notifications (G-8)
 
   /** Marks connections with fresh push notifications due now and the notifications processed. */
-  async function notifications(counts: CalendarRunCounts = emptyCounts()): Promise<CalendarRunCounts> {
+  async function notifications(counts: CalendarRunCounts = emptyCounts(), deadline?: Date): Promise<CalendarRunCounts> {
+    if (past(deadline)) return counts;
     await deps.service(async (tx) => {
       const at = new Date(nowMs());
       const marked = (await tx.query<{ marked: number; channels: string[] | null }>(
@@ -273,9 +284,19 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     return counts;
   }
 
+  /** Claimed connections a pass will not reach before its deadline: the leases go back, so the next run takes them at once. */
+  async function releaseConnections(rows: readonly ConnectionRow[]): Promise<void> {
+    await deps.service((tx) => tx.query(
+      `UPDATE calendar_connections c SET lease_until=NULL
+         FROM unnest($1::uuid[], $2::uuid[], $3::timestamptz[]) AS u(tenant_id, id, lease_until)
+        WHERE c.tenant_id=u.tenant_id AND c.id=u.id AND c.lease_until=u.lease_until`,
+      [rows.map((row) => row.tenant_id), rows.map((row) => row.id), rows.map((row) => row.lease_until)]));
+  }
+
   // ---------------------------------------------------------------- b. disconnects (G-9)
 
-  async function disconnects(counts: CalendarRunCounts = emptyCounts(), tokens: Tokens = new Map()): Promise<CalendarRunCounts> {
+  async function disconnects(counts: CalendarRunCounts = emptyCounts(), tokens: Tokens = new Map(), deadline?: Date): Promise<CalendarRunCounts> {
+    if (past(deadline)) return counts;
     const rows = await deps.service(async (tx) => {
       const at = nowMs();
       return (await tx.query<ConnectionRow>(
@@ -289,7 +310,11 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
            c.updated_at, c.lease_until`,
         [new Date(at), config.claimLimit, new Date(at + config.leaseMs)])).rows;
     });
-    for (const row of rows) {
+    for (const [index, row] of rows.entries()) {
+      if (past(deadline)) {
+        await releaseConnections(rows.slice(index));
+        break;
+      }
       try {
         await disconnectOne(row, counts, tokens);
       } catch (error) {
@@ -312,14 +337,17 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     }
     let revoke = "skipped";
     // Google revokes a whole grant (one Google account and this client), not one refresh token,
-    // so a revoke would also end a live connection on the same account: the reconnect that
-    // replaced this row, or another resource or tenant. Then the grant stays, and only this row
-    // lets go of its token.
+    // so a revoke would also end an active connection on the same account: the reconnect that
+    // replaced this row, or another resource or tenant. Without an email on either row, a
+    // replacement on the same resource may be that account. Then the grant stays, and only this
+    // row lets go of its token. A reauthorize row's grant is already gone, so it shares nothing.
     const shared = refreshToken !== null && (await deps.service((tx) => tx.query(
-      `SELECT 1 FROM calendar_connections other
-        WHERE other.status IN ('active', 'reauthorize') AND NOT (other.tenant_id=$1 AND other.id=$2)
-          AND ((other.tenant_id=$1 AND other.resource_id=$3)
-            OR lower(other.account_email) = (SELECT lower(account_email) FROM calendar_connections WHERE tenant_id=$1 AND id=$2))
+      `SELECT 1 FROM calendar_connections leaving, calendar_connections other
+        WHERE leaving.tenant_id=$1 AND leaving.id=$2
+          AND other.status='active' AND NOT (other.tenant_id=$1 AND other.id=$2)
+          AND (lower(other.account_email) = lower(leaving.account_email)
+            OR ((other.account_email IS NULL OR leaving.account_email IS NULL)
+              AND other.tenant_id=$1 AND other.resource_id=$3))
         LIMIT 1`,
       [row.tenant_id, row.id, row.resource_id]))).rowCount === 1;
     if (shared) revoke = "shared_grant";
@@ -375,7 +403,8 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
 
   // ---------------------------------------------------------------- c. sync (G-6, G-7) and d. channels (G-8)
 
-  async function sync(counts: CalendarRunCounts = emptyCounts(), tokens: Tokens = new Map()): Promise<CalendarRunCounts> {
+  async function sync(counts: CalendarRunCounts = emptyCounts(), tokens: Tokens = new Map(), deadline?: Date): Promise<CalendarRunCounts> {
+    if (past(deadline)) return counts;
     const rows = await deps.service(async (tx) => {
       const at = nowMs();
       return (await tx.query<ConnectionRow>(
@@ -390,7 +419,11 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
            c.channel_id, c.channel_resource_id, c.channel_expires_at, r.time_zone`,
         [new Date(at), config.claimLimit, new Date(at + config.leaseMs)])).rows;
     });
-    for (const row of rows) {
+    for (const [index, row] of rows.entries()) {
+      if (past(deadline)) {
+        await releaseConnections(rows.slice(index));
+        break;
+      }
       const lease = { until: row.lease_until };
       try {
         await syncOne(row, lease, counts, tokens);
@@ -414,11 +447,13 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     lease.until = next;
   }
 
-  async function listAll(access: string, row: ConnectionRow, lease: { until: Date }, syncToken: string | null): Promise<Listing> {
+  async function listAll(access: string, row: ConnectionRow, lease: { until: Date }, syncToken: string | null,
+    aheadMs = FULL_AHEAD_MS): Promise<Listing> {
     const at = nowMs();
-    const base = syncToken !== null
-      ? { calendarId: row.calendar_id, syncToken }
-      : { calendarId: row.calendar_id, timeMin: new Date(at - DAY).toISOString(), timeMax: new Date(at + 400 * DAY).toISOString() };
+    const window = syncToken !== null ? null : { start: at - DAY, end: at + aheadMs };
+    const base = window === null
+      ? { calendarId: row.calendar_id, syncToken: syncToken! }
+      : { calendarId: row.calendar_id, timeMin: new Date(window.start).toISOString(), timeMax: new Date(window.end).toISOString() };
     const events: GoogleEvent[] = [];
     let pageToken: string | null = null;
     for (let page = 0; page < config.maxPages; page += 1) {
@@ -428,14 +463,14 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       if (!result.nextPageToken) {
         const token = result.nextSyncToken;
         return {
-          mode: syncToken !== null ? "incremental" : "full", events, complete: true,
+          mode: syncToken !== null ? "incremental" : "full", events, complete: true, window,
           nextSyncToken: token && token.length <= 2000 ? token : null,
         };
       }
       pageToken = result.nextPageToken;
       await renewLease(row, lease);
     }
-    return { mode: syncToken !== null ? "incremental" : "full", events, nextSyncToken: null, complete: false };
+    return { mode: syncToken !== null ? "incremental" : "full", events, nextSyncToken: null, complete: false, window };
   }
 
   async function syncOne(row: ConnectionRow, lease: { until: Date }, counts: CalendarRunCounts, tokens: Tokens): Promise<void> {
@@ -450,6 +485,13 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       // G-6: an expired sync token means a full list, in this same pass.
       if (!(incremental && error instanceof GoogleRequestFailed && (error.code === "sync_token_expired" || error.status === 410))) throw error;
       listing = await listAll(access, row, lease, null);
+    }
+    // G-6: a full list cut short by the page cap; a complete near list still settles its window.
+    // Either way no sync token is stored, so the next sync is full again.
+    if (listing.mode === "full" && !listing.complete) {
+      await renewLease(row, lease);
+      const near = await listAll(access, row, lease, null, NEAR_AHEAD_MS);
+      if (near.complete) listing = { ...listing, near };
     }
 
     // d. G-8: open or renew the watch channel while the access token is fresh.
@@ -503,14 +545,28 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
   /** G-6, G-7: one transaction under the B-21 lock. */
   async function apply(row: ConnectionRow, lease: Date, listing: Listing,
     opened: { id: string; resourceId: string; expiresAt: Date } | null): Promise<"applied" | "lost" | "inactive"> {
+    const own = { tenantId: row.tenant_id, resourceId: row.resource_id };
     // Last state per event ID wins; IDs that cannot be stored are skipped.
-    const spans = new Map<string, BusySpan | null>();
-    for (const event of listing.events) {
-      if (typeof event?.id !== "string" || event.id.length < 1 || event.id.length > 1024) continue;
-      spans.set(event.id, busySpan(event, row.time_zone));
-    }
-    const busy = [...spans].filter((entry): entry is [string, BusySpan] => entry[1] !== null);
+    const spansOf = (events: readonly GoogleEvent[]) => {
+      const found = new Map<string, BusySpan | null>();
+      for (const event of events) {
+        if (typeof event?.id !== "string" || event.id.length < 1 || event.id.length > 1024) continue;
+        found.set(event.id, busySpan(event, row.time_zone, own));
+      }
+      return found;
+    };
+    const busyOf = (found: Map<string, BusySpan | null>) =>
+      [...found].filter((entry): entry is [string, BusySpan] => entry[1] !== null);
+    const spans = spansOf(listing.events);
     const free = [...spans].filter(([, span]) => span === null).map(([id]) => id);
+    // G-6: the near list decides every block starting in its window; the capped list only adds
+    // or moves blocks starting outside it.
+    const near = listing.near?.window ? { window: listing.near.window, busy: busyOf(spansOf(listing.near.events)) } : null;
+    const nearIds = new Set(listing.near?.events.map((event) => event?.id));
+    const busy = near === null ? busyOf(spans) : [
+      ...near.busy,
+      ...busyOf(spans).filter(([id, span]) => !nearIds.has(id) && (span.start < near.window.start || span.start >= near.window.end)),
+    ];
     return deps.service(async (tx) => {
       await lockBookingResource(tx, row.tenant_id, row.resource_id);
       const current = (await tx.query<{ status: string }>(
@@ -526,6 +582,11 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       const replace = listing.mode === "full" && listing.complete;
       if (replace)
         await tx.query("DELETE FROM booking_external_blocks WHERE tenant_id=$1 AND connection_id=$2", [row.tenant_id, row.id]);
+      else if (near !== null)
+        await tx.query(
+          `DELETE FROM booking_external_blocks WHERE tenant_id=$1 AND connection_id=$2
+              AND starts_at >= $3 AND starts_at < $4 AND external_id <> ALL($5::text[])`,
+          [row.tenant_id, row.id, new Date(near.window.start), new Date(near.window.end), near.busy.map(([id]) => id)]);
       else if (free.length > 0 && listing.mode === "incremental")
         await tx.query(
           "DELETE FROM booking_external_blocks WHERE tenant_id=$1 AND connection_id=$2 AND external_id = ANY($3::text[])",
@@ -581,7 +642,8 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
 
   // ---------------------------------------------------------------- e. pushes (G-10)
 
-  async function pushes(counts: CalendarRunCounts = emptyCounts(), tokens: Tokens = new Map()): Promise<CalendarRunCounts> {
+  async function pushes(counts: CalendarRunCounts = emptyCounts(), tokens: Tokens = new Map(), deadline?: Date): Promise<CalendarRunCounts> {
+    if (past(deadline)) return counts;
     const claimed = await deps.service(async (tx) => {
       const at = nowMs();
       const queued = await tx.query(
@@ -605,11 +667,23 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
            FROM due, bookings b, calendar_connections c
           WHERE p.tenant_id=due.tenant_id AND p.connection_id=due.connection_id AND p.booking_id=due.booking_id
             AND b.tenant_id=p.tenant_id AND b.id=p.booking_id AND c.tenant_id=p.tenant_id AND c.id=p.connection_id
-         RETURNING p.tenant_id, p.connection_id, p.booking_id, p.google_event_id, p.attempts, p.lease_until,
+         RETURNING p.tenant_id, p.connection_id, p.booking_id, c.resource_id, p.google_event_id, p.attempts, p.lease_until,
            b.starts_at, b.ends_at, c.calendar_id, c.refresh_token_sealed`,
         [new Date(at), config.pushLimit, new Date(at + config.leaseMs)])).rows;
     });
-    for (const push of claimed) {
+    for (const [index, push] of claimed.entries()) {
+      if (past(deadline)) {
+        // Not attempted: the lease goes back and so does the attempt the claim counted.
+        const rest = claimed.slice(index);
+        await deps.service((tx) => tx.query(
+          `UPDATE calendar_pushes p SET lease_until=NULL, attempts=p.attempts-1
+             FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::timestamptz[]) AS u(tenant_id, connection_id, booking_id, lease_until)
+            WHERE p.tenant_id=u.tenant_id AND p.connection_id=u.connection_id AND p.booking_id=u.booking_id
+              AND p.lease_until=u.lease_until AND p.status='pending'`,
+          [rest.map((entry) => entry.tenant_id), rest.map((entry) => entry.connection_id), rest.map((entry) => entry.booking_id),
+            rest.map((entry) => entry.lease_until)]));
+        break;
+      }
       try {
         await pushOne(push, counts, tokens);
       } catch (error) {
@@ -628,7 +702,8 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
         summary: config.eventTitle,
         start: push.starts_at.toISOString(),
         end: push.ends_at.toISOString(),
-        privateProperties: { zs_booking: push.booking_id, zs_tenant: push.tenant_id },
+        // G-7: a sync of this resource skips the event; one of another resource sharing the calendar blocks it.
+        privateProperties: { zs_booking: push.booking_id, zs_tenant: push.tenant_id, zs_resource: push.resource_id },
       }, { signal }));
       outcome = { status: "pushed" };
     } catch (error) {
@@ -637,7 +712,11 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
         // The push waits for the owner; the connection stops being claimed until then.
         if (await markReauthorize(push.tenant_id, push.connection_id, code, null)) counts.reauthorized += 1;
         outcome = { status: push.attempts >= config.pushMaxAttempts ? "failed" : "pending", code };
-      } else outcome = { status: retry && push.attempts < config.pushMaxAttempts ? "pending" : "failed", code };
+      } else {
+        // G-10: a 401 means the grant went away mid-pass; the next refresh decides reauthorize.
+        const again = retry || (error instanceof GoogleRequestFailed && error.status === 401);
+        outcome = { status: again && push.attempts < config.pushMaxAttempts ? "pending" : "failed", code };
+      }
     }
     const at = nowMs();
     const recorded = await deps.service((tx) => tx.query(
@@ -666,17 +745,23 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
 
   // ---------------------------------------------------------------- one pass
 
-  /** a. notifications, b. disconnects, c. sync with d. channels, e. pushes; one step's failure stops none of the others. */
-  async function runOnce(): Promise<CalendarRunCounts> {
+  /**
+   * a. notifications, b. disconnects, c. sync with d. channels, e. pushes; one step's failure stops
+   * none of the others. Once `deadline` passes (G-10) the pass claims nothing more, and connections
+   * or pushes it claimed but has not started go back.
+   */
+  async function runOnce(options: { readonly deadline?: Date } = {}): Promise<CalendarRunCounts> {
     const counts = emptyCounts();
     const tokens: Tokens = new Map();
+    const { deadline } = options;
     const steps: Array<["notifications" | "disconnects" | "sync" | "pushes", () => Promise<unknown>]> = [
-      ["notifications", () => notifications(counts)],
-      ["disconnects", () => disconnects(counts, tokens)],
-      ["sync", () => sync(counts, tokens)],
-      ["pushes", () => pushes(counts, tokens)],
+      ["notifications", () => notifications(counts, deadline)],
+      ["disconnects", () => disconnects(counts, tokens, deadline)],
+      ["sync", () => sync(counts, tokens, deadline)],
+      ["pushes", () => pushes(counts, tokens, deadline)],
     ];
     for (const [step, work] of steps) {
+      if (past(deadline)) break;
       try {
         await work();
       } catch (error) {

@@ -176,10 +176,10 @@ describe("sync (G-6, G-7)", () => {
     expect((w.google.of("listEvents")[0]![1] as { syncToken?: string }).syncToken).toBeUndefined();
   });
 
-  it("events this system pushed never become blocks", async () => {
+  it("events this system pushed for the connection's own resource never become blocks", async () => {
     const w = await world();
     w.google.put(w.token, timed("ours", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z",
-      { extendedProperties: { private: { zs_booking: randomUUID(), zs_tenant: w.resource.tenantId } } }));
+      { extendedProperties: { private: { zs_booking: randomUUID(), zs_tenant: w.resource.tenantId, zs_resource: w.resource.id } } }));
     const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
     const worker = h.worker(w.google, w.clock);
     const first = await worker.runOnce();
@@ -190,6 +190,102 @@ describe("sync (G-6, G-7)", () => {
     await worker.runOnce();
     expect(w.google.events(w.token).some((event) => event.id === bookingId.replaceAll("-", ""))).toBe(true);
     expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+  });
+
+  it("two resources sharing one calendar: a booking pushed for one blocks the other, not itself", async () => {
+    const w = await world();
+    const tenantId = w.resource.tenantId;
+    // R2 is connected to the same Google calendar as R1.
+    const second = await h.resource(tenantId);
+    const secondConnection = await h.connection(second, w.token, START);
+    const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    const worker = h.worker(w.google, w.clock);
+    expect(await worker.runOnce()).toMatchObject({ synced: 2, pushesQueued: 1, pushed: 1 });
+    expect((w.google.of("insertEvent")[0]![2] as NewGoogleEvent).privateProperties)
+      .toEqual({ zs_booking: bookingId, zs_tenant: tenantId, zs_resource: w.resource.id });
+    w.clock.advance(15 * MINUTE);
+    expect((await worker.runOnce()).synced).toBe(2);
+    expect(await h.blocks(tenantId, w.connectionId)).toEqual([]);
+    const blocks = await h.blocks(tenantId, secondConnection);
+    expect(spans(blocks)).toEqual([[bookingId.replaceAll("-", ""), "2026-10-22T10:00:00.000Z", "2026-10-22T10:30:00.000Z"]]);
+    expect(blocks[0]!.resource_id).toBe(second.id);
+  });
+
+  it("a full list that hits the page cap: a complete near list replaces its window, the rest is only upserted", async () => {
+    const w = await world({ pageSize: 2 });
+    const tenantId = w.resource.tenantId;
+    const put = (id: string, day: string) => w.google.put(w.token, timed(id, `${day}T10:00:00Z`, `${day}T11:00:00Z`));
+    put("far1", "2027-03-01");
+    put("near1", "2026-10-25");
+    put("gone", "2026-10-26");
+    put("far2", "2027-04-01");
+    put("fargone", "2027-05-01");
+    await h.worker(w.google, w.clock).runOnce();
+    expect((await h.blocks(tenantId)).length).toBe(5);
+    const near1 = (await h.blocks(tenantId)).find((block) => block.external_id === "near1")!.id;
+    w.google.forget(w.token, "gone");
+    w.google.forget(w.token, "fargone");
+    put("far2", "2027-04-02");
+    put("far3", "2027-06-01");
+    put("near2", "2026-11-05");
+    // In Google's order two pages of two hold far1, near1, far2 and far3; near2 is past the cap.
+    w.google.expireSyncTokens(w.token);
+    w.clock.advance(15 * MINUTE);
+    w.google.reset();
+    const reports: CalendarWorkerReport[] = [];
+    const capped = h.worker(w.google, w.clock, { maxPages: 2 }, reports);
+    expect((await capped.runOnce()).synced).toBe(1);
+    const at = START + 15 * MINUTE;
+    const queries = w.google.of("listEvents").map((args) => args[1] as { syncToken?: string; timeMin?: string; timeMax?: string; pageToken?: string });
+    expect(queries.map((query) => [query.syncToken, query.timeMin, query.timeMax, query.pageToken])).toEqual([
+      ["sync-5", undefined, undefined, undefined],
+      [undefined, iso(new Date(at - DAY)), iso(new Date(at + 400 * DAY)), undefined],
+      [undefined, iso(new Date(at - DAY)), iso(new Date(at + 400 * DAY)), "page-2"],
+      [undefined, iso(new Date(at - DAY)), iso(new Date(at + 30 * DAY)), undefined],
+    ]);
+    const blocks = await h.blocks(tenantId);
+    expect(spans(blocks)).toEqual([
+      // The near window: as the near list says, so `gone` is gone and near2 is there.
+      ["near1", "2026-10-25T10:00:00.000Z", "2026-10-25T11:00:00.000Z"],
+      ["near2", "2026-11-05T10:00:00.000Z", "2026-11-05T11:00:00.000Z"],
+      // Beyond it: the capped list adds and moves blocks but deletes none (fargone stays).
+      ["far1", "2027-03-01T10:00:00.000Z", "2027-03-01T11:00:00.000Z"],
+      ["far2", "2027-04-02T10:00:00.000Z", "2027-04-02T11:00:00.000Z"],
+      ["fargone", "2027-05-01T10:00:00.000Z", "2027-05-01T11:00:00.000Z"],
+      ["far3", "2027-06-01T10:00:00.000Z", "2027-06-01T11:00:00.000Z"],
+    ]);
+    expect(blocks.find((block) => block.external_id === "near1")!.id).toBe(near1);
+    const row = await h.connectionRow(tenantId, w.connectionId);
+    expect(row).toMatchObject({ sync_token: null, last_error: "too_many_events", lease_until: null });
+    expect(row.last_full_sync_at.getTime()).toBe(START);
+    expect(reports).toContainEqual({ kind: "synced", tenantId, connectionId: w.connectionId, mode: "full", events: 4, complete: false });
+    // No sync token: the next sync is a full list again.
+    w.clock.advance(15 * MINUTE);
+    w.google.reset();
+    await capped.runOnce();
+    expect((w.google.of("listEvents")[0]![1] as { syncToken?: string; timeMax?: string }))
+      .toMatchObject({ timeMax: iso(new Date(at + 15 * MINUTE + 400 * DAY)) });
+    expect((w.google.of("listEvents")[0]![1] as { syncToken?: string }).syncToken).toBeUndefined();
+  });
+
+  it("when the near list hits the page cap too, the blocks are only upserted", async () => {
+    const w = await world({ pageSize: 1 });
+    const tenantId = w.resource.tenantId;
+    const put = (id: string, day: string) => w.google.put(w.token, timed(id, `${day}T10:00:00Z`, `${day}T11:00:00Z`));
+    put("stale", "2026-10-21");
+    await h.worker(w.google, w.clock).runOnce();
+    w.google.forget(w.token, "stale");
+    put("a", "2026-10-22");
+    put("b", "2026-10-23");
+    put("c", "2026-10-24");
+    w.google.expireSyncTokens(w.token);
+    w.clock.advance(15 * MINUTE);
+    w.google.reset();
+    expect((await h.worker(w.google, w.clock, { maxPages: 2 }).runOnce()).synced).toBe(1);
+    // A 410, two pages of the full list, two of the near list.
+    expect(w.google.count("listEvents")).toBe(5);
+    expect((await h.blocks(tenantId)).map((block) => block.external_id)).toEqual(["stale", "a", "b"]);
+    expect(await h.connectionRow(tenantId, w.connectionId)).toMatchObject({ sync_token: null, last_error: "too_many_events" });
   });
 
   it("blocks stop slots: a booking in a blocked slot is refused, a free one commits", async () => {
@@ -384,14 +480,16 @@ describe("disconnect cleanup (G-9)", () => {
     expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).status).toBe("disconnected");
   });
 
-  it("keeps a grant another live connection shares: the reconnect of the resource, or the same account elsewhere", async () => {
+  it("keeps a grant an active connection may share: the same account anywhere, or the same resource without an email", async () => {
     const { w, worker } = await connectedWithChannel();
-    // The owner reconnected the same resource: the new row is active, the old one disconnecting.
+    // The owner reconnected the same resource with the same Google account: a revoke would end the new grant too.
+    const email = (await h.connectionRow(w.resource.tenantId, w.connectionId)).account_email as string;
     await disconnect(w);
-    const replacement = await h.connection(w.resource, w.google.account(), START);
+    const replacement = await h.connection(w.resource, w.google.account(), START, { email: email.toUpperCase() });
     w.google.reset();
     expect((await worker.runOnce()).disconnected).toBe(1);
     expect(w.google.count("revoke")).toBe(0);
+    expect(w.google.isRevoked(w.token)).toBe(false);
     expect(await h.blocks(w.resource.tenantId, w.connectionId)).toEqual([]);
     expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).status).toBe("disconnected");
     expect((await h.connectionRow(w.resource.tenantId, replacement)).status).toBe("active");
@@ -405,6 +503,42 @@ describe("disconnect cleanup (G-9)", () => {
     w.google.reset();
     expect((await worker.runOnce()).disconnected).toBe(1);
     expect(w.google.count("revoke")).toBe(0);
+    expect((await h.connectionRow(tenantId, leaving)).status).toBe("disconnected");
+
+    // Without an email on either row, an active replacement on the same resource may be the same account.
+    for (const [leavingEmail, replacementEmail] of [[null, "next@haldenrowe.example"], ["prior@haldenrowe.example", null]] as const) {
+      const resource = await h.resource(await h.tenant());
+      const id = await h.connection(resource, w.google.account(), START, { email: leavingEmail, status: "disconnecting" });
+      await h.connection(resource, w.google.account(), START, { email: replacementEmail });
+      w.google.reset();
+      expect((await worker.runOnce()).disconnected).toBe(1);
+      expect(w.google.count("revoke")).toBe(0);
+      expect((await h.connectionRow(resource.tenantId, id)).status).toBe("disconnected");
+    }
+  });
+
+  it("revokes when no active connection shares the grant: another account on the resource, or a reauthorize row", async () => {
+    const { w, worker } = await connectedWithChannel();
+    // The owner reconnected the same resource with a different Google account: the old grant goes.
+    await disconnect(w);
+    const replacementToken = w.google.account();
+    const replacement = await h.connection(w.resource, replacementToken, START);
+    w.google.reset();
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.of("revoke").map((args) => args[0])).toEqual([w.token]);
+    expect(w.google.isRevoked(w.token)).toBe(true);
+    expect(w.google.isRevoked(replacementToken)).toBe(false);
+    expect((await h.connectionRow(w.resource.tenantId, replacement)).status).toBe("active");
+
+    // A reauthorize row on the same account elsewhere has lost its grant already: it keeps nothing.
+    const stale = "stale@haldenrowe.example";
+    await h.connection(await h.resource(await h.tenant()), w.google.account(), START, { email: stale, status: "reauthorize" });
+    const tenantId = await h.tenant();
+    const leavingToken = w.google.account();
+    const leaving = await h.connection(await h.resource(tenantId), leavingToken, START, { email: stale, status: "disconnecting" });
+    w.google.reset();
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.of("revoke").map((args) => args[0])).toEqual([leavingToken]);
     expect((await h.connectionRow(tenantId, leaving)).status).toBe("disconnected");
   });
 
@@ -502,7 +636,7 @@ describe("bookings out (G-10)", () => {
     expect(inserted[0]![1]).toBe("primary");
     expect(inserted[0]![2]).toEqual({
       id: future.replaceAll("-", ""), summary: "Booked", start: "2026-10-22T10:00:00.000Z", end: "2026-10-22T10:45:00.000Z",
-      privateProperties: { zs_booking: future, zs_tenant: w.resource.tenantId },
+      privateProperties: { zs_booking: future, zs_tenant: w.resource.tenantId, zs_resource: w.resource.id },
     } satisfies NewGoogleEvent);
     expect(await h.push(w.resource.tenantId, future)).toMatchObject({ status: "pushed", attempts: 1, last_error: null, lease_until: null });
     expect((await h.push(w.resource.tenantId, future)).pushed_at.getTime()).toBe(START);
@@ -553,12 +687,84 @@ describe("bookings out (G-10)", () => {
     expect(w.google.count("insertEvent")).toBe(0);
   });
 
+  it("a 401 (the grant went away mid-pass) keeps the push pending for a retry", async () => {
+    const w = await world();
+    const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    const worker = h.worker(w.google, w.clock);
+    w.google.fail("insertEvent", new GoogleRequestFailed("google_401_authError", false, 401));
+    expect(await worker.runOnce()).toMatchObject({ pushRetries: 1, pushesFailed: 0, reauthorized: 0 });
+    const push = await h.push(w.resource.tenantId, bookingId);
+    expect(push).toMatchObject({ status: "pending", attempts: 1, last_error: "google_401_authError", lease_until: null });
+    expect(push.next_attempt_at.getTime()).toBe(START + MINUTE);
+    expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).status).toBe("active");
+    w.clock.advance(MINUTE);
+    expect((await worker.runOnce()).pushed).toBe(1);
+    // On the last attempt a 401 fails the push like any other retryable error.
+    const last = await h.booking(w.resource, "2026-10-23T10:00:00.000Z");
+    w.google.fail("insertEvent", new GoogleRequestFailed("google_401_authError", false, 401));
+    expect((await h.worker(w.google, w.clock, { pushMaxAttempts: 1 }).runOnce()).pushesFailed).toBe(1);
+    expect(await h.push(w.resource.tenantId, last)).toMatchObject({ status: "failed", attempts: 1, last_error: "google_401_authError" });
+  });
+
   it("another refusal fails the push at once", async () => {
     const w = await world();
     const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
     w.google.fail("insertEvent", new GoogleRequestFailed("google_403_forbidden", false, 403));
     expect((await h.worker(w.google, w.clock).runOnce()).pushesFailed).toBe(1);
     expect(await h.push(w.resource.tenantId, bookingId)).toMatchObject({ status: "failed", attempts: 1, last_error: "google_403_forbidden" });
+  });
+});
+
+describe("deadline (G-10)", () => {
+  it("a pass whose deadline has passed claims nothing; one with time left runs", async () => {
+    const w = await world();
+    const tenantId = w.resource.tenantId;
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    const leaving = await h.connection(await h.resource(tenantId), w.google.account(), START, { status: "disconnecting" });
+    const channelId = randomUUID();
+    await h.database.db.tenant(tenantId, (tx) => tx.query(
+      "INSERT INTO calendar_push_notifications (channel_id,message_number,resource_state,received_at) VALUES ($1,1,'exists',$2)",
+      [channelId, new Date(START)]));
+    const worker = h.worker(w.google, w.clock);
+    const counts = await worker.runOnce({ deadline: w.clock.now() });
+    expect(Object.values(counts).every((count) => count === 0)).toBe(true);
+    expect(w.google.calls).toEqual([]);
+    expect(await h.connectionRow(tenantId, w.connectionId)).toMatchObject({ status: "active", lease_until: null, last_synced_at: null });
+    expect(await h.connectionRow(tenantId, leaving)).toMatchObject({ status: "disconnecting", lease_until: null });
+    expect(await h.push(tenantId, bookingId)).toBeUndefined();
+    expect(await h.rows("SELECT processed_at FROM calendar_push_notifications WHERE channel_id=$1", [channelId]))
+      .toEqual([{ processed_at: null }]);
+    expect(await worker.runOnce({ deadline: new Date(START + MINUTE) }))
+      .toMatchObject({ notifications: 1, disconnected: 1, synced: 1, pushed: 1 });
+  });
+
+  it("a deadline that passes mid-step gives back the connections and pushes the pass has not started", async () => {
+    const w = await world();
+    const tenantId = w.resource.tenantId;
+    const second = await h.resource(tenantId);
+    const secondConnection = await h.connection(second, w.google.account(), START);
+    const deadline = new Date(START + MINUTE);
+    // The first listing outlasts the deadline: the other claimed connection goes back unsynced.
+    w.google.fail("listEvents", () => { w.clock.advance(2 * MINUTE); });
+    const worker = h.worker(w.google, w.clock);
+    expect(await worker.runOnce({ deadline })).toMatchObject({ synced: 1, pushesQueued: 0 });
+    expect(w.google.count("listEvents")).toBe(1);
+    const rows = [await h.connectionRow(tenantId, w.connectionId), await h.connectionRow(tenantId, secondConnection)];
+    expect(rows.map((row) => row.lease_until)).toEqual([null, null]);
+    expect(rows.filter((row) => row.last_synced_at === null).length).toBe(1);
+    expect((await worker.runOnce()).synced).toBe(1);
+
+    // Pushes: the first insert outlasts the deadline; the second push goes back with its attempt.
+    const one = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    const two = await h.booking(second, "2026-10-22T12:00:00.000Z");
+    w.google.fail("insertEvent", () => { w.clock.advance(2 * MINUTE); });
+    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + MINUTE) }))
+      .toMatchObject({ pushesQueued: 2, pushed: 1 });
+    const pushes = [await h.push(tenantId, one), await h.push(tenantId, two)];
+    expect(pushes.map((push) => push.status).sort()).toEqual(["pending", "pushed"]);
+    expect(pushes.find((push) => push.status === "pending")).toMatchObject({ attempts: 0, lease_until: null, last_error: null });
+    expect((await worker.runOnce()).pushed).toBe(1);
   });
 });
 

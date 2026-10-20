@@ -226,8 +226,8 @@ export async function createCalendarHarness() {
       return { tenantId, id, timeZone };
     },
     /** An active connection whose sealed token opens to `refreshToken`. */
-    /** Each connection gets its own Google account unless `email` names a shared one (G-9). */
-    async connection(resource: Resource, refreshToken: string, at: number, overrides: { sealFor?: string; status?: string; email?: string } = {}) {
+    /** Each connection gets its own Google account email unless `email` names a shared one, or null for none (G-9). */
+    async connection(resource: Resource, refreshToken: string, at: number, overrides: { sealFor?: string; status?: string; email?: string | null } = {}) {
       const id = randomUUID();
       const sealed = sealRefreshToken(publicKey, { tenantId: resource.tenantId, connectionId: overrides.sealFor ?? id }, refreshToken);
       await service((tx) => tx.query(
@@ -235,7 +235,7 @@ export async function createCalendarHarness() {
            created_by,next_sync_at,created_at,updated_at)
          VALUES ($1,$2,$3,'primary',$8,$4,$5,'openid email calendar.events',$6,$7,$7,$7)`,
         [resource.tenantId, id, resource.id, overrides.status ?? "active", sealed, randomUUID(), new Date(at),
-          overrides.email ?? `owner+${id.slice(0, 8)}@haldenrowe.example`]));
+          overrides.email === undefined ? `owner+${id.slice(0, 8)}@haldenrowe.example` : overrides.email]));
       return id;
     },
     async booking(resource: Resource, startsAt: string, minutes = 30) {

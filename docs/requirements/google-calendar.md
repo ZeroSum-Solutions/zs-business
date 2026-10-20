@@ -1,6 +1,6 @@
 # M5: Google Calendar busy sync
 
-Status: draft contract for M5, provider 3 (2026-10-20), revision 1. Code follows this file; a
+Status: draft contract for M5, provider 3 (2026-10-20), revision 2. Code follows this file; a
 change to a numbered rule needs a new revision of this file first.
 
 Scope: an owner connects one Google Calendar to one booking resource. Busy time on that
@@ -62,8 +62,13 @@ redirects (303) to `GOOGLE_RETURN_URL` with `calendar=connected` or `calendar=er
 when Google sent none, `scope_missing` when the granted scope lacks calendar events. On success it
 runs `calendar.google.connect` through the dispatcher as the member the state names, under the
 reserved key `oauth-google:<connection id>`, so that member must still be an owner and a reload
-replays the stored result. The refresh token is sealed (G-3) before the action sees it. The
-access token is never stored.
+replays the stored result. The action refuses any other key, so it never runs through an approval
+or with a payload the callback did not build. A reload counts as `connected` only while that
+connection is `active`; any other existing row answers `reason=conflict`. When the callback fails
+after the code exchange it stores nothing and does not revoke: Google revokes a whole grant, so a
+revoke could end another live connection on the same Google account, and the callback cannot see
+other tenants' rows. The refresh token is sealed (G-3) before the action sees it. The access
+token is never stored.
 
 **G-3. Sealed tokens.** The API holds only a public key (`GOOGLE_TOKEN_PUBLIC_KEY`, X25519); the
 calendar worker holds the private key. A refresh token is sealed as
@@ -97,14 +102,19 @@ applies the result in one transaction that takes the B-21 lock for the connectio
 A 410 clears the sync token and runs a full list in the same pass. A full list replaces every
 block of the connection; an incremental one upserts and deletes by event ID. The next sync is due
 after `CALENDAR_POLL_INTERVAL_MS` (default 15 minutes), sooner on a push (G-8), and a full list
-runs at least every 7 days so instances entering the 400-day window are seen.
+runs at least every 7 days so instances entering the 400-day window are seen. When a
+full list reaches the page cap it is incomplete: the worker then lists again from 1 day ago to 30
+days ahead and, if that list is complete, replaces the connection's blocks that start in that
+window and upserts the rest; it stores no sync token, so the next sync is full again.
 
 **G-7. What is busy.** An event blocks time when its `status` is not `cancelled`, its
 `transparency` is not `transparent`, its `eventType` is not `workingLocation` or `birthday`, and
 the calendar's own attendee entry (`self`) has not `declined`. A timed event blocks
 `[start, end)`; an all-day event blocks from midnight of its start date to midnight of its end
-date in the resource's time zone. Events this system pushed (`extendedProperties.private.zs_booking`)
-never become blocks. Blocks are stored with `source = google`, the connection and the event ID
+date in the resource's time zone. An event this system pushed for this
+connection's own tenant and resource (`extendedProperties.private` `zs_tenant` and `zs_resource`
+both match) never becomes a block; an event pushed for another resource or tenant that shares the
+calendar blocks like any other. Blocks are stored with `source = google`, the connection and the event ID
 (unique per connection). A block may overlap an existing booking: it stops new slots and changes
 no booking.
 
@@ -117,9 +127,11 @@ insert into; it answers 200. The worker marks those connections due now. Notific
 calendar data, so a forged one could only cause an early sync.
 
 **G-9. Cleanup.** For a `disconnecting` connection the worker stops its channel, revokes the
-grant (an already invalid token counts as revoked) unless another `active` or `reauthorize`
-connection shares it (the same resource, or the same Google account: Google revokes a whole grant,
-not one refresh token, so a revoke would end the reconnect that replaced this row), deletes its blocks under the B-21 lock, and
+grant (an already invalid token counts as revoked) unless another `active` connection may share
+it: one with the same Google account (emails compared without case), or, when either row has no
+account email, one on the same tenant and resource. Google revokes a whole grant, not one refresh
+token, so a revoke would end the reconnect that replaced this row. A `reauthorize` row shares
+nothing (its grant is already gone). It then deletes its blocks under the B-21 lock, and
 sets `disconnected`, clearing the sealed token, sync token and channel. Events already pushed
 stay in the owner's calendar. A refresh that answers `invalid_grant` sets `reauthorize`: the
 blocks stay (a stale block refuses a slot; a missing one could double-book) until the owner
@@ -129,9 +141,11 @@ reconnects or disconnects.
 that has not ended, the worker records one `calendar_pushes` row and inserts one event with
 `id` = the booking ID's 32 hex digits, `summary` = `GOOGLE_EVENT_TITLE` (default `Booked`, no
 customer data), the booking's start and end, `transparency: opaque` and
-`extendedProperties.private` `zs_booking` and `zs_tenant`. 200 or 409 marks it `pushed`; a 5xx,
-429 or network error retries with backoff; another refusal, or 8 failed attempts, marks it
-`failed` with the error code.
+`extendedProperties.private` `zs_booking`, `zs_tenant` and `zs_resource`. 200 or 409 marks it
+`pushed`; a 5xx, 429, 401 (the grant went away mid-pass; the next refresh decides `reauthorize`) or
+network error retries with backoff; another refusal, or 8 failed attempts, marks it `failed` with
+the error code. A worker run stops claiming new work once its deadline passes, so a run ends
+inside the function's time limit.
 
 **G-11. Tenancy.** `calendar_connections` and `calendar_pushes` have `tenant_id`, forced RLS and
 the tenant policy, and are in the catalog isolation test; every relationship includes
@@ -150,9 +164,17 @@ that may `SET ROLE service_role`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_API_BASE_URL`) exist for tests. In Google Cloud: an OAuth client (web), the Calendar API
 enabled, the consent screen with the three scopes, and the webhook domain verified for push.
 
-## Known limits (revision 1)
+## Known limits (revision 2)
 
 - One calendar (`primary`) per resource, one resource per connection.
 - Bookings are only pushed, never updated or deleted in Google (bookings have no cancellation yet).
 - Busy time comes from one calendar's events; free/busy across several calendars is not read.
 - The dashboard has no connect screen yet; the API routes are ready for it.
+- The OAuth `state` is a 10-minute bearer token and is not bound to the browser that started the
+  flow, so whoever holds an `authorizeUrl` can finish it with their own Google account. Binding it
+  to a cookie needs the page that starts the flow, which comes with the dashboard connect screen.
+- A disconnect followed by a reconnect of the same account within one worker revoke call can lose
+  the new grant; the new row then shows `reauthorize` and the owner connects again.
+- Vercel environment variables are project-wide: in one project the API function can also read
+  `GOOGLE_TOKEN_PRIVATE_KEY` and `CALENDAR_DATABASE_URL`. G-3 holds at code level; a separate
+  Vercel project for the workers makes it hold at deploy level too.

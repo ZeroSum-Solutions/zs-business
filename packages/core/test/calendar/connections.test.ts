@@ -7,12 +7,14 @@ import {
   CALENDAR_GOOGLE_CONNECT_ACTION,
   NotFound,
   TenantDenied,
+  ValidationFailed,
   calendarConnectionListSchema,
   calendarConnectionSchema,
   type ActionCommand,
 } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
+  approvedDispatch,
   createSession,
   derivedId,
   generateSealKeyPair,
@@ -98,6 +100,7 @@ const storedRow = (tenantId: string, id: string) => fixture.service(async (tx) =
   `SELECT status::text AS status, resource_id, created_by, next_sync_at, refresh_token_sealed, account_email
      FROM calendar_connections WHERE tenant_id=$1 AND id=$2`, [tenantId, id])).rows[0]);
 const pgCode = (error: unknown) => (error as { code?: string }).code;
+const onlyFromCallback = (error: unknown) => error instanceof ValidationFailed && /only from the OAuth callback/.test(error.message);
 
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -167,6 +170,30 @@ describe("calendar.google.connect (G-2, G-4)", () => {
     for (const command of [foreign, staff, outsider]) expect(await storedRow(tenantId, command.target.id)).toBeUndefined();
     // Tenant B's resources were never changed by A's attempt.
     expect((await listAll(tenants.b.tenantId)).filter((c) => c.resourceId === tenants.b.resourceId)).toEqual([]);
+  });
+
+  it("refuses any key but the callback's reserved one, so a hand-built payload never lands (G-2)", async () => {
+    const { tenantId, ownerId, resourceId } = tenants.a;
+    const command = connectCommand(tenantId, resourceId);
+    for (const idempotencyKey of [randomUUID(), `approval:${randomUUID()}`, googleConnectIdempotencyKey(randomUUID()), `${command.idempotencyKey}x`])
+      await expect(connectAs(tenantId, ownerId, { ...command, idempotencyKey }), idempotencyKey).rejects.toSatisfy(onlyFromCallback);
+    expect(await storedRow(tenantId, command.target.id)).toBeUndefined();
+    // The reserved key, as the callback sends it, still connects.
+    await connectAs(tenantId, ownerId, command);
+    expect((await storedRow(tenantId, command.target.id))!.status).toBe("active");
+  });
+
+  it("never runs from an approval, even one that reached the table approved (G-2)", async () => {
+    const { tenantId, ownerId, resourceId } = tenants.a;
+    const command = connectCommand(tenantId, resourceId);
+    const approvalId = randomUUID();
+    await fixture.service((tx) => tx.query(
+      `INSERT INTO approvals (tenant_id,id,action_type,target_type,target_id,payload,summary,requested_by,requested_at,expires_at,status,decided_by,decided_at)
+       VALUES ($1,$2,$3,'calendar_connection',$4,$5,'Connect',$6,$7,$8,'approved',$6,$7)`,
+      [tenantId, approvalId, CALENDAR_GOOGLE_CONNECT_ACTION, command.target.id, JSON.stringify(command.payload), ownerId,
+        NOW, new Date(Date.parse(NOW) + 3_600_000)]));
+    await expect(approvedDispatch(deps(), tenantId, ownerId)(approvalId)).rejects.toSatisfy(onlyFromCallback);
+    expect(await storedRow(tenantId, command.target.id)).toBeUndefined();
   });
 });
 

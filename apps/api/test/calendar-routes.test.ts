@@ -88,6 +88,20 @@ const rows = (tenantId: string) => h.fixture.service(async (tx) => (await tx.que
      FROM calendar_connections WHERE tenant_id=$1 ORDER BY created_at, id`, [tenantId])).rows);
 const row = async (tenantId: string, id: string) => (await rows(tenantId)).find((found) => found.id === id);
 const tokenCalls = () => google.requestsTo("token").length;
+/** The tokens the callback sent to Google's revoke endpoint, oldest first. */
+const revoked = () => google.requestsTo("revoke").map((request) => request.form.token);
+/** The fake's grant for a code registered with this email. */
+const grantOf = (email: string) => google.grants().find((grant) => grant.email === email)!;
+const uniqueEmail = (label: string) => `${label}-${randomUUID().slice(0, 8)}@calendar.test`;
+
+/** Holds the next request to the token endpoint until released, after the exchange has started. */
+function holdExchange() {
+  let release!: () => void;
+  let reached!: () => void;
+  const arrived = new Promise<void>((resolve) => { reached = resolve; });
+  google.failNext("token", { hold: new Promise<void>((resolve) => { release = resolve; }), reached });
+  return { arrived, release: () => release() };
+}
 
 describe("POST /v1/calendar/google/connect (G-1)", () => {
   it("answers the consent URL with a signed state and the PKCE challenge, and stores nothing", async () => {
@@ -188,6 +202,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     expect(JSON.stringify(action[0]!.result)).not.toContain("zsg1.");
 
     // A reload replays: still connected, one row, and the spent code is not sent again.
+    expect(revoked()).not.toContain(grant.refreshToken);
     const calls = tokenCalls();
     expect(landing(await callback({ state: back.get("state")!, code: back.get("code")! }))).toEqual({ calendar: "connected" });
     expect(tokenCalls()).toBe(calls);
@@ -246,8 +261,10 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     google.setConsent({});
     expect(back.get("error")).toBe("access_denied");
     const calls = tokenCalls();
+    const revokes = revoked().length;
     expect(landing(await callback({ state: back.get("state")!, error: back.get("error")! }))).toEqual({ calendar: "error", reason: "denied" });
     expect(tokenCalls()).toBe(calls);
+    expect(revoked()).toHaveLength(revokes);
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
   });
 
@@ -255,6 +272,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     const resourceId = await newResource(h.a.tenantId);
     const flow = await consentFor(h.a, resourceId);
     const reason = async (query: Record<string, string>) => landing(await callback({ state: flow.state, ...query }));
+    const revokes = revoked().length;
     expect(await reason({ code: "4/never-issued" })).toEqual({ calendar: "error", reason: "exchange_failed" });
     // A code issued for another challenge: PKCE fails at Google.
     const other = google.registerCode({ codeChallenge: pkceChallenge(pkceVerifier(STATE_SECRET, randomUUID())), redirectUri: REDIRECT_URL });
@@ -266,22 +284,105 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     expect(await reason({ code: good })).toEqual({ calendar: "error", reason: "exchange_failed" });
     expect(await reason({})).toEqual({ calendar: "error", reason: "exchange_failed" });
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    // Nothing was issued, so nothing is revoked.
+    expect(revoked()).toHaveLength(revokes);
     // The code itself was never spent, so the owner's next try with it still connects.
     expect(await reason({ code: good })).toEqual({ calendar: "connected" });
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it("redirects with reason=no_refresh_token or scope_missing and stores nothing", async () => {
+  it("redirects with reason=no_refresh_token or scope_missing, stores nothing and leaves the grant alone", async () => {
     const flow = await consentFor(h.a, await newResource(h.a.tenantId));
     const challenge = flow.query.get("code_challenge")!;
-    const noRefresh = google.registerCode({ codeChallenge: challenge, redirectUri: REDIRECT_URL, refreshToken: false });
-    expect(landing(await callback({ state: flow.state, code: noRefresh }))).toEqual({ calendar: "error", reason: "no_refresh_token" });
-    const narrow = google.registerCode({ codeChallenge: challenge, redirectUri: REDIRECT_URL, scope: "openid https://www.googleapis.com/auth/userinfo.email" });
-    expect(landing(await callback({ state: flow.state, code: narrow }))).toEqual({ calendar: "error", reason: "scope_missing" });
+    const revokes = revoked().length;
+    const code = (email: string, over: { refreshToken?: boolean; scope?: string }) =>
+      google.registerCode({ codeChallenge: challenge, redirectUri: REDIRECT_URL, email, ...over });
+    const noRefreshEmail = uniqueEmail("no-refresh");
+    expect(landing(await callback({ state: flow.state, code: code(noRefreshEmail, { refreshToken: false }) })))
+      .toEqual({ calendar: "error", reason: "no_refresh_token" });
+    const narrowEmail = uniqueEmail("narrow");
+    expect(landing(await callback({ state: flow.state, code: code(narrowEmail, { scope: "openid https://www.googleapis.com/auth/userinfo.email" }) })))
+      .toEqual({ calendar: "error", reason: "scope_missing" });
     // A read-only calendar scope is not calendar.events.
-    const readonly = google.registerCode({ codeChallenge: challenge, redirectUri: REDIRECT_URL, scope: "openid https://www.googleapis.com/auth/calendar.events.readonly" });
-    expect(landing(await callback({ state: flow.state, code: readonly }))).toEqual({ calendar: "error", reason: "scope_missing" });
+    const readonlyEmail = uniqueEmail("readonly");
+    expect(landing(await callback({ state: flow.state, code: code(readonlyEmail, { scope: "openid https://www.googleapis.com/auth/calendar.events.readonly" }) })))
+      .toEqual({ calendar: "error", reason: "scope_missing" });
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    // Google revokes a whole grant for the user and client, so a revoke here could end another
+    // live connection on the same account; the unused grant is stored nowhere and left alone.
+    expect(revoked()).toHaveLength(revokes);
+    for (const email of [noRefreshEmail, narrowEmail, readonlyEmail]) expect(grantOf(email).revoked, email).toBe(false);
+  });
+
+  it("answers forbidden when the member is demoted during the exchange, revoking nothing", async () => {
+    const owner = await signedInMember(h.database, h.fixture, h.a.tenantId, "owner");
+    const flow = await consentFor(owner, await newResource(h.a.tenantId));
+    const email = uniqueEmail("demoted");
+    const code = google.registerCode({ codeChallenge: flow.query.get("code_challenge")!, redirectUri: REDIRECT_URL, email });
+    const revokes = revoked().length;
+    const exchange = holdExchange();
+    const pending = callback({ state: flow.state, code });
+    await exchange.arrived;
+    await h.fixture.service((tx) => tx.query("UPDATE tenant_members SET role='staff' WHERE tenant_id=$1 AND id=$2", [h.a.tenantId, owner.memberId]));
+    exchange.release();
+    expect(landing(await pending)).toEqual({ calendar: "error", reason: "forbidden" });
+    expect(revoked()).toHaveLength(revokes);
+    expect(grantOf(email).revoked).toBe(false);
+    expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+  });
+
+  it("when a second tab connected during the exchange: connected while it is active, else conflict; nothing revoked", async () => {
+    for (const status of ["active", "disconnecting"] as const) {
+      const flow = await consentFor(h.a, await newResource(h.a.tenantId));
+      const challenge = flow.query.get("code_challenge")!;
+      const slow = uniqueEmail("slow-tab");
+      const fast = uniqueEmail("fast-tab");
+      const slowCode = google.registerCode({ codeChallenge: challenge, redirectUri: REDIRECT_URL, email: slow });
+      const revokes = revoked().length;
+      const exchange = holdExchange();
+      const pending = callback({ state: flow.state, code: slowCode });
+      await exchange.arrived;
+      const fastCode = google.registerCode({ codeChallenge: challenge, redirectUri: REDIRECT_URL, email: fast });
+      expect(landing(await callback({ state: flow.state, code: fastCode }))).toEqual({ calendar: "connected" });
+      if (status !== "active")
+        await h.fixture.service((tx) => tx.query("UPDATE calendar_connections SET status=$3 WHERE tenant_id=$1 AND id=$2",
+          [h.a.tenantId, flow.connectionId, status]));
+      exchange.release();
+      expect(landing(await pending), status).toEqual(status === "active" ? { calendar: "connected" } : { calendar: "error", reason: "conflict" });
+      // Revoking at Google could end the winning tab's grant too, so neither grant is revoked.
+      expect(revoked()).toHaveLength(revokes);
+      expect(grantOf(slow).revoked).toBe(false);
+      // The winning tab's grant is the one the row holds.
+      const stored = (await row(h.a.tenantId, flow.connectionId))!;
+      expect(openRefreshToken(TOKEN_PRIVATE_KEY, { tenantId: h.a.tenantId, connectionId: flow.connectionId }, stored.refresh_token_sealed!))
+        .toBe(grantOf(fast).refreshToken);
+      expect(grantOf(fast).revoked).toBe(false);
+    }
+  });
+
+  it("answers a reload connected only while the connection is active, and conflict once it is not", async () => {
+    const flow = await consentFor(h.a, await newResource(h.a.tenantId));
+    const back = await consent(flow.authorizeUrl);
+    const reload = async () => landing(await callback({ state: back.get("state")!, code: back.get("code")! }));
+    expect(await reload()).toEqual({ calendar: "connected" });
+    const calls = tokenCalls();
+    const revokes = revoked().length;
+    expect(await reload()).toEqual({ calendar: "connected" });
+    const setStatus = (status: string) => h.fixture.service((tx) => tx.query(
+      `UPDATE calendar_connections SET status=$3::calendar_connection_status,
+         refresh_token_sealed=CASE WHEN $3='disconnected' THEN NULL ELSE refresh_token_sealed END WHERE tenant_id=$1 AND id=$2`,
+      [h.a.tenantId, flow.connectionId, status]));
+    for (const status of ["reauthorize", "disconnecting"]) {
+      await setStatus(status);
+      expect(await reload(), status).toEqual({ calendar: "error", reason: "conflict" });
+    }
+    await setStatus("active");
+    expect(await reload()).toEqual({ calendar: "connected" });
+    await setStatus("disconnected");
+    expect(await reload()).toEqual({ calendar: "error", reason: "conflict" });
+    // A reload never spends the code again or touches Google.
+    expect(tokenCalls()).toBe(calls);
+    expect(revoked()).toHaveLength(revokes);
   });
 
   it("refuses a member demoted to staff before the callback, before the code is spent", async () => {
