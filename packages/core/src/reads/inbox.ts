@@ -29,6 +29,7 @@ interface ReplyRow {
   tenant_id: string;
   contact_id: string;
   channel: "email";
+  subject: string;
   body: string;
   status: ReplyStatus;
   drafted_by: string;
@@ -43,7 +44,7 @@ interface ReplyRow {
 
 // Actor emails come from the current members; a removed member shows as an ID only.
 const REPLY_SELECT = `
-  SELECT r.id, r.tenant_id, r.contact_id, r.channel, r.body, r.status, r.drafted_by, d.email AS drafted_by_email,
+  SELECT r.id, r.tenant_id, r.contact_id, r.channel, r.subject, r.body, r.status, r.drafted_by, d.email AS drafted_by_email,
          r.created_at, r.approved_by, a.email AS approved_by_email, r.approved_at, r.discarded_at, r.settled_at
     FROM inbox_replies r
     LEFT JOIN tenant_members d ON d.tenant_id = r.tenant_id AND d.user_id = r.drafted_by
@@ -55,6 +56,7 @@ function replyRecord(row: ReplyRow): ReplyRecord {
     tenantId: row.tenant_id,
     contactId: row.contact_id,
     channel: row.channel,
+    subject: row.subject,
     body: row.body,
     status: row.status,
     draftedBy: { userId: row.drafted_by, email: row.drafted_by_email },

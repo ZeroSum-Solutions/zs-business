@@ -61,6 +61,7 @@ CREATE TABLE public.inbox_replies (
   id uuid NOT NULL,
   contact_id uuid NOT NULL,
   channel text NOT NULL DEFAULT 'email' CONSTRAINT inbox_replies_channel CHECK (channel IN ('email')),
+  subject text NOT NULL CONSTRAINT inbox_replies_subject_length CHECK (char_length(subject) BETWEEN 1 AND 200),
   body text NOT NULL CONSTRAINT inbox_replies_body_length CHECK (char_length(body) BETWEEN 1 AND 5000),
   status text NOT NULL DEFAULT 'draft'
     CONSTRAINT inbox_replies_status CHECK (status IN ('draft', 'approved', 'sent', 'failed', 'discarded')),
@@ -90,9 +91,9 @@ LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
   IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id OR NEW.id IS DISTINCT FROM OLD.id
      OR NEW.contact_id IS DISTINCT FROM OLD.contact_id OR NEW.channel IS DISTINCT FROM OLD.channel
-     OR NEW.body IS DISTINCT FROM OLD.body OR NEW.drafted_by IS DISTINCT FROM OLD.drafted_by
+     OR NEW.subject IS DISTINCT FROM OLD.subject OR NEW.body IS DISTINCT FROM OLD.body OR NEW.drafted_by IS DISTINCT FROM OLD.drafted_by
      OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
-    RAISE EXCEPTION 'A drafted reply cannot change its text, customer or author'
+    RAISE EXCEPTION 'A drafted reply cannot change its subject, text, customer or author'
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'inbox_replies',
         CONSTRAINT = 'inbox_replies_guard';
   END IF;

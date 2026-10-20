@@ -15,6 +15,11 @@ export type ReplyStatus = z.infer<typeof replyStatusSchema>;
 export const replyChannelSchema = z.enum(["email"]);
 export type ReplyChannel = z.infer<typeof replyChannelSchema>;
 export const MAX_REPLY_LENGTH = 5000;
+export const MAX_SUBJECT_LENGTH = 200;
+/** I-5: an email subject, trimmed, on one line. */
+export const replySubjectSchema = z.string().max(MAX_SUBJECT_LENGTH * 2).refine(isPostgresText, "Invalid Postgres text")
+  .transform((value) => value.trim())
+  .pipe(z.string().min(1, "Write a subject").max(MAX_SUBJECT_LENGTH).regex(/^[^\r\n]*$/, "A subject is one line"));
 /** I-5: trimmed, so a reply of spaces is refused rather than stored. */
 export const replyBodySchema = z.string().max(MAX_REPLY_LENGTH * 2).refine(isPostgresText, "Invalid Postgres text")
   .transform((value) => value.trim())
@@ -28,7 +33,12 @@ export type ThreadId = z.infer<typeof threadIdSchema>;
 export const threadKindSchema = z.enum(["customer", "visitor"]);
 export type ThreadKind = z.infer<typeof threadKindSchema>;
 
-export const draftReplyInputSchema = z.strictObject({ replyId: idSchema, contactId: idSchema, body: replyBodySchema });
+export const draftReplyInputSchema = z.strictObject({
+  replyId: idSchema, contactId: idSchema,
+  /** null: the handler writes "Message from <business name>". */
+  subject: replySubjectSchema.nullable(),
+  body: replyBodySchema,
+});
 export type DraftReplyInput = z.infer<typeof draftReplyInputSchema>;
 export const draftReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("inbox.reply.draft"),
@@ -60,6 +70,7 @@ export const replyRecordSchema = z.strictObject({
   tenantId: idSchema,
   contactId: idSchema,
   channel: replyChannelSchema,
+  subject: z.string(),
   body: z.string(),
   status: replyStatusSchema,
   draftedBy: replyActorSchema,
@@ -73,17 +84,27 @@ export type ReplyRecord = z.infer<typeof replyRecordSchema>;
 export const replyOutputSchema = z.lazy(() => actionResultSchema.extend({ result: replyRecordSchema }));
 export type ReplyOutput = z.infer<typeof replyOutputSchema>;
 
-/** I-6: the one outbox event an approval writes; the delivery worker (M3d) reads it. */
-export const REPLY_APPROVED_EVENT = "inbox.reply.approved";
-export const replyApprovedEventSchema = z.strictObject({
-  replyId: idSchema,
+/**
+ * I-6: the one outbox event an approval writes, in the delivery worker's (M3d) shape: the
+ * payload carries the exact approved subject and text, since it is what gets sent and priced.
+ * `messageId` is the reply ID; the worker takes the address from the contact at delivery time.
+ */
+export const MESSAGE_SEND_REQUESTED = "message.send_requested";
+export const replySendRequestedSchema = z.strictObject({
+  messageId: idSchema,
   contactId: idSchema,
-  channel: replyChannelSchema,
+  channel: z.literal("email"),
+  purpose: z.literal("transactional"),
+  subject: z.string(),
+  body: z.string(),
 });
-export type ReplyApprovedEvent = z.infer<typeof replyApprovedEventSchema>;
+export type ReplySendRequested = z.infer<typeof replySendRequestedSchema>;
 
 /** HTTP and MCP bodies; the edge mints replyId from the idempotency key. */
-export const draftReplyRequestSchema = z.strictObject({ contactId: idSchema, body: replyBodySchema });
+/** Without a subject the server writes "Message from <business name>". */
+export const draftReplyRequestSchema = z.strictObject({
+  contactId: idSchema, subject: replySubjectSchema.nullable().default(null), body: replyBodySchema,
+});
 export type DraftReplyRequest = z.input<typeof draftReplyRequestSchema>;
 export const replyStepRequestSchema = z.strictObject({});
 

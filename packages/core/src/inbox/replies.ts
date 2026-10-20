@@ -6,11 +6,13 @@ import {
   Conflict,
   discardReplyCommandSchema,
   draftReplyCommandSchema,
-  REPLY_APPROVED_EVENT,
+  MAX_SUBJECT_LENGTH,
+  MESSAGE_SEND_REQUESTED,
+  uuidSchema,
   TenantDenied,
   ValidationFailed,
   type ActionBinding,
-  type ReplyApprovedEvent,
+  type ReplySendRequested,
   type ReplyRecord,
   type ReplyStatus,
   type Target,
@@ -50,9 +52,9 @@ async function resolveReply(tx: Transaction, target: Target): Promise<Target | n
 }
 
 /** Lock the reply and require that it is still a draft (I-6, I-7). */
-async function lockDraft(tx: Transaction, tenantId: string, replyId: string): Promise<{ contact_id: string }> {
-  const row = (await tx.query<{ status: ReplyStatus; contact_id: string }>(
-    "SELECT status, contact_id FROM inbox_replies WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, replyId],
+async function lockDraft(tx: Transaction, tenantId: string, replyId: string) {
+  const row = (await tx.query<{ status: ReplyStatus; contact_id: string; subject: string; body: string }>(
+    "SELECT status, contact_id, subject, body FROM inbox_replies WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, replyId],
   )).rows[0];
   if (!row) throw new TenantDenied();
   if (row.status !== "draft") throw new Conflict("The reply is no longer a draft", { reason: "not_draft", status: row.status });
@@ -81,11 +83,13 @@ export const draftReplyHandler: ActionHandler = {
     // I-5: the customer must be this tenant's (the insert's FK then holds the contact row).
     const contact = await tx.query("SELECT 1 FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, payload.contactId]);
     if (contact.rowCount !== 1) throw new TenantDenied("Contact is not owned by this tenant");
+    const subject = payload.subject ?? `Message from ${(await tx.query<{ name: string }>(
+      "SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows[0]!.name}`.slice(0, MAX_SUBJECT_LENGTH);
     try {
       await tx.query(
-        `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,body,status,drafted_by,created_at)
-         VALUES ($1,$2,$3,'email',$4,'draft',$5,$6)`,
-        [tenantId, payload.replyId, payload.contactId, payload.body, binding.actorId, now],
+        `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,subject,body,status,drafted_by,created_at)
+         VALUES ($1,$2,$3,'email',$4,$5,'draft',$6,$7)`,
+        [tenantId, payload.replyId, payload.contactId, subject, payload.body, binding.actorId, now],
       );
     } catch (error) {
       if (pgCode(error) === "23505") throw idInUse("reply");
@@ -115,8 +119,11 @@ export function createApproveReplyHandler(approvals: ReplyApprovals): ActionHand
         "UPDATE inbox_replies SET status='approved', approved_by=$3, approved_at=$4 WHERE tenant_id=$1 AND id=$2",
         [tenantId, payload.replyId, binding.actorId, now],
       );
-      const event: ReplyApprovedEvent = { replyId: payload.replyId, contactId: draft.contact_id, channel: "email" };
-      return { ...(await replyResult(tx, tenantId, payload.replyId)), event: { type: REPLY_APPROVED_EVENT, payload: { ...event } } };
+      const event: ReplySendRequested = {
+        messageId: payload.replyId, contactId: draft.contact_id, channel: "email", purpose: "transactional",
+        subject: draft.subject, body: draft.body,
+      };
+      return { ...(await replyResult(tx, tenantId, payload.replyId)), event: { type: MESSAGE_SEND_REQUESTED, payload: { ...event } } };
     },
   };
 }
@@ -136,14 +143,17 @@ export const discardReplyHandler: ActionHandler = {
 };
 
 /**
- * I-6: the delivery worker (M3d) settles an approved reply once, in its own transaction, with
- * the service role (runtime holds no grant on settled_at). Returns false when the reply was not
- * waiting (already settled, or never approved), so a retried settle changes nothing.
+ * I-6: the delivery worker's (M3d) settle hook. It runs inside the worker's settling transaction
+ * with the service role (runtime holds no grant on settled_at), so it filters by tenant itself.
+ * Returns false, changing nothing, for a message that is not an approved inbox reply: one already
+ * settled, never approved, or another sender's message sharing the worker.
  */
 export async function settleReplyDelivery(
   tx: Transaction, tenantId: string, replyId: string, outcome: "sent" | "failed", at: Date,
 ): Promise<boolean> {
   if (!Number.isFinite(at.getTime())) throw new ValidationFailed("Invalid settle time");
+  // Another sender's message ID need not be a UUID; casting it would abort the worker's transaction.
+  if (!uuidSchema.safeParse(replyId).success || !uuidSchema.safeParse(tenantId).success) return false;
   const updated = await tx.query(
     "UPDATE inbox_replies SET status=$3, settled_at=$4 WHERE tenant_id=$1 AND id=$2 AND status='approved'",
     [tenantId, replyId, outcome, at],

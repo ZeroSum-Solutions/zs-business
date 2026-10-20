@@ -48,15 +48,16 @@ with no thread, is a 404 with the fixed `NotFound` body.
 Discarded drafts are not shown. A thread returns at most its 200 latest entries and says
 whether older ones exist.
 
-**I-4. Replies are fixed once drafted.** `inbox_replies` keeps the text, customer, channel,
+**I-4. Replies are fixed once drafted.** `inbox_replies` keeps the subject, text, customer, channel,
 author and draft time unchanged for every role, the table owner included
 (`inbox_replies_guard`). Status only moves forward: `draft` to `approved` or `discarded`;
 `approved` to `sent` or `failed`. Each step records its actor and time and never rewrites
 an earlier step. So an approval of a reply ID is an approval of those exact words.
 
-**I-5. Draft.** `inbox.reply.draft` `{ replyId, contactId, body }`, permission
+**I-5. Draft.** `inbox.reply.draft` `{ replyId, contactId, subject, body }`, permission
 `inbox.drafts` (owners and staff). `replyId` derives from the idempotency key. The body is
-trimmed, 1..5000 characters. The contact must belong to the tenant (`TenantDenied`
+trimmed, 1..5000 characters; the subject is trimmed, one line, 1..200 characters, and the handler
+fills "Message from <business name>" when the request leaves it out. The contact must belong to the tenant (`TenantDenied`
 otherwise). Visitor threads take no replies: the owner links the request first (I-1). Several
 drafts may wait on one thread.
 
@@ -69,11 +70,13 @@ only). In one dispatcher transaction, with the reply row locked:
 - the approval is recorded through the approval interface (M3b) when it is wired in;
   until then the action row is the record (actor, time, and the direct approval binding);
 - the reply becomes `approved` with `approved_by` and `approved_at`, and the action writes
-  one outbox event `inbox.reply.approved` with
-  `{ replyId, contactId, channel: "email" }`.
-Nothing in M3c sends. The delivery worker (M3d) reads the event, reads the text by reply ID
-and the address from the contact at delivery time, re-checks consent and suppression, and
-settles the reply once with `settleReplyDelivery` (`approved` to `sent` or `failed`).
+  one outbox event `message.send_requested` in the delivery worker's shape:
+  `{ messageId: replyId, contactId, channel: "email", purpose: "transactional", subject, body }`,
+  carrying the exact approved words, since the payload is what gets sent and priced.
+Nothing in M3c sends. The delivery worker (M3d) reads the event, takes the address from the
+contact at delivery time, re-checks approval, consent and suppression, and settles the reply
+once through its settle hook, `settleReplyDelivery(tx, tenantId, messageId, outcome, at)`
+(`approved` to `sent` or `failed`; a no-op for any other message or a settled reply).
 
 **I-7. Discard.** `inbox.reply.discard` `{ replyId }`, permission `inbox.drafts`. Only a
 `draft` can be discarded (409 `not_draft` otherwise). An approved reply cannot be withdrawn
@@ -95,7 +98,7 @@ Reads need `inbox.drafts`. MCP exposes the same reads and writes as tools.
 
 | Table | Columns and constraints |
 |---|---|
-| `inbox_replies` | `tenant_id`, `id`, `contact_id`, `channel` (`email`), `body` (1..5000), `status`, `drafted_by`, `created_at`, `approved_by`, `approved_at`, `discarded_by`, `discarded_at`, `settled_at`; PK `(tenant_id,id)`; tenant FK and FK to the contact with the tenant; checks tie each status to its step columns; `inbox_replies_guard` (I-4) |
+| `inbox_replies` | `tenant_id`, `id`, `contact_id`, `channel` (`email`), `subject` (1..200), `body` (1..5000), `status`, `drafted_by`, `created_at`, `approved_by`, `approved_at`, `discarded_by`, `discarded_at`, `settled_at`; PK `(tenant_id,id)`; tenant FK and FK to the contact with the tenant; checks tie each status to its step columns; `inbox_replies_guard` (I-4) |
 
 Forced RLS with the shared `tenant_scope` policy. Runtime may SELECT and INSERT, and UPDATE
 only `status`, `approved_by`, `approved_at`, `discarded_by`, `discarded_at`. Only the service
