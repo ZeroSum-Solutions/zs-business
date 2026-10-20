@@ -542,7 +542,7 @@ Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Of
 | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | The Resend sender (R-6). `RESEND_FROM` must be on a domain verified in Resend. |
 | `SMS_PROVIDER` | `twilio` sends SMS through Twilio (twilio.md T-9); unset or `none` refuses SMS as `sms_provider_not_configured`. |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET` (or `TWILIO_AUTH_TOKEN`), `TWILIO_WEBHOOK_BASE_URL`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | With `SMS_PROVIDER=twilio`. Each tenant sends from its own number in `sms_numbers`. The status callback URL is built from `TWILIO_WEBHOOK_BASE_URL`. An outcome with no status callback waits `TWILIO_OUTCOME_WAIT_MS` (24 h) before it is a dead letter for an operator. |
-| `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × timeout must fit the budget. |
+| `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × (timeout + 500 ms) + 1 s must fit the budget; the cron function allows at most 20000. |
 | `DELIVERY_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/delivery`, for example `*/5 * * * *`. Unset, there is no cron. |
 
 `GET /cron/delivery` answers 401 without the right bearer, 200 `{ ran: false }` with the switch

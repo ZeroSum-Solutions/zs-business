@@ -50,6 +50,7 @@ import {
   type ApprovalPage,
   type ApprovalRecord,
   type ApproveApprovalResponse,
+  type JsonValue,
   type BookingPageSummary,
   type MeResponse,
   type MemberList,
@@ -214,7 +215,7 @@ export function approvedDispatch(deps: EdgeDependencies, tenantId: string, actor
       generateId: deps.generateId,
       resolveApproval: async (tx, reference) =>
         reference.tenantId === tenantId && reference.id === row.id
-          ? resolveStoredApproval(tx, tenantId, row.id, new Date(readClock(deps.clock)))
+          ? resolveStoredApproval(tx, tenantId, row.id, () => new Date(readClock(deps.clock)))
           : null,
       authorize: async (tx, binding) => {
         const permission = ACTION_PERMISSIONS[binding.actionType];
@@ -514,8 +515,19 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const id = parseInput(uuidSchema, approvalId, "approval ID");
       const request = parseInput(decideApprovalRequestSchema, body);
       const { id: _id, ...rest } = envelope(key, "approval", id);
-      const approval = parseInput(approvalOutputSchema,
-        await run({ actionType: "approval.approve", ...rest, payload: defined({ approvalId: id, ...request }) }), "result");
+      // A-6: when this caller already approved it and its action has not run (the run failed),
+      // approve goes straight to the run, whatever key it carries; the run key stays the approval's.
+      const decided = await read("approve", async (tx) => {
+        const row = await loadApproval(tx, tenantId, id);
+        if (!row || row.status !== "approved" || row.decided_by !== actorId || row.executed_action_id !== null) return null;
+        return (await tx.query<{ id: string; result: JsonValue }>(
+          `SELECT id, result FROM actions
+            WHERE tenant_id=$1 AND action_type='approval.approve' AND target->>'type'='approval' AND target->>'id'=$2 AND actor_id=$3
+            ORDER BY created_at LIMIT 1`, [tenantId, id, actorId])).rows[0] ?? null;
+      });
+      const approval = parseInput(approvalOutputSchema, decided
+        ? { actionId: decided.id, result: decided.result }
+        : await run({ actionType: "approval.approve", ...rest, payload: defined({ approvalId: id, ...request }) }), "result");
       return { approval, execution: await runApproved(id) };
     },
     async rejectApproval(approvalId: unknown, body: unknown, key: unknown): Promise<ApprovalOutput> {

@@ -66,6 +66,7 @@ type Config = z.infer<typeof deliveryWorkerConfigSchema>;
 
 export type DeliveryReport =
   | { readonly kind: "invalid_event"; readonly tenantId: string; readonly outboxId: string; readonly error: string }
+  | { readonly kind: "ingest_deferred"; readonly tenantId: string; readonly outboxId: string; readonly error: string }
   | { readonly kind: "lost_lease"; readonly tenantId: string; readonly deliveryId: string }
   | { readonly kind: "step_failed"; readonly tenantId: string; readonly deliveryId: string; readonly error: string };
 
@@ -134,8 +135,19 @@ type Plan =
   | { readonly kind: "send"; readonly attempt: number; readonly request: ProviderSendRequest }
   | { readonly kind: "lookup"; readonly onNotFound: Terminal; readonly channel: DeliveryChannel; readonly key: string; readonly startedAt: Date };
 
-/** Provider and database text fits the error columns (1..200) and never carries NUL. */
-const errorText = (code: string) => (code.replaceAll("\u0000", "").trim() || "unknown").slice(0, 200);
+/** Provider text fits a column of `max` characters, never empty and never carrying NUL. */
+const boundedText = (text: string, max: number) => (text.replaceAll("\u0000", "").trim() || "unknown").slice(0, max);
+const errorText = (code: string) => boundedText(code, 200);
+
+/**
+ * D-2: a database error that will recur for this event (bad data, a constraint), so the event
+ * may be marked processed. Anything else (a lock or statement timeout, a deadlock, a
+ * serialization failure, a lost connection) is retried on a later pass.
+ */
+export function isPermanentIngestError(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && /^(22|23)[0-9A-Z]{3}$/.test(code);
+}
 
 export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
   const parsed = deliveryWorkerConfigSchema.safeParse(deps.config);
@@ -172,14 +184,14 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
   }
 
   /** D-2: moves unprocessed send events into deliveries, one transaction per batch. */
-  async function ingest(limit = 100): Promise<{ ingested: number; duplicates: number; invalid: number }> {
+  async function ingest(limit = 100): Promise<{ ingested: number; duplicates: number; invalid: number; deferred: number }> {
     return deps.service(async (tx) => {
       const at = now();
       const events = (await tx.query<{ tenant_id: string; id: string; action_id: string; payload: unknown }>(
         `SELECT tenant_id, id, action_id, payload FROM outbox
           WHERE event_type=$1 AND processed_at IS NULL ORDER BY seq LIMIT $2 FOR UPDATE SKIP LOCKED`,
         [MESSAGE_SEND_REQUESTED, limit])).rows;
-      const counts = { ingested: 0, duplicates: 0, invalid: 0 };
+      const counts = { ingested: 0, duplicates: 0, invalid: 0, deferred: 0 };
       const invalid = (event: { tenant_id: string; id: string }, error: string) => {
         counts.invalid += 1;
         deps.report?.({ kind: "invalid_event", tenantId: event.tenant_id, outboxId: event.id, error });
@@ -209,7 +221,14 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
             await tx.query("RELEASE SAVEPOINT delivery_ingest");
           } catch (error) {
             await tx.query("ROLLBACK TO SAVEPOINT delivery_ingest");
-            invalid(event, error instanceof Error ? error.message.slice(0, 500) : "Insert refused");
+            const text = error instanceof Error ? error.message.slice(0, 500) : "Insert refused";
+            if (!isPermanentIngestError(error)) {
+              // A valid event is never dropped for a passing failure: it stays unprocessed.
+              counts.deferred += 1;
+              deps.report?.({ kind: "ingest_deferred", tenantId: event.tenant_id, outboxId: event.id, error: text });
+              continue;
+            }
+            invalid(event, text);
           }
         }
         await tx.query("UPDATE outbox SET processed_at=$3 WHERE tenant_id=$1 AND id=$2", [event.tenant_id, event.id, at]);
@@ -264,7 +283,7 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       `UPDATE message_deliveries SET status='sent', provider_message_id=$3, outcome_unknown=false, final_reason=NULL,
          lease_token=NULL, lease_owner=NULL, lease_expires_at=NULL, last_error=NULL, updated_at=$4
         WHERE tenant_id=$1 AND id=$2`,
-      [row.tenant_id, row.id, (providerMessageId.trim() || "unknown").slice(0, 500), at]);
+      [row.tenant_id, row.id, boundedText(providerMessageId, 500), at]);
     await deps.onSettled?.(tx, row.tenant_id, row.message_id, "sent", at);
     return { outcome: "sent", providerMessageId };
   }
@@ -297,9 +316,12 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     const contact = (await tx.query<{ normalized_email: string | null; e164_phone: string | null }>(
       "SELECT normalized_email, e164_phone FROM crm_contacts WHERE tenant_id=$1 AND id=$2",
       [row.tenant_id, row.contact_id])).rows[0];
-    const current = row.channel === "email" ? usableEmail(contact?.normalized_email ?? null) : contact?.e164_phone ?? null;
-    const address = row.recipient_address ?? current;
+    const address = row.channel === "email" ? usableEmail(contact?.normalized_email ?? null) : contact?.e164_phone ?? null;
     if (!contact || !address) return { reason: "no_address", address: null };
+    // D-1: the contact's current address, except that a send whose outcome is unknown may only
+    // be repeated to the recipient it went to; if that changed, the provider is asked instead.
+    if (row.outcome_unknown && row.recipient_address !== null && row.recipient_address !== address)
+      return { reason: "address_changed", address: null };
     const suppressed = (await tx.query(
       "SELECT 1 FROM suppressions WHERE tenant_id=$1 AND channel=$2::crm_consent_channel AND address=$3",
       [row.tenant_id, row.channel, address])).rowCount === 1;
@@ -363,12 +385,14 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
         const onNotFound: Terminal = reason ? { status: "blocked", reason } : { status: "dead", reason: "dedupe_window_expired" };
         return { kind: "lookup", onNotFound, channel: row.channel, key: row.idempotency_key, startedAt: at };
       }
-      // Without provider dedupe a send only ever follows a definite answer, so no window applies.
+      // The re-check took time; the window is judged from after it. Without provider dedupe a
+      // send only ever follows a definite answer, so no window applies.
+      const checkedAt = now();
       const windowEnd = row.first_attempt_at && channelProvider.dedupeWindowMs > 0
         ? row.first_attempt_at.getTime() + channelProvider.dedupeWindowMs - config.dedupeMarginMs
         : Number.POSITIVE_INFINITY;
       // The whole call, to its deadline, must fit inside the provider's dedupe window.
-      const windowOpen = at.getTime() + config.providerTimeoutMs <= windowEnd;
+      const windowOpen = checkedAt.getTime() + config.providerTimeoutMs <= windowEnd;
       if (reason || !windowOpen || row.attempts >= config.maxAttempts) {
         const terminal: Terminal = reason
           ? { status: "blocked", reason }
@@ -426,7 +450,14 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
         case "rejected":
           return finish(tx, row, { status: "dead", reason: "provider_rejected" }, at);
         case "failed": {
-          // Definitely not accepted: the money goes back, and the outcome is known again.
+          // This attempt was not accepted, but an earlier uncertain one under the same key may
+          // have been: the outcome stays unknown and the money held until the provider says (D-8).
+          const earlierUncertain = (await tx.query(
+            `SELECT 1 FROM message_delivery_attempts
+              WHERE tenant_id=$1 AND delivery_id=$2 AND attempt<$3 AND kind='send' AND outcome='uncertain' LIMIT 1`,
+            [row.tenant_id, row.id, attempt])).rowCount === 1;
+          if (earlierUncertain) return retryLater(tx, row, "uncertain", outcome.code, row.attempts, at);
+          // Definitely never accepted: the money goes back, and the outcome is known again.
           const held = await heldReservation(tx, row.tenant_id, row.id);
           if (held) await releaseReservation(tx, { tenantId: row.tenant_id, reservationId: held.id, now: at });
           await tx.query("UPDATE message_deliveries SET outcome_unknown=false WHERE tenant_id=$1 AND id=$2", [row.tenant_id, row.id]);
@@ -545,6 +576,9 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       if (!row) throw new NotFound();
       if (row.status !== "dead" || !(row.outcome_unknown || row.final_reason === "worker_error"))
         throw new Conflict("The delivery has no unknown outcome to settle", { reason: "already_settled" });
+      // Without an unknown outcome no attempt can have reached the provider.
+      if (input.outcome === "sent" && !row.outcome_unknown)
+        throw new Conflict("No attempt of this delivery can have been sent", { reason: "never_sent" });
       const at = now();
       return input.outcome === "sent"
         ? markSent(tx, row, input.providerMessageId!, at)

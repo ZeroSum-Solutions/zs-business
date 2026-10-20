@@ -17,9 +17,14 @@ const NOW_SECONDS = Math.floor(clock.now().getTime() / 1000);
 const UNAUTHORIZED = { error: { code: "Unauthorized", message: "Invalid webhook signature", details: {} } };
 
 let h: ApiHarness;
+/** What the webhook reported, for the logs, in order. */
+const reports: { id: string; type: string; reason: string | null }[] = [];
 beforeAll(async () => {
   h = await createApiHarness({
-    resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET, previous: PREVIOUS_RESEND_WEBHOOK_SECRET } },
+    resendWebhook: {
+      secrets: { current: RESEND_WEBHOOK_SECRET, previous: PREVIOUS_RESEND_WEBHOOK_SECRET },
+      report: ({ id, type, outcome }) => { reports.push({ id, type, reason: outcome.handled ? null : outcome.reason }); },
+    },
   });
 });
 afterAll(async () => h.close());
@@ -238,8 +243,34 @@ describe("signature and body checks (R-7)", () => {
 
   it("acknowledges a signed event of a shape it does not read", async () => {
     const before = await snapshot();
-    for (const event of [{ type: "contact.created", data: { id: randomUUID() } }, [], "text", { type: "email.bounced" }])
+    for (const event of [{ type: "contact.created", data: { id: randomUUID() } }, [], "text", { type: "email.delivered" }])
       expect(await deliver(event)).toEqual({ status: 200, body: { handled: false, reason: "unread_event" } });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("reads null optional fields: a bounce with bounce, its type or tags null still suppresses or is told apart", async () => {
+    const delivery = await sentDelivery(h.a);
+    expect(await deliver(emailEvent("email.bounced", delivery, { bounce: null }))).toEqual({ status: 200, body: { handled: true } });
+    expect((await suppressions(h.a.tenantId)).map((row) => row.address)).toContain(delivery.address);
+    const other = await sentDelivery(h.a);
+    expect(await deliver(emailEvent("email.bounced", other, { bounce: { type: null } }))).toEqual({ status: 200, body: { handled: true } });
+    const untagged = await sentDelivery(h.a);
+    expect(await deliver(emailEvent("email.complained", untagged, { tags: null })))
+      .toEqual({ status: 200, body: { handled: false, reason: "untagged" } });
+  });
+
+  it("answers 400 and reports a signed bounce, complaint or suppression it cannot read, so Resend retries it", async () => {
+    const delivery = await sentDelivery(h.a);
+    const before = await snapshot();
+    for (const type of ["email.bounced", "email.complained", "email.suppressed"]) {
+      const id = newId();
+      for (const event of [{ type }, emailEvent(type, delivery, { to: 42 }), emailEvent(type, delivery, { bounce: "Permanent" })]) {
+        const response = await deliver(event, { id });
+        expect(response.status).toBe(400);
+        expect(response.body).toMatchObject({ error: { code: "ValidationFailed", message: "Unreadable suppression event" } });
+        expect(reports.at(-1)).toEqual({ id, type, reason: "malformed_event" });
+      }
+    }
     expect(await snapshot()).toEqual(before);
   });
 

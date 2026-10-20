@@ -9,6 +9,7 @@ import {
   apiErrorBody,
   createEmailFeedbackSession,
   resendEmailEventSchema,
+  RESEND_SUPPRESSION_EVENT_TYPES,
   verifyResendWebhook,
   type EdgeDependencies,
   type EmailFeedbackOutcome,
@@ -56,8 +57,18 @@ export function resendWebhookRoutes(
           ? c.json(apiErrorBody("ValidationFailed", "Invalid webhook payload"), 400)
           : c.json(apiErrorBody("Unauthorized", "Invalid webhook signature"), 401);
       const event = resendEmailEventSchema.safeParse(verified.payload);
-      // A signed event of a shape this system does not read (a contact or domain event) is not ours to act on.
-      if (!event.success) return c.json({ handled: false, reason: "unread_event" }, 200);
+      if (!event.success) {
+        const type = typeof (verified.payload as { type?: unknown } | null)?.type === "string"
+          ? (verified.payload as { type: string }).type.slice(0, 100) : "";
+        // A bounce or complaint this system cannot read must not vanish: it is logged and answered
+        // 400, so it shows as failed in Resend and is retried.
+        if (RESEND_SUPPRESSION_EVENT_TYPES.has(type)) {
+          config.report?.({ id: verified.id, type, outcome: { handled: false, reason: "malformed_event" } });
+          return c.json(apiErrorBody("ValidationFailed", "Unreadable suppression event"), 400);
+        }
+        // A signed event of a shape this system does not read (a contact or domain event) is not ours to act on.
+        return c.json({ handled: false, reason: "unread_event" }, 200);
+      }
       const session = createEmailFeedbackSession(requestEdge(c), {
         ...(config.providerName === undefined ? {} : { providerName: config.providerName }),
       });

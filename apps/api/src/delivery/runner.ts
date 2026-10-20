@@ -18,7 +18,7 @@ import {
 } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
 import type { Pool } from "pg";
-import type { DeliveryRunnerEnv } from "./config.js";
+import { deliveryPassEstimateMs, type DeliveryRunnerEnv } from "./config.js";
 
 /** SMS without SMS_PROVIDER=twilio; nothing produces SMS in v1. */
 export const smsNotConfigured: DeliveryProvider = {
@@ -81,7 +81,8 @@ export function createDeliveryWorkerFromEnv(deps: DeliveryRunnerDeps): DeliveryW
 
 /**
  * Runs passes until one claims fewer deliveries than the limit, or until starting another pass
- * could outlast the budget (each claimed delivery may wait one provider timeout).
+ * could outlast the budget. A pass is assumed to take its estimate (each claimed delivery may
+ * wait one provider timeout, plus database time) or as long as the last pass took, if longer.
  */
 export function createDeliveryRunner(input: {
   readonly worker: DeliveryWorker;
@@ -90,7 +91,7 @@ export function createDeliveryRunner(input: {
   readonly claimLimit: number;
 }) {
   const { worker, clock, budgetMs, claimLimit } = input;
-  const perPassMs = claimLimit * worker.config.providerTimeoutMs;
+  const estimateMs = deliveryPassEstimateMs(claimLimit, worker.config.providerTimeoutMs);
   return {
     async run(): Promise<RunSummary> {
       const started = clock.now().getTime();
@@ -102,12 +103,15 @@ export function createDeliveryRunner(input: {
         else if (result.outcome === "dead") totals.dead += 1;
         else if (result.outcome === "error") totals.errors += 1;
       };
+      let lastPassMs = 0;
       for (;;) {
-        if (clock.now().getTime() - started + perPassMs > budgetMs) {
+        const passStarted = clock.now().getTime();
+        if (passStarted - started + Math.max(estimateMs, lastPassMs) > budgetMs) {
           totals.budgetSpent = true;
           break;
         }
         const pass = await worker.runOnce({ claimLimit });
+        lastPassMs = clock.now().getTime() - passStarted;
         totals.passes += 1;
         totals.ingested += pass.ingested;
         totals.claimed += pass.claimed;

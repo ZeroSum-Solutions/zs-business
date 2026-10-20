@@ -7,7 +7,7 @@ import { type MemberRole } from "@zs/contracts";
 import { createSession, creditWallet, type DeliveryReport, type DeliveryWorker, type EdgeDependencies, type StepResult } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { parseDeliveryEnv, PLACEHOLDER_CRON_SECRET } from "../src/delivery/config.js";
+import { assertDeliveryCronFits, parseDeliveryEnv, PLACEHOLDER_CRON_SECRET } from "../src/delivery/config.js";
 import { cronRoutes } from "../src/delivery/cron.js";
 import { createDeliveryRunner, createDeliveryWorkerFromEnv, type DeliveryRunner, type RunSummary } from "../src/delivery/runner.js";
 import { PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../src/config.js";
@@ -140,14 +140,29 @@ describe("parseDeliveryEnv", () => {
     expect(parseDeliveryEnv({ ...ON, DELIVERY_DATABASE_URL: `${LOCAL_DB}?sslmode=disable` }).runner).not.toBeNull();
   });
 
-  it("refuses a claim limit whose provider waits could outlast the run budget", () => {
-    expect(errorOf({ ...ON, DELIVERY_CLAIM_LIMIT: "5" })).toMatch(/DELIVERY_CLAIM_LIMIT × DELIVERY_PROVIDER_TIMEOUT_MS/);
-    expect(errorOf({ ...ON, DELIVERY_RUN_BUDGET_MS: "9999" })).toMatch(/must fit in DELIVERY_RUN_BUDGET_MS/);
-    expect(parseDeliveryEnv({ ...ON, DELIVERY_CLAIM_LIMIT: "4" }).runner).toMatchObject({ claimLimit: 4, budgetMs: 20_000 });
-    expect(parseDeliveryEnv({ ...ON, DELIVERY_CLAIM_LIMIT: "10", DELIVERY_PROVIDER_TIMEOUT_MS: "2000" }).runner)
-      .toMatchObject({ claimLimit: 10, providerTimeoutMs: 2_000 });
+  it("refuses a claim limit whose provider waits and database time could outlast the run budget", () => {
+    // 4 × (5000 + 500) + 1000 = 23000 > 20000.
+    expect(errorOf({ ...ON, DELIVERY_CLAIM_LIMIT: "4" })).toMatch(/DELIVERY_CLAIM_LIMIT × \(DELIVERY_PROVIDER_TIMEOUT_MS \+ 500 ms\) \+ 1000 ms/);
+    // 2 × 5500 + 1000 = 12000.
+    expect(errorOf({ ...ON, DELIVERY_RUN_BUDGET_MS: "11999" })).toMatch(/must fit in DELIVERY_RUN_BUDGET_MS/);
+    expect(parseDeliveryEnv({ ...ON, DELIVERY_RUN_BUDGET_MS: "12000" }).runner).toMatchObject({ claimLimit: 2, budgetMs: 12_000 });
+    expect(parseDeliveryEnv({ ...ON, DELIVERY_CLAIM_LIMIT: "3" }).runner).toMatchObject({ claimLimit: 3, budgetMs: 20_000 });
+    expect(parseDeliveryEnv({ ...ON, DELIVERY_CLAIM_LIMIT: "10", DELIVERY_PROVIDER_TIMEOUT_MS: "1000" }).runner)
+      .toMatchObject({ claimLimit: 10, providerTimeoutMs: 1_000 });
     for (const [name, value] of [["DELIVERY_CLAIM_LIMIT", "0"], ["DELIVERY_CLAIM_LIMIT", "51"], ["DELIVERY_PROVIDER_TIMEOUT_MS", "999"], ["DELIVERY_RUN_BUDGET_MS", "600001"]] as const)
       expect(errorOf({ ...ON, [name]: value })).toMatch(new RegExp(name));
+  });
+
+  it("lets the Node worker take a long budget, but the cron entry only one its 30 s function can finish", () => {
+    const long = parseDeliveryEnv({ ...ON, DELIVERY_RUN_BUDGET_MS: "60000", DELIVERY_PROVIDER_TIMEOUT_MS: "40000", DELIVERY_CLAIM_LIMIT: "1" });
+    expect(long.runner).toMatchObject({ budgetMs: 60_000, providerTimeoutMs: 40_000 });
+    expect(() => assertDeliveryCronFits(long.runner)).toThrow(/DELIVERY_RUN_BUDGET_MS must be at most 20000 for the cron function/);
+    expect(() => assertDeliveryCronFits(parseDeliveryEnv({ ...ON, DELIVERY_RUN_BUDGET_MS: "20001" }).runner)).toThrow(/at most 20000/);
+    // The defaults fit, and so does the switch being off.
+    expect(() => assertDeliveryCronFits(parseDeliveryEnv(ON).runner)).not.toThrow();
+    expect(() => assertDeliveryCronFits(parseDeliveryEnv({}).runner)).not.toThrow();
+    // Within the cron budget, a provider timeout must leave room for a whole pass.
+    expect(errorOf({ ...ON, DELIVERY_CLAIM_LIMIT: "1", DELIVERY_PROVIDER_TIMEOUT_MS: "19000" })).toMatch(/must fit in DELIVERY_RUN_BUDGET_MS/);
   });
 
   it("refuses a short or placeholder CRON_SECRET, with the switch on or off", () => {
@@ -308,25 +323,38 @@ describe("createDeliveryRunner", () => {
   });
 
   it("stops before a pass that could outlast the budget, and says the budget is spent", async () => {
-    // claimLimit 2 × timeout 1s = 2s per pass; a 5s budget.
+    // claimLimit 2 × (timeout 1s + 0.5s database) + 1s = 4s per pass; a 10s budget.
     const { worker, calls } = stubWorker([
-      { claimed: 2, results: sent(2), takesMs: 1_500 }, // 1.5s in: 1.5 + 2 <= 5, go on
-      { claimed: 2, results: sent(2), takesMs: 1_600 }, // 3.1s in: 3.1 + 2 > 5, stop
+      { claimed: 2, results: sent(2), takesMs: 1_500 }, // 1.5s in: 1.5 + 4 <= 10, go on
+      { claimed: 2, results: sent(2), takesMs: 4_600 }, // 6.1s in: 6.1 + 4.6 > 10, stop
       { claimed: 2, results: sent(2) },
     ]);
-    const result = await createDeliveryRunner({ worker, clock, budgetMs: 5_000, claimLimit: 2 }).run();
+    const result = await createDeliveryRunner({ worker, clock, budgetMs: 10_000, claimLimit: 2 }).run();
     expect(calls).toHaveLength(2);
     expect(result).toEqual(summary({ passes: 2, claimed: 4, sent: 4, budgetSpent: true }));
   });
 
   it("starts a pass that ends exactly on the budget", async () => {
     const { worker, calls } = stubWorker([
-      { claimed: 2, results: sent(2), takesMs: 3_000 }, // 3s in: 3 + 2 == 5, still fits
-      { claimed: 1, results: sent(1), takesMs: 2_000 },
+      { claimed: 2, results: sent(2), takesMs: 2_000 }, // 2s in: 2 + 4 <= 10
+      { claimed: 2, results: sent(2), takesMs: 4_000 }, // 6s in: 6 + 4 == 10, still fits
+      { claimed: 1, results: sent(1), takesMs: 4_000 },
     ]);
-    const result = await createDeliveryRunner({ worker, clock, budgetMs: 5_000, claimLimit: 2 }).run();
-    expect(calls).toHaveLength(2);
-    expect(result).toMatchObject({ passes: 2, budgetSpent: false });
+    const result = await createDeliveryRunner({ worker, clock, budgetMs: 10_000, claimLimit: 2 }).run();
+    expect(calls).toHaveLength(3);
+    expect(result).toMatchObject({ passes: 3, budgetSpent: false });
+  });
+
+  it("counts a pass that took longer than its estimate, database time and all, against the next one", async () => {
+    // The first pass takes 6.5s against a 4s estimate: 6.5 + 6.5 > 12, so no second pass,
+    // though 6.5 + 4 would have fit.
+    const { worker, calls } = stubWorker([
+      { claimed: 2, results: sent(2), takesMs: 6_500 },
+      { claimed: 2, results: sent(2) },
+    ]);
+    const result = await createDeliveryRunner({ worker, clock, budgetMs: 12_000, claimLimit: 2 }).run();
+    expect(calls).toHaveLength(1);
+    expect(result).toEqual(summary({ passes: 1, claimed: 2, sent: 2, budgetSpent: true }));
   });
 
   it("does not start at all when one pass could not fit the budget", async () => {
