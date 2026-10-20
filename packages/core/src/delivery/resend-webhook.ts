@@ -84,16 +84,22 @@ const tagsSchema = z.union([
     .transform((tags) => Object.fromEntries(tags.map((tag) => [tag.name, tag.value]))),
 ]);
 
-/** R-8: the fields an email event carries that this system uses; other fields pass unread. */
+/**
+ * R-8: the fields an email event carries that this system uses; other fields pass unread. An
+ * optional field may be absent or null.
+ */
 export const resendEmailEventSchema = z.object({
   type: z.string().min(1).max(100),
   data: z.object({
     email_id: z.string().min(1).max(500),
     to: z.union([z.string().max(320).transform((to) => [to]), z.array(z.string().max(320)).max(50)]),
-    tags: tagsSchema.optional(),
-    bounce: z.object({ type: z.string().max(100).optional() }).optional(),
+    tags: tagsSchema.nullish(),
+    bounce: z.object({ type: z.string().max(100).nullish() }).nullish(),
   }),
 });
+
+/** R-8: the event types that may suppress an address; one of these that cannot be read is an error. */
+export const RESEND_SUPPRESSION_EVENT_TYPES: ReadonlySet<string> = new Set(["email.bounced", "email.complained", "email.suppressed"]);
 export type ResendEmailEvent = z.infer<typeof resendEmailEventSchema>;
 
 /**

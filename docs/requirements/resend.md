@@ -1,6 +1,6 @@
 # M5: Resend email provider
 
-Status: draft contract for M5, provider 1 of 5 (2026-10-20), revision 1. Code follows this file;
+Status: draft contract for M5, provider 1 of 5 (2026-10-20), revision 2. Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: the first real provider behind the M3d provider port (`delivery.md` D-7, D-8). It turns
@@ -47,8 +47,11 @@ deliveries end as `outcome_unknown` for an operator, never as a second send.
   same key answers with the ID).
 - 400, 413, 422: `rejected` (the same request cannot succeed).
 - 408, 409: `uncertain` (a request with this key is in flight or was already taken).
-- 429 and every other 4xx (401, 403, 404, …): `failed`. Resend refused before acceptance, so the
-  reservation is released and the worker retries with backoff up to its attempt cap.
+- 429 and every other 4xx (401, 403, 404, …): `failed`. Resend refused this request before
+  acceptance, so the reservation is released and the worker retries with backoff up to its
+  attempt cap, unless an earlier attempt of the same delivery was `uncertain`: a refusal now
+  proves nothing about that one, so the outcome stays unknown and the reservation held (D-7), and
+  the delivery settles through the resend or, at the cap, as a dead letter `outcome_unknown`.
 - 5xx, 3xx and anything else: `uncertain`. Redirects are not followed.
 - A connection that never opened (refused, DNS failure, unreachable): `failed`. A timeout, a
   reset or any other network error after that: `uncertain`.
@@ -92,7 +95,10 @@ tenant and delivery come from the tags (R-5) and are checked under that tenant's
 role, RLS): the delivery must exist, be email, have `provider` equal to the adapter's name and a
 pinned recipient; a recorded `provider_message_id` must equal the event's `email_id`; the
 event's recipient must be the pinned recipient. Anything else is acknowledged (200) and
-changes nothing. The suppression goes through the dispatcher with a server-built principal
+changes nothing. Optional fields (`tags`, `bounce`, `bounce.type`) may be absent or null. A
+signed `email.bounced`, `email.complained` or `email.suppressed` whose fields cannot be read is
+reported to the log as `malformed_event` and answered 400, so it shows as failed in Resend and is
+retried; other unreadable events are acknowledged as `unread_event`. The suppression goes through the dispatcher with a server-built principal
 (`emailFeedbackActorId`) that may run `suppression.record` only, with the idempotency key
 `email-feedback:<svix-id>`, so a redelivered webhook replays the stored action. Member and MCP
 keys may not use that prefix (D-9). Database errors answer 503, so Resend retries.
@@ -107,14 +113,17 @@ points share one runner (`apps/api/src/delivery/`):
 The kill switch is `DELIVERY_WORKER`: anything but `on` runs nothing (the cron answers 200
 `{ ran: false }` without touching the database). A run ingests new send events and works due
 deliveries until a pass claims fewer than `DELIVERY_CLAIM_LIMIT`, and never starts a pass that
-could outlast `DELIVERY_RUN_BUDGET_MS` (limit × provider timeout must fit the budget). A run cut
+could outlast `DELIVERY_RUN_BUDGET_MS`. A pass is assumed to take limit × (provider timeout +
+500 ms of database time) + 1 s, or as long as the last pass took if that was longer; the config
+refuses a budget that one pass of that estimate does not fit. The cron entry also refuses a
+budget over 20 s, since Vercel stops its function at 30 s; the Node worker may run longer. A run cut
 short is safe: leases expire and an open attempt counts as uncertain (D-7). The wiring is
 production's: M3b's `approvalForAction` behind `approvalsFromRecords`, M3c's
 `settleReplyDelivery` as `onSettled`, Resend for email. SMS has no provider yet and is refused
 as `sms_provider_not_configured`; nothing produces SMS in v1. The worker connects with
 `DELIVERY_DATABASE_URL`, a login that may `SET ROLE service_role`, never the API's runtime login.
 
-## Known limits (revision 1)
+## Known limits (revision 2)
 
 - One sender for every tenant. Per-tenant sending domains come later.
 - No lookup by key: an unknown outcome past the window waits for an operator (D-8).

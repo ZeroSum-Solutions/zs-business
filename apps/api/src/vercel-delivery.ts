@@ -4,11 +4,12 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
-import { parseDeliveryEnv } from "./delivery/config.js";
+import { assertDeliveryCronFits, parseDeliveryEnv } from "./delivery/config.js";
 import { cronRoutes } from "./delivery/cron.js";
 import { startDeliveryRunner } from "./delivery/start.js";
 
 const env = parseDeliveryEnv(process.env);
+assertDeliveryCronFits(env.runner);
 const clock = { now: () => new Date() };
 const runner = env.runner === null ? null : startDeliveryRunner(env.runner, { clock, generateId: randomUUID }).runner;
 

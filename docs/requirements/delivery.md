@@ -37,8 +37,10 @@ owner approves a reply; M6 agents will too.
 outbox rows of that type whose `processed_at` is null (`FOR UPDATE SKIP LOCKED`), inserting
 one delivery each and setting `processed_at`, in one transaction. A delivery is unique per
 outbox row and per message, so a repeated event for the same message never becomes a second
-send. A payload that fails the schema is marked processed and reported; the outbox row stays
-as the record.
+send. A payload that fails the schema, or that the database refuses as bad data or a
+constraint breach (SQLSTATE classes 22 and 23), is marked processed and reported; the outbox row
+stays as the record. Any other database error (a timeout, a deadlock, a lost connection) leaves
+the event unprocessed for a later pass.
 
 **D-3. Leases.** A worker claims deliveries that are due (`pending` or `uncertain` with
 `next_attempt_at` reached) or whose lease expired, by setting `status = leased`, a fresh
@@ -71,15 +73,18 @@ worker re-checks, for every attempt:
   blocks `approval_revoked` or `approval_missing`. `approvalsFromRecords` implements the port
   over M3b's `approvalForAction` (approvals.md A-10): a direct approval stands; a stored one
   stands only while `approved`; revoked, expired and rejected block `approval_revoked`;
-- a usable address (`no_address`).
+- a usable address (`no_address`). The send goes to the contact's current address, except
+  that while an outcome is unknown it may only be repeated to the address it went to; if the
+  contact's address changed, the delivery blocks `address_changed` (after a lookup, D-8).
 A blocked delivery sends nothing and releases its reservation. A withdrawal that commits after
 an attempt has started does not stop that attempt; it stops every later one. Suppression
 blocks every purpose, transactional included: a person who opted out hears nothing more until
 they opt back in.
 
 **D-7. Outcomes.** The provider answers one of: `accepted` (captured, `sent`), `rejected`
-(permanent: released, dead letter `provider_rejected`), `failed` (definitely not accepted:
-released, retried with backoff) or `uncertain` (timeout, lost connection, or any thrown
+(permanent: released, dead letter `provider_rejected`), `failed` (this attempt was not
+accepted: released and retried with backoff, unless an earlier attempt under the same key was
+uncertain, in which case the outcome stays unknown and the reservation held, as for `uncertain`) or `uncertain` (timeout, lost connection, or any thrown
 error: the reservation stays held, `uncertain`). A worker that crashes after starting an
 attempt leaves the attempt open, and the next lease holder treats that as uncertain. Provider
 adapters (M5) map "a request with this key is in flight" to `uncertain` and a failure the

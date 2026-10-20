@@ -29,6 +29,10 @@ afterEach(async () => {
 });
 afterAll(async () => { await h?.close(); });
 
+/** What the worker told the producer about each settled delivery, in order. */
+let settled: { messageId: string; outcome: "sent" | "failed" }[] = [];
+beforeEach(() => { settled = []; });
+
 /** A worker like the harness's, with Resend for email and the harness fake for SMS. */
 function resendWorker(overrides: Partial<DeliveryWorkerConfig> = {}) {
   const config = h.worker(overrides).config;
@@ -40,6 +44,7 @@ function resendWorker(overrides: Partial<DeliveryWorkerConfig> = {}) {
     clock: h.clock,
     generateId: randomUUID,
     config,
+    onSettled: async (_tx, _tenantId, messageId, outcome) => { settled.push({ messageId, outcome }); },
   });
 }
 
@@ -176,6 +181,42 @@ describe("Resend as the worker's email provider", () => {
     expect(await h.wallet(tenant)).toEqual({ balance: before.balance - PRICES.email, reserved: before.reserved });
     const reservations = await h.rows("SELECT status FROM wallet_reservations WHERE tenant_id=$1 AND delivery_id=$2", [tenant, delivery.id]);
     expect(reservations.map((row) => row.status).sort()).toEqual(["captured", "released"]);
+  });
+
+  it("a 429 after a lost reply proves nothing about the first send: at the cap it is outcome_unknown with the money held", async () => {
+    await h.credit(tenant, 100);
+    const before = await h.wallet(tenant);
+    const contactId = await h.contact(tenant);
+    const { messageId } = await h.enqueue(tenant, { contactId });
+    const worker = resendWorker({ maxAttempts: 2 });
+    // Attempt 1 reaches Resend, which sends the email, but the reply is lost.
+    server.queue("lose-reply");
+    await worker.runOnce();
+    expect(server.delivered).toHaveLength(1);
+    // Attempt 2, the last one allowed, is refused under the same key.
+    server.queue({ respond: 429, body: { statusCode: 429, name: "rate_limit_exceeded", message: "Too many requests." } });
+    h.clock.advance(1_000);
+    await worker.runOnce();
+    let delivery = await h.delivery(tenant, messageId);
+    expect(delivery).toMatchObject({ status: "uncertain", outcome_unknown: true, attempts: 2, last_error: "resend_429_rate_limit_exceeded" });
+    expect(await h.wallet(tenant)).toEqual({ balance: before.balance, reserved: before.reserved + PRICES.email });
+    // The cap is reached with the outcome unknown: Resend cannot be asked, so an operator decides (D-8).
+    h.clock.set((delivery.next_attempt_at as Date).getTime());
+    await worker.runOnce();
+    delivery = await h.delivery(tenant, messageId);
+    expect(delivery).toMatchObject({ status: "dead", final_reason: "outcome_unknown", outcome_unknown: true, last_error: "lookup_unsupported" });
+    expect(await h.wallet(tenant)).toEqual({ balance: before.balance, reserved: before.reserved + PRICES.email });
+    expect(await captures(tenant)).toBe(0);
+    const reservations = await h.rows("SELECT status FROM wallet_reservations WHERE tenant_id=$1 AND delivery_id=$2", [tenant, delivery.id]);
+    expect(reservations.map((row) => row.status)).toEqual(["held"]);
+    // The reply is not reported as failed, so nobody is invited to send it again.
+    expect(settled).toEqual([]);
+    expect(server.received).toHaveLength(2);
+    expect(server.delivered).toHaveLength(1);
+    expectOneKeyOneBody(delivery.idempotency_key);
+    expect((await attempts(delivery.id)).map((row) => [row.kind, row.outcome])).toEqual([
+      ["send", "uncertain"], ["send", "failed"], ["lookup", "unknown"],
+    ]);
   });
 
   it("a 422 is a dead letter provider_rejected with the money back and nothing captured", async () => {

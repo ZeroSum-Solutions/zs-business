@@ -542,7 +542,7 @@ Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Of
 | `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY` | What one email and one SMS segment take from the wallet, in minor units (`usd` by default). |
 | `UNSUBSCRIBE_TOKEN_SECRET`, `DELIVERY_UNSUBSCRIBE_BASE_URL` | Signs the List-Unsubscribe links; the same secret as the API. The URL is the https address of `/public/v1/unsubscribe`. |
 | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | The Resend sender (R-6). `RESEND_FROM` must be on a domain verified in Resend. |
-| `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × timeout must fit the budget. |
+| `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × (timeout + 500 ms) + 1 s must fit the budget; the cron function allows at most 20000. |
 | `DELIVERY_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/delivery`, for example `*/5 * * * *`. Unset, there is no cron. |
 
 `GET /cron/delivery` answers 401 without the right bearer, 200 `{ ran: false }` with the switch
