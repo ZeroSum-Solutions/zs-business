@@ -7,10 +7,12 @@ import { apiErrorBody, AuthUnavailable, authenticate, DatabaseUnavailable, mapEr
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { billingRoutes } from "./routes/billing.js";
+import { approvalRoutes } from "./routes/approvals.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
+import { sourceRoutes } from "./routes/sources.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
@@ -147,6 +149,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/crm", crmRoutes);
   app.route("/v1/intake", intakeRoutes);
   app.route("/v1", billingRoutes);
+  app.route("/v1/approvals", approvalRoutes);
+  app.route("/v1/sources", sourceRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));

@@ -54,11 +54,11 @@ describe("tables to probe", () => {
   it("reads every table the migrations create, tenant_members included", async () => {
     const tables = await readMigrationTables(migrations);
     expect(tables.map((table) => `${table.schema}.${table.name}`)).toEqual([
-      "public.actions", "public.booking_external_blocks", "public.booking_page_disclosures", "public.booking_page_resources",
+      "public.actions", "public.approvals", "public.booking_external_blocks", "public.booking_page_disclosures", "public.booking_page_resources",
       "public.booking_pages", "public.booking_resources", "public.bookings",
       "public.crm_contact_consent", "public.crm_contacts", "public.crm_deals", "public.crm_pipelines", "public.crm_stages",
       "public.intake_item_consent", "public.intake_items", "public.message_deliveries", "public.message_delivery_attempts",
-      "public.outbox", "public.suppressions", "public.tenant_members", "public.tenants",
+      "public.outbox", "public.source_records", "public.suppressions", "public.tenant_members", "public.tenants",
       "public.wallet_ledger", "public.wallet_reservations", "public.wallets",
     ]);
   });
@@ -165,13 +165,13 @@ describe("runDataApiProbes against a fake PostgREST", () => {
   it("passes when only graphql_public is exposed: every table, both callers, all four operations refused", async () => {
     const { ok, detail, seen } = await run(() => ({ status: 406, body: { code: "PGRST106", message: "Invalid schema" } }));
     expect(ok).toBe(true);
-    expect(detail.probed).toBe(23);
+    expect(detail.probed).toBe(25);
     // Per caller: the control and the action RPC, then four operations on each table.
-    expect(seen).toHaveLength(2 * 2 + 23 * 2 * 4);
+    expect(seen).toHaveLength(2 * 2 + 25 * 2 * 4);
     const tableProbes = seen.filter((request) => !isRpc(request));
     for (const operation of ["GET", "POST", "PATCH", "DELETE"])
-      expect(tableProbes.filter((request) => request.method === operation)).toHaveLength(23 * 2);
-    expect(seen.filter(isUser)).toHaveLength(2 + 23 * 4);
+      expect(tableProbes.filter((request) => request.method === operation)).toHaveLength(25 * 2);
+    expect(seen.filter(isUser)).toHaveLength(2 + 25 * 4);
     expect(detail.control).toEqual({ anon: "406 PGRST106: token accepted", authenticated: "406 PGRST106: token accepted" });
     expect(seen.every((request) => request.headers.apikey === ANON_KEY && schemaOf(request) === "public")).toBe(true);
     expect(detail.tables["public.tenant_members"]!.authenticated.select).toBe("406 PGRST106: refused");
@@ -203,7 +203,7 @@ describe("runDataApiProbes against a fake PostgREST", () => {
 
     const outage = await run(() => ({ status: 502, html: true }));
     expect(outage.ok).toBe(false);
-    expect(outage.detail.failures).toHaveLength(2 * 2 + 23 * 2 * 4);
+    expect(outage.detail.failures).toHaveLength(2 * 2 + 25 * 2 * 4);
 
     const unreachable = fakePostgrest(() => ({ status: 200 }));
     const thrown = await runDataApiProbes({ ...context, userToken: USER_TOKEN, generateId: randomUUID, tables: [{ schema: "public", name: "tenants" }],

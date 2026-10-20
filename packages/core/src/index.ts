@@ -27,3 +27,15 @@ export {
   type CreditInput,
   type Reservation,
 } from "./wallet/index.js";
+export {
+  APPROVAL_POLICIES,
+  approvalForAction,
+  approvalHandlers,
+  approvalPolicy,
+  checkApproval,
+  listApprovals,
+  resolveStoredApproval,
+  type ApprovalCheck,
+  type ApprovalPolicy,
+} from "./approvals/index.js";
+export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandlers } from "./sources/index.js";
