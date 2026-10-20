@@ -271,8 +271,9 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
       return request({ method: "POST", path, body: { spec }, readOnly: true, schema: sitePreviewSchema });
     },
 
-    publishSite(siteId, spec, options) {
-      return write(`/v1/sites/${encodeURIComponent(siteId)}/releases`, { spec }, siteReleaseResponseSchema, options);
+    publishSite(input, options) {
+      const body = { spec: input.spec, expectedCurrentReleaseId: input.expectedCurrentReleaseId };
+      return write(`/v1/sites/${encodeURIComponent(input.siteId)}/releases`, body, siteReleaseResponseSchema, options);
     },
 
     activateSiteRelease(input, options) {

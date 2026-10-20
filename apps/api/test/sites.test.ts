@@ -67,6 +67,13 @@ const createSite = async (tenant: TenantSetup, name = "Main site") => {
 };
 const publish = (tenant: Pick<TenantSetup, "token">, siteId: string, title: string, key: string = randomUUID()) =>
   call(h.app, "POST", `/v1/sites/${siteId}/releases`, { token: tenant.token, key, body: { spec: spec(title) } });
+/** A publish from an editor that started on `expectedCurrentReleaseId` (null: before any release). */
+const publishFrom = (tenant: TenantSetup, siteId: string, title: string, expectedCurrentReleaseId: string | null) =>
+  call(h.app, "POST", `/v1/sites/${siteId}/releases`, {
+    token: tenant.token, key: randomUUID(), body: { spec: spec(title), expectedCurrentReleaseId },
+  });
+const listReleases = async (tenant: TenantSetup, siteId: string) =>
+  siteReleaseListSchema.parse((await call(h.app, "GET", `/v1/sites/${siteId}/releases`, { token: tenant.token })).body).items;
 const published = async (tenant: TenantSetup, siteId: string, title: string): Promise<SiteReleaseResponse> => {
   const response = await publish(tenant, siteId, title);
   expect(response.status).toBe(201);
@@ -163,6 +170,91 @@ describe("publishing a site", () => {
   });
 });
 
+describe("publishing from a baseline", () => {
+  it("publishes when the edit started from the live release", async () => {
+    const site = await createSite(h.a);
+    const v1 = await published(h.a, site.id, "One");
+    const response = await publishFrom(h.a, site.id, "Two", v1.result.release.id);
+    expect(response.status).toBe(201);
+    const v2 = siteReleaseResponseSchema.parse(response.body);
+    expect(v2.result.site).toMatchObject({ currentReleaseId: v2.result.release.id, pointerVersion: 2 });
+  });
+
+  it("refuses a stale baseline with 409 and records nothing", async () => {
+    const site = await createSite(h.a);
+    const host = hostName();
+    await attach(h.a, site.id, host);
+    const v1 = await published(h.a, site.id, "One");
+    const v2 = await published(h.a, site.id, "Two");
+    const keys = memory.keys().length;
+    const stale = await publishFrom(h.a, site.id, "Edited from one", v1.result.release.id);
+    expect(stale.status).toBe(409);
+    expect(errorOf(stale)).toMatchObject({ code: "Conflict", details: { reason: "stale_release" } });
+    expect(memory.keys().length).toBe(keys);
+    expect((await listReleases(h.a, site.id)).map((release) => release.id)).toEqual([v2.result.release.id, v1.result.release.id]);
+    const live = siteOutputSchema.shape.result.parse((await call(h.app, "GET", `/v1/sites/${site.id}`, { token: h.a.token })).body);
+    expect(live).toMatchObject({ currentReleaseId: v2.result.release.id, pointerVersion: 2 });
+    expect((await visit(host)).text).toContain("Two");
+  });
+
+  it("treats a null baseline as never published", async () => {
+    const site = await createSite(h.a);
+    const first = await publishFrom(h.a, site.id, "First", null);
+    expect(first.status).toBe(201);
+    const again = await publishFrom(h.a, site.id, "Also first", null);
+    expect(again.status).toBe(409);
+    expect(errorOf(again).details).toEqual({ reason: "stale_release" });
+    expect(await listReleases(h.a, site.id)).toHaveLength(1);
+  });
+
+  it("lets one of two racing publishes from the same baseline win", async () => {
+    const site = await createSite(h.a);
+    const v1 = await published(h.a, site.id, "Base");
+    const [x, y] = await Promise.all([
+      publishFrom(h.a, site.id, "Edit X", v1.result.release.id),
+      publishFrom(h.a, site.id, "Edit Y", v1.result.release.id),
+    ]);
+    expect([x.status, y.status].sort()).toEqual([201, 409]);
+    const loser = x.status === 409 ? x : y;
+    expect(errorOf(loser).details).toEqual({ reason: "stale_release" });
+    expect(await listReleases(h.a, site.id)).toHaveLength(2);
+  });
+});
+
+describe("release numbers", () => {
+  it("count 1, 2, 3 per site, survive a rollback, and show in the list and the detail", async () => {
+    const site = await createSite(h.a);
+    const other = await createSite(h.a);
+    const v1 = await published(h.a, site.id, "One");
+    const elsewhere = await published(h.a, other.id, "Other one");
+    const v2 = await published(h.a, site.id, "Two");
+    const v3 = await published(h.a, site.id, "Three");
+    expect([v1, v2, v3].map((release) => release.result.release.number)).toEqual([1, 2, 3]);
+    expect(elsewhere.result.release.number).toBe(1);
+
+    const back = siteReleaseResponseSchema.parse((await activate(h.a, site.id, v1.result.release.id, v3.result.release.id)).body);
+    expect(back.result.release).toMatchObject({ id: v1.result.release.id, number: 1 });
+    const v4 = await published(h.a, site.id, "Four");
+    expect(v4.result.release.number).toBe(4);
+
+    expect((await listReleases(h.a, site.id)).map((release) => [release.id, release.number])).toEqual([
+      [v4.result.release.id, 4], [v3.result.release.id, 3], [v2.result.release.id, 2], [v1.result.release.id, 1],
+    ]);
+    expect((await listReleases(h.a, other.id)).map((release) => release.number)).toEqual([1]);
+    const detail = siteReleaseDetailSchema.parse((await call(h.app, "GET",
+      `/v1/sites/${site.id}/releases/${v2.result.release.id}`, { token: h.a.token })).body);
+    expect(detail).toMatchObject({ id: v2.result.release.id, number: 2, spec: spec("Two") });
+  });
+
+  it("number releases of other tenants independently", async () => {
+    const a = await createSite(h.a);
+    const b = await createSite(h.b);
+    await published(h.a, a.id, "A one");
+    await published(h.a, a.id, "A two");
+    expect((await published(h.b, b.id, "B one")).result.release.number).toBe(1);
+  });
+});
+
 describe("activating a release (rollback)", () => {
   it("moves the pointer back and forward, one version per move", async () => {
     const site = await createSite(h.a);
@@ -227,6 +319,9 @@ describe("the pointer flip", () => {
     for (const response of results) expect(response.status).toBe(201);
     const versions = results.map((response) => siteReleaseResponseSchema.parse(response.body).result.site.pointerVersion).sort();
     expect(versions).toEqual([1, 2, 3, 4]);
+    // Each publish took the next release number under the same site lock.
+    const numbers = results.map((response) => siteReleaseResponseSchema.parse(response.body).result.release.number).sort();
+    expect(numbers).toEqual([1, 2, 3, 4]);
     const live = siteOutputSchema.shape.result.parse((await call(h.app, "GET", `/v1/sites/${site.id}`, { token: h.a.token })).body);
     const pointer = siteHostPointerSchema.parse(JSON.parse(new TextDecoder().decode((await memory.get(siteObjectKeys.host(host)))!.body)));
     expect(pointer).toMatchObject({ releaseId: live.currentReleaseId, version: 4, tenantId: h.a.tenantId, siteId: site.id });

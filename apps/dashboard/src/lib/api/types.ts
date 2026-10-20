@@ -186,6 +186,13 @@ export interface IntakeApi {
   listBookingPages(): Promise<BookingPageSummary[]>;
 }
 
+export interface SitePublish {
+  siteId: string;
+  spec: SiteSpec;
+  /** The release live when the edit started (null before the first); another one live now is a `stale_release` conflict. */
+  expectedCurrentReleaseId: string | null;
+}
+
 export interface ReleaseActivation {
   siteId: string;
   releaseId: string;
@@ -204,7 +211,7 @@ export interface SitesApi {
   /** What publishing this spec would serve; nothing is stored. */
   previewSite(siteId: string, spec: SiteSpec): Promise<SitePreview>;
   /** Builds, stores and makes the spec live. `edge: "pending"` means the site still shows the previous version. */
-  publishSite(siteId: string, spec: SiteSpec, options: WriteOptions): Promise<SiteReleaseResponse>;
+  publishSite(input: SitePublish, options: WriteOptions): Promise<SiteReleaseResponse>;
   /** Rollback, or roll forward again. */
   activateSiteRelease(input: ReleaseActivation, options: WriteOptions): Promise<SiteReleaseResponse>;
   /** Pushes the live version to the site again after `edge: "pending"`. */

@@ -47,13 +47,13 @@ export async function listSites(tx: Transaction, tenantId: string): Promise<Site
   )).rows.map(siteRecord);
 }
 
-const RELEASE_COLUMNS = "id, site_id, entry, digest, file_count, total_bytes, created_by, created_at";
+const RELEASE_COLUMNS = "id, site_id, number, entry, digest, file_count, total_bytes, created_by, created_at";
 interface ReleaseRow {
-  id: string; site_id: string; entry: string; digest: string; file_count: number;
+  id: string; site_id: string; number: number; entry: string; digest: string; file_count: number;
   total_bytes: string; created_by: string; created_at: Date;
 }
 const releaseRecord = (row: ReleaseRow): SiteReleaseRecord => siteReleaseRecordSchema.parse({
-  id: row.id, siteId: row.site_id, entry: row.entry, digest: row.digest, fileCount: row.file_count,
+  id: row.id, siteId: row.site_id, number: row.number, entry: row.entry, digest: row.digest, fileCount: row.file_count,
   totalBytes: Number(row.total_bytes), createdBy: row.created_by, createdAt: row.created_at.toISOString(),
 });
 
@@ -63,12 +63,12 @@ export async function findRelease(tx: Transaction, tenantId: string, siteId: str
   )).rows[0];
   return row ? releaseRecord(row) : null;
 }
-/** Newest first. */
+/** Newest first: the highest release number first. */
 export async function listReleases(tx: Transaction, tenantId: string, siteId: string): Promise<SiteReleaseRecord[]> {
   await getSite(tx, tenantId, siteId);
   return (await tx.query<ReleaseRow>(
     `SELECT ${RELEASE_COLUMNS} FROM site_releases WHERE tenant_id=$1 AND site_id=$2
-      ORDER BY created_at DESC, id DESC LIMIT ${SITE_RELEASE_LIST_LIMIT}`, [tenantId, siteId],
+      ORDER BY number DESC LIMIT ${SITE_RELEASE_LIST_LIMIT}`, [tenantId, siteId],
   )).rows.map(releaseRecord);
 }
 

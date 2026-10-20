@@ -6,57 +6,27 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
 import { Input, Label, Textarea } from "@/components/ui/input";
 import { DisabledReason } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isApiError, isStaleRelease, type SitePreview, type SiteRecord, type SiteReleaseRecord, type SiteSpec } from "@/lib/api";
+import {
+  isApiError,
+  isStaleRelease,
+  type SitePreview,
+  type SiteRecord,
+  type SiteReleaseRecord,
+  type SiteReleaseResponse,
+  type SiteSpec,
+} from "@/lib/api";
 import { useApi } from "@/lib/api/react";
-import { useIntentKey } from "@/lib/intent-key";
-import { useKeys, useSiteRelease, useSiteReleases, useSites } from "@/lib/queries";
+import { useDialogGeneration } from "@/lib/dialog-generation";
+import { fingerprint, isDefinitive, useIntentKey, type IntentKeys } from "@/lib/intent-key";
+import { useKeys, useSiteEdge, useSiteRelease, useSiteReleases, useSites } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { relativeTime } from "@/lib/utils";
-
-/** The plain site spec as the editor holds it; sections carry a local key for React. */
-interface Draft {
-  title: string;
-  tagline: string;
-  sections: { key: number; heading: string; body: string }[];
-}
-const MAX_SECTIONS = 20;
-let nextKey = 1;
-
-function draftFrom(spec: SiteSpec | undefined, fallbackTitle: string): Draft {
-  const plain = spec?.kind === "plain" ? spec : undefined;
-  const sections = Array.isArray(plain?.sections) ? plain.sections : [];
-  return {
-    title: typeof plain?.title === "string" ? plain.title : fallbackTitle,
-    tagline: typeof plain?.tagline === "string" ? plain.tagline : "",
-    sections: sections.flatMap((section) => {
-      if (section === null || typeof section !== "object" || Array.isArray(section)) return [];
-      const { heading, body } = section as Record<string, unknown>;
-      return typeof heading === "string" && typeof body === "string" ? [{ key: nextKey++, heading, body }] : [];
-    }),
-  };
-}
-
-function specFrom(draft: Draft): SiteSpec {
-  const tagline = draft.tagline.trim();
-  return {
-    kind: "plain",
-    title: draft.title.trim(),
-    ...(tagline ? { tagline } : {}),
-    sections: draft.sections.map((section) => ({ heading: section.heading.trim(), body: section.body.trim() })),
-  };
-}
-
-/** Why the draft cannot go out yet, or null. The API checks the same limits. */
-function draftProblem(draft: Draft): string | null {
-  if (!draft.title.trim()) return "Add a site title first.";
-  if (draft.sections.some((section) => !section.heading.trim() || !section.body.trim())) return "Each section needs a heading and some text.";
-  return null;
-}
+import { draftFrom, draftProblem, LIMITS, MAX_SECTIONS, newSectionKey, specFrom, type Draft } from "./draft";
 
 function PreviewFrame({ preview }: { preview: SitePreview }) {
   if (preview.entryHtml === null) return <p className="text-sm text-muted">This page cannot be shown here. Publish to see it on your site.</p>;
@@ -72,61 +42,90 @@ function PreviewFrame({ preview }: { preview: SitePreview }) {
   );
 }
 
-function SiteEditor({ site, liveSpec, onClose, onPublished }: {
+/** One opening of the editor: the live release it started from, and the spec that release holds. */
+interface Editing { baseline: string | null; liveSpec: SiteSpec | undefined }
+
+function SiteEditor({ site, editing, intents, generation, onClose, onPublished }: {
   site: SiteRecord;
-  liveSpec: SiteSpec | undefined;
+  editing: Editing;
+  /** Held by the page, so a publish whose answer was lost replays after the editor closes and reopens. */
+  intents: IntentKeys;
+  /** Tags an attempt with this opening, so the page can tell a late answer from a current one. */
+  generation: () => number;
   onClose: () => void;
-  onPublished: (pending: boolean) => void;
+  onPublished: (response: SiteReleaseResponse, generation: number) => void;
 }) {
   const api = useApi();
-  const intents = useIntentKey();
-  const [draft, setDraft] = useState(() => draftFrom(liveSpec, site.name));
-  const [preview, setPreview] = useState<SitePreview | null>(null);
-  const problem = draftProblem(draft);
+  const queryClient = useQueryClient();
+  const { keys } = useKeys();
+  const [draft, setDraft] = useState(() => draftFrom(editing.liveSpec, site.name));
+  // A preview is shown only while the draft still says what was previewed.
+  const [preview, setPreview] = useState<{ print: string; preview: SitePreview } | null>(null);
+  const [stale, setStale] = useState(false);
+  const spec = specFrom(draft);
+  const shown = preview && preview.print === fingerprint(spec) ? preview.preview : null;
+  const problem = draftProblem(draft, editing.baseline);
   const edit = (change: Partial<Draft>) => { setDraft({ ...draft, ...change }); setPreview(null); };
   const editSection = (key: number, change: { heading?: string; body?: string }) =>
     edit({ sections: draft.sections.map((section) => (section.key === key ? { ...section, ...change } : section)) });
 
   const showPreview = useMutation({
-    mutationFn: () => api.previewSite(site.id, specFrom(draft)),
-    onSuccess: setPreview,
+    mutationFn: (requested: SiteSpec) => api.previewSite(site.id, requested),
+    onSuccess: (result, requested) => setPreview({ print: fingerprint(requested), preview: result }),
   });
   const publish = useMutation({
-    mutationFn: (spec: SiteSpec) => api.publishSite(site.id, spec, { idempotencyKey: intents.keyFor({ siteId: site.id, spec }) }),
-    onSettled: (_result, error, spec) => intents.settle({ siteId: site.id, spec }, error),
-    onSuccess: (response) => onPublished(response.edge === "pending"),
+    mutationFn: ({ input }: { input: { siteId: string; spec: SiteSpec; expectedCurrentReleaseId: string | null }; generation: number }) =>
+      api.publishSite(input, { idempotencyKey: intents.keyFor(input) }),
+    onSettled: (_result, error, attempt) => intents.settle(attempt.input, error),
+    onSuccess: (response, attempt) => onPublished(response, attempt.generation),
+    onError: (error) => {
+      if (!isStaleRelease(error)) return;
+      setStale(true);
+      void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
+    },
   });
   const busy = showPreview.isPending || publish.isPending;
-  const error = publish.error ?? showPreview.error;
+  const error = publish.isError && !isStaleRelease(publish.error) ? publish.error : showPreview.error;
+  const runPreview = () => {
+    if (busy || problem) return;
+    publish.reset();
+    showPreview.mutate(spec);
+  };
+  const runPublish = () => {
+    if (busy || problem || stale) return;
+    showPreview.reset();
+    publish.mutate({ input: { siteId: site.id, spec, expectedCurrentReleaseId: editing.baseline }, generation: generation() });
+  };
+  const publishWhy = [problem ? "draft-why" : null, stale ? "stale-why" : null].filter(Boolean).join(" ") || undefined;
 
   return (
     <DialogContent title="Edit site" description="Change the words, preview the page, then publish. Earlier versions stay in History.">
-      {preview ? (
+      {shown ? (
         <div className="space-y-4">
-          <PreviewFrame preview={preview} />
+          <PreviewFrame preview={shown} />
           <Button variant="secondary" onClick={() => setPreview(null)}><PencilSimple aria-hidden />Back to editing</Button>
         </div>
       ) : (
-        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); if (!problem) showPreview.mutate(); }}>
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); runPreview(); }}>
           <div>
             <Label htmlFor="site-title">Site title</Label>
-            <Input id="site-title" value={draft.title} maxLength={120} onChange={(event) => edit({ title: event.target.value })} />
+            <Input id="site-title" value={draft.title} maxLength={LIMITS.title} onChange={(event) => edit({ title: event.target.value })} />
           </div>
           <div>
             <Label htmlFor="site-tagline">Tagline</Label>
-            <Input id="site-tagline" value={draft.tagline} maxLength={200} onChange={(event) => edit({ tagline: event.target.value })} />
+            <Input id="site-tagline" value={draft.tagline} maxLength={LIMITS.tagline} onChange={(event) => edit({ tagline: event.target.value })} />
           </div>
           {draft.sections.map((section, index) => (
             <fieldset key={section.key} className="space-y-3 rounded-sm p-3 shadow-[inset_0_0_0_1px_var(--border-strong)]">
               <legend className="px-1 text-sm font-medium text-fg">Section {index + 1}</legend>
               <div>
                 <Label htmlFor={`section-${section.key}-heading`}>Heading</Label>
-                <Input id={`section-${section.key}-heading`} value={section.heading} maxLength={120}
+                <Input id={`section-${section.key}-heading`} value={section.heading} maxLength={LIMITS.heading}
                   onChange={(event) => editSection(section.key, { heading: event.target.value })} />
               </div>
               <div>
                 <Label htmlFor={`section-${section.key}-body`}>Text</Label>
-                <Textarea id={`section-${section.key}-body`} value={section.body} maxLength={2000}
+                <Textarea id={`section-${section.key}-body`} value={section.body} maxLength={LIMITS.body}
                   onChange={(event) => editSection(section.key, { body: event.target.value })} />
               </div>
               <Button variant="ghost" onClick={() => edit({ sections: draft.sections.filter((item) => item.key !== section.key) })}>
@@ -136,7 +135,7 @@ function SiteEditor({ site, liveSpec, onClose, onPublished }: {
           ))}
           <Button variant="secondary" disabled={draft.sections.length >= MAX_SECTIONS}
             aria-describedby={draft.sections.length >= MAX_SECTIONS ? "sections-full" : undefined}
-            onClick={() => edit({ sections: [...draft.sections, { key: nextKey++, heading: "", body: "" }] })}>
+            onClick={() => edit({ sections: [...draft.sections, { key: newSectionKey(), heading: "", body: "" }] })}>
             <Plus aria-hidden />Add section
           </Button>
           {draft.sections.length >= MAX_SECTIONS ? <DisabledReason id="sections-full">A page holds {MAX_SECTIONS} sections at most.</DisabledReason> : null}
@@ -145,17 +144,24 @@ function SiteEditor({ site, liveSpec, onClose, onPublished }: {
         </form>
       )}
       {error ? <div className="mt-4"><ErrorNote error={error} /></div> : null}
-      {problem ? <div className="mt-4"><DisabledReason id="publish-why">{problem}</DisabledReason></div> : null}
+      {stale ? (
+        <div className="mt-4">
+          <DisabledReason id="stale-why">
+            Another version went live while you were editing, so this one was not published. Close the editor and open it again to start from the live version.
+          </DisabledReason>
+        </div>
+      ) : null}
+      {problem ? <div className="mt-4"><DisabledReason id="draft-why">{problem}</DisabledReason></div> : null}
       <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-        <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        {preview ? null : (
+        <Button variant="ghost" onClick={onClose}>{stale ? "Close" : "Cancel"}</Button>
+        {shown ? null : (
           <Button variant="secondary" disabled={busy || problem !== null} aria-busy={showPreview.isPending}
-            aria-describedby={problem ? "publish-why" : undefined} onClick={() => showPreview.mutate()}>
+            aria-describedby={problem ? "draft-why" : undefined} onClick={runPreview}>
             <Eye aria-hidden />{showPreview.isPending ? "Building preview" : "Preview"}
           </Button>
         )}
-        <Button disabled={busy || problem !== null} aria-busy={busy}
-          aria-describedby={problem ? "publish-why" : undefined} onClick={() => publish.mutate(specFrom(draft))}>
+        <Button disabled={busy || problem !== null || stale} aria-busy={publish.isPending}
+          aria-describedby={publishWhy} onClick={runPublish}>
           {publish.isPending ? "Publishing" : "Publish"}
         </Button>
       </div>
@@ -163,45 +169,42 @@ function SiteEditor({ site, liveSpec, onClose, onPublished }: {
   );
 }
 
-function RollbackDialog({ site, release, version, onClose, onActivated }: {
+/** One opening of the rollback dialog, with the live release as the page showed it then. */
+interface RollingBack { release: SiteReleaseRecord; expectedCurrentReleaseId: string | null }
+
+function RollbackDialog({ site, target, intents, generation, onDone }: {
   site: SiteRecord;
-  release: SiteReleaseRecord;
-  version: number;
-  onClose: () => void;
-  onActivated: (pending: boolean) => void;
+  target: RollingBack;
+  intents: IntentKeys;
+  generation: () => number;
+  onDone: (outcome: { response: SiteReleaseResponse } | { stale: true }, generation: number) => void;
 }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
-  const toast = useToast();
-  const intents = useIntentKey();
-  const input = { siteId: site.id, releaseId: release.id, expectedCurrentReleaseId: site.currentReleaseId };
+  const { release } = target;
+  // Fixed for this opening: a retry after a lost answer sends the same request with the same key,
+  // so the server's stale check still guards it if another version went live meanwhile.
+  const input = { siteId: site.id, releaseId: release.id, expectedCurrentReleaseId: target.expectedCurrentReleaseId };
   const activate = useMutation({
-    mutationFn: () => api.activateSiteRelease(input, { idempotencyKey: intents.keyFor(input) }),
+    mutationFn: (_attempt: { generation: number }) => api.activateSiteRelease(input, { idempotencyKey: intents.keyFor(input) }),
     onSettled: (_result, error) => {
       intents.settle(input, error);
-      void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
+      // After a lost answer the outcome is unknown; refreshing now would only hide what the owner confirmed.
+      if (isDefinitive(error)) void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
     },
-    onSuccess: (response) => {
-      toast(response.edge === "pending"
-        ? `Version ${version} is live. Your site will show it in a moment.`
-        : `Version ${version} is live again.`, response.edge === "pending" ? "info" : "success");
-      onActivated(response.edge === "pending");
-      onClose();
-    },
-    onError: (error) => {
-      if (!isStaleRelease(error)) return;
-      toast("Another version went live since you opened this page. History is up to date now.", "info");
-      onClose();
+    onSuccess: (response, attempt) => onDone({ response }, attempt.generation),
+    onError: (error, attempt) => {
+      if (isStaleRelease(error)) onDone({ stale: true }, attempt.generation);
     },
   });
   return (
-    <DialogContent title={`Make version ${version} live?`} description={`Published ${relativeTime(release.createdAt).toLowerCase()}. Visitors see it as soon as it is live.`}>
+    <DialogContent title={`Make version ${release.number} live?`} description={`Published ${relativeTime(release.createdAt).toLowerCase()}. Visitors see it as soon as it is live.`}>
       {activate.isError && !isStaleRelease(activate.error) ? <div className="mb-4"><ErrorNote error={activate.error} /></div> : null}
       <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-        <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        <Button disabled={activate.isPending} aria-busy={activate.isPending} onClick={() => activate.mutate()}>
-          <ArrowCounterClockwise aria-hidden />{activate.isPending ? "Making it live" : `Make version ${version} live`}
+        <DialogClose asChild><Button variant="ghost">Cancel</Button></DialogClose>
+        <Button disabled={activate.isPending} aria-busy={activate.isPending} onClick={() => activate.mutate({ generation: generation() })}>
+          <ArrowCounterClockwise aria-hidden />{activate.isPending ? "Making it live" : `Make version ${release.number} live`}
         </Button>
       </div>
     </DialogContent>
@@ -222,8 +225,8 @@ function CreateSite() {
     },
   });
   return (
-    <EmptyState title="No website yet">
-      <form className="mx-auto mt-4 max-w-sm space-y-3 text-left" onSubmit={(event) => { event.preventDefault(); if (name.trim()) create.mutate(name.trim()); }}>
+    <EmptyState title="No website yet" action={
+      <form className="mx-auto max-w-sm space-y-3 text-left" onSubmit={(event) => { event.preventDefault(); if (name.trim() && !create.isPending) create.mutate(name.trim()); }}>
         <div>
           <Label htmlFor="site-name">Website name</Label>
           <Input id="site-name" value={name} maxLength={200} onChange={(event) => setName(event.target.value)} />
@@ -233,7 +236,7 @@ function CreateSite() {
         <Button type="submit" disabled={!name.trim() || create.isPending} aria-busy={create.isPending}
           aria-describedby={name.trim() ? undefined : "site-name-why"}>{create.isPending ? "Creating" : "Create website"}</Button>
       </form>
-    </EmptyState>
+    } />
   );
 }
 
@@ -244,19 +247,33 @@ function SitePanel({ site }: { site: SiteRecord }) {
   const toast = useToast();
   const releases = useSiteReleases(site.id);
   const live = useSiteRelease(site.id, site.currentReleaseId);
-  const [editing, setEditing] = useState(false);
-  const [rollingBack, setRollingBack] = useState<{ release: SiteReleaseRecord; version: number } | null>(null);
-  const [pending, setPending] = useState(false);
+  const edge = useSiteEdge(site.id, site.currentReleaseId !== null);
+  const [editing, setEditing] = useState<Editing | null>(null);
+  const [rollingBack, setRollingBack] = useState<RollingBack | null>(null);
+  // Held here, not in the dialogs, so they outlive a close and reopen.
+  const publishIntents = useIntentKey();
+  const rollbackIntents = useIntentKey();
+  // A publish or rollback answering after its dialog closed (and maybe reopened) still updates
+  // the page and may confirm itself, but never closes the newer opening.
+  const editorGeneration = useDialogGeneration(editing !== null);
+  const rollbackGeneration = useDialogGeneration(rollingBack !== null, rollingBack?.release.id);
   const sync = useMutation({
     mutationFn: () => api.syncSite(site.id),
     onSuccess: (response) => {
-      setPending(response.edge === "pending");
-      if (response.edge === "synced") toast("Your site shows the live version now.");
+      queryClient.setQueryData(keys.siteEdge(site.id), response.edge);
+      toast(response.edge === "synced" ? "Your site shows the live version now." : "Your site still shows the previous version. Try again in a moment.",
+        response.edge === "synced" ? "success" : "info");
     },
   });
+  const wentLive = (response: SiteReleaseResponse) => {
+    queryClient.setQueryData(keys.siteEdge(site.id), response.edge);
+    void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
+  };
   const host = site.hosts[0] ?? null;
-  const count = releases.data?.length ?? 0;
-  const liveVersion = releases.data ? count - releases.data.findIndex((release) => release.id === site.currentReleaseId) : null;
+  const edgeBehind = site.currentReleaseId !== null && (edge.data === "pending" || edge.isError);
+  const liveSummary = site.currentReleaseId === null ? "Write your first page and publish it."
+    : live.data ? `Version ${live.data.number} is live. Published ${relativeTime(live.data.createdAt).toLowerCase()}.`
+      : live.isError ? "Could not load the live version." : "Loading the live version.";
 
   return (
     <>
@@ -274,22 +291,22 @@ function SitePanel({ site }: { site: SiteRecord }) {
           <h2 className="text-base font-semibold">{site.name}</h2>
           {site.currentReleaseId ? <Badge tone="success">Live</Badge> : <Badge tone="warn">Not published</Badge>}
         </div>
-        <p className="text-sm text-muted" data-testid="site-live-summary">
-          {site.currentReleaseId && live.data
-            ? `Version ${liveVersion ?? "?"} is live. Published ${relativeTime(live.data.createdAt).toLowerCase()}.`
-            : site.currentReleaseId ? "Loading the live version." : "Write your first page and publish it."}
-        </p>
+        <p id="site-live-summary" className="text-sm text-muted" data-testid="site-live-summary">{liveSummary}</p>
         {live.isError ? <ErrorNote error={live.error} retry={() => live.refetch()} /> : null}
-        {pending ? (
-          <div className="rounded-sm bg-warn/10 p-3 text-sm text-fg-2" role="status">
-            <p>Saved and live here, but your site still shows the previous version.</p>
+        {edgeBehind ? (
+          <div className="rounded-sm bg-warn/10 p-3 text-sm text-fg-2" role="status" data-testid="site-edge">
+            <p>{edge.data === "pending"
+              ? "Saved and live here, but your site still shows the previous version."
+              : "Could not check whether your site shows the live version."}</p>
             <Button className="mt-2" variant="secondary" disabled={sync.isPending} aria-busy={sync.isPending} onClick={() => sync.mutate()}>
               {sync.isPending ? "Updating" : "Update the site now"}
             </Button>
+            {sync.isError ? <div className="mt-2"><ErrorNote error={sync.error} retry={() => sync.mutate()} /></div> : null}
           </div>
         ) : null}
         <Button disabled={site.currentReleaseId !== null && !live.data} aria-busy={site.currentReleaseId !== null && live.isPending}
-          onClick={() => setEditing(true)}>
+          aria-describedby={live.isError ? "site-live-summary" : undefined}
+          onClick={() => setEditing({ baseline: site.currentReleaseId, liveSpec: live.data?.spec })}>
           <PencilSimple aria-hidden />Edit site
         </Button>
       </Card>
@@ -302,22 +319,21 @@ function SitePanel({ site }: { site: SiteRecord }) {
           <p className="text-sm text-muted">Each time you publish, the version you replaced stays here, ready to bring back.</p>
         ) : (
           <ul className="space-y-2">
-            {releases.data.map((release, index) => {
-              const version = count - index;
+            {releases.data.map((release) => {
               const isLive = release.id === site.currentReleaseId;
               return (
                 <li key={release.id} data-testid="site-release">
                   <Card className="flex flex-wrap items-center gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <p className="font-medium">Version {version}</p>
+                        <p className="font-medium">Version {release.number}</p>
                         {isLive ? <Badge tone="success">Live</Badge> : null}
                       </div>
                       <p className="text-xs text-meta">Published {relativeTime(release.createdAt).toLowerCase()}</p>
                     </div>
                     {isLive ? null : (
-                      <Button variant="secondary" onClick={() => setRollingBack({ release, version })}>
-                        <ArrowCounterClockwise aria-hidden />Make live<span className="sr-only"> version {version}</span>
+                      <Button variant="secondary" onClick={() => setRollingBack({ release, expectedCurrentReleaseId: site.currentReleaseId })}>
+                        <ArrowCounterClockwise aria-hidden />Make live<span className="sr-only"> version {release.number}</span>
                       </Button>
                     )}
                   </Card>
@@ -328,25 +344,45 @@ function SitePanel({ site }: { site: SiteRecord }) {
         )}
       </section>
 
-      <Dialog open={editing} onOpenChange={setEditing}>
+      <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
         {editing ? (
           <SiteEditor
             site={site}
-            liveSpec={live.data?.spec}
-            onClose={() => setEditing(false)}
-            onPublished={(wasPending) => {
-              setEditing(false);
-              setPending(wasPending);
-              void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
-              toast(wasPending ? "Published. Your site will show it in a moment." : "Published. Your site is live.", wasPending ? "info" : "success");
+            editing={editing}
+            intents={publishIntents}
+            generation={editorGeneration.current}
+            onClose={() => setEditing(null)}
+            onPublished={(response, tag) => {
+              wentLive(response);
+              const current = editorGeneration.isCurrent(tag);
+              if (current) setEditing(null);
+              if (current || editorGeneration.isClosed()) {
+                toast(response.edge === "pending" ? "Published. Your site will show it in a moment." : "Published. Your site is live.",
+                  response.edge === "pending" ? "info" : "success");
+              }
             }}
           />
         ) : null}
       </Dialog>
       <Dialog open={rollingBack !== null} onOpenChange={(open) => !open && setRollingBack(null)}>
         {rollingBack ? (
-          <RollbackDialog site={site} release={rollingBack.release} version={rollingBack.version}
-            onClose={() => setRollingBack(null)} onActivated={setPending} />
+          <RollbackDialog site={site} target={rollingBack} intents={rollbackIntents} generation={rollbackGeneration.current}
+            onDone={(outcome, tag) => {
+              const current = rollbackGeneration.isCurrent(tag);
+              const speak = current || rollbackGeneration.isClosed();
+              if ("stale" in outcome) {
+                if (speak) toast("Another version went live since you opened this page. History is up to date now.", "info");
+              } else {
+                wentLive(outcome.response);
+                const number = outcome.response.result.release.number;
+                if (speak) {
+                  toast(outcome.response.edge === "pending"
+                    ? `Version ${number} is live. Your site will show it in a moment.`
+                    : `Version ${number} is live again.`, outcome.response.edge === "pending" ? "info" : "success");
+                }
+              }
+              if (current) setRollingBack(null);
+            }} />
         ) : null}
       </Dialog>
     </>

@@ -18,7 +18,10 @@ test("creates the website, previews and publishes two versions, then brings the 
   await expect(edit).toBeEnabled();
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
   const releases = page.getByTestId("site-release");
-  const before = await releases.count();
+  await expect(page.getByText("Each time you publish").or(releases.first())).toBeVisible();
+  const rows = await releases.count();
+  // Numbers come from the API (1, 2, 3 per site), not from positions in the list.
+  const before = rows === 0 ? 0 : Number((await releases.first().getByText(/^Version \d+$/).textContent())!.slice("Version ".length));
   const summary = page.getByTestId("site-live-summary");
 
   const publish = async (tagline: string) => {
@@ -39,7 +42,8 @@ test("creates the website, previews and publishes two versions, then brings the 
   await expect(summary).toHaveText(new RegExp(`^Version ${before + 1} is live\\.`));
   await publish("Rings and repairs on Hudson Street");
   await expect(summary).toHaveText(new RegExp(`^Version ${before + 2} is live\\.`));
-  await expect(releases).toHaveCount(before + 2);
+  await expect(releases).toHaveCount(Math.min(rows + 2, 100));
+  await expect(releases.first()).toContainText(`Version ${before + 2}`);
   await shot(page, "21-site", info.project.name, PREFIX);
 
   await page.getByRole("button", { name: `Make live version ${before + 1}` }).click();

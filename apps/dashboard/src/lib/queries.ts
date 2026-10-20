@@ -46,6 +46,8 @@ export const keys = {
   siteReleases: (siteId: string) => ["sites", "releases", siteId] as const,
   siteRelease: (siteId: string, releaseId: string) => ["sites", "release", siteId, releaseId] as const,
   sitesAll: ["sites"] as const,
+  /** Whether the site shows the live release. Outside "sites", so refreshing the lists does not re-sync. */
+  siteEdge: (siteId: string) => ["siteEdge", siteId] as const,
   agents: ["ws", "agents"] as const,
   approvals: ["ws", "approvals"] as const,
   connections: ["ws", "connections"] as const,
@@ -273,6 +275,23 @@ export function useSiteRelease(siteId: string | null, releaseId: string | null) 
     queryKey: keys.siteRelease(siteId ?? "none", releaseId ?? "none"),
     queryFn: ({ signal }) => api.getSiteRelease(siteId!, releaseId!, { signal }),
     staleTime: Infinity,
+  });
+}
+
+/**
+ * Whether the site itself shows the live release. Asked once per visit with a sync (it only
+ * catches the site up), then set by every publish, rollback and "Update the site now", so a
+ * pending site stays pending across leaving the page and coming back.
+ */
+export function useSiteEdge(siteId: string | null, enabled = true) {
+  const api = useApi();
+  const { keys, enabled: signedIn } = useKeys();
+  return useQuery({
+    enabled: signedIn && enabled && siteId !== null,
+    queryKey: keys.siteEdge(siteId ?? "none"),
+    queryFn: async () => (await api.syncSite(siteId!)).edge,
+    staleTime: Infinity,
+    retry: false,
   });
 }
 

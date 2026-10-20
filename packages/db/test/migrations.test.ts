@@ -246,6 +246,59 @@ it("adds public intake over a pre-M3 database that holds bookings and contacts",
   }
 }, 30000);
 
+it("numbers the releases a database already holds, per site and in the order they were made", async () => {
+  const numbers = "20261020710000_site_release_numbers.sql";
+  const partial = await mkdtemp(join(tmpdir(), "zs-migrations-pre-numbers-"));
+  try {
+    for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql") && name < numbers))
+      await copyFile(new URL(name, migrations), join(partial, name));
+    const tenants = [randomUUID(), randomUUID()];
+    const sites = [randomUUID(), randomUUID(), randomUUID()];
+    // [tenant, site, release, created_at]: out of order on disk, and two at one instant (id breaks the tie).
+    const [low, high] = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"];
+    const releases: [number, number, string, string][] = [
+      [0, 0, randomUUID(), "2026-10-20T12:00Z"], [0, 0, high, "2026-10-20T11:00Z"], [0, 0, low, "2026-10-20T11:00Z"],
+      [0, 1, randomUUID(), "2026-10-20T09:00Z"], [1, 2, randomUUID(), "2026-10-20T08:00Z"],
+    ];
+    const after = await withTestDatabase(async (database) => {
+      await asService(database.servicePool, async (tx) => {
+        for (const tenantId of tenants) await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Tenant')", [tenantId]);
+        for (const [i, siteId] of sites.entries())
+          await tx.query("INSERT INTO sites (tenant_id,id,name,created_at,updated_at) VALUES ($1,$2,'Site',now(),now())", [tenants[i === 2 ? 1 : 0], siteId]);
+        for (const [tenant, site, id, createdAt] of releases)
+          await tx.query(
+            `INSERT INTO site_releases (tenant_id,id,site_id,spec,entry,file_count,total_bytes,created_by,created_at)
+             VALUES ($1,$2,$3,'{}','index.html',1,1,$4,$5)`, [tenants[tenant], id, sites[site], randomUUID(), createdAt]);
+      });
+      await copyFile(new URL(numbers, migrations), join(partial, numbers));
+      for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql") && name > numbers))
+        await copyFile(new URL(name, migrations), join(partial, name));
+      // As the non-superuser migrator hosted databases use, which forced RLS would blind.
+      const url = new URL(database.url);
+      url.username = database.migrator!;
+      const migrator = new Pool({ connectionString: url.href, max: 1 });
+      try {
+        await migrate(migrator, pathToFileURL(`${partial}/`));
+      } finally {
+        await migrator.end();
+      }
+      const state = await database.pool.query<{ force: boolean; enabled: string }>(
+        `SELECT c.relforcerowsecurity AS force, t.tgenabled AS enabled FROM pg_class c
+           JOIN pg_trigger t ON t.tgrelid=c.oid AND t.tgname='site_releases_append_only' WHERE c.oid='public.site_releases'::regclass`);
+      return {
+        state: state.rows,
+        numbers: await asService(database.servicePool, async (tx) =>
+          (await tx.query<{ id: string; number: number }>("SELECT id, number FROM site_releases")).rows),
+      };
+    }, undefined, { migrations: pathToFileURL(`${partial}/`), nonSuperuserMigrator: true });
+    expect(after.state).toEqual([{ force: true, enabled: "O" }]);
+    const byId = Object.fromEntries(after.numbers.map((row) => [row.id, row.number]));
+    expect(releases.map(([, , id]) => byId[id])).toEqual([3, 2, 1, 1, 1]);
+  } finally {
+    await rm(partial, { recursive: true, force: true });
+  }
+}, 30000);
+
 it("a dry run rolls back, and an apply commits only the set the dry run reported", async () => {
   const atMain = await mkdtemp(join(tmpdir(), "zs-migrations-dry-"));
   try {

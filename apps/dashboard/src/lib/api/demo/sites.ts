@@ -1,7 +1,7 @@
 /**
- * In-memory sites for the demo, with the server's rules: owners publish immutable releases,
- * one is live, rollback names the release the caller saw as live (`stale_release` if another
- * went live since), and a write retried with its key replays. Specs are `{ kind: "plain" }`,
+ * In-memory sites for the demo, with the server's rules: owners publish immutable releases
+ * numbered 1, 2, 3 per site, one is live, publish and rollback name the release the caller saw
+ * as live (`stale_release` if another went live since), and a write retried with its key replays. Specs are `{ kind: "plain" }`,
  * checked with the same @zs/contracts schema the API's built-in compiler uses.
  */
 import {
@@ -16,7 +16,7 @@ import {
   type SiteSpec,
 } from "@zs/contracts";
 import { newId as defaultNewId } from "../../id";
-import { demoError, demoValidationError } from "../errors";
+import { ApiError, defaultMessage, demoError, demoValidationError } from "../errors";
 import { fingerprint } from "../../intent-key";
 import type { SitesApi } from "../types";
 import type { DemoClock } from "./adapter";
@@ -27,6 +27,10 @@ export interface DemoSiteControls {
   rollBackElsewhere(): void;
   /** While down, publishes and rollbacks commit but the site keeps the previous version. */
   setSiteEdgeDown(down: boolean): void;
+  /** The next publish or rollback answers this much later. */
+  delayNextSiteWrite(ms: number): void;
+  /** The next publish or rollback commits, then its answer is lost as a network failure. */
+  loseNextSiteAnswer(): void;
 }
 
 export const DEMO_SITE_ID = "5b0c7d2e-41a6-4f3b-9c55-8e2f6a1d3b70";
@@ -90,19 +94,21 @@ export function createDemoSites(options: { clock?: DemoClock; newId?: () => stri
 
   interface DemoSite { record: SiteRecord; releases: SiteReleaseDetail[] }
   const sites = new Map<string, DemoSite>();
-  const replies = new Map<string, { print: string; response: unknown }>();
+  const replies = new Map<string, { print: string; response: Promise<unknown> }>();
   let edgeDown = false;
+  let delayNext = 0;
+  let loseNext = false;
   let seeded: Promise<void> | null = null;
 
-  async function release(siteId: string, spec: SiteSpec, createdAt: string): Promise<SiteReleaseDetail> {
+  async function release(siteId: string, number: number, spec: SiteSpec, createdAt: string): Promise<SiteReleaseDetail> {
     const { preview } = await compile(spec);
     return {
-      id: newId(), siteId, entry: preview.entry, digest: preview.digest, fileCount: preview.files.length,
+      id: newId(), siteId, number, entry: preview.entry, digest: preview.digest, fileCount: preview.files.length,
       totalBytes: preview.files.reduce((sum, file) => sum + file.bytes, 0), createdBy: OWNER_ID, createdAt, spec, files: preview.files,
     };
   }
   const seed = () => (seeded ??= (async () => {
-    const releases = [await release(DEMO_SITE_ID, SEED_SPECS[1]!, ago(4)), await release(DEMO_SITE_ID, SEED_SPECS[0]!, ago(30))];
+    const releases = [await release(DEMO_SITE_ID, 2, SEED_SPECS[1]!, ago(4)), await release(DEMO_SITE_ID, 1, SEED_SPECS[0]!, ago(30))];
     sites.set(DEMO_SITE_ID, {
       record: {
         id: DEMO_SITE_ID, name: "Halden & Rowe", currentReleaseId: releases[0]!.id, pointerVersion: 2,
@@ -118,17 +124,33 @@ export function createDemoSites(options: { clock?: DemoClock; newId?: () => stri
     return site;
   };
   const summary = ({ spec: _spec, files: _files, ...record }: SiteReleaseDetail) => record;
-  /** A key names one write: the same body replays its answer, another body is a conflict. */
+  /**
+   * A key names one write: the same body replays its answer (a second call while the first
+   * runs waits for it), another body is a conflict. A write that fails leaves nothing behind.
+   */
   async function once<T>(key: string, body: unknown, work: () => Promise<T>): Promise<T> {
     const print = fingerprint(body);
+    if (delayNext > 0) {
+      const ms = delayNext;
+      delayNext = 0;
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    }
     const stored = replies.get(key);
+    let response: Promise<unknown>;
     if (stored) {
       if (stored.print !== print) throw demoError("Conflict", { reason: "idempotency_key_reused" });
-      return structuredClone(stored.response) as T;
+      response = stored.response;
+    } else {
+      response = work().then((value) => structuredClone(value));
+      replies.set(key, { print, response });
+      response.catch(() => replies.delete(key));
     }
-    const response = await work();
-    replies.set(key, { print, response: structuredClone(response) });
-    return response;
+    const answer = structuredClone(await response) as T;
+    if (loseNext) {
+      loseNext = false;
+      throw new ApiError("network", defaultMessage("network"));
+    }
+    return answer;
   }
   const goLive = (site: DemoSite, releaseId: string) => {
     site.record = { ...site.record, currentReleaseId: releaseId, pointerVersion: site.record.pointerVersion + 1, updatedAt: clock.now().toISOString() };
@@ -167,13 +189,16 @@ export function createDemoSites(options: { clock?: DemoClock; newId?: () => stri
       if (!parsed.success) throw demoValidationError(parsed.error.issues);
       return (await compile(parsed.data.spec)).preview;
     },
-    async publishSite(siteId, spec, options) {
+    async publishSite(input, options) {
       await seed(); await wait();
-      const site = findSite(siteId);
-      const parsed = publishSiteRequestSchema.safeParse({ spec });
+      const site = findSite(input.siteId);
+      const parsed = publishSiteRequestSchema.safeParse({ spec: input.spec, expectedCurrentReleaseId: input.expectedCurrentReleaseId });
       if (!parsed.success) throw demoValidationError(parsed.error.issues);
-      return once(options.idempotencyKey, ["publish", siteId, parsed.data], async (): Promise<SiteReleaseResponse> => {
-        const made = await release(siteId, parsed.data.spec, clock.now().toISOString());
+      return once(options.idempotencyKey, ["publish", input.siteId, parsed.data], async (): Promise<SiteReleaseResponse> => {
+        const built = await release(input.siteId, 1, parsed.data.spec, clock.now().toISOString());
+        // Checked and numbered after the build, with no await in between, as the server does under its lock.
+        if (site.record.currentReleaseId !== input.expectedCurrentReleaseId) throw demoError("Conflict", { reason: "stale_release" });
+        const made = { ...built, number: (site.releases[0]?.number ?? 0) + 1 };
         site.releases.unshift(made);
         goLive(site, made.id);
         return { actionId: newId(), result: { site: structuredClone(site.record), release: summary(made) }, edge: edgeDown ? "pending" : "synced" };
@@ -205,6 +230,8 @@ export function createDemoSites(options: { clock?: DemoClock; newId?: () => stri
         if (site && older) goLive(site, older.id);
       },
       setSiteEdgeDown(down) { edgeDown = down; },
+      delayNextSiteWrite(ms) { delayNext = ms; },
+      loseNextSiteAnswer() { loseNext = true; },
     },
   };
 }

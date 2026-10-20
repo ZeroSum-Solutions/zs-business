@@ -5,6 +5,7 @@
 // read or action needs (members/access.ts), so a removed member is refused at once.
 // M3b: stored approvals (approvals.md) run through approvedDispatch beside the direct path.
 import {
+  Conflict,
   ROLE_PERMISSIONS,
   ValidationFailed,
   approvalOutputSchema,
@@ -459,8 +460,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const { id: _id, ...rest } = envelope(key, "site", id);
       // Permission and ownership first, so nobody else's request stores bytes under this tenant.
       const recorded = await read("publish", async (tx) => {
-        await getSite(tx, tenantId, id);
-        return (await tx.query("SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, rest.idempotencyKey])).rowCount === 1;
+        const site = await getSite(tx, tenantId, id);
+        const replay = (await tx.query("SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, rest.idempotencyKey])).rowCount === 1;
+        // Fail a stale edit before compiling and storing; the handler checks again under the site lock.
+        if (!replay && request.expectedCurrentReleaseId !== undefined && site.currentReleaseId !== request.expectedCurrentReleaseId)
+          throw new Conflict("Another release went live since this edit started", { reason: "stale_release" });
+        return replay;
       });
       const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
       // A recorded key replays (or is refused as reused) in dispatch; its files were stored then.
@@ -472,6 +477,8 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         payload: {
           siteId: id, releaseId: derivedId(tenantId, rest.idempotencyKey, "site_release"), spec: request.spec,
           entry: release.entry, digest: release.digest, files: [...release.files],
+          // Only when sent: a payload without the key still matches what older keys recorded.
+          ...(request.expectedCurrentReleaseId !== undefined ? { expectedCurrentReleaseId: request.expectedCurrentReleaseId } : {}),
         },
       }, writeContext);
       return { ...output, edge: await syncAfterWrite(sites, id, verifiedBlobs ? { verifiedBlobs } : {}) };

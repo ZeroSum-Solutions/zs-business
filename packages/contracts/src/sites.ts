@@ -96,6 +96,8 @@ export const publishSiteReleaseInputSchema = z.strictObject({
   entry: sitePathSchema,
   digest: sha256HexSchema,
   files: siteFilesSchema,
+  /** When given, the release the caller's edit started from; another one now live is a stale edit (409). */
+  expectedCurrentReleaseId: idSchema.nullable().optional(),
 }).refine((value) => value.files.some((file) => file.path === value.entry), "The entry must be one of the files");
 export const publishSiteReleaseCommandSchema = command("site.release.publish", publishSiteReleaseInputSchema)
   .refine((value) => value.target.id === value.payload.siteId, "Target must equal the site ID");
@@ -129,6 +131,8 @@ export type SiteRecord = z.infer<typeof siteRecordSchema>;
 export const siteReleaseRecordSchema = z.strictObject({
   id: idSchema,
   siteId: idSchema,
+  /** 1 for the site's first release, then one more per publish; never reused or renumbered. */
+  number: z.number().int().min(1),
   entry: z.string(),
   digest: sha256HexSchema,
   fileCount: z.number().int(),
@@ -166,7 +170,12 @@ export type SiteSyncResponse = z.infer<typeof siteSyncResponseSchema>;
 // HTTP bodies.
 export const createSiteRequestSchema = z.strictObject({ name: siteNameSchema });
 export type CreateSiteRequest = z.infer<typeof createSiteRequestSchema>;
-export const publishSiteRequestSchema = z.strictObject({ spec: siteSpecSchema });
+/**
+ * `expectedCurrentReleaseId`: the live release the edit started from (null before the first
+ * publish). When given, a publish after another release went live is 409 `stale_release`
+ * instead of replacing it. Omitted, the publish goes live whatever is live now.
+ */
+export const publishSiteRequestSchema = z.strictObject({ spec: siteSpecSchema, expectedCurrentReleaseId: idSchema.nullable().optional() });
 export type PublishSiteRequest = z.infer<typeof publishSiteRequestSchema>;
 /**
  * `POST /v1/sites/:id/preview { spec }`: what a publish of this spec would serve, without

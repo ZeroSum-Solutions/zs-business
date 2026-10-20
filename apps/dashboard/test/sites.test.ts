@@ -35,7 +35,8 @@ describe("demo sites", () => {
     expect(before).toHaveLength(2);
     expect(site!.currentReleaseId).toBe(before[0]!.id);
 
-    const published = await api.publishSite(site!.id, SPEC, key());
+    const published = await api.publishSite({ siteId: site!.id, spec: SPEC, expectedCurrentReleaseId: site!.currentReleaseId }, key());
+    expect(published.result.release.number).toBe(3);
     expect(siteReleaseResponseSchema.parse(published)).toEqual(published);
     expect(published.edge).toBe("synced");
     expect(published.result.site.currentReleaseId).toBe(published.result.release.id);
@@ -48,7 +49,7 @@ describe("demo sites", () => {
     const back = await api.activateSiteRelease(
       { siteId: site!.id, releaseId: before[1]!.id, expectedCurrentReleaseId: published.result.release.id }, key());
     expect(back.result.site.currentReleaseId).toBe(before[1]!.id);
-    expect(await api.listSiteReleases(site!.id)).toHaveLength(3);
+    expect((await api.listSiteReleases(site!.id)).map((release) => release.number)).toEqual([3, 2, 1]);
   });
 
   it("answers stale_release when another release went live, and replays a retried write", async () => {
@@ -60,12 +61,20 @@ describe("demo sites", () => {
       { siteId: site!.id, releaseId: releases[1]!.id, expectedCurrentReleaseId: site!.currentReleaseId }, key()).catch((caught: unknown) => caught);
     expect(isStaleRelease(error)).toBe(true);
 
+    // A publish started from the version this page showed is stale too, and nothing is added.
+    const stale = await api.publishSite({ siteId: site!.id, spec: SPEC, expectedCurrentReleaseId: site!.currentReleaseId }, key())
+      .catch((caught: unknown) => caught);
+    expect(isStaleRelease(stale)).toBe(true);
+    expect(await api.listSiteReleases(site!.id)).toHaveLength(2);
+
+    const [now] = await api.listSites();
+    const input = { siteId: site!.id, spec: SPEC, expectedCurrentReleaseId: now!.currentReleaseId };
     const once = key();
-    const first = await api.publishSite(site!.id, SPEC, once);
-    const again = await api.publishSite(site!.id, SPEC, once);
+    // Two tries with one key, the second sent before the first answered: one release.
+    const [first, again] = await Promise.all([api.publishSite(input, once), api.publishSite(input, once)]);
     expect(again).toEqual(first);
     expect(await api.listSiteReleases(site!.id)).toHaveLength(3);
-    const reused = await api.publishSite(site!.id, { ...SPEC, title: "Other" }, once).catch((caught: unknown) => caught);
+    const reused = await api.publishSite({ ...input, spec: { ...SPEC, title: "Other" } }, once).catch((caught: unknown) => caught);
     expect(reused).toBeInstanceOf(ApiError);
     expect((reused as ApiError).reason).toBe("idempotency_key_reused");
   });
@@ -76,7 +85,8 @@ describe("demo sites", () => {
     expect(preview.entryHtml).toContain("Rings &lt;and&gt; repairs");
     expect(await api.listSiteReleases(DEMO_SITE_ID)).toHaveLength(2);
     controls.setSiteEdgeDown(true);
-    expect((await api.publishSite(DEMO_SITE_ID, SPEC, key())).edge).toBe("pending");
+    const [site] = await api.listSites();
+    expect((await api.publishSite({ siteId: DEMO_SITE_ID, spec: SPEC, expectedCurrentReleaseId: site!.currentReleaseId }, key())).edge).toBe("pending");
     expect((await api.syncSite(DEMO_SITE_ID)).edge).toBe("pending");
     controls.setSiteEdgeDown(false);
     expect((await api.syncSite(DEMO_SITE_ID)).edge).toBe("synced");
@@ -94,7 +104,7 @@ describe("http client sites", () => {
   it("sends publish and rollback with the caller's key, and preview and sync without one", async () => {
     const demo = createDemoSites({ clock }).api;
     const [site] = await demo.listSites();
-    const published = await demo.publishSite(site!.id, SPEC, key());
+    const published = await demo.publishSite({ siteId: site!.id, spec: SPEC, expectedCurrentReleaseId: site!.currentReleaseId }, key());
     const preview = await demo.previewSite(site!.id, SPEC);
     const { api, calls } = client([
       json(200, preview),
@@ -109,8 +119,9 @@ describe("http client sites", () => {
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ spec: SPEC });
 
     const publishKey = key();
-    expect((await api.publishSite(site!.id, SPEC, publishKey)).edge).toBe("synced");
+    expect((await api.publishSite({ siteId: site!.id, spec: SPEC, expectedCurrentReleaseId: site!.currentReleaseId }, publishKey)).edge).toBe("synced");
     expect(calls[1]!.url).toBe(`https://api.example.test/v1/sites/${site!.id}/releases`);
+    expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ spec: SPEC, expectedCurrentReleaseId: site!.currentReleaseId });
     expect(headers(calls[1]!.init)["Idempotency-Key"]).toBe(publishKey.idempotencyKey);
 
     const input = { siteId: site!.id, releaseId: published.result.release.id, expectedCurrentReleaseId: site!.currentReleaseId };
@@ -127,7 +138,7 @@ describe("http client sites", () => {
 
   it("refuses a publish without a caller-owned key, and maps a stale_release 409", async () => {
     const { api, calls } = client([json(409, { error: { code: "Conflict", message: "stale", details: { reason: "stale_release" } } })]);
-    await expect(api.publishSite(DEMO_SITE_ID, SPEC, {} as never)).rejects.toThrow(TypeError);
+    await expect(api.publishSite({ siteId: DEMO_SITE_ID, spec: SPEC, expectedCurrentReleaseId: null }, {} as never)).rejects.toThrow(TypeError);
     expect(calls).toHaveLength(0);
     const error = await api.activateSiteRelease(
       { siteId: DEMO_SITE_ID, releaseId: DEMO_SITE_ID, expectedCurrentReleaseId: null }, key()).catch((caught: unknown) => caught);

@@ -232,19 +232,30 @@ customer or title, so live mode shows them as "Appointment".
 
 Site: the Site page reads `/v1/sites` and shows the first site, its live version and
 History. Only owners see it; staff get "Owners publish the website", and a 404 (the API
-runs without `SITES_STORE`) says publishing is not switched on yet. "Edit site" starts from
-the live version's spec (`{ kind: "plain", title, tagline, sections }`). Preview posts to
+runs without `SITES_STORE`) says publishing is not switched on yet. Version numbers are the
+API's `number` (1, 2, 3 per site, never reused), not positions in the list. "Edit site"
+starts from the live version's spec (`{ kind: "plain", title, tagline, sections }`) and
+checks the API's limits before sending: title 120, tagline 200, heading 120 and text 2,000
+characters after trimming, and a publish body of at most 64 KiB in UTF-8, the cap of the
+proxy and the API (`src/components/site/draft.ts`). Preview posts to
 `/v1/sites/:id/preview`, which compiles without saving, and shows the page in an iframe
-with `sandbox=""` (no scripts, forms or same-origin access). Publish posts a new release,
-which goes live in the same action; its key belongs to the site and spec. "Make live" on an
-older version sends the release the page last saw as live (`expectedCurrentReleaseId`): a
-409 `stale_release` (`isStaleRelease`) means another version went live since, so the page
-says so and reloads History. When the API answers `edge: "pending"` the database moved but
-the site's host pointer did not, so the page says the site still shows the previous version
-and offers "Update the site now" (`/v1/sites/:id/sync`). Preview and sync change nothing,
-so they send no `Idempotency-Key`. The demo adapter (`src/lib/api/demo/sites.ts`) builds the
-same plain page in the browser and exposes `rollBackElsewhere()` and `setSiteEdgeDown()` on
-`window.__zsDemo` for tests. `e2e:live` runs the API with `SITES_STORE=memory`.
+with `sandbox=""` (no scripts, forms or same-origin access); a preview whose draft changed
+since is not shown. Publish and "Make live" both send the release that was live when the
+editor or dialog opened (`expectedCurrentReleaseId`): a 409 `stale_release`
+(`isStaleRelease`) means another version went live since, so nothing is replaced. The
+editor keeps the draft and says to reopen it; the rollback dialog closes and History
+reloads. Their intent keys are held by the page, so a retry after a lost answer replays
+even after the dialog was closed and reopened, and a late answer updates the page but
+never closes a newer opening (`useDialogGeneration`). When the API answers
+`edge: "pending"` the database moved but the site's host pointer did not, so the page says
+the site still shows the previous version and offers "Update the site now"
+(`/v1/sites/:id/sync`). That state is a query per site (`useSiteEdge`): set by every
+publish, rollback and sync, and asked once with a sync when the page first opens, so it
+survives leaving the page. Preview and sync change nothing, so they send no
+`Idempotency-Key`. The demo adapter (`src/lib/api/demo/sites.ts`) builds the same plain
+page in the browser and exposes `rollBackElsewhere()`, `setSiteEdgeDown()`,
+`delayNextSiteWrite()` and `loseNextSiteAnswer()` on `window.__zsDemo` for tests.
+`e2e:live` runs the API with `SITES_STORE=memory`.
 
 `TODO(api)`: results, usage, inbox, agents, connections and plan have no API yet.
 Live mode still reads them from the demo workspace.
