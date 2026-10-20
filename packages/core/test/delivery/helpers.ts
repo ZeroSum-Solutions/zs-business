@@ -18,6 +18,7 @@ import {
   type ActionHandler,
   type ApprovalStanding,
   type DeliveryApprovals,
+  type DeliveryProvider,
   type DeliveryWorkerConfig,
   type DispatchContext,
   type FakeProvider,
@@ -84,7 +85,7 @@ export interface DeliveryHarness {
   provider: FakeProvider;
   approvals: ReturnType<typeof fakeApprovals>;
   service<T>(work: (tx: Transaction) => Promise<T>): Promise<T>;
-  worker(overrides?: Partial<DeliveryWorkerConfig>, provider?: FakeProvider): ReturnType<typeof createDeliveryWorker>;
+  worker(overrides?: Partial<DeliveryWorkerConfig>, provider?: DeliveryProvider): ReturnType<typeof createDeliveryWorker>;
   /** A contact with optional consent rows. */
   contact(tenantId: string, input?: { email?: string | null; phone?: string | null; consent?: Partial<Record<DeliveryChannel, "granted" | "denied">> }): Promise<string>;
   credit(tenantId: string, amount: number): Promise<void>;
