@@ -186,6 +186,7 @@ describe("contact create/find on the runtime database", () => {
       }
     };
     const dbFor = (me: number): ScopedDatabase => ({
+      ...h.database.db,
       tenant: (tenantId, work) => h.database.db.tenant(tenantId, (tx) => {
         const run = tx.query.bind(tx) as (...args: unknown[]) => Promise<unknown>;
         let held = false;
@@ -226,6 +227,7 @@ describe("contact create/find on the runtime database", () => {
     // Commit a competing contact on another connection after the handler's lookup and before its insert,
     // so only the unique index (23505) can arbitrate. The advisory identity locks do not stop this writer.
     const db: ScopedDatabase = {
+      ...h.database.db,
       tenant: (tenantId, work) => h.database.db.tenant(tenantId, (tx) => {
         const run = tx.query.bind(tx) as (...args: unknown[]) => Promise<unknown>;
         const query = async (...args: unknown[]) => {

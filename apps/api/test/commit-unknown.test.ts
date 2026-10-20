@@ -61,6 +61,7 @@ describe("a COMMIT whose reply is lost at the deadline", () => {
     const inner = createScopedDatabase(pool);
     const failures: unknown[] = [];
     const db: ScopedDatabase = {
+      ...inner,
       tenant: (tenantId, work, options) => inner.tenant(tenantId, work, options)
         .catch((error: unknown) => { failures.push(error); throw error; }),
     };
@@ -176,6 +177,7 @@ describe("a public booking request under the request deadline", () => {
     const held = new Promise<void>((resolve) => { holding = resolve; });
     const runtime = createScopedDatabase(h.database.runtimePool);
     const slow: ScopedDatabase = {
+      ...runtime,
       tenant: (tenantId, work, options) => runtime.tenant(tenantId, (tx) => {
         let first = true;
         const gated: Transaction = {
