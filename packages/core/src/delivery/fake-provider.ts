@@ -37,6 +37,8 @@ export function createFakeProvider(options: {
   readonly clock: { now(): Date };
   readonly name?: string;
   readonly dedupeWindowMs?: number;
+  /** For `dedupeWindowMs: 0`: how long an unknown outcome waits for lookup evidence (D-8). */
+  readonly outcomeWaitMs?: number;
   /** False leaves out lookup, like a provider without a status API. */
   readonly lookup?: boolean;
   readonly channels?: readonly DeliveryChannel[];
@@ -84,6 +86,7 @@ export function createFakeProvider(options: {
   const provider: FakeProvider = {
     name: options.name ?? "fake",
     dedupeWindowMs,
+    ...(options.outcomeWaitMs === undefined ? {} : { outcomeWaitMs: options.outcomeWaitMs }),
     queue: (...behaviours) => { script.push(...behaviours); },
     delivered,
     calls,
