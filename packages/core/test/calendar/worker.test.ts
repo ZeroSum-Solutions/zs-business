@@ -713,6 +713,22 @@ describe("bookings out (G-10)", () => {
     expect((await h.worker(w.google, w.clock).runOnce()).pushesFailed).toBe(1);
     expect(await h.push(w.resource.tenantId, bookingId)).toMatchObject({ status: "failed", attempts: 1, last_error: "google_403_forbidden" });
   });
+
+  it("a disconnect during a push batch sends none of the pushes the batch has not started", async () => {
+    const w = await world();
+    const tenantId = w.resource.tenantId;
+    const bookings = [await h.booking(w.resource, "2026-10-22T10:00:00.000Z"), await h.booking(w.resource, "2026-10-22T12:00:00.000Z")];
+    // The owner disconnects while the first insert is in flight.
+    w.google.fail("insertEvent", async () => {
+      await h.service((tx) => tx.query("UPDATE calendar_connections SET status='disconnecting' WHERE tenant_id=$1 AND id=$2",
+        [tenantId, w.connectionId]));
+    });
+    expect(await h.worker(w.google, w.clock).runOnce()).toMatchObject({ pushesQueued: 2, pushed: 1, lostLeases: 1 });
+    expect(w.google.count("insertEvent")).toBe(1);
+    const pushes = await Promise.all(bookings.map((id) => h.push(tenantId, id)));
+    expect(pushes.map((push) => push.status).sort()).toEqual(["pending", "pushed"]);
+    expect(pushes.find((push) => push.status === "pending")).toMatchObject({ pushed_at: null, google_event_id: expect.any(String) });
+  });
 });
 
 describe("deadline (G-10)", () => {
@@ -765,6 +781,60 @@ describe("deadline (G-10)", () => {
     expect(pushes.map((push) => push.status).sort()).toEqual(["pending", "pushed"]);
     expect(pushes.find((push) => push.status === "pending")).toMatchObject({ attempts: 0, lease_until: null, last_error: null });
     expect((await worker.runOnce()).pushed).toBe(1);
+  });
+
+  it("a list that pages past the deadline stops there: a later connection goes back unchanged", async () => {
+    const w = await world({ pageSize: 2 });
+    const tenantId = w.resource.tenantId;
+    w.google.put(w.token, timed("first", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const second = await h.resource(tenantId);
+    const secondToken = w.google.account();
+    for (let index = 0; index < 5; index += 1)
+      w.google.put(secondToken, timed(`p${index}`, `2026-10-2${index + 1}T10:00:00Z`, `2026-10-2${index + 1}T10:30:00Z`));
+    const secondConnection = await h.connection(second, secondToken, START);
+    // The first connection is claimed first; the second one's first page outlasts the deadline.
+    await h.service((tx) => tx.query("UPDATE calendar_connections SET next_sync_at=$3 WHERE tenant_id=$1 AND id=$2",
+      [tenantId, w.connectionId, new Date(START - MINUTE)]));
+    const before = await h.connectionRow(tenantId, secondConnection);
+    w.google.fail("listEvents", () => {}, () => { w.clock.advance(2 * MINUTE); });
+    const reports: CalendarWorkerReport[] = [];
+    const worker = h.worker(w.google, w.clock, {}, reports);
+    expect(await worker.runOnce({ deadline: new Date(START + MINUTE) }))
+      .toMatchObject({ synced: 1, deadlineStops: 1, syncFailed: 0 });
+    expect(w.google.count("listEvents")).toBe(2);
+    expect(reports).toContainEqual({ kind: "deadline_reached", tenantId, connectionId: secondConnection });
+    expect(await h.connectionRow(tenantId, secondConnection)).toMatchObject({
+      lease_until: null, next_sync_at: before.next_sync_at, last_synced_at: null, last_error: null, sync_token: null,
+    });
+    expect(await h.blocks(tenantId, secondConnection)).toEqual([]);
+    // The next run takes it first, with a whole budget.
+    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + MINUTE) })).toMatchObject({ synced: 1, deadlineStops: 0 });
+    expect((await h.blocks(tenantId, secondConnection)).length).toBe(5);
+  });
+
+  it("a connection cut by the deadline while first in the pass backs off instead of taking every run", async () => {
+    const w = await world({ pageSize: 2 });
+    for (let index = 0; index < 5; index += 1)
+      w.google.put(w.token, timed(`p${index}`, `2026-10-2${index + 1}T10:00:00Z`, `2026-10-2${index + 1}T10:30:00Z`));
+    w.google.fail("listEvents", () => { w.clock.advance(2 * MINUTE); });
+    const worker = h.worker(w.google, w.clock);
+    expect(await worker.runOnce({ deadline: new Date(START + MINUTE) })).toMatchObject({ synced: 0, syncFailed: 1, deadlineStops: 0 });
+    expect(w.google.count("listEvents")).toBe(1);
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ lease_until: null, last_error: "run_deadline", sync_token: null });
+    expect(row.next_sync_at.getTime()).toBeGreaterThan(w.clock.now().getTime());
+    expect(await h.blocks(w.resource.tenantId, w.connectionId)).toEqual([]);
+  });
+
+  it("bounds each Google call by the time the run has left", async () => {
+    const w = await world({ delayMs: 400 });
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const worker = h.worker(w.google, w.clock);
+    // 50 ms left: the 10 s request timeout would outlast the run, so the call ends with the deadline.
+    const started = Date.now();
+    expect(await worker.runOnce({ deadline: new Date(START + 50) })).toMatchObject({ synced: 0, syncFailed: 1 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ lease_until: null, last_error: "run_deadline" });
   });
 });
 

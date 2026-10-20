@@ -1,6 +1,6 @@
 # M5: Google Calendar busy sync
 
-Status: draft contract for M5, provider 3 (2026-10-20), revision 2. Code follows this file; a
+Status: draft contract for M5, provider 3 (2026-10-20), revision 3. Code follows this file; a
 change to a numbered rule needs a new revision of this file first.
 
 Scope: an owner connects one Google Calendar to one booking resource. Busy time on that
@@ -48,7 +48,10 @@ sets the variables in G-12.
 
 **G-1. Connecting.** `POST /v1/calendar/google/connect { resourceId }` with an
 `Idempotency-Key`, owners only (`publish`: it decides what the public pages offer), answers
-`{ authorizeUrl }` and changes nothing. The connection ID derives from the tenant and the key.
+`{ authorizeUrl }` and changes nothing. The connection ID derives from the tenant and the key,
+so a key names one connection: once that connection exists, the key answers 409 for another
+resource or for a connection no longer `active`, and the callback reads a state whose resource
+differs from the row's as `conflict`, never `connected`.
 `state` is a signed token (HMAC-SHA-256 by `GOOGLE_STATE_SECRET`, `previous` verifying through
 a rotation) naming the tenant, the member, the resource, the connection ID and an expiry 10
 minutes ahead. The PKCE verifier derives from the state secret and the connection ID, so nothing
@@ -145,9 +148,14 @@ customer data), the booking's start and end, `transparency: opaque` and
 `extendedProperties.private` `zs_booking`, `zs_tenant` and `zs_resource`. 200 or 409 marks it
 `pushed`; a 5xx, 429, 401 (the grant went away mid-pass; the next refresh decides `reauthorize`) or
 network error retries with backoff; another refusal, or 8 failed attempts, marks it `failed` with
-the error code. A worker run stops claiming new work once its deadline passes, so a run ends
-inside the function's time limit; the cron entry refuses a `CALENDAR_RUN_BUDGET_MS` over 20 s,
-since Vercel stops its function at 30 s.
+the error code. Before each insert the worker checks that the push still holds its lease and its
+connection is still `active`, so a disconnect during a batch sends none of the pushes it has not
+started. A worker run stops claiming new work once its deadline passes, so a run ends inside the
+function's time limit: each Google call is bounded by the time the run has left, and a list cut by
+the deadline writes nothing. A connection cut that way after others in the pass goes back with
+its lease released and `next_sync_at` unchanged, so the next run takes it first; one cut while
+first in the pass is too slow for a run and backs off as a failed sync (`run_deadline`). The cron
+entry refuses a `CALENDAR_RUN_BUDGET_MS` over 20 s, since Vercel stops its function at 30 s.
 
 **G-11. Tenancy.** `calendar_connections` and `calendar_pushes` have `tenant_id`, forced RLS and
 the tenant policy, and are in the catalog isolation test; every relationship includes
@@ -166,7 +174,7 @@ that may `SET ROLE service_role`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_API_BASE_URL`) exist for tests. In Google Cloud: an OAuth client (web), the Calendar API
 enabled, the consent screen with the three scopes, and the webhook domain verified for push.
 
-## Known limits (revision 2)
+## Known limits (revision 3)
 
 - One calendar (`primary`) per resource, one resource per connection.
 - Bookings are only pushed, never updated or deleted in Google (bookings have no cancellation yet).

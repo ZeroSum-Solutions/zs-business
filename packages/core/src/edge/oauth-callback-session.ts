@@ -65,12 +65,14 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
 
       /**
        * Whether this flow's connection already exists: a reload, or a second tab that won. Only an
-       * active row counts as connected; one since retired or needing reauthorization is a conflict.
+       * active row for this state's resource counts as connected; one since retired, needing
+       * reauthorization, or made for another resource under a reused key is a conflict.
        */
       const existing = () => deps.db.tenant(tenantId, async (tx): Promise<Existing> => {
         await requireMember(tx, tenantId, actorId, "publish");
         const found = await getCalendarConnection(tx, tenantId, connectionId);
-        return !found ? "none" : found.status === "active" ? "active" : "other";
+        if (!found) return "none";
+        return found.status === "active" && found.resourceId === state.resourceId ? "active" : "other";
       });
       try {
         // Before the code is spent: a member who may no longer connect is refused, and a reload

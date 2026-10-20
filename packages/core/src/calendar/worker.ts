@@ -75,6 +75,7 @@ export type CalendarWorkerReport =
   | { readonly kind: "channel_failed"; readonly tenantId: string; readonly connectionId: string; readonly code: string }
   | { readonly kind: "push_failed"; readonly tenantId: string; readonly connectionId: string; readonly bookingId: string; readonly code: string; readonly final: boolean }
   | { readonly kind: "lost_lease"; readonly tenantId: string; readonly connectionId: string; readonly bookingId?: string }
+  | { readonly kind: "deadline_reached"; readonly tenantId: string; readonly connectionId: string }
   | { readonly kind: "step_failed"; readonly step: "notifications" | "disconnects" | "sync" | "pushes"; readonly tenantId?: string; readonly connectionId?: string; readonly error: string };
 
 export interface CalendarWorkerDeps {
@@ -99,6 +100,8 @@ export interface CalendarRunCounts {
   syncFailed: number;
   reauthorized: number;
   lostLeases: number;
+  /** Connections the run's deadline cut mid-list and handed back unchanged (G-10). */
+  deadlineStops: number;
   /** d. */
   channelsOpened: number;
   channelsStopped: number;
@@ -112,7 +115,7 @@ export interface CalendarRunCounts {
 
 const emptyCounts = (): CalendarRunCounts => ({
   notifications: 0, markedDue: 0, disconnected: 0, disconnectRetries: 0, synced: 0, syncFailed: 0, reauthorized: 0,
-  lostLeases: 0, channelsOpened: 0, channelsStopped: 0, channelFailures: 0, pushesQueued: 0, pushed: 0,
+  lostLeases: 0, deadlineStops: 0, channelsOpened: 0, channelsStopped: 0, channelFailures: 0, pushesQueued: 0, pushed: 0,
   pushRetries: 0, pushesFailed: 0,
 });
 
@@ -129,6 +132,11 @@ const GRANT_GONE = new Set(["invalid_grant", "token_unreadable"]);
 
 class LostLease extends Error {
   constructor() { super("Lease lost"); this.name = "LostLease"; }
+}
+
+/** G-10: the run's deadline came while a connection was still listing; nothing of it is written. */
+class DeadlineReached extends Error {
+  constructor() { super("Run deadline reached"); this.name = "DeadlineReached"; }
 }
 
 interface ConnectionRow {
@@ -188,15 +196,21 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
   /** G-10: once a run's deadline passes it claims no new work. */
   const past = (deadline?: Date) => deadline !== undefined && nowMs() >= deadline.getTime();
 
-  /** One Google call with the configured deadline; anything but a typed failure is retryable. */
-  async function call<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  /**
+   * One Google call with the configured timeout, cut shorter by a run deadline when one is given;
+   * anything but a typed failure is retryable.
+   */
+  async function call<T>(work: (signal: AbortSignal) => Promise<T>, runDeadline?: Date): Promise<T> {
+    const left = runDeadline === undefined ? Infinity : runDeadline.getTime() - nowMs();
+    if (left <= 0) throw new DeadlineReached();
+    const cut = left < config.requestTimeoutMs;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         controller.abort();
-        reject(new GoogleRequestFailed("google_timeout", true));
-      }, config.requestTimeoutMs);
+        reject(cut ? new DeadlineReached() : new GoogleRequestFailed("google_timeout", true));
+      }, cut ? left : config.requestTimeoutMs);
     });
     try {
       return await Promise.race([
@@ -212,7 +226,9 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
 
   /** Google failures keep their code; anything else is the worker's own error, retried. */
   const classify = (error: unknown): { code: string; retry: boolean } =>
-    error instanceof GoogleRequestFailed ? { code: codeText(error.code), retry: error.retry } : { code: "worker_error", retry: true };
+    error instanceof GoogleRequestFailed ? { code: codeText(error.code), retry: error.retry }
+      : error instanceof DeadlineReached ? { code: "run_deadline", retry: true }
+      : { code: "worker_error", retry: true };
 
   /** Wait before retrying something that has been failing since `since`: it grows with the outage. */
   const retryDelay = (since: Date | null, at: number) =>
@@ -419,6 +435,9 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
            c.channel_id, c.channel_resource_id, c.channel_expires_at, r.time_zone`,
         [new Date(at), config.claimLimit, new Date(at + config.leaseMs)])).rows;
     });
+    // RETURNING keeps no order: the longest overdue goes first, which a deadline cut relies on.
+    rows.sort((a, b) => a.next_sync_at.getTime() - b.next_sync_at.getTime()
+      || (a.tenant_id < b.tenant_id ? -1 : a.tenant_id > b.tenant_id ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     for (const [index, row] of rows.entries()) {
       if (past(deadline)) {
         await releaseConnections(rows.slice(index));
@@ -426,8 +445,17 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       }
       const lease = { until: row.lease_until };
       try {
-        await syncOne(row, lease, counts, tokens);
+        await syncOne(row, lease, counts, tokens, deadline);
       } catch (error) {
+        // G-10: a later connection cut by the deadline goes back as it was, so the next run takes it
+        // first with a whole budget. One cut while first in the pass is too slow for a run and
+        // backs off as a failed sync instead of taking every run's budget.
+        if (error instanceof DeadlineReached && index > 0) {
+          await releaseConnections([{ ...row, lease_until: lease.until }, ...rows.slice(index + 1)]);
+          counts.deadlineStops += 1;
+          report({ kind: "deadline_reached", tenantId: row.tenant_id, connectionId: row.id });
+          break;
+        }
         await syncFailed(row, lease.until, error, counts).catch((failure: unknown) =>
           report({ kind: "step_failed", step: "sync", tenantId: row.tenant_id, connectionId: row.id, error: errorMessage(failure) }));
       }
@@ -447,8 +475,8 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     lease.until = next;
   }
 
-  async function listAll(access: string, row: ConnectionRow, lease: { until: Date }, syncToken: string | null,
-    aheadMs = FULL_AHEAD_MS): Promise<Listing> {
+  async function listAll(access: string, row: ConnectionRow, lease: { until: Date }, deadline: Date | undefined,
+    syncToken: string | null, aheadMs = FULL_AHEAD_MS): Promise<Listing> {
     const at = nowMs();
     const window = syncToken !== null ? null : { start: at - DAY, end: at + aheadMs };
     const base = window === null
@@ -458,7 +486,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     let pageToken: string | null = null;
     for (let page = 0; page < config.maxPages; page += 1) {
       const query: ListEventsQuery = pageToken === null ? base : { ...base, pageToken };
-      const result: GoogleEventPage = await call((signal) => deps.google.listEvents(access, query, { signal }));
+      const result: GoogleEventPage = await call((signal) => deps.google.listEvents(access, query, { signal }), deadline);
       events.push(...result.items);
       if (!result.nextPageToken) {
         const token = result.nextSyncToken;
@@ -473,30 +501,31 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     return { mode: syncToken !== null ? "incremental" : "full", events, nextSyncToken: null, complete: false, window };
   }
 
-  async function syncOne(row: ConnectionRow, lease: { until: Date }, counts: CalendarRunCounts, tokens: Tokens): Promise<void> {
+  async function syncOne(row: ConnectionRow, lease: { until: Date }, counts: CalendarRunCounts, tokens: Tokens,
+    deadline?: Date): Promise<void> {
     const access = await accessToken(tokens, row);
     const startedAt = nowMs();
     const incremental = row.sync_token !== null && row.last_full_sync_at !== null
       && startedAt - row.last_full_sync_at.getTime() < config.fullSyncIntervalMs;
     let listing: Listing;
     try {
-      listing = await listAll(access, row, lease, incremental ? row.sync_token : null);
+      listing = await listAll(access, row, lease, deadline, incremental ? row.sync_token : null);
     } catch (error) {
       // G-6: an expired sync token means a full list, in this same pass.
       if (!(incremental && error instanceof GoogleRequestFailed && (error.code === "sync_token_expired" || error.status === 410))) throw error;
-      listing = await listAll(access, row, lease, null);
+      listing = await listAll(access, row, lease, deadline, null);
     }
     // G-6: a full list cut short by the page cap; a complete near list still settles its window.
     // Either way no sync token is stored, so the next sync is full again.
     if (listing.mode === "full" && !listing.complete) {
       await renewLease(row, lease);
-      const near = await listAll(access, row, lease, null, NEAR_AHEAD_MS);
+      const near = await listAll(access, row, lease, deadline, null, NEAR_AHEAD_MS);
       if (near.complete) listing = { ...listing, near };
     }
 
     // d. G-8: open or renew the watch channel while the access token is fresh.
     let opened: { id: string; resourceId: string; expiresAt: Date } | null = null;
-    if (config.webhookUrl && (row.channel_expires_at === null
+    if (config.webhookUrl && !past(deadline) && (row.channel_expires_at === null
       || row.channel_expires_at.getTime() <= nowMs() + config.channelRenewBeforeMs)) {
       // verifyChannelToken (G-8) reads channel IDs in lower case.
       const channelId = deps.generateId().toLowerCase();
@@ -693,10 +722,27 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     return counts;
   }
 
+  /** The push still holds its lease and its connection is still active. */
+  async function stillPushable(push: PushRow): Promise<boolean> {
+    const found = await deps.service((tx) => tx.query(
+      `SELECT 1 FROM calendar_pushes p
+         JOIN calendar_connections c ON c.tenant_id=p.tenant_id AND c.id=p.connection_id AND c.status='active'
+        WHERE p.tenant_id=$1 AND p.connection_id=$2 AND p.booking_id=$3 AND p.lease_until=$4 AND p.status='pending'`,
+      [push.tenant_id, push.connection_id, push.booking_id, push.lease_until]));
+    return found.rowCount === 1;
+  }
+
   async function pushOne(push: PushRow, counts: CalendarRunCounts, tokens: Tokens): Promise<void> {
     let outcome: { status: "pushed" } | { status: "pending" | "failed"; code: string };
     try {
       const access = await accessToken(tokens, { tenant_id: push.tenant_id, id: push.connection_id, refresh_token_sealed: push.refresh_token_sealed });
+      // G-10: push only for an active connection. A disconnect during this batch fails the push
+      // (G-9) or retires the connection; either way the claimed push is not sent.
+      if (!(await stillPushable(push))) {
+        counts.lostLeases += 1;
+        report({ kind: "lost_lease", tenantId: push.tenant_id, connectionId: push.connection_id, bookingId: push.booking_id });
+        return;
+      }
       await call((signal) => deps.google.insertEvent(access, push.calendar_id, {
         id: push.google_event_id,
         summary: config.eventTitle,

@@ -385,6 +385,33 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     expect(revoked()).toHaveLength(revokes);
   });
 
+  it("binds a connect key to its resource: reused for another, it is refused and never reads as connected", async () => {
+    const key = randomUUID();
+    const first = await newResource(h.a.tenantId);
+    const other = await newResource(h.a.tenantId);
+    // Two states for one key, both signed before the connection exists.
+    const flow = await consentFor(h.a, first, key);
+    const stale = await consentFor(h.a, other, key);
+    const back = await consent(flow.authorizeUrl);
+    expect(landing(await callback({ state: back.get("state")!, code: back.get("code")! }))).toEqual({ calendar: "connected" });
+    // Once the key's connection exists, the key starts no flow for another resource.
+    const reused = await startConnect(h.a.token, other, key);
+    expect(reused.status).toBe(409);
+    expect(reused.body).toMatchObject({ error: { code: "Conflict", details: { reason: "idempotency_key_reused" } } });
+    // The other resource's state lands on the first resource's row: a conflict, before the code is spent.
+    const calls = tokenCalls();
+    const staleBack = await consent(stale.authorizeUrl);
+    expect(landing(await callback({ state: staleBack.get("state")!, code: staleBack.get("code")! })))
+      .toEqual({ calendar: "error", reason: "conflict" });
+    expect(tokenCalls()).toBe(calls);
+    expect((await row(h.a.tenantId, flow.connectionId))!.resource_id).toBe(first);
+    // The same resource still answers as it did; a retired connection's key starts no new flow.
+    expect((await startConnect(h.a.token, first, key)).status).toBe(200);
+    await h.fixture.service((tx) => tx.query("UPDATE calendar_connections SET status='disconnecting' WHERE tenant_id=$1 AND id=$2",
+      [h.a.tenantId, flow.connectionId]));
+    expect((await startConnect(h.a.token, first, key)).status).toBe(409);
+  });
+
   it("refuses a member demoted to staff before the callback, before the code is spent", async () => {
     const owner = await signedInMember(h.database, h.fixture, h.a.tenantId, "owner");
     const flow = await consentFor(owner, await newResource(h.a.tenantId));

@@ -29,6 +29,7 @@ import {
   inviteMemberRequestSchema,
   linkIntakeItemRequestSchema,
   memberOutputSchema,
+  IdempotencyConflict,
   NotFound,
   removeMemberOutputSchema,
   TenantDenied,
@@ -96,7 +97,7 @@ import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } fro
 import { getWallet } from "../wallet/index.js";
 import { getTopUp, listTopUps, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
-import { calendarHandlers, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
+import { calendarHandlers, getCalendarConnection, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
 import { OAUTH_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signOAuthState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
 import type { GoogleClient } from "../calendar/types.js";
 import { derivedId } from "./ids.js";
@@ -566,6 +567,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       await read("publish", async (tx) => {
         if (!(await resourceInTenant(tx, tenantId, request.resourceId)))
           throw new TenantDenied("Booking resource is not owned by this tenant");
+        // The key names one connection: reused for another resource, or after that connection
+        // retired, it would only end at a consent screen that answers `conflict`.
+        const found = await getCalendarConnection(tx, tenantId, connectionId);
+        if (found && (found.resourceId !== request.resourceId || found.status !== "active"))
+          throw new IdempotencyConflict("Idempotency key belongs to another calendar connection");
       });
       const secret = calendar.stateSecrets.current;
       const state = signOAuthState(secret, {
