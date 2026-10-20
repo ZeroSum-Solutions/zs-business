@@ -43,6 +43,7 @@ export {
 export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandlers } from "./sources/index.js";
 export * from "./delivery/index.js";
 export * from "./billing/index.js";
+export * from "./calendar/index.js";
 export {
   captureReservation,
   creditWallet,

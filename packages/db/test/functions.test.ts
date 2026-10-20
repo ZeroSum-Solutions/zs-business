@@ -45,6 +45,8 @@ const expectedPath: Record<string, string> = {
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_windows_valid(jsonb)": "pg_catalog, pg_temp",
+  // M5 (20261020630000_google_calendar.sql): the runtime status guard on calendar connections.
+  "calendar_connections_runtime_guard()": "pg_catalog, pg_temp",
   // M3c (20261020200000_inbox_home.sql): the won-date and reply-guard triggers.
   "crm_deals_won_at()": "pg_catalog, pg_temp",
   "inbox_replies_guard()": "pg_catalog, pg_temp",
