@@ -5,11 +5,12 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
-import { parseCalendarEnv } from "./calendar/config.js";
+import { assertCalendarCronFits, parseCalendarEnv } from "./calendar/config.js";
 import { startCalendarRunner } from "./calendar/start.js";
 import { cronRoutes } from "./delivery/cron.js";
 
 const env = parseCalendarEnv(process.env);
+assertCalendarCronFits(env.runner);
 const clock = { now: () => new Date() };
 const runner = env.runner === null ? null : startCalendarRunner(env.runner, { clock, generateId: randomUUID }).runner;
 

@@ -3,7 +3,7 @@
 // never values.
 import { describe, expect, it } from "vitest";
 import { generateSealKeyPair } from "@zs/core";
-import { parseCalendarEnv } from "../src/calendar/config.js";
+import { assertCalendarCronFits, parseCalendarEnv } from "../src/calendar/config.js";
 import { parseServerEnv } from "../src/config.js";
 import { PLACEHOLDER_CRON_SECRET } from "../src/delivery/config.js";
 import { SECRET } from "./helpers.js";
@@ -202,6 +202,14 @@ describe("parseCalendarEnv (G-12)", () => {
       ["CALENDAR_INTERVAL_MS", "abc", /CALENDAR_INTERVAL_MS/],
     ];
     for (const [name, value, pattern] of cases) expect(calendarError({ ...ON, [name]: value }), name).toMatch(pattern);
+  });
+
+  it("lets the Node worker take a long budget, but the cron entry at most 20 s inside its 30 s function", () => {
+    const long = parseCalendarEnv({ ...ON, CALENDAR_RUN_BUDGET_MS: "60000" }).runner;
+    expect(long).toMatchObject({ budgetMs: 60_000 });
+    expect(() => assertCalendarCronFits(long)).toThrow(/CALENDAR_RUN_BUDGET_MS must be at most 20000 for the cron function/);
+    expect(() => assertCalendarCronFits(parseCalendarEnv(ON).runner)).not.toThrow();
+    expect(() => assertCalendarCronFits(parseCalendarEnv({}).runner)).not.toThrow();
   });
 
   it("needs DATABASE_CA_CERT for a database that is not on loopback, and no query string", () => {

@@ -6,7 +6,7 @@ import type { KeyObject } from "node:crypto";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { parseSealPrivateKey, type GoogleClientConfig } from "@zs/core";
-import { PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
+import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
 import { formatIssues, googleClientFromVariables, googleClientVariables, signingSecretVariable } from "./google-env.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -32,7 +32,7 @@ const onSchema = z.object({
   GOOGLE_WEBHOOK_URL: z.url({ protocol: /^https$/, error: "must be an https URL" }).optional(),
   // G-10: the summary of every pushed event; no customer data.
   GOOGLE_EVENT_TITLE: z.string().trim().min(1, "must not be blank").max(200, "must be at most 200 characters").optional(),
-  // One cron run stops starting passes this long after it began.
+  // One run stops claiming work this long after it began; the cron entry allows at most 20 s.
   CALENDAR_RUN_BUDGET_MS: int(1_000, 600_000).default(20_000),
   // The Node worker's pause between runs.
   CALENDAR_INTERVAL_MS: int(1_000, 3_600_000).default(60_000),
@@ -56,6 +56,15 @@ export interface CalendarEnv {
   readonly runner: CalendarRunnerEnv | null;
   /** Null when CRON_SECRET is unset: the cron route answers 404. */
   readonly cronSecret: string | null;
+}
+
+/**
+ * The cron entry refuses a budget its Vercel function (stopped at 30 s) could not finish. Work
+ * claimed before the deadline may still run past it; a run cut short is safe (leases, G-6).
+ */
+export function assertCalendarCronFits(runner: CalendarRunnerEnv | null): void {
+  if (runner !== null && runner.budgetMs > DELIVERY_CRON_BUDGET_LIMIT_MS)
+    throw new Error(`Invalid environment: CALENDAR_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
 
 export function parseCalendarEnv(env: Readonly<Record<string, string | undefined>>): CalendarEnv {

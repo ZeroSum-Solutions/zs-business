@@ -145,7 +145,8 @@ customer data), the booking's start and end, `transparency: opaque` and
 `pushed`; a 5xx, 429, 401 (the grant went away mid-pass; the next refresh decides `reauthorize`) or
 network error retries with backoff; another refusal, or 8 failed attempts, marks it `failed` with
 the error code. A worker run stops claiming new work once its deadline passes, so a run ends
-inside the function's time limit.
+inside the function's time limit; the cron entry refuses a `CALENDAR_RUN_BUDGET_MS` over 20 s,
+since Vercel stops its function at 30 s.
 
 **G-11. Tenancy.** `calendar_connections` and `calendar_pushes` have `tenant_id`, forced RLS and
 the tenant policy, and are in the catalog isolation test; every relationship includes

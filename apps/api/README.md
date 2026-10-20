@@ -633,7 +633,7 @@ connections (revoke, remove blocks). It alone holds the token private key. Off u
 | `GOOGLE_WEBHOOK_URL` | Optional: `https://<api host>/webhooks/google/calendar`. Unset, no channels are opened and syncs run on the poll interval only. |
 | `GOOGLE_EVENT_TITLE` | Optional: the title of every pushed event, default `Booked`. No customer data. |
 | `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | Optional, for tests. |
-| `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS` | Optional tuning: 20000 and 60000 (Node worker only). |
+| `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS` | Optional tuning: 20000 and 60000 (Node worker only). The cron function allows a budget of at most 20000. |
 | `CALENDAR_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/calendar`. Unset, there is no cron. |
 
 `GET /cron/calendar` answers like `/cron/delivery`, with `{ ran: true, passes, counts,
