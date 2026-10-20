@@ -199,6 +199,7 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `POST /v1/sites` `{ name }` | 201 site, not yet published |
 | `GET /v1/sites/:id` | one site with its live release, pointer version and hosts |
 | `POST /v1/sites/:id/releases` `{ spec }` | 201 `{ actionId, result: { site, release }, edge }`: compiled, stored and live |
+| `POST /v1/sites/:id/preview` `{ spec }` | what publishing would serve (`entry`, `digest`, `files`, `entryHtml`); stores and records nothing |
 | `GET /v1/sites/:id/releases` | `{ items: Release[] }`, newest first, up to 100 |
 | `GET /v1/sites/:id/releases/:releaseId` | one release with its spec and files |
 | `POST /v1/sites/:id/releases/:releaseId/activate` `{ expectedCurrentReleaseId }` | 200, the rollback; 409 `stale_release` when another release went live since |

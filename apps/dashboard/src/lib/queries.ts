@@ -42,7 +42,10 @@ export const keys = {
   checklist: ["ws", "checklist"] as const,
   threads: ["ws", "threads"] as const,
   thread: (id: string) => ["ws", "thread", id] as const,
-  sitePages: ["ws", "site"] as const,
+  sites: ["sites", "list"] as const,
+  siteReleases: (siteId: string) => ["sites", "releases", siteId] as const,
+  siteRelease: (siteId: string, releaseId: string) => ["sites", "release", siteId, releaseId] as const,
+  sitesAll: ["sites"] as const,
   agents: ["ws", "agents"] as const,
   approvals: ["ws", "approvals"] as const,
   connections: ["ws", "connections"] as const,
@@ -245,10 +248,32 @@ export function useThread(id: string | null) {
   return useQuery({ queryKey: keys.thread(id ?? "none"), queryFn: () => api.getThread(id!), enabled: enabled && id !== null });
 }
 
-export function useSitePages() {
+export function useSites() {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.sitePages, queryFn: () => api.listSitePages() });
+  return useQuery({ enabled, queryKey: keys.sites, queryFn: ({ signal }) => api.listSites({ signal }) });
+}
+
+export function useSiteReleases(siteId: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && siteId !== null,
+    queryKey: keys.siteReleases(siteId ?? "none"),
+    queryFn: ({ signal }) => api.listSiteReleases(siteId!, { signal }),
+  });
+}
+
+/** A release never changes, so it is read once. */
+export function useSiteRelease(siteId: string | null, releaseId: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && siteId !== null && releaseId !== null,
+    queryKey: keys.siteRelease(siteId ?? "none", releaseId ?? "none"),
+    queryFn: ({ signal }) => api.getSiteRelease(siteId!, releaseId!, { signal }),
+    staleTime: Infinity,
+  });
 }
 
 export function useAgents() {

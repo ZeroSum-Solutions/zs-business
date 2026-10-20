@@ -1,4 +1,5 @@
 import { createDemoAdapter, type DemoControls } from "./demo/adapter";
+import { createDemoSites, type DemoSiteControls } from "./demo/sites";
 import { createDemoWorkspace } from "./demo/workspace";
 import { createHttpClient } from "./http-client";
 import type { ZsApi } from "./types";
@@ -19,7 +20,7 @@ export interface ApiRuntime {
   api: ZsApi;
   mode: "live" | "demo";
   /** Only set in demo mode: acts as a second person, to show conflicts. */
-  demo: DemoControls | null;
+  demo: (DemoControls & DemoSiteControls) | null;
 }
 
 /** next.config.ts sets NEXT_PUBLIC_API_MODE to "live" when the build has ZS_API_URL. It carries no URL or token. */
@@ -31,10 +32,11 @@ export function readEnvConfig(): ApiRuntimeConfig {
 export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntime {
   if (config.mode !== "live") {
     const demo = createDemoAdapter({ latencyMs: 180 });
-    return { api: { ...demo, ...createDemoWorkspace({ latencyMs: 180 }) }, mode: "demo", demo };
+    const sites = createDemoSites({ latencyMs: 180 });
+    return { api: { ...demo, ...sites.api, ...createDemoWorkspace({ latencyMs: 180 }) }, mode: "demo", demo: { ...demo, ...sites.controls } };
   }
   // No token here: the proxy adds it on the server.
   const http = createHttpClient({ baseUrl: API_PROXY_PATH });
-  // TODO(api): results, wallet, inbox, site, agents, connections and plan have no routes yet.
+  // TODO(api): results, wallet, inbox, agents, connections and plan have no routes yet.
   return { api: { ...createDemoWorkspace(), ...http }, mode: "live", demo: null };
 }

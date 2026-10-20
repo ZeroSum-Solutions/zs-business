@@ -41,6 +41,8 @@ import {
   type SiteReleaseResponse,
   type SiteSyncResponse,
   type SiteObjectStore,
+  SITE_PREVIEW_HTML_BYTES,
+  type SitePreview,
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
@@ -315,6 +317,19 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         },
       }, writeContext);
       return { ...output, edge: await syncAfterWrite(sites.store, id) };
+    },
+    /** Compile without storing or recording anything: what a publish of this spec would serve. */
+    async previewSite(siteId: unknown, body: unknown): Promise<SitePreview> {
+      const sites = deps.sites;
+      if (!sites) throw new NotFound();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const request = parseInput(publishSiteRequestSchema, body);
+      await read("publish", (tx) => getSite(tx, tenantId, id));
+      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      const entry = release.files.find((file) => file.path === release.entry)!;
+      const html = entry.mediaType.startsWith("text/html") && entry.bytes <= SITE_PREVIEW_HTML_BYTES
+        ? new TextDecoder("utf-8", { fatal: false }).decode(release.bytes.get(entry.path)) : null;
+      return { entry: release.entry, digest: release.digest, files: [...release.files], entryHtml: html };
     },
     /** Make an earlier (or later) release live again: the rollback. */
     async activateSiteRelease(siteId: unknown, releaseId: unknown, body: unknown, key: unknown): Promise<SiteReleaseResponse> {

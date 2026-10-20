@@ -188,6 +188,7 @@ function operations(session: Session): Record<string, { permission: Permission |
       const live = await sessionFor(tenant.ownerId).getSite(tenant.siteId);
       return session.activateSiteRelease(tenant.siteId, tenant.releaseId, { expectedCurrentReleaseId: live.currentReleaseId }, randomUUID());
     } },
+    previewSite: { permission: "publish", run: () => session.previewSite(tenant.siteId, { spec: siteSpec }) },
     syncSite: { permission: "publish", run: () => session.syncSite(tenant.siteId) },
     me: { permission: null, run: () => session.me() },
   };

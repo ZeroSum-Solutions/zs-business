@@ -5,7 +5,7 @@ test.describe("sheets", () => {
   const cases: { name: string; path: string; opener: (page: Page) => Locator; dialog: string }[] = [
     { name: "add customer", path: "/customers", opener: (page) => page.getByRole("button", { name: "Add customer" }), dialog: "Add a customer" },
     { name: "booking", path: "/calendar", opener: (page) => page.getByRole("button", { name: "Book appointment" }), dialog: "Book an appointment" },
-    { name: "site editor", path: "/site", opener: (page) => page.getByRole("button", { name: "Edit Home on phone" }), dialog: "Edit Home" },
+    { name: "site editor", path: "/site", opener: (page) => page.getByRole("button", { name: "Edit site" }), dialog: "Edit site" },
   ];
   for (const sheet of cases) {
     test(`returns focus to the opener after Escape: ${sheet.name}`, async ({ page }) => {

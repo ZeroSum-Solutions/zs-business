@@ -267,6 +267,8 @@ export default async function globalSetup() {
         PORT: String(LIVE.apiPort),
         PUBLIC_BOOKING_KEY_SECRET: bookingKeySecret,
         PUBLIC_BASE_URL: LIVE.apiUrl,
+        // Releases live in the API's memory: no R2 here. The DB rows are the real ones.
+        SITES_STORE: "memory",
       }),
     });
     children.push(api);

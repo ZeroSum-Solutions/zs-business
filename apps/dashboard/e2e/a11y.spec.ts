@@ -106,7 +106,7 @@ test.describe("accessibility", () => {
 
   test("the site editor's labels all point at controls, and its disabled buttons say why", async ({ page }) => {
     await open(page, "/site", "Site");
-    await page.getByRole("button", { name: /^Edit .* on phone$/ }).first().click();
+    await page.getByRole("button", { name: "Edit site" }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
     expect(await brokenLabels(page)).toEqual([]);
     expect(await silentDisabled(page)).toEqual([]);

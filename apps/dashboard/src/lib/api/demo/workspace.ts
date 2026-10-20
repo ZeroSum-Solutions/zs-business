@@ -7,7 +7,6 @@ import type {
   Connection,
   Plan,
   Results,
-  SitePage,
   Thread,
   Usage,
   WorkspaceApi,
@@ -106,48 +105,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     },
   ];
 
-  const pages: SitePage[] = [
-    {
-      id: "home", title: "Home", path: "/", status: "live", updatedAt: ago(60 * 24 * 4),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Fine jewelry, made in our Hudson Street workshop" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Engagement rings, heirloom resets and repairs by the same four hands for twenty-two years." },
-        { id: "cta", label: "Button", kind: "text", value: "Book a showroom visit" },
-        { id: "image", label: "Hero image", kind: "image", value: "Workbench with an oval diamond in a four-prong setting" },
-      ],
-    },
-    {
-      id: "engagement", title: "Engagement", path: "/engagement", status: "live", updatedAt: ago(60 * 24 * 9),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Engagement rings, drawn for one person" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Start with a stone or a sketch. We guide you through design, casting and setting." },
-        { id: "cta", label: "Button", kind: "text", value: "Start a design" },
-      ],
-    },
-    {
-      id: "bespoke", title: "Bespoke", path: "/bespoke", status: "live", updatedAt: ago(60 * 24 * 16),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Commissions" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Signets, pendants and pieces that carry a family story." },
-      ],
-    },
-    {
-      id: "repairs", title: "Repairs", path: "/repairs", status: "draft", updatedAt: ago(60 * 3),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Repairs and restringing" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Book a ten-minute drop-off. Most repairs are ready within a week." },
-        { id: "cta", label: "Button", kind: "text", value: "Book repair intake" },
-      ],
-    },
-    {
-      id: "visit", title: "Visit us", path: "/visit", status: "live", updatedAt: ago(60 * 24 * 30),
-      slots: [
-        { id: "headline", label: "Headline", kind: "text", value: "Visit the showroom" },
-        { id: "sub", label: "Supporting line", kind: "longtext", value: "Tuesday to Saturday. Appointments are recommended, walk-ins are welcome." },
-      ],
-    },
-  ];
-
   const agents: Agent[] = [
     { id: "front-desk", name: "Front desk", description: "Answers new messages on text, email, Instagram and web chat.", status: "running", lastRun: ago(6), actionsThisWeek: 87 },
     { id: "reminders", name: "Appointment reminders", description: "Texts a reminder the day before and asks customers to confirm.", status: "running", lastRun: ago(55), actionsThisWeek: 31 },
@@ -201,7 +158,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
       if (!thread) throw new ApiError("not_found", "We could not find that conversation.", 404);
       return structuredClone(thread);
     },
-    async listSitePages() { await wait(); return structuredClone(pages); },
     async listAgents() { await wait(); return structuredClone(agents); },
     async listApprovals() { await wait(); return structuredClone(approvals); },
     async listConnections() { await wait(); return structuredClone(connections); },

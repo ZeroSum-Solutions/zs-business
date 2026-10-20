@@ -111,7 +111,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   `apps/api`. The API checks the token, that its session is still live in Supabase Auth,
   and the person's membership and role on every request. All settings are server-only; the
   build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST and DELETE
-  to `/v1/booking/*`, `/v1/crm/*`, `/v1/me` and `/v1/members*`, only `Accept`,
+  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/sites*`, `/v1/me` and `/v1/members*`, only `Accept`,
   `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POSTs, and
   answers `no-store`. A POST body may be 64 KiB and must arrive within 15 seconds; it is
   read through `src/lib/server/body.ts`, which never holds more than the limit: a larger
@@ -178,7 +178,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   the same `ZS_API_URL` setting the server runs with.
 - Live mode labels every area that still reads the demo workspace with a "Sample data"
   badge, and disables its writes (cancel plan, agent switches and approvals, settings,
-  connections, site edits) with the reason shown as visible text
+  connections) with the reason shown as visible text
   (`src/components/ui/sample.tsx`). Nothing pretends to save.
 - Errors: the demo adapter parses requests with the same `@zs/contracts` schemas and throws
   the error the HTTP client would build from the API's body: the fixed message per code,
@@ -230,7 +230,23 @@ pipeline yet", "<name> has no stages yet", or a pipeline picker when there are s
 API bookings carry no
 customer or title, so live mode shows them as "Appointment".
 
-`TODO(api)`: results, usage, inbox, site, agents, connections and plan have no API yet.
+Site: the Site page reads `/v1/sites` and shows the first site, its live version and
+History. Only owners see it; staff get "Owners publish the website", and a 404 (the API
+runs without `SITES_STORE`) says publishing is not switched on yet. "Edit site" starts from
+the live version's spec (`{ kind: "plain", title, tagline, sections }`). Preview posts to
+`/v1/sites/:id/preview`, which compiles without saving, and shows the page in an iframe
+with `sandbox=""` (no scripts, forms or same-origin access). Publish posts a new release,
+which goes live in the same action; its key belongs to the site and spec. "Make live" on an
+older version sends the release the page last saw as live (`expectedCurrentReleaseId`): a
+409 `stale_release` (`isStaleRelease`) means another version went live since, so the page
+says so and reloads History. When the API answers `edge: "pending"` the database moved but
+the site's host pointer did not, so the page says the site still shows the previous version
+and offers "Update the site now" (`/v1/sites/:id/sync`). Preview and sync change nothing,
+so they send no `Idempotency-Key`. The demo adapter (`src/lib/api/demo/sites.ts`) builds the
+same plain page in the browser and exposes `rollBackElsewhere()` and `setSiteEdgeDown()` on
+`window.__zsDemo` for tests. `e2e:live` runs the API with `SITES_STORE=memory`.
+
+`TODO(api)`: results, usage, inbox, agents, connections and plan have no API yet.
 Live mode still reads them from the demo workspace.
 
 ## Notes

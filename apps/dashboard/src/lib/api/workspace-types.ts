@@ -1,6 +1,6 @@
 /**
- * Read models for areas that have no HTTP route yet (results, wallet, inbox, site,
- * agents, connections, plan). TODO(api): move each to a route as it is built.
+ * Read models for areas that have no HTTP route yet (results, wallet, inbox, agents,
+ * connections, plan). TODO(api): move each to a route as it is built.
  */
 
 export interface WeekCompare {
@@ -74,22 +74,6 @@ export interface Thread extends ThreadSummary {
   messages: Message[];
 }
 
-export interface SiteSlot {
-  id: string;
-  label: string;
-  kind: "text" | "longtext" | "image";
-  value: string;
-}
-
-export interface SitePage {
-  id: string;
-  title: string;
-  path: string;
-  status: "live" | "draft";
-  updatedAt: string;
-  slots: SiteSlot[];
-}
-
 export type AgentStatus = "running" | "paused" | "needs_approval";
 
 export interface Agent {
@@ -136,7 +120,6 @@ export interface WorkspaceApi {
   getChecklist(): Promise<ChecklistItem[]>;
   listThreads(): Promise<ThreadSummary[]>;
   getThread(id: string): Promise<Thread>;
-  listSitePages(): Promise<SitePage[]>;
   listAgents(): Promise<Agent[]>;
   listApprovals(): Promise<ApprovalItem[]>;
   listConnections(): Promise<Connection[]>;

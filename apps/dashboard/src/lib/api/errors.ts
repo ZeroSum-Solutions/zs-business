@@ -101,6 +101,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   already_reviewed: "This website request was already reviewed.",
   last_owner: "A business needs at least one owner. Make someone else an owner first.",
   member_exists: "That email is already on the team.",
+  stale_release: "Another version went live since you opened this page.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -126,6 +127,10 @@ export const DEAL_CHANGED_REASONS: ReadonlySet<string> = new Set(["stale_revisio
 
 export function isDealChanged(error: unknown): error is ApiError {
   return isApiError(error, "conflict") && error.reason !== null && DEAL_CHANGED_REASONS.has(error.reason);
+}
+
+export function isStaleRelease(error: unknown): error is ApiError {
+  return isApiError(error, "conflict") && error.reason === "stale_release";
 }
 
 /**

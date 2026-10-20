@@ -6,6 +6,7 @@ import {
   siteListSchema,
   siteObjectKeys,
   siteOutputSchema,
+  sitePreviewSchema,
   siteReleaseDetailSchema,
   siteReleaseListSchema,
   siteReleaseResponseSchema,
@@ -114,6 +115,21 @@ describe("publishing a site", () => {
     expect(errorOf(other).details).toEqual({ reason: "idempotency_key_reused" });
     const releases = siteReleaseListSchema.parse((await call(h.app, "GET", `/v1/sites/${site.id}/releases`, { token: h.a.token })).body);
     expect(releases.items).toHaveLength(1);
+  });
+
+  it("previews a spec without storing or recording anything", async () => {
+    const site = await createSite(h.a);
+    const before = memory.keys().length;
+    const response = await call(h.app, "POST", `/v1/sites/${site.id}/preview`, { token: h.a.token, body: { spec: spec("Draft <b>") } });
+    expect(response.status).toBe(200);
+    const preview = sitePreviewSchema.parse(response.body);
+    expect(preview.entry).toBe("index.html");
+    expect(preview.entryHtml).toContain("<h1>Draft &lt;b&gt;</h1>");
+    expect(memory.keys().length).toBe(before);
+    const live = siteOutputSchema.shape.result.parse((await call(h.app, "GET", `/v1/sites/${site.id}`, { token: h.a.token })).body);
+    expect(live.currentReleaseId).toBeNull();
+    // The same spec published gives the digest the preview showed.
+    expect((await published(h.a, site.id, "Draft <b>")).result.release.digest).toBe(preview.digest);
   });
 
   it("refuses a spec the compiler cannot build, before storing anything", async () => {
@@ -304,5 +320,6 @@ describe("permissions", () => {
     expect((await call(h.app, "GET", "/v1/sites", { token: staff.token })).status).toBe(403);
     expect((await call(h.app, "POST", "/v1/sites", { token: staff.token, key: randomUUID(), body: { name: "Mine" } })).status).toBe(403);
     expect((await publish(staff, site.id, "Staff edit")).status).toBe(403);
+    expect((await call(h.app, "POST", `/v1/sites/${site.id}/preview`, { token: staff.token, body: { spec: spec("x") } })).status).toBe(403);
   });
 });

@@ -428,15 +428,15 @@ test("labels sample areas and turns off writes that would not reach the API", as
   await expect(page.getByRole("region", { name: "Next appointments" }).getByTestId("sample-badge")).toHaveCount(0);
   if (info.project.name === "desktop") await expect(page.getByTestId("sample-note")).toHaveText("Some areas show sample data until their API ships.");
 
-  // Bookings and customers are live: no sample marker.
-  for (const path of ["/calendar", "/customers"]) {
+  // Bookings, customers and the site are live: no sample marker.
+  for (const path of ["/calendar", "/customers", "/site"]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expect(page.getByRole("main").getByTestId("sample-badge")).toHaveCount(0);
   }
 
   const header = (name: string) => page.getByRole("main").locator("header").filter({ has: page.getByRole("heading", { level: 1, name }) });
-  for (const [path, name] of [["/inbox", "Inbox"], ["/site", "Site"], ["/agents", "Agents"], ["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
+  for (const [path, name] of [["/inbox", "Inbox"], ["/agents", "Agents"], ["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
     await page.goto(path);
     await expect(header(name).getByTestId("sample-badge"), name).toBeVisible();
   }
@@ -457,15 +457,6 @@ test("labels sample areas and turns off writes that would not reach the API", as
   await page.goto("/account/settings");
   await expect(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
   for (const toggle of await page.getByRole("switch").all()) await expect(toggle).toBeDisabled();
-
-  await page.goto("/site");
-  await page.getByRole("button", { name: /^Edit .* on phone$/ }).first().click();
-  const editor = page.getByRole("dialog");
-  await expect(editor.getByRole("button", { name: "Save draft" })).toBeDisabled();
-  await expect(editor.getByText(/^Not available yet/)).toBeVisible();
-  await editor.getByRole("textbox").first().press("Enter");
-  // Nothing claims a save that never left the browser.
-  await expect(page.getByRole("status").getByText(/saved/i)).toHaveCount(0);
 });
 
 test("reloads and allows a retry when the API reports a concurrent update", async ({ page }, info) => {

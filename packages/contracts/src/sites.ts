@@ -168,6 +168,19 @@ export const createSiteRequestSchema = z.strictObject({ name: siteNameSchema });
 export type CreateSiteRequest = z.infer<typeof createSiteRequestSchema>;
 export const publishSiteRequestSchema = z.strictObject({ spec: siteSpecSchema });
 export type PublishSiteRequest = z.infer<typeof publishSiteRequestSchema>;
+/**
+ * `POST /v1/sites/:id/preview { spec }`: what a publish of this spec would serve, without
+ * storing or recording anything. `entryHtml` is the entry page's text when it is HTML of at
+ * most SITE_PREVIEW_HTML_BYTES, for a sandboxed frame; otherwise null.
+ */
+export const SITE_PREVIEW_HTML_BYTES = 1024 * 1024;
+export const sitePreviewSchema = z.strictObject({
+  entry: sitePathSchema,
+  digest: sha256HexSchema,
+  files: z.array(siteFileSchema),
+  entryHtml: z.string().nullable(),
+});
+export type SitePreview = z.infer<typeof sitePreviewSchema>;
 export const activateSiteReleaseRequestSchema = z.strictObject({ expectedCurrentReleaseId: idSchema.nullable() });
 export type ActivateSiteReleaseRequest = z.infer<typeof activateSiteReleaseRequestSchema>;
 export const siteListSchema = z.strictObject({ items: z.array(siteRecordSchema) });

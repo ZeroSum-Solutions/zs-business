@@ -12,6 +12,13 @@ import {
   moveDealStageOutputSchema,
   pipelineSummarySchema,
   resourceSummarySchema,
+  siteListSchema,
+  siteOutputSchema,
+  sitePreviewSchema,
+  siteReleaseDetailSchema,
+  siteReleaseListSchema,
+  siteReleaseResponseSchema,
+  siteSyncResponseSchema,
   slotsResponseSchema,
   uuidSchema,
   type CreateBookingRequest,
@@ -26,6 +33,7 @@ import {
   type CrmApi,
   type IntakeApi,
   type ListResult,
+  type SitesApi,
   type WriteOptions,
 } from "./types";
 
@@ -45,6 +53,8 @@ interface RequestSpec<T extends z.ZodType> {
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   idempotencyKey?: string;
+  /** A POST that changes nothing (a preview), so it takes no Idempotency-Key. */
+  readOnly?: boolean;
   schema: T;
   signal?: AbortSignal | undefined;
 }
@@ -61,7 +71,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi & IntakeApi {
+export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi & IntakeApi & SitesApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
   const base = config.baseUrl.replace(/\/+$/, "");
 
@@ -75,7 +85,7 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
     const token = config.getToken?.() ?? null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (spec.body !== undefined) headers["Content-Type"] = "application/json";
-    if (spec.method !== "GET") {
+    if (spec.method !== "GET" && !spec.readOnly) {
       // The caller owns the key, so a retry can reuse it. A made-up key would turn a retry
       // after a lost answer into a second write.
       if (!spec.idempotencyKey) throw new TypeError(`${spec.method} ${spec.path} needs an Idempotency-Key from the caller`);
@@ -236,6 +246,42 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
 
     async listBookingPages() {
       return (await request({ method: "GET", path: "/v1/booking/pages", schema: bookingPageListSchema })).items;
+    },
+
+    async listSites(options = {}) {
+      return (await request({ method: "GET", path: "/v1/sites", schema: siteListSchema, signal: options.signal })).items;
+    },
+
+    async createSite(name, options) {
+      return (await write("/v1/sites", { name }, siteOutputSchema, options)).result;
+    },
+
+    async listSiteReleases(siteId, options = {}) {
+      const path = `/v1/sites/${encodeURIComponent(siteId)}/releases`;
+      return (await request({ method: "GET", path, schema: siteReleaseListSchema, signal: options.signal })).items;
+    },
+
+    getSiteRelease(siteId, releaseId, options = {}) {
+      const path = `/v1/sites/${encodeURIComponent(siteId)}/releases/${encodeURIComponent(releaseId)}`;
+      return request({ method: "GET", path, schema: siteReleaseDetailSchema, signal: options.signal });
+    },
+
+    previewSite(siteId, spec) {
+      const path = `/v1/sites/${encodeURIComponent(siteId)}/preview`;
+      return request({ method: "POST", path, body: { spec }, readOnly: true, schema: sitePreviewSchema });
+    },
+
+    publishSite(siteId, spec, options) {
+      return write(`/v1/sites/${encodeURIComponent(siteId)}/releases`, { spec }, siteReleaseResponseSchema, options);
+    },
+
+    activateSiteRelease(input, options) {
+      const path = `/v1/sites/${encodeURIComponent(input.siteId)}/releases/${encodeURIComponent(input.releaseId)}/activate`;
+      return write(path, { expectedCurrentReleaseId: input.expectedCurrentReleaseId }, siteReleaseResponseSchema, options);
+    },
+
+    syncSite(siteId) {
+      return request({ method: "POST", path: `/v1/sites/${encodeURIComponent(siteId)}/sync`, body: {}, readOnly: true, schema: siteSyncResponseSchema });
     },
   };
 }
