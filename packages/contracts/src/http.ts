@@ -17,7 +17,7 @@ const idSchema = z.uuid().toLowerCase();
 /** M1 edge boundary: request, response and error shapes shared by the HTTP API and MCP tools. */
 /**
  * Key prefixes the server builds for actions no member runs (public intake, unsubscribe,
- * inbound SMS), for the run of an approved action (`approval:<approval ID>`, approvals.md A-7)
+ * inbound SMS), for the run of an approved action (`approval:<approval ID>`, approvals.md A-7, A-14)
  * and for the steps of an inbox reply write (`inbox:`, inbox-home.md I-6). Keys are unique per
  * tenant, so a member key with one of them could take a recipient's key first and turn their
  * request into a conflict; approval IDs are visible to members, so `approval:` would be easy.
