@@ -1,27 +1,18 @@
 // Entry point: an operator assigns or removes a tenant's SMS sending number (twilio.md T-7). It
 // connects with DELIVERY_DATABASE_URL (a login that may SET ROLE service_role) and
 // DATABASE_CA_CERT, like the delivery worker. Run from apps/api:
-//   pnpm sms:number -- --tenant <uuid> --number +15555550100 [--help-reply "<text>"]
-//   pnpm sms:number -- --tenant <uuid> --remove
+//   pnpm sms:number --tenant <uuid> --number +15555550100 [--help-reply "<text>"]
+//   pnpm sms:number --tenant <uuid> --remove
 // The number must already be bought in Twilio, registered for A2P 10DLC (or a verified toll-free
 // number), with its messaging webhook at <TWILIO_WEBHOOK_BASE_URL>/webhooks/twilio/inbound/<uuid>.
 import process from "node:process";
-import { parseArgs } from "node:util";
-import { uuidSchema } from "@zs/contracts";
 import { assignSmsNumber } from "@zs/core";
 import { asService, createRuntimePool } from "@zs/db";
+import { parseSmsNumberArgs, SMS_NUMBER_USAGE } from "../sms-number.js";
 
-const { values } = parseArgs({
-  options: {
-    tenant: { type: "string" },
-    number: { type: "string" },
-    "help-reply": { type: "string" },
-    remove: { type: "boolean", default: false },
-  },
-});
-const tenantId = uuidSchema.safeParse(values.tenant);
-if (!tenantId.success || (values.remove === (values.number !== undefined))) {
-  console.error("Usage: pnpm sms:number -- --tenant <uuid> (--number <E.164> [--help-reply <text>] | --remove)");
+const args = parseSmsNumberArgs(process.argv.slice(2));
+if (!args) {
+  console.error(SMS_NUMBER_USAGE);
   process.exit(2);
 }
 const url = process.env.DELIVERY_DATABASE_URL;
@@ -39,12 +30,12 @@ const pool = createRuntimePool({
 });
 try {
   const result = await asService(pool, (tx) => assignSmsNumber(tx, {
-    tenantId: tenantId.data,
-    phoneNumber: values.remove ? null : values.number!,
-    ...(values["help-reply"] === undefined ? {} : { helpReply: values["help-reply"] }),
+    tenantId: args.tenantId,
+    phoneNumber: args.phoneNumber,
+    ...(args.helpReply === undefined ? {} : { helpReply: args.helpReply }),
     now: new Date(),
   }));
-  console.log(result.phoneNumber === null ? `Removed the SMS number of ${tenantId.data}` : `Tenant ${tenantId.data} sends SMS from ${result.phoneNumber}`);
+  console.log(result.phoneNumber === null ? `Removed the SMS number of ${args.tenantId}` : `Tenant ${args.tenantId} sends SMS from ${result.phoneNumber}`);
 } finally {
   await pool.end();
 }
