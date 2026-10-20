@@ -6,6 +6,9 @@ import { SignJWT } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   apiErrorBodySchema,
+  approvalOutputSchema,
+  approvalPageSchema,
+  approvalRecordSchema,
   bookingPageSchema,
   homeResultsSchema,
   MESSAGE_SEND_REQUESTED,
@@ -20,9 +23,11 @@ import {
   createOrFindContactOutputSchema,
   dealPageSchema,
   moveDealStageOutputSchema,
+  observeSourceOutputSchema,
   pipelineSummarySchema,
   resourceSummarySchema,
   slotsResponseSchema,
+  sourceListSchema,
 } from "@zs/contracts";
 import {
   createTestDatabase,
@@ -33,7 +38,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createHs256Verifier, createLocalStubSessionCheck, type TokenVerifier } from "@zs/core";
+import { createHs256Verifier, createLocalStubSessionCheck, createSession, type TokenVerifier } from "@zs/core";
 import { createMcpServer, type AccessTokenSource } from "../src/server.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -41,6 +46,8 @@ const NOW = "2026-10-19T08:00:00.000Z";
 const SECRET = ["mcp", "test", "secret", "x".repeat(32)].join("-");
 const clock = { now: () => new Date(NOW) };
 let database: TestDatabase;
+/** The member `client` acts as, for owner steps no MCP tool offers (approvals.md A-6). */
+let ownerId: string;
 let fixture: TwoTenantFixture;
 let client: Client;
 let other: Client;
@@ -120,7 +127,9 @@ beforeAll(async () => {
       [fixture.a.tenantId, tenant.stages[0], tenant.pipelineId, tenant.stages[1]],
     );
   });
-  client = await connect(fixture.a.tenantId);
+  const owner = await signedInMember(fixture.a.tenantId, "owner");
+  ownerId = owner.actorId;
+  client = await serve(owner.token);
   other = await connect(fixture.b.tenantId);
 });
 afterAll(async () => {
@@ -144,10 +153,13 @@ describe("MCP tools over an in-memory transport", () => {
   it("lists every write and read tool", async () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
-      "approve_reply", "create_booking", "create_deal", "discard_reply", "draft_reply", "find_slots", "get_contact",
-      "get_thread", "home_results", "list_bookings", "list_contacts", "list_deals", "list_pipelines", "list_resources",
-      "list_threads", "move_deal_stage", "set_deal_details", "upsert_contact",
+      "create_booking", "create_deal", "discard_reply", "draft_reply", "find_slots", "get_approval", "get_contact",
+      "get_thread", "home_results", "list_approvals", "list_bookings", "list_contacts", "list_deals", "list_pipelines",
+      "list_resources", "list_sources", "list_threads", "move_deal_stage", "observe_source", "request_approval",
+      "set_deal_details", "upsert_contact",
     ]);
+    // Deciding stays with the owner in the dashboard or API: an agent cannot approve its own proposal.
+    expect(names.filter((name) => /approve|reject|revoke/.test(name))).toEqual([]);
   });
 
   it("upsert_contact creates, then matches by email", async () => {
@@ -231,6 +243,64 @@ describe("MCP tools over an in-memory transport", () => {
     expect(await range("2026-10-19T10:00:00.000Z", "2026-10-20T00:00:00.000Z")).toBe(0);
   });
 
+  it("request_approval creates a pending approval as the token's member; list_approvals and get_approval read it", async () => {
+    const staff = await signedInMember(fixture.a.tenantId, "staff");
+    const mcp = await serve(staff.token);
+    try {
+      const bookingId = randomUUID();
+      const action = {
+        actionType: "booking.create", target: { type: "booking", id: bookingId },
+        payload: { bookingId, resourceId: tenant.resourceId, startsAt: "2026-10-19T13:00:00.000Z" },
+      };
+      const args = { idempotencyKey: "ap-1", action, summary: "Book the showroom at 13:00" };
+      const requested = await callTool(mcp, "request_approval", args);
+      expect(requested.isError, JSON.stringify(requested.value)).toBe(false);
+      const approval = approvalOutputSchema.parse(requested.value).result;
+      expect(approval).toMatchObject({
+        tenantId: fixture.a.tenantId, actionType: "booking.create", target: { tenantId: fixture.a.tenantId, ...action.target },
+        payload: action.payload, summary: args.summary, status: "pending", standing: "pending", requestedBy: staff.actorId,
+        decidedBy: null, executedActionId: null,
+      });
+      // Seven days by default; nothing was booked.
+      expect(approval.expiresAt).toBe("2026-10-26T08:00:00.000Z");
+      expect((await callTool(mcp, "request_approval", args)).value).toEqual(requested.value);
+      expect(bookingPageSchema.parse((await callTool(client, "list_bookings", { from: "2026-10-19T13:00:00.000Z", to: "2026-10-19T14:00:00.000Z" })).value).items).toEqual([]);
+
+      const mine = approvalPageSchema.parse((await callTool(mcp, "list_approvals", { status: "pending" })).value);
+      expect(mine.items.map((item) => item.id)).toEqual([approval.id]);
+      const owners = approvalPageSchema.parse((await callTool(client, "list_approvals")).value);
+      expect(owners.items.map((item) => item.id)).toContain(approval.id);
+      expect(approvalRecordSchema.parse((await callTool(mcp, "get_approval", { approvalId: approval.id })).value)).toEqual(approval);
+
+      expect(approvalPageSchema.parse((await callTool(other, "list_approvals")).value).items).toEqual([]);
+      expect(apiErrorBodySchema.parse((await callTool(other, "get_approval", { approvalId: approval.id })).value).error.code).toBe("NotFound");
+      const rows = await fixture.service((tx) => tx.query<{ action_type: string }>(
+        "SELECT action_type FROM actions WHERE tenant_id=$1 AND actor_id=$2", [staff.tenantId, staff.actorId],
+      ));
+      expect(rows.rows.map((row) => row.action_type)).toEqual(["approval.request"]);
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("observe_source and list_sources round-trip for a contact, for this tenant only", async () => {
+    const observed = await callTool(client, "observe_source", {
+      idempotencyKey: "src-1", subject: { type: "contact", id: contactId }, source: "website",
+      sourceRef: "form/contact", observedAt: "2026-10-19T07:00:00.000Z", freshForMinutes: 120,
+    });
+    expect(observed.isError, JSON.stringify(observed.value)).toBe(false);
+    const { record, applied } = observeSourceOutputSchema.parse(observed.value).result;
+    expect(applied).toBe(true);
+    expect(record).toMatchObject({
+      tenantId: fixture.a.tenantId, subject: { type: "contact", id: contactId }, source: "website", sourceRef: "form/contact",
+      observedAt: "2026-10-19T07:00:00.000Z", freshUntil: "2026-10-19T09:00:00.000Z", fresh: true, revision: 1,
+    });
+    const listed = sourceListSchema.parse((await callTool(client, "list_sources", { subjectType: "contact", subjectId: contactId })).value);
+    expect(listed.items).toEqual([record]);
+    const hidden = await callTool(other, "list_sources", { subjectType: "contact", subjectId: contactId });
+    expect(apiErrorBodySchema.parse(hidden.value).error.code).toBe("NotFound");
+  });
+
   it("another tenant's server cannot move this tenant's deal", async () => {
     const denied = await callTool(other, "move_deal_stage", {
       idempotencyKey: "x-1", dealId, pipelineId: tenant.pipelineId, stageId: tenant.stages[0], expectedRevision: 2,
@@ -269,6 +339,9 @@ describe("MCP tools over an in-memory transport", () => {
     ["create_booking", { idempotencyKey: "v-2", resourceId: "not-a-uuid", start: "soon" }, "resourceId"],
     ["list_contacts", { limit: "many" }, "limit"],
     ["list_pipelines", { extra: true }, "extra"],
+    ["request_approval", { idempotencyKey: "v-3", summary: "x", action: { actionType: "booking.create" } }, "target"],
+    ["observe_source", { idempotencyKey: "v-4", subject: { type: "contact", id: randomUUID() }, source: "Not A Name" }, "source"],
+    ["list_sources", { subjectType: "planet", subjectId: randomUUID() }, "subjectType"],
   ])("normalizes malformed %s arguments into ValidationFailed", async (name, args, field) => {
     const response = await callTool(client, name, args);
     expect(response.isError).toBe(true);
@@ -301,7 +374,7 @@ describe("MCP tools over an in-memory transport", () => {
     expect(apiErrorBodySchema.parse(foreign.value).error.code).toBe("Forbidden");
   });
 
-  it("draft_reply, list_threads, get_thread and approve_reply: an approval hands one send request to the outbox", async () => {
+  it("draft_reply proposes the send; once an owner approves, one send request reaches the outbox", async () => {
     const drafted = await callTool(client, "draft_reply", { idempotencyKey: "r-1", contactId, subject: "Your ring", body: "Your ring is ready." });
     const reply = replyOutputSchema.parse(drafted.value).result;
     expect(reply).toMatchObject({ contactId, subject: "Your ring", body: "Your ring is ready.", status: "draft" });
@@ -312,7 +385,14 @@ describe("MCP tools over an in-memory transport", () => {
     }]);
     const thread = threadDetailSchema.parse((await callTool(client, "get_thread", { threadId: `c_${contactId}` })).value);
     expect(thread.entries).toEqual([{ type: "reply", at: NOW, reply }]);
-    const approved = replyOutputSchema.parse((await callTool(client, "approve_reply", { idempotencyKey: "ra-1", replyId: reply.id })).value);
+    // The draft waits as a pending approval; no MCP tool decides one (approvals.md A-6).
+    const pending = approvalPageSchema.parse((await callTool(client, "list_approvals", { status: "pending" })).value).items
+      .filter((approval) => approval.actionType === "inbox.reply.send");
+    expect(pending).toEqual([expect.objectContaining({
+      target: { tenantId: fixture.a.tenantId, type: "inbox_reply", id: reply.id }, payload: { replyId: reply.id },
+    })]);
+    const owner = createSession({ db: database.db, clock, generateId: randomUUID }, { tenantId: fixture.a.tenantId, actorId: ownerId });
+    const approved = await owner.approveReply(reply.id, {}, "ra-1");
     expect(approved.result).toMatchObject({ id: reply.id, status: "approved", approvedAt: NOW });
     const again = await callTool(client, "discard_reply", { idempotencyKey: "rd-1", replyId: reply.id });
     expect(apiErrorBodySchema.parse(again.value).error).toMatchObject({ code: "Conflict", details: { reason: "not_draft", status: "approved" } });
@@ -333,9 +413,8 @@ describe("MCP tools over an in-memory transport", () => {
     expect(apiErrorBodySchema.parse((await callTool(other, "draft_reply", { idempotencyKey: "x-r", contactId, body: "Hi" })).value).error.code)
       .toBe("Forbidden");
     const third = replyOutputSchema.parse((await callTool(client, "draft_reply", { idempotencyKey: "r-3", contactId, body: "Hello again." })).value).result;
-    for (const name of ["approve_reply", "discard_reply"])
-      expect(apiErrorBodySchema.parse((await callTool(other, name, { idempotencyKey: `x-${name}`, replyId: third.id })).value).error.code)
-        .toBe("Forbidden");
+    expect(apiErrorBodySchema.parse((await callTool(other, "discard_reply", { idempotencyKey: "x-discard", replyId: third.id })).value).error.code)
+      .toBe("Forbidden");
     const bad = await callTool(client, "get_thread", { threadId: "nope" });
     expect(apiErrorBodySchema.parse(bad.value).error.code).toBe("ValidationFailed");
   });
@@ -459,7 +538,7 @@ describe("authorization on every tool call, like the HTTP API", () => {
     });
   });
 
-  it("lets staff draft replies but refuses them approve_reply and home_results", async () => {
+  it("lets staff draft replies, proposing each send, but refuses them home_results", async () => {
     const staff = await signedInMember(fixture.a.tenantId, "staff");
     await using(await serve(staff.token), async (mcp) => {
       const contact = createOrFindContactOutputSchema.parse(await succeeds(mcp, "upsert_contact", {
@@ -470,9 +549,13 @@ describe("authorization on every tool call, like the HTTP API", () => {
       })).result;
       expect(reply.draftedBy.userId).toBe(staff.actorId);
       await succeeds(mcp, "list_threads");
-      expect(await errorCode(mcp, "approve_reply", { idempotencyKey: "staff-ra-1", replyId: reply.id })).toBe("Forbidden");
+      const mine = approvalPageSchema.parse(await succeeds(mcp, "list_approvals", { status: "pending" })).items;
+      expect(mine.filter((approval) => approval.target.id === reply.id)).toEqual([expect.objectContaining({ requestedBy: staff.actorId })]);
       expect(await errorCode(mcp, "home_results")).toBe("Forbidden");
       await succeeds(mcp, "discard_reply", { idempotencyKey: "staff-rd-1", replyId: reply.id });
+      // Discarding withdrew the staff member's own pending proposal (approvals.md A-8).
+      expect(approvalPageSchema.parse(await succeeds(mcp, "list_approvals", {})).items
+        .find((approval) => approval.target.id === reply.id)).toMatchObject({ status: "revoked" });
     });
   });
 

@@ -6,14 +6,13 @@ export { findSlots, listBookings, listResources } from "./reads/booking.js";
 export { listContacts, listDeals, listPipelines } from "./reads/crm.js";
 export { dealDetailsHandlers, setDealDetails, SET_DEAL_DETAILS_ACTION } from "./deals/details.js";
 export {
-  approveReply,
-  createInboxHandlers,
-  directReplyApprovals,
   discardReply,
   draftReply,
   inboxHandlers,
+  openSendApproval,
+  SEND_REPLY_ACTION,
   settleReplyDelivery,
-  type ReplyApprovals,
+  type SendApproval,
 } from "./inbox/index.js";
 export { getThread, listThreads, loadReply } from "./reads/inbox.js";
 export { homeResults } from "./reads/home.js";
@@ -30,3 +29,15 @@ export {
 } from "./intake/index.js";
 export { listBookingPages, listIntakeItems } from "./reads/intake.js";
 export { findMembership, listMembers, lockMembership, memberHandlers, requireMember, type MemberAccess } from "./members/index.js";
+export {
+  APPROVAL_POLICIES,
+  approvalForAction,
+  approvalHandlers,
+  approvalPolicy,
+  checkApproval,
+  listApprovals,
+  resolveStoredApproval,
+  type ApprovalCheck,
+  type ApprovalPolicy,
+} from "./approvals/index.js";
+export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandlers } from "./sources/index.js";

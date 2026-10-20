@@ -19,6 +19,7 @@ export const SNAPSHOT_SQL = `
 export const RESET_SQL = `
   BEGIN;
   DELETE FROM public.inbox_replies;
+  DELETE FROM public.approvals;
   DELETE FROM public.bookings b WHERE NOT EXISTS (SELECT 1 FROM zs_e2e.bookings s WHERE s.tenant_id = b.tenant_id AND s.id = b.id);
   DELETE FROM public.intake_item_consent;
   DELETE FROM public.intake_items;

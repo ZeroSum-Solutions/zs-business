@@ -1,7 +1,11 @@
 export {
+  ACTION_PERMISSIONS,
+  approvedDispatch,
   bookingPageSnippets,
   createSession,
   directDispatch,
+  memberAuthorize,
+  PAYLOAD_PERMISSION_ACTIONS,
   parseInput,
   trimTrailingSlashes,
   type EdgeDependencies,

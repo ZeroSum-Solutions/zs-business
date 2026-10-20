@@ -1,17 +1,16 @@
 // Inbox replies (inbox-home.md I-4..I-7). Original code. Every step runs inside the shared
 // dispatcher transaction, so the reply row, the action row and its outbox event commit
-// together or not at all. Nothing here sends: an approval hands the reply to the outbox.
+// together or not at all. Nothing here sends: an approved send hands the reply to the outbox.
 import {
-  approveReplyCommandSchema,
   Conflict,
   discardReplyCommandSchema,
   draftReplyCommandSchema,
   MAX_SUBJECT_LENGTH,
   MESSAGE_SEND_REQUESTED,
+  sendReplyCommandSchema,
   uuidSchema,
   TenantDenied,
   ValidationFailed,
-  type ActionBinding,
   type ReplySendRequested,
   type ReplyRecord,
   type ReplyStatus,
@@ -23,27 +22,21 @@ import { idInUse, parseOrFail, pgCode } from "../crm/rows.js";
 import { loadReply } from "../reads/inbox.js";
 
 export const DRAFT_REPLY_ACTION = "inbox.reply.draft";
-export const APPROVE_REPLY_ACTION = "inbox.reply.approve";
+/** I-6: required by APPROVAL_POLICIES, so it runs only under an owner's stored approval. */
+export const SEND_REPLY_ACTION = "inbox.reply.send";
 export const DISCARD_REPLY_ACTION = "inbox.reply.discard";
-
-/**
- * Where an approval of a reply is recorded, inside the approving transaction after the reply
- * row is locked. The approval-record interface (M3b) plugs in here; `directReplyApprovals`
- * records nothing beyond the action row, which already holds the approver, the time and the
- * approved binding (the same direct approval every owner write uses).
- */
-export interface ReplyApprovals {
-  record(tx: Transaction, input: {
-    readonly binding: ActionBinding;
-    readonly approverId: string;
-    readonly decidedAt: Date;
-    readonly subject: { readonly type: "inbox_reply"; readonly id: string };
-  }): Promise<void>;
-}
-export const directReplyApprovals: ReplyApprovals = Object.freeze({ record: async () => {} });
 
 /** A placeholder address (crm_contacts' column default) is no address to reply to. */
 const PLACEHOLDER_EMAIL = /@placeholder\.invalid$/;
+
+/** I-6: email is the only reply channel in v1, so the customer needs a real address. */
+export async function requireEmail(tx: Transaction, tenantId: string, contactId: string): Promise<void> {
+  const email = (await tx.query<{ normalized_email: string | null }>(
+    "SELECT normalized_email FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, contactId],
+  )).rows[0]?.normalized_email ?? null;
+  if (email === null || PLACEHOLDER_EMAIL.test(email))
+    throw new Conflict("The customer has no email address to reply to", { reason: "no_email" });
+}
 
 async function resolveReply(tx: Transaction, target: Target): Promise<Target | null> {
   if (target.type !== "inbox_reply") throw new ValidationFailed("Inbox reply actions require an inbox_reply target");
@@ -99,34 +92,25 @@ export const draftReplyHandler: ActionHandler = {
   },
 };
 
-export function createApproveReplyHandler(approvals: ReplyApprovals): ActionHandler {
-  return {
-    resolveTarget: resolveReply,
-    async handle({ tx, command, binding, now }) {
-      const { payload } = parseOrFail(approveReplyCommandSchema, command);
-      const tenantId = binding.tenantId;
-      const draft = await lockDraft(tx, tenantId, payload.replyId);
-      // I-6: email is the only reply channel in v1, so the customer needs a real address.
-      const email = (await tx.query<{ normalized_email: string | null }>(
-        "SELECT normalized_email FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, draft.contact_id],
-      )).rows[0]?.normalized_email ?? null;
-      if (email === null || PLACEHOLDER_EMAIL.test(email))
-        throw new Conflict("The customer has no email address to reply to", { reason: "no_email" });
-      await approvals.record(tx, {
-        binding, approverId: binding.actorId, decidedAt: now, subject: { type: "inbox_reply", id: payload.replyId },
-      });
-      await tx.query(
-        "UPDATE inbox_replies SET status='approved', approved_by=$3, approved_at=$4 WHERE tenant_id=$1 AND id=$2",
-        [tenantId, payload.replyId, binding.actorId, now],
-      );
-      const event: ReplySendRequested = {
-        messageId: payload.replyId, contactId: draft.contact_id, channel: "email", purpose: "transactional",
-        subject: draft.subject, body: draft.body,
-      };
-      return { ...(await replyResult(tx, tenantId, payload.replyId)), event: { type: MESSAGE_SEND_REQUESTED, payload: { ...event } } };
-    },
-  };
-}
+/** I-6: the approved send. Its actor is the owner who decided the approval (approvals.md A-6). */
+export const sendReplyHandler: ActionHandler = {
+  resolveTarget: resolveReply,
+  async handle({ tx, command, binding, now }) {
+    const { payload } = parseOrFail(sendReplyCommandSchema, command);
+    const tenantId = binding.tenantId;
+    const draft = await lockDraft(tx, tenantId, payload.replyId);
+    await requireEmail(tx, tenantId, draft.contact_id);
+    await tx.query(
+      "UPDATE inbox_replies SET status='approved', approved_by=$3, approved_at=$4 WHERE tenant_id=$1 AND id=$2",
+      [tenantId, payload.replyId, binding.actorId, now],
+    );
+    const event: ReplySendRequested = {
+      messageId: payload.replyId, contactId: draft.contact_id, channel: "email", purpose: "transactional",
+      subject: draft.subject, body: draft.body,
+    };
+    return { ...(await replyResult(tx, tenantId, payload.replyId)), event: { type: MESSAGE_SEND_REQUESTED, payload: { ...event } } };
+  },
+};
 
 export const discardReplyHandler: ActionHandler = {
   resolveTarget: resolveReply,
@@ -141,6 +125,26 @@ export const discardReplyHandler: ActionHandler = {
     return replyResult(tx, tenantId, payload.replyId);
   },
 };
+
+/** A proposal to send one reply that can still be decided or run (approvals.md A-3). */
+export interface SendApproval {
+  readonly id: string;
+  readonly status: "pending" | "approved";
+  readonly requestedBy: string;
+  readonly decidedBy: string | null;
+}
+
+/** I-6: the newest unexpired pending or approved proposal to send this reply, if any. */
+export async function openSendApproval(tx: Transaction, tenantId: string, replyId: string, now: Date): Promise<SendApproval | null> {
+  const row = (await tx.query<{ id: string; status: "pending" | "approved"; requested_by: string; decided_by: string | null }>(
+    `SELECT id, status, requested_by, decided_by FROM approvals
+      WHERE tenant_id=$1 AND action_type=$2 AND target_type='inbox_reply' AND target_id=$3
+        AND status IN ('pending','approved') AND expires_at > $4
+      ORDER BY requested_at DESC, id DESC LIMIT 1`,
+    [tenantId, SEND_REPLY_ACTION, replyId, now],
+  )).rows[0];
+  return row ? { id: row.id, status: row.status, requestedBy: row.requested_by, decidedBy: row.decided_by } : null;
+}
 
 /**
  * I-6: the delivery worker's (M3d) settle hook. It runs inside the worker's settling transaction

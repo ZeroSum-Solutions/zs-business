@@ -179,10 +179,10 @@ export function useTenantId(): string | null {
 }
 
 /**
- * The permission that approves an inbox reply (owners only). The one place its name lives:
- * M3b renames it to "approve".
+ * The permission that approves an inbox reply (owners only): M3b's `approve`, which decides
+ * the reply's approval record and runs the send (inbox-home.md I-6). The one place it is named.
  */
-export const APPROVE_REPLIES: Permission = "inbox.approve";
+export const APPROVE_REPLIES: Permission = "approve";
 /** The permission that reads Home results (owners only). */
 export const READ_RESULTS: Permission = "reports";
 
