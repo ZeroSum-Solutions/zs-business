@@ -10,7 +10,7 @@ intake (`docs/requirements/public-intake.md`) and M3c the Inbox and Home results
 (`docs/requirements/inbox-home.md`). Requirements live in `docs/requirements/`.
 Plan: `/Users/zero-suminc./Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
 
-## Hosting (M2b)
+## Hosting (M6, 2026-10-20)
 
 Pilot data only (the invented Halden & Rowe tenant). Everything is in US East.
 
@@ -27,6 +27,12 @@ ref, and the preview dashboard's `ZS_API_URL` is the preview API. DNS is on Clou
 Secrets live in ZS Vault (`zs_business_<prod|preview>_*`) and in Vercel env vars, never in
 the repo. The runbook (roles, migrations, seed, tokens, deploy, checks) is in
 `apps/api/README.md`, "Hosted deploy".
+
+On since 2026-10-20 (both targets): Supabase Auth sessions (an owner signs in by email link;
+prod owner devszerosum@gmail.com), public booking, unsubscribe links, the Resend bounce webhook
+and Activepieces with its 5-minute cron. Off until their settings exist: the delivery runner
+(needs `DELIVERY_PRICE_*`), Stripe top-ups, Twilio SMS, Google Calendar, site publishing (R2)
+and the follow-up agent (no model provider yet).
 
 ## Development
 
