@@ -48,7 +48,7 @@ describe("worker", () => {
 
   it("serves a release from the R2 binding", async () => {
     const SITES = fakeBucket({
-      [siteObjectKeys.host(host)]: { body: JSON.stringify({ format: SITE_OBJECT_FORMAT, host, tenantId, siteId, releaseId, version: 1 }) },
+      [siteObjectKeys.host(host)]: { body: JSON.stringify({ format: SITE_OBJECT_FORMAT, host, assignment: 1, tenantId, siteId, releaseId, version: 1 }) },
       [siteObjectKeys.manifest(tenantId, releaseId)]: {
         body: JSON.stringify({
           format: SITE_OBJECT_FORMAT, tenantId, siteId, releaseId, entry: "index.html", digest: "0".repeat(64),
@@ -59,7 +59,8 @@ describe("worker", () => {
     });
     const response = await worker.fetch(new Request(`https://${host}/`), { SITES });
     expect(response.status).toBe(200);
-    expect(response.headers.get("etag")).toBe(`"${sha}"`);
+    // The digest, then 32-bit FNV-1a of "text/html" (checked against an independent implementation).
+    expect(response.headers.get("etag")).toBe(`"${sha}-75d8656e"`);
   });
 
   it("answers a fixed 500 when the bucket throws", async () => {

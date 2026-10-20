@@ -26,21 +26,36 @@ import {
 import { serveSite } from "@zs/site-worker";
 import { call, clock, createApiHarness, signedInMember, type ApiHarness, type TenantSetup } from "./helpers.js";
 
-/** The real store, with a switch that makes every host-pointer write fail (an R2 outage). */
+/**
+ * The real store, with switches for R2 failures: host-pointer writes fail, every call fails,
+ * host-pointer reads never answer, or a manifest write loses a conflict (409) whose winner fails.
+ */
 const memory = createMemorySiteStore();
 let pointerWritesFail = false;
+let storeDown = false;
+let pointerReadsHang = false;
+let manifestConflict = false;
+const down = () => { if (storeDown) throw new Error("R2 answered 500"); };
 const store: SiteObjectStore = {
-  get: (key) => memory.get(key),
-  head: (key) => memory.head(key),
-  delete: (key) => memory.delete(key),
+  get: async (key) => {
+    down();
+    if (pointerReadsHang && key.startsWith("hosts/")) return new Promise(() => undefined);
+    return memory.get(key);
+  },
+  head: async (key) => { down(); return memory.head(key); },
+  delete: async (key) => { down(); return memory.delete(key); },
   put: async (key, body, options) => {
+    down();
     if (pointerWritesFail && key.startsWith("hosts/")) throw new Error("R2 put failed with status 500");
+    if (manifestConflict && key.endsWith("/manifest.json")) return null;
     return memory.put(key, body, options);
   },
 };
+/** The projection's own time in these tests: short, so a hung store answers quickly. */
+const SYNC_TIMEOUT_MS = 1_500;
 
 let h: ApiHarness;
-beforeAll(async () => { h = await createApiHarness({ sites: { store, compiler: plainSiteCompiler } }); });
+beforeAll(async () => { h = await createApiHarness({ sites: { store, compiler: plainSiteCompiler, syncTimeoutMs: SYNC_TIMEOUT_MS } }); });
 afterAll(async () => { await h?.close(); });
 
 const errorOf = (response: { body: unknown }) => apiErrorBodySchema.parse(response.body).error;
@@ -63,6 +78,11 @@ const activate = (tenant: TenantSetup, siteId: string, releaseId: string, expect
   });
 const attach = (tenant: TenantSetup, siteId: string, host: string) =>
   h.fixture.service((tx) => attachSiteHost(tx, { tenantId: tenant.tenantId, siteId, host }, clock.now()));
+const detach = async (tenant: TenantSetup, siteId: string, host: string) => {
+  const detached = await h.fixture.service((tx) => detachSiteHost(tx, { tenantId: tenant.tenantId, siteId, host }));
+  expect(detached).not.toBeNull();
+  return detached!;
+};
 const visit = async (host: string, path = "/") => {
   const response = await serveSite(new Request(`https://${host}${path}`), store);
   return { status: response.status, text: await response.text(), headers: response.headers };
@@ -243,6 +263,67 @@ describe("the pointer flip", () => {
     expect(synced).toMatchObject({ edge: "synced", site: { pointerVersion: 2 } });
     expect((await visit(host)).text).toContain("After outage");
   });
+
+  it("answers a committed write with pending, in time, when the store stops answering", async () => {
+    const site = await createSite(h.a);
+    const host = hostName();
+    await attach(h.a, site.id, host);
+    await published(h.a, site.id, "Before the hang");
+    pointerReadsHang = true;
+    try {
+      const started = Date.now();
+      const during = await published(h.a, site.id, "During the hang");
+      expect(during.edge).toBe("pending");
+      expect(during.result.site.pointerVersion).toBe(2);
+      expect(Date.now() - started).toBeLessThan(SYNC_TIMEOUT_MS + 3_000);
+    } finally {
+      pointerReadsHang = false;
+    }
+    const synced = siteSyncResponseSchema.parse((await call(h.app, "POST", `/v1/sites/${site.id}/sync`, { token: h.a.token })).body);
+    expect(synced.edge).toBe("synced");
+    expect((await visit(host)).text).toContain("During the hang");
+  });
+
+  it("keeps the hosts on the old release when the manifest write loses a conflict that never lands", async () => {
+    const site = await createSite(h.a);
+    const host = hostName();
+    await attach(h.a, site.id, host);
+    await published(h.a, site.id, "Readable");
+    manifestConflict = true;
+    let during: SiteReleaseResponse;
+    try {
+      during = await published(h.a, site.id, "No manifest yet");
+    } finally {
+      manifestConflict = false;
+    }
+    expect(during.edge).toBe("pending");
+    expect((await visit(host)).text).toContain("Readable");
+    const synced = siteSyncResponseSchema.parse((await call(h.app, "POST", `/v1/sites/${site.id}/sync`, { token: h.a.token })).body);
+    expect(synced.edge).toBe("synced");
+    expect((await visit(host)).text).toContain("No manifest yet");
+  });
+
+  it("replays a committed publish while the store is down, and refuses a new one with 503", async () => {
+    const site = await createSite(h.a);
+    const key = randomUUID();
+    const first = await publish(h.a, site.id, "Recorded", key);
+    expect(first.status).toBe(201);
+    storeDown = true;
+    try {
+      const again = await publish(h.a, site.id, "Recorded", key);
+      expect(again.status).toBe(201);
+      const replayed = siteReleaseResponseSchema.parse(again.body);
+      expect(replayed.result).toEqual(siteReleaseResponseSchema.parse(first.body).result);
+      expect(replayed.edge).toBe("pending");
+      const fresh = await publish(h.a, site.id, "Not recorded");
+      expect(fresh.status).toBe(503);
+      expect(errorOf(fresh).code).toBe("Unavailable");
+    } finally {
+      storeDown = false;
+    }
+    const releases = siteReleaseListSchema.parse((await call(h.app, "GET", `/v1/sites/${site.id}/releases`, { token: h.a.token })).body);
+    expect(releases.items).toHaveLength(1);
+  });
 });
 
 describe("hosts", () => {
@@ -261,9 +342,60 @@ describe("hosts", () => {
     await attach(h.a, site.id, host);
     await published(h.a, site.id, "Leaving soon");
     expect((await visit(host)).status).toBe(200);
-    expect(await h.fixture.service((tx) => detachSiteHost(tx, { tenantId: h.a.tenantId, siteId: site.id, host }))).toBe(true);
-    await retractHostPointer(store, host, h.a.tenantId, site.id);
+    const detached = await detach(h.a, site.id, host);
+    expect(await retractHostPointer(store, detached)).toBe(true);
     expect((await visit(host)).status).toBe(404);
+  });
+
+  it("normalize the host on detach, so the retraction finds its pointer", async () => {
+    const site = await createSite(h.a);
+    const host = hostName();
+    await attach(h.a, site.id, host);
+    await published(h.a, site.id, "Mixed case");
+    const detached = await detach(h.a, site.id, `${host.toUpperCase()}.`);
+    expect(detached.host).toBe(host);
+    await retractHostPointer(store, detached);
+    expect((await visit(host)).status).toBe(404);
+  });
+
+  it("go to their new site, and a stale sync or a late retraction from the old one cannot take them back", async () => {
+    const a = await createSite(h.a);
+    const b = await createSite(h.b);
+    const host = hostName();
+    await attach(h.a, a.id, host);
+    await published(h.a, a.id, "Tenant A before the move");
+    // A's sync reads the database, then stalls before it writes the host pointer.
+    const stale = await h.database.db.tenant(h.a.tenantId, (tx) => loadSiteEdgeState(tx, h.a.tenantId, a.id));
+
+    // The host leaves A. Until it is retracted, a stale sync may not bring it back either.
+    const detached = await detach(h.a, a.id, host);
+    await retractHostPointer(store, detached);
+    expect(await projectSiteEdge(store, stale)).toBe("pending");
+    expect((await visit(host)).status).toBe(404);
+
+    // The host goes to tenant B, which publishes; then A's stale sync and the retraction run again.
+    await attach(h.b, b.id, host);
+    await published(h.b, b.id, "Tenant B owns it now");
+    expect(await projectSiteEdge(store, stale)).toBe("pending");
+    expect(await retractHostPointer(store, detached)).toBe(true);
+    const page = await visit(host);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain("Tenant B owns it now");
+    expect(page.text).not.toContain("Tenant A");
+  });
+
+  it("go to their new site even when the old pointer was never retracted", async () => {
+    const a = await createSite(h.a);
+    const b = await createSite(h.b);
+    const host = hostName();
+    await attach(h.a, a.id, host);
+    await published(h.a, a.id, "Tenant A forgot");
+    const stale = await h.database.db.tenant(h.a.tenantId, (tx) => loadSiteEdgeState(tx, h.a.tenantId, a.id));
+    await detach(h.a, a.id, host);
+    await attach(h.b, b.id, host);
+    await published(h.b, b.id, "Tenant B took over");
+    expect(await projectSiteEdge(store, stale)).toBe("pending");
+    expect((await visit(host)).text).toContain("Tenant B took over");
   });
 });
 

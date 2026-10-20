@@ -191,15 +191,30 @@ export type SiteReleaseList = z.infer<typeof siteReleaseListSchema>;
 // Edge objects: written by the API (a projection of committed state), read by the Worker.
 export const SITE_OBJECT_FORMAT = 1;
 
-/** One host's live release. The Worker reads it once per request, so a flip is one object write. */
-export const siteHostPointerSchema = z.strictObject({
+/**
+ * One host's live release. The Worker reads it once per request, so a flip is one object write.
+ * `assignment` is the host's attach number (`site_hosts.assignment`): a pointer never replaces
+ * one with a higher number, so a site that lost the host cannot write it back.
+ */
+export const siteHostLivePointerSchema = z.strictObject({
   format: z.literal(SITE_OBJECT_FORMAT),
   host: z.string(),
+  assignment: z.number().int().min(1),
   tenantId: idSchema,
   siteId: idSchema,
   releaseId: idSchema,
   version: z.number().int().min(1),
 });
+export type SiteHostLivePointer = z.infer<typeof siteHostLivePointerSchema>;
+/** Left where a detached host's pointer was, under the detach's number: the Worker answers 404. */
+export const siteHostRetiredPointerSchema = z.strictObject({
+  format: z.literal(SITE_OBJECT_FORMAT),
+  host: z.string(),
+  assignment: z.number().int().min(1),
+  retired: z.literal(true),
+});
+export type SiteHostRetiredPointer = z.infer<typeof siteHostRetiredPointerSchema>;
+export const siteHostPointerSchema = z.union([siteHostLivePointerSchema, siteHostRetiredPointerSchema]);
 export type SiteHostPointer = z.infer<typeof siteHostPointerSchema>;
 
 /** A release's file table. Immutable once written: a release never changes. */

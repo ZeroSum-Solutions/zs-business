@@ -19,6 +19,9 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 const json = (value: unknown) => encoder.encode(JSON.stringify(value));
 
 const HTML = "text/html; charset=utf-8";
+const TEXT = "text/plain; charset=utf-8";
+/** The etag is the quoted digest plus a hash of the media type; only its shape is fixed here. */
+const etagOf = (digest: string) => new RegExp(`^"${digest}-[0-9a-f]{8}"$`);
 
 interface ReleaseInput {
   readonly tenantId: string;
@@ -61,7 +64,7 @@ async function publish(store: SiteObjectStore, input: ReleaseInput): Promise<Rec
 }
 
 async function point(store: SiteObjectStore, host: string, tenantId: string, siteId: string, releaseId: string, version = 1) {
-  const pointer = { format: SITE_OBJECT_FORMAT, host, tenantId, siteId, releaseId, version };
+  const pointer = { format: SITE_OBJECT_FORMAT, host, assignment: 1, tenantId, siteId, releaseId, version };
   await store.put(siteObjectKeys.host(host), json(pointer), { contentType: "application/json" });
 }
 
@@ -105,6 +108,15 @@ describe("host lookup", () => {
     expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
   });
 
+  it("answers 404 for a host whose pointer was retired by a detach", async () => {
+    const { store } = await siteA();
+    const retired = { format: SITE_OBJECT_FORMAT, host: HOST_A, assignment: 2, retired: true };
+    await store.put(siteObjectKeys.host(HOST_A), json(retired), { contentType: "application/json" });
+    const response = await serveSite(get("/"), store);
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
   it("answers 404 for an invalid host without reading the store", async () => {
     const { store } = await siteA();
     for (const host of ["localhost", "127.0.0.1", "[::1]:8080", "bad_host.example.com", "a..example.com", ""]) {
@@ -145,7 +157,7 @@ describe("host lookup", () => {
 
   it("answers 502 for a pointer that names another host", async () => {
     const { store } = await siteA();
-    const pointer = { format: SITE_OBJECT_FORMAT, host: HOST_B, tenantId: TENANT_A, siteId: SITE_A, releaseId: RELEASE_1, version: 1 };
+    const pointer = { format: SITE_OBJECT_FORMAT, host: HOST_B, assignment: 1, tenantId: TENANT_A, siteId: SITE_A, releaseId: RELEASE_1, version: 1 };
     await store.put(siteObjectKeys.host(HOST_A), json(pointer), { contentType: "application/json" });
     expect((await serveSite(get("/"), store)).status).toBe(502);
   });
@@ -158,7 +170,7 @@ describe("serving files", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("<h1>home v1</h1>");
     expect(response.headers.get("content-type")).toBe(HTML);
-    expect(response.headers.get("etag")).toBe(`"${digests["index.html"]}"`);
+    expect(response.headers.get("etag")).toMatch(etagOf(digests["index.html"]!));
     expect(response.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
@@ -177,9 +189,7 @@ describe("serving files", () => {
     const cases: Array<[string, string]> = [
       ["/about", "<h1>about</h1>"],
       ["/about.html", "<h1>about</h1>"],
-      ["/docs", "<h1>docs</h1>"],
       ["/docs/", "<h1>docs</h1>"],
-      ["/docs/guide", "<h1>guide</h1>"],
       ["/docs/guide/", "<h1>guide</h1>"],
       ["/docs/index.html", "<h1>docs</h1>"],
       ["/style.css", "body{}"],
@@ -195,6 +205,42 @@ describe("serving files", () => {
     expect(css.headers.get("content-type")).toBe("text/css; charset=utf-8");
     // A trailing slash means a directory: "/about/" is not about.html.
     expect((await serveSite(get("/about/"), store)).status).toBe(404);
+  });
+
+  it("redirects a directory without its trailing slash, with 308 and no blob read", async () => {
+    const { store } = await siteA();
+    const cases: Array<[string, string]> = [
+      ["/docs", "/docs/"],
+      ["/docs/guide", "/docs/guide/"],
+      ["/d%6Fcs", "/d%6Fcs/"],
+    ];
+    for (const [path, location] of cases) {
+      for (const method of ["GET", "HEAD"]) {
+        const { keys, reader } = recording(store);
+        const response = await serveSite(get(path, HOST_A, { method }), reader);
+        expect(response.status, `${method} ${path}`).toBe(308);
+        expect(response.headers.get("location"), path).toBe(location);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        expect(response.headers.get("etag")).toBeNull();
+        expect(response.body).toBeNull();
+        expect(keys.some((key) => key.includes("/blobs/"))).toBe(false);
+      }
+    }
+    // A file or a .html page of that name wins over the directory, with no redirect.
+    const store2 = createMemorySiteStore();
+    await publish(store2, { tenantId: TENANT_A, siteId: SITE_A, releaseId: RELEASE_1, files: { "docs.html": "docs page", "docs/index.html": "docs dir" } });
+    await point(store2, HOST_A, TENANT_A, SITE_A, RELEASE_1);
+    const page = await serveSite(get("/docs"), store2);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toBe("docs page");
+  });
+
+  it("keeps the query string on the trailing-slash redirect", async () => {
+    const { store } = await siteA();
+    const response = await serveSite(get("/docs/guide?tab=api&x=%20y"), store);
+    expect(response.status).toBe(308);
+    expect(response.headers.get("location")).toBe("/docs/guide/?tab=api&x=%20y");
+    expect((await serveSite(get("/docs?"), store)).headers.get("location")).toBe("/docs/");
   });
 
   it("serves 404.html with status 404 for an unknown path", async () => {
@@ -222,7 +268,7 @@ describe("serving files", () => {
     const response = await serveSite(get("/about", HOST_A, { method: "HEAD" }), store);
     expect(response.status).toBe(200);
     expect(response.headers.get("content-length")).toBe(String("<h1>about</h1>".length));
-    expect(response.headers.get("etag")).toBe(`"${digests["about.html"]}"`);
+    expect(response.headers.get("etag")).toMatch(etagOf(digests["about.html"]!));
     expect(response.headers.get("content-type")).toBe(HTML);
     expect(response.body).toBeNull();
   });
@@ -238,17 +284,22 @@ describe("serving files", () => {
 
   it("answers 304 when If-None-Match matches, without reading the blob", async () => {
     const { store, digests } = await siteA();
-    const etag = `"${digests["index.html"]}"`;
+    const etag = (await serveSite(get("/"), store)).headers.get("etag")!;
+    expect(etag).toMatch(etagOf(digests["index.html"]!));
     for (const header of [etag, `W/${etag}`, `"other", ${etag}`, "*"]) {
       const { keys, reader } = recording(store);
       const response = await serveSite(get("/", HOST_A, { headers: { "if-none-match": header } }), reader);
       expect(response.status, header).toBe(304);
       expect(response.headers.get("etag")).toBe(etag);
+      expect(response.headers.get("content-type")).toBe(HTML);
       expect(response.body).toBeNull();
       expect(keys.some((key) => key.includes("/blobs/"))).toBe(false);
     }
     const stale = await serveSite(get("/", HOST_A, { headers: { "if-none-match": '"stale"' } }), store);
     expect(stale.status).toBe(200);
+    // The bare digest, the validator before media types were part of it, no longer matches.
+    const bare = await serveSite(get("/", HOST_A, { headers: { "if-none-match": `"${digests["index.html"]}"` } }), store);
+    expect(bare.status).toBe(200);
   });
 });
 
@@ -307,10 +358,36 @@ describe("releases", () => {
     };
     const response = await serveSite(get("/about"), flipping);
     expect(await response.text()).toBe("about v1");
-    expect(response.headers.get("etag")).toBe(`"${v1["about.html"]}"`);
+    expect(response.headers.get("etag")).toMatch(etagOf(v1["about.html"]!));
     expect(pointerReads).toBe(1);
     // The next request sees the flip.
     expect(await (await serveSite(get("/about"), store)).text()).toBe("about v2");
+  });
+
+  it("does not answer 304 when a release keeps the bytes but changes the media type", async () => {
+    const store = createMemorySiteStore();
+    const v1 = await publish(store, { tenantId: TENANT_A, siteId: SITE_A, releaseId: RELEASE_1, files: { "page": { body: "<b>hi</b>", mediaType: TEXT } } });
+    const v2 = await publish(store, { tenantId: TENANT_A, siteId: SITE_A, releaseId: RELEASE_2, files: { "page": { body: "<b>hi</b>", mediaType: HTML } } });
+    expect(v2["page"]).toBe(v1["page"]);
+    await point(store, HOST_A, TENANT_A, SITE_A, RELEASE_1, 1);
+    const old = await serveSite(get("/page"), store);
+    expect(old.headers.get("content-type")).toBe(TEXT);
+    const oldEtag = old.headers.get("etag")!;
+    expect(oldEtag).toMatch(etagOf(v1["page"]!));
+
+    await point(store, HOST_A, TENANT_A, SITE_A, RELEASE_2, 2);
+    const fresh = await serveSite(get("/page", HOST_A, { headers: { "if-none-match": oldEtag } }), store);
+    expect(fresh.status).toBe(200);
+    expect(fresh.headers.get("content-type")).toBe(HTML);
+    expect(await fresh.text()).toBe("<b>hi</b>");
+    const newEtag = fresh.headers.get("etag")!;
+    expect(newEtag).toMatch(etagOf(v2["page"]!));
+    expect(newEtag).not.toBe(oldEtag);
+
+    // The new validator still revalidates, and its 304 names the new type.
+    const revalidated = await serveSite(get("/page", HOST_A, { headers: { "if-none-match": newEtag } }), store);
+    expect(revalidated.status).toBe(304);
+    expect(revalidated.headers.get("content-type")).toBe(HTML);
   });
 
   it("serves the old bytes again after a rollback", async () => {
