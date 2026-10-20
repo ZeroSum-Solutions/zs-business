@@ -12,9 +12,10 @@ import {
   type AutomationEdgeConfig,
   type Session,
   type SessionCheck,
+  type StripeClient,
 } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
-import type { ScopedDatabase } from "@zs/db";
+import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import type { SiteCompiler } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
@@ -31,6 +32,7 @@ import { sourceRoutes } from "./routes/sources.js";
 import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public/activepieces.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
+import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-webhook.js";
 import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
@@ -61,6 +63,10 @@ export interface AppDependencies {
   readonly unsubscribe?: UnsubscribeConfig;
   /** Resend email events, bounces and complaints feeding suppression (resend.md R-7, R-8); absent means off. */
   readonly resendWebhook?: ResendWebhookConfig;
+  /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means POST /v1/wallet/top-ups is 404. */
+  readonly stripe?: StripeClient;
+  /** Signed Stripe events into the billing inbox (stripe.md S-3); absent means the route is off. */
+  readonly stripeWebhook?: StripeWebhookConfig;
   /** Twilio status callbacks and inbound STOP/START/HELP texts (twilio.md T-6, T-8); absent means off. */
   readonly twilioWebhook?: TwilioWebhookConfig;
   /**
@@ -84,9 +90,12 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
  * statement after the signal fires, and no statement or lock wait outlasts the time left.
  */
 function withDeadline(db: ScopedDatabase, signal: AbortSignal, remainingMs: () => number): ScopedDatabase {
+  const platform = db.platform?.bind(db);
   return {
     tenant: (tenantId, work, options) => db.tenant(tenantId, work, { signal, remainingMs, ...options }),
     withoutTenant: (work, options) => db.withoutTenant(work, { signal, remainingMs, ...options }),
+    ...(platform ? { platform: <T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions) =>
+      platform(work, { signal, remainingMs, ...options }) } : {}),
   };
 }
 
@@ -153,6 +162,7 @@ export function createApp(deps: AppDependencies) {
     ...(deps.publicIntake
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
+    ...(deps.stripe ? { billing: { stripe: deps.stripe } } : {}),
     ...(deps.sites ? { sites: deps.sites } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
@@ -168,6 +178,7 @@ export function createApp(deps: AppDependencies) {
   }
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
+  if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
 
@@ -225,6 +236,7 @@ export type App = ReturnType<typeof createApp>;
 export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
+export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
 export type { TwilioWebhookConfig } from "./public/twilio-webhook.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createPostgresRateLimiter } from "./public/postgres-limiter.js";

@@ -25,11 +25,18 @@ export const isApprovalAction = (actionType: string) => actionType.startsWith("a
  * runs the handler alone: it could commit a release whose files were never stored.
  */
 export const isSiteAction = (actionType: string) => actionType.startsWith("site.");
-export const cannotBeApproved = (actionType: string) => isApprovalAction(actionType) || isSiteAction(actionType);
+
+/**
+ * Member actions that never run through an approval. stripe.md S-1: a top-up runs only from the
+ * member's top-up route, with the server's terms, and asks Stripe for a Checkout Session after.
+ */
+export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["wallet.topup.create"]);
+export const cannotBeApproved = (actionType: string) =>
+  isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);
 
 /**
  * The policy for one action type, or null when it cannot be requested: it has no
- * ACTION_PERMISSIONS entry (so no member may run it), or it is an approval or site action.
+ * ACTION_PERMISSIONS entry (so no member may run it), or it cannot be approved (cannotBeApproved).
  */
 export function approvalPolicy(
   actionType: string,

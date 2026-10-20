@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   formatEnvIssues,
   jwtEnvSchema,
+  parseStripeEnv,
   resendWebhookSecretSchema,
   secureUrlProblem,
   sessionCheckEnvSchema,
@@ -12,6 +13,7 @@ import {
   type JwtConfig,
   type KeywordReplies,
   type SessionCheckConfig,
+  type StripeEnv,
 } from "@zs/core";
 import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
@@ -150,6 +152,8 @@ export interface ServerEnv {
   readonly sites: SitesEnv | null;
   readonly unsubscribe: UnsubscribeEnv | null;
   readonly resendWebhook: ResendWebhookEnv | null;
+  /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
+  readonly stripe: StripeEnv | null;
   readonly twilioWebhook: TwilioWebhookEnv | null;
   readonly activepieces: ActivepiecesEnv | null;
 }
@@ -214,6 +218,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     sites: parseSites(parsed.data),
     unsubscribe: parseUnsubscribe(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
+    stripe: parseStripeEnv(env),
     twilioWebhook: parseTwilioWebhook(parsed.data),
     activepieces: parseActivepieces(parsed.data),
   };
