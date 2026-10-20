@@ -137,6 +137,8 @@ test("a late publish answer does not close the editor opened after it", async ({
 });
 
 test("a publish retried after a lost answer replays instead of adding a second version", async ({ page }) => {
+  // Lists count as fresh for 30 s; the clock moves past that before the page is shown again.
+  await page.clock.install();
   await openSite(page);
   await page.getByRole("button", { name: "Edit site" }).click();
   const editor = page.getByRole("dialog", { name: "Edit site" });
@@ -146,13 +148,46 @@ test("a publish retried after a lost answer replays instead of adding a second v
   await expect(editor.getByRole("alert")).toBeVisible();
   await editor.getByRole("button", { name: "Cancel" }).click();
 
-  // Closing and reopening keeps the key, so the same publish replays.
+  // The lost publish did go live. Leaving and coming back later refreshes the page onto it.
+  await page.clock.fastForward(60_000);
+  await mainNav(page).getByRole("link", { name: "Customers" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Customers" })).toBeVisible();
+  await mainNav(page).getByRole("link", { name: "Site" }).click();
+  await expect(liveSummary(page)).toHaveText(/^Version 3 is live\./);
+
+  // The editor reopens the unanswered publish as it was sent, so publishing it replays.
   await page.getByRole("button", { name: "Edit site" }).click();
-  await editor.getByLabel("Tagline").fill("Open late on Thursdays");
+  await expect(editor.getByTestId("site-resume")).toBeVisible();
+  await expect(editor.getByLabel("Tagline")).toHaveValue("Open late on Thursdays");
   await editor.getByRole("button", { name: "Publish" }).click();
   await expect(page.getByRole("status").getByText("Published. Your site is live.")).toBeVisible();
   await expect(releases(page)).toHaveCount(3);
   await expect(liveSummary(page)).toHaveText(/^Version 3 is live\./);
+
+  // Settled: the next opening starts from the live version again.
+  await page.getByRole("button", { name: "Edit site" }).click();
+  await expect(editor.getByTestId("site-resume")).toHaveCount(0);
+});
+
+test("checks the site again when another owner makes a version live", async ({ page }) => {
+  // Lists count as fresh for 30 s; the clock moves past that before the page is shown again.
+  await page.clock.install();
+  await openSite(page);
+  const behind = page.getByText("Saved and live here, but your site still shows the previous version.");
+  await expect(page.getByRole("button", { name: "Edit site" })).toBeEnabled();
+  await expect(behind).toHaveCount(0);
+  // Another owner makes version 1 live while the site host is down.
+  await page.evaluate(() => {
+    window.__zsDemo!.setSiteEdgeDown(true);
+    window.__zsDemo!.rollBackElsewhere();
+  });
+  await mainNav(page).getByRole("link", { name: "Customers" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Customers" })).toBeVisible();
+  await page.clock.fastForward(60_000);
+  await mainNav(page).getByRole("link", { name: "Site" }).click();
+  await expect(liveSummary(page)).toHaveText(/^Version 1 is live\./);
+  // What this page learned about version 2 does not stand for version 1.
+  await expect(behind).toBeVisible();
 });
 
 test("explains when a page holds more text than one request can carry", async ({ page }) => {

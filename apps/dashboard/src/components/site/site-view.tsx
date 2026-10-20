@@ -22,7 +22,7 @@ import {
 } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useDialogGeneration } from "@/lib/dialog-generation";
-import { fingerprint, isDefinitive, useIntentKey, type IntentKeys } from "@/lib/intent-key";
+import { createIntentKeys, fingerprint, isDefinitive, useIntentKey, type IntentKeys } from "@/lib/intent-key";
 import { useKeys, useSiteEdge, useSiteRelease, useSiteReleases, useSites } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { relativeTime } from "@/lib/utils";
@@ -42,14 +42,37 @@ function PreviewFrame({ preview }: { preview: SitePreview }) {
   );
 }
 
-/** One opening of the editor: the live release it started from, and the spec that release holds. */
-interface Editing { baseline: string | null; liveSpec: SiteSpec | undefined }
+/** One opening of the editor: the live release it started from, and the spec it starts with. */
+interface Editing {
+  baseline: string | null;
+  liveSpec: SiteSpec | undefined;
+  /** It reopens a publish whose answer was lost, exactly as it was sent. */
+  resuming: boolean;
+}
 
-function SiteEditor({ site, editing, intents, generation, onClose, onPublished }: {
+/** A publish whose answer was lost: it may have committed, so a retry must send the very same request. */
+interface UnsettledPublish { spec: SiteSpec; expectedCurrentReleaseId: string | null }
+
+/**
+ * Per site, for as long as the tab lives: the intent keys for publish and rollback, and the
+ * publish whose answer was lost. Kept outside React, so neither closing a dialog, leaving the
+ * page nor a refresh that moves the live release turns a retry into a second write.
+ */
+interface SiteWrites { publish: IntentKeys; rollback: IntentKeys; unsettled: UnsettledPublish | null }
+const siteWrites = new Map<string, SiteWrites>();
+function writesFor(siteId: string): SiteWrites {
+  let writes = siteWrites.get(siteId);
+  if (!writes) {
+    writes = { publish: createIntentKeys(), rollback: createIntentKeys(), unsettled: null };
+    siteWrites.set(siteId, writes);
+  }
+  return writes;
+}
+
+function SiteEditor({ site, editing, writes, generation, onClose, onPublished }: {
   site: SiteRecord;
   editing: Editing;
-  /** Held by the page, so a publish whose answer was lost replays after the editor closes and reopens. */
-  intents: IntentKeys;
+  writes: SiteWrites;
   /** Tags an attempt with this opening, so the page can tell a late answer from a current one. */
   generation: () => number;
   onClose: () => void;
@@ -75,8 +98,13 @@ function SiteEditor({ site, editing, intents, generation, onClose, onPublished }
   });
   const publish = useMutation({
     mutationFn: ({ input }: { input: { siteId: string; spec: SiteSpec; expectedCurrentReleaseId: string | null }; generation: number }) =>
-      api.publishSite(input, { idempotencyKey: intents.keyFor(input) }),
-    onSettled: (_result, error, attempt) => intents.settle(attempt.input, error),
+      api.publishSite(input, { idempotencyKey: writes.publish.keyFor(input) }),
+    onSettled: (_result, error, attempt) => {
+      writes.publish.settle(attempt.input, error);
+      // A lost answer is kept with its baseline for the retry; any real answer ends the doubt,
+      // since a publish from the same baseline would now be refused if the lost one had gone live.
+      writes.unsettled = isDefinitive(error) ? null : { spec: attempt.input.spec, expectedCurrentReleaseId: attempt.input.expectedCurrentReleaseId };
+    },
     onSuccess: (response, attempt) => onPublished(response, attempt.generation),
     onError: (error) => {
       if (!isStaleRelease(error)) return;
@@ -100,6 +128,11 @@ function SiteEditor({ site, editing, intents, generation, onClose, onPublished }
 
   return (
     <DialogContent title="Edit site" description="Change the words, preview the page, then publish. Earlier versions stay in History.">
+      {editing.resuming ? (
+        <p className="mb-4 rounded-sm bg-warn/10 p-3 text-sm text-fg-2" role="status" data-testid="site-resume">
+          Your last publish got no answer, so it may already be live. It is filled in below: publish it again to finish it. It will not be added twice.
+        </p>
+      ) : null}
       {shown ? (
         <div className="space-y-4">
           <PreviewFrame preview={shown} />
@@ -247,12 +280,10 @@ function SitePanel({ site }: { site: SiteRecord }) {
   const toast = useToast();
   const releases = useSiteReleases(site.id);
   const live = useSiteRelease(site.id, site.currentReleaseId);
-  const edge = useSiteEdge(site.id, site.currentReleaseId !== null);
+  const edge = useSiteEdge(site.id, site.pointerVersion, site.currentReleaseId !== null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [rollingBack, setRollingBack] = useState<RollingBack | null>(null);
-  // Held here, not in the dialogs, so they outlive a close and reopen.
-  const publishIntents = useIntentKey();
-  const rollbackIntents = useIntentKey();
+  const writes = writesFor(site.id);
   // A publish or rollback answering after its dialog closed (and maybe reopened) still updates
   // the page and may confirm itself, but never closes the newer opening.
   const editorGeneration = useDialogGeneration(editing !== null);
@@ -260,13 +291,14 @@ function SitePanel({ site }: { site: SiteRecord }) {
   const sync = useMutation({
     mutationFn: () => api.syncSite(site.id),
     onSuccess: (response) => {
-      queryClient.setQueryData(keys.siteEdge(site.id), response.edge);
+      queryClient.setQueryData(keys.siteEdge(site.id, response.site.pointerVersion), response.edge);
+      if (response.site.pointerVersion !== site.pointerVersion) void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
       toast(response.edge === "synced" ? "Your site shows the live version now." : "Your site still shows the previous version. Try again in a moment.",
         response.edge === "synced" ? "success" : "info");
     },
   });
   const wentLive = (response: SiteReleaseResponse) => {
-    queryClient.setQueryData(keys.siteEdge(site.id), response.edge);
+    queryClient.setQueryData(keys.siteEdge(site.id, response.result.site.pointerVersion), response.edge);
     void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
   };
   const host = site.hosts[0] ?? null;
@@ -306,7 +338,9 @@ function SitePanel({ site }: { site: SiteRecord }) {
         ) : null}
         <Button disabled={site.currentReleaseId !== null && !live.data} aria-busy={site.currentReleaseId !== null && live.isPending}
           aria-describedby={live.isError ? "site-live-summary" : undefined}
-          onClick={() => setEditing({ baseline: site.currentReleaseId, liveSpec: live.data?.spec })}>
+          onClick={() => setEditing(writes.unsettled
+            ? { baseline: writes.unsettled.expectedCurrentReleaseId, liveSpec: writes.unsettled.spec, resuming: true }
+            : { baseline: site.currentReleaseId, liveSpec: live.data?.spec, resuming: false })}>
           <PencilSimple aria-hidden />Edit site
         </Button>
       </Card>
@@ -349,7 +383,7 @@ function SitePanel({ site }: { site: SiteRecord }) {
           <SiteEditor
             site={site}
             editing={editing}
-            intents={publishIntents}
+            writes={writes}
             generation={editorGeneration.current}
             onClose={() => setEditing(null)}
             onPublished={(response, tag) => {
@@ -366,7 +400,7 @@ function SitePanel({ site }: { site: SiteRecord }) {
       </Dialog>
       <Dialog open={rollingBack !== null} onOpenChange={(open) => !open && setRollingBack(null)}>
         {rollingBack ? (
-          <RollbackDialog site={site} target={rollingBack} intents={rollbackIntents} generation={rollbackGeneration.current}
+          <RollbackDialog site={site} target={rollingBack} intents={writes.rollback} generation={rollbackGeneration.current}
             onDone={(outcome, tag) => {
               const current = rollbackGeneration.isCurrent(tag);
               const speak = current || rollbackGeneration.isClosed();

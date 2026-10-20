@@ -261,14 +261,17 @@ since is not shown. Publish and "Make live" both send the release that was live 
 editor or dialog opened (`expectedCurrentReleaseId`): a 409 `stale_release`
 (`isStaleRelease`) means another version went live since, so nothing is replaced. The
 editor keeps the draft and says to reopen it; the rollback dialog closes and History
-reloads. Their intent keys are held by the page, so a retry after a lost answer replays
-even after the dialog was closed and reopened, and a late answer updates the page but
-never closes a newer opening (`useDialogGeneration`). When the API answers
+reloads. Their intent keys live per site for the life of the tab, with any publish whose
+answer was lost: reopening the editor then offers that exact request again (same spec,
+same baseline, same key), even after leaving the page or a refresh that moved the live
+release, so the retry replays instead of adding a second version. A late answer updates
+the page but never closes a newer opening (`useDialogGeneration`). When the API answers
 `edge: "pending"` the database moved but the site's host pointer did not, so the page says
 the site still shows the previous version and offers "Update the site now"
-(`/v1/sites/:id/sync`). That state is a query per site (`useSiteEdge`): set by every
-publish, rollback and sync, and asked once with a sync when the page first opens, so it
-survives leaving the page. Preview and sync change nothing, so they send no
+(`/v1/sites/:id/sync`). That state is a query per site and pointer version
+(`useSiteEdge`): set by every publish, rollback and sync under the version its answer
+names, and asked once with a sync when a version is first shown, so it survives leaving
+the page and a version another owner made live is checked afresh. Preview and sync change nothing, so they send no
 `Idempotency-Key`. The demo adapter (`src/lib/api/demo/sites.ts`) builds the same plain
 page in the browser and exposes `rollBackElsewhere()`, `setSiteEdgeDown()`,
 `delayNextSiteWrite()` and `loseNextSiteAnswer()` on `window.__zsDemo` for tests.
