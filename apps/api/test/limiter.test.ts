@@ -202,6 +202,22 @@ describe("shared Postgres limiter", () => {
     }
   });
 
+  it("answers a backend lost between the transaction's statements as an unavailable store", async () => {
+    const runtime = instance();
+    // Kills its own backend after the transaction setup, before the limiter's statement.
+    const dropping: ScopedDatabase = {
+      ...runtime,
+      withoutTenant: (work, options) => runtime.withoutTenant(async (tx) => {
+        const { rows } = await tx.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        await database.pool.query("SELECT pg_terminate_backend($1)", [rows[0]!.pid]);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return work(tx);
+      }, options),
+    };
+    await expect(createPostgresRateLimiter(dropping, at(0)).take([{ key: randomUUID(), rule: rule(1) }]))
+      .rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "connect" });
+  });
+
   it("refuses malformed charges", async () => {
     const take = (charges: unknown) => database.db.withoutTenant((tx) =>
       tx.query("SELECT public.rate_limit_take($1,$2::jsonb)", [new Date(NOW).toISOString(), JSON.stringify(charges)]));

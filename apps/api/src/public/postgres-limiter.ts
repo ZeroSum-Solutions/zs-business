@@ -13,7 +13,7 @@ const bucketKey = (name: string) => createHash("sha256").update(name).digest("he
  * Failures that mean the store could not answer now, not a fault in the call: a lock wait or
  * statement past its timeout, a serialization failure or deadlock, a lost or refused
  * connection (SQLSTATE classes 08 and 57P, socket errors, node-postgres's "Connection
- * terminated"), or a server out of resources (class 53). P-10 answers them with a retryable
+ * terminated" and "not queryable"), or a server out of resources (class 53). P-10 answers them with a retryable
  * 503, like a busy pool.
  */
 function transient(error: unknown): DatabaseUnavailable | undefined {
@@ -21,7 +21,8 @@ function transient(error: unknown): DatabaseUnavailable | undefined {
   const code = "code" in error && typeof error.code === "string" ? error.code : "";
   if (["55P03", "57014", "40001", "40P01"].includes(code) || code.startsWith("53"))
     return new DatabaseUnavailable("busy", { cause: error });
-  if (code.startsWith("08") || code.startsWith("57P") || /^E[A-Z]+$/.test(code) || error.message.startsWith("Connection terminated"))
+  if (code.startsWith("08") || code.startsWith("57P") || /^E[A-Z]+$/.test(code)
+    || error.message.startsWith("Connection terminated") || error.message.endsWith("is not queryable"))
     return new DatabaseUnavailable("connect", { cause: error });
   return undefined;
 }

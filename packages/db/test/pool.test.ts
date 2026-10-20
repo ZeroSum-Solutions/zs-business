@@ -135,8 +135,29 @@ describe("runtime pool bounds", () => {
         if (pid === undefined) await new Promise((resolve) => setTimeout(resolve, 20));
       }
       await database.pool.query("SELECT pg_terminate_backend($1)", [pid]);
-      await expect(running).rejects.toThrow();
+      await expect(running).rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "connect", cause: { message: expect.stringMatching(/terminat/) } });
       // The lost client was discarded; the next transaction gets a new connection.
+      expect((await db.tenant(fixture.a.tenantId, (tx) => tx.query<{ ok: number }>("SELECT 1 AS ok"))).rows).toEqual([{ ok: 1 }]);
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it("reports a backend lost between two statements as the lost connection, not as \"not queryable\"", async () => {
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, connectionTimeoutMs: 2000, onError: () => undefined });
+    const failures: unknown[] = [];
+    const db = createScopedDatabase(pool, { onResetFailure: (error) => failures.push(error) });
+    try {
+      const outcome = db.tenant(fixture.a.tenantId, async (tx) => {
+        const { rows } = await tx.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        await database.pool.query("SELECT pg_terminate_backend($1)", [rows[0]!.pid]);
+        // Let the client see the socket close before it sends the next statement.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return tx.query("SELECT 1");
+      });
+      await expect(outcome).rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "connect", cause: { message: expect.stringMatching(/terminat/) } });
+      // No cleanup was tried on the dead connection, so none is reported as failed.
+      expect(failures).toEqual([]);
       expect((await db.tenant(fixture.a.tenantId, (tx) => tx.query<{ ok: number }>("SELECT 1 AS ok"))).rows).toEqual([{ ok: 1 }]);
     } finally {
       await pool.end();

@@ -740,4 +740,26 @@ describe("shared limiter unavailable (P-10)", () => {
     }
     expect((await call(outage.app, "GET", `/public/v1/pages/${page.key}`, { socket: "192.0.2.80" })).status).toBe(200);
   });
+
+  it("answers a retryable 503 when the limiter's connection drops between statements", async () => {
+    const page = await provisionPage(outage, outage.a);
+    const runtime = createScopedDatabase(outage.database.runtimePool);
+    const previous = inner;
+    inner = createPostgresRateLimiter({
+      ...runtime,
+      withoutTenant: (work, options) => runtime.withoutTenant(async (tx) => {
+        const { rows } = await tx.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+        await outage.database.pool.query("SELECT pg_terminate_backend($1)", [rows[0]!.pid]);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return work(tx);
+      }, options),
+    }, clock);
+    try {
+      const response = await call(outage.app, "GET", `/public/v1/pages/${page.key}`, { socket: "192.0.2.81" });
+      expect(response).toMatchObject({ status: 503, body: { error: { code: "Unavailable" } } });
+      expect(response.headers.get("retry-after")).toBe("1");
+    } finally {
+      inner = previous;
+    }
+  });
 });
