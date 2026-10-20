@@ -104,6 +104,21 @@ describe("observe (F-4, F-5)", () => {
     expect(stored!.revision).toBe(results.filter((out) => out.result.applied).length);
   });
 
+  it("keeps updated_at at or after recorded_at when lock order differs from clock order", async () => {
+    // B read the clock at 11s and inserted first; A read it at 10s (or runs on a lagging
+    // worker) and takes the lock second with a newer observation.
+    const subject = { type: "contact" as const, id: await newContact() };
+    now = START + 11_000;
+    const b = await sessionFor(owner).observeSource({ subject, source: "website", observedAt: at(0) }, randomUUID());
+    now = START + 10_000;
+    const a = await sessionFor(owner).observeSource({ subject, source: "website", observedAt: new Date(START + 8_000).toISOString() }, randomUUID());
+    expect(a.result).toMatchObject({ applied: true, record: { id: b.result.record.id, revision: 2, observedAt: new Date(START + 8_000).toISOString() } });
+    const [row] = (await fixture.service((tx) => tx.query<{ recorded_at: Date; updated_at: Date }>(
+      "SELECT recorded_at, updated_at FROM source_records WHERE id=$1", [b.result.record.id]))).rows;
+    expect(row!.updated_at.getTime()).toBe(row!.recorded_at.getTime());
+    expect(row!.recorded_at.getTime()).toBe(START + 11_000);
+  });
+
   it("refuses observations from the future, bad names and bad bounds", async () => {
     const subject = { type: "contact" as const, id: contactId };
     await expect(sessionFor(owner).observeSource({ subject, source: "owner", observedAt: new Date(now + 1).toISOString() }, randomUUID()))

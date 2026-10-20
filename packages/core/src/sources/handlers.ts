@@ -48,8 +48,12 @@ export const observeSourceHandler: ActionHandler = {
       row = stored;
       applied = false;
     } else {
+      // `now` was read before the lock, so an observation that sampled the clock earlier can
+      // land after a later insert (or a worker's clock can lag): never set updated_at before
+      // recorded_at. observedAt <= now keeps observed_at <= updated_at.
       row = (await tx.query<SourceRow>(
-        `UPDATE source_records SET source_ref=$3, observed_at=$4, fresh_until=$5, revision=revision+1, updated_at=$6
+        `UPDATE source_records SET source_ref=$3, observed_at=$4, fresh_until=$5, revision=revision+1,
+                 updated_at=GREATEST($6, recorded_at)
           WHERE tenant_id=$1 AND id=$2 RETURNING ${sourceColumns}`,
         [tenantId, stored.id, payload.sourceRef ?? null, observedAt, freshUntil, now],
       )).rows[0]!;

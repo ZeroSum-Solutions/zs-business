@@ -24,20 +24,22 @@ CREATE TABLE public.approvals (
   PRIMARY KEY (tenant_id, id),
   CONSTRAINT approvals_expiry CHECK (expires_at > requested_at),
   -- A-2: pending has no decision; approved and rejected have one; a revoked approval keeps
-  -- the decision it had (none when a pending request was withdrawn).
+  -- the decision it had (none, and no note, when a pending request was withdrawn).
   CONSTRAINT approvals_decision_state CHECK (CASE status
     WHEN 'pending' THEN decided_by IS NULL AND decided_at IS NULL AND decision_note IS NULL
-    WHEN 'revoked' THEN (decided_by IS NULL) = (decided_at IS NULL)
+    WHEN 'revoked' THEN (decided_by IS NULL) = (decided_at IS NULL) AND (decided_by IS NOT NULL OR decision_note IS NULL)
     ELSE decided_by IS NOT NULL AND decided_at IS NOT NULL END),
-  CONSTRAINT approvals_revocation_state CHECK (
-    (status = 'revoked') = (revoked_by IS NOT NULL AND revoked_at IS NOT NULL)
-    AND (status = 'revoked' OR revoke_note IS NULL))
+  -- Only a revoked approval has revocation columns, and it has both who and when.
+  CONSTRAINT approvals_revocation_state CHECK (CASE status
+    WHEN 'revoked' THEN revoked_by IS NOT NULL AND revoked_at IS NOT NULL
+    ELSE revoked_by IS NULL AND revoked_at IS NULL AND revoke_note IS NULL END)
 );
 CREATE INDEX approvals_tenant_status ON public.approvals (tenant_id, status, requested_at DESC, id);
 CREATE INDEX approvals_tenant_requested ON public.approvals (tenant_id, requested_at DESC, id);
 CREATE INDEX approvals_tenant_requester ON public.approvals (tenant_id, requested_by, requested_at DESC, id);
 
--- A-2: only the allowed transitions, and a decision once made stays made. Column grants
+-- A-2: only the allowed transitions, and the decision columns change only when a pending
+-- approval is approved or rejected (a withdrawn request records none). Column grants
 -- already keep the runtime role off the binding columns (A-4); this holds for every role
 -- that can UPDATE, so a handler bug cannot reopen a rejected or revoked approval.
 CREATE FUNCTION public.approvals_transition() RETURNS trigger
@@ -47,8 +49,9 @@ BEGIN
       OR (OLD.status = 'pending' AND NEW.status IN ('approved', 'rejected', 'revoked'))
       OR (OLD.status = 'approved' AND NEW.status = 'revoked'))
     OR (OLD.status IN ('rejected', 'revoked') AND NEW IS DISTINCT FROM OLD)
-    OR (OLD.decided_by IS NOT NULL AND (NEW.decided_by, NEW.decided_at, NEW.decision_note)
-      IS DISTINCT FROM (OLD.decided_by, OLD.decided_at, OLD.decision_note)) THEN
+    OR (NOT (OLD.status = 'pending' AND NEW.status IN ('approved', 'rejected'))
+      AND (NEW.decided_by, NEW.decided_at, NEW.decision_note)
+        IS DISTINCT FROM (OLD.decided_by, OLD.decided_at, OLD.decision_note)) THEN
     RAISE EXCEPTION 'Approval % cannot move from % to %', OLD.id, OLD.status, NEW.status
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'approvals',
         CONSTRAINT = 'approvals_transition';
