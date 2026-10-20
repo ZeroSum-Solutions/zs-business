@@ -76,8 +76,9 @@ is useless once the grant is revoked (G-9).
 **G-4. Connection rows.** `calendar_connections` (tenant table) holds one row per grant: the
 resource, `calendar_id` (`primary`), the Google account email from the `id_token`, `status`
 (`active`, `reauthorize`, `disconnecting`, `disconnected`), the sealed token, sync state, the
-watch channel and timestamps. At most one row per resource is not `disconnected`. Connecting a
-resource that already has one moves the old row to `disconnecting` in the same action. The
+watch channel and timestamps. At most one row per resource is `active` or `reauthorize`. Connecting
+a resource that already has one moves the old row to `disconnecting` in the same action, and the
+worker cleans it up beside its replacement. The
 runtime role reads its tenant's rows (the sealed token is useless without the worker's key),
 inserts through the connect action (a new row starts `active`) and may set only `status`, from
 `active` or `reauthorize` to `disconnecting`, and `updated_at`; a trigger refuses any other status

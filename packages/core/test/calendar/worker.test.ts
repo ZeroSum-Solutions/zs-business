@@ -1,0 +1,599 @@
+// G-6..G-10: the calendar worker against the real local Postgres with an in-memory Google stub.
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createBookingCommandSchema, type ActionBinding } from "@zs/contracts";
+import { asService } from "@zs/db";
+import {
+  bookingHandlers,
+  channelToken,
+  createBooking,
+  createDispatcher,
+  GoogleRequestFailed,
+  lockBookingResource,
+  type CalendarWorkerReport,
+  type DispatchContext,
+  type GoogleEvent,
+  type NewGoogleEvent,
+} from "../../src/index.js";
+import {
+  CHANNEL_SECRET,
+  CHANNEL_TTL_MS,
+  createCalendarHarness,
+  manualClock,
+  START,
+  stubGoogle,
+  WEBHOOK_URL,
+  type CalendarHarness,
+  type ManualClock,
+  type Resource,
+  type StubGoogle,
+} from "./worker-stub.js";
+
+const MINUTE = 60_000;
+const DAY = 24 * 60 * MINUTE;
+let h: CalendarHarness;
+beforeAll(async () => { h = await createCalendarHarness(); });
+afterAll(async () => { await h?.close(); });
+beforeEach(async () => { await h.retireAll(); });
+
+const timed = (id: string, start: string, end: string, extra: Partial<GoogleEvent> = {}): GoogleEvent =>
+  ({ id, status: "confirmed", start: { dateTime: start }, end: { dateTime: end }, ...extra });
+const iso = (value: Date) => value.toISOString();
+const spans = (blocks: Array<{ external_id: string | null; starts_at: Date; ends_at: Date }>) =>
+  blocks.map((block) => [block.external_id, iso(block.starts_at), iso(block.ends_at)]);
+
+interface World {
+  clock: ManualClock;
+  google: StubGoogle;
+  resource: Resource;
+  token: string;
+  connectionId: string;
+}
+async function world(options: { pageSize?: number; delayMs?: number; timeZone?: string } = {}): Promise<World> {
+  const clock = manualClock();
+  const google = stubGoogle(clock, options);
+  const tenantId = await h.tenant();
+  const resource = await h.resource(tenantId, options.timeZone);
+  const token = google.account();
+  const connectionId = await h.connection(resource, token, clock.now().getTime());
+  return { clock, google, resource, token, connectionId };
+}
+
+describe("sync (G-6, G-7)", () => {
+  it("a full sync turns busy events into blocks and stores the sync state", async () => {
+    const w = await world({ timeZone: "America/New_York" });
+    w.google.put(w.token, timed("busy1", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    w.google.put(w.token, timed("free1", "2026-10-21T12:00:00Z", "2026-10-21T13:00:00Z", { transparency: "transparent" }));
+    w.google.put(w.token, { id: "allday1", start: { date: "2026-10-23" }, end: { date: "2026-10-24" } });
+    w.google.put(w.token, timed("bday", "2026-10-22T00:00:00Z", "2026-10-22T01:00:00Z", { eventType: "birthday" }));
+    const counts = await h.worker(w.google, w.clock).runOnce();
+    expect(counts).toMatchObject({ synced: 1, syncFailed: 0, reauthorized: 0 });
+    const blocks = await h.blocks(w.resource.tenantId);
+    expect(spans(blocks)).toEqual([
+      ["busy1", "2026-10-21T10:00:00.000Z", "2026-10-21T11:00:00.000Z"],
+      // All-day in the resource's zone (EDT).
+      ["allday1", "2026-10-23T04:00:00.000Z", "2026-10-24T04:00:00.000Z"],
+    ]);
+    expect(blocks.every((block) => block.source === "google" && block.connection_id === w.connectionId
+      && block.resource_id === w.resource.id)).toBe(true);
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ status: "active", sync_token: "sync-4", lease_until: null, last_error: null });
+    expect(row.last_full_sync_at.getTime()).toBe(START);
+    expect(row.last_synced_at.getTime()).toBe(START);
+    expect(row.next_sync_at.getTime()).toBe(START + 15 * MINUTE);
+    // Full window: one day back, 400 days ahead, no sync token.
+    const query = w.google.of("listEvents")[0]![1] as { timeMin: string; timeMax: string; syncToken?: string };
+    expect(query).toMatchObject({ calendarId: "primary", timeMin: new Date(START - DAY).toISOString(), timeMax: new Date(START + 400 * DAY).toISOString() });
+    expect(query.syncToken).toBeUndefined();
+    // Every Google call carried an abort signal.
+    expect(w.google.calls.every((entry) => (entry.args.at(-1) as { signal?: AbortSignal })?.signal instanceof AbortSignal)).toBe(true);
+    // Not due again until the poll interval passes.
+    expect((await h.worker(w.google, w.clock).runOnce()).synced).toBe(0);
+  });
+
+  it("reads every page of a long list", async () => {
+    const w = await world({ pageSize: 2 });
+    for (let index = 0; index < 5; index += 1)
+      w.google.put(w.token, timed(`p${index}`, `2026-10-2${index + 1}T10:00:00Z`, `2026-10-2${index + 1}T10:30:00Z`));
+    await h.worker(w.google, w.clock).runOnce();
+    expect(w.google.count("listEvents")).toBe(3);
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(5);
+    expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).sync_token).toBe("sync-5");
+  });
+
+  it("an incremental sync moves, adds and removes blocks by event ID", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("move", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    w.google.put(w.token, timed("cancel", "2026-10-21T12:00:00Z", "2026-10-21T13:00:00Z"));
+    w.google.put(w.token, timed("free", "2026-10-21T14:00:00Z", "2026-10-21T15:00:00Z"));
+    w.google.put(w.token, timed("keep", "2026-10-21T16:00:00Z", "2026-10-21T17:00:00Z"));
+    const worker = h.worker(w.google, w.clock);
+    await worker.runOnce();
+    const keptId = (await h.blocks(w.resource.tenantId)).find((block) => block.external_id === "keep")!.id;
+    w.google.put(w.token, timed("move", "2026-10-22T10:00:00Z", "2026-10-22T11:30:00Z"));
+    w.google.cancel(w.token, "cancel");
+    w.google.put(w.token, timed("free", "2026-10-21T14:00:00Z", "2026-10-21T15:00:00Z", { transparency: "transparent" }));
+    w.google.put(w.token, timed("new", "2026-10-23T08:00:00Z", "2026-10-23T09:00:00Z"));
+    w.google.put(w.token, timed("declined", "2026-10-23T10:00:00Z", "2026-10-23T11:00:00Z",
+      { attendees: [{ self: true, responseStatus: "declined" }] }));
+    w.clock.advance(15 * MINUTE);
+    w.google.reset();
+    expect((await worker.runOnce()).synced).toBe(1);
+    expect(w.google.of("listEvents").map((args) => (args[1] as { syncToken?: string }).syncToken)).toEqual(["sync-4"]);
+    const blocks = await h.blocks(w.resource.tenantId);
+    expect(spans(blocks)).toEqual([
+      ["keep", "2026-10-21T16:00:00.000Z", "2026-10-21T17:00:00.000Z"],
+      ["move", "2026-10-22T10:00:00.000Z", "2026-10-22T11:30:00.000Z"],
+      ["new", "2026-10-23T08:00:00.000Z", "2026-10-23T09:00:00.000Z"],
+    ]);
+    // An untouched block is the same row; a moved one is updated in place.
+    expect(blocks.find((block) => block.external_id === "keep")!.id).toBe(keptId);
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row.sync_token).toBe("sync-9");
+    expect(row.last_full_sync_at.getTime()).toBe(START);
+    expect(row.last_synced_at.getTime()).toBe(START + 15 * MINUTE);
+  });
+
+  it("a 410 runs a full list in the same pass and replaces the connection's blocks", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("old", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    w.google.put(w.token, timed("stay", "2026-10-21T12:00:00Z", "2026-10-21T13:00:00Z"));
+    const worker = h.worker(w.google, w.clock);
+    await worker.runOnce();
+    // A block that did not come from this connection survives the replace.
+    await h.service((tx) => tx.query(
+      `INSERT INTO booking_external_blocks (tenant_id,id,resource_id,starts_at,ends_at,source,created_at)
+       VALUES ($1,$2,$3,'2026-10-25T10:00:00Z','2026-10-25T11:00:00Z','manual',$4)`,
+      [w.resource.tenantId, randomUUID(), w.resource.id, new Date(START)]));
+    w.google.forget(w.token, "old");
+    w.google.put(w.token, timed("fresh", "2026-10-24T10:00:00Z", "2026-10-24T11:00:00Z"));
+    w.google.expireSyncTokens(w.token);
+    w.clock.advance(15 * MINUTE);
+    w.google.reset();
+    expect((await worker.runOnce()).synced).toBe(1);
+    const queries = w.google.of("listEvents").map((args) => args[1] as { syncToken?: string; timeMin?: string });
+    expect(queries.length).toBe(2);
+    expect(queries[0]!.syncToken).toBe("sync-2");
+    expect(queries[1]!.timeMin).toBe(new Date(START + 15 * MINUTE - DAY).toISOString());
+    expect(w.google.count("refreshAccessToken")).toBe(1);
+    expect(spans(await h.blocks(w.resource.tenantId, w.connectionId))).toEqual([
+      ["stay", "2026-10-21T12:00:00.000Z", "2026-10-21T13:00:00.000Z"],
+      ["fresh", "2026-10-24T10:00:00.000Z", "2026-10-24T11:00:00.000Z"],
+    ]);
+    expect((await h.blocks(w.resource.tenantId)).filter((block) => block.source === "manual").length).toBe(1);
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row.sync_token).toBe("sync-3");
+    expect(row.last_full_sync_at.getTime()).toBe(START + 15 * MINUTE);
+  });
+
+  it("runs a full list again once the full-sync interval has passed", async () => {
+    const w = await world();
+    const worker = h.worker(w.google, w.clock, { fullSyncIntervalMs: DAY });
+    await worker.runOnce();
+    w.clock.advance(DAY);
+    w.google.reset();
+    await worker.runOnce();
+    expect((w.google.of("listEvents")[0]![1] as { syncToken?: string }).syncToken).toBeUndefined();
+  });
+
+  it("events this system pushed never become blocks", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("ours", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z",
+      { extendedProperties: { private: { zs_booking: randomUUID(), zs_tenant: w.resource.tenantId } } }));
+    const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    const worker = h.worker(w.google, w.clock);
+    const first = await worker.runOnce();
+    expect(first).toMatchObject({ synced: 1, pushed: 1 });
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+    // The pushed booking comes back on the next list and is skipped too.
+    w.clock.advance(15 * MINUTE);
+    await worker.runOnce();
+    expect(w.google.events(w.token).some((event) => event.id === bookingId.replaceAll("-", ""))).toBe(true);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+  });
+
+  it("blocks stop slots: a booking in a blocked slot is refused, a free one commits", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    await h.worker(w.google, w.clock).runOnce();
+    const dispatch = createDispatcher({ ...bookingHandlers });
+    const actorId = randomUUID();
+    const book = (startsAt: string) => {
+      const tenantId = w.resource.tenantId;
+      const bookingId = randomUUID();
+      const cmd = createBookingCommandSchema.parse({
+        actionType: "booking.create", target: { tenantId, type: "booking", id: bookingId },
+        payload: { bookingId, resourceId: w.resource.id, startsAt },
+        approvalReference: { tenantId, id: randomUUID() }, idempotencyKey: randomUUID(),
+      });
+      const ctx: DispatchContext = {
+        tenantId, actor: { tenantId, id: actorId }, db: h.database.db, clock: w.clock, config: {}, generateId: randomUUID,
+        resolveApproval: async (): Promise<ActionBinding> => ({
+          tenantId, actorId, actionType: cmd.actionType, target: cmd.target, payload: cmd.payload, approvalReference: cmd.approvalReference,
+        }),
+      };
+      return createBooking(cmd, { dispatch: (parsed) => dispatch(ctx, parsed) });
+    };
+    await expect(book("2026-10-21T10:30:00.000Z")).rejects.toMatchObject({ details: { reason: "slot_unavailable" } });
+    await expect(book("2026-10-21T10:00:00.000Z")).rejects.toMatchObject({ details: { reason: "slot_unavailable" } });
+    await expect(book("2026-10-21T11:00:00.000Z")).resolves.toMatchObject({ result: { startsAt: "2026-10-21T11:00:00.000Z" } });
+  });
+
+  it("applies under the B-21 resource lock: the write waits while a booking holds it", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let locked!: () => void;
+    const holding = new Promise<void>((resolve) => { locked = resolve; });
+    const holder = asService(h.database.servicePool, async (tx) => {
+      await lockBookingResource(tx, w.resource.tenantId, w.resource.id);
+      locked();
+      await gate;
+    });
+    await holding;
+    let finished = false;
+    const run = h.worker(w.google, w.clock).runOnce().then((counts) => { finished = true; return counts; });
+    // The worker's apply transaction waits on the same advisory lock.
+    let waiting = 0;
+    for (let tries = 0; tries < 100 && waiting === 0; tries += 1) {
+      waiting = Number((await h.database.pool.query<{ n: string }>(
+        "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())")).rows[0]!.n);
+      if (waiting === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(waiting).toBe(1);
+    expect(finished).toBe(false);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+    release();
+    await holder;
+    expect((await run).synced).toBe(1);
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+  });
+
+  it("invalid_grant moves the connection to reauthorize and keeps its blocks", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const reports: CalendarWorkerReport[] = [];
+    const worker = h.worker(w.google, w.clock, {}, reports);
+    await worker.runOnce();
+    w.google.revokeGrant(w.token);
+    w.clock.advance(15 * MINUTE);
+    expect(await worker.runOnce()).toMatchObject({ synced: 0, reauthorized: 1 });
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId))
+      .toMatchObject({ status: "reauthorize", last_error: "invalid_grant", lease_until: null });
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    expect(reports).toContainEqual({ kind: "reauthorize", tenantId: w.resource.tenantId, connectionId: w.connectionId, code: "invalid_grant" });
+    // Not claimed again.
+    w.clock.advance(60 * MINUTE);
+    w.google.reset();
+    await worker.runOnce();
+    expect(w.google.calls).toEqual([]);
+    // Reports never carry a token.
+    expect(JSON.stringify(reports)).not.toContain(w.token);
+  });
+
+  it("a sealed token that does not open moves the connection to reauthorize without calling Google", async () => {
+    const w = await world();
+    const other = await h.connection(await h.resource(w.resource.tenantId), w.google.account(), START, { sealFor: randomUUID() });
+    expect(await h.worker(w.google, w.clock).runOnce()).toMatchObject({ synced: 1, reauthorized: 1 });
+    expect(await h.connectionRow(w.resource.tenantId, other)).toMatchObject({ status: "reauthorize", last_error: "token_unreadable" });
+    expect(w.google.count("refreshAccessToken")).toBe(1);
+  });
+
+  it("a retryable Google error keeps the blocks and retries with a growing delay", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const worker = h.worker(w.google, w.clock);
+    // A brand-new connection that fails waits the base delay.
+    w.google.fail("listEvents", new GoogleRequestFailed("google_503_backendError", true, 503));
+    expect(await worker.runOnce()).toMatchObject({ synced: 0, syncFailed: 1 });
+    let row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ status: "active", last_error: "google_503_backendError", lease_until: null });
+    expect(row.next_sync_at.getTime()).toBe(START + MINUTE);
+    w.clock.advance(MINUTE);
+    await worker.runOnce();
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    // Healthy for 15 minutes, then Google stops answering: the delay grows with the outage.
+    w.clock.advance(15 * MINUTE);
+    w.google.fail("refreshAccessToken", new GoogleRequestFailed("google_network", true));
+    expect((await worker.runOnce()).syncFailed).toBe(1);
+    row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row.last_error).toBe("google_network");
+    expect(row.next_sync_at.getTime()).toBe(START + 16 * MINUTE + 15 * MINUTE);
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    // A hanging call times out instead of holding the pass.
+    w.clock.advance(15 * MINUTE);
+    w.google.fail("listEvents", () => new Promise<void>(() => undefined));
+    const timedOut = h.worker(w.google, w.clock, { requestTimeoutMs: 50, leaseMs: 1000 });
+    expect((await timedOut.runOnce()).syncFailed).toBe(1);
+    expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).last_error).toBe("google_timeout");
+  });
+
+  it("a connection that turns disconnecting mid-sync gets no blocks", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    w.google.fail("listEvents", async () => {
+      await h.database.db.tenant(w.resource.tenantId, (tx) => tx.query(
+        "UPDATE calendar_connections SET status='disconnecting', updated_at=$3 WHERE tenant_id=$1 AND id=$2",
+        [w.resource.tenantId, w.connectionId, new Date(START)]));
+    });
+    const worker = h.worker(w.google, w.clock);
+    expect((await worker.runOnce()).synced).toBe(0);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ status: "disconnecting", lease_until: null });
+    expect((await worker.runOnce()).disconnected).toBe(1);
+  });
+});
+
+describe("disconnect cleanup (G-9)", () => {
+  async function connectedWithChannel() {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const worker = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL });
+    await worker.runOnce();
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row.channel_id).not.toBeNull();
+    return { w, worker, channelId: row.channel_id as string, channelResource: row.channel_resource_id as string };
+  }
+  const disconnect = (w: World) => h.database.db.tenant(w.resource.tenantId, (tx) => tx.query(
+    "UPDATE calendar_connections SET status='disconnecting', updated_at=$3 WHERE tenant_id=$1 AND id=$2",
+    [w.resource.tenantId, w.connectionId, w.clock.now()]));
+
+  it("stops the channel, revokes the grant, removes the blocks and clears the token", async () => {
+    const { w, worker, channelId, channelResource } = await connectedWithChannel();
+    // A pending push of this connection cannot go out any more.
+    const bookingId = await h.booking(w.resource, "2026-10-23T10:00:00.000Z");
+    await h.service((tx) => tx.query(
+      `INSERT INTO calendar_pushes (tenant_id,connection_id,booking_id,next_attempt_at,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,$4,$4)`, [w.resource.tenantId, w.connectionId, bookingId, new Date(START + DAY)]));
+    await disconnect(w);
+    w.google.reset();
+    expect(await worker.runOnce()).toMatchObject({ disconnected: 1, channelsStopped: 1 });
+    expect(w.google.of("stopChannel").map((args) => args[1])).toEqual([{ channelId, resourceId: channelResource }]);
+    expect(w.google.of("revoke").map((args) => args[0])).toEqual([w.token]);
+    expect(w.google.isRevoked(w.token)).toBe(true);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({
+      status: "disconnected", refresh_token_sealed: null, sync_token: null, channel_id: null, channel_resource_id: null,
+      channel_expires_at: null, lease_until: null,
+    });
+    expect(await h.push(w.resource.tenantId, bookingId)).toMatchObject({ status: "failed", last_error: "disconnected" });
+    // Done for good: nothing more is claimed or called.
+    w.google.reset();
+    w.clock.advance(DAY);
+    await worker.runOnce();
+    expect(w.google.calls).toEqual([]);
+  });
+
+  it("a revoke that fails on the network keeps disconnecting with the blocks, then finishes", async () => {
+    const { w, worker } = await connectedWithChannel();
+    await disconnect(w);
+    w.google.fail("stopChannel", new GoogleRequestFailed("google_503", true, 503));
+    w.google.fail("revoke", new GoogleRequestFailed("google_network", true));
+    expect(await worker.runOnce()).toMatchObject({ disconnected: 0, disconnectRetries: 1 });
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ status: "disconnecting", last_error: "google_network" });
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    // Not retried before its delay.
+    w.google.reset();
+    await worker.runOnce();
+    expect(w.google.count("revoke")).toBe(0);
+    w.clock.advance(MINUTE);
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+    expect((await h.connectionRow(w.resource.tenantId, w.connectionId)).status).toBe("disconnected");
+  });
+
+  it("an already revoked grant or an unreadable token still cleans up", async () => {
+    const { w, worker } = await connectedWithChannel();
+    w.google.revokeGrant(w.token);
+    await disconnect(w);
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+
+    const tenantId = await h.tenant();
+    const resource = await h.resource(tenantId);
+    const unreadable = await h.connection(resource, w.google.account(), START, { sealFor: randomUUID(), status: "disconnecting" });
+    w.google.reset();
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.calls).toEqual([]);
+    expect((await h.connectionRow(tenantId, unreadable)).status).toBe("disconnected");
+  });
+});
+
+describe("push notifications and channels (G-8)", () => {
+  it("opens a channel with the derived token, renews it a day before expiry and stops the old one", async () => {
+    const w = await world();
+    const worker = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL });
+    expect(await worker.runOnce()).toMatchObject({ synced: 1, channelsOpened: 1 });
+    const watched = w.google.of("watch")[0]![1] as { channelId: string; address: string; token: string; calendarId: string };
+    expect(watched).toMatchObject({ address: WEBHOOK_URL, calendarId: "primary", token: channelToken(CHANNEL_SECRET, watched.channelId) });
+    let row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row.channel_id).toBe(watched.channelId);
+    expect(row.channel_expires_at.getTime()).toBe(START + CHANNEL_TTL_MS);
+    const first = { id: row.channel_id, resource: row.channel_resource_id };
+
+    // Well before expiry: no new channel.
+    w.clock.advance(15 * MINUTE);
+    expect((await worker.runOnce()).channelsOpened).toBe(0);
+    // Within a day of expiry: a new channel, then the old one stopped.
+    w.clock.set(START + CHANNEL_TTL_MS - DAY + MINUTE);
+    w.google.reset();
+    expect(await worker.runOnce()).toMatchObject({ channelsOpened: 1, channelsStopped: 1 });
+    row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row.channel_id).not.toBe(first.id);
+    expect(w.google.of("stopChannel").map((args) => args[1])).toEqual([{ channelId: first.id, resourceId: first.resource }]);
+    expect(w.google.channels.get(first.id)!.stopped).toBe(true);
+    expect(w.google.channels.get(row.channel_id)!.stopped).toBe(false);
+  });
+
+  it("opens no channel without a webhook URL, and a watch failure does not fail the sync", async () => {
+    const w = await world();
+    expect(await h.worker(w.google, w.clock).runOnce()).toMatchObject({ synced: 1, channelsOpened: 0 });
+    expect(w.google.count("watch")).toBe(0);
+    const v = await world();
+    v.google.fail("watch", new GoogleRequestFailed("google_400_push_webhookNotVerified", false, 400));
+    expect(await h.worker(v.google, v.clock, { webhookUrl: WEBHOOK_URL }).runOnce())
+      .toMatchObject({ synced: 1, channelsOpened: 0, channelFailures: 1 });
+    expect((await h.connectionRow(v.resource.tenantId, v.connectionId)).channel_id).toBeNull();
+  });
+
+  it("a notification makes its connection due now and is marked processed", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const worker = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL });
+    await worker.runOnce();
+    const channelId = (await h.connectionRow(w.resource.tenantId, w.connectionId)).channel_id as string;
+    const notify = (number: number, state: string, at: number) => h.database.db.tenant(w.resource.tenantId, (tx) => tx.query(
+      `INSERT INTO calendar_push_notifications (channel_id,message_number,resource_state,received_at) VALUES ($1,$2,$3,$4)`,
+      [channelId, number, state, new Date(at)]));
+    // The first `sync` message carries no change.
+    await notify(1, "sync", START);
+    w.clock.advance(MINUTE);
+    expect(await worker.runOnce()).toMatchObject({ notifications: 1, markedDue: 0, synced: 0 });
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T12:00:00Z"));
+    await notify(2, "exists", START + MINUTE);
+    w.clock.advance(MINUTE);
+    expect(await worker.runOnce()).toMatchObject({ notifications: 1, markedDue: 1, synced: 1 });
+    expect(spans(await h.blocks(w.resource.tenantId))).toEqual([["busy", "2026-10-21T10:00:00.000Z", "2026-10-21T12:00:00.000Z"]]);
+    const stored = await h.rows("SELECT processed_at FROM calendar_push_notifications WHERE channel_id=$1 ORDER BY message_number", [channelId]);
+    expect(stored.map((entry) => entry.processed_at?.getTime())).toEqual([START + MINUTE, START + 2 * MINUTE]);
+    // Processed notifications older than a day are deleted.
+    w.clock.advance(DAY + 2 * MINUTE);
+    await worker.runOnce();
+    expect(await h.rows("SELECT 1 FROM calendar_push_notifications WHERE channel_id=$1", [channelId])).toEqual([]);
+  });
+});
+
+describe("bookings out (G-10)", () => {
+  it("pushes each confirmed future booking once with the booking ID as the event ID", async () => {
+    const w = await world();
+    const future = await h.booking(w.resource, "2026-10-22T10:00:00.000Z", 45);
+    const ended = await h.booking(w.resource, "2026-10-19T10:00:00.000Z");
+    const unconnected = await h.booking(await h.resource(w.resource.tenantId), "2026-10-22T10:00:00.000Z");
+    const worker = h.worker(w.google, w.clock);
+    expect(await worker.runOnce()).toMatchObject({ pushesQueued: 1, pushed: 1 });
+    const inserted = w.google.of("insertEvent");
+    expect(inserted.length).toBe(1);
+    expect(inserted[0]![1]).toBe("primary");
+    expect(inserted[0]![2]).toEqual({
+      id: future.replaceAll("-", ""), summary: "Booked", start: "2026-10-22T10:00:00.000Z", end: "2026-10-22T10:45:00.000Z",
+      privateProperties: { zs_booking: future, zs_tenant: w.resource.tenantId },
+    } satisfies NewGoogleEvent);
+    expect(await h.push(w.resource.tenantId, future)).toMatchObject({ status: "pushed", attempts: 1, last_error: null, lease_until: null });
+    expect((await h.push(w.resource.tenantId, future)).pushed_at.getTime()).toBe(START);
+    expect(await h.push(w.resource.tenantId, ended)).toBeUndefined();
+    expect(await h.push(w.resource.tenantId, unconnected)).toBeUndefined();
+    w.clock.advance(15 * MINUTE);
+    expect(await worker.runOnce()).toMatchObject({ pushesQueued: 0, pushed: 0 });
+    expect(w.google.count("insertEvent")).toBe(1);
+  });
+
+  it("a configured title and a 409 (already there) both work", async () => {
+    const w = await world();
+    const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    w.google.put(w.token, timed(bookingId.replaceAll("-", ""), "2026-10-22T10:00:00Z", "2026-10-22T10:30:00Z",
+      { extendedProperties: { private: { zs_booking: bookingId } } }));
+    expect((await h.worker(w.google, w.clock, { eventTitle: "Held" }).runOnce()).pushed).toBe(1);
+    expect((w.google.of("insertEvent")[0]![2] as NewGoogleEvent).summary).toBe("Held");
+    expect((await h.push(w.resource.tenantId, bookingId)).status).toBe("pushed");
+  });
+
+  it("retries a retryable failure after a backoff and fails after the last attempt", async () => {
+    const w = await world();
+    const retried = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    const worker = h.worker(w.google, w.clock, { pushMaxAttempts: 3 });
+    w.google.fail("insertEvent", new GoogleRequestFailed("google_503", true, 503));
+    expect(await worker.runOnce()).toMatchObject({ pushRetries: 1, pushed: 0 });
+    let push = await h.push(w.resource.tenantId, retried);
+    expect(push).toMatchObject({ status: "pending", attempts: 1, last_error: "google_503", lease_until: null });
+    expect(push.next_attempt_at.getTime()).toBe(START + MINUTE);
+    w.clock.advance(30_000);
+    await worker.runOnce();
+    expect(w.google.count("insertEvent")).toBe(1);
+    w.clock.advance(30_000);
+    expect((await worker.runOnce()).pushed).toBe(1);
+    expect((await h.push(w.resource.tenantId, retried)).status).toBe("pushed");
+
+    const doomed = await h.booking(w.resource, "2026-10-23T10:00:00.000Z");
+    w.google.fail("insertEvent", ...[1, 2, 3].map(() => new GoogleRequestFailed("google_429_rateLimitExceeded", true, 429)));
+    for (const wait of [0, MINUTE, 2 * MINUTE]) {
+      w.clock.advance(wait);
+      await worker.runOnce();
+    }
+    push = await h.push(w.resource.tenantId, doomed);
+    expect(push).toMatchObject({ status: "failed", attempts: 3, last_error: "google_429_rateLimitExceeded", pushed_at: null });
+    w.clock.advance(DAY);
+    w.google.reset();
+    await worker.runOnce();
+    expect(w.google.count("insertEvent")).toBe(0);
+  });
+
+  it("another refusal fails the push at once", async () => {
+    const w = await world();
+    const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    w.google.fail("insertEvent", new GoogleRequestFailed("google_403_forbidden", false, 403));
+    expect((await h.worker(w.google, w.clock).runOnce()).pushesFailed).toBe(1);
+    expect(await h.push(w.resource.tenantId, bookingId)).toMatchObject({ status: "failed", attempts: 1, last_error: "google_403_forbidden" });
+  });
+});
+
+describe("tenancy and concurrency (G-11)", () => {
+  it("tenant A's sync never touches tenant B's blocks", async () => {
+    const a = await world();
+    const clock = a.clock;
+    const tenantB = await h.tenant();
+    const resourceB = await h.resource(tenantB);
+    const tokenB = a.google.account();
+    a.google.put(tokenB, timed("shared-id", "2026-10-21T14:00:00Z", "2026-10-21T15:00:00Z"));
+    const connectionB = await h.connection(resourceB, tokenB, START);
+    a.google.put(a.token, timed("shared-id", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const worker = h.worker(a.google, clock);
+    expect((await worker.runOnce()).synced).toBe(2);
+    const before = await h.blocks(tenantB);
+    expect(spans(before)).toEqual([["shared-id", "2026-10-21T14:00:00.000Z", "2026-10-21T15:00:00.000Z"]]);
+    // Only A is due: a full replace and an incremental delete of the same event ID in A.
+    await h.service((tx) => tx.query("UPDATE calendar_connections SET next_sync_at=$3 WHERE tenant_id=$1 AND id=$2",
+      [tenantB, connectionB, new Date(START + 365 * DAY)]));
+    a.google.cancel(a.token, "shared-id");
+    clock.advance(15 * MINUTE);
+    expect((await worker.runOnce()).synced).toBe(1);
+    expect(await h.blocks(a.resource.tenantId)).toEqual([]);
+    a.google.expireSyncTokens(a.token);
+    clock.advance(15 * MINUTE);
+    expect((await worker.runOnce()).synced).toBe(1);
+    expect(await h.blocks(tenantB)).toEqual(before);
+    // The runtime role in tenant A cannot see B's blocks either.
+    const seen = await h.database.db.tenant(a.resource.tenantId, (tx) => tx.query("SELECT 1 FROM booking_external_blocks WHERE tenant_id=$1", [tenantB]));
+    expect(seen.rowCount).toBe(0);
+  });
+
+  it("two passes at once never double-apply or double-push", async () => {
+    const clock = manualClock();
+    const google = stubGoogle(clock, { delayMs: 5 });
+    const connections: Array<{ resource: Resource; token: string }> = [];
+    for (let index = 0; index < 4; index += 1) {
+      const tenantId = await h.tenant();
+      const resource = await h.resource(tenantId);
+      const token = google.account();
+      google.put(token, timed(`e${index}`, "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+      await h.connection(resource, token, START);
+      await h.booking(resource, "2026-10-22T10:00:00.000Z");
+      await h.booking(resource, "2026-10-22T12:00:00.000Z");
+      connections.push({ resource, token });
+    }
+    const one = h.worker(google, clock, { claimLimit: 2, pushLimit: 3 });
+    const two = h.worker(google, clock, { claimLimit: 2, pushLimit: 3 });
+    const results = await Promise.all([one.runOnce(), two.runOnce(), one.runOnce(), two.runOnce()]);
+    const total = (key: keyof (typeof results)[number]) => results.reduce((sum, counts) => sum + counts[key], 0);
+    expect(total("synced")).toBe(4);
+    expect(total("pushed")).toBe(8);
+    expect(total("pushesQueued")).toBe(8);
+    expect(total("lostLeases")).toBe(0);
+    expect(google.count("listEvents")).toBe(4);
+    const ids = google.of("insertEvent").map((args) => (args[2] as NewGoogleEvent).id);
+    expect(ids.length).toBe(8);
+    expect(new Set(ids).size).toBe(8);
+    for (const { resource } of connections) expect((await h.blocks(resource.tenantId)).length).toBe(1);
+  });
+});

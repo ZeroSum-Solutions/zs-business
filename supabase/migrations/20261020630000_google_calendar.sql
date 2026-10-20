@@ -44,8 +44,9 @@ CREATE TABLE public.calendar_connections (
   CONSTRAINT calendar_connections_token_state CHECK ((status = 'disconnected') = (refresh_token_sealed IS NULL)),
   CONSTRAINT calendar_connections_channel_state CHECK ((channel_id IS NULL) = (channel_expires_at IS NULL))
 );
+-- One live grant per resource; a row being cleaned up (disconnecting) may sit beside its replacement.
 CREATE UNIQUE INDEX calendar_connections_one_per_resource ON public.calendar_connections (tenant_id, resource_id)
-  WHERE status <> 'disconnected';
+  WHERE status IN ('active', 'reauthorize');
 -- Channel IDs are global: a push names only its channel (G-8).
 CREATE UNIQUE INDEX calendar_connections_channel ON public.calendar_connections (channel_id) WHERE channel_id IS NOT NULL;
 CREATE INDEX calendar_connections_due ON public.calendar_connections (next_sync_at) WHERE status IN ('active', 'disconnecting');
