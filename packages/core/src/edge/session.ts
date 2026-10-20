@@ -33,18 +33,21 @@ import {
   type MemberOutput,
   type Permission,
   type RemoveMemberOutput,
+  type WalletSummary,
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
+import { suppressionHandlers } from "../delivery/suppression.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
 import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
+import { getWallet } from "../wallet/index.js";
 import { derivedId } from "./ids.js";
 import { validationError } from "./errors.js";
 
@@ -71,11 +74,12 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
   return parsed.data;
 }
 
-const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers });
+const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers, ...suppressionHandlers });
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
- * request (public-intake.md P-1) is never reachable from a member session.
+ * request (public-intake.md P-1) and the suppression actions (delivery.md D-9) are never
+ * reachable from a member session.
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
@@ -256,6 +260,8 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return { tenantId, userId: actorId, memberId: access.memberId, role: access.role, permissions: [...ROLE_PERMISSIONS[access.role]] };
     }),
     listMembers: async (): Promise<MemberList> => ({ items: await read("members", (tx) => listMembers(tx, tenantId)) }),
+    /** The prepaid wallet (delivery.md D-4); billing is an owner permission. */
+    getWallet: (): Promise<WalletSummary> => read("billing", (tx) => getWallet(tx, tenantId)),
 
     async inviteMember(body: unknown, key: unknown): Promise<MemberOutput> {
       const request = parseInput(inviteMemberRequestSchema, body);
