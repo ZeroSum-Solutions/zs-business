@@ -32,6 +32,9 @@ const shipped: Record<string, string> = {
   "20261018200000_public_intake.sql": "85d553cabf471202999f1872a853d15c59e84fe213186dc07d71a506fd30ab97",
   // M2a auth (#8).
   "20261019090000_members_and_sessions.sql": "ea534900166381f1665ab4cf173882bc0f94e5c5ef0c0f7449acb0f12f08ad30",
+  // M3b approvals and source records (#12).
+  "20261020100000_approvals.sql": "6cc3330683f223a71ace1235d550edfe5142b71b7f2ece4533e0d4c8f4939e87",
+  "20261020100100_source_records.sql": "8aa230cd0371b4841c73cef4937b2a79cc57797a2dae870a08bd8625af276b27",
 };
 /**
  * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is
@@ -110,7 +113,7 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(8);
+    expect(upgraded.functions).toHaveLength(9);
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });

@@ -6,10 +6,12 @@ import type { ApiErrorCode } from "@zs/contracts";
 import { apiErrorBody, AuthUnavailable, authenticate, DatabaseUnavailable, mapError, type Session, type SessionCheck } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
+import { approvalRoutes } from "./routes/approvals.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
+import { sourceRoutes } from "./routes/sources.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 
 export interface AppConfig {
@@ -144,6 +146,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/booking", bookingRoutes);
   app.route("/v1/crm", crmRoutes);
   app.route("/v1/intake", intakeRoutes);
+  app.route("/v1/approvals", approvalRoutes);
+  app.route("/v1/sources", sourceRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));

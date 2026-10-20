@@ -53,6 +53,7 @@ const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
   "disclosure_changed", "already_reviewed",
+  "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
 ]);
 
 /** One fixed message per code, so database or handler text never reaches a response. */
