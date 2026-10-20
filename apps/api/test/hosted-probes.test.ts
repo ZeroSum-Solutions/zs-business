@@ -50,6 +50,7 @@ function handRolledDatabase(target: Pool, policy: { cleanOnCommit: boolean; clea
         client.release();
       }
     },
+    withoutTenant: () => Promise.reject(new Error("unused")),
   };
 }
 
@@ -106,6 +107,7 @@ describe("hosted session-contamination probe", () => {
         pools.push(once);
         return createScopedDatabase(once).tenant(tenantId, work);
       },
+      withoutTenant: () => Promise.reject(new Error("unused")),
     };
     try {
       const result = await sessionContaminationProbe(fresh, fixture.a.tenantId, small);

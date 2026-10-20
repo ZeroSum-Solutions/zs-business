@@ -12,6 +12,7 @@ import { createLocalStubSessionCheck, signBookingKey, type AutomationEdgeConfig 
 import {
   createApp,
   createHs256Verifier,
+  createPostgresRateLimiter,
   type App,
   type PublicIntakeConfig,
   type ResendWebhookConfig,
@@ -112,6 +113,8 @@ async function provision(database: TestDatabase, fixture: TwoTenantFixture, tena
 export interface HarnessOptions {
   /** Turns the public booking routes on; secrets and base URL default to the test values. */
   publicIntake?: Partial<PublicIntakeConfig>;
+  /** Where the public and unsubscribe limits count; "postgres" builds the shared limiter on the harness database. */
+  limiterStore?: "memory" | "postgres";
   /** Turns the unsubscribe routes on; the token secret defaults to UNSUBSCRIBE_SECRET. */
   unsubscribe?: Partial<UnsubscribeConfig>;
   /** Turns POST /webhooks/resend on; the signing secret defaults to RESEND_WEBHOOK_SECRET. */
@@ -125,6 +128,8 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
   const database = await createTestDatabase();
   const fixture = await createTwoTenantFixture(database);
   const appClock = options.clock ?? clock;
+  // As in the server: one shared limiter for the booking and unsubscribe routes.
+  const shared = options.limiterStore === "postgres" ? { limiter: createPostgresRateLimiter(database.db, appClock) } : {};
   const app = createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
     // The loopback auth stub stands in for Supabase Auth; core's tests cover the Supabase check.
@@ -134,10 +139,18 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     generateId: randomUUID,
     config: { allowedOrigins: [ORIGIN] },
     ...(options.publicIntake
-      ? { publicIntake: { keySecrets: { current: KEY_SECRET }, publicBaseUrl: PUBLIC_BASE_URL, ...options.publicIntake } }
+      ? { publicIntake: {
+        keySecrets: { current: KEY_SECRET },
+        publicBaseUrl: PUBLIC_BASE_URL,
+        ...shared,
+        ...options.publicIntake,
+      } }
       : {}),
     ...(options.unsubscribe
-      ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...options.unsubscribe } }
+      ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...shared, ...options.unsubscribe } }
+      : {}),
+    ...(options.resendWebhook
+      ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }
       : {}),
     ...(options.resendWebhook
       ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }

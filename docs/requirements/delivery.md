@@ -128,7 +128,8 @@ member cannot take a recipient's key first:
   suppresses the address that delivery went to. A GET never changes anything. The endpoint
   checks the token before any database work: a forged token is rate limited per caller
   address, a valid one per delivery, because one-click POSTs come from a few mailbox-provider
-  servers that every recipient shares.
+  servers that every recipient shares. The counts are shared by every API instance
+  (public-intake.md P-10).
 - SMS: an inbound message whose whole text is a stop keyword (`STOP`, `STOPALL`,
   `UNSUBSCRIBE`, `CANCEL`, `END`, `QUIT`, `REVOKE`, `OPTOUT`, any case, surrounding
   space and punctuation ignored) suppresses the sender's number with reason `stop` and gets
