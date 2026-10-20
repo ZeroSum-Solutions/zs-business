@@ -15,6 +15,8 @@ import {
   discardReplyHandler,
   DRAFT_REPLY_ACTION,
   draftReplyHandler,
+  RESUME_REPLY_ACTION,
+  resumeReplyHandler,
   SEND_REPLY_ACTION,
   sendReplyHandler,
 } from "./replies.js";
@@ -24,6 +26,7 @@ export {
   DRAFT_REPLY_ACTION,
   openSendApproval,
   requireEmail,
+  RESUME_REPLY_ACTION,
   SEND_REPLY_ACTION,
   settleReplyDelivery,
   type SendApproval,
@@ -34,6 +37,7 @@ export const inboxHandlers: Readonly<Record<string, ActionHandler>> = Object.fre
   [DRAFT_REPLY_ACTION]: draftReplyHandler,
   [SEND_REPLY_ACTION]: sendReplyHandler,
   [DISCARD_REPLY_ACTION]: discardReplyHandler,
+  [RESUME_REPLY_ACTION]: resumeReplyHandler,
 });
 
 interface InboxWriteContext {

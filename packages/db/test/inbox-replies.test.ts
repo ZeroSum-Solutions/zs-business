@@ -154,6 +154,45 @@ describe("inbox_replies_guard (I-4)", () => {
     expect((await fixture.service((tx) => tx.query("DELETE FROM inbox_replies WHERE tenant_id=$1 AND id=$2", [tenantId, id]))).rowCount).toBe(1);
   });
 
+  it("keeps the approval and discard records through every later step, settling included", async () => {
+    // Settling may not rewrite who approved or when (I-4 "never rewrites an earlier step").
+    const settles = ["approved_by=gen_random_uuid()", "approved_at=$3", "approved_by=gen_random_uuid(), approved_at=$3"];
+    for (const [writer, run] of writers())
+      for (const outcome of ["sent", "failed"] as const)
+        for (const set of settles) {
+          const id = await reply("approved");
+          const before = await row(id);
+          await expectGuarded(`${writer} approved -> ${outcome} with ${set}`, () => run((tx) => tx.query(
+            `UPDATE inbox_replies SET status='${outcome}', settled_at=$3, ${set} WHERE tenant_id=$1 AND id=$2 AND $3::timestamptz IS NOT NULL`,
+            [tenantId, id, "2026-10-22T00:00:00.000Z"])));
+          expect(await row(id)).toEqual(before);
+        }
+    // The plain settle still works and keeps the approval as it was.
+    const id = await reply("approved");
+    await fixture.service((tx) => tx.query(
+      "UPDATE inbox_replies SET status='sent', settled_at=$3 WHERE tenant_id=$1 AND id=$2", [tenantId, id, T2]));
+    expect(await row(id)).toMatchObject({ status: "sent", approved_by: approver, approved_at: new Date(T1) });
+  });
+
+  it("lets the runtime role insert drafts only, never a reply that is already approved or settled", async () => {
+    const insert = (columns: string, values: unknown[]) => fixture.a.run((tx) => tx.query(
+      `INSERT INTO inbox_replies (tenant_id,id,contact_id,subject,body,drafted_by,created_at${columns})
+       VALUES ($1,$2,$3,'S','B',$4,$5${values.map((_, index) => `,$${index + 6}`).join("")})`,
+      [tenantId, randomUUID(), contactId, author, T0, ...values]));
+    for (const [columns, values] of [
+      [",status,approved_by,approved_at", ["approved", approver, T1]],
+      [",status,approved_by,approved_at,settled_at", ["sent", approver, T1, T2]],
+      [",status,discarded_by,discarded_at", ["discarded", approver, T1]],
+      [",status", ["draft"]],
+    ] as [string, unknown[]][])
+      await expect(insert(columns, values), columns).rejects.toMatchObject({ code: "42501" });
+    const id = randomUUID();
+    await fixture.a.run((tx) => tx.query(
+      `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,subject,body,drafted_by,created_at)
+       VALUES ($1,$2,$3,'email','S','B',$4,$5)`, [tenantId, id, contactId, author, T0]));
+    expect(await row(id)).toMatchObject({ status: "draft", approved_at: null, settled_at: null });
+  });
+
   it("holds for the runtime role too, which also lacks the grants for text and settle columns", async () => {
     const approved = await reply("approved");
     await expectGuarded("runtime approved -> draft", () => fixture.a.run((tx) => tx.query(

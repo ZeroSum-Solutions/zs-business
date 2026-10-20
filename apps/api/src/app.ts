@@ -16,8 +16,8 @@ import {
 import type { ScopedDatabase } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
-import { approvalRoutes } from "./routes/approvals.js";
 import { billingRoutes } from "./routes/billing.js";
+import { approvalRoutes } from "./routes/approvals.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { homeRoutes } from "./routes/home.js";
@@ -175,10 +175,10 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/intake", intakeRoutes);
   app.route("/v1/inbox", inboxRoutes);
   app.route("/v1/home", homeRoutes);
+  app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
   if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
-  app.route("/v1", billingRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
