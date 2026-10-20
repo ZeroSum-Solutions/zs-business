@@ -93,8 +93,9 @@ export const createEndpointHandler: ActionHandler = {
       "SELECT count(*)::text AS count FROM webhook_endpoints WHERE tenant_id=$1", [binding.tenantId])).rows[0]!.count);
     if (count >= AUTOMATION_LIMITS.endpoints) throw limitReached("endpoint_limit");
     await tx.query(
-      `INSERT INTO webhook_endpoints (tenant_id, id, url, description, events, scan_from, created_by, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5::automation_event_type[],$6,$7,$6,$6)`,
+      `INSERT INTO webhook_endpoints (tenant_id, id, url, description, events, scan_from, activated_at, created_by, created_at,
+         updated_at)
+       VALUES ($1,$2,$3,$4,$5::automation_event_type[],$6,$6,$7,$6,$6)`,
       [binding.tenantId, payload.endpointId, payload.url, payload.description, payload.events, now, binding.actorId]);
     const row = (await loadEndpoint(tx, binding.tenantId, payload.endpointId))!;
     return {
@@ -117,13 +118,17 @@ export const updateEndpointHandler: ActionHandler = {
     const row = (await loadEndpoint(tx, binding.tenantId, payload.endpointId, true))!;
     if (Number(row.revision) !== payload.expectedRevision) throw staleRevision(row.revision);
     const enabled = payload.enabled ?? row.enabled;
-    // W-7: an endpoint switched back on starts from now; what happened while it was off is not sent.
-    const scanFrom = enabled && !row.enabled ? now : row.scan_from;
+    // W-7: an endpoint switched back on starts from now. Nothing from before goes out, not even a
+    // delivery queued before it was switched off (the worker compares it with activated_at), and
+    // the next ingest pass reads it first.
+    const reactivated = enabled && !row.enabled;
     await tx.query(
-      `UPDATE webhook_endpoints SET url=$3, events=$4::automation_event_type[], description=$5, enabled=$6, scan_from=$7,
-         revision=revision+1, updated_at=$8 WHERE tenant_id=$1 AND id=$2`,
+      `UPDATE webhook_endpoints SET url=$3, events=$4::automation_event_type[], description=$5, enabled=$6,
+         scan_from = CASE WHEN $7 THEN $8 ELSE scan_from END, activated_at = CASE WHEN $7 THEN $8 ELSE activated_at END,
+         ingested_at = CASE WHEN $7 THEN NULL ELSE ingested_at END, revision=revision+1, updated_at=$8
+       WHERE tenant_id=$1 AND id=$2`,
       [binding.tenantId, row.id, payload.url ?? row.url, payload.events ?? row.events,
-        payload.description === undefined ? row.description : payload.description, enabled, scanFrom, now]);
+        payload.description === undefined ? row.description : payload.description, enabled, reactivated, now]);
     return { result: endpointRecord((await loadEndpoint(tx, binding.tenantId, row.id))!, now) };
   },
 };

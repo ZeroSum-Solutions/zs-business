@@ -107,21 +107,41 @@ function ownerBooking(row: OutboxRow): BusinessEvent[] {
   }];
 }
 
+/** Every deal write bumps the revision and leaves one outbox row whose result is the deal. */
+const DEAL_WRITE_TYPES = ["crm.deal.create", "crm.deal.move-stage", "crm.deal.set-details"];
+
 /**
- * W-4: a deal is won when a write puts it in a stage whose outcome is `won` and it was not
- * already won before that write (won_at earlier than the write means it moved between two won
- * stages). A deal that has since left the won stage still counts: the win happened.
+ * W-4: a deal is won when a write puts it in a stage whose outcome is `won` and the deal was
+ * not already in a won stage just before that write. Both are read from the outbox history,
+ * which is append-only, so a later reopen or edit cannot change the answer: the stage before
+ * is the one the previous revision's write left, and the value is the last one set before this
+ * write. A deal with no recorded previous write (made outside the action path) falls back to
+ * its live won date.
  */
 async function dealWon(tx: Transaction, row: OutboxRow): Promise<BusinessEvent[]> {
   const parsed = actionEvent(dealRecordSchema).safeParse(row.payload);
   if (!parsed.success) return [];
   const deal = parsed.data.result;
-  const found = (await tx.query<{ outcome: string; won_at: Date | null; value_minor: string | null; currency: string | null }>(
-    `SELECT s.outcome, d.won_at, d.value_minor::text AS value_minor, d.currency
-       FROM crm_deals d JOIN crm_stages s ON s.tenant_id = d.tenant_id AND s.id = $3
-      WHERE d.tenant_id=$1 AND d.id=$2`, [row.tenant_id, deal.id, deal.stageId])).rows[0];
-  if (!found || found.outcome !== "won") return [];
-  if (found.won_at !== null && found.won_at.getTime() < Date.parse(deal.updatedAt)) return [];
+  const outcome = async (stageId: string) => (await tx.query<{ outcome: string }>(
+    "SELECT outcome FROM crm_stages WHERE tenant_id=$1 AND id=$2", [row.tenant_id, stageId])).rows[0]?.outcome ?? null;
+  if (await outcome(deal.stageId) !== "won") return [];
+  const history = (revision: string, extra = "") => tx.query<{ stage_id: string | null; value: { amountMinor: number; currency: string } | null }>(
+    `SELECT payload->'result'->>'stageId' AS stage_id, payload->'result'->'value' AS value FROM outbox
+      WHERE tenant_id=$1 AND event_type = ANY($2::text[]) AND payload->'result'->>'id' = $3 ${extra}`,
+    [row.tenant_id, DEAL_WRITE_TYPES, deal.id, revision]);
+  if (deal.revision > 1) {
+    const before = (await history(String(deal.revision - 1), "AND payload->'result'->>'revision' = $4 LIMIT 1")).rows[0];
+    if (before?.stage_id) {
+      if (await outcome(before.stage_id) === "won") return [];
+    } else {
+      const live = (await tx.query<{ won_at: Date | null }>(
+        "SELECT won_at FROM crm_deals WHERE tenant_id=$1 AND id=$2", [row.tenant_id, deal.id])).rows[0];
+      if (live?.won_at && live.won_at.getTime() < Date.parse(deal.updatedAt)) return [];
+    }
+  }
+  const value = (await history(String(deal.revision),
+    `AND event_type = 'crm.deal.set-details' AND (payload->'result'->>'revision')::bigint < $4::bigint
+     ORDER BY (payload->'result'->>'revision')::bigint DESC LIMIT 1`)).rows[0]?.value ?? null;
   return [{
     type: "deal.won",
     data: {
@@ -130,8 +150,8 @@ async function dealWon(tx: Transaction, row: OutboxRow): Promise<BusinessEvent[]
       pipelineId: deal.pipelineId,
       stageId: deal.stageId,
       title: deal.title,
-      valueMinor: found.value_minor === null ? null : Number(found.value_minor),
-      currency: found.currency,
+      valueMinor: value?.amountMinor ?? null,
+      currency: value?.currency ?? null,
       wonAt: deal.updatedAt,
     },
   }];

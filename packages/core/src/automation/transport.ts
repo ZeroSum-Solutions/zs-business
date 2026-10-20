@@ -22,15 +22,40 @@ const loopback = new BlockList();
 loopback.addSubnet("127.0.0.0", 8, "ipv4");
 loopback.addAddress("::1", "ipv6");
 
-/** An IPv4 address carried inside IPv6 (::ffff:a.b.c.d, ::a.b.c.d) is judged as IPv4. */
+/** The eight 16-bit groups of an IPv6 address, or null when it is not one. */
+function ipv6Groups(address: string): number[] | null {
+  if (isIP(address) !== 6) return null;
+  let text = address.toLowerCase().split("%")[0]!;
+  // A dotted IPv4 tail is two groups.
+  const tail = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (tail) {
+    const [a, b, c, d] = tail.slice(1).map(Number) as [number, number, number, number];
+    text = `${text.slice(0, tail.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, rest] = text.includes("::") ? text.split("::") as [string, string] : [text, null];
+  const left = head ? head.split(":") : [];
+  const right = rest ? rest.split(":") : [];
+  const fill = rest === null ? [] : Array<string>(8 - left.length - right.length).fill("0");
+  const groups = [...left, ...fill, ...right].map((group) => Number.parseInt(group, 16));
+  return groups.length === 8 && groups.every((group) => Number.isInteger(group) && group >= 0 && group <= 0xffff) ? groups : null;
+}
+
+/**
+ * An IPv4 address carried inside IPv6 is judged as IPv4, in every spelling `new URL` or DNS may
+ * produce (`[::7f00:1]` for `[::127.0.0.1]`): IPv4-compatible `::/96`, IPv4-mapped
+ * `::ffff:0:0/96`, SIIT `::ffff:0:0:0/96`, and the 6to4 prefix `2002::/16`.
+ */
 function embeddedIpv4(address: string): string | null {
-  const match = /^::(?:ffff:(?:0:)?)?(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
-  if (match) return match[1]!;
-  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(address);
-  if (!hex) return null;
-  const high = Number.parseInt(hex[1]!, 16);
-  const low = Number.parseInt(hex[2]!, 16);
-  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  const groups = ipv6Groups(address);
+  if (!groups) return null;
+  const v4 = (high: number, low: number) => `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  const zero = (from: number, to: number) => groups.slice(from, to).every((group) => group === 0);
+  // `::` and `::1` are IPv6's own unspecified and loopback addresses, judged as IPv6.
+  if (zero(0, 6) && groups[6] === 0 && groups[7]! <= 1) return null;
+  if (zero(0, 5) && (groups[5] === 0 || groups[5] === 0xffff)) return v4(groups[6]!, groups[7]!);
+  if (zero(0, 4) && groups[4] === 0xffff && groups[5] === 0) return v4(groups[6]!, groups[7]!);
+  if (groups[0] === 0x2002) return v4(groups[1]!, groups[2]!);
+  return null;
 }
 
 export interface UrlPolicy {
@@ -61,7 +86,8 @@ export function webhookUrlProblem(raw: string, policy: UrlPolicy = {}): string |
     return "not_a_url";
   }
   const host = url.hostname.toLowerCase();
-  const bare = host.startsWith("[") ? host.slice(1, -1) : host;
+  // A fully qualified name's trailing dot (`localhost.`) names the same host.
+  const bare = host.startsWith("[") ? host.slice(1, -1) : host.replace(/\.$/, "");
   const literal = isIP(bare) !== 0;
   const loopbackHost = bare === "localhost" || (literal && !addressRefused(bare, { allowLoopback: true }) && addressRefused(bare));
   if (url.username || url.password) return "credentials_in_url";

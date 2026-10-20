@@ -43,9 +43,31 @@ describe("receiver URL policy (W-2)", () => {
     expect(webhookUrlProblem("https://10.0.0.1/hook", { allowLoopback: true })).toBe("private_address");
   });
 
+  it("judges IPv4 inside an IPv6 literal as IPv4 after URL normalization rewrites it to hex", () => {
+    for (const url of ["https://[::127.0.0.1]/hook", "https://[::7f00:1]/hook", "https://[::10.0.0.1]/hook", "https://[::a00:1]/hook",
+      "https://[::ffff:0:127.0.0.1]/hook", "https://[::ffff:0:7f00:1]/hook", "https://[::ffff:a00:1]/hook",
+      "https://[0:0:0:0:0:ffff:a9fe:a9fe]/hook", "https://[2002:a00:1::]/hook", "https://[2002:7f00:1::1]/hook", "https://[::]/hook"])
+      expect(webhookUrlProblem(url), url).toBe("private_address");
+    for (const url of ["https://[::ffff:5db8:d822]/hook", "https://[::5db8:d822]/hook", "https://[2002:5db8:d822::1]/hook"])
+      expect(webhookUrlProblem(url), url).toBeNull();
+    expect(webhookUrlProblem("https://[::1]/hook", { allowLoopback: true })).toBeNull();
+    expect(webhookUrlProblem("https://[::7f00:1]/hook", { allowLoopback: true })).toBeNull();
+    expect(webhookUrlProblem("https://[::a00:1]/hook", { allowLoopback: true })).toBe("private_address");
+  });
+
+  it("checks a name with a trailing dot as the same name", () => {
+    for (const url of ["https://localhost./hook", "https://intranet./hook", "https://box.local./hook", "https://svc.internal./hook",
+      "https://x.localhost./hook", "https://nas.home.arpa./hook"])
+      expect(webhookUrlProblem(url), url).toBe("private_address");
+    expect(webhookUrlProblem("https://cloud.activepieces.com./hook")).toBeNull();
+    expect(webhookUrlProblem("http://localhost.:9999/hook", { allowLoopback: true })).toBeNull();
+  });
+
   it("judges an IPv4 address carried in IPv6 as IPv4", () => {
     expect(addressRefused("::ffff:10.0.0.1")).toBe(true);
     expect(addressRefused("::ffff:93.184.216.34")).toBe(false);
+    expect(addressRefused("0:0:0:0:0:ffff:7f00:1")).toBe(true);
+    expect(addressRefused("::ffff:0:a00:1")).toBe(true);
     expect(addressRefused("93.184.216.34")).toBe(false);
     expect(addressRefused("not-an-ip")).toBe(true);
   });

@@ -27,12 +27,13 @@ export interface EndpointRow {
   previous_secret_version: number | null;
   previous_valid_until: Date | null;
   scan_from: Date;
+  activated_at: Date;
   created_at: Date;
   updated_at: Date;
 }
 // pg returns an enum array as its text form; cast to text[] so it arrives as an array.
 export const ENDPOINT_COLUMNS = `tenant_id, id, url, description, events::text[] AS events, enabled, revision::text AS revision,
-  secret_version, previous_secret_version, previous_valid_until, scan_from, created_at, updated_at`;
+  secret_version, previous_secret_version, previous_valid_until, scan_from, activated_at, created_at, updated_at`;
 
 export async function loadEndpoint(tx: Transaction, tenantId: string, id: string, lock = false): Promise<EndpointRow | null> {
   return (await tx.query<EndpointRow>(

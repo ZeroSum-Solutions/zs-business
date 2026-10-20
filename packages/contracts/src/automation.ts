@@ -100,7 +100,7 @@ export type WebhookEndpointList = z.infer<typeof webhookEndpointListSchema>;
 export const webhookDeliveryStatusSchema = z.enum(["pending", "leased", "delivered", "dead"]);
 export type WebhookDeliveryStatus = z.infer<typeof webhookDeliveryStatusSchema>;
 export const webhookDeliveryFinalReasonSchema = z.enum([
-  "max_attempts", "endpoint_gone", "endpoint_disabled", "url_refused", "worker_error",
+  "max_attempts", "endpoint_gone", "endpoint_disabled", "url_refused", "worker_error", "approval_withdrawn",
 ]);
 export type WebhookDeliveryFinalReason = z.infer<typeof webhookDeliveryFinalReasonSchema>;
 export const webhookDeliverySchema = z.strictObject({

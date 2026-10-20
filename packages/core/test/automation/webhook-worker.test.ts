@@ -271,3 +271,137 @@ describe("secret rotation (W-5, W-6)", () => {
     expect(webhookSigningSecret(OTHER_KEY, h.a.tenantId, endpoint.id, 1)).not.toBe(webhookSigningSecret(KEY, h.a.tenantId, endpoint.id, 1));
   });
 });
+
+describe("events of approved actions (approvals.md A-8, A-10)", () => {
+  let hour = 200;
+  /** A booking a flow proposed and the owner approved, so it ran under a stored approval. */
+  async function approvedBooking(expiresInMinutes = 10_080) {
+    const { secret } = await h.admin(h.a).createToken({ name: "Booking flow", scopes: ["bookings:propose"] }, randomUUID());
+    const principal = await h.inbound().authenticate(`Bearer ${secret}`);
+    const base = Math.ceil(h.clock.now().getTime() / 3_600_000) * 3_600_000;
+    const startsAt = new Date(base + (hour++) * 3_600_000).toISOString();
+    const proposal = await h.inbound().propose(principal,
+      { action: "booking.create", input: { resourceId: h.a.resourceId, startsAt }, expiresInMinutes }, randomUUID());
+    await h.session(h.a).approveApproval(proposal.id, {}, randomUUID());
+    return proposal.id;
+  }
+
+  it("sends while the approval stands, and stops once the owner revokes it, before or after ingest", async () => {
+    const { flowId, endpoint } = await subscribe(h.a, ["booking.created"]);
+    h.clock.advance(1_000);
+    await approvedBooking();
+    await drain();
+    expect(ap.events(flowId)).toHaveLength(1);
+
+    // Revoked after the event was queued: the next attempt dead-letters it and sends nothing.
+    h.clock.advance(1_000);
+    const queued = await approvedBooking();
+    const worker = h.worker();
+    await worker.ingest();
+    await h.session(h.a).revokeApproval(queued, {}, randomUUID());
+    await worker.runOnce();
+    expect(ap.events(flowId)).toHaveLength(1);
+    expect((await deliveries(endpoint.id)).map((row) => row.final_reason)).toEqual([null, "approval_withdrawn"]);
+
+    // Revoked before ingest: no delivery is queued at all.
+    h.clock.advance(1_000);
+    const early = await approvedBooking();
+    await h.session(h.a).revokeApproval(early, {}, randomUUID());
+    await drain();
+    expect(await deliveries(endpoint.id)).toHaveLength(2);
+    expect(ap.events(flowId)).toHaveLength(1);
+  });
+
+  it("stops once the approval expires, including on a retry", async () => {
+    const { flowId, endpoint } = await subscribe(h.a, ["booking.created"]);
+    h.clock.advance(1_000);
+    await approvedBooking(5);
+    const worker = h.worker();
+    await worker.ingest();
+    h.clock.advance(6 * 60_000);
+    await worker.runOnce();
+    expect(ap.events(flowId)).toHaveLength(0);
+    expect((await deliveries(endpoint.id))[0]).toMatchObject({ status: "dead", final_reason: "approval_withdrawn" });
+  });
+});
+
+describe("decided from what happened, not from the live rows (W-4, W-7)", () => {
+  it("judges deal.won and its value from the deal's history, even after a reopen and an edit before ingest", async () => {
+    const { flowId } = await subscribe(h.a, ["deal.won"]);
+    const otherWon = randomUUID();
+    await h.service((tx) => tx.query("INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome) VALUES ($1,$2,$3,'Won late',3,'won')",
+      [h.a.tenantId, otherWon, h.a.pipelineId]));
+    const session = h.session(h.a);
+    const step = () => h.clock.advance(1_000);
+    step();
+    const contact = await session.upsertContact({ email: `race-${randomUUID().slice(0, 8)}@haldenrowe.example` }, randomUUID());
+    const deal = await session.createDeal({ contactId: contact.result.contact.id, pipelineId: h.a.pipelineId, stageId: h.a.openStage, title: "Gutters" }, randomUUID());
+    const id = deal.result.id;
+    step();
+    await session.setDealDetails(id, { expectedRevision: 1, value: { amountMinor: 5_000, currency: "USD" }, leadSource: null }, randomUUID());
+    step();
+    const won = await session.moveDealStage(id, { pipelineId: h.a.pipelineId, stageId: h.a.wonStage, expectedRevision: 2 }, randomUUID());
+    step();
+    await session.moveDealStage(id, { pipelineId: h.a.pipelineId, stageId: otherWon, expectedRevision: 3 }, randomUUID());
+    step();
+    // Reopened and repriced before the worker ever ran.
+    await session.moveDealStage(id, { pipelineId: h.a.pipelineId, stageId: h.a.openStage, expectedRevision: 4 }, randomUUID());
+    step();
+    await session.setDealDetails(id, { expectedRevision: 5, value: { amountMinor: 9_000, currency: "USD" }, leadSource: null }, randomUUID());
+    await drain();
+    expect(ap.events(flowId).map((event) => event.body.data)).toEqual([expect.objectContaining({
+      dealId: id, stageId: h.a.wonStage, valueMinor: 5_000, currency: "USD", wonAt: won.result.updatedAt,
+    })]);
+
+    // Won again after the reopen: a new win, at the price it had then.
+    step();
+    await session.moveDealStage(id, { pipelineId: h.a.pipelineId, stageId: otherWon, expectedRevision: 6 }, randomUUID());
+    await drain();
+    expect(ap.events(flowId).map((event) => event.body.data)).toEqual([
+      expect.objectContaining({ stageId: h.a.wonStage, valueMinor: 5_000 }),
+      expect.objectContaining({ stageId: otherWon, valueMinor: 9_000 }),
+    ]);
+  });
+
+  it("drops a delivery queued before the endpoint was switched off and on, but sends an owner's replay of it", async () => {
+    const { flowId, endpoint } = await subscribe(h.a, ["booking.created"]);
+    h.clock.advance(1_000);
+    await h.websiteRequest(h.a);
+    const worker = h.worker();
+    await worker.ingest();
+    h.clock.advance(1_000);
+    await h.admin(h.a).updateEndpoint(endpoint.id, { enabled: false, expectedRevision: 1 }, randomUUID());
+    h.clock.advance(1_000);
+    await h.admin(h.a).updateEndpoint(endpoint.id, { enabled: true, expectedRevision: 2 }, randomUUID());
+    await worker.runOnce();
+    expect(ap.events(flowId)).toHaveLength(0);
+    const [old] = await deliveries(endpoint.id);
+    expect(old).toMatchObject({ status: "dead", final_reason: "endpoint_disabled" });
+
+    h.clock.advance(1_000);
+    await h.websiteRequest(h.a);
+    await h.admin(h.a).replayDelivery(old!.id, {}, randomUUID());
+    await drain();
+    expect(ap.events(flowId)).toHaveLength(2);
+  });
+
+  it("reads a new endpoint first, so endpoints that were read before cannot starve it", async () => {
+    const first = await subscribe(h.a, ["booking.created"]);
+    const second = await subscribe(h.b, ["booking.created"]);
+    await h.worker().ingest();
+    h.clock.advance(1_000);
+    const fresh = await subscribe(h.a, ["booking.created"]);
+    h.clock.advance(1_000);
+    await h.websiteRequest(h.a);
+    // One endpoint per pass: the one never read goes first.
+    const narrow = h.worker({ ingestEndpoints: 1 });
+    await narrow.ingest();
+    expect(await deliveries(fresh.endpoint.id)).toHaveLength(1);
+    expect(await deliveries(first.endpoint.id)).toHaveLength(0);
+    // Then the least recently read, in turn.
+    await narrow.ingest();
+    await narrow.ingest();
+    expect(await deliveries(first.endpoint.id)).toHaveLength(1);
+    expect(await deliveries(second.endpoint.id)).toHaveLength(0);
+  });
+});

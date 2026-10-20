@@ -24,6 +24,10 @@ CREATE TABLE public.webhook_endpoints (
   previous_secret_version integer,
   previous_valid_until timestamptz,
   scan_from timestamptz NOT NULL,
+  -- W-7: when the endpoint was last switched on; an event from before it is never sent.
+  activated_at timestamptz NOT NULL,
+  -- W-7: the last ingest visit; the least recently visited endpoint is read first.
+  ingested_at timestamptz,
   created_by uuid NOT NULL,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
@@ -33,6 +37,7 @@ CREATE TABLE public.webhook_endpoints (
     AND (previous_secret_version IS NULL OR previous_secret_version < secret_version))
 );
 CREATE INDEX webhook_endpoints_enabled ON public.webhook_endpoints (tenant_id) WHERE enabled;
+CREATE INDEX webhook_endpoints_ingest ON public.webhook_endpoints (ingested_at NULLS FIRST, tenant_id, id) WHERE enabled;
 
 -- W-7: every outbox row one endpoint's ingest has read, so each is mapped once per endpoint.
 CREATE TABLE public.webhook_ingest_marks (
@@ -68,7 +73,7 @@ CREATE TABLE public.webhook_deliveries (
   last_status_code integer CONSTRAINT webhook_deliveries_status_code CHECK (last_status_code BETWEEN 100 AND 599),
   last_error text CONSTRAINT webhook_deliveries_last_error_length CHECK (char_length(last_error) BETWEEN 1 AND 200),
   final_reason text CONSTRAINT webhook_deliveries_final_reason CHECK (final_reason IN
-    ('max_attempts', 'endpoint_gone', 'endpoint_disabled', 'url_refused', 'worker_error')),
+    ('max_attempts', 'endpoint_gone', 'endpoint_disabled', 'url_refused', 'worker_error', 'approval_withdrawn')),
   delivered_at timestamptz,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
@@ -144,7 +149,7 @@ END $$;
 -- of a token (its tenant, ID, scopes and creator) never change; a token is only ever revoked.
 GRANT INSERT ON public.webhook_endpoints, public.automation_tokens TO authenticated;
 GRANT UPDATE (url, description, events, enabled, revision, secret_version, previous_secret_version,
-  previous_valid_until, scan_from, updated_at) ON public.webhook_endpoints TO authenticated;
+  previous_valid_until, scan_from, activated_at, ingested_at, updated_at) ON public.webhook_endpoints TO authenticated;
 GRANT UPDATE (revoked_at, revoked_by) ON public.automation_tokens TO authenticated;
 -- W-14: an owner replays a dead letter; nothing else about a delivery is the runtime's to change.
 GRANT UPDATE (status, attempts, step_errors, replays, next_attempt_at, final_reason, last_error, updated_at)
@@ -152,7 +157,7 @@ GRANT UPDATE (status, attempts, step_errors, replays, next_attempt_at, final_rea
 -- The worker (service role) moves deliveries forward and its own ingest point; nothing deletes history.
 -- Like every tenant table, the service role (provisioning, operators) may add rows.
 GRANT INSERT ON public.webhook_endpoints, public.automation_tokens TO service_role;
-GRANT UPDATE (scan_from) ON public.webhook_endpoints TO service_role;
+GRANT UPDATE (scan_from, ingested_at) ON public.webhook_endpoints TO service_role;
 GRANT INSERT ON public.webhook_ingest_marks TO service_role;
 GRANT INSERT, UPDATE ON public.webhook_deliveries, public.webhook_delivery_attempts TO service_role;
 -- The enums are read by both roles.

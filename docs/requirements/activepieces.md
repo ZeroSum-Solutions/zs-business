@@ -1,6 +1,6 @@
 # M5: Activepieces automations
 
-Status: draft contract for M5, provider 5 of 5 (2026-10-20), revision 1. Code follows this file;
+Status: draft contract for M5, provider 5 of 5 (2026-10-20), revision 2 (hub review r1: W-2, W-4, W-7, W-8). Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: let an owner connect Activepieces flows to their business in two directions. Outbound,
@@ -41,8 +41,10 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
   404. Each change is one action through the shared path, with an idempotency key.
 - **W-2 Receiver URLs.** An endpoint URL is `https`, carries no user or password, and names no
   private host: no `localhost`, single-label, `.local`, `.internal`, `.localhost` or `.home.arpa` names, and
-  no private, loopback, link-local, CGNAT, multicast or reserved IPv4 or IPv6 address (IPv4
-  inside IPv6 is judged as IPv4). The API checks on save; the worker checks again before every
+  no private, loopback, link-local, CGNAT, multicast or reserved IPv4 or IPv6 address. IPv4
+  inside IPv6 is judged as IPv4 in every spelling, including the hex form `new URL` rewrites
+  `[::127.0.0.1]` to (`::/96`, `::ffff:0:0/96`, `::ffff:0:0:0/96`, and 6to4 `2002::/16`). A name
+  with a trailing dot (`localhost.`) is judged as the same name. The API checks on save; the worker checks again before every
   attempt, and its DNS lookup refuses any private answer, so a name that later resolves inside
   the network is never contacted. Redirects are never followed. Loopback over http is allowed
   only when `ACTIVEPIECES_ALLOW_LOOPBACK=on`, which needs a loopback database.
@@ -55,7 +57,9 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
   phone, channel, page, possible-match flag), `booking.created` with `source: "website"`, and
   `message.received` when the visitor wrote a note. An owner's booking gives `booking.created`
   with `source: "owner"`. A deal create or stage move gives `deal.won` when the new stage's
-  outcome is `won` and the deal was not already won before that write.
+  outcome is `won` and the stage the deal's previous write left was not. Both, and the value the
+  event carries (the last one set before that write), are read from the outbox history, so a
+  later reopen or price change does not alter or repeat an event.
 - **W-5 Signing secrets.** Each endpoint has one `whsec_` secret per version, shown on create
   and on rotate only. Rotating moves to the next version; with a grace period (default 24 h,
   0 to 7 days) the old version keeps signing beside the new one until the grace ends.
@@ -67,14 +71,18 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
   and writes one delivery per wanted event. When it has read everything, the scan point moves
   to one hour (configurable) before now, so a transaction that committed late is still found.
   A new or re-enabled endpoint starts at the time of that change and never receives older
-  events.
+  events: a delivery queued before it was switched off is dead-lettered (`endpoint_disabled`)
+  unless an owner replays it. Each pass reads the least recently read endpoints first, so a new
+  endpoint is never starved by older ones.
 - **W-8 Delivery.** Workers lease due deliveries (`FOR UPDATE SKIP LOCKED`) and check the
   lease on every write, so two workers never send one attempt and a crashed holder's attempt
   is retried after its lease. Each attempt has a timeout well inside the lease. 2xx is
   delivered. 410 stops at once (`endpoint_gone`). Anything else, a timeout, a network error or
   a redirect retries with exponential backoff (from 30 s, at most 6 h) until the attempt
   cap (8), then dead-letters (`max_attempts`). A disabled endpoint or a refused URL
-  dead-letters at once. Every attempt is recorded with its status or error code; the reply
+  dead-letters at once. As for email (`approvals.md` A-8, A-10), an event whose action ran under
+  a stored approval is queued and sent only while that approval stands; once it is revoked or
+  expired, the next attempt dead-letters it (`approval_withdrawn`). Every attempt is recorded with its status or error code; the reply
   body is never stored.
 - **W-9 Tokens.** An owner creates a named token with scopes and an optional expiry
   (1 to 365 days). The secret `zsap1_…` is shown once. It carries the tenant and token IDs and

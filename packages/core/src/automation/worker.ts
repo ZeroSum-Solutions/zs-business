@@ -6,6 +6,7 @@
 import { z } from "zod";
 import { ValidationFailed, type AutomationEventType, type WebhookDeliveryFinalReason } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { approvalForAction } from "../approvals/records.js";
 import { readClock } from "../booking/slots.js";
 import { backoffMs } from "../delivery/policy.js";
 import { derivedId } from "../edge/ids.js";
@@ -67,6 +68,9 @@ interface LeasedRow {
   tenant_id: string;
   id: string;
   endpoint_id: string;
+  outbox_id: string;
+  occurred_at: Date;
+  replays: number;
   event_id: string;
   body: string;
   attempts: number;
@@ -87,6 +91,19 @@ function eventBody(input: { eventId: string; type: AutomationEventType; tenantId
     occurredAt: input.occurredAt.toISOString(),
     data: input.data,
   });
+}
+
+/**
+ * approvals.md A-8, A-10: an event whose action ran under a stored approval goes out only while
+ * that approval stands. A direct action (no approval record) stands; a revoked, expired or
+ * rejected approval, or an outbox row with no action, does not.
+ */
+async function approvalStands(tx: Transaction, tenantId: string, outboxId: string, at: Date): Promise<boolean> {
+  const actionId = (await tx.query<{ action_id: string | null }>(
+    "SELECT action_id FROM outbox WHERE tenant_id=$1 AND id=$2", [tenantId, outboxId])).rows[0]?.action_id;
+  if (!actionId) return false;
+  const found = await approvalForAction(tx, tenantId, actionId, at);
+  return found !== null && (found.kind === "direct" || found.standing === "approved");
 }
 
 export function createWebhookWorker(deps: WebhookWorkerDeps) {
@@ -119,7 +136,8 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
       const wanted = new Set(endpoint.events);
       let events = 0;
       for (const row of rows) {
-        for (const event of await businessEvents(tx, row)) {
+        const found = await approvalStands(tx, tenantId, row.id, at) ? await businessEvents(tx, row) : [];
+        for (const event of found) {
           if (!wanted.has(event.type)) continue;
           // One event ID per outbox row and type, the same for every endpoint and replay.
           const eventId = derivedId(tenantId, row.id, event.type, "webhook-event");
@@ -135,11 +153,12 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
           "INSERT INTO webhook_ingest_marks (tenant_id, endpoint_id, outbox_id, ingested_at) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
           [tenantId, endpoint.id, row.id, at]);
       }
-      if (rows.length < config.ingestRows) {
-        const next = new Date(at.getTime() - config.ingestLookbackMs);
-        if (next.getTime() > endpoint.scan_from.getTime())
-          await tx.query("UPDATE webhook_endpoints SET scan_from=$3 WHERE tenant_id=$1 AND id=$2", [tenantId, endpoint.id, next]);
-      }
+      const drained = rows.length < config.ingestRows;
+      const next = new Date(at.getTime() - config.ingestLookbackMs);
+      await tx.query(
+        `UPDATE webhook_endpoints SET ingested_at=$3, scan_from = CASE WHEN $4 THEN greatest(scan_from, $5) ELSE scan_from END
+          WHERE tenant_id=$1 AND id=$2`,
+        [tenantId, endpoint.id, at, drained, next]);
       return { events, rows: rows.length };
     });
   }
@@ -147,7 +166,8 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
   /** One ingest pass over the enabled endpoints; one endpoint that fails does not stop the rest. */
   async function ingest(): Promise<{ endpoints: number; events: number }> {
     const endpoints = await deps.service(async (tx) => (await tx.query<{ tenant_id: string; id: string }>(
-      "SELECT tenant_id, id FROM webhook_endpoints WHERE enabled ORDER BY scan_from, id LIMIT $1",
+      // W-7: least recently visited first, so a new endpoint never waits behind full ones.
+      "SELECT tenant_id, id FROM webhook_endpoints WHERE enabled ORDER BY ingested_at NULLS FIRST, tenant_id, id LIMIT $1",
       [config.ingestEndpoints])).rows);
     let events = 0;
     for (const endpoint of endpoints) {
@@ -183,8 +203,10 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
 
   const lockLeased = async (tx: Transaction, lease: WebhookClaim): Promise<LeasedRow | undefined> =>
     (await tx.query<LeasedRow>(
-      `SELECT tenant_id, id, endpoint_id, event_id, body::text AS body, attempts, step_errors FROM webhook_deliveries
-        WHERE tenant_id=$1 AND id=$2 AND lease_token=$3 AND status='leased' FOR UPDATE`,
+      `SELECT d.tenant_id, d.id, d.endpoint_id, d.outbox_id, o.created_at AS occurred_at, d.event_id, d.body::text AS body,
+         d.attempts, d.step_errors, d.replays
+        FROM webhook_deliveries d JOIN outbox o ON o.tenant_id = d.tenant_id AND o.id = d.outbox_id
+        WHERE d.tenant_id=$1 AND d.id=$2 AND d.lease_token=$3 AND d.status='leased' FOR UPDATE OF d`,
       [lease.tenantId, lease.deliveryId, lease.leaseToken])).rows[0];
 
   const RELEASE = "lease_token=NULL, lease_owner=NULL, lease_expires_at=NULL";
@@ -212,10 +234,15 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
         return { kind: "done", result: await deadLetter(tx, row, "worker_error", at, "step_errors") };
       const endpoint = (await tx.query<EndpointRow>(
         `SELECT ${ENDPOINT_COLUMNS} FROM webhook_endpoints WHERE tenant_id=$1 AND id=$2`, [row.tenant_id, row.endpoint_id])).rows[0];
-      if (!endpoint || !endpoint.enabled) return { kind: "done", result: await deadLetter(tx, row, "endpoint_disabled", at) };
+      // W-7, W-8: switched off, or switched back on after this event happened (it was queued
+      // before). An owner's replay of a dead letter (W-14) is a choice to send it anyway.
+      if (!endpoint || !endpoint.enabled || (row.replays === 0 && row.occurred_at.getTime() < endpoint.activated_at.getTime()))
+        return { kind: "done", result: await deadLetter(tx, row, "endpoint_disabled", at) };
       const problem = webhookUrlProblem(endpoint.url, policy);
       if (problem) return { kind: "done", result: await deadLetter(tx, row, "url_refused", at, problem) };
       if (row.attempts >= config.maxAttempts) return { kind: "done", result: await deadLetter(tx, row, "max_attempts", at) };
+      if (!await approvalStands(tx, row.tenant_id, row.outbox_id, at))
+        return { kind: "done", result: await deadLetter(tx, row, "approval_withdrawn", at) };
       const attempt = (await tx.query<{ next: number }>(
         "SELECT coalesce(max(attempt),0)+1 AS next FROM webhook_delivery_attempts WHERE tenant_id=$1 AND delivery_id=$2",
         [row.tenant_id, row.id])).rows[0]!.next;
