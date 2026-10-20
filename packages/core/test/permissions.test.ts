@@ -10,9 +10,9 @@ import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  approvalHandlers, bookingHandlers, createDispatcher, createMemorySiteStore, crmHandlers, dealDetailsHandlers, inboxHandlers,
-  intakeHandlers, memberHandlers, plainSiteCompiler, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers,
-  type DispatchContext, type StripeClient,
+  approvalHandlers, bookingHandlers, calendarHandlers, createDispatcher, createMemorySiteStore, crmHandlers, dealDetailsHandlers,
+  generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey, plainSiteCompiler, sealRefreshToken,
+  siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext, type GoogleClient, type StripeClient,
 } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -42,6 +42,8 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "approval.approve": "approve",
   "approval.reject": "approve",
   "wallet.topup.create": "billing",
+  "calendar.google.connect": "publish",
+  "calendar.google.disconnect": "publish",
 };
 
 interface Tenant {
@@ -81,8 +83,17 @@ const stripe: StripeClient = {
   }),
   createCheckoutSession: async (request) => ({ id: `cs_test_${request.topupId.replaceAll("-", "")}`, url: "https://checkout.stripe.test/pay" }),
 };
+/** Google answers only the consent URL here; the OAuth callback has its own tests. */
+const unused = async (): Promise<never> => { throw new Error("not used"); };
+const google: GoogleClient = {
+  authorizeUrl: ({ state, codeChallenge }) => `https://accounts.google.test/auth?state=${state}&code_challenge=${codeChallenge}`,
+  exchangeCode: unused, refreshAccessToken: unused, revoke: unused, listEvents: unused, insertEvent: unused, watch: unused, stopChannel: unused,
+};
+const tokenPublicKey = parseSealPublicKey(generateSealKeyPair().publicKey);
+/** Synthetic OAuth state secret, built at runtime like the booking key secret. */
+const calendar = { google, stateSecrets: { current: ["test", "oauth", "s".repeat(32)].join("-") }, tokenPublicKey };
 const sites = { store: createMemorySiteStore(), compiler: plainSiteCompiler };
-const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, billing: { stripe }, sites });
+const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, billing: { stripe }, calendar, sites });
 const siteSpec = { kind: "plain", title: "Halden & Rowe" };
 const sessionFor = (actorId: string, tenantId = tenant.tenantId): Session => createSession(deps(), { tenantId, actorId });
 
@@ -243,7 +254,29 @@ function operations(session: Session): Record<string, { permission: Permission |
     observeSource: { permission: "customers", run: () => session.observeSource(
       { subject: { type: "contact", id: tenant.contactId }, source: "owner" }, randomUUID()) },
     listSources: { permission: "customers", run: () => session.listSources({ subjectType: "contact", subjectId: tenant.contactId }) },
+    // google-calendar.md G-1, G-5: owners connect and disconnect; members with the calendar see the list.
+    listCalendarConnections: { permission: "calendar", run: () => session.listCalendarConnections() },
+    startGoogleConnect: { permission: "publish", run: () => session.startGoogleConnect({ resourceId: tenant.resourceId }, randomUUID()) },
+    disconnectCalendar: { permission: "publish", run: async () => session.disconnectCalendar(await calendarConnection(), randomUUID()) },
   };
+}
+
+/** An active connection on its own resource, as the OAuth callback's connect action leaves it. */
+async function calendarConnection(): Promise<string> {
+  const id = randomUUID();
+  const resourceId = randomUUID();
+  await fixture.service(async (tx) => {
+    await tx.query(
+      `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+         buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+       VALUES ($1,$2,'UTC','[]'::jsonb,'[]'::jsonb,60,30,0,0,0,20160)`, [tenant.tenantId, resourceId]);
+    await tx.query(
+      `INSERT INTO calendar_connections (tenant_id,id,resource_id,status,refresh_token_sealed,created_by,next_sync_at,created_at,updated_at)
+       VALUES ($1,$2,$3,'active',$4,$5,$6,$6,$6)`,
+      [tenant.tenantId, id, resourceId, sealRefreshToken(tokenPublicKey, { tenantId: tenant.tenantId, connectionId: id }, "1//refresh"),
+        tenant.ownerId, NOW]);
+  });
+  return id;
 }
 
 /** A booking proposal; only one that will run needs a free hour (`next`). */
@@ -263,7 +296,7 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...siteHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers,
     })
       .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action)).sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);

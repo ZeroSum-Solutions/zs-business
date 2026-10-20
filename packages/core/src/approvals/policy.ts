@@ -27,10 +27,12 @@ export const isApprovalAction = (actionType: string) => actionType.startsWith("a
 export const isSiteAction = (actionType: string) => actionType.startsWith("site.");
 
 /**
- * Member actions that never run through an approval. stripe.md S-1: a top-up runs only from the
- * member's top-up route, with the server's terms, and asks Stripe for a Checkout Session after.
+ * Member actions that never run through an approval. google-calendar.md G-2: the connect action
+ * runs only from the OAuth callback, with the grant it sealed, under its reserved key. stripe.md
+ * S-1: a top-up runs only from the member's top-up route, with the server's terms, and asks Stripe
+ * for a Checkout Session after.
  */
-export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["wallet.topup.create"]);
+export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect", "wallet.topup.create"]);
 export const cannotBeApproved = (actionType: string) =>
   isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);
 

@@ -101,7 +101,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins, for example the dashboard dev server. |
 | `PORT` | Listen port, default 8787. |
 | `DATABASE_CONNECT_TIMEOUT_MS` | Longest wait for a pooled connection, default 5000. Past it the request is 503. |
-| `REQUEST_TIMEOUT_MS` | Longest time a `/v1`, `/public/v1` or `/webhooks` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
+| `REQUEST_TIMEOUT_MS` | Longest time a `/v1`, `/public/v1`, `/webhooks` or `/oauth` request may take, default 10000 (under the dashboard proxy's 15 s). Past it the request is 503. |
 | `RUNTIME_DATABASE_URL` | Seed only, optional: runtime login URL; defaults to `DATABASE_URL` as `zs_runtime`. |
 | `DATABASE_CA_CERT` | PEM. When set, the pool verifies the server against it (`rejectUnauthorized`). Required whenever `DATABASE_URL` is not a loopback host (`127.0.0.1`, `::1`, `localhost`), so a hosted API never falls back to plain TCP; only a loopback database runs without TLS. A non-loopback URL, or any URL with a CA, must carry no query string, because pg lets URL ssl options (`sslmode=no-verify`, `ssl=false`, a `host` override) replace the config. Hosted: `supabase/hosted/supabase-root-2021-ca.crt`. |
 | `DATABASE_POOL_MAX` | Pool size per process, 1 to 50, default 10. Vercel sets 3: each serverless instance has its own pool. |
@@ -123,6 +123,8 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `RESEND_WEBHOOK_PREVIOUS_SECRET` | Optional, during a rotation: events signed with it still verify. Needs `RESEND_WEBHOOK_SECRET`. |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_LIVEMODE`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL` | Stripe wallet top-ups (stripe.md S-9), all or none. None set: top-ups and `POST /webhooks/stripe` are off. A secret or restricted key (`sk_`/`rk_`), the endpoint's `whsec_` secret, `true` or `false` matching the key's mode, and https return URLs. |
 | `STRIPE_WEBHOOK_PREVIOUS_SECRET`, `STRIPE_CURRENCY`, `STRIPE_TOPUP_MIN`, `STRIPE_TOPUP_MAX`, `STRIPE_API_VERSION`, `STRIPE_BASE_URL` | Optional: a rotation secret, `usd`, 500 and 50000 minor units, the account's default API version, `https://api.stripe.com`. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY`, `GOOGLE_CHANNEL_SECRET` | Google Calendar busy sync (google-calendar.md G-12), all or none. None set: connecting, `GET /oauth/google/callback` and `POST /webhooks/google/calendar` are off. The OAuth web client's ID and secret; `https://<api host>/oauth/google/callback` (also registered in Google Cloud); the dashboard page the callback lands on; a state signing secret (32+ characters); base64 of the DER SPKI of the X25519 key whose private half only the calendar runner holds; the push channel secret (32+ characters, the same as the runner's). URLs must be https (plain http only on loopback). |
+| `GOOGLE_STATE_PREVIOUS_SECRET`, `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | Optional: a rotation secret (states it signed keep verifying for their 10 minutes), and base URLs for tests (`https://accounts.google.com`, `https://oauth2.googleapis.com`, `https://www.googleapis.com`). |
 | `TWILIO_AUTH_TOKEN` | The Twilio account's auth token (32 hex), which verifies `X-Twilio-Signature`. Unset, the `/webhooks/twilio` routes are off. Needs `TWILIO_ACCOUNT_SID` and `TWILIO_WEBHOOK_BASE_URL`. |
 | `TWILIO_PREVIOUS_AUTH_TOKEN` | Optional, during a rotation (Twilio's secondary token): webhooks signed with it still verify. |
 | `TWILIO_ACCOUNT_SID` | Every Twilio webhook must name this account. |
@@ -229,6 +231,9 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
 | `GET /v1/wallet/top-ups` | `{ items: TopUp[] }`, newest first, at most 20; owners only |
 | `POST /v1/wallet/top-ups` | `{ amount }` in minor units with `Idempotency-Key`: 201 `{ topup, checkoutUrl }` (stripe.md S-1, S-2). The same key replays the same top-up and Checkout Session. 409 `topup_closed` once the top-up is no longer pending or 25 minutes old; 409 `wallet_currency` when the wallet already holds another currency; 503 when Stripe is unreachable or busy (retry with the same key); 404 when Stripe is not configured. Owners only |
+| `GET /v1/calendar/connections` | `{ items: CalendarConnection[] }`, newest first, at most 100: `{ id, provider, resourceId, calendarId, accountEmail, status, lastSyncedAt, lastError, createdAt }`, never a token (google-calendar.md G-5). Owners and staff |
+| `POST /v1/calendar/google/connect` `{ resourceId }` | With `Idempotency-Key`: 200 `{ authorizeUrl }`, `Cache-Control: no-store` (G-1). Changes nothing: send the browser there. The connection ID derives from the tenant and the key; the URL carries a signed state (10 minutes) and a PKCE challenge. 409 `idempotency_key_reused` once the key's connection exists for another resource or is no longer active; 403 for another tenant's resource; 404 when Google is not configured. Owners only (`publish`) |
+| `POST /v1/calendar/connections/:id/disconnect` | With `Idempotency-Key`: 200 `{ actionId, result: CalendarConnection }` (G-5). `active` or `reauthorize` becomes `disconnecting` (the calendar runner revokes the grant and removes its blocks); `disconnecting` and `disconnected` answer as they are. 404 for an unknown or another tenant's connection. Owners only |
 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
 with no `user_id`; the runtime role cannot set `user_id` (binding an invite to a signed-up
@@ -392,6 +397,47 @@ its ID in `stripe_events`. It moves no money: the billing runner does (below).
 | 413 `ValidationFailed` | Body over 256 KiB. |
 | 503 `Unavailable` | The database did not answer; Stripe delivers it again. |
 | 200 `{"received":true,"stored":…}` | Stored, already stored, or from the other mode (dropped). |
+
+## Google OAuth callback (`/oauth/google/callback`, no auth)
+
+Google sends the owner's browser here after the consent screen (google-calendar.md G-2). On only
+when the `GOOGLE_*` variables are set. The request is anonymous: what it may do comes from the
+signed `state` alone (tenant, member, resource, connection ID, 10-minute expiry; current or
+previous `GOOGLE_STATE_SECRET`). With a valid state it exchanges the code with the PKCE verifier
+derived for that connection, seals the refresh token with `GOOGLE_TOKEN_PUBLIC_KEY` for that
+tenant and connection, drops the access token, and runs `calendar.google.connect` as the member
+the state names, under the reserved key `oauth-google:<connection id>`. That member must still be
+an owner. Connecting a resource that already has a connection moves the old one to
+`disconnecting`. Every answer is `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+
+| Answer | When |
+|---|---|
+| 400 `ValidationFailed` | Missing, forged, tampered or expired `state`. No redirect: nothing proves where the caller came from. |
+| 303 to `GOOGLE_RETURN_URL?calendar=connected` | Connected, or a reload of a callback that already connected (the code is not sent again). |
+| 303 to `…?calendar=error&reason=denied` | Google sent `error` (the owner declined). |
+| `reason=exchange_failed` | No code, or Google refused or did not answer the exchange. |
+| `reason=no_refresh_token`, `reason=scope_missing` | Google granted no refresh token, or not `calendar.events`. Nothing is stored. |
+| `reason=forbidden` | The member is no longer an owner of the tenant, or the resource is gone. Checked before the code is spent. |
+| `reason=conflict` | Another connect for the same resource committed at the same moment. |
+| 503 `Unavailable` | The database did not answer. |
+
+## Google Calendar webhook (`/webhooks/google/calendar`, no auth)
+
+Google posts here when a watched calendar changes (G-8). On only when the `GOOGLE_*` variables are
+set; the calendar runner opens channels only when `GOOGLE_WEBHOOK_URL` names this route. The route
+checks `X-Goog-Channel-Token` against `HMAC-SHA-256(GOOGLE_CHANNEL_SECRET, X-Goog-Channel-ID)` in
+constant time before any database work, then stores the channel ID, `X-Goog-Message-Number` and
+`X-Goog-Resource-State` once in `calendar_push_notifications`. The body is ignored. The runner marks
+the channel's connection due; a push carries no calendar data, so a forged one could only cause an
+early sync.
+
+| Answer | When |
+|---|---|
+| 401 `Unauthorized` | Missing or wrong channel ID or token. One body for all of them. |
+| 400 `ValidationFailed` | A valid token with a malformed message number or resource state. |
+| 413 `ValidationFailed` | Body over 4 KiB (Google sends none). |
+| 503 `Unavailable` | The database did not answer; Google delivers it again. |
+| 200 `{"received":true,"stored":…}` | Stored, or already stored. |
 
 ## Twilio webhooks (`/webhooks/twilio/...`, no auth)
 
@@ -676,6 +722,33 @@ and the wallet reserves nothing until it is repaid). Off unless `BILLING_WORKER=
 `GET /cron/billing` answers like `/cron/delivery`, with `{ ran: true, passes, claimed,
 outcomes, budgetSpent }` after a run. Events that end `mismatch`, `orphaned` or `not_ours` are
 logged for an operator.
+
+## Calendar runner (`/cron/calendar`, `pnpm calendar:worker`)
+
+Runs the Google Calendar worker (google-calendar.md G-6..G-10): it syncs busy time from each active
+connection into external blocks, keeps one push channel per connection when `GOOGLE_WEBHOOK_URL`
+is set, pushes confirmed bookings to the calendar as events, and cleans up disconnecting
+connections (revoke, remove blocks). It alone holds the token private key. Off unless
+`CALENDAR_WORKER=on`.
+
+| Variable | Meaning |
+|---|---|
+| `CALENDAR_WORKER` | Kill switch. `on` runs; anything else, or unset, runs nothing. |
+| `CRON_SECRET` | The same bearer as `/cron/delivery`. Unset, the route is 404. |
+| `CALENDAR_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The same OAuth client as the API. |
+| `GOOGLE_TOKEN_PRIVATE_KEY` | Base64 of the DER PKCS#8 of the X25519 key whose public half is the API's `GOOGLE_TOKEN_PUBLIC_KEY`. Only this function holds it. |
+| `GOOGLE_CHANNEL_SECRET` | The same channel secret as the API (32+ characters). |
+| `GOOGLE_WEBHOOK_URL` | Optional: `https://<api host>/webhooks/google/calendar`. Unset, no channels are opened and syncs run on the poll interval only. |
+| `GOOGLE_EVENT_TITLE` | Optional: the title of every pushed event, default `Booked`. No customer data. |
+| `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | Optional, for tests. |
+| `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS` | Optional tuning: 20000 and 60000 (Node worker only). The cron function allows a budget of at most 20000. |
+| `CALENDAR_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/calendar`. Unset, there is no cron. |
+
+`GET /cron/calendar` answers like `/cron/delivery`, with `{ ran: true, passes, counts,
+budgetSpent }` after a run: `counts` sums the worker's passes (`synced`, `pushed`, `disconnected`,
+`channelsOpened`, …). A run makes passes until one moves nothing or the budget is spent.
+Reauthorize, failed syncs, failed pushes and channel failures are logged for an operator.
 
 ## Activepieces (`/v1/integrations/activepieces`, `/integrations/activepieces/v1`, `/cron/activepieces`)
 
