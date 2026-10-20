@@ -62,9 +62,10 @@ CREATE TABLE public.message_deliveries (
   provider text CONSTRAINT message_deliveries_provider_length CHECK (char_length(provider) BETWEEN 1 AND 100),
   -- D-8: what the first attempt sent (subject, text, headers). Later attempts under the same key
   -- replay it exactly, so a config change (an unsubscribe secret rotation) never alters a resend.
-  -- json, not jsonb, keeps the stored text as written.
+  -- json, not jsonb, keeps the stored text as written. The cap covers the largest legal
+  -- request: a 20000-character body of control characters is 6 bytes each once escaped.
   request json CONSTRAINT message_deliveries_request_shape
-    CHECK (json_typeof(request) = 'object' AND octet_length(request::text) <= 65536),
+    CHECK (json_typeof(request) = 'object' AND octet_length(request::text) <= 262144),
   -- Steps that threw inside the worker; at the cap the delivery is a dead letter `worker_error`.
   step_errors integer NOT NULL DEFAULT 0 CONSTRAINT message_deliveries_step_errors CHECK (step_errors BETWEEN 0 AND 1000),
   provider_message_id text CONSTRAINT message_deliveries_provider_id_length CHECK (char_length(provider_message_id) BETWEEN 1 AND 500),
