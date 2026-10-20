@@ -38,7 +38,7 @@ export interface AgentControls {
   readonly killed: { readonly at: Date; readonly by: string; readonly note: string | null } | null;
 }
 
-const SETTINGS_COLUMNS = `enabled, max_drafts_per_day, max_drafts_per_contact, contact_window_hours, wait_hours,
+export const SETTINGS_COLUMNS = `enabled, max_drafts_per_day, max_drafts_per_contact, contact_window_hours, wait_hours,
   lookback_days, quiet_start_minute, quiet_end_minute, time_zone, killed_at, killed_by, kill_note, revision, updated_at`;
 
 export function controlsFromRow(row: SettingsRow | undefined): AgentControls {

@@ -127,6 +127,26 @@ runs the agent.
 approvals route by an owner, who becomes the send's actor (A-6, A-7). Staff cannot approve. The
 delivery worker then re-checks the approval, consent and suppression as for every reply (D-6).
 
+**G-13. Scheduled runs.** Off unless the deploy sets `FOLLOWUP_AGENT=on`, and on Vercel only
+when the build sets `FOLLOWUP_CRON_SCHEDULE`. `GET /cron/followup` (its own Vercel function,
+`Authorization: Bearer <CRON_SECRET>`, 404 without a secret, 401 before any work, 200 without
+work while off) and `pnpm followup:worker` (a Node loop every `FOLLOWUP_INTERVAL_MS`) share
+one runner:
+- Time is cut into slots of `FOLLOWUP_SLOT_MINUTES`. A tenant gets one run per slot, keyed
+  `schedule:<slot start>` (G-6), so a repeated call in the slot continues an unfinished run
+  and skips a finished one.
+- The service role reads which tenants are due: none while the global switch is off;
+  otherwise tenants with the agent enabled, not killed and outside quiet hours, least recently
+  run first. Every switch and cap is still re-checked under the draft action's locks
+  (G-3..G-5), and the run itself goes through the agent principal under RLS (G-1).
+- A run starts no tenant whose worst case (`FOLLOWUP_MAX_CANDIDATES` inquiries, each waiting at
+  most `FOLLOWUP_MODEL_TIMEOUT_MS` for the model) could outlast `FOLLOWUP_RUN_BUDGET_MS`; the
+  rest wait for the next call. A model answer later than the timeout is dropped, and that
+  inquiry is skipped as `model_error` for this run.
+- A tenant whose run fails is reported and left due; the run goes on with the next tenant.
+- No real model provider is wired: `FOLLOWUP_MODEL` accepts only `fake`, and only against
+  loopback databases. `pnpm followup:global-switch on|off` flips the global switch (G-3).
+
 ## Known limits (revision 1)
 
 - `POST /runs` runs inside one HTTP request and its deadline. If the deadline fires mid-run the
@@ -146,3 +166,6 @@ immediately (a draft racing a kill either commits before it or is refused), the 
 quiet hours across midnight in a zone, staff cannot approve and the agent principal cannot
 approve or send, suppressed and consent-denied customers are skipped without a model call,
 two-tenant isolation, replayed runs, and the catalog isolation suite over the new tables.
+`apps/api/test/followup-runner.test.ts` and `followup-worker.test.ts` cover G-13: the
+environment, the cron route, one run per slot, the switches and quiet hours, the daily cap,
+least-recently-run order, the budget, a failing tenant, and the worker entry point.

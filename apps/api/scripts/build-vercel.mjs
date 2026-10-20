@@ -1,18 +1,21 @@
 // Bundles src/vercel.ts into one ESM file and writes Vercel's Build Output API layout
-// (.vercel/output): every path routes to the one Node function. Workspace packages ship
-// TypeScript with NodeNext ".js" specifiers, which Vercel's own Node builder does not map,
-// so the bundle is made here. Run from apps/api: `pnpm build:vercel`.
+// (.vercel/output): /cron/followup routes to the follow-up function, every other path to the API
+// function. Workspace packages ship TypeScript with NodeNext ".js" specifiers, which Vercel's
+// own Node builder does not map, so the bundle is made here. Run from apps/api: `pnpm build:vercel`.
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import process from "node:process";
 import { build } from "esbuild";
 
 const output = new URL("../.vercel/output/", import.meta.url);
 const fn = new URL("functions/index.func/", output);
+const followUpFn = new URL("functions/cron/followup.func/", output);
 await rm(output, { recursive: true, force: true });
 await mkdir(fn, { recursive: true });
+await mkdir(followUpFn, { recursive: true });
 
-await build({
-  entryPoints: [new URL("../src/vercel.ts", import.meta.url).pathname],
-  outfile: new URL("index.mjs", fn).pathname,
+const bundle = (entry, outDir) => build({
+  entryPoints: [new URL(entry, import.meta.url).pathname],
+  outfile: new URL("index.mjs", outDir).pathname,
   bundle: true,
   platform: "node",
   format: "esm",
@@ -36,6 +39,11 @@ await build({
   logLevel: "warning",
 });
 
+await bundle("../src/vercel.ts", fn);
+// agents.md G-13: the follow-up cron is its own function, so the API's code never opens the
+// service database login.
+await bundle("../src/vercel-followup.ts", followUpFn);
+
 // The hosted booking page and widget read these at start-up (src/public/assets.ts).
 await cp(new URL("../static/", import.meta.url), new URL("static/", fn), { recursive: true });
 await writeFile(new URL(".vc-config.json", fn), JSON.stringify({
@@ -46,8 +54,22 @@ await writeFile(new URL(".vc-config.json", fn), JSON.stringify({
   maxDuration: 30,
 }, null, 2));
 await writeFile(new URL("package.json", fn), JSON.stringify({ type: "module" }));
+await writeFile(new URL(".vc-config.json", followUpFn), JSON.stringify({
+  runtime: "nodejs24.x",
+  handler: "index.mjs",
+  launcherType: "Nodejs",
+  shouldAddHelpers: false,
+  maxDuration: 30,
+}, null, 2));
+await writeFile(new URL("package.json", followUpFn), JSON.stringify({ type: "module" }));
+// No schedule unless the build sets one (for example "0 * * * *"), so a deploy never starts
+// drafting by itself; FOLLOWUP_AGENT=on is the second switch, at run time.
+const schedule = process.env.FOLLOWUP_CRON_SCHEDULE;
+if (schedule !== undefined && !/^[0-9*/,-]+( [0-9*/,-]+){4}$/.test(schedule))
+  throw new Error("FOLLOWUP_CRON_SCHEDULE must be a five-field cron expression");
 await writeFile(new URL("config.json", output), JSON.stringify({
   version: 3,
-  routes: [{ src: "/(.*)", dest: "/index" }],
+  routes: [{ src: "/cron/followup", dest: "/cron/followup" }, { src: "/(.*)", dest: "/index" }],
+  ...(schedule ? { crons: [{ path: "/cron/followup", schedule }] } : {}),
 }, null, 2));
 console.log("Wrote apps/api/.vercel/output");

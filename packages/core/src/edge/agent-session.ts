@@ -13,6 +13,7 @@ import { agentActorId } from "../agents/controls.js";
 import { AGENT_ACTIONS } from "../agents/handlers.js";
 import type { FollowUpModel } from "../agents/model.js";
 import { runFollowUps, type FollowUpRunReport } from "../agents/runner.js";
+import { scheduledRunKey } from "../agents/schedule.js";
 import { requireMember } from "../members/access.js";
 import { directDispatch, parseInput, type Authorize, type EdgeDependencies, type Principal } from "./session.js";
 
@@ -48,7 +49,7 @@ export function createFollowUpAgent(deps: EdgeDependencies, agent: FollowUpAgent
      * A scheduled run (the hub or M5 calls this on a timer). `slot` names the run, for example
      * the hour it is for, so a repeated call for the same slot continues that run.
      */
-    runScheduled: (tenantId: string, slot: string): Promise<FollowUpRunDetail> => run(tenantId, `schedule:${slot}`, null),
+    runScheduled: (tenantId: string, slot: string): Promise<FollowUpRunDetail> => run(tenantId, scheduledRunKey(slot), null),
     /** G-11: an owner runs the agent now. A retry with the same key continues the same run. */
     async runForMember(principal: Principal, body: unknown, rawKey: unknown): Promise<FollowUpRunDetail> {
       parseInput(startFollowUpRunRequestSchema, body);

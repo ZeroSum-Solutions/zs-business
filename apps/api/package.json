@@ -18,7 +18,9 @@
     "db:hosted-backup": "tsx src/scripts/hosted-backup.ts",
     "seed:hosted": "tsx src/scripts/hosted-seed.ts",
     "build:vercel": "node scripts/build-vercel.mjs",
-    "check:hosted": "tsx src/scripts/hosted-checks.ts"
+    "check:hosted": "tsx src/scripts/hosted-checks.ts",
+    "followup:worker": "tsx src/scripts/followup-worker.ts",
+    "followup:global-switch": "tsx src/scripts/followup-global-switch.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",
