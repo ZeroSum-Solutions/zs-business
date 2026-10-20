@@ -12,6 +12,7 @@ import {
   formFields,
   parseTwilioForm,
   TWILIO_WEBHOOK_BODY_LIMIT,
+  trimTrailingSlashes,
   twiml,
   twilioInboundSchema,
   twilioStatusCallbackSchema,
@@ -49,7 +50,7 @@ export function twilioWebhookRoutes(
   config: TwilioWebhookConfig,
   requestEdge: (c: Context<AppEnv>) => EdgeDependencies,
 ) {
-  const base = config.webhookBaseUrl.replace(/\/+$/, "");
+  const base = trimTrailingSlashes(config.webhookBaseUrl);
   const unauthorized = (c: Context<AppEnv>) => c.json(apiErrorBody("Unauthorized", "Invalid webhook signature"), 401);
 
   /** The signed form fields, or null when the request is not Twilio's for this account. */

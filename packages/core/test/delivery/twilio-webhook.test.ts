@@ -1,5 +1,5 @@
 // M5 Twilio webhook verification (docs/requirements/twilio.md T-6, T-8). No database.
-import { createHmac, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   formFields,
@@ -21,9 +21,9 @@ const params = () => form({ MessageStatus: "delivered", AccountSid: ACCOUNT, Mes
 
 describe("X-Twilio-Signature (T-6)", () => {
   it("is base64 HMAC-SHA1 of the URL followed by each name and value, sorted by name", () => {
-    const expected = createHmac("sha1", TOKEN)
-      .update(`${URL}AccountSid${ACCOUNT}ErrorCodeMessageSid${SID}MessageStatusdeliveredTo+15555550123`).digest("base64");
-    expect(signTwilioRequest(TOKEN, URL, params())).toBe(expected);
+    // A fixed vector: HMAC-SHA1 keyed "5f"×16 over the URL, then AccountSid…ErrorCode (empty)…
+    // MessageSid…MessageStatus…To in name order, computed independently of this module.
+    expect(signTwilioRequest("5f".repeat(16), URL, params())).toBe("Ica+Msi1Jx/B8DAao+AU/kwRYkI=");
   });
 
   it("verifies with the current or previous token and nothing else", () => {

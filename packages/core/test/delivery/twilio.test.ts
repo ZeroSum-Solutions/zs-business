@@ -161,7 +161,7 @@ describe("classification of HTTP answers (T-4)", () => {
     [201, { sid, status: "queued" }, { status: "accepted", providerMessageId: sid }],
     [200, { sid: mms }, { status: "accepted", providerMessageId: mms }],
     [201, {}, { status: "uncertain", code: "twilio_unreadable_success" }],
-    [201, { sid: sid.toUpperCase().replace(/^SM/, "SM") }, { status: "uncertain", code: "twilio_unreadable_success" }],
+    [201, { sid: `SM${sid.slice(2).toUpperCase()}` }, { status: "uncertain", code: "twilio_unreadable_success" }],
     [201, { sid: `SM${hex(15)}` }, { status: "uncertain", code: "twilio_unreadable_success" }],
     [201, { sid: `AC${hex(16)}` }, { status: "uncertain", code: "twilio_unreadable_success" }],
     [201, { sid: 42 }, { status: "uncertain", code: "twilio_unreadable_success" }],
