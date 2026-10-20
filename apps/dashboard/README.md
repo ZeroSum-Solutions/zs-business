@@ -283,10 +283,11 @@ since is not shown. Publish and "Make live" both send the release that was live 
 editor or dialog opened (`expectedCurrentReleaseId`): a 409 `stale_release`
 (`isStaleRelease`) means another version went live since, so nothing is replaced. The
 editor keeps the draft and says to reopen it; the rollback dialog closes and History
-reloads. Their intent keys live per site for the life of the tab, with any publish whose
-answer was lost: reopening the editor then offers that exact request again (same spec,
-same baseline, same key), even after leaving the page or a refresh that moved the live
-release, so the retry replays instead of adding a second version. A late answer updates
+reloads. Their intent keys live per site for the life of the tab. A site has at most one
+open publish (in flight, or its answer was lost), held the same way: until it is answered
+for good, the editor reopens it exactly as sent (same spec, same baseline, same key) and
+publishes nothing else, even after leaving the page or a refresh that moved the live
+release. So a retry replays instead of adding a second version. A late answer updates
 the page but never closes a newer opening (`useDialogGeneration`). When the API answers
 `edge: "pending"` the database moved but the site's host pointer did not, so the page says
 the site still shows the previous version and offers "Update the site now"

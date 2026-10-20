@@ -126,7 +126,10 @@ test("a late publish answer does not close the editor opened after it", async ({
   await page.keyboard.press("Escape");
   await expect(editor).toBeHidden();
 
+  // Reopened while the first publish is on its way: nothing else can be published yet.
   await page.getByRole("button", { name: "Edit site" }).click();
+  await expect(editor.getByTestId("site-resume")).toContainText("still on its way");
+  await expect(editor.getByRole("button", { name: "Publish" })).toBeDisabled();
   await editor.getByLabel("Tagline").fill("Second draft, still typing");
   // The first publish lands: History and the summary move on, the open draft stays.
   await expect(releases(page)).toHaveCount(3);
@@ -169,36 +172,34 @@ test("a publish retried after a lost answer replays instead of adding a second v
   await expect(editor.getByTestId("site-resume")).toHaveCount(0);
 });
 
-test("a late answer to an older publish does not drop a newer publish whose answer was lost", async ({ page }) => {
+test("refuses a second publish while the first has no answer", async ({ page }) => {
   await openSite(page);
   await page.getByRole("button", { name: "Edit site" }).click();
   const editor = page.getByRole("dialog", { name: "Edit site" });
-  // Publish A is slow; the owner closes the editor and opens it again meanwhile.
+  const publish = editor.getByRole("button", { name: "Publish" });
   await editor.getByLabel("Tagline").fill("Draft A");
-  await page.evaluate(() => window.__zsDemo!.delayNextSiteWrite(1_500));
-  await editor.getByRole("button", { name: "Publish" }).click();
-  await page.keyboard.press("Escape");
-  await expect(editor).toBeHidden();
-  await page.getByRole("button", { name: "Edit site" }).click();
-
-  // Publish B goes live, but its answer is lost.
-  await editor.getByLabel("Tagline").fill("Draft B");
   await page.evaluate(() => window.__zsDemo!.loseNextSiteAnswer());
-  await editor.getByRole("button", { name: "Publish" }).click();
+  await publish.click();
   await expect(editor.getByRole("alert")).toBeVisible();
-
-  // A then answers stale_release, and the page reloads onto B's version.
-  await expect(releases(page)).toHaveCount(3);
-  await expect(liveSummary(page)).toHaveText(/^Version 3 is live\./);
-
-  // B is still the unanswered publish: reopening offers it, and publishing replays it.
   await editor.getByRole("button", { name: "Cancel" }).click();
+
+  // Reopened, the editor holds A. Any other draft cannot be published until A is answered.
   await page.getByRole("button", { name: "Edit site" }).click();
   await expect(editor.getByTestId("site-resume")).toBeVisible();
-  await expect(editor.getByLabel("Tagline")).toHaveValue("Draft B");
-  await editor.getByRole("button", { name: "Publish" }).click();
+  await expect(editor.getByLabel("Tagline")).toHaveValue("Draft A");
+  await editor.getByLabel("Tagline").fill("Draft B");
+  await expect(publish).toBeDisabled();
+  await expect(editor.getByText("This changes the publish that got no answer.")).toBeVisible();
+
+  // Sent again as it was, A replays: one new version, and the page is free again.
+  await editor.getByLabel("Tagline").fill("Draft A");
+  await publish.click();
   await expect(page.getByRole("status").getByText("Published. Your site is live.")).toBeVisible();
   await expect(releases(page)).toHaveCount(3);
+  await page.getByRole("button", { name: "Edit site" }).click();
+  await expect(editor.getByTestId("site-resume")).toHaveCount(0);
+  await editor.getByLabel("Tagline").fill("Draft B");
+  await expect(publish).toBeEnabled();
 });
 
 test("checks the site again when another owner makes a version live", async ({ page }) => {

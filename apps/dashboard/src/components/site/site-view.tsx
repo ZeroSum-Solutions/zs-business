@@ -2,7 +2,7 @@
 
 import { ArrowCounterClockwise, ArrowSquareOut, Eye, PencilSimple, Plus, Trash } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -43,30 +43,42 @@ function PreviewFrame({ preview }: { preview: SitePreview }) {
 }
 
 /** One opening of the editor: the live release it started from, and the spec it starts with. */
-interface Editing {
-  baseline: string | null;
-  liveSpec: SiteSpec | undefined;
-  /** It reopens a publish whose answer was lost, exactly as it was sent. */
-  resuming: boolean;
-}
+interface Editing { baseline: string | null; liveSpec: SiteSpec | undefined }
 
-/** A publish whose answer was lost: it may have committed, so a retry must send the very same request. */
-interface UnsettledPublish { spec: SiteSpec; expectedCurrentReleaseId: string | null }
+interface PublishRequest { spec: SiteSpec; expectedCurrentReleaseId: string | null }
 
 /**
- * Per site, for as long as the tab lives: the intent keys for publish and rollback, and the
- * publish whose answer was lost. Kept outside React, so neither closing a dialog, leaving the
- * page nor a refresh that moves the live release turns a retry into a second write.
+ * A publish sent and not yet answered for good: still in flight, or its answer was lost, so it
+ * may have committed. A site has at most one, and until it settles the only publish allowed is
+ * that very request again, which reuses its key and so replays instead of adding a version.
  */
-interface SiteWrites { publish: IntentKeys; rollback: IntentKeys; unsettled: UnsettledPublish | null }
+interface OpenPublish { request: PublishRequest; inFlight: boolean }
+
+/**
+ * Per site, for as long as the tab lives: the intent keys for publish and rollback, and the open
+ * publish. Kept outside React, so neither closing a dialog, leaving the page nor a refresh that
+ * moves the live release lets a second publish overlap one whose outcome is unknown.
+ */
+interface SiteWrites { publish: IntentKeys; rollback: IntentKeys; open: OpenPublish | null; listeners: Set<() => void> }
 const siteWrites = new Map<string, SiteWrites>();
 function writesFor(siteId: string): SiteWrites {
   let writes = siteWrites.get(siteId);
   if (!writes) {
-    writes = { publish: createIntentKeys(), rollback: createIntentKeys(), unsettled: null };
+    writes = { publish: createIntentKeys(), rollback: createIntentKeys(), open: null, listeners: new Set() };
     siteWrites.set(siteId, writes);
   }
   return writes;
+}
+function setOpenPublish(writes: SiteWrites, open: OpenPublish | null) {
+  writes.open = open;
+  for (const listener of writes.listeners) listener();
+}
+function useOpenPublish(writes: SiteWrites): OpenPublish | null {
+  return useSyncExternalStore(
+    (listener) => { writes.listeners.add(listener); return () => { writes.listeners.delete(listener); }; },
+    () => writes.open,
+    () => writes.open,
+  );
 }
 
 function SiteEditor({ site, editing, writes, generation, onClose, onPublished }: {
@@ -86,6 +98,10 @@ function SiteEditor({ site, editing, writes, generation, onClose, onPublished }:
   const [preview, setPreview] = useState<{ print: string; preview: SitePreview } | null>(null);
   const [stale, setStale] = useState(false);
   const spec = specFrom(draft);
+  const request: PublishRequest = { spec, expectedCurrentReleaseId: editing.baseline };
+  const open = useOpenPublish(writes);
+  // While a publish is open, nothing else may be published: wait for it, or send it again as it was.
+  const held = open === null ? null : open.inFlight ? "in_flight" : fingerprint(open.request) === fingerprint(request) ? null : "changed";
   const shown = preview && preview.print === fingerprint(spec) ? preview.preview : null;
   const problem = draftProblem(draft, editing.baseline);
   const edit = (change: Partial<Draft>) => { setDraft({ ...draft, ...change }); setPreview(null); };
@@ -97,16 +113,14 @@ function SiteEditor({ site, editing, writes, generation, onClose, onPublished }:
     onSuccess: (result, requested) => setPreview({ print: fingerprint(requested), preview: result }),
   });
   const publish = useMutation({
-    mutationFn: ({ input }: { input: { siteId: string; spec: SiteSpec; expectedCurrentReleaseId: string | null }; generation: number }) =>
+    mutationFn: ({ input }: { input: { siteId: string } & PublishRequest; generation: number }) =>
       api.publishSite(input, { idempotencyKey: writes.publish.keyFor(input) }),
     onSettled: (_result, error, attempt) => {
       writes.publish.settle(attempt.input, error);
-      const request: UnsettledPublish = { spec: attempt.input.spec, expectedCurrentReleaseId: attempt.input.expectedCurrentReleaseId };
-      // A lost answer is kept with its baseline for the retry. Only an answer to that same
-      // request settles it: another attempt, such as an older one answering late, says
-      // nothing about whether the lost one went live.
-      if (!isDefinitive(error)) writes.unsettled = request;
-      else if (writes.unsettled && fingerprint(writes.unsettled) === fingerprint(request)) writes.unsettled = null;
+      const sent: PublishRequest = { spec: attempt.input.spec, expectedCurrentReleaseId: attempt.input.expectedCurrentReleaseId };
+      if (writes.open && fingerprint(writes.open.request) === fingerprint(sent)) {
+        setOpenPublish(writes, isDefinitive(error) ? null : { request: sent, inFlight: false });
+      }
     },
     onSuccess: (response, attempt) => onPublished(response, attempt.generation),
     onError: (error) => {
@@ -123,17 +137,22 @@ function SiteEditor({ site, editing, writes, generation, onClose, onPublished }:
     showPreview.mutate(spec);
   };
   const runPublish = () => {
-    if (busy || problem || stale) return;
+    if (busy || problem || stale || held) return;
     showPreview.reset();
-    publish.mutate({ input: { siteId: site.id, spec, expectedCurrentReleaseId: editing.baseline }, generation: generation() });
+    setOpenPublish(writes, { request, inFlight: true });
+    publish.mutate({ input: { siteId: site.id, ...request }, generation: generation() });
   };
-  const publishWhy = [problem ? "draft-why" : null, stale ? "stale-why" : null].filter(Boolean).join(" ") || undefined;
+  // This opening's own publish shows as "Publishing"; one sent from an earlier opening is explained.
+  const heldWhy = held && !publish.isPending ? held : null;
+  const publishWhy = [problem ? "draft-why" : null, stale ? "stale-why" : null, heldWhy ? "held-why" : null].filter(Boolean).join(" ") || undefined;
 
   return (
     <DialogContent title="Edit site" description="Change the words, preview the page, then publish. Earlier versions stay in History.">
-      {editing.resuming ? (
+      {open && !publish.isPending ? (
         <p className="mb-4 rounded-sm bg-warn/10 p-3 text-sm text-fg-2" role="status" data-testid="site-resume">
-          Your last publish got no answer, so it may already be live. It is filled in below: publish it again to finish it. It will not be added twice.
+          {open.inFlight
+            ? "Your last publish is still on its way. You can publish again once it has an answer."
+            : "Your last publish got no answer, so it may already be live. Publish it again as it was to finish it. It will not be added twice."}
         </p>
       ) : null}
       {shown ? (
@@ -188,6 +207,15 @@ function SiteEditor({ site, editing, writes, generation, onClose, onPublished }:
         </div>
       ) : null}
       {problem ? <div className="mt-4"><DisabledReason id="draft-why">{problem}</DisabledReason></div> : null}
+      {heldWhy ? (
+        <div className="mt-4">
+          <DisabledReason id="held-why">
+            {heldWhy === "in_flight"
+              ? "Wait for your last publish to answer before publishing again."
+              : "This changes the publish that got no answer. Publish it as it was first, then make more changes."}
+          </DisabledReason>
+        </div>
+      ) : null}
       <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
         <Button variant="ghost" onClick={onClose}>{stale ? "Close" : "Cancel"}</Button>
         {shown ? null : (
@@ -196,7 +224,7 @@ function SiteEditor({ site, editing, writes, generation, onClose, onPublished }:
             <Eye aria-hidden />{showPreview.isPending ? "Building preview" : "Preview"}
           </Button>
         )}
-        <Button disabled={busy || problem !== null || stale} aria-busy={publish.isPending}
+        <Button disabled={busy || problem !== null || stale || held !== null} aria-busy={publish.isPending}
           aria-describedby={publishWhy} onClick={runPublish}>
           {publish.isPending ? "Publishing" : "Publish"}
         </Button>
@@ -341,9 +369,10 @@ function SitePanel({ site }: { site: SiteRecord }) {
         ) : null}
         <Button disabled={site.currentReleaseId !== null && !live.data} aria-busy={site.currentReleaseId !== null && live.isPending}
           aria-describedby={live.isError ? "site-live-summary" : undefined}
-          onClick={() => setEditing(writes.unsettled
-            ? { baseline: writes.unsettled.expectedCurrentReleaseId, liveSpec: writes.unsettled.spec, resuming: true }
-            : { baseline: site.currentReleaseId, liveSpec: live.data?.spec, resuming: false })}>
+          // An open publish reopens exactly as it was sent, since it is the only one that may be sent.
+          onClick={() => setEditing(writes.open
+            ? { baseline: writes.open.request.expectedCurrentReleaseId, liveSpec: writes.open.request.spec }
+            : { baseline: site.currentReleaseId, liveSpec: live.data?.spec })}>
           <PencilSimple aria-hidden />Edit site
         </Button>
       </Card>
