@@ -75,7 +75,7 @@ import {
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import type { KeyObject } from "node:crypto";
-import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
+import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
@@ -93,7 +93,7 @@ import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
 import { getWallet } from "../wallet/index.js";
-import { getTopUp, listTopUps, startTopUp, topUpHandlers } from "../billing/topups.js";
+import { getTopUp, listTopUps, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
 import { calendarHandlers, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
 import { OAUTH_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signOAuthState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
@@ -264,7 +264,7 @@ export function approvedDispatch(deps: EdgeDependencies, tenantId: string, actor
  * that binding only for this command's own reference. Member sessions and the server-built public
  * principal (public-intake.md P-3) both dispatch through here, each with its own authorize.
  */
-export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId: string, authorize: Authorize) {
+export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId: string, authorize: Authorize, config: DispatchConfig = {}) {
   return (command: ActionCommand): Promise<ActionResult> => {
     const { idempotencyKey: _key, ...fields } = command;
     const approved: ActionBinding = { ...fields, tenantId, actorId };
@@ -273,7 +273,7 @@ export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId
       actor: { id: actorId, tenantId },
       db: deps.db,
       clock: deps.clock,
-      config: {},
+      config,
       generateId: deps.generateId,
       resolveApproval: async (_tx, reference) =>
         reference.tenantId === tenantId && reference.id === command.approvalReference.id ? approved : null,
@@ -535,12 +535,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const request = parseInput(createTopUpRequestSchema, body);
       const { id, ...rest } = envelope(key, "wallet_topup");
       const config = billing.stripe.config;
+      // S-1: the terms travel as dispatch config, never in the stored payload.
+      const terms: TopUpDispatchConfig = { topUp: { currency: config.currency, minAmount: config.minTopUp, maxAmount: config.maxTopUp } };
       return startTopUp({
-        command: {
-          actionType: WALLET_TOPUP_CREATE_ACTION, ...rest,
-          payload: { topupId: id, amount: request.amount, currency: config.currency, minAmount: config.minTopUp, maxAmount: config.maxTopUp },
-        },
-        dispatch: run,
+        command: { actionType: WALLET_TOPUP_CREATE_ACTION, ...rest, payload: { topupId: id, amount: request.amount } },
+        dispatch: directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), terms),
         read: (topupId) => read("billing", (tx) => getTopUp(tx, tenantId, topupId)),
         stripe: billing.stripe,
         tenantId,

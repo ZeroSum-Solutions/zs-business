@@ -4,6 +4,7 @@
 import {
   Conflict,
   createTopUpCommandSchema,
+  NotFound,
   topUpSchema,
   ValidationFailed,
   type ActionCommand,
@@ -46,28 +47,46 @@ export const topUpFromRow = (row: TopUpRow): TopUp => topUpSchema.parse({
   paidAt: row.paid_at ? row.paid_at.toISOString() : null,
 });
 
-export const createTopUpHandler: ActionHandler = {
+/**
+ * S-1: the server's top-up terms. They reach the handler as dispatch config, never in the stored
+ * payload, so a caller cannot choose them and a retry after a change replays the first request.
+ */
+export interface TopUpTerms {
+  readonly currency: string;
+  readonly minAmount: number;
+  readonly maxAmount: number;
+}
+export type TopUpDispatchConfig = { readonly topUp?: TopUpTerms };
+
+export const createTopUpHandler: ActionHandler<TopUpDispatchConfig> = {
   async resolveTarget(tx, target) {
     if (target.type !== "wallet_topup") throw new ValidationFailed("Top-ups require a wallet_topup target");
     const tenantId = await currentTenant(tx);
     if (!tenantId || tenantId !== target.tenantId) return null;
     return { tenantId, type: "wallet_topup", id: target.id };
   },
-  async handle({ tx, command, binding, now }) {
+  async handle({ tx, command, binding, now, config }) {
     const { payload } = parseOrFail(createTopUpCommandSchema, command);
     if (command.target.id !== payload.topupId) throw new ValidationFailed("Target must name the top-up");
-    if (payload.amount < payload.minAmount || payload.amount > payload.maxAmount)
-      throw new ValidationFailed(`Top-ups are between ${payload.minAmount} and ${payload.maxAmount} minor units`);
+    // Only the member session's top-up route passes the terms; nothing else may create one.
+    const terms = config.topUp;
+    if (!terms) throw new NotFound();
+    if (payload.amount < terms.minAmount || payload.amount > terms.maxAmount)
+      throw new ValidationFailed(`Top-ups are between ${terms.minAmount} and ${terms.maxAmount} minor units`);
+    // A wallet's currency is fixed by its first credit; a payment in another could never be credited.
+    const wallet = (await tx.query<{ currency: string }>("SELECT currency FROM wallets WHERE tenant_id=$1", [binding.tenantId])).rows[0];
+    if (wallet && wallet.currency !== terms.currency)
+      throw new Conflict("The wallet holds another currency than top-ups are taken in", { reason: "wallet_currency" });
     const row = (await tx.query<TopUpRow>(
       `INSERT INTO wallet_topups (tenant_id, id, amount, currency, created_by, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$6) RETURNING ${TOPUP_COLUMNS}`,
-      [binding.tenantId, payload.topupId, payload.amount, payload.currency, binding.actorId, now])).rows[0]!;
+      [binding.tenantId, payload.topupId, payload.amount, terms.currency, binding.actorId, now])).rows[0]!;
     return { result: { ...topUpFromRow(row) } };
   },
 };
 
 export const topUpHandlers: Readonly<Record<string, ActionHandler>> = Object.freeze({
-  [WALLET_TOPUP_CREATE_ACTION]: createTopUpHandler,
+  [WALLET_TOPUP_CREATE_ACTION]: createTopUpHandler as ActionHandler,
 });
 
 export async function getTopUp(tx: Transaction, tenantId: string, topupId: string): Promise<TopUp | null> {

@@ -345,7 +345,7 @@ describe("the runtime role on calendar tables (G-4, G-8, G-11)", () => {
     expect(await storedRow(tenantId, id)).toEqual(before);
   });
 
-  it("lets the runtime role insert push notifications and nothing more", async () => {
+  it("lets only the platform scope insert push notifications, and nothing more", async () => {
     const channelId = randomUUID();
     await database.db.platform!((tx) => tx.query(
       "INSERT INTO calendar_push_notifications (channel_id,message_number,resource_state,received_at) VALUES ($1,1,'sync',$2)", [channelId, NOW]));
@@ -354,6 +354,9 @@ describe("the runtime role on calendar tables (G-4, G-8, G-11)", () => {
       "INSERT INTO calendar_push_notifications (channel_id,message_number,resource_state,received_at,processed_at) VALUES ($1,2,'exists',$2,$2)",
       [channelId, NOW]))).rejects.toMatchObject({ code: "42501" });
     await expect(database.db.platform!((tx) => tx.query("DELETE FROM calendar_push_notifications"))).rejects.toMatchObject({ code: "42501" });
+    await expect(fixture.a.run((tx) => tx.query(
+      "INSERT INTO calendar_push_notifications (channel_id,message_number,resource_state,received_at) VALUES ($1,3,'exists',$2)",
+      [channelId, NOW]))).rejects.toMatchObject({ code: "42501" });
     expect((await fixture.service((tx) => tx.query("SELECT message_number FROM calendar_push_notifications WHERE channel_id=$1", [channelId]))).rows)
       .toEqual([{ message_number: "1" }]);
   });

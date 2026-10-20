@@ -602,7 +602,7 @@ describe("push notifications and channels (G-8)", () => {
     const worker = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL });
     await worker.runOnce();
     const channelId = (await h.connectionRow(w.resource.tenantId, w.connectionId)).channel_id as string;
-    const notify = (number: number, state: string, at: number) => h.database.db.tenant(w.resource.tenantId, (tx) => tx.query(
+    const notify = (number: number, state: string, at: number) => h.database.db.platform!((tx) => tx.query(
       `INSERT INTO calendar_push_notifications (channel_id,message_number,resource_state,received_at) VALUES ($1,$2,$3,$4)`,
       [channelId, number, state, new Date(at)]));
     // The first `sync` message carries no change.
@@ -723,7 +723,7 @@ describe("deadline (G-10)", () => {
     const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
     const leaving = await h.connection(await h.resource(tenantId), w.google.account(), START, { status: "disconnecting" });
     const channelId = randomUUID();
-    await h.database.db.tenant(tenantId, (tx) => tx.query(
+    await h.database.db.platform!((tx) => tx.query(
       "INSERT INTO calendar_push_notifications (channel_id,message_number,resource_state,received_at) VALUES ($1,1,'exists',$2)",
       [channelId, new Date(START)]));
     const worker = h.worker(w.google, w.clock);

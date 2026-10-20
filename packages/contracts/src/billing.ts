@@ -16,9 +16,6 @@ export type CreateTopUpRequest = z.infer<typeof createTopUpRequestSchema>;
 export const createTopUpInputSchema = z.strictObject({
   topupId: idSchema,
   amount: z.number().int().positive().max(100_000_000),
-  currency: z.string().regex(/^[a-z]{3}$/),
-  minAmount: z.number().int().positive(),
-  maxAmount: z.number().int().positive(),
 });
 export const createTopUpCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal(WALLET_TOPUP_CREATE_ACTION),

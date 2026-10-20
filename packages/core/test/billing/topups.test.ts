@@ -3,7 +3,8 @@
 import { randomUUID } from "node:crypto";
 import type { Transaction } from "@zs/db";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { CHECKOUT_LIFETIME_MS, CHECKOUT_RETRY_LIMIT_MS } from "../../src/index.js";
+import { WALLET_TOPUP_CREATE_ACTION } from "@zs/contracts";
+import { CHECKOUT_LIFETIME_MS, CHECKOUT_RETRY_LIMIT_MS, createSession, directDispatch, memberAuthorize } from "../../src/index.js";
 import { createBillingHarness, stripeId, type BillingHarness } from "./helpers.js";
 
 let b: BillingHarness;
@@ -147,6 +148,70 @@ describe("webhook intake (S-3)", () => {
     }
     // The service role reads it, untouched.
     expect(await b.eventRow(payload.id)).toMatchObject({ attempts: 0, processed_at: null, outcome: null });
+  });
+
+  it("a fresh, well-formed insert from a tenant-scoped runtime transaction is refused: only the webhook's platform intake may write", async () => {
+    // What a signed-in user's JWT would be through the Data API: the runtime role without app.platform.
+    const forged = b.event("checkout.session.completed", { id: stripeId("cs"), object: "checkout.session", mode: "payment" });
+    const insert = (tx: Transaction) => tx.query(
+      "INSERT INTO stripe_events (id,type,payload,received_at,next_attempt_at) VALUES ($1,$2,$3::jsonb,now(),now())",
+      [forged.id, forged.type, JSON.stringify(forged)]);
+    await expect(b.h.database.db.tenant(b.h.fixture.a.tenantId, insert)).rejects.toMatchObject({ code: "42501" });
+    expect(await b.h.rows("SELECT id FROM stripe_events WHERE id=$1", [forged.id])).toEqual([]);
+    // The same insert through the platform intake is stored.
+    await b.h.database.db.platform!(insert);
+    expect(await b.h.rows("SELECT id FROM stripe_events WHERE id=$1", [forged.id])).toHaveLength(1);
+  });
+});
+
+describe("the server's top-up terms (S-1)", () => {
+  /** A session whose Stripe config differs from the harness's in the given fields. */
+  const sessionWith = async (tenantId: string, change: { currency?: string; minTopUp?: number; maxTopUp?: number }) =>
+    createSession({ ...b.deps(), billing: { stripe: { ...b.stripe.client, config: { ...b.stripe.client.config, ...change } } } },
+      { tenantId, actorId: await b.owner(tenantId) });
+
+  it("a retry after the limits change replays the first request instead of conflicting", async () => {
+    const tenantId = await b.tenant();
+    const key = `topup-${randomUUID()}`;
+    const first = await (await b.session(tenantId)).createTopUp({ amount: 1_000 }, key);
+    // The amount is now outside the range, but the retry is the same request (S-2).
+    const again = await (await sessionWith(tenantId, { minTopUp: 2_000, maxTopUp: 9_000 })).createTopUp({ amount: 1_000 }, key);
+    expect(again).toEqual(first);
+    expect(await topupCount(tenantId)).toBe(1);
+    // A new request is judged by the new limits.
+    await expect((await sessionWith(tenantId, { minTopUp: 2_000 })).createTopUp({ amount: 1_000 }, `topup-${randomUUID()}`))
+      .rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
+  it("refuses with 409 wallet_currency, before Stripe, when the wallet holds another currency", async () => {
+    const tenantId = await b.tenant();
+    await b.paidTopUp(tenantId, 1_000);
+    b.stripe.calls.length = 0;
+    await expect((await sessionWith(tenantId, { currency: "eur" })).createTopUp({ amount: 1_000 }, `topup-${randomUUID()}`))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "wallet_currency" } });
+    expect(b.stripe.calls).toEqual([]);
+    expect(await topupCount(tenantId)).toBe(1);
+    // A tenant with no wallet yet may start in the configured currency.
+    const fresh = await b.tenant();
+    expect((await (await sessionWith(fresh, { currency: "eur" })).createTopUp({ amount: 1_000 }, `topup-${randomUUID()}`)).topup.currency).toBe("eur");
+  });
+
+  it("cannot be run without the session's top-up route: no terms, no row", async () => {
+    const tenantId = await b.tenant();
+    const actorId = await b.owner(tenantId);
+    const topupId = randomUUID();
+    const run = directDispatch(b.deps(), tenantId, actorId, memberAuthorize(tenantId, actorId));
+    await expect(run({
+      actionType: WALLET_TOPUP_CREATE_ACTION, target: { tenantId, type: "wallet_topup", id: topupId },
+      payload: { topupId, amount: 1_000 }, approvalReference: { tenantId, id: randomUUID() }, idempotencyKey: `topup-${randomUUID()}`,
+    })).rejects.toMatchObject({ code: "NotFound" });
+    // Old payloads that named their own terms are refused outright.
+    await expect(run({
+      actionType: WALLET_TOPUP_CREATE_ACTION, target: { tenantId, type: "wallet_topup", id: topupId },
+      payload: { topupId, amount: 1_000, currency: "usd", minAmount: 1, maxAmount: 100_000_000 },
+      approvalReference: { tenantId, id: randomUUID() }, idempotencyKey: `topup-${randomUUID()}`,
+    })).rejects.toMatchObject({ code: "ValidationFailed" });
+    expect(await topupCount(tenantId)).toBe(0);
   });
 });
 

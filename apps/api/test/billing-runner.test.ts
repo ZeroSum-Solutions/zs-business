@@ -106,17 +106,19 @@ describe("createBillingRunner", () => {
   /** A worker that answers the given passes in order, moving the clock by each pass's `takesMs`. */
   function stubWorker(passes: Pass[]) {
     const limits: number[] = [];
+    const deadlines: Array<number | undefined> = [];
     const worker = {
       config: {},
-      async runOnce(limit = 50) {
+      async runOnce(limit = 50, options: { deadline?: Date } = {}) {
         limits.push(limit);
+        deadlines.push(options.deadline?.getTime());
         const pass = passes[limits.length - 1];
         if (!pass) throw new Error("runOnce called more often than the test expected");
         now += pass.takesMs ?? 0;
         return { claimed: pass.claimed, outcomes: pass.outcomes ?? {} };
       },
     };
-    return { worker: worker as unknown as BillingWorker, limits };
+    return { worker: worker as unknown as BillingWorker, limits, deadlines };
   }
 
   it("stops after a pass that claims fewer than the limit", async () => {
@@ -142,6 +144,12 @@ describe("createBillingRunner", () => {
       passes: 3, claimed: 5, outcomes: { credited: 2, ignored: 1, refund_debited: 1, orphaned: 1 }, budgetSpent: false,
     });
     expect(limits).toEqual([2, 2, 2]);
+  });
+
+  it("hands every pass the run's deadline, so a pass ends inside the budget", async () => {
+    const { worker, deadlines } = stubWorker([{ claimed: 2, takesMs: 1_000 }, { claimed: 0 }]);
+    await createBillingRunner({ worker, clock, budgetMs: 5_000, claimLimit: 2 }).run();
+    expect(deadlines).toEqual([START + 5_000, START + 5_000]);
   });
 
   it("stops at the budget with budgetSpent true, though passes still come back full", async () => {

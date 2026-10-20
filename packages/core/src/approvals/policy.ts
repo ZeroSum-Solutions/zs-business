@@ -22,9 +22,11 @@ export const isApprovalAction = (actionType: string) => actionType.startsWith("a
 
 /**
  * Member actions that never run through an approval. google-calendar.md G-2: the connect action
- * runs only from the OAuth callback, with the grant it sealed, under its reserved key.
+ * runs only from the OAuth callback, with the grant it sealed, under its reserved key. stripe.md
+ * S-1: a top-up runs only from the member's top-up route, with the server's terms, and asks Stripe
+ * for a Checkout Session after.
  */
-export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect"]);
+export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect", "wallet.topup.create"]);
 
 /**
  * The policy for one action type, or null when it cannot be requested: it has no

@@ -151,8 +151,10 @@ CREATE TABLE public.calendar_push_notifications (
 CREATE INDEX calendar_push_notifications_due ON public.calendar_push_notifications (received_at) WHERE processed_at IS NULL;
 ALTER TABLE public.calendar_push_notifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.calendar_push_notifications FORCE ROW LEVEL SECURITY;
+-- Only the push route's platform transaction (db.platform) sets app.platform; a runtime-role request
+-- through the Data API cannot, so it cannot plant a push for a channel it guessed.
 CREATE POLICY calendar_push_notifications_intake ON public.calendar_push_notifications FOR INSERT TO authenticated
-  WITH CHECK (processed_at IS NULL);
+  WITH CHECK (processed_at IS NULL AND current_setting('app.platform', true) = 'on');
 REVOKE ALL ON public.calendar_push_notifications FROM PUBLIC, authenticated, service_role;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN REVOKE ALL ON public.calendar_push_notifications FROM anon; END IF;

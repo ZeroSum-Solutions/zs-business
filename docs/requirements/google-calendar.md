@@ -123,7 +123,8 @@ per active connection, with `token = HMAC-SHA-256(GOOGLE_CHANNEL_SECRET, channel
 a day before it expires and stopping the old one. `POST /webhooks/google/calendar` checks the
 token in constant time before any database work (401 otherwise) and records the channel ID and
 message number once in `calendar_push_notifications`, a platform table the runtime role may only
-insert into; it answers 200. The worker marks those connections due now. Notifications carry no
+insert into, and only from the platform scope (`app.platform`, set by the push route's own
+transaction); it answers 200. The worker marks those connections due now. Notifications carry no
 calendar data, so a forged one could only cause an early sync.
 
 **G-9. Cleanup.** For a `disconnecting` connection the worker stops its channel, revokes the

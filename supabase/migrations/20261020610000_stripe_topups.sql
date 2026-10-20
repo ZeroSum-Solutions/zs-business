@@ -90,7 +90,10 @@ CREATE TABLE public.stripe_events (
 CREATE INDEX stripe_events_due ON public.stripe_events (next_attempt_at) WHERE processed_at IS NULL;
 ALTER TABLE public.stripe_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stripe_events FORCE ROW LEVEL SECURITY;
-CREATE POLICY stripe_events_intake ON public.stripe_events FOR INSERT TO authenticated WITH CHECK (processed_at IS NULL AND attempts = 0);
+-- Only the webhook's platform transaction (db.platform) sets app.platform; a runtime-role request
+-- through the Data API cannot, so it cannot plant an unsigned event (S-3).
+CREATE POLICY stripe_events_intake ON public.stripe_events FOR INSERT TO authenticated
+  WITH CHECK (processed_at IS NULL AND attempts = 0 AND current_setting('app.platform', true) = 'on');
 REVOKE ALL ON public.stripe_events FROM PUBLIC, authenticated, service_role;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN REVOKE ALL ON public.stripe_events FROM anon; END IF;

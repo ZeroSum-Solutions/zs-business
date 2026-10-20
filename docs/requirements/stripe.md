@@ -35,7 +35,12 @@ Everything is off until the Mac sets the variables in S-9.
 owners only (`billing`), runs the action `wallet.topup.create` through the dispatcher. It
 inserts one `wallet_topups` row (`pending`) whose ID derives from the key, so a retry names the
 same top-up. The amount is whole minor units between `STRIPE_TOPUP_MIN` and `STRIPE_TOPUP_MAX`
-in the configured currency. Off (404) without Stripe config.
+in the configured currency. The payload is only `{ topupId, amount }`: the currency and limits
+reach the handler as dispatch config from this route, so a caller cannot choose them, a retry
+after they change replays the stored result, and the action cannot run from anywhere else (an
+approval cannot propose it; without the route's config it is 404). A wallet's currency is fixed
+by its first credit, so a top-up in another currency is refused (409 `wallet_currency`) before
+Stripe is asked. Off (404) without Stripe config.
 
 **S-2. The Checkout Session.** After the action commits, the route asks Stripe for a session
 with `Idempotency-Key: zst-<topup id>`: one line item of the amount, `client_reference_id` and
@@ -56,7 +61,9 @@ event whose `livemode` differs from `STRIPE_LIVEMODE` is acknowledged and droppe
 event is inserted into `stripe_events` once by its ID (a redelivery changes nothing) and the
 answer is 200. Bodies are capped at 256 KiB. Database errors answer 503, so Stripe retries.
 `stripe_events` is a platform table, not a tenant table: the runtime role may insert into it
-and nothing else; only the service role reads it.
+and nothing else, and only inside the webhook's platform transaction, which sets `app.platform`
+(the insert policy requires it, and a runtime-role request through the Data API cannot set it);
+only the service role reads it.
 
 **S-4. Processing.** The billing worker (service role) claims unprocessed events oldest first
 one at a time (`FOR UPDATE SKIP LOCKED`, due by `next_attempt_at`), applies each in its own
@@ -83,7 +90,8 @@ smaller total changes nothing. `charge.dispute.funds_withdrawn` debits the dispu
 (`balance - reserved`) and records the rest as `owed` on the wallet: the balance never goes
 below zero and held reservations stay covered. While a wallet owes anything it reserves nothing
 (D-5 gains `owed = 0`), so no send is paid from money that was taken back. Every later credit,
-and every billing worker pass, first repays `owed` from what is available. Each debit or
+and every billing worker pass, first repays `owed` from what is available (a pass skips a wallet
+another transaction holds, and reports and skips one whose repayment fails). Each debit or
 reinstatement is recorded once in `wallet_billing_events` by its Stripe reference (refund
 total, dispute ID and direction), so repeats and reordering are safe.
 
@@ -95,7 +103,8 @@ worker names `tenant_id` in every statement.
 **S-8. Running it.** `GET /cron/billing` is its own Vercel function, with the same Bearer
 `CRON_SECRET` check as `/cron/delivery`; `pnpm billing:worker` is the Node loop. The kill switch
 is `BILLING_WORKER=on`. The build adds a Vercel cron only when `BILLING_CRON_SCHEDULE` is set.
-A run stops starting passes once `BILLING_RUN_BUDGET_MS` is spent; the cron entry refuses a
+A run stops starting passes once `BILLING_RUN_BUDGET_MS` is spent, and each pass stops claiming
+events at that deadline (each event commits on its own); the cron entry refuses a
 budget over 20 s, since Vercel stops its function at 30 s (the Node loop may run longer).
 
 **S-9. Configuration the Mac sets.** API function: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`

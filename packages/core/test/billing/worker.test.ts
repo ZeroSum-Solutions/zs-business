@@ -3,7 +3,7 @@
 // every scenario ends with the wallet balance equal to its ledger.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { releaseReservation, reserveFunds } from "../../src/index.js";
+import { createBillingWorker, releaseReservation, reserveFunds } from "../../src/index.js";
 import { createBillingHarness, stripeId, type BillingHarness, type PaidTopUp } from "./helpers.js";
 
 let b: BillingHarness;
@@ -470,6 +470,70 @@ describe("tenancy and concurrency", () => {
     const total = topups.reduce((sum, t) => sum + t.amount, 0);
     expect(await b.wallet(tenantId)).toEqual({ balance: total, reserved: 0, owed: 0 });
     expect(await creditKeys(tenantId)).toHaveLength(6);
+  });
+
+  it("a wallet another transaction holds does not stop the pass: the credits commit and the other wallets are repaid", async () => {
+    /** A wallet that owes 700 while 700 stays reserved, as the refund test above leaves it. */
+    const owing = async () => {
+      const tenantId = await tenant();
+      const t = await b.paidTopUp(tenantId, 1_000);
+      const [held] = await b.deliveryIds(tenantId, 1);
+      const hold = await reserve(tenantId, held!, 700);
+      await send(b.event("charge.refunded", b.charge(t, 1_000)));
+      await b.worker().runOnce();
+      return { tenantId, reservationId: hold!.id };
+    };
+    const owingWallets = [await owing(), await owing()];
+    // The reservations come back, so both wallets can repay on the next pass.
+    for (const { tenantId, reservationId } of owingWallets) {
+      await b.h.service((tx) => releaseReservation(tx, { tenantId, reservationId, now: b.h.clock.now() }));
+      expect(await b.wallet(tenantId)).toEqual({ balance: 700, reserved: 0, owed: 700 });
+    }
+    const [locked, free] = owingWallets.map((wallet) => wallet.tenantId) as [string, string];
+    const payer = await tenant();
+    const { topup, sessionId } = await b.startTopUp(payer, 900);
+    const credit = await send(b.event("checkout.session.completed",
+      b.checkoutSession({ tenantId: payer, topupId: topup.id, sessionId, amount: 900, paymentIntent: stripeId("pi") })));
+    let release!: () => void;
+    let holding!: () => void;
+    const held = new Promise<void>((resolve) => { holding = resolve; });
+    const holder = b.h.service(async (tx) => {
+      await tx.query("SELECT 1 FROM wallets WHERE tenant_id=$1 FOR UPDATE", [locked]);
+      holding();
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    await held;
+    b.h.clock.advance(1_000);
+    await b.worker().runOnce();
+    release();
+    await holder;
+    expect(await outcome(credit)).toBe("credited");
+    expect(await b.wallet(payer)).toEqual({ balance: 900, reserved: 0, owed: 0 });
+    expect(await b.wallet(free)).toEqual({ balance: 0, reserved: 0, owed: 0 });
+    expect(await b.wallet(locked)).toEqual({ balance: 700, reserved: 0, owed: 700 });
+    // Once free, the next pass repays it.
+    await b.worker().runOnce();
+    expect(await b.wallet(locked)).toEqual({ balance: 0, reserved: 0, owed: 0 });
+  });
+
+  it("a pass stops claiming at its deadline and keeps what it applied", async () => {
+    const tenantId = await tenant();
+    const events: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      const { topup, sessionId } = await b.startTopUp(tenantId, 1_000 + i * 100);
+      events.push(await send(b.event("checkout.session.completed",
+        b.checkoutSession({ tenantId, topupId: topup.id, sessionId, amount: 1_000 + i * 100, paymentIntent: stripeId("pi") }))));
+    }
+    // A deadline already passed claims nothing.
+    expect(await b.worker().runOnce(50, { deadline: b.h.clock.now() })).toEqual({ claimed: 0, outcomes: {} });
+    // Each event takes 4 seconds; the deadline falls during the third.
+    const slow = createBillingWorker({
+      service: b.h.service, clock: b.h.clock, generateId: randomUUID, report: () => b.h.clock.advance(4_000),
+    });
+    const pass = await slow.runOnce(50, { deadline: new Date(b.h.clock.now().getTime() + 10_000) });
+    expect(pass).toEqual({ claimed: 3, outcomes: { credited: 3 } });
+    expect((await Promise.all(events.map(outcome))).filter((value) => value === "credited")).toHaveLength(3);
+    expect(await b.worker().runOnce()).toEqual({ claimed: 1, outcomes: { credited: 1 } });
   });
 
   it("parallel passes over refunds and disputes of one top-up debit each once", async () => {
