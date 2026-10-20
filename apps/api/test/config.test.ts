@@ -4,9 +4,13 @@ import {
   KEY_SECRET,
   PREVIOUS_KEY_SECRET,
   PREVIOUS_RESEND_WEBHOOK_SECRET,
+  PREVIOUS_TWILIO_AUTH_TOKEN,
   PREVIOUS_UNSUBSCRIBE_SECRET,
   RESEND_WEBHOOK_SECRET,
   SECRET,
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
+  TWILIO_WEBHOOK_BASE_URL,
   UNSUBSCRIBE_SECRET,
 } from "./helpers.js";
 
@@ -153,6 +157,30 @@ describe("parseServerEnv", () => {
     }
     expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: short })).toThrow(/too short/);
     expect(() => parseServerEnv({ ...base, RESEND_WEBHOOK_SECRET: "sk_live_x" })).toThrow(/whsec_/);
+  });
+
+  it("keeps the Twilio webhooks off until the auth token is set, then needs the account and base URL (twilio.md T-9)", () => {
+    expect(parseServerEnv(base).twilioWebhook).toBeNull();
+    expect(parseServerEnv({ ...base, TWILIO_ACCOUNT_SID, TWILIO_WEBHOOK_BASE_URL }).twilioWebhook).toBeNull();
+    expect(() => parseServerEnv({ ...base, TWILIO_PREVIOUS_AUTH_TOKEN: PREVIOUS_TWILIO_AUTH_TOKEN }))
+      .toThrow(/TWILIO_PREVIOUS_AUTH_TOKEN needs TWILIO_AUTH_TOKEN/);
+    expect(() => parseServerEnv({ ...base, TWILIO_AUTH_TOKEN, TWILIO_WEBHOOK_BASE_URL })).toThrow(/needs TWILIO_ACCOUNT_SID/);
+    expect(() => parseServerEnv({ ...base, TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID })).toThrow(/needs TWILIO_WEBHOOK_BASE_URL/);
+    const full = { ...base, TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID, TWILIO_WEBHOOK_BASE_URL: `${TWILIO_WEBHOOK_BASE_URL}/` };
+    expect(parseServerEnv(full).twilioWebhook).toEqual({
+      tokens: { current: TWILIO_AUTH_TOKEN }, accountSid: TWILIO_ACCOUNT_SID, webhookBaseUrl: TWILIO_WEBHOOK_BASE_URL, keywordReplies: "provider",
+    });
+    expect(parseServerEnv({ ...full, TWILIO_PREVIOUS_AUTH_TOKEN: PREVIOUS_TWILIO_AUTH_TOKEN, TWILIO_KEYWORD_REPLIES: "app" }).twilioWebhook)
+      .toMatchObject({ tokens: { current: TWILIO_AUTH_TOKEN, previous: PREVIOUS_TWILIO_AUTH_TOKEN }, keywordReplies: "app" });
+    for (const bad of [{ TWILIO_AUTH_TOKEN: "short" }, { TWILIO_ACCOUNT_SID: "AC1" }, { TWILIO_KEYWORD_REPLIES: "both" },
+      { TWILIO_WEBHOOK_BASE_URL: "http://api.example.test" }, { TWILIO_WEBHOOK_BASE_URL: "https://api.example.test/?x=1" }]) {
+      const [name] = Object.keys(bad);
+      expect(() => parseServerEnv({ ...full, ...bad }), name).toThrow(new RegExp(name!));
+    }
+    let message = "";
+    try { parseServerEnv({ ...full, TWILIO_AUTH_TOKEN: `${TWILIO_AUTH_TOKEN}z` }); } catch (error) { message = (error as Error).message; }
+    expect(message).toMatch(/TWILIO_AUTH_TOKEN/);
+    expect(message).not.toContain(TWILIO_AUTH_TOKEN);
   });
 
   it("takes the client address source from explicit settings only", () => {
