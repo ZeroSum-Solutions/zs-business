@@ -1,17 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createGoogleClient, createSessionCheckFromConfig, createStripeClient } from "@zs/core";
+import { createGoogleClient, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, plainSiteCompiler, type SiteCompiler } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
 import type { ServerEnv } from "./config.js";
+import { createR2SiteStore } from "./sites/r2-s3.js";
 
 /**
  * Builds the runtime pool and the app from a parsed environment, for the Node server
  * (main.ts) and the Vercel function (vercel.ts). Returns only after the pool's login passes
  * assertRuntimeLogin, so a misconfigured DATABASE_URL never serves a request.
  */
-export async function createServer(env: ServerEnv, clock: { now(): Date }) {
+export async function createServer(env: ServerEnv, clock: { now(): Date }, options: {
+  /** Replaces the compiler SITE_COMPILER names, such as an adapter over @mish/publisher. */
+  readonly siteCompiler?: SiteCompiler;
+} = {}) {
   const pool = createRuntimePool({
     connectionString: env.databaseUrl,
     max: env.databasePoolMax,
@@ -52,6 +56,12 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
     limits: limits(env.unsubscribe.limitOverrides),
     ...shared,
   };
+  const sites = env.sites === null ? undefined : {
+    store: env.sites.store.kind === "memory"
+      ? createMemorySiteStore()
+      : createR2SiteStore(env.sites.store, { fetch: globalThis.fetch, clock }),
+    compiler: options.siteCompiler ?? plainSiteCompiler,
+  };
   const app = createApp({
     verifier: createVerifierFromConfig(env.jwt, clock),
     sessionCheck: createSessionCheckFromConfig(env.sessionCheck, { db, clock }),
@@ -60,6 +70,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
     generateId: randomUUID,
     config: { allowedOrigins: env.allowedOrigins, requestTimeoutMs: env.requestTimeoutMs },
     ...(publicIntake === undefined ? {} : { publicIntake }),
+    ...(sites === undefined ? {} : { sites }),
     ...(unsubscribe === undefined ? {} : { unsubscribe }),
     ...(env.resendWebhook === null ? {} : {
       resendWebhook: {
@@ -91,6 +102,9 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
           if (event.route === "callback" && !["connected", "denied"].includes(event.outcome)) console.warn("Google OAuth callback", event);
         },
       },
+    }),
+    ...(env.activepieces === null ? {} : {
+      activepieces: { keySecrets: env.activepieces.keySecrets, urlPolicy: { allowLoopback: env.activepieces.allowLoopback } },
     }),
     onError: (error) => console.error("Unhandled API error", error),
     ready: () => checkDatabase(pool),

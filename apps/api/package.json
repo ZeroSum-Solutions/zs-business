@@ -21,7 +21,8 @@
     "check:hosted": "tsx src/scripts/hosted-checks.ts",
     "delivery:worker": "tsx src/scripts/delivery-worker.ts",
     "billing:worker": "tsx src/scripts/billing-worker.ts",
-    "calendar:worker": "tsx src/scripts/calendar-worker.ts"
+    "calendar:worker": "tsx src/scripts/calendar-worker.ts",
+    "activepieces:worker": "tsx src/scripts/activepieces-worker.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",
@@ -36,7 +37,8 @@
   },
   "devDependencies": {
     "@types/pg": "8.23.1",
-    "tsx": "4.23.15",
-    "esbuild": "0.28.2"
+    "@zs/site-worker": "workspace:*",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15"
   }
 }

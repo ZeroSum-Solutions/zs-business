@@ -36,7 +36,7 @@ export {
   type OAuthCallbackReason,
   type OAuthCallbackSession,
 } from "./oauth-callback-session.js";
-export { apiErrorBody, mapError, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
+export { apiErrorBody, mapError, SiteStoreUnavailable, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
 export {
   createHs256Verifier,
   createJwksVerifier,

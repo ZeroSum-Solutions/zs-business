@@ -1,0 +1,12 @@
+# Copy to wrangler.toml on the Mac before `wrangler deploy`. No account id here: wrangler
+# takes it from the logged-in account or CLOUDFLARE_ACCOUNT_ID.
+name = "zs-site-worker"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+
+# The bucket the API projects releases into (hosts/<host>, t/<tenant>/releases, t/<tenant>/blobs).
+[[r2_buckets]]
+binding = "SITES"
+bucket_name = "REPLACE_WITH_SITES_BUCKET"
+
+# Routes and Custom Hostnames for tenant domains are configured on the Mac, not in this file.

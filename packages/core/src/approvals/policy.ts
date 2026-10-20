@@ -19,6 +19,12 @@ export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Objec
 
 /** Never proposed through an approval: the approval actions themselves. */
 export const isApprovalAction = (actionType: string) => actionType.startsWith("approval.");
+/**
+ * Site actions are never proposed either. Their edge path compiles the spec, stores the files,
+ * checks that sites are on and projects to the edge around the handler, and an approved action
+ * runs the handler alone: it could commit a release whose files were never stored.
+ */
+export const isSiteAction = (actionType: string) => actionType.startsWith("site.");
 
 /**
  * Member actions that never run through an approval. google-calendar.md G-2: the connect action
@@ -27,11 +33,12 @@ export const isApprovalAction = (actionType: string) => actionType.startsWith("a
  * for a Checkout Session after.
  */
 export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect", "wallet.topup.create"]);
+export const cannotBeApproved = (actionType: string) =>
+  isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);
 
 /**
  * The policy for one action type, or null when it cannot be requested: it has no
- * ACTION_PERMISSIONS entry (so no member may run it), it is an approval action, or it is in
- * NEVER_APPROVED_ACTIONS.
+ * ACTION_PERMISSIONS entry (so no member may run it), or it cannot be approved (cannotBeApproved).
  */
 export function approvalPolicy(
   actionType: string,
@@ -39,6 +46,6 @@ export function approvalPolicy(
   policies: Readonly<Record<string, ApprovalPolicy>> = APPROVAL_POLICIES,
 ): ApprovalPolicy | null {
   const own = Object.hasOwn(actionPermissions, actionType) ? actionPermissions[actionType] : undefined;
-  if (!own || isApprovalAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType)) return null;
+  if (!own || cannotBeApproved(actionType)) return null;
   return Object.hasOwn(policies, actionType) ? policies[actionType]! : { request: own, required: false };
 }

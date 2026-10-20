@@ -28,6 +28,7 @@ export {
   type BookingPageRef,
 } from "./intake/index.js";
 export { listBookingPages, listIntakeItems } from "./reads/intake.js";
+export * from "./sites/index.js";
 export { findMembership, listMembers, lockMembership, memberHandlers, requireMember, type MemberAccess } from "./members/index.js";
 export {
   APPROVAL_POLICIES,
@@ -44,6 +45,7 @@ export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandle
 export * from "./delivery/index.js";
 export * from "./billing/index.js";
 export * from "./calendar/index.js";
+export * from "./automation/index.js";
 export {
   captureReservation,
   creditWallet,
