@@ -82,6 +82,8 @@ same `createDispatcher` registry as direct writes, with:
   the binding only when the record exists in the tenant, its status is `approved`, `now <
   expires_at`, and `decided_by` is the caller. Otherwise `Conflict`: `approval_not_approved`
   (pending, rejected, revoked) or `approval_expired`; a missing record is `TenantDenied`.
+Before dispatching, the edge reads the record as the caller: a record the caller may not see
+(A-11) or that does not exist answers `NotFound`.
 The dispatcher then compares the full binding as for every action, so a different actor,
 target or payload is `BindingMismatch`. The unique approval index allows one committed
 action per approval; a replay with the same key returns the stored result.

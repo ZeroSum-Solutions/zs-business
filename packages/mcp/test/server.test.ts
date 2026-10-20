@@ -6,6 +6,9 @@ import { SignJWT } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   apiErrorBodySchema,
+  approvalOutputSchema,
+  approvalPageSchema,
+  approvalRecordSchema,
   bookingPageSchema,
   contactPageSchema,
   contactRecordSchema,
@@ -14,9 +17,11 @@ import {
   createOrFindContactOutputSchema,
   dealPageSchema,
   moveDealStageOutputSchema,
+  observeSourceOutputSchema,
   pipelineSummarySchema,
   resourceSummarySchema,
   slotsResponseSchema,
+  sourceListSchema,
 } from "@zs/contracts";
 import {
   createTestDatabase,
@@ -137,9 +142,12 @@ describe("MCP tools over an in-memory transport", () => {
   it("lists every write and read tool", async () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
-      "create_booking", "create_deal", "find_slots", "get_contact", "list_bookings", "list_contacts",
-      "list_deals", "list_pipelines", "list_resources", "move_deal_stage", "upsert_contact",
+      "create_booking", "create_deal", "find_slots", "get_approval", "get_contact", "list_approvals", "list_bookings",
+      "list_contacts", "list_deals", "list_pipelines", "list_resources", "list_sources", "move_deal_stage",
+      "observe_source", "request_approval", "upsert_contact",
     ]);
+    // Deciding stays with the owner in the dashboard or API: an agent cannot approve its own proposal.
+    expect(names.filter((name) => /approve|reject|revoke/.test(name))).toEqual([]);
   });
 
   it("upsert_contact creates, then matches by email", async () => {
@@ -218,6 +226,64 @@ describe("MCP tools over an in-memory transport", () => {
     expect(await range("2026-10-19T10:00:00.000Z", "2026-10-20T00:00:00.000Z")).toBe(0);
   });
 
+  it("request_approval creates a pending approval as the token's member; list_approvals and get_approval read it", async () => {
+    const staff = await signedInMember(fixture.a.tenantId, "staff");
+    const mcp = await serve(staff.token);
+    try {
+      const bookingId = randomUUID();
+      const action = {
+        actionType: "booking.create", target: { type: "booking", id: bookingId },
+        payload: { bookingId, resourceId: tenant.resourceId, startsAt: "2026-10-19T13:00:00.000Z" },
+      };
+      const args = { idempotencyKey: "ap-1", action, summary: "Book the showroom at 13:00" };
+      const requested = await callTool(mcp, "request_approval", args);
+      expect(requested.isError, JSON.stringify(requested.value)).toBe(false);
+      const approval = approvalOutputSchema.parse(requested.value).result;
+      expect(approval).toMatchObject({
+        tenantId: fixture.a.tenantId, actionType: "booking.create", target: { tenantId: fixture.a.tenantId, ...action.target },
+        payload: action.payload, summary: args.summary, status: "pending", standing: "pending", requestedBy: staff.actorId,
+        decidedBy: null, executedActionId: null,
+      });
+      // Seven days by default; nothing was booked.
+      expect(approval.expiresAt).toBe("2026-10-26T08:00:00.000Z");
+      expect((await callTool(mcp, "request_approval", args)).value).toEqual(requested.value);
+      expect(bookingPageSchema.parse((await callTool(client, "list_bookings", { from: "2026-10-19T13:00:00.000Z", to: "2026-10-19T14:00:00.000Z" })).value).items).toEqual([]);
+
+      const mine = approvalPageSchema.parse((await callTool(mcp, "list_approvals", { status: "pending" })).value);
+      expect(mine.items.map((item) => item.id)).toEqual([approval.id]);
+      const owners = approvalPageSchema.parse((await callTool(client, "list_approvals")).value);
+      expect(owners.items.map((item) => item.id)).toContain(approval.id);
+      expect(approvalRecordSchema.parse((await callTool(mcp, "get_approval", { approvalId: approval.id })).value)).toEqual(approval);
+
+      expect(approvalPageSchema.parse((await callTool(other, "list_approvals")).value).items).toEqual([]);
+      expect(apiErrorBodySchema.parse((await callTool(other, "get_approval", { approvalId: approval.id })).value).error.code).toBe("NotFound");
+      const rows = await fixture.service((tx) => tx.query<{ action_type: string }>(
+        "SELECT action_type FROM actions WHERE tenant_id=$1 AND actor_id=$2", [staff.tenantId, staff.actorId],
+      ));
+      expect(rows.rows.map((row) => row.action_type)).toEqual(["approval.request"]);
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("observe_source and list_sources round-trip for a contact, for this tenant only", async () => {
+    const observed = await callTool(client, "observe_source", {
+      idempotencyKey: "src-1", subject: { type: "contact", id: contactId }, source: "website",
+      sourceRef: "form/contact", observedAt: "2026-10-19T07:00:00.000Z", freshForMinutes: 120,
+    });
+    expect(observed.isError, JSON.stringify(observed.value)).toBe(false);
+    const { record, applied } = observeSourceOutputSchema.parse(observed.value).result;
+    expect(applied).toBe(true);
+    expect(record).toMatchObject({
+      tenantId: fixture.a.tenantId, subject: { type: "contact", id: contactId }, source: "website", sourceRef: "form/contact",
+      observedAt: "2026-10-19T07:00:00.000Z", freshUntil: "2026-10-19T09:00:00.000Z", fresh: true, revision: 1,
+    });
+    const listed = sourceListSchema.parse((await callTool(client, "list_sources", { subjectType: "contact", subjectId: contactId })).value);
+    expect(listed.items).toEqual([record]);
+    const hidden = await callTool(other, "list_sources", { subjectType: "contact", subjectId: contactId });
+    expect(apiErrorBodySchema.parse(hidden.value).error.code).toBe("NotFound");
+  });
+
   it("another tenant's server cannot move this tenant's deal", async () => {
     const denied = await callTool(other, "move_deal_stage", {
       idempotencyKey: "x-1", dealId, pipelineId: tenant.pipelineId, stageId: tenant.stages[0], expectedRevision: 2,
@@ -256,6 +322,9 @@ describe("MCP tools over an in-memory transport", () => {
     ["create_booking", { idempotencyKey: "v-2", resourceId: "not-a-uuid", start: "soon" }, "resourceId"],
     ["list_contacts", { limit: "many" }, "limit"],
     ["list_pipelines", { extra: true }, "extra"],
+    ["request_approval", { idempotencyKey: "v-3", summary: "x", action: { actionType: "booking.create" } }, "target"],
+    ["observe_source", { idempotencyKey: "v-4", subject: { type: "contact", id: randomUUID() }, source: "Not A Name" }, "source"],
+    ["list_sources", { subjectType: "planet", subjectId: randomUUID() }, "subjectType"],
   ])("normalizes malformed %s arguments into ValidationFailed", async (name, args, field) => {
     const response = await callTool(client, name, args);
     expect(response.isError).toBe(true);
