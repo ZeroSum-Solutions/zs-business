@@ -2,7 +2,10 @@
 // (@zs/core authenticate: verify the member's access token against the injected clock, require
 // a live Supabase session and a membership), then parses with the contracts schemas and calls
 // the same edge session the HTTP API uses, which checks the role per read or action. Tenant and
-// actor come only from the verified token, never from tool input.
+// actor come only from the verified token, never from tool input. An agent may propose an
+// action for approval and read approvals, but there is deliberately no approve, reject or
+// revoke tool: deciding stays with the owner in the dashboard or API, so an agent token
+// cannot approve its own proposal.
 import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -10,10 +13,14 @@ import {
   createBookingRequestSchema,
   createDealRequestSchema,
   idempotencyKeySchema,
+  listApprovalsQuerySchema,
   listBookingsQuerySchema,
   listContactsQuerySchema,
   listDealsQuerySchema,
+  listSourcesQuerySchema,
   moveDealStageRequestSchema,
+  observeSourceRequestSchema,
+  requestApprovalRequestSchema,
   slotsQuerySchema,
   upsertContactRequestSchema,
   uuidSchema,
@@ -144,6 +151,35 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     description: "Find free slots on a resource between two UTC instants (at most 31 days).",
     inputSchema: slotsQuerySchema, annotations: read,
   }, (query, session) => session.findSlots(query));
+
+  tool("request_approval", {
+    description: "Propose one exact action (actionType, target, payload) for an owner to approve. It does not run now: "
+      + "an owner must approve it before it runs, and it expires after expiresInMinutes (default 7 days). Returns the pending approval.",
+    inputSchema: keyed(requestApprovalRequestSchema.shape),
+    annotations: write,
+  }, ({ idempotencyKey, ...body }, session) => session.requestApproval(body, idempotencyKey));
+
+  tool("list_approvals", {
+    description: "List approvals, newest first; optionally only one status. Owners see every approval, other members the ones they requested.",
+    inputSchema: listApprovalsQuerySchema, annotations: read,
+  }, (query, session) => session.listApprovals(query));
+
+  tool("get_approval", {
+    description: "Read one approval with its standing (pending, approved, rejected, revoked or expired) and, once run, the action it ran.",
+    inputSchema: z.strictObject({ approvalId: uuidSchema }), annotations: read,
+  }, ({ approvalId }, session) => session.getApproval(approvalId));
+
+  tool("observe_source", {
+    description: "Record where a fact about a contact, deal, booking, resource or intake item came from, and how long it stays fresh. "
+      + "An observation older than the stored one is not applied.",
+    inputSchema: keyed(observeSourceRequestSchema.shape),
+    annotations: write,
+  }, ({ idempotencyKey, ...body }, session) => session.observeSource(body, idempotencyKey));
+
+  tool("list_sources", {
+    description: "List the source records of one subject (contact, deal, booking, booking_resource or intake_item), each with whether it is still fresh.",
+    inputSchema: listSourcesQuerySchema, annotations: read,
+  }, (query, session) => session.listSources(query));
 
   server.server.setRequestHandler(CallToolRequestSchema, (request) => {
     const call = calls.get(request.params.name);

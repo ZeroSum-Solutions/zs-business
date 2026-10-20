@@ -111,7 +111,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   `apps/api`. The API checks the token, that its session is still live in Supabase Auth,
   and the person's membership and role on every request. All settings are server-only; the
   build only learns `NEXT_PUBLIC_API_MODE=live`. The proxy passes only GET, POST and DELETE
-  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/sites*`, `/v1/me` and `/v1/members*`, only `Accept`,
+  to `/v1/booking/*`, `/v1/crm/*`, `/v1/intake/*`, `/v1/approvals*`, `/v1/sources*`, `/v1/sites*`, `/v1/me` and `/v1/members*`, only `Accept`,
   `Content-Type` and `Idempotency-Key`, refuses cross-site callers and non-JSON POSTs, and
   answers `no-store`. A POST body may be 64 KiB and must arrive within 15 seconds; it is
   read through `src/lib/server/body.ts`, which never holds more than the limit: a larger

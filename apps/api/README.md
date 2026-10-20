@@ -114,6 +114,8 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `R2_ENDPOINT` | `r2` only: `https://<account-id>.r2.cloudflarestorage.com`. https only. |
 | `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
+| `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets. |
+| `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
 environment or the system clock. Everything else gets them through `createApp(deps)`.
@@ -152,7 +154,8 @@ Then, on every request:
    billing, plan, publish (booking page keys and embed snippets) and intake (website request
    review). `staff` may use the calendar, customers and inbox drafts (`ROLE_PERMISSIONS` in
    `@zs/contracts`). Otherwise 403. The anonymous `/public/v1` routes take no token: a signed
-   booking page key names the tenant, and they may run the one public action only.
+   booking page key names the tenant, and they may run the one public action only. Likewise a
+   signed unsubscribe token names the tenant and delivery, and may record one suppression only.
 
 Member writes hold an exclusive per-tenant advisory lock and every other request a shared
 one, so a role change or removal is never interleaved with a request it affects.
@@ -204,6 +207,7 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/sites/:id/releases/:releaseId` | one release with its spec and files |
 | `POST /v1/sites/:id/releases/:releaseId/activate` `{ expectedCurrentReleaseId }` | 200, the rollback; 409 `stale_release` when another release went live since |
 | `POST /v1/sites/:id/sync` | `{ site, edge }`: writes the edge objects again |
+| `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
 with no `user_id`; the runtime role cannot set `user_id` (binding an invite to a signed-up
@@ -292,6 +296,25 @@ the old site has a lower one and changes nothing. Retraction is safe to repeat.
 
   The Mish publisher's own refusals (`invalid-spec` and the family's validation errors)
   should become `ValidationFailed` in the adapter, so a bad recipe is a 400.
+## Unsubscribe (`/public/v1/unsubscribe/:token`, no auth)
+
+Every email carries `List-Unsubscribe: <…/public/v1/unsubscribe/zsu1_…>` and
+`List-Unsubscribe-Post: List-Unsubscribe=One-Click` (delivery.md D-9). On only when
+`UNSUBSCRIBE_TOKEN_SECRET` is set.
+
+| Method and path | Result |
+|---|---|
+| `GET /public/v1/unsubscribe/:token` | 200 HTML confirmation with a form that posts back to the same URL. Changes nothing, since mail scanners fetch links. |
+| `POST /public/v1/unsubscribe/:token` | RFC 8058 one-click: suppresses the address that delivery went to, then 200 HTML "You are unsubscribed". The body is not required: `List-Unsubscribe=One-Click` (form-urlencoded or multipart), the page's form or an empty body all work. A repeat replays the stored action (one suppression, one action). |
+
+Both answer HTML on success, whatever `Accept` says; errors use the shared JSON error shape. A
+forged token, another tenant's delivery, an SMS delivery or one with no pinned address all get
+the same 404 `NotFound` body as other public routes. Before any database work each request
+spends one count from the caller's address bucket (reads and writes apart, limits from
+`PUBLIC_RATE_ADDRESS_*`); past the limit it is 429 `RateLimited` with `Retry-After`. Bodies
+are capped at 8 KiB (413). Responses are `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, and the page loads nothing from anywhere (CSP
+`default-src 'none'`, its one inline style pinned by hash, no script).
 
 ## Database pool and request limits
 
