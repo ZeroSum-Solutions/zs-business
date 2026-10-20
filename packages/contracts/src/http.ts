@@ -18,11 +18,12 @@ const idSchema = z.uuid().toLowerCase();
 /**
  * Key prefixes the server builds for actions no member runs (public intake, unsubscribe,
  * inbound SMS), for the run of an approved action (`approval:<approval ID>`, approvals.md A-7)
- * and for the steps of an inbox reply write (`inbox:`, inbox-home.md I-6). Keys are unique per
+ * for the steps of an inbox reply write (`inbox:`, inbox-home.md I-6) and for the follow-up
+ * agent's steps (`agent:`, agents.md G-6). Keys are unique per
  * tenant, so a member key with one of them could take a recipient's key first and turn their
  * request into a conflict; approval IDs are visible to members, so `approval:` would be easy.
  */
-export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["public:", "unsubscribe:", "sms-inbound:", "approval:", "inbox:"] as const);
+export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["public:", "unsubscribe:", "sms-inbound:", "approval:", "inbox:", "agent:"] as const);
 export const idempotencyKeySchema = z.string().min(1).max(200)
   .refine(isPostgresText, "Text is not valid in Postgres")
   .refine((key) => !SERVER_IDEMPOTENCY_PREFIXES.some((prefix) => key.toLowerCase().startsWith(prefix)),

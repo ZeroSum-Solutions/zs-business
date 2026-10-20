@@ -1,0 +1,528 @@
+// M6 inquiry follow-up agent (docs/requirements/agents.md G-1..G-12) under the runtime role:
+// the agent drafts through the Inbox's draft and approval records and never sends; only an
+// owner's approval sends, through the real delivery worker. Caps hold under concurrent runs, a
+// kill stops new drafts at once, quiet hours follow the tenant's zone, opted-out customers are
+// skipped before the model sees them, and tenants stay apart. The clock is injected; each test
+// starts a month after the last, so earlier inquiries fall out of the lookback window.
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { ActionError, TenantDenied, type FollowUpPrompt, type FollowUpSettings, type MemberRole } from "@zs/contracts";
+import { asService, type Transaction } from "@zs/db";
+import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
+import {
+  agentActorId,
+  agentAuthorize,
+  approvalForAction,
+  approvalsFromRecords,
+  createDeliveryWorker,
+  createFakeFollowUpModel,
+  createFakeProvider,
+  createFollowUpAgent,
+  createPublicSession,
+  createSession,
+  creditWallet,
+  directDispatch,
+  inQuietHours,
+  memberAuthorize,
+  setGlobalAgentSwitch,
+  settleReplyDelivery,
+  type EdgeDependencies,
+  type FakeFollowUpModel,
+  type Session,
+} from "../src/index.js";
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+/** Tuesday 2026-10-20 12:00 UTC; each test moves a month on from here. */
+const START = Date.parse("2026-10-20T12:00:00.000Z");
+let epoch = START;
+let now = START;
+const clock = { now: () => new Date(now) };
+
+let database: TestDatabase;
+let fixture: TwoTenantFixture;
+let tenantId: string;
+let pageId: string;
+let resourceId: string;
+let owner: string;
+let staff: string;
+let ownerB: string;
+
+const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID });
+const sessionFor = (actorId: string, tenant = tenantId): Session => createSession(deps(), { tenantId: tenant, actorId });
+const service = <T>(work: (tx: Transaction) => Promise<T>) => asService(database.servicePool, work);
+const rows = async <T = Record<string, unknown>>(sql: string, params: unknown[]) => service(async (tx) => (await tx.query(sql, params)).rows as T[]);
+const agent = (model: FakeFollowUpModel, maxCandidatesPerRun = 50) => createFollowUpAgent(deps(), { model, maxCandidatesPerRun });
+
+async function addMember(tenant: string, role: MemberRole) {
+  const userId = randomUUID();
+  await fixture.service((tx) => tx.query(
+    "INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$6)",
+    [tenant, randomUUID(), `${role}-${userId.slice(0, 8)}@example.com`, userId, role, new Date(START)],
+  ));
+  return userId;
+}
+
+/** A website request now, booking the next free hour three weeks out. */
+let slot = 0;
+async function inquiry(input: { name?: string; email?: string; notes?: string | null; phone?: string | null } = {}) {
+  // A request from a known address waits for the owner to link it (public-intake.md P-7).
+  const known = input.email === undefined ? null
+    : (await rows<{ id: string }>("SELECT id FROM crm_contacts WHERE tenant_id=$1 AND normalized_email=$2", [tenantId, input.email]))[0]?.id ?? null;
+  const n = slot++;
+  const day = new Date(Math.floor(now / DAY) * DAY + (21 + Math.floor(n / 8)) * DAY);
+  const startsAt = new Date(day.getTime() + (9 + (n % 8)) * HOUR).toISOString();
+  const email = input.email ?? `guest-${randomUUID().slice(0, 8)}@haldenrowe.example`;
+  const reply = await createPublicSession(deps(), { tenantId, pageId }).request({
+    resourceId, startsAt, name: input.name ?? "Halden Guest", email, phone: input.phone ?? null, notes: input.notes ?? "Do you have parking?",
+    consent: { email: false, sms: false }, disclosureVersion: "v1", channel: "widget", website: "",
+  }, randomUUID());
+  if (known) await sessionFor(owner).linkIntakeItem(reply.requestId, { contactId: known }, randomUUID());
+  const item = (await rows<{ contact_id: string }>("SELECT contact_id FROM intake_items WHERE tenant_id=$1 AND id=$2", [tenantId, reply.requestId]))[0]!;
+  return { itemId: reply.requestId, contactId: item.contact_id, email };
+}
+
+/** Owners set the settings; every test starts from these with the agent on and not killed. */
+const BASE: FollowUpSettings = {
+  enabled: true, maxDraftsPerDay: 10, maxDraftsPerContact: 1, contactWindowHours: 168, waitHours: 24, lookbackDays: 14,
+  quietStartMinute: 21 * 60, quietEndMinute: 8 * 60, timeZone: "UTC",
+};
+async function configure(settings: Partial<FollowUpSettings> = {}) {
+  const session = sessionFor(owner);
+  const status = await session.getFollowUpStatus();
+  if (status.killed) await session.resumeFollowUp({}, randomUUID());
+  return (await session.updateFollowUpSettings({ ...BASE, ...settings, expectedRevision: status.revision }, randomUUID())).result;
+}
+
+const decisions = (runId: string) => rows<{ intake_item_id: string; outcome: string; reason: string | null; reply_id: string | null }>(
+  "SELECT intake_item_id, outcome, reason, reply_id FROM agent_followups WHERE tenant_id=$1 AND run_id=$2 ORDER BY created_at, id", [tenantId, runId]);
+const sendEvents = (replyId: string) => rows(
+  "SELECT 1 FROM outbox WHERE tenant_id=$1 AND event_type='message.send_requested' AND payload->>'messageId'=$2", [tenantId, replyId]);
+const agentDraftsSince = async (since: number) => Number((await rows<{ n: string }>(
+  "SELECT count(*)::text AS n FROM agent_followups WHERE tenant_id=$1 AND outcome='drafted' AND created_at >= $2", [tenantId, new Date(since)]))[0]!.n);
+
+async function rejection(promise: Promise<unknown>): Promise<ActionError> {
+  try { await promise; } catch (error) { if (error instanceof ActionError) return error; throw error; }
+  throw new Error("Expected a rejection");
+}
+
+beforeAll(async () => {
+  database = await createTestDatabase();
+  fixture = await createTwoTenantFixture(database);
+  tenantId = fixture.a.tenantId;
+  resourceId = randomUUID();
+  pageId = randomUUID();
+  for (const tenant of [fixture.a.tenantId, fixture.b.tenantId]) {
+    const resource = tenant === tenantId ? resourceId : randomUUID();
+    const page = tenant === tenantId ? pageId : randomUUID();
+    await fixture.service(async (tx) => {
+      await tx.query(
+        `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+           buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+         VALUES ($1,$2,'UTC',$3::jsonb,'[]'::jsonb,60,60,0,0,0,525600)`,
+        [tenant, resource, JSON.stringify([1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, windows: [{ startMinute: 540, endMinute: 1020 }] })))],
+      );
+      await tx.query("INSERT INTO booking_pages (tenant_id,id,title,published,disclosure_version,created_at) VALUES ($1,$2,'Book',true,'v1',$3)",
+        [tenant, page, new Date(START)]);
+      await tx.query("INSERT INTO booking_page_resources (tenant_id,page_id,resource_id,position) VALUES ($1,$2,$3,0)", [tenant, page, resource]);
+    });
+  }
+  owner = await addMember(tenantId, "owner");
+  staff = await addMember(tenantId, "staff");
+  ownerB = await addMember(fixture.b.tenantId, "owner");
+});
+afterAll(async () => { await database?.close(); });
+beforeEach(async () => {
+  epoch += 30 * DAY;
+  now = epoch;
+  slot = 0;
+  await configure();
+  await service((tx) => setGlobalAgentSwitch(tx, { killed: false, now: clock.now() }));
+});
+
+/** Make inquiries now, then move past the wait so they are due. */
+async function dueInquiries(count: number) {
+  const made = [];
+  for (let i = 0; i < count; i += 1) made.push(await inquiry({ name: `Guest ${i}` }));
+  now += 25 * HOUR;
+  return made;
+}
+
+describe("drafts but never sends (G-6, G-12)", () => {
+  it("leaves an agent draft with a pending proposal; nothing is sent until an owner approves, then once", async () => {
+    const { itemId, contactId, email } = await inquiry({ name: "Mara Quill", notes: "Can I bring my dog?" });
+    now += 25 * HOUR;
+    const model = createFakeFollowUpModel();
+    const run = await agent(model).runForMember({ tenantId, actorId: owner }, {}, randomUUID());
+    expect(run).toMatchObject({ status: "completed", stopReason: null, considered: 1, drafted: 1, skipped: 0, requestedBy: owner });
+    const [decision] = run.decisions;
+    expect(decision).toMatchObject({ intakeItemId: itemId, contactId, outcome: "drafted", reason: null });
+
+    // G-9: the model saw this inquiry and nothing about other customers.
+    expect(model.prompts).toEqual([{
+      businessName: "Tenant A", customerName: "Mara Quill", requestedAt: new Date(now - 25 * HOUR).toISOString(),
+      notes: "Can I bring my dog?", booking: { startsAt: expect.any(String), endsAt: expect.any(String), timeZone: "UTC" },
+    } satisfies FollowUpPrompt]);
+    expect(JSON.stringify(model.prompts)).not.toContain(email);
+
+    const replyId = decision!.replyId!;
+    const reply = (await rows<{ status: string; drafted_by: string; subject: string }>(
+      "SELECT status, drafted_by, subject FROM inbox_replies WHERE tenant_id=$1 AND id=$2", [tenantId, replyId]))[0]!;
+    expect(reply).toEqual({ status: "draft", drafted_by: agentActorId(tenantId), subject: "Following up from Tenant A" });
+    const approval = (await sessionFor(owner).getApproval(decision!.approvalId!));
+    expect(approval).toMatchObject({
+      actionType: "inbox.reply.send", target: { type: "inbox_reply", id: replyId }, payload: { replyId },
+      status: "pending", requestedBy: agentActorId(tenantId),
+    });
+    // The Inbox shows it as a waiting draft in the customer's thread.
+    const thread = await sessionFor(owner).getThread(`c_${contactId}`);
+    expect(thread.drafts).toBe(1);
+
+    // Nothing to deliver: no send event exists, and the worker finds nothing.
+    expect(await sendEvents(replyId)).toHaveLength(0);
+    expect(await rows("SELECT 1 FROM outbox WHERE tenant_id=$1 AND event_type='message.send_requested' AND processed_at IS NULL", [tenantId])).toHaveLength(0);
+    const provider = createFakeProvider({ clock });
+    await service((tx) => creditWallet(tx, { tenantId, ledgerId: randomUUID(), amount: 100, idempotencyKey: `credit:${randomUUID()}`, now: clock.now() }));
+    const worker = createDeliveryWorker({
+      service, providers: { email: provider, sms: provider }, approvals: approvalsFromRecords(approvalForAction, clock),
+      onSettled: async (tx, tenant, messageId, outcome, at) => { await settleReplyDelivery(tx, tenant, messageId, outcome, at); },
+      clock, generateId: randomUUID, report: () => undefined,
+      config: {
+        workerId: "m6", leaseMs: 60_000, providerTimeoutMs: 5_000, pricing: { currency: "usd", email: 2, smsSegment: 3 },
+        unsubscribe: { secret: "unsubscribe-test-secret-0123456789abcdef", baseUrl: "https://api.example.test/public/v1/unsubscribe" },
+      },
+    });
+    expect(await worker.runOnce()).toMatchObject({ ingested: 0, claimed: 0 });
+    expect(provider.calls).toHaveLength(0);
+
+    // The owner approves: the owner is the send's actor, and the worker delivers it once.
+    now += 60_000;
+    const approved = await sessionFor(owner).approveReply(replyId, {}, randomUUID());
+    expect(approved.result).toMatchObject({ status: "approved", approvedBy: { userId: owner } });
+    expect(await sendEvents(replyId)).toHaveLength(1);
+    now += 60_000;
+    expect(await worker.runOnce()).toMatchObject({ ingested: 1, claimed: 1, results: [{ outcome: "sent" }] });
+    expect(provider.delivered).toHaveLength(1);
+    expect(provider.delivered[0]!.request).toMatchObject({ to: email, subject: "Following up from Tenant A" });
+    now += 60_000;
+    expect(await worker.runOnce()).toMatchObject({ ingested: 0, claimed: 0 });
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("staff cannot approve an agent draft, and the agent principal can neither approve nor send", async () => {
+    await dueInquiries(1);
+    const run = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    const { replyId, approvalId } = run.decisions[0]!;
+    await expect(sessionFor(staff).approveReply(replyId!, {}, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
+    await expect(sessionFor(staff).approveApproval(approvalId!, {}, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
+
+    const actor = agentActorId(tenantId);
+    const asAgent = directDispatch(deps(), tenantId, actor, agentAuthorize);
+    const key = randomUUID();
+    const approvalReference = { tenantId, id: randomUUID() };
+    await expect(asAgent({ actionType: "approval.approve", target: { tenantId, type: "approval", id: approvalId! }, approvalReference,
+      idempotencyKey: key, payload: { approvalId: approvalId! } })).rejects.toBeInstanceOf(TenantDenied);
+    await expect(asAgent({ actionType: "inbox.reply.send", target: { tenantId, type: "inbox_reply", id: replyId! }, approvalReference,
+      idempotencyKey: `${key}-send`, payload: { replyId: replyId! } })).rejects.toBeInstanceOf(TenantDenied);
+    // Members cannot run the agent's own actions either (G-1).
+    const asOwner = directDispatch(deps(), tenantId, owner, memberAuthorize(tenantId, owner));
+    await expect(asOwner({ actionType: "agent.run.start", target: { tenantId, type: "agent_run", id: randomUUID() }, approvalReference,
+      idempotencyKey: `${key}-start`, payload: { runId: randomUUID(), requestedBy: owner } })).rejects.toBeInstanceOf(TenantDenied);
+    // Staff cannot start a run.
+    await expect(agent(createFakeFollowUpModel()).runForMember({ tenantId, actorId: staff }, {}, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
+
+    expect((await sessionFor(owner).getApproval(approvalId!)).status).toBe("pending");
+    expect(await sendEvents(replyId!)).toHaveLength(0);
+  });
+
+  it("an owner can discard an agent draft, which withdraws its proposal", async () => {
+    await dueInquiries(1);
+    const run = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    const { replyId, approvalId } = run.decisions[0]!;
+    await sessionFor(owner).discardReply(replyId!, {}, randomUUID());
+    expect((await sessionFor(owner).getApproval(approvalId!)).status).toBe("revoked");
+    // The inquiry has its one agent draft; another run leaves it alone.
+    now += HOUR;
+    const again = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(again).toMatchObject({ considered: 0, drafted: 0 });
+  });
+});
+
+describe("skips (G-7, G-8)", () => {
+  it("skips suppressed, consent-denied and address-less customers without showing them to the model", async () => {
+    const suppressed = await inquiry({ name: "Suppressed Sam" });
+    const denied = await inquiry({ name: "Denied Dee" });
+    const noEmail = await inquiry({ name: "Phone Only Pat", phone: "+15555550123" });
+    const fine = await inquiry({ name: "Fine Fay" });
+    await service(async (tx) => {
+      await tx.query("INSERT INTO suppressions (tenant_id,channel,address,reason,source,created_at) VALUES ($1,'email',$2,'unsubscribe','test',$3)",
+        [tenantId, suppressed.email, clock.now()]);
+      await tx.query(
+        `INSERT INTO crm_contact_consent (tenant_id,contact_id,channel,status,source,recorded_at) VALUES ($1,$2,'email','denied','test',$3)
+         ON CONFLICT (tenant_id,contact_id,channel) DO UPDATE SET status='denied'`, [tenantId, denied.contactId, clock.now()]);
+      await tx.query("UPDATE crm_contacts SET normalized_email=NULL WHERE tenant_id=$1 AND id=$2", [tenantId, noEmail.contactId]);
+    });
+    now += 25 * HOUR;
+    const model = createFakeFollowUpModel();
+    const run = await agent(model).runScheduled(tenantId, randomUUID());
+    expect(run).toMatchObject({ status: "completed", considered: 4, drafted: 1, skipped: 3 });
+    const byItem = new Map((await decisions(run.id)).map((row) => [row.intake_item_id, row]));
+    expect(byItem.get(suppressed.itemId)).toMatchObject({ outcome: "skipped", reason: "suppressed", reply_id: null });
+    expect(byItem.get(denied.itemId)).toMatchObject({ outcome: "skipped", reason: "consent_denied" });
+    expect(byItem.get(noEmail.itemId)).toMatchObject({ outcome: "skipped", reason: "no_email" });
+    expect(byItem.get(fine.itemId)).toMatchObject({ outcome: "drafted" });
+    expect(model.prompts.map((prompt) => prompt.customerName)).toEqual(["Fine Fay"]);
+  });
+
+  it("leaves answered, too-young and too-old inquiries alone, and only follows up a customer's latest request", async () => {
+    const old = await inquiry({ name: "Old Ollie" });
+    now += 15 * DAY;
+    const answered = await inquiry({ name: "Answered Ann" });
+    const repeat = await inquiry({ name: "Repeat Rae" });
+    now += HOUR;
+    const latest = await inquiry({ name: "Repeat Rae", email: repeat.email });
+    expect(latest.contactId).toBe(repeat.contactId);
+    await sessionFor(staff).draftReply({ contactId: answered.contactId, body: "We have parking out back." }, randomUUID());
+    now += 25 * HOUR;
+    const young = await inquiry({ name: "Young Yan" });
+    const model = createFakeFollowUpModel();
+    const run = await agent(model).runScheduled(tenantId, randomUUID());
+    expect(run.decisions.map((decision) => decision.intakeItemId)).toEqual([latest.itemId]);
+    for (const skipped of [old, answered, repeat, young]) expect(run.decisions.some((d) => d.intakeItemId === skipped.itemId)).toBe(false);
+  });
+
+  it("records model errors and invalid answers and goes on", async () => {
+    const [broken, empty, fine] = await dueInquiries(3);
+    const model = createFakeFollowUpModel((prompt) => {
+      if (prompt.customerName === "Guest 0") throw new Error("model down");
+      if (prompt.customerName === "Guest 1") return { subject: "Hi", body: "   " };
+      return { subject: "  Hello again  ", body: "  Checking in.  " };
+    });
+    const run = await agent(model).runScheduled(tenantId, randomUUID());
+    expect(run).toMatchObject({ drafted: 1, skipped: 2 });
+    const byItem = new Map(run.decisions.map((decision) => [decision.intakeItemId, decision]));
+    expect(byItem.get(broken!.itemId)?.reason).toBe("model_error");
+    expect(byItem.get(empty!.itemId)?.reason).toBe("model_invalid");
+    const reply = (await rows<{ subject: string; body: string }>("SELECT subject, body FROM inbox_replies WHERE tenant_id=$1 AND id=$2",
+      [tenantId, byItem.get(fine!.itemId)!.replyId]))[0];
+    expect(reply).toEqual({ subject: "Hello again", body: "Checking in." });
+  });
+});
+
+describe("caps (G-4)", () => {
+  it("holds the daily cap across concurrent runs", async () => {
+    await configure({ maxDraftsPerDay: 3 });
+    const made = await dueInquiries(8);
+    const since = now;
+    const runs = await Promise.all(Array.from({ length: 4 }, () => agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID())));
+    expect(await agentDraftsSince(since)).toBe(3);
+    expect(runs.reduce((sum, run) => sum + run.drafted, 0)).toBe(3);
+    // No inquiry got two drafts, and every run ended on the cap or ran out of work.
+    const drafted = await rows<{ intake_item_id: string }>(
+      "SELECT intake_item_id FROM agent_followups WHERE tenant_id=$1 AND outcome='drafted' AND created_at >= $2", [tenantId, new Date(since)]);
+    expect(new Set(drafted.map((row) => row.intake_item_id)).size).toBe(3);
+    expect(drafted.every((row) => made.some((item) => item.itemId === row.intake_item_id))).toBe(true);
+    for (const run of runs) expect(run.status === "completed" || run.stopReason === "daily_cap").toBe(true);
+    expect(runs.some((run) => run.stopReason === "daily_cap")).toBe(true);
+    expect((await sessionFor(owner).getFollowUpStatus())).toMatchObject({ canDraft: false, blockedBy: "daily_cap" });
+
+    // The cap is a rolling day: a day later there is room again.
+    now += DAY + 1;
+    const later = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(later.drafted).toBe(3);
+  });
+
+  it("holds the per-customer cap inside its window", async () => {
+    await configure({ maxDraftsPerContact: 1, contactWindowHours: 72 });
+    const first = await inquiry({ name: "Kai" });
+    now += 25 * HOUR;
+    const run = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(run.drafted).toBe(1);
+    await sessionFor(owner).discardReply(run.decisions[0]!.replyId!, {}, randomUUID());
+    // The customer asks again; inside the window the agent leaves them alone.
+    const second = await inquiry({ name: "Kai", email: first.email });
+    now += 25 * HOUR;
+    const capped = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(capped.decisions).toEqual([expect.objectContaining({ intakeItemId: second.itemId, outcome: "skipped", reason: "contact_cap" })]);
+    now += 48 * HOUR;
+    const after = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(after.decisions).toEqual([expect.objectContaining({ intakeItemId: second.itemId, outcome: "drafted" })]);
+  });
+
+  it("stops at maxCandidatesPerRun", async () => {
+    await dueInquiries(3);
+    const run = await agent(createFakeFollowUpModel(), 2).runScheduled(tenantId, randomUUID());
+    expect(run).toMatchObject({ considered: 2, drafted: 2 });
+  });
+});
+
+describe("kill switches (G-3)", () => {
+  it("a tenant kill stops runs; staff may kill, only owners resume", async () => {
+    await dueInquiries(2);
+    const killed = await sessionFor(staff).killFollowUp({ note: "Wrong tone" }, randomUUID());
+    expect(killed.result).toMatchObject({ canDraft: false, blockedBy: "tenant_killed", killed: { by: staff, note: "Wrong tone" } });
+    const model = createFakeFollowUpModel();
+    const stopped = await agent(model).runScheduled(tenantId, randomUUID());
+    expect(stopped).toMatchObject({ status: "stopped", stopReason: "tenant_killed", considered: 0 });
+    expect(model.prompts).toHaveLength(0);
+    await expect(sessionFor(staff).resumeFollowUp({}, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
+    await sessionFor(owner).resumeFollowUp({}, randomUUID());
+    expect(await agent(model).runScheduled(tenantId, randomUUID())).toMatchObject({ status: "completed", drafted: 2 });
+  });
+
+  it("a kill that commits while a draft is being written refuses that draft", async () => {
+    await dueInquiries(2);
+    // The kill lands while the model is writing the first draft: that draft must not commit.
+    const model = createFakeFollowUpModel(async () => {
+      if (model.prompts.length === 1) await sessionFor(staff).killFollowUp({}, randomUUID());
+      return { subject: "Hello", body: "Checking in." };
+    });
+    const run = await agent(model).runScheduled(tenantId, randomUUID());
+    expect(run).toMatchObject({ status: "stopped", stopReason: "tenant_killed", drafted: 0, skipped: 1 });
+    expect(run.decisions).toEqual([expect.objectContaining({ outcome: "skipped", reason: "tenant_killed" })]);
+    expect(model.prompts).toHaveLength(1);
+    expect(await rows("SELECT 1 FROM inbox_replies WHERE tenant_id=$1 AND drafted_by=$2 AND created_at >= $3",
+      [tenantId, agentActorId(tenantId), new Date(now)])).toHaveLength(0);
+  });
+
+  it("no draft commits after a kill has answered, however many runs are in flight", async () => {
+    await configure({ maxDraftsPerDay: 200 });
+    await dueInquiries(16);
+    const since = now;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started = 0;
+    const model = () => createFakeFollowUpModel(async () => {
+      started += 1;
+      await gate;
+      return { subject: "Hello", body: "Checking in." };
+    });
+    const runs = Array.from({ length: 4 }, () => agent(model()).runScheduled(tenantId, randomUUID()));
+    while (started < 4) await new Promise((resolve) => setTimeout(resolve, 5));
+    release();
+    while ((await agentDraftsSince(since)) < 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    await sessionFor(owner).killFollowUp({}, randomUUID());
+    const atKill = await agentDraftsSince(since);
+    const finished = await Promise.all(runs);
+    expect(atKill).toBeGreaterThanOrEqual(1);
+    expect(await agentDraftsSince(since)).toBe(atKill);
+    for (const run of finished) expect(run.status === "completed" || run.stopReason === "tenant_killed").toBe(true);
+  });
+
+  it("the global switch stops every tenant", async () => {
+    await dueInquiries(1);
+    await service((tx) => setGlobalAgentSwitch(tx, { killed: true, note: "Incident", now: clock.now() }));
+    expect(await sessionFor(owner).getFollowUpStatus()).toMatchObject({ globalKilled: true, canDraft: false, blockedBy: "global_killed" });
+    expect(await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID())).toMatchObject({ status: "stopped", stopReason: "global_killed" });
+    await service((tx) => setGlobalAgentSwitch(tx, { killed: false, now: clock.now() }));
+    expect(await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID())).toMatchObject({ status: "completed", drafted: 1 });
+  });
+
+  it("a tenant that never turned the agent on gets nothing", async () => {
+    await configure({ enabled: false });
+    await dueInquiries(1);
+    expect(await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID())).toMatchObject({ status: "stopped", stopReason: "disabled" });
+    // Tenant B has no settings row at all: the defaults, agent off.
+    expect(await sessionFor(ownerB, fixture.b.tenantId).getFollowUpStatus()).toMatchObject({ revision: 0, canDraft: false, blockedBy: "disabled" });
+  });
+});
+
+describe("quiet hours (G-5)", () => {
+  it("follows the tenant's zone, across midnight", () => {
+    const settings = { ...BASE, timeZone: "America/New_York", quietStartMinute: 21 * 60, quietEndMinute: 8 * 60 };
+    expect(inQuietHours(settings, new Date("2026-10-21T00:59:00Z"))).toBe(false); // 20:59 EDT
+    expect(inQuietHours(settings, new Date("2026-10-21T01:00:00Z"))).toBe(true); // 21:00 EDT
+    expect(inQuietHours(settings, new Date("2026-10-21T11:59:00Z"))).toBe(true); // 07:59 EDT
+    expect(inQuietHours(settings, new Date("2026-10-21T12:00:00Z"))).toBe(false); // 08:00 EDT
+    // After the DST change, the same local hours are an hour later in UTC.
+    expect(inQuietHours(settings, new Date("2026-11-10T01:30:00Z"))).toBe(false); // 20:30 EST
+    expect(inQuietHours(settings, new Date("2026-11-10T02:00:00Z"))).toBe(true); // 21:00 EST
+    expect(inQuietHours({ ...settings, quietStartMinute: 600, quietEndMinute: 600 }, new Date("2026-10-21T14:00:00Z"))).toBe(false);
+    expect(inQuietHours({ ...settings, timeZone: "UTC", quietStartMinute: 9 * 60, quietEndMinute: 17 * 60 }, new Date("2026-10-21T16:59:00Z"))).toBe(true);
+  });
+
+  it("runs in quiet hours stop without drafting", async () => {
+    await configure({ timeZone: "America/New_York" });
+    await dueInquiries(1);
+    now = Math.floor(now / DAY) * DAY + DAY + 2 * HOUR; // 22:00 or 21:00 local
+    const model = createFakeFollowUpModel();
+    expect(await agent(model).runScheduled(tenantId, randomUUID())).toMatchObject({ status: "stopped", stopReason: "quiet_hours" });
+    expect(model.prompts).toHaveLength(0);
+    now += 12 * HOUR; // mid-morning local
+    expect(await agent(model).runScheduled(tenantId, randomUUID())).toMatchObject({ status: "completed", drafted: 1 });
+  });
+});
+
+describe("settings (G-2)", () => {
+  it("compare-and-set on the revision, and validated values", async () => {
+    const session = sessionFor(owner);
+    const status = await session.getFollowUpStatus();
+    const saved = await session.updateFollowUpSettings({ ...status.settings, maxDraftsPerDay: 5, expectedRevision: status.revision }, randomUUID());
+    expect(saved.result).toMatchObject({ revision: status.revision + 1, settings: { maxDraftsPerDay: 5 } });
+    const stale = await rejection(session.updateFollowUpSettings({ ...status.settings, expectedRevision: status.revision }, randomUUID()));
+    expect(stale).toMatchObject({ code: "Conflict", details: { reason: "stale_revision", currentRevision: status.revision + 1 } });
+    for (const bad of [{ maxDraftsPerDay: 0 }, { quietStartMinute: 1440 }, { timeZone: "Mars/Olympus" }, { timeZone: "EST" }]) {
+      const invalid = await rejection(session.updateFollowUpSettings({ ...status.settings, ...bad, expectedRevision: status.revision + 1 }, randomUUID()));
+      expect(invalid.code, JSON.stringify(bad)).toBe("ValidationFailed");
+    }
+    await expect(sessionFor(staff).updateFollowUpSettings({ ...status.settings, expectedRevision: status.revision + 1 }, randomUUID()))
+      .rejects.toBeInstanceOf(TenantDenied);
+    // Server keys are reserved: a member cannot take an agent step's key.
+    expect(await rejection(session.killFollowUp({}, `agent:start:${randomUUID()}`))).toMatchObject({ code: "ValidationFailed" });
+  });
+});
+
+describe("runs are recorded and replay (G-6, G-10)", () => {
+  it("a repeated run key continues the same run without asking the model again", async () => {
+    await dueInquiries(2);
+    const model = createFakeFollowUpModel();
+    const key = randomUUID();
+    const first = await agent(model).runForMember({ tenantId, actorId: owner }, {}, key);
+    const again = await agent(model).runForMember({ tenantId, actorId: owner }, {}, key);
+    expect(again).toEqual(first);
+    expect(model.prompts).toHaveLength(2);
+    const page = await sessionFor(staff).listFollowUpRuns({ limit: 1 });
+    expect(page.items).toEqual([expect.objectContaining({ id: first.id, drafted: 2 })]);
+    const next = await sessionFor(staff).listFollowUpRuns({ limit: 1, cursor: page.nextCursor! });
+    expect(next.items[0]?.id).not.toBe(first.id);
+    expect(await sessionFor(staff).getFollowUpRun(first.id)).toEqual(first);
+  });
+});
+
+describe("two tenants (G-10)", () => {
+  it("a tenant's runs, settings and inquiries stay its own", async () => {
+    await dueInquiries(1);
+    const run = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    const b = sessionFor(ownerB, fixture.b.tenantId);
+    await expect(b.getFollowUpRun(run.id)).rejects.toMatchObject({ code: "NotFound" });
+    expect((await b.listFollowUpRuns({})).items.some((item) => item.id === run.id)).toBe(false);
+
+    // Tenant B's agent, turned on, finds none of tenant A's inquiries.
+    const bStatus = await b.getFollowUpStatus();
+    await b.updateFollowUpSettings({ ...BASE, expectedRevision: bStatus.revision }, randomUUID());
+    const fresh = await inquiry({ name: "Only In A" });
+    now += 25 * HOUR;
+    const bModel = createFakeFollowUpModel();
+    const bRun = await agent(bModel).runScheduled(fixture.b.tenantId, randomUUID());
+    expect(bRun).toMatchObject({ considered: 0, drafted: 0 });
+    expect(bModel.prompts).toHaveLength(0);
+
+    // Tenant B's agent cannot draft for tenant A's inquiry by naming it.
+    const bTenant = fixture.b.tenantId;
+    const asAgentB = directDispatch(deps(), bTenant, agentActorId(bTenant), agentAuthorize);
+    const followupId = randomUUID();
+    await expect(asAgentB({
+      actionType: "agent.followup.draft", target: { tenantId: bTenant, type: "agent_followup", id: followupId },
+      approvalReference: { tenantId: bTenant, id: randomUUID() }, idempotencyKey: randomUUID(),
+      payload: { followupId, runId: bRun.id, intakeItemId: fresh.itemId, contactId: fresh.contactId, replyId: randomUUID(),
+        approvalId: randomUUID(), subject: "Hi", body: "Hello" },
+    })).rejects.toBeInstanceOf(TenantDenied);
+    // And the runtime role in tenant B sees none of tenant A's agent rows.
+    for (const table of ["agent_settings", "agent_runs", "agent_followups"]) {
+      const seen = await fixture.b.run(async (tx) => (await tx.query(`SELECT 1 FROM ${table} WHERE tenant_id=$1`, [tenantId])).rowCount);
+      expect(seen, table).toBe(0);
+    }
+    // Tenant A's own agent still drafts for it.
+    expect(await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID())).toMatchObject({ drafted: 1 });
+  });
+});
