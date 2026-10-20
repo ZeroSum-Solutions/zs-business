@@ -66,7 +66,7 @@ export const startFollowUpRunRequestSchema = z.strictObject({});
 /** G-11: the agent's state for one tenant. */
 export const followUpStatusSchema = z.strictObject({
   settings: followUpSettingsSchema,
-  /** 0 until an owner first saves settings. */
+  /** 0 until the settings row exists (an owner saves settings or anyone kills the agent). */
   revision: z.number().int().min(0),
   updatedAt: instantSchema.nullable(),
   killed: z.strictObject({ at: instantSchema, by: idSchema, note: z.string().nullable() }).nullable(),

@@ -52,7 +52,11 @@ export interface FollowUpEnv {
 
 const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
-function databaseHost(name: string, url: string, caCert: string | undefined): boolean {
+/**
+ * Throws unless `url` can be used with pinned TLS: off loopback it needs DATABASE_CA_CERT and no
+ * query string. Returns whether the host is loopback.
+ */
+export function checkDatabaseUrl(name: string, url: string, caCert: string | undefined): boolean {
   let host: string;
   try {
     host = (parse(url).host ?? "").toLowerCase();
@@ -81,8 +85,8 @@ export function parseFollowUpEnv(env: Readonly<Record<string, string | undefined
   if (!parsed.success) throw new Error(`Invalid environment: ${problems(parsed.error)}`);
   const data = parsed.data;
   const loopback = [
-    databaseHost("FOLLOWUP_DATABASE_URL", data.FOLLOWUP_DATABASE_URL, data.DATABASE_CA_CERT),
-    databaseHost("FOLLOWUP_SERVICE_DATABASE_URL", data.FOLLOWUP_SERVICE_DATABASE_URL, data.DATABASE_CA_CERT),
+    checkDatabaseUrl("FOLLOWUP_DATABASE_URL", data.FOLLOWUP_DATABASE_URL, data.DATABASE_CA_CERT),
+    checkDatabaseUrl("FOLLOWUP_SERVICE_DATABASE_URL", data.FOLLOWUP_SERVICE_DATABASE_URL, data.DATABASE_CA_CERT),
   ].every(Boolean);
   if (data.FOLLOWUP_MODEL === "fake" && !loopback)
     throw new Error("Invalid environment: FOLLOWUP_MODEL=fake runs only against loopback databases");

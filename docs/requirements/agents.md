@@ -9,8 +9,8 @@ reads it and approves, edits by discarding and redrafting, or discards it. The a
 approves and never sends. Caps, quiet hours and two kill switches bound what it may draft; every
 run and every decision it makes is recorded.
 
-Out of scope: a scheduler (the hub or M5 runs the agent on a timer through `runFollowUps`), a
-real model adapter (M5 brings one behind the same port), other agents, SMS follow-ups.
+Out of scope: a real model adapter (M5 brings one behind the same port), other agents, SMS
+follow-ups. The scheduler that runs the agent on a timer is G-13.
 
 ## Evidence and decisions
 
@@ -51,8 +51,9 @@ with `currentRevision`).
 - the tenant's kill switch is not engaged (`killed_at` null).
 `agent.kill` engages the tenant switch (permission `inbox.drafts`, so staff can stop it too);
 `agent.resume` clears it (permission `agents`, owners only). The draft action locks the
-tenant's settings row `FOR UPDATE` and the global row `FOR SHARE` before it checks them, and the
-kill writes take those rows, so a kill that commits stops every draft that commits after it: no
+tenant's settings row `FOR UPDATE`, and takes a shared transaction advisory lock for the global
+switch, before it checks them. A tenant kill writes that row and a global flip takes the
+advisory lock exclusively, so a kill that commits stops every draft that commits after it: no
 new draft appears once `kill` has answered. A draft already committed stays a draft; it still
 needs an owner's approval to send.
 
@@ -62,7 +63,8 @@ needs an owner's approval to send.
   agent drafts for that customer in that window;
 - one agent draft per inquiry, ever (a unique index backs it).
 Because every draft for a tenant holds the settings row lock while it counts and inserts,
-concurrent runs cannot exceed a cap.
+concurrent runs cannot exceed a cap. The counts have no upper time bound: a draft whose time
+was read before it waited on the lock still counts a draft that committed meanwhile.
 
 **G-5. Quiet hours.** `quietStartMinute` and `quietEndMinute` (0..1439, local minutes past
 midnight in `timeZone`, defaults 21:00 and 08:00) name a window in which the agent drafts
@@ -83,13 +85,19 @@ the injected clock and the IANA zone, never the host's zone.
 - `agent.run.finish` `{runId, stopReason}`: closes the run, `completed` or `stopped`, with its
   counts taken from its decisions.
 Keys are `agent:<step>:<runId>[:<intakeItemId>]`, and every ID derives from them, so a retried
-run replays the steps that committed and continues with the rest.
+run replays the steps that committed and continues with the rest. A run whose step failed for
+an inquiry (a lock timeout, a lost connection) is not finished: it stays `running`, the error
+reaches the caller, and a retry with the same key continues it. A stop reason ends the run
+either way.
 
 **G-7. Candidates.** An inquiry is a website request (`intake_items`) with a customer
 (`new_contact` or `linked`), created between `lookbackDays` (1..90, default 14) and `waitHours`
 (1..720, default 24) before now, that is the customer's latest request, has no agent draft yet,
-and after which no reply to that customer (any status but `discarded`) was drafted. Oldest
-first, at most `maxCandidatesPerRun` (injected config) per run.
+and after which no reply to that customer (any status but `discarded`) was drafted. Inquiries
+no run has decided come first, then those decided longest ago, oldest request first within
+each, so inquiries skipped for lasting reasons cannot take every run's batch. At most
+`maxCandidatesPerRun` (injected config) per run, counting what a resumed run already decided;
+a resumed run leaves out what it decided.
 
 **G-8. Skips.** A candidate is skipped, with its reason recorded, when the customer has no
 real email (`no_email`), the email is suppressed (`suppressed`), email consent is `denied`
@@ -143,7 +151,8 @@ one runner:
   most `FOLLOWUP_MODEL_TIMEOUT_MS` for the model) could outlast `FOLLOWUP_RUN_BUDGET_MS`; the
   rest wait for the next call. A model answer later than the timeout is dropped, and that
   inquiry is skipped as `model_error` for this run.
-- A tenant whose run fails is reported and left due; the run goes on with the next tenant.
+- A tenant whose run fails, or leaves an inquiry undecided (G-6), is reported, counted in
+  `errors` and left due; the run goes on with the next tenant.
 - No real model provider is wired: `FOLLOWUP_MODEL` accepts only `fake`, and only against
   loopback databases. `pnpm followup:global-switch on|off` flips the global switch (G-3).
 
@@ -155,7 +164,8 @@ one runner:
   run the agent from the scheduler only.
 - A member run checks `agents` in its own transaction just before the run, so a demotion that
   commits in that gap still lets one run start; its writes are limited to the agent actions.
-- Every run records a skip again for an inquiry that is still suppressed or capped.
+- Every run that has room left after the undecided inquiries records a skip again for an
+  inquiry that is still suppressed, without an address or capped.
 
 ## Tests
 

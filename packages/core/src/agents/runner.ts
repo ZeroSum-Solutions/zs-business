@@ -72,15 +72,20 @@ export async function runFollowUps(
   const started = await read((tx) => getRun(tx, tenantId, runId));
   if (!started || started.status !== "running") return started!;
 
-  let stop: FollowUpStopReason | null = null;
-  const candidates = await read(async (tx) =>
-    findCandidates(tx, tenantId, (await loadControls(tx, tenantId, false)).settings, now(), deps.config.maxCandidatesPerRun));
+  // A resumed run keeps its decisions: a stop it already met still stands, and it decides at most
+  // what is left of its limit (G-7), never asking the model twice for one inquiry.
+  let stop: FollowUpStopReason | null = started.decisions.map((d) => d.reason)
+    .find((reason): reason is FollowUpStopReason => reason !== null && isStopReason(reason)) ?? null;
+  let failure: { error: unknown } | null = null;
+  const candidates = stop ? [] : await read(async (tx) =>
+    findCandidates(tx, tenantId, (await loadControls(tx, tenantId, false)).settings, now(),
+      deps.config.maxCandidatesPerRun - started.decisions.length, runId));
   for (const candidate of candidates) {
     const key = `agent:item:${runId}:${candidate.intakeItemId}`;
     const ids = stepIds(tenantId, key);
     const ref = { followupId: ids.followupId, runId, intakeItemId: candidate.intakeItemId, contactId: candidate.contactId };
     try {
-      // A retried run keeps the decisions it already made, and never asks the model twice.
+      // Another call resuming the same run may have decided it meanwhile.
       const done = await read((tx) => loadDecision(tx, tenantId, ids.followupId));
       if (done) {
         if (done.reason && isStopReason(done.reason)) { stop = done.reason; break; }
@@ -98,8 +103,12 @@ export async function runFollowUps(
       if (decision.reason && isStopReason(decision.reason)) { stop = decision.reason; break; }
     } catch (error) {
       deps.report?.({ tenantId, runId, intakeItemId: candidate.intakeItemId, error });
+      failure ??= { error };
     }
   }
+  // G-6: an inquiry left without a decision keeps the run open, so a retry with the same key
+  // (or the next scheduled call in the slot) continues it. A stop ends the run either way.
+  if (failure && !stop) throw failure.error;
   parseOrFail(followUpRunOutputSchema,
     await deps.dispatch(command(FINISH_RUN_ACTION, `agent:finish:${runId}`, "agent_run", runId, { runId, stopReason: stop })));
   return (await read((tx) => getRun(tx, tenantId, runId)))!;

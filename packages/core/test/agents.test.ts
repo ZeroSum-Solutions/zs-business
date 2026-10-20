@@ -6,8 +6,8 @@
 // starts a month after the last, so earlier inquiries fall out of the lookback window.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ActionError, TenantDenied, type FollowUpPrompt, type FollowUpSettings, type MemberRole } from "@zs/contracts";
-import { asService, type Transaction } from "@zs/db";
+import { ActionError, TenantDenied, type ActionCommand, type FollowUpPrompt, type FollowUpSettings, type MemberRole } from "@zs/contracts";
+import { asService, DatabaseUnavailable, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
   agentActorId,
@@ -24,6 +24,7 @@ import {
   directDispatch,
   inQuietHours,
   memberAuthorize,
+  runFollowUps,
   setGlobalAgentSwitch,
   settleReplyDelivery,
   type EdgeDependencies,
@@ -307,6 +308,27 @@ describe("skips (G-7, G-8)", () => {
       [tenantId, byItem.get(fine!.itemId)!.replyId]))[0];
     expect(reply).toEqual({ subject: "Hello again", body: "Checking in." });
   });
+  it("puts undecided inquiries ahead of ones already skipped, so lasting skips cannot fill every batch", async () => {
+    const stuck = [await inquiry({ name: "Suppressed Sid" }), await inquiry({ name: "Suppressed Sue" })];
+    await service(async (tx) => {
+      for (const item of stuck)
+        await tx.query("INSERT INTO suppressions (tenant_id,channel,address,reason,source,created_at) VALUES ($1,'email',$2,'unsubscribe','test',$3)",
+          [tenantId, item.email, clock.now()]);
+    });
+    now += 25 * HOUR;
+    const first = await agent(createFakeFollowUpModel(), 2).runScheduled(tenantId, randomUUID());
+    expect(first).toMatchObject({ considered: 2, drafted: 0, skipped: 2 });
+
+    // A newer, sendable inquiry arrives; with a batch of two, the next run reaches it first.
+    const fresh = await inquiry({ name: "Fresh Fern" });
+    now += 25 * HOUR;
+    const second = await agent(createFakeFollowUpModel(), 2).runScheduled(tenantId, randomUUID());
+    expect(second.decisions[0]).toMatchObject({ intakeItemId: fresh.itemId, outcome: "drafted" });
+    expect(second).toMatchObject({ considered: 2, drafted: 1, skipped: 1 });
+    // The skip it still had room for went to the one decided longest ago, not the same one again.
+    const third = await agent(createFakeFollowUpModel(), 1).runScheduled(tenantId, randomUUID());
+    expect(third.decisions.map((d) => d.intakeItemId)).not.toEqual([second.decisions[1]!.intakeItemId]);
+  });
 });
 
 describe("caps (G-4)", () => {
@@ -353,6 +375,64 @@ describe("caps (G-4)", () => {
     await dueInquiries(3);
     const run = await agent(createFakeFollowUpModel(), 2).runScheduled(tenantId, randomUUID());
     expect(run).toMatchObject({ considered: 2, drafted: 2 });
+  });
+
+  it("counts a draft that committed with a later time than the check's own", async () => {
+    // A draft reads its time before it waits on the settings lock, so another draft can commit
+    // meanwhile with a later time. Here the later draft commits first, then a run reads an
+    // earlier time: the daily cap of one must still hold.
+    await configure({ maxDraftsPerDay: 1 });
+    await dueInquiries(2);
+    const later = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(later).toMatchObject({ drafted: 1, stopReason: "daily_cap" });
+    now -= 30 * 60_000;
+    const earlier = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(earlier).toMatchObject({ drafted: 0, stopReason: "daily_cap" });
+  });
+
+  it("counts a customer's draft that committed with a later time than the check's own", async () => {
+    await configure({ maxDraftsPerContact: 1, contactWindowHours: 72 });
+    const start = now;
+    const first = await inquiry({ name: "Kai" });
+    now = start + 25 * HOUR;
+    const run = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(run.drafted).toBe(1);
+    await sessionFor(owner).discardReply(run.decisions[0]!.replyId!, {}, randomUUID());
+    // A second request from Kai, stamped before that draft; then a run whose time is still before it.
+    now = start + 30 * 60_000;
+    const second = await inquiry({ name: "Kai", email: first.email });
+    now = start + 24 * HOUR + 31 * 60_000;
+    const capped = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(capped.decisions).toEqual([expect.objectContaining({ intakeItemId: second.itemId, outcome: "skipped", reason: "contact_cap" })]);
+  });
+
+  it("a run that fails mid-way stays open, and its retry decides only what is left of the limit", async () => {
+    await dueInquiries(4);
+    const real = directDispatch(deps(), tenantId, agentActorId(tenantId), agentAuthorize);
+    let drafts = 0;
+    // The second draft's write is lost (a dropped connection, say).
+    const flaky = async (command: ActionCommand) => {
+      if (command.actionType === "agent.followup.draft" && ++drafts === 2) throw new DatabaseUnavailable("connect");
+      return real(command);
+    };
+    const reports: unknown[] = [];
+    const key = `schedule:${randomUUID()}`;
+    const run = (dispatch: typeof real) => runFollowUps({
+      db: database.db, clock, model: createFakeFollowUpModel(), config: { maxCandidatesPerRun: 2 },
+      dispatch, report: (event) => reports.push(event.error),
+    }, tenantId, { key, requestedBy: null });
+
+    await expect(run(flaky)).rejects.toBeInstanceOf(DatabaseUnavailable);
+    expect(reports).toEqual([expect.any(DatabaseUnavailable)]);
+    const open = (await rows<{ id: string; status: string }>(
+      "SELECT id, status FROM agent_runs WHERE tenant_id=$1 ORDER BY started_at DESC LIMIT 1", [tenantId]))[0]!;
+    expect(open.status).toBe("running");
+    expect(await decisions(open.id)).toHaveLength(1);
+
+    // The retry continues the same run and stops at two decisions, not two more.
+    const resumed = await run(real);
+    expect(resumed).toMatchObject({ id: open.id, status: "completed", considered: 2, drafted: 2 });
+    expect(await agentDraftsSince(now - 25 * HOUR)).toBe(2);
   });
 });
 

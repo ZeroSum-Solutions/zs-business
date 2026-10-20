@@ -118,20 +118,24 @@ export function gate(controls: AgentControls, globalKilled: boolean, now: Date):
 
 const HOUR_MS = 3_600_000;
 
-/** G-4: agent drafts in the tenant in the 24 hours before now. */
+/**
+ * G-4: agent drafts in the tenant in the 24 hours before now. No upper bound: a draft whose
+ * `now` was read before it waited on the settings lock must still count a draft that committed
+ * meanwhile with a later time.
+ */
 export async function draftsToday(tx: Transaction, tenantId: string, now: Date): Promise<number> {
   return Number((await tx.query<{ n: string }>(
-    "SELECT count(*)::text AS n FROM agent_followups WHERE tenant_id=$1 AND outcome='drafted' AND created_at > $2 AND created_at <= $3",
-    [tenantId, new Date(now.getTime() - 24 * HOUR_MS), now],
+    "SELECT count(*)::text AS n FROM agent_followups WHERE tenant_id=$1 AND outcome='drafted' AND created_at > $2",
+    [tenantId, new Date(now.getTime() - 24 * HOUR_MS)],
   )).rows[0]!.n);
 }
 
-/** G-4: agent drafts for one customer in the settings' window before now. */
+/** G-4: agent drafts for one customer in the settings' window before now; no upper bound, as above. */
 export async function contactDrafts(tx: Transaction, tenantId: string, contactId: string, settings: FollowUpSettings, now: Date): Promise<number> {
   return Number((await tx.query<{ n: string }>(
     `SELECT count(*)::text AS n FROM agent_followups
-      WHERE tenant_id=$1 AND contact_id=$2 AND outcome='drafted' AND created_at > $3 AND created_at <= $4`,
-    [tenantId, contactId, new Date(now.getTime() - settings.contactWindowHours * HOUR_MS), now],
+      WHERE tenant_id=$1 AND contact_id=$2 AND outcome='drafted' AND created_at > $3`,
+    [tenantId, contactId, new Date(now.getTime() - settings.contactWindowHours * HOUR_MS)],
   )).rows[0]!.n);
 }
 

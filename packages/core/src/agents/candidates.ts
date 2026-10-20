@@ -15,13 +15,17 @@ export interface Candidate {
 }
 
 /**
- * G-7: inquiries nobody answered, oldest first. An inquiry is the customer's latest website
- * request, old enough to follow up and young enough to matter, with no agent draft yet and no
- * reply (other than a discarded one) drafted after it.
+ * G-7: inquiries nobody answered. An inquiry is the customer's latest website request, old
+ * enough to follow up and young enough to matter, with no agent draft yet and no reply (other
+ * than a discarded one) drafted after it. Inquiries this run already decided are left out, so a
+ * resumed run only fills what is left of its limit. Inquiries no run has decided come first,
+ * then those decided longest ago, so lasting skips (no address, suppressed) cannot hold the
+ * whole batch; oldest request first within each.
  */
 export async function findCandidates(
-  tx: Transaction, tenantId: string, settings: FollowUpSettings, now: Date, limit: number,
+  tx: Transaction, tenantId: string, settings: FollowUpSettings, now: Date, limit: number, runId: string,
 ): Promise<Candidate[]> {
+  if (limit < 1) return [];
   const rows = (await tx.query<{ id: string; contact_id: string; created_at: Date }>(
     `SELECT i.id, i.contact_id, i.created_at FROM intake_items i
       WHERE i.tenant_id=$1 AND i.contact_id IS NOT NULL AND i.status IN ('new_contact','linked')
@@ -29,11 +33,14 @@ export async function findCandidates(
         AND NOT EXISTS (SELECT 1 FROM intake_items l WHERE l.tenant_id=i.tenant_id AND l.contact_id=i.contact_id
               AND (l.created_at, l.id) > (i.created_at, i.id))
         AND NOT EXISTS (SELECT 1 FROM agent_followups f WHERE f.tenant_id=i.tenant_id AND f.intake_item_id=i.id
-              AND f.outcome='drafted')
+              AND (f.outcome='drafted' OR f.run_id=$5))
         AND NOT EXISTS (SELECT 1 FROM inbox_replies r WHERE r.tenant_id=i.tenant_id AND r.contact_id=i.contact_id
               AND r.status<>'discarded' AND r.created_at >= i.created_at)
-      ORDER BY i.created_at, i.id LIMIT $4`,
-    [tenantId, new Date(now.getTime() - settings.waitHours * HOUR_MS), new Date(now.getTime() - settings.lookbackDays * DAY_MS), limit],
+      ORDER BY (SELECT max(f.created_at) FROM agent_followups f WHERE f.tenant_id=i.tenant_id AND f.intake_item_id=i.id)
+                 ASC NULLS FIRST,
+               i.created_at, i.id
+      LIMIT $4`,
+    [tenantId, new Date(now.getTime() - settings.waitHours * HOUR_MS), new Date(now.getTime() - settings.lookbackDays * DAY_MS), limit, runId],
   )).rows;
   return rows.map((row) => ({ intakeItemId: row.id, contactId: row.contact_id, createdAt: row.created_at }));
 }

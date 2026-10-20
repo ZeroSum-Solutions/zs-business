@@ -13,8 +13,8 @@ const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
 
-function startWorker(env: Record<string, string>) {
-  const child = spawn(TSX, ["src/scripts/followup-worker.ts"], {
+function startWorker(env: Record<string, string>, script = "src/scripts/followup-worker.ts", args: string[] = []) {
+  const child = spawn(TSX, [script, ...args], {
     cwd: API_DIR,
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...env },
     stdio: ["ignore", "pipe", "pipe"],
@@ -78,5 +78,35 @@ describe("follow-up worker entry point", () => {
       "SELECT tenant_id, requested_by, status FROM agent_runs"));
     // One run for the current slot, for A only; B never turned the agent on.
     expect(runs.rows).toEqual([{ tenant_id: fixture.a.tenantId, requested_by: null, status: "completed" }]);
+  }, 30_000);
+});
+
+describe("global switch script", () => {
+  const SWITCH = "src/scripts/followup-global-switch.ts";
+  const CA_CERT = ["-----BEGIN CERTIFICATE-----", "MIIBtest", "-----END CERTIFICATE-----"].join("\n");
+  const killed = async () => (await fixture.service((tx) => tx.query<{ killed: boolean; note: string | null }>(
+    "SELECT killed, note FROM agent_global_switch WHERE id"))).rows[0];
+
+  it("refuses a hosted URL whose query string could turn TLS checks off", async () => {
+    // Synthetic password, built at runtime so secret scanners do not flag a literal.
+    const remote = `postgres://postgres:${["pw", "d".repeat(20)].join("-")}@db.abcd.supabase.co:5432/postgres`;
+    for (const [url, message] of [
+      [`${remote}?sslmode=no-verify`, "FOLLOWUP_SERVICE_DATABASE_URL must not carry a query string"],
+      [remote, "DATABASE_CA_CERT is required"],
+    ] as const) {
+      const run = startWorker({ FOLLOWUP_SERVICE_DATABASE_URL: url, ...(url === remote ? {} : { DATABASE_CA_CERT: CA_CERT }) }, SWITCH, ["off"]);
+      expect(await run.exited).not.toBe(0);
+      expect(run.output()).toContain(message);
+    }
+    expect(await killed()).toMatchObject({ killed: false });
+  });
+
+  it("stops every tenant, then lets them draft again", async () => {
+    const off = startWorker({ FOLLOWUP_SERVICE_DATABASE_URL: database.url }, SWITCH, ["off", "Checking", "the", "wording"]);
+    expect(await off.exited, off.output()).toBe(0);
+    expect(await killed()).toEqual({ killed: true, note: "Checking the wording" });
+    const on = startWorker({ FOLLOWUP_SERVICE_DATABASE_URL: database.url }, SWITCH, ["on"]);
+    expect(await on.exited, on.output()).toBe(0);
+    expect(await killed()).toEqual({ killed: false, note: null });
   }, 30_000);
 });
