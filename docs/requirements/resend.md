@@ -97,10 +97,28 @@ changes nothing. The suppression goes through the dispatcher with a server-built
 `email-feedback:<svix-id>`, so a redelivered webhook replays the stored action. Member and MCP
 keys may not use that prefix (D-9). Database errors answer 503, so Resend retries.
 
+**R-9. The runner.** Something must run the worker, or an approved reply stays queued. Two entry
+points share one runner (`apps/api/src/delivery/`):
+- `GET /cron/delivery`, its own Vercel function (`functions/cron/delivery.func`), for Vercel
+  Cron. It needs `Authorization: Bearer <CRON_SECRET>` (constant-time compare; 401 otherwise,
+  404 without `CRON_SECRET`). The build adds a `crons` entry only when `DELIVERY_CRON_SCHEDULE`
+  is set at build time, so no deploy starts sending by itself.
+- `pnpm delivery:worker`, a Node loop for any other host, every `DELIVERY_INTERVAL_MS`.
+The kill switch is `DELIVERY_WORKER`: anything but `on` runs nothing (the cron answers 200
+`{ ran: false }` without touching the database). A run ingests new send events and works due
+deliveries until a pass claims fewer than `DELIVERY_CLAIM_LIMIT`, and never starts a pass that
+could outlast `DELIVERY_RUN_BUDGET_MS` (limit × provider timeout must fit the budget). A run cut
+short is safe: leases expire and an open attempt counts as uncertain (D-7). The wiring is
+production's: M3b's `approvalForAction` behind `approvalsFromRecords`, M3c's
+`settleReplyDelivery` as `onSettled`, Resend for email. SMS has no provider yet and is refused
+as `sms_provider_not_configured`; nothing produces SMS in v1. The worker connects with
+`DELIVERY_DATABASE_URL`, a login that may `SET ROLE service_role`, never the API's runtime login.
+
 ## Known limits (revision 1)
 
 - One sender for every tenant. Per-tenant sending domains come later.
 - No lookup by key: an unknown outcome past the window waits for an operator (D-8).
 - Delivered, opened and clicked events are not stored; nothing reads them yet.
-- The worker has no runtime entry point yet; wiring it (cron or queue) on the Mac is the
-  M5 deploy step.
+- Vercel environment variables are project-wide, so the API function can see
+  `DELIVERY_DATABASE_URL` too; only the delivery function's code opens it.
+- Vercel Hobby runs crons once a day; a useful schedule needs Pro, or the Node worker.

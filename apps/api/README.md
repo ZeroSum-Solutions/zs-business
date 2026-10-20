@@ -505,3 +505,24 @@ Hosted settings that the scripts do not manage:
   `x-vercel-protection-bypass` header for automated checks.
 - The dashboard's sign-in attempt limiter is in memory, so on Vercel each serverless
   instance counts on its own; Supabase Auth's own email rate limit still bounds the links sent.
+
+## Delivery runner (`/cron/delivery`, `pnpm delivery:worker`)
+
+Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Off unless
+`DELIVERY_WORKER=on`.
+
+| Variable | Meaning |
+|---|---|
+| `DELIVERY_WORKER` | Kill switch. `on` runs; anything else, or unset, runs nothing. |
+| `CRON_SECRET` | 32+ characters. Vercel Cron sends it as `Authorization: Bearer …`. Unset, the route is 404. |
+| `DELIVERY_DATABASE_URL` | A login that may `SET ROLE service_role` (postgres on hosted Supabase), never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY` | What one email and one SMS segment take from the wallet, in minor units (`usd` by default). |
+| `UNSUBSCRIBE_TOKEN_SECRET`, `DELIVERY_UNSUBSCRIBE_BASE_URL` | Signs the List-Unsubscribe links; the same secret as the API. The URL is the https address of `/public/v1/unsubscribe`. |
+| `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | The Resend sender (R-6). `RESEND_FROM` must be on a domain verified in Resend. |
+| `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × timeout must fit the budget. |
+| `DELIVERY_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/delivery`, for example `*/5 * * * *`. Unset, there is no cron. |
+
+`GET /cron/delivery` answers 401 without the right bearer, 200 `{ ran: false }` with the switch
+off, 200 `{ ran: true, passes, ingested, claimed, sent, retried, blocked, dead, errors,
+budgetSpent }` after a run, and 503 when a run fails (the next run picks the work up again).
+It is its own Vercel function; the API function never opens the service login.
