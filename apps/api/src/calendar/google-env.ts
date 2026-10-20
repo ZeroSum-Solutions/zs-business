@@ -43,9 +43,10 @@ export const formatIssues = (error: z.ZodError) =>
 
 const apiSchema = z.object({
   ...googleClientVariables,
-  // https://<api host>/oauth/google/callback, registered in Google Cloud as well.
+  // https://<dashboard host>/api/calendar/google/callback, registered in Google Cloud as well. The
+  // dashboard's route adds the browser key and calls /oauth/google/callback here (G-2).
   GOOGLE_REDIRECT_URL: secureUrlVariable("GOOGLE_REDIRECT_URL"),
-  // The dashboard page the callback sends the owner back to.
+  // The dashboard page the callback sends the owner back to (https://<dashboard host>/account/connections).
   GOOGLE_RETURN_URL: secureUrlVariable("GOOGLE_RETURN_URL"),
   GOOGLE_STATE_SECRET: signingSecretVariable(),
   GOOGLE_STATE_PREVIOUS_SECRET: signingSecretVariable().optional(),

@@ -4,13 +4,15 @@
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
  * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source, inbox, home, agent and site routes and /v1/me are forwarded (for example
- * /v1/approvals/:id/approve, /v1/inbox/threads and PUT /v1/agents/followup/settings), only from
- * this origin: other sites cannot make a signed-in browser spend its session here.
+ * approval, source, inbox, home, agent, site and calendar routes and /v1/me are forwarded (for
+ * example /v1/approvals/:id/approve, /v1/inbox/threads and PUT /v1/agents/followup/settings), only
+ * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
+ * Google Calendar connection also binds the flow to this browser (calendar-connect.ts).
  */
 import type { ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
 import { readBoundedBody, type BodyTiming } from "./body";
+import { bindConnectStart, isConnectStart } from "./calendar-connect";
 import { reportSetupProblem, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
 import { authFor, lookupSession, type AuthContext } from "./supabase";
@@ -20,7 +22,7 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites"]);
+const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar"]);
 const SINGLE = new Set(["me", "members", "approvals", "sources", "sites"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
@@ -71,6 +73,13 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
     if (!read.ok) return auth.finish(reply(BODY_REFUSED[read.reason], "ValidationFailed"));
     body = read.bytes;
   }
+  let setCookie: string | null = null;
+  if (body && isConnectStart(request.method, path)) {
+    const bound = bindConnectStart(request, body, config.trustProxy);
+    if (!bound) return auth.finish(reply(400, "ValidationFailed"));
+    body = bound.body;
+    setCookie = bound.cookie;
+  }
 
   const target = `${config.apiUrl}/${path.join("/")}${new URL(request.url).search}`;
   let upstream: Response;
@@ -85,7 +94,10 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
   } catch {
     return auth.finish(reply(502, "Internal"));
   }
-  return relay(upstream, auth);
+  const response = await relay(upstream, auth);
+  // The browser keeps its key only for a flow the API started.
+  if (setCookie && upstream.ok) response.headers.append("Set-Cookie", setCookie);
+  return response;
 }
 
 async function relay(upstream: Response, auth: AuthContext): Promise<Response> {

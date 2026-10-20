@@ -261,7 +261,7 @@ function operations(session: Session): Record<string, { permission: Permission |
     listSources: { permission: "customers", run: () => session.listSources({ subjectType: "contact", subjectId: tenant.contactId }) },
     // google-calendar.md G-1, G-5: owners connect and disconnect; members with the calendar see the list.
     listCalendarConnections: { permission: "calendar", run: () => session.listCalendarConnections() },
-    startGoogleConnect: { permission: "publish", run: () => session.startGoogleConnect({ resourceId: tenant.resourceId }, randomUUID()) },
+    startGoogleConnect: { permission: "publish", run: () => session.startGoogleConnect({ resourceId: tenant.resourceId, browserBinding: "b".repeat(43) }, randomUUID()) },
     disconnectCalendar: { permission: "publish", run: async () => session.disconnectCalendar(await calendarConnection(), randomUUID()) },
     // M6 follow-up agent: owners set it up and resume it; anyone who drafts may read it or stop it (agents.md G-11).
     getFollowUpStatus: { permission: "inbox.drafts", run: () => session.getFollowUpStatus() },

@@ -1,10 +1,14 @@
 // M5 Google Calendar connections through the real app (docs/requirements/google-calendar.md G-1,
 // G-2, G-3, G-5): the consent URL, the OAuth callback against the in-process fake Google (real
 // client, real PKCE), the sealed token, and the owner's list and disconnect. No network.
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { apiErrorBodySchema, calendarConnectionListSchema, calendarConnectionSchema, connectGoogleCalendarResponseSchema } from "@zs/contracts";
-import { DatabaseUnavailable, derivedId, openRefreshToken, pkceChallenge, pkceVerifier, signConnectState, verifyConnectState } from "@zs/core";
+import {
+  apiErrorBodySchema, calendarConnectionListSchema, calendarConnectionSchema, CONNECT_BROWSER_KEY_HEADER, connectGoogleCalendarResponseSchema,
+} from "@zs/contracts";
+import {
+  browserBindingFor, DatabaseUnavailable, derivedId, openRefreshToken, pkceChallenge, pkceVerifier, signConnectState, verifyConnectState,
+} from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { call, createApiHarness, NOW, signedInMember, type ApiHarness, type MemberSetup } from "./helpers.js";
 import {
@@ -43,8 +47,13 @@ async function newResource(tenantId: string): Promise<string> {
   return id;
 }
 
+/** The key the dashboard keeps in the starting browser's cookie (G-2); a fresh one is another browser. */
+const newBrowserKey = () => randomBytes(32).toString("base64url");
+const BROWSER_KEY = newBrowserKey();
+const BINDING = browserBindingFor(BROWSER_KEY);
+
 const startConnect = (token: string, resourceId: unknown, key: string | null = randomUUID(), target = app) =>
-  call(target, "POST", "/v1/calendar/google/connect", { token, body: { resourceId }, ...(key === null ? {} : { key }) });
+  call(target, "POST", "/v1/calendar/google/connect", { token, body: { resourceId, browserBinding: BINDING }, ...(key === null ? {} : { key }) });
 
 /** The consent URL for one resource, and what it names. */
 async function consentFor(member: Pick<MemberSetup, "token" | "tenantId">, resourceId: string, key = randomUUID()) {
@@ -64,8 +73,10 @@ async function consent(authorizeUrl: string): Promise<URLSearchParams> {
   return location.searchParams;
 }
 
-async function callback(query: Record<string, string>, target = app) {
-  const response = await target.request(`/oauth/google/callback?${new URLSearchParams(query)}`);
+/** The callback as the dashboard's route forwards it: the query, and the browser key from the cookie. */
+async function callback(query: Record<string, string>, target = app, browserKey: string | null = BROWSER_KEY) {
+  const headers: Record<string, string> = browserKey === null ? {} : { [CONNECT_BROWSER_KEY_HEADER]: browserKey };
+  const response = await target.request(`/oauth/google/callback?${new URLSearchParams(query)}`, { headers });
   const text = await response.text();
   return { status: response.status, headers: response.headers, body: text ? JSON.parse(text) as unknown : null };
 }
@@ -127,7 +138,7 @@ describe("POST /v1/calendar/google/connect (G-1)", () => {
     });
     const connectionId = derivedId(h.a.tenantId, key, "calendar_connection");
     expect(verifyConnectState({ current: STATE_SECRET }, query.get("state")!, clock.now())).toEqual({
-      tenantId: h.a.tenantId, actorId: h.a.actorId, resourceId, connectionId, expiresAt: now + 10 * 60_000,
+      tenantId: h.a.tenantId, actorId: h.a.actorId, resourceId, connectionId, browserBinding: BINDING, expiresAt: now + 10 * 60_000,
     });
     // Signed by the current secret only: another secret does not verify it.
     expect(verifyConnectState({ current: PREVIOUS_STATE_SECRET }, query.get("state")!, clock.now())).toBeNull();
@@ -150,8 +161,12 @@ describe("POST /v1/calendar/google/connect (G-1)", () => {
     expect((await startConnect(h.a.token, resourceId, null)).status).toBe(400);
     expect((await startConnect(h.a.token, resourceId, `oauth-google:${randomUUID()}`)).status).toBe(400);
     expect((await startConnect(h.a.token, "not-a-uuid")).status).toBe(400);
-    expect((await call(app, "POST", "/v1/calendar/google/connect", { token: h.a.token, key: randomUUID(), body: { resourceId, extra: 1 } })).status)
+    expect((await call(app, "POST", "/v1/calendar/google/connect", { token: h.a.token, key: randomUUID(), body: { resourceId, browserBinding: BINDING, extra: 1 } })).status)
       .toBe(400);
+    // A start that names no browser, or not as a SHA-256 in base64url, starts nothing.
+    for (const browserBinding of [undefined, "", BINDING.slice(1), `${BINDING}A`, `${BINDING.slice(0, 42)}=`, BROWSER_KEY.replace(/./, "+")])
+      expect((await call(app, "POST", "/v1/calendar/google/connect", { token: h.a.token, key: randomUUID(), body: { resourceId, browserBinding } })).status,
+        String(browserBinding)).toBe(400);
   });
 
   it("is not found without Google config, and the callback is not served", async () => {
@@ -238,6 +253,25 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     expect((await callback({ state: flow.state, code: "c" })).status).toBe(400);
     expect(tokenCalls()).toBe(calls);
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+  });
+
+  it("finishes only in the browser that started: another, missing or malformed browser key is browser_mismatch, before anything else", async () => {
+    const flow = await consentFor(h.a, await newResource(h.a.tenantId));
+    const back = await consent(flow.authorizeUrl);
+    const query = { state: back.get("state")!, code: back.get("code")! };
+    const calls = tokenCalls();
+    // The binding itself is public in the state; only its preimage, the cookie's key, finishes the flow.
+    for (const browserKey of [newBrowserKey(), null, "", BINDING, BROWSER_KEY.slice(1), `${BROWSER_KEY}A`, `${BROWSER_KEY.slice(0, 42)}é`]) {
+      expect(landing(await callback(query, app, browserKey)), String(browserKey)).toEqual({ calendar: "error", reason: "browser_mismatch" });
+      // Not even Google's own answer is told to another browser.
+      expect(landing(await callback({ state: query.state, error: "access_denied" }, app, browserKey))).toEqual({ calendar: "error", reason: "browser_mismatch" });
+    }
+    expect(tokenCalls()).toBe(calls);
+    expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    // The starting browser still finishes with the unspent code; another browser's reload learns nothing.
+    expect(landing(await callback(query))).toEqual({ calendar: "connected" });
+    expect(landing(await callback(query, app, newBrowserKey()))).toEqual({ calendar: "error", reason: "browser_mismatch" });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("accepts a state signed with the previous secret during a rotation, deriving its verifier from that secret", async () => {

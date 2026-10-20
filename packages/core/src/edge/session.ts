@@ -749,8 +749,9 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       ({ items: await read("calendar", (tx) => listCalendarConnections(tx, tenantId)) }),
     /**
      * G-1: the consent URL for connecting one resource. Changes nothing: the connection ID derives
-     * from the tenant and the key, the signed state names who asked and for what, and the PKCE
-     * verifier derives from the state secret and the connection ID, so the callback rebuilds both.
+     * from the tenant and the key, the signed state names who asked, for what and from which
+     * browser, and the PKCE verifier derives from the state secret and the connection ID, so the
+     * callback rebuilds both.
      */
     async startGoogleConnect(body: unknown, key: unknown): Promise<ConnectGoogleCalendarResponse> {
       const calendar = deps.calendar;
@@ -769,7 +770,8 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       });
       const secret = calendar.stateSecrets.current;
       const state = signConnectState(secret, {
-        tenantId, actorId, resourceId: request.resourceId, connectionId, expiresAt: now + CONNECT_STATE_LIFETIME_MS,
+        tenantId, actorId, resourceId: request.resourceId, connectionId, browserBinding: request.browserBinding,
+        expiresAt: now + CONNECT_STATE_LIFETIME_MS,
       });
       return parseInput(connectGoogleCalendarResponseSchema, {
         authorizeUrl: calendar.google.authorizeUrl({ state, codeChallenge: pkceChallenge(pkceVerifier(secret, connectionId)) }),

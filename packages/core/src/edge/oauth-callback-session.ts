@@ -1,6 +1,8 @@
 // M5 Google OAuth callback (docs/requirements/google-calendar.md G-2, G-3). Original code. The
 // request is anonymous; what it may do comes from the signed state alone: the tenant, the member
-// who asked, the resource and the connection ID. The connect action then runs through the member
+// who asked, the resource and the connection ID. It goes on only for the browser that started the
+// flow: the dashboard passes the key from that browser's cookie, which must hash to the state's
+// binding. The connect action then runs through the member
 // write path as that member, so a member who is no longer an owner is refused, under the reserved
 // key `oauth-google:<connection ID>`. The refresh token is sealed before the action sees it; the
 // access token is dropped.
@@ -15,7 +17,7 @@ import {
 import { readClock } from "../booking/slots.js";
 import { getCalendarConnection, googleConnectIdempotencyKey } from "../calendar/connections.js";
 import { GOOGLE_EVENTS_SCOPE } from "../calendar/google.js";
-import { pkceVerifier, verifyConnectState, type OAuthState } from "../calendar/oauth-state.js";
+import { browserKeyMatches, pkceVerifier, verifyConnectState, type OAuthState } from "../calendar/oauth-state.js";
 import { sealRefreshToken } from "../calendar/seal.js";
 import { GoogleRequestFailed, type GoogleTokenGrant } from "../calendar/types.js";
 import { requireMember } from "../members/access.js";
@@ -23,12 +25,15 @@ import { derivedId } from "./ids.js";
 import { memberDispatch, type EdgeDependencies } from "./session.js";
 
 /** G-2: the redirect's `reason` when the connection was not made. */
-export type OAuthCallbackReason = "denied" | "exchange_failed" | "no_refresh_token" | "scope_missing" | "forbidden" | "conflict";
+export type OAuthCallbackReason =
+  | "browser_mismatch" | "denied" | "exchange_failed" | "no_refresh_token" | "scope_missing" | "forbidden" | "conflict";
 
 export interface OAuthCallbackInput {
   readonly state?: string | undefined;
   readonly code?: string | undefined;
   readonly error?: string | undefined;
+  /** The browser key from the cookie of the browser that came back (the dashboard forwards it). */
+  readonly browserKey?: string | undefined;
 }
 
 export type OAuthCallbackOutcome =
@@ -61,6 +66,9 @@ export function createOAuthCallbackSession(deps: EdgeDependencies) {
       const fail = (reason: OAuthCallbackReason): OAuthCallbackOutcome => ({ ok: true, connected: false, reason });
       const connected: OAuthCallbackOutcome = { ok: true, connected: true, tenantId, connectionId };
 
+      // Before anything else, Google's own answer included: a consent URL finished in another
+      // browser (someone else's Google account) must not connect, nor learn how far it got.
+      if (!browserKeyMatches(state, input.browserKey)) return fail("browser_mismatch");
       if (input.error !== undefined) return fail("denied");
 
       /**

@@ -3,6 +3,8 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  browserBindingFor,
+  browserKeyMatches,
   channelToken,
   CONNECT_STATE_LIFETIME_MS,
   pkceChallenge,
@@ -15,9 +17,10 @@ import {
 
 const NOW = Date.parse("2026-10-20T09:00:00.000Z");
 const secret = () => randomBytes(32).toString("hex");
+const browserKey = () => randomBytes(32).toString("base64url");
 const state = (over: Partial<OAuthState> = {}): OAuthState => ({
   tenantId: randomUUID(), actorId: randomUUID(), resourceId: randomUUID(), connectionId: randomUUID(),
-  expiresAt: NOW + CONNECT_STATE_LIFETIME_MS, ...over,
+  browserBinding: browserBindingFor(browserKey()), expiresAt: NOW + CONNECT_STATE_LIFETIME_MS, ...over,
 });
 const at = (ms: number) => new Date(ms);
 
@@ -65,23 +68,28 @@ describe("the OAuth state (G-1, G-2)", () => {
     for (const changed of swap(tag, 0).slice(0, 8)) expect(verifyConnectState({ current: key }, `${prefix}.${body}.${changed}`, at(NOW))).toBeNull();
   });
 
-  it("refuses a validly signed body that is not five lower-case UUIDs and a safe integer", () => {
+  it("refuses a validly signed body that is not four lower-case UUIDs, a browser binding and a safe integer", () => {
     const key = secret();
     const forge = (fields: unknown) => {
       const body = Buffer.from(typeof fields === "string" ? fields : JSON.stringify(fields)).toString("base64url");
       return `zgs1.${body}.${createHmac("sha256", key).update(`zgs1.${body}`).digest().toString("base64url")}`;
     };
     const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
-    expect(verifyConnectState({ current: key }, forge([...ids, NOW + 1000]), at(NOW))).not.toBeNull();
+    const binding = browserBindingFor(browserKey());
+    expect(verifyConnectState({ current: key }, forge([...ids, binding, NOW + 1000]), at(NOW))).not.toBeNull();
     const bad: unknown[] = [
-      [...ids],
-      [...ids, NOW + 1000, "extra"],
-      [...ids.slice(0, 3), "not-a-uuid", NOW + 1000],
-      [ids[0]!.toUpperCase(), ...ids.slice(1), NOW + 1000],
-      [...ids.slice(0, 3), 7, NOW + 1000],
-      [...ids, String(NOW + 1000)],
-      [...ids, NOW + 1000.5],
-      [...ids, Number.MAX_SAFE_INTEGER + 2],
+      [...ids, NOW + 1000],
+      [...ids, binding],
+      [...ids, binding, NOW + 1000, "extra"],
+      [...ids.slice(0, 3), "not-a-uuid", binding, NOW + 1000],
+      [ids[0]!.toUpperCase(), ...ids.slice(1), binding, NOW + 1000],
+      [...ids.slice(0, 3), 7, binding, NOW + 1000],
+      [...ids, binding.slice(1), NOW + 1000],
+      [...ids, `${binding.slice(0, 42)}+`, NOW + 1000],
+      [...ids, null, NOW + 1000],
+      [...ids, binding, String(NOW + 1000)],
+      [...ids, binding, NOW + 1000.5],
+      [...ids, binding, Number.MAX_SAFE_INTEGER + 2],
       { tenantId: ids[0] },
       "not json",
       "null",
@@ -109,6 +117,19 @@ describe("the OAuth state (G-1, G-2)", () => {
       ` ${token}`,
     ];
     for (const value of malformed) expect(verifyConnectState({ current: key }, value, at(NOW)), value.slice(0, 30)).toBeNull();
+  });
+});
+
+describe("the browser binding (G-1, G-2)", () => {
+  it("matches only the key the binding was made from, in constant time, and never a missing or malformed key", () => {
+    const key = browserKey();
+    const bound = state({ browserBinding: browserBindingFor(key) });
+    expect(bound.browserBinding).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(bound.browserBinding).toBe(createHash("sha256").update(key).digest("base64url"));
+    expect(browserKeyMatches(bound, key)).toBe(true);
+    // The binding is in the (readable) state; it is not the key.
+    for (const given of [undefined, "", bound.browserBinding, browserKey(), key.slice(1), `${key}A`, `${key.slice(0, 42)}é`, ` ${key.slice(1)}`, key.toUpperCase()])
+      expect(browserKeyMatches(bound, given), String(given)).toBe(given === key);
   });
 });
 

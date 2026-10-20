@@ -1,7 +1,7 @@
 // M5 Google Calendar connections (docs/requirements/google-calendar.md G-1, G-4, G-5, G-11): the
 // connect and disconnect actions through the member write path, the owner's list, and what the
 // runtime role may and may not do to calendar rows, all under the runtime role with two tenants.
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   CALENDAR_GOOGLE_CONNECT_ACTION,
@@ -15,6 +15,7 @@ import {
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import {
   approvedDispatch,
+  browserBindingFor,
   createSession,
   derivedId,
   generateSealKeyPair,
@@ -38,6 +39,8 @@ const publicKey = parseSealPublicKey(keys.publicKey);
 const privateKey = parseSealPrivateKey(keys.privateKey);
 /** Synthetic state secret, built at runtime so secret scanners do not flag a literal. */
 const STATE_SECRET = ["test", "oauth-state", "s".repeat(32)].join("-");
+/** The hash of the starting browser's key (G-1); the callback tests live in apps/api. */
+const BINDING = browserBindingFor(randomBytes(32).toString("base64url"));
 
 /** Only the consent URL is used here; the callback's exchange is covered by the API tests. */
 const google: GoogleClient = {
@@ -260,11 +263,11 @@ describe("listCalendarConnections and startGoogleConnect", () => {
   it("signs a state naming the member, resource and derived connection, with a matching PKCE challenge", async () => {
     const { tenantId, ownerId, resourceId } = tenants.a;
     const key = randomUUID();
-    const { authorizeUrl } = await createSession(deps(), { tenantId, actorId: ownerId }).startGoogleConnect({ resourceId }, key);
+    const { authorizeUrl } = await createSession(deps(), { tenantId, actorId: ownerId }).startGoogleConnect({ resourceId, browserBinding: BINDING }, key);
     const query = new URL(authorizeUrl).searchParams;
     const connectionId = derivedId(tenantId, key, "calendar_connection");
     expect(verifyConnectState({ current: STATE_SECRET }, query.get("state")!, clock.now())).toEqual({
-      tenantId, actorId: ownerId, resourceId, connectionId, expiresAt: Date.parse(NOW) + 10 * 60_000,
+      tenantId, actorId: ownerId, resourceId, connectionId, browserBinding: BINDING, expiresAt: Date.parse(NOW) + 10 * 60_000,
     });
     expect(query.get("code_challenge")).toBe(pkceChallenge(pkceVerifier(STATE_SECRET, connectionId)));
     // Nothing is stored before the callback.
@@ -273,9 +276,9 @@ describe("listCalendarConnections and startGoogleConnect", () => {
 
   it("refuses another tenant's resource and answers NotFound without calendar config", async () => {
     const session = createSession(deps(), { tenantId: tenants.a.tenantId, actorId: tenants.a.ownerId });
-    await expect(session.startGoogleConnect({ resourceId: tenants.b.resourceId }, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
+    await expect(session.startGoogleConnect({ resourceId: tenants.b.resourceId, browserBinding: BINDING }, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
     await expect(createSession(deps(false), { tenantId: tenants.a.tenantId, actorId: tenants.a.ownerId })
-      .startGoogleConnect({ resourceId: tenants.a.resourceId }, randomUUID())).rejects.toBeInstanceOf(NotFound);
+      .startGoogleConnect({ resourceId: tenants.a.resourceId, browserBinding: BINDING }, randomUUID())).rejects.toBeInstanceOf(NotFound);
   });
 });
 

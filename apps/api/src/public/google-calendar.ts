@@ -1,8 +1,10 @@
 // docs/requirements/google-calendar.md G-2, G-8: the two anonymous Google routes. Original code.
-// The OAuth callback trusts only its signed state, and runs the connect action as the member the
+// The OAuth callback trusts only its signed state and the browser key the dashboard's callback
+// route forwards from the starting browser's cookie, and runs the connect action as the member the
 // state names. The push webhook checks the channel token before any database work and only stores
 // that a channel changed; the calendar worker (service role) does the rest.
 import type { KeyObject } from "node:crypto";
+import { CONNECT_BROWSER_KEY_HEADER } from "@zs/contracts";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import {
@@ -48,6 +50,7 @@ export function googleCalendarRoutes(
     .get("/oauth/google/callback", async (c) => {
       const outcome = await createOAuthCallbackSession(requestEdge(c)).complete({
         state: c.req.query("state"), code: c.req.query("code"), error: c.req.query("error"),
+        browserKey: c.req.header(CONNECT_BROWSER_KEY_HEADER),
       }, c.var.signal);
       if (!outcome.ok) {
         config.report?.({ route: "callback", outcome: "bad_state" });

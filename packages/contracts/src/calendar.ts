@@ -9,9 +9,18 @@ const instantSchema = z.iso.datetime({ precision: 3 });
 export const CALENDAR_GOOGLE_CONNECT_ACTION = "calendar.google.connect";
 export const CALENDAR_GOOGLE_DISCONNECT_ACTION = "calendar.google.disconnect";
 
-/** G-1: start connecting a booking resource to the owner's Google Calendar. */
-export const connectGoogleCalendarRequestSchema = z.strictObject({ resourceId: idSchema });
+/**
+ * G-1: start connecting a booking resource to the owner's Google Calendar. `browserBinding` is the
+ * SHA-256 (base64url) of a random key the dashboard's server keeps in an httpOnly cookie on the
+ * browser that asked; the callback finishes only with that key (G-2).
+ */
+export const connectGoogleCalendarRequestSchema = z.strictObject({
+  resourceId: idSchema,
+  browserBinding: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+});
 export type ConnectGoogleCalendarRequest = z.infer<typeof connectGoogleCalendarRequestSchema>;
+/** G-2: the header the dashboard's callback route uses to hand the API the browser's key. */
+export const CONNECT_BROWSER_KEY_HEADER = "x-zs-browser-key";
 export const connectGoogleCalendarResponseSchema = z.strictObject({
   authorizeUrl: z.url({ protocol: /^https?$/ }),
 });
