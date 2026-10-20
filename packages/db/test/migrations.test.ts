@@ -35,6 +35,8 @@ const shipped: Record<string, string> = {
   // M3b approvals and source records (#12).
   "20261020100000_approvals.sql": "6cc3330683f223a71ace1235d550edfe5142b71b7f2ece4533e0d4c8f4939e87",
   "20261020100100_source_records.sql": "8aa230cd0371b4841c73cef4937b2a79cc57797a2dae870a08bd8625af276b27",
+  // M3d wallet and delivery (#14).
+  "20261020300000_wallet_and_delivery.sql": "6604e6ffea01774b25b497c0a01e02d4e04e6183cc98dc12dd52bc6feb4d4bd7",
 };
 /**
  * Main before M3 public intake, with M2a members: the intake migration sorts earlier but is

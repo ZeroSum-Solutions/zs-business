@@ -9,7 +9,7 @@ import {
   type TwoTenantFixture,
 } from "@zs/db/testing";
 import { createLocalStubSessionCheck, signBookingKey } from "@zs/core";
-import { createApp, createHs256Verifier, createPostgresRateLimiter, type App, type PublicIntakeConfig } from "../src/app.js";
+import { createApp, createHs256Verifier, createPostgresRateLimiter, type App, type PublicIntakeConfig, type UnsubscribeConfig } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
 /** Synthetic HS256 key, built at runtime so secret scanners do not flag a literal. */
@@ -22,6 +22,9 @@ export const clock = { now: () => new Date(NOW) };
 export const KEY_SECRET = ["test", "booking", "k".repeat(32)].join("-");
 export const PREVIOUS_KEY_SECRET = ["test", "booking", "p".repeat(32)].join("-");
 export const PUBLIC_BASE_URL = "http://book.test";
+/** Synthetic unsubscribe token secrets, built at runtime like SECRET. */
+export const UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "u".repeat(32)].join("-");
+export const PREVIOUS_UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "q".repeat(32)].join("-");
 
 /** A signed-in member: an auth user with a live session and a membership row. */
 export interface MemberSetup {
@@ -97,8 +100,10 @@ async function provision(database: TestDatabase, fixture: TwoTenantFixture, tena
 export interface HarnessOptions {
   /** Turns the public booking routes on; secrets and base URL default to the test values. */
   publicIntake?: Partial<PublicIntakeConfig>;
-  /** Where the public limits count; "postgres" builds the shared limiter on the harness database. */
+  /** Where the public and unsubscribe limits count; "postgres" builds the shared limiter on the harness database. */
   limiterStore?: "memory" | "postgres";
+  /** Turns the unsubscribe routes on; the token secret defaults to UNSUBSCRIBE_SECRET. */
+  unsubscribe?: Partial<UnsubscribeConfig>;
   clock?: { now(): Date };
 }
 
@@ -106,6 +111,8 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
   const database = await createTestDatabase();
   const fixture = await createTwoTenantFixture(database);
   const appClock = options.clock ?? clock;
+  // As in the server: one shared limiter for the booking and unsubscribe routes.
+  const shared = options.limiterStore === "postgres" ? { limiter: createPostgresRateLimiter(database.db, appClock) } : {};
   const app = createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
     // The loopback auth stub stands in for Supabase Auth; core's tests cover the Supabase check.
@@ -118,9 +125,12 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
       ? { publicIntake: {
         keySecrets: { current: KEY_SECRET },
         publicBaseUrl: PUBLIC_BASE_URL,
-        ...(options.limiterStore === "postgres" ? { limiter: createPostgresRateLimiter(database.db, appClock) } : {}),
+        ...shared,
         ...options.publicIntake,
       } }
+      : {}),
+    ...(options.unsubscribe
+      ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...shared, ...options.unsubscribe } }
       : {}),
   });
   return {

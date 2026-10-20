@@ -152,7 +152,8 @@ expired buckets, so the table stays bounded by the live windows. The charge runs
 own runtime transaction under the request deadline. If the database cannot answer (no
 connection in time, a lock or statement timeout, a lost connection), the request gets 503
 with `Retry-After` and is not served. `PUBLIC_RATE_LIMIT_STORE=memory` counts in the process instead and
-is refused unless `DATABASE_URL` is a loopback host.
+is refused unless `DATABASE_URL` is a loopback host. The email unsubscribe routes
+(delivery.md D-9) charge their own buckets through the same limiter and store.
 The client address is the socket address, unless the deployment names another source:
 `PUBLIC_CLIENT_IP_HEADER`, a header the host overwrites (on Vercel `x-vercel-forwarded-for`
 or `x-real-ip`, only when the API is reachable through the host alone); or

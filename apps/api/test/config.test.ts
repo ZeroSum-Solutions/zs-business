@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseServerEnv, PLACEHOLDER_BOOKING_KEY_SECRET, PLACEHOLDER_JWT_SECRET } from "../src/config.js";
-import { KEY_SECRET, PREVIOUS_KEY_SECRET, SECRET } from "./helpers.js";
+import { parseServerEnv, PLACEHOLDER_BOOKING_KEY_SECRET, PLACEHOLDER_JWT_SECRET, PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../src/config.js";
+import { KEY_SECRET, PREVIOUS_KEY_SECRET, PREVIOUS_UNSUBSCRIBE_SECRET, SECRET, UNSUBSCRIBE_SECRET } from "./helpers.js";
 
 const LOCAL = { DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", SESSION_CHECK: "local-stub" };
 const base = { ...LOCAL, JWT_VERIFIER: "hs256", JWT_SECRET: SECRET };
@@ -67,7 +67,6 @@ describe("parseServerEnv", () => {
   it("reads the public booking settings with safe defaults", () => {
     expect(parseServerEnv({ ...base, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PORT: "8798" }).publicIntake).toEqual({
       keySecrets: { current: KEY_SECRET }, publicBaseUrl: "http://localhost:8798", clientIp: {}, limitOverrides: {},
-      limiterStore: "postgres",
     });
     expect(parseServerEnv({
       ...base, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PUBLIC_BOOKING_KEY_PREVIOUS_SECRET: PREVIOUS_KEY_SECRET,
@@ -75,7 +74,6 @@ describe("parseServerEnv", () => {
     }).publicIntake).toEqual({
       keySecrets: { current: KEY_SECRET, previous: PREVIOUS_KEY_SECRET },
       publicBaseUrl: "https://book.example.com", clientIp: { header: "x-vercel-forwarded-for" }, limitOverrides: { addressWrites: 5 },
-      limiterStore: "postgres",
     });
   });
 
@@ -84,6 +82,38 @@ describe("parseServerEnv", () => {
       expect(() => parseServerEnv({ ...base, PUBLIC_BOOKING_KEY_SECRET: secret })).toThrow(/PUBLIC_BOOKING_KEY_SECRET/);
     expect(() => parseServerEnv({ ...base, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PUBLIC_BASE_URL: "javascript:alert(1)" }))
       .toThrow(/PUBLIC_BASE_URL/);
+  });
+
+  it("keeps the unsubscribe routes off until a token secret is set", () => {
+    expect(parseServerEnv(base).unsubscribe).toBeNull();
+    // The booking secret does not turn them on, and theirs does not turn booking on.
+    expect(parseServerEnv({ ...base, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET }).unsubscribe).toBeNull();
+    expect(parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_SECRET: UNSUBSCRIBE_SECRET }).publicIntake).toBeNull();
+    expect(() => parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: PREVIOUS_UNSUBSCRIBE_SECRET }))
+      .toThrow(/needs UNSUBSCRIBE_TOKEN_SECRET/);
+  });
+
+  it("reads the unsubscribe settings, sharing the client address source and address limits", () => {
+    expect(parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_SECRET: UNSUBSCRIBE_SECRET }).unsubscribe).toEqual({
+      tokenSecrets: { current: UNSUBSCRIBE_SECRET }, clientIp: {}, limitOverrides: {},
+    });
+    expect(parseServerEnv({
+      ...base, UNSUBSCRIBE_TOKEN_SECRET: UNSUBSCRIBE_SECRET, UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: PREVIOUS_UNSUBSCRIBE_SECRET,
+      PUBLIC_CLIENT_IP_HEADER: "x-vercel-forwarded-for", PUBLIC_RATE_ADDRESS_READS: "50", PUBLIC_RATE_TENANT_WRITES: "9",
+    }).unsubscribe).toEqual({
+      tokenSecrets: { current: UNSUBSCRIBE_SECRET, previous: PREVIOUS_UNSUBSCRIBE_SECRET },
+      clientIp: { header: "x-vercel-forwarded-for" }, limitOverrides: { addressReads: 50 },
+    });
+    expect(() => parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_SECRET: UNSUBSCRIBE_SECRET, PUBLIC_TRUSTED_PROXIES: "proxy.internal" }))
+      .toThrow(/PUBLIC_TRUSTED_PROXIES/);
+  });
+
+  it("refuses a short or placeholder unsubscribe token secret", () => {
+    for (const secret of ["short", PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET]) {
+      expect(() => parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_SECRET: secret })).toThrow(/UNSUBSCRIBE_TOKEN_SECRET/);
+      expect(() => parseServerEnv({ ...base, UNSUBSCRIBE_TOKEN_SECRET: UNSUBSCRIBE_SECRET, UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: secret }))
+        .toThrow(/UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET/);
+    }
   });
 
   it("takes the client address source from explicit settings only", () => {
@@ -132,9 +162,9 @@ describe("parseServerEnv", () => {
 
   // P-10: per-process counters would let every serverless instance grant the full limit.
   it("counts public limits in Postgres by default, and in memory only on a loopback database", () => {
-    const intake = (env: Record<string, string>) => parseServerEnv({ ...remote, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, ...env }).publicIntake;
-    expect(intake({ DATABASE_URL: hosted, DATABASE_CA_CERT: ca })?.limiterStore).toBe("postgres");
-    expect(intake({ PUBLIC_RATE_LIMIT_STORE: "memory" })?.limiterStore).toBe("memory");
+    const intake = (env: Record<string, string>) => parseServerEnv({ ...remote, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, ...env });
+    expect(intake({ DATABASE_URL: hosted, DATABASE_CA_CERT: ca }).rateLimitStore).toBe("postgres");
+    expect(intake({ PUBLIC_RATE_LIMIT_STORE: "memory" }).rateLimitStore).toBe("memory");
     expect(() => intake({ DATABASE_URL: hosted, DATABASE_CA_CERT: ca, PUBLIC_RATE_LIMIT_STORE: "memory" }))
       .toThrow(/PUBLIC_RATE_LIMIT_STORE: memory needs a loopback DATABASE_URL/);
     for (const value of ["", "redis", "Postgres"]) expect(() => intake({ PUBLIC_RATE_LIMIT_STORE: value })).toThrow(/PUBLIC_RATE_LIMIT_STORE/);

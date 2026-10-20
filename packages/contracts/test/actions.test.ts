@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   actionCommandSchema,
+  idempotencyKeySchema,
   jsonValueSchema,
   BindingMismatch,
   Conflict,
@@ -52,5 +53,14 @@ describe("Postgres JSON boundary", () => {
     expect(
       jsonValueSchema.parse({ emoji: "😀", nested: [null, true, 1, "text"] }),
     ).toEqual({ emoji: "😀", nested: [null, true, 1, "text"] });
+  });
+});
+
+describe("idempotencyKeySchema", () => {
+  it("refuses the prefixes the server builds for public, unsubscribe and inbound SMS actions", () => {
+    expect(idempotencyKeySchema.safeParse("booking-42").success).toBe(true);
+    expect(idempotencyKeySchema.safeParse("republic:1").success).toBe(true);
+    for (const key of ["public:page:1", "unsubscribe:2d6c", "Unsubscribe:2d6c", "sms-inbound:SM1"])
+      expect(idempotencyKeySchema.safeParse(key).success, key).toBe(false);
   });
 });
