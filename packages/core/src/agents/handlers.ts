@@ -150,9 +150,9 @@ export const startRunHandler: ActionHandler = {
     let stop: FollowUpStopReason | null = gate(controls, await readGlobalKilled(tx, false), now);
     if (!stop && (await draftsToday(tx, tenantId, now)) >= controls.settings.maxDraftsPerDay) stop = "daily_cap";
     await tx.query(
-      `INSERT INTO agent_runs (tenant_id, id, requested_by, started_at, finished_at, status, stop_reason)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [tenantId, payload.runId, payload.requestedBy, now, stop ? now : null, stop ? "stopped" : "running", stop],
+      `INSERT INTO agent_runs (tenant_id, id, requested_by, started_at, finished_at, status, stop_reason, max_decisions)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [tenantId, payload.runId, payload.requestedBy, now, stop ? now : null, stop ? "stopped" : "running", stop, payload.maxDecisions],
     );
     return { result: (await loadRun(tx, tenantId, payload.runId))! };
   },
@@ -188,12 +188,23 @@ async function resolveNewDecision(tx: Transaction, target: Target): Promise<Targ
   return { tenantId: target.tenantId, type: "agent_followup", id: target.id };
 }
 
-/** The decision's run must be this tenant's and still open; its inquiry must be this customer's. */
+/**
+ * The decision's run must be this tenant's, still open and under its limit (G-7); its inquiry
+ * must be this customer's. The run's row stays locked until the decision commits, so calls that
+ * resume one run concurrently cannot together decide more than its limit.
+ */
 async function requireOpenRunAndInquiry(tx: Transaction, tenantId: string, input: { runId: string; intakeItemId: string; contactId: string }) {
   const inquiry = await loadInquiry(tx, tenantId, input.intakeItemId, input.contactId);
-  const run = await loadRun(tx, tenantId, input.runId);
+  const run = (await tx.query<{ status: string; max_decisions: number }>(
+    "SELECT status, max_decisions FROM agent_runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, input.runId],
+  )).rows[0];
   if (!inquiry || !run) throw new TenantDenied();
   if (run.status !== "running") throw new Conflict("The run has finished", { reason: "run_finished" });
+  // Counted after the lock, in a statement of its own, so it sees every decision committed before.
+  const decided = (await tx.query<{ n: number }>(
+    "SELECT count(*)::int AS n FROM agent_followups WHERE tenant_id=$1 AND run_id=$2", [tenantId, input.runId],
+  )).rows[0]!.n;
+  if (decided >= run.max_decisions) throw new Conflict("The run has decided its limit", { reason: "run_limit" });
   return inquiry;
 }
 

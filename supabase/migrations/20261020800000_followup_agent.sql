@@ -61,6 +61,8 @@ CREATE TABLE public.agent_runs (
   considered integer NOT NULL DEFAULT 0 CONSTRAINT agent_runs_considered CHECK (considered >= 0),
   drafted integer NOT NULL DEFAULT 0 CONSTRAINT agent_runs_drafted CHECK (drafted >= 0),
   skipped integer NOT NULL DEFAULT 0 CONSTRAINT agent_runs_skipped CHECK (skipped >= 0),
+  -- G-7: the most decisions this run may record, fixed when it starts. Runtime cannot change it.
+  max_decisions integer NOT NULL CONSTRAINT agent_runs_max_decisions CHECK (max_decisions BETWEEN 1 AND 1000),
   PRIMARY KEY (tenant_id, id),
   CONSTRAINT agent_runs_finish_state CHECK (
     (status = 'running') = (finished_at IS NULL)

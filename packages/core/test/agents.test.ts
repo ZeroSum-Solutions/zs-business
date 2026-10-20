@@ -22,6 +22,7 @@ import {
   createSession,
   creditWallet,
   directDispatch,
+  followUpRunId,
   inQuietHours,
   memberAuthorize,
   runFollowUps,
@@ -228,7 +229,7 @@ describe("drafts but never sends (G-6, G-12)", () => {
     // Members cannot run the agent's own actions either (G-1).
     const asOwner = directDispatch(deps(), tenantId, owner, memberAuthorize(tenantId, owner));
     await expect(asOwner({ actionType: "agent.run.start", target: { tenantId, type: "agent_run", id: randomUUID() }, approvalReference,
-      idempotencyKey: `${key}-start`, payload: { runId: randomUUID(), requestedBy: owner } })).rejects.toBeInstanceOf(TenantDenied);
+      idempotencyKey: `${key}-start`, payload: { runId: randomUUID(), requestedBy: owner, maxDecisions: 3 } })).rejects.toBeInstanceOf(TenantDenied);
     // Staff cannot start a run.
     await expect(agent(createFakeFollowUpModel()).runForMember({ tenantId, actorId: staff }, {}, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
 
@@ -435,6 +436,55 @@ describe("caps (G-4)", () => {
     const resumed = await run(real);
     expect(resumed).toMatchObject({ id: open.id, status: "completed", considered: 2, drafted: 2 });
     expect(await agentDraftsSince(now - 25 * HOUR)).toBe(2);
+  });
+
+  it("two overlapping calls on one run decide no more than its limit together", async () => {
+    await dueInquiries(4);
+    const real = directDispatch(deps(), tenantId, agentActorId(tenantId), agentAuthorize);
+    const key = `schedule:${randomUUID()}`;
+    const reports: unknown[] = [];
+    const run = (db: typeof database.db, dispatch: typeof real) => runFollowUps({
+      db, clock, model: createFakeFollowUpModel(), config: { maxCandidatesPerRun: 2 }, dispatch,
+      report: (event) => reports.push(event.error),
+    }, tenantId, { key, requestedBy: null });
+    const gate = () => { let open!: () => void; return { done: new Promise<void>((resolve) => { open = resolve; }), open: () => open() }; };
+    const bReadRun = gate();
+    const aDecided = gate();
+    // B starts once A has started the run; this settles when B does.
+    let startSecond!: (run: Promise<unknown>) => void;
+    const second = new Promise<unknown>((resolve) => { startSecond = resolve; });
+    // B reads the run before A records anything, then picks its inquiries after A's first decision,
+    // with a limit of two still in mind.
+    let bReads = 0;
+    const bDb: typeof database.db = {
+      ...database.db,
+      tenant: async (tenant, work) => {
+        bReads += 1;
+        if (bReads === 2) await aDecided.done;
+        const result = await database.db.tenant(tenant, work);
+        if (bReads === 1) bReadRun.open();
+        return result;
+      },
+    };
+    let aDecisions = 0;
+    const aDispatch = async (command: ActionCommand) => {
+      const decision = command.actionType === "agent.followup.draft" || command.actionType === "agent.followup.skip";
+      if (decision && aDecisions === 0) await bReadRun.done;
+      // A closes the run only after B is done, so B's stale limit has every chance to overshoot.
+      if (command.actionType === "agent.run.finish") await second.catch(() => undefined);
+      const result = await real(command);
+      if (command.actionType === "agent.run.start") startSecond(run(bDb, real));
+      if (decision && ++aDecisions === 1) aDecided.open();
+      return result;
+    };
+
+    const settled = await Promise.allSettled([run(database.db, aDispatch), second]);
+    const runId = followUpRunId(tenantId, key);
+    expect(await decisions(runId)).toHaveLength(2);
+    expect(await agentDraftsSince(now - 25 * HOUR)).toBe(2);
+    expect(reports).toEqual([]);
+    expect(settled.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+    expect(await sessionFor(owner).getFollowUpRun(runId)).toMatchObject({ status: "completed", considered: 2, drafted: 2 });
   });
 });
 

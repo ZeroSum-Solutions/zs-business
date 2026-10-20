@@ -97,7 +97,10 @@ and after which no reply to that customer (any status but `discarded`) was draft
 no run has decided come first, then those decided longest ago, oldest request first within
 each, so inquiries skipped for lasting reasons cannot take every run's batch. At most
 `maxCandidatesPerRun` (injected config) per run, counting what a resumed run already decided;
-a resumed run leaves out what it decided.
+a resumed run leaves out what it decided. A run records its limit when it starts
+(`agent_runs.max_decisions`) and keeps it when resumed. Each decision locks the run's row and is
+refused once the run holds that many, so calls that resume one run at the same time cannot
+together decide more.
 
 **G-8. Skips.** A candidate is skipped, with its reason recorded, when the customer has no
 real email (`no_email`), the email is suppressed (`suppressed`), email consent is `denied`
@@ -175,7 +178,8 @@ approves; then exactly once), caps hold under concurrent runs, a kill stops new 
 immediately (a draft racing a kill either commits before it or is refused), the global switch,
 quiet hours across midnight in a zone, staff cannot approve and the agent principal cannot
 approve or send, suppressed and consent-denied customers are skipped without a model call,
-two-tenant isolation, replayed runs, and the catalog isolation suite over the new tables.
+two-tenant isolation, replayed runs, a run's limit held across overlapping calls that resume
+it, and the catalog isolation suite over the new tables.
 `apps/api/test/followup-runner.test.ts` and `followup-worker.test.ts` cover G-13: the
 environment, the cron route, one run per slot, the switches and quiet hours, the daily cap,
 least-recently-run order, the budget, a failing tenant, and the worker entry point.

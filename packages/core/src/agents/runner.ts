@@ -2,6 +2,7 @@
 // run that stops halfway keeps what committed and a retry with the same key continues it. The
 // model is called outside any transaction, and only for inquiries that passed the checks.
 import {
+  Conflict,
   followUpDraftSchema,
   followUpDecisionOutputSchema,
   followUpRunOutputSchema,
@@ -65,21 +66,25 @@ export async function runFollowUps(
     parseOrFail(followUpDecisionOutputSchema,
       await deps.dispatch(command(actionType, key, "agent_followup", payload.followupId, payload as ActionCommand["payload"]))).result;
 
-  const startKey = `agent:start:${runId}`;
-  parseOrFail(followUpRunOutputSchema,
-    await deps.dispatch(command(START_RUN_ACTION, startKey, "agent_run", runId, { runId, requestedBy: input.requestedBy })));
-  // A replayed start returns the run as it began; read where it stands now.
-  const started = await read((tx) => getRun(tx, tenantId, runId));
-  if (!started || started.status !== "running") return started!;
+  // A resumed run keeps the limit it started with, so it starts only when it does not exist yet.
+  let state = await read((tx) => runState(tx, tenantId, runId));
+  if (!state) {
+    parseOrFail(followUpRunOutputSchema, await deps.dispatch(command(START_RUN_ACTION, `agent:start:${runId}`, "agent_run", runId,
+      { runId, requestedBy: input.requestedBy, maxDecisions: deps.config.maxCandidatesPerRun })));
+    state = (await read((tx) => runState(tx, tenantId, runId)))!;
+  }
+  const { run: started, maxDecisions } = state;
+  if (started.status !== "running") return started;
 
   // A resumed run keeps its decisions: a stop it already met still stands, and it decides at most
-  // what is left of its limit (G-7), never asking the model twice for one inquiry.
+  // what is left of its limit (G-7), never asking the model twice for one inquiry. The decision
+  // actions hold the limit under the run's lock; this only spares the model calls.
   let stop: FollowUpStopReason | null = started.decisions.map((d) => d.reason)
     .find((reason): reason is FollowUpStopReason => reason !== null && isStopReason(reason)) ?? null;
   let failure: { error: unknown } | null = null;
   const candidates = stop ? [] : await read(async (tx) =>
     findCandidates(tx, tenantId, (await loadControls(tx, tenantId, false)).settings, now(),
-      deps.config.maxCandidatesPerRun - started.decisions.length, runId));
+      maxDecisions - started.decisions.length, runId));
   for (const candidate of candidates) {
     const key = `agent:item:${runId}:${candidate.intakeItemId}`;
     const ids = stepIds(tenantId, key);
@@ -102,6 +107,8 @@ export async function runFollowUps(
       });
       if (decision.reason && isStopReason(decision.reason)) { stop = decision.reason; break; }
     } catch (error) {
+      // Another call resuming this run reached its limit or finished it: nothing is left to do.
+      if (error instanceof Conflict && (error.details.reason === "run_limit" || error.details.reason === "run_finished")) break;
       deps.report?.({ tenantId, runId, intakeItemId: candidate.intakeItemId, error });
       failure ??= { error };
     }
@@ -112,6 +119,14 @@ export async function runFollowUps(
   parseOrFail(followUpRunOutputSchema,
     await deps.dispatch(command(FINISH_RUN_ACTION, `agent:finish:${runId}`, "agent_run", runId, { runId, stopReason: stop })));
   return (await read((tx) => getRun(tx, tenantId, runId)))!;
+}
+
+async function runState(tx: Transaction, tenantId: string, runId: string) {
+  const run = await getRun(tx, tenantId, runId);
+  if (!run) return null;
+  const { max_decisions: maxDecisions } = (await tx.query<{ max_decisions: number }>(
+    "SELECT max_decisions FROM agent_runs WHERE tenant_id=$1 AND id=$2", [tenantId, runId])).rows[0]!;
+  return { run, maxDecisions };
 }
 
 /** The same checks as the draft action, without its locks, before any model call (G-8). */

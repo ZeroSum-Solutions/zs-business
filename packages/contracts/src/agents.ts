@@ -134,7 +134,11 @@ export const resumeFollowUpCommandSchema = z.lazy(() => actionCommandSchema.exte
 export const followUpStatusOutputSchema = z.lazy(() => actionResultSchema.extend({ result: followUpStatusSchema }));
 export type FollowUpStatusOutput = z.infer<typeof followUpStatusOutputSchema>;
 
-export const startFollowUpRunInputSchema = z.strictObject({ runId: idSchema, requestedBy: idSchema.nullable() });
+export const startFollowUpRunInputSchema = z.strictObject({
+  runId: idSchema, requestedBy: idSchema.nullable(),
+  /** G-7: the run's limit, fixed when it starts; each decision checks it under the run's lock. */
+  maxDecisions: z.number().int().min(1).max(1000),
+});
 export const startFollowUpRunCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("agent.run.start"),
   target: targetSchema.extend({ type: z.literal("agent_run") }),
