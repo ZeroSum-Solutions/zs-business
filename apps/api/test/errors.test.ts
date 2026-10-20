@@ -10,7 +10,7 @@ const app = createApp({
   verifier: createHs256Verifier(SECRET, { clock }),
   sessionCheck: { isLive: () => Promise.reject(new Error("unused")) },
   clock,
-  db: { tenant: () => Promise.reject(new Error("unused")) },
+  db: { tenant: () => Promise.reject(new Error("unused")), withoutTenant: () => Promise.reject(new Error("unused")) },
   generateId: randomUUID,
   config: { allowedOrigins: [] },
 });
