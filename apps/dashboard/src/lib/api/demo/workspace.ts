@@ -1,13 +1,10 @@
-/** Made-up read-only content for areas without an HTTP route yet. TODO(api). */
-import { ApiError } from "../errors";
+/** Made-up read-only content for areas without an HTTP route yet (wallet, site, agents, connections, plan). TODO(api). */
 import type {
   Agent,
   ApprovalItem,
   ChecklistItem,
   Connection,
   Plan,
-  Results,
-  Thread,
   Usage,
   WorkspaceApi,
 } from "../workspace-types";
@@ -19,20 +16,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
   const wait = () => (latency > 0 ? new Promise((resolve) => setTimeout(resolve, latency)) : Promise.resolve());
   const ago = (minutes: number) => new Date(clock.now().getTime() - minutes * 60000).toISOString();
   const ahead = (days: number) => new Date(clock.now().getTime() + days * 86400000).toISOString();
-
-  const results: Results = {
-    currency: "USD",
-    leads: { thisWeek: 23, lastWeek: 17 },
-    bookings: { thisWeek: 14, lastWeek: 11 },
-    revenue: { thisWeek: 38460, lastWeek: 29915 },
-    revenueBySource: [
-      { source: "Showroom walk-in", thisWeek: 14200, lastWeek: 12650 },
-      { source: "Referral", thisWeek: 9850, lastWeek: 6120 },
-      { source: "Website", thisWeek: 7340, lastWeek: 5480 },
-      { source: "Instagram", thisWeek: 4690, lastWeek: 3915 },
-      { source: "Google search", thisWeek: 2380, lastWeek: 1750 },
-    ],
-  };
 
   const usage: Usage = {
     currency: "USD",
@@ -51,58 +34,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     { id: "gbp", label: "Allow Google Business Profile", detail: "Grant review access so review requests can link to your profile.", status: "action", actionLabel: "Allow access" },
     { id: "calendar", label: "Google Calendar", detail: "Syncing both calendars.", status: "ok", actionLabel: null },
     { id: "stripe", label: "Stripe deposits", detail: "Deposits land in your account in 2 days.", status: "ok", actionLabel: null },
-  ];
-
-  const threads: Thread[] = [
-    {
-      id: "t-1", contactName: "Noor Haddad", channel: "sms", unread: true, needsReply: true, updatedAt: ago(12),
-      preview: "Could we move Thursday to later in the afternoon?",
-      messages: [
-        { id: "m1", from: "business", author: "Halden & Rowe", body: "Hi Noor, you're booked for a signet ring consultation on Thursday at noon. Reply here with any questions.", sentAt: ago(60 * 26) },
-        { id: "m2", from: "customer", author: "Noor Haddad", body: "Thank you! Could we move Thursday to later in the afternoon? Work ran long this week.", sentAt: ago(12) },
-      ],
-    },
-    {
-      id: "t-2", contactName: "Celeste Vandermeer", channel: "email", unread: true, needsReply: true, updatedAt: ago(48),
-      preview: "Is a 3 mm band too thin for an emerald that size?",
-      messages: [
-        { id: "m1", from: "customer", author: "Celeste Vandermeer", body: "Hello, I'm thinking about the emerald cocktail ring we talked about. Is a 3 mm band too thin for an emerald that size? I'd love your honest view before I commit.", sentAt: ago(48) },
-      ],
-    },
-    {
-      id: "t-3", contactName: "Teodor Lindqvist", channel: "instagram", unread: false, needsReply: false, updatedAt: ago(60 * 5),
-      preview: "Perfect, see you Saturday.",
-      messages: [
-        { id: "m1", from: "customer", author: "Teodor Lindqvist", body: "Do you do engraving on the inside of bands?", sentAt: ago(60 * 7) },
-        { id: "m2", from: "agent", author: "Front desk agent", body: "We do. Hand engraving takes about a week, machine engraving two days. Would you like to bring the band in on Saturday?", sentAt: ago(60 * 6) },
-        { id: "m3", from: "customer", author: "Teodor Lindqvist", body: "Perfect, see you Saturday.", sentAt: ago(60 * 5) },
-      ],
-    },
-    {
-      id: "t-4", contactName: "Marguerite Okafor", channel: "email", unread: false, needsReply: false, updatedAt: ago(60 * 20),
-      preview: "The new sketches look beautiful. Can we try a thinner halo?",
-      messages: [
-        { id: "m1", from: "business", author: "Halden & Rowe", body: "Marguerite, the updated sketches for your oval are attached. Two halo widths to compare.", sentAt: ago(60 * 23) },
-        { id: "m2", from: "customer", author: "Marguerite Okafor", body: "The new sketches look beautiful. Can we try a thinner halo? I'll see you for the design review.", sentAt: ago(60 * 20) },
-        { id: "m3", from: "business", author: "Halden & Rowe", body: "Of course. We'll have it ready to view at your appointment.", sentAt: ago(60 * 19) },
-      ],
-    },
-    {
-      id: "t-5", contactName: "Website visitor", channel: "webchat", unread: false, needsReply: true, updatedAt: ago(60 * 30),
-      preview: "Do you buy estate jewelry?",
-      messages: [
-        { id: "m1", from: "customer", author: "Website visitor", body: "Do you buy estate jewelry? I have a few pieces from my aunt.", sentAt: ago(60 * 30) },
-        { id: "m2", from: "agent", author: "Front desk agent", body: "We appraise estate pieces by appointment. Can I take a name and phone number so the team can call you?", sentAt: ago(60 * 30 - 1) },
-      ],
-    },
-    {
-      id: "t-6", contactName: "Wendell Ashby", channel: "sms", unread: false, needsReply: false, updatedAt: ago(60 * 52),
-      preview: "Got it, thanks for the quick fix.",
-      messages: [
-        { id: "m1", from: "business", author: "Halden & Rowe", body: "Your prong re-tip is booked. Drop-off takes about ten minutes.", sentAt: ago(60 * 53) },
-        { id: "m2", from: "customer", author: "Wendell Ashby", body: "Got it, thanks for the quick fix.", sentAt: ago(60 * 52) },
-      ],
-    },
   ];
 
   const agents: Agent[] = [
@@ -145,19 +76,8 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
   };
 
   return {
-    async getResults() { await wait(); return structuredClone(results); },
     async getUsage() { await wait(); return structuredClone(usage); },
     async getChecklist() { await wait(); return structuredClone(checklist); },
-    async listThreads() {
-      await wait();
-      return threads.map(({ messages: _messages, ...summary }) => summary).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    },
-    async getThread(id) {
-      await wait();
-      const thread = threads.find((item) => item.id === id);
-      if (!thread) throw new ApiError("not_found", "We could not find that conversation.", 404);
-      return structuredClone(thread);
-    },
     async listAgents() { await wait(); return structuredClone(agents); },
     async listApprovals() { await wait(); return structuredClone(approvals); },
     async listConnections() { await wait(); return structuredClone(connections); },

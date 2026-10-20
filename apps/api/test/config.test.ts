@@ -160,6 +160,16 @@ describe("parseServerEnv", () => {
   const ca = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
   const hosted = "postgres://zs_runtime.ref:pw@aws-0-us-east-1.pooler.supabase.com:6543/postgres";
 
+  // P-10: per-process counters would let every serverless instance grant the full limit.
+  it("counts public limits in Postgres by default, and in memory only on a loopback database", () => {
+    const intake = (env: Record<string, string>) => parseServerEnv({ ...remote, PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, ...env });
+    expect(intake({ DATABASE_URL: hosted, DATABASE_CA_CERT: ca }).rateLimitStore).toBe("postgres");
+    expect(intake({ PUBLIC_RATE_LIMIT_STORE: "memory" }).rateLimitStore).toBe("memory");
+    expect(() => intake({ DATABASE_URL: hosted, DATABASE_CA_CERT: ca, PUBLIC_RATE_LIMIT_STORE: "memory" }))
+      .toThrow(/PUBLIC_RATE_LIMIT_STORE: memory needs a loopback DATABASE_URL/);
+    for (const value of ["", "redis", "Postgres"]) expect(() => intake({ PUBLIC_RATE_LIMIT_STORE: value })).toThrow(/PUBLIC_RATE_LIMIT_STORE/);
+  });
+
   it("reads the CA and pool size for a hosted database", () => {
     expect(parseServerEnv({ ...remote, DATABASE_URL: hosted, DATABASE_CA_CERT: ca, DATABASE_POOL_MAX: "3" }))
       .toMatchObject({ databaseCaCert: ca, databasePoolMax: 3 });

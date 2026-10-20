@@ -9,11 +9,13 @@ import {
   type BookingListQuery,
   type ContactRecord,
   type DealListQuery,
-  type DealRecord,
+  type DealSummary,
+  type HomeResultsQuery,
   type IntakeStatus,
   type ListResult,
   type Page,
   type SlotQuery,
+  type ThreadSummary,
 } from "./api";
 import type { BookingRecord, SlotsResponse } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
@@ -37,11 +39,14 @@ export const keys = {
   contact: (id: string) => ["crm", "contact", id] as const,
   deals: (query: DealListQuery = {}) => ["crm", "deals", query] as const,
   dealsAll: ["crm", "deals"] as const,
-  results: ["ws", "results"] as const,
+  results: (query: HomeResultsQuery) => ["home", "results", query] as const,
+  resultsAll: ["home", "results"] as const,
+  /** Pages of the thread list, latest activity first. */
+  threads: ["inbox", "threads"] as const,
+  thread: (id: string) => ["inbox", "thread", id] as const,
+  inboxAll: ["inbox"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
-  threads: ["ws", "threads"] as const,
-  thread: (id: string) => ["ws", "thread", id] as const,
   sites: ["sites", "list"] as const,
   siteReleases: (siteId: string) => ["sites", "releases", siteId] as const,
   siteRelease: (siteId: string, releaseId: string) => ["sites", "release", siteId, releaseId] as const,
@@ -106,6 +111,20 @@ export function dropBookedTime(queryClient: QueryClient, slotsKey: QueryKey, boo
     ? { ...current, slots: current.slots.filter((slot) => Date.parse(slot.endsAt) <= taken || Date.parse(slot.startsAt) >= takenEnd) }
     // Undefined leaves a list untouched, its age and staleness included.
     : undefined);
+}
+
+/** The browser's own time zone. */
+export function browserZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+}
+
+/**
+ * The zone the business's times show in: its first calendar's, else the browser's. Home results
+ * count weeks in it too, so the owner's week matches the calendar's.
+ */
+export function useDisplayZone(): string {
+  const resources = useResources();
+  return resources.data?.[0]?.timeZone ?? browserZone();
 }
 
 /** One range of bookings, filtered by the API; a day or week is one short read. */
@@ -216,14 +235,23 @@ export function useDeals(query: DealListQuery = {}, options: { enabled?: boolean
     enabled: enabled && (options.enabled ?? true),
     queryKey: keys.deals(query),
     queryFn: ({ signal }) => api.listDeals(query, { signal }),
-    structuralSharing: (previous, next) => preferNewerDeals(previous as ListResult<DealRecord> | undefined, next as ListResult<DealRecord>),
+    structuralSharing: (previous, next) => preferNewerDeals(previous as ListResult<DealSummary> | undefined, next as ListResult<DealSummary>),
   });
 }
 
-export function useResults() {
+/**
+ * Home results for one zone and week start (inbox-home.md H-3). Pass null for a member
+ * without `reports`: nothing is fetched, so staff never see a 403 for it.
+ */
+export function useResults(query: HomeResultsQuery | null) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.results, queryFn: () => api.getResults() });
+  return useQuery({
+    enabled: enabled && query !== null,
+    queryKey: query ? keys.results(query) : [...keys.resultsAll, "idle"],
+    queryFn: ({ signal }) => api.getResults(query!, { signal }),
+    placeholderData: keepPreviousData,
+  });
 }
 
 export function useUsage() {
@@ -238,16 +266,27 @@ export function useChecklist() {
   return useQuery({ enabled, queryKey: keys.checklist, queryFn: () => api.getChecklist() });
 }
 
+/** The inbox list, a page at a time by keyset cursor (inbox-home.md I-8). */
 export function useThreads() {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.threads, queryFn: () => api.listThreads() });
+  return useInfiniteQuery({
+    enabled,
+    queryKey: keys.threads,
+    queryFn: ({ pageParam, signal }) => api.listThreads(pageParam ? { cursor: pageParam } : {}, { signal }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last: Page<ThreadSummary>) => last.nextCursor ?? undefined,
+  });
 }
 
 export function useThread(id: string | null) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ queryKey: keys.thread(id ?? "none"), queryFn: () => api.getThread(id!), enabled: enabled && id !== null });
+  return useQuery({
+    queryKey: keys.thread(id ?? "none"),
+    queryFn: ({ signal }) => api.getThread(id!, { signal }),
+    enabled: enabled && id !== null,
+  });
 }
 
 export function useSites() {

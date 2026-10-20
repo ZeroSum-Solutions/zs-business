@@ -9,9 +9,12 @@ import {
   createBookingOutputSchema,
   createOrFindContactOutputSchema,
   dealPageSchema,
+  homeResultsSchema,
   moveDealStageOutputSchema,
   pipelineSummarySchema,
+  replyOutputSchema,
   resourceSummarySchema,
+  setDealDetailsOutputSchema,
   siteListSchema,
   siteOutputSchema,
   sitePreviewSchema,
@@ -20,17 +23,25 @@ import {
   siteReleaseResponseSchema,
   siteSyncResponseSchema,
   slotsResponseSchema,
+  threadDetailSchema,
+  threadIdSchema,
+  threadPageSchema,
   uuidSchema,
   type CreateBookingRequest,
+  type DraftReplyRequest,
   type LinkIntakeItemRequest,
   type MoveDealStageRequest,
+  type SetDealDetailsRequest,
 } from "@zs/contracts";
-import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError } from "./errors";
+import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, threadNotFound } from "./errors";
 import {
   CONTACT_PAGE_SIZE,
+  THREAD_PAGE_SIZE,
   toUpsertContactRequest,
   type BookingApi,
   type CrmApi,
+  type HomeApi,
+  type InboxApi,
   type IntakeApi,
   type ListResult,
   type SitesApi,
@@ -71,7 +82,9 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi & IntakeApi & SitesApi {
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & SitesApi;
+
+export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
   const base = config.baseUrl.replace(/\/+$/, "");
 
@@ -229,6 +242,12 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
       return (await write(path, body, moveDealStageOutputSchema, options)).result;
     },
 
+    async setDealDetails(input, options) {
+      const body: SetDealDetailsRequest = { expectedRevision: input.expectedRevision, value: input.value, leadSource: input.leadSource };
+      const path = `/v1/crm/deals/${encodeURIComponent(input.dealId)}/details`;
+      return (await write(path, body, setDealDetailsOutputSchema, options)).result;
+    },
+
     listIntakeItems(query = {}, options = {}) {
       return listAll("/v1/intake/items", intakeItemPageSchema, { status: query.status }, options.signal);
     },
@@ -246,6 +265,50 @@ export function createHttpClient(config: HttpClientConfig): BookingApi & CrmApi 
 
     async listBookingPages() {
       return (await request({ method: "GET", path: "/v1/booking/pages", schema: bookingPageListSchema })).items;
+    },
+
+    async listThreads(query = {}, options = {}) {
+      const page = await request({
+        method: "GET",
+        path: "/v1/inbox/threads",
+        query: { limit: query.limit ?? THREAD_PAGE_SIZE, cursor: query.cursor },
+        schema: threadPageSchema,
+        signal: options.signal,
+      });
+      return { items: page.items, nextCursor: page.nextCursor };
+    },
+
+    async getThread(id, options = {}) {
+      // A malformed ID in the address bar is an unknown conversation, not a bad request.
+      if (!threadIdSchema.safeParse(id).success) throw threadNotFound();
+      try {
+        return await request({ method: "GET", path: `/v1/inbox/threads/${encodeURIComponent(id)}`, schema: threadDetailSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? threadNotFound() : error;
+      }
+    },
+
+    async draftReply(input, options) {
+      const body: DraftReplyRequest = { contactId: input.contactId, subject: input.subject, body: input.body };
+      return (await write("/v1/inbox/replies", body, replyOutputSchema, options)).result;
+    },
+
+    async approveReply(replyId, options) {
+      return (await write(`/v1/inbox/replies/${encodeURIComponent(replyId)}/approve`, {}, replyOutputSchema, options)).result;
+    },
+
+    async discardReply(replyId, options) {
+      return (await write(`/v1/inbox/replies/${encodeURIComponent(replyId)}/discard`, {}, replyOutputSchema, options)).result;
+    },
+
+    getResults(query, options = {}) {
+      return request({
+        method: "GET",
+        path: "/v1/home/results",
+        query: { zone: query.zone, weekStart: query.weekStart },
+        schema: homeResultsSchema,
+        signal: options.signal,
+      });
     },
 
     async listSites(options = {}) {

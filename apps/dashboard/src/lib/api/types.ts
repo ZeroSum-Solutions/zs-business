@@ -6,9 +6,17 @@ import type {
   ContactRecord,
   CreateBookingRequest,
   DealRecord,
+  DealSummary,
+  DealValue,
+  HomeResults,
   IntakeItemRecord,
   IntakeStatus,
+  LeadSource,
   PipelineSummary,
+  ReplyEntry,
+  ReplyRecord,
+  ReplyStatus,
+  RequestEntry,
   ResourceSummary,
   SitePreview,
   SiteRecord,
@@ -18,7 +26,12 @@ import type {
   SiteSpec,
   SiteSyncResponse,
   SlotsResponse,
+  StageOutcome,
+  ThreadDetail,
+  ThreadEntry,
+  ThreadSummary,
   UpsertContactRequest,
+  WeekStart,
 } from "@zs/contracts";
 import type { WorkspaceApi } from "./workspace-types";
 
@@ -28,9 +41,17 @@ export type {
   ConsentEvidence,
   ContactRecord,
   DealRecord,
+  DealSummary,
+  DealValue,
+  HomeResults,
   IntakeItemRecord,
   IntakeStatus,
+  LeadSource,
   PipelineSummary,
+  ReplyEntry,
+  ReplyRecord,
+  ReplyStatus,
+  RequestEntry,
   ResourceSummary,
   SitePreview,
   SiteRecord,
@@ -40,6 +61,11 @@ export type {
   SiteSpec,
   SiteSyncResponse,
   SlotsResponse,
+  StageOutcome,
+  ThreadDetail,
+  ThreadEntry,
+  ThreadSummary,
+  WeekStart,
 };
 
 /**
@@ -149,6 +175,14 @@ export interface StageMove {
   expectedRevision: number;
 }
 
+/** Value and lead source for one deal (inbox-home.md H-1), with the revision the owner saw. */
+export interface DealDetailsChange {
+  dealId: string;
+  expectedRevision: number;
+  value: DealValue | null;
+  leadSource: LeadSource | null;
+}
+
 export interface BookingApi {
   listResources(options?: ReadOptions): Promise<ResourceSummary[]>;
   getSlots(query: SlotQuery, options?: ReadOptions): Promise<SlotsResponse>;
@@ -166,9 +200,15 @@ export interface CrmApi {
   getContact(id: string, options?: ReadOptions): Promise<ContactRecord>;
   /** Returns `created: false` with the existing contact when the email or phone is known. */
   createOrFindContact(input: NewContact, options: WriteOptions): Promise<ContactWriteResult>;
-  listDeals(query?: DealListQuery, options?: ReadOptions): Promise<ListResult<DealRecord>>;
-  /** Throws an ApiError where `isDealChanged(error)` holds when the deal changed since `expectedRevision`. */
+  /** Each deal with its value, lead source and won date (inbox-home.md H-1). */
+  listDeals(query?: DealListQuery, options?: ReadOptions): Promise<ListResult<DealSummary>>;
+  /**
+   * Throws an ApiError where `isDealChanged(error)` holds when the deal changed since `expectedRevision`.
+   * Answers with the frozen deal record (crm.md C-14): no value, lead source or won date.
+   */
   moveDealStage(input: StageMove, options: WriteOptions): Promise<DealRecord>;
+  /** Same revision check as a stage move; answers with the deal as lists show it. */
+  setDealDetails(input: DealDetailsChange, options: WriteOptions): Promise<DealSummary>;
 }
 
 export interface IntakeLink {
@@ -185,6 +225,50 @@ export interface IntakeApi {
   rejectIntakeItem(itemId: string, options: WriteOptions): Promise<IntakeItemRecord>;
   listBookingPages(): Promise<BookingPageSummary[]>;
 }
+
+export interface ThreadListQuery {
+  /** The previous page's `nextCursor`. */
+  cursor?: string;
+  limit?: number;
+}
+
+export interface NewReply {
+  contactId: string;
+  /** One line; null lets the server write "Message from <business name>". */
+  subject: string | null;
+  body: string;
+}
+
+/**
+ * The owner's Inbox (inbox-home.md I-1..I-8): one thread per customer, plus one per website
+ * request not yet linked to a customer. Replies are drafted, then approved by an owner; an
+ * approval queues the reply for delivery, it does not send it.
+ */
+export interface InboxApi {
+  /** Latest activity first, one page at a time. */
+  listThreads(query?: ThreadListQuery, options?: ReadOptions): Promise<Page<ThreadSummary>>;
+  /** Throws `not_found` for an unknown or malformed thread ID, or one that moved (a linked visitor). */
+  getThread(id: string, options?: ReadOptions): Promise<ThreadDetail>;
+  draftReply(input: NewReply, options: WriteOptions): Promise<ReplyRecord>;
+  /** Owners only. A conflict with reason `not_draft` or `no_email` when it cannot be approved. */
+  approveReply(replyId: string, options: WriteOptions): Promise<ReplyRecord>;
+  /** A conflict with reason `not_draft` once it was approved or discarded. */
+  discardReply(replyId: string, options: WriteOptions): Promise<ReplyRecord>;
+}
+
+export interface HomeResultsQuery {
+  /** IANA zone the weeks start in. */
+  zone: string;
+  weekStart: WeekStart;
+}
+
+/** Home results (inbox-home.md H-3..H-5); owners only (`reports`), staff get a 403. */
+export interface HomeApi {
+  getResults(query: HomeResultsQuery, options?: ReadOptions): Promise<HomeResults>;
+}
+
+/** Threads per page of the inbox list. */
+export const THREAD_PAGE_SIZE = 30;
 
 export interface SitePublish {
   siteId: string;
@@ -223,7 +307,7 @@ export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & SitesApi & WorkspaceApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & SitesApi & WorkspaceApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

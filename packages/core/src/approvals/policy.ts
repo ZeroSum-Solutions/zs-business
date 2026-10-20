@@ -11,16 +11,25 @@ export interface ApprovalPolicy {
 /**
  * Action types with their own request rule. An action without an entry may be requested by
  * any member who holds its ACTION_PERMISSIONS entry and still runs directly as well.
- * M3c adds `"inbox.reply.send": { request: "inbox.drafts", required: true }`.
  */
-export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Object.freeze({});
+export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Object.freeze({
+  // inbox-home.md I-6: staff and owners propose sending a reply; it runs only once an owner approves.
+  "inbox.reply.send": Object.freeze({ request: "inbox.drafts", required: true }),
+});
 
 /** Never proposed through an approval: the approval actions themselves. */
 export const isApprovalAction = (actionType: string) => actionType.startsWith("approval.");
+/**
+ * Site actions are never proposed either. Their edge path compiles the spec, stores the files,
+ * checks that sites are on and projects to the edge around the handler, and an approved action
+ * runs the handler alone: it could commit a release whose files were never stored.
+ */
+export const isSiteAction = (actionType: string) => actionType.startsWith("site.");
+export const cannotBeApproved = (actionType: string) => isApprovalAction(actionType) || isSiteAction(actionType);
 
 /**
  * The policy for one action type, or null when it cannot be requested: it has no
- * ACTION_PERMISSIONS entry (so no member may run it) or it is an approval action.
+ * ACTION_PERMISSIONS entry (so no member may run it), or it is an approval or site action.
  */
 export function approvalPolicy(
   actionType: string,
@@ -28,6 +37,6 @@ export function approvalPolicy(
   policies: Readonly<Record<string, ApprovalPolicy>> = APPROVAL_POLICIES,
 ): ApprovalPolicy | null {
   const own = Object.hasOwn(actionPermissions, actionType) ? actionPermissions[actionType] : undefined;
-  if (!own || isApprovalAction(actionType)) return null;
+  if (!own || cannotBeApproved(actionType)) return null;
   return Object.hasOwn(policies, actionType) ? policies[actionType]! : { request: own, required: false };
 }

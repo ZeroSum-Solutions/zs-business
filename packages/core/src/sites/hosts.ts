@@ -21,9 +21,19 @@ export interface SiteHostInput {
   readonly host: string;
 }
 
+/**
+ * Attach and detach of one host run one at a time, before any number is drawn. The lock works
+ * when no row exists yet, so an attach that waits on another transaction's attach and detach
+ * takes its number (the INSERT's default) after that detach committed, and so above it.
+ */
+async function lockHost(tx: Transaction, host: string): Promise<void> {
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('site-host:' || $1, 0))", [host]);
+}
+
 /** Attach a host in a service-role transaction. Refuses a host that another site holds. */
 export async function attachSiteHost(tx: Transaction, input: SiteHostInput, now: Date): Promise<string> {
   const host = parseHost(input.host);
+  await lockHost(tx, host);
   const site = await tx.query("SELECT 1 FROM sites WHERE tenant_id=$1 AND id=$2", [input.tenantId, input.siteId]);
   if (site.rowCount !== 1) throw new NotFound("Site not found");
   const holder = (await tx.query<{ tenant_id: string; site_id: string }>(
@@ -59,8 +69,9 @@ export interface DetachedHost {
  */
 export async function detachSiteHost(tx: Transaction, input: SiteHostInput): Promise<DetachedHost | null> {
   const host = parseHost(input.host);
-  // Lock the row, then number the detach, then delete: an attach waiting on this row takes
-  // its number after the commit, so it is always above the detach's.
+  await lockHost(tx, host);
+  // Then number the detach and delete: an attach waiting on the host lock takes its number
+  // after the commit, so it is always above the detach's.
   const held = await tx.query(
     "SELECT 1 FROM site_hosts WHERE tenant_id=$1 AND site_id=$2 AND host=$3 FOR UPDATE", [input.tenantId, input.siteId, host],
   );

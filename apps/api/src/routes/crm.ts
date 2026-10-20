@@ -15,4 +15,7 @@ export const crmRoutes = new Hono<AppEnv>()
   .post("/deals", async (c) =>
     c.json(await c.var.session.createDeal(await jsonBody(c), idempotencyKey(c)), 201))
   .post("/deals/:id/stage", async (c) =>
-    c.json(await c.var.session.moveDealStage(c.req.param("id"), await jsonBody(c), idempotencyKey(c))));
+    c.json(await c.var.session.moveDealStage(c.req.param("id"), await jsonBody(c), idempotencyKey(c))))
+  // inbox-home.md H-1: value and lead source, with the same revision check as a stage move.
+  .post("/deals/:id/details", async (c) =>
+    c.json(await c.var.session.setDealDetails(c.req.param("id"), await jsonBody(c), idempotencyKey(c))));

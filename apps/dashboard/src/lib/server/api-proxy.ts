@@ -4,9 +4,9 @@
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
  * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source and site routes and /v1/me are forwarded (for example /v1/approvals and
- * /v1/approvals/:id/approve), only from this origin: other sites cannot make a signed-in
- * browser spend its session here.
+ * approval, source, inbox, home and site routes and /v1/me are forwarded (for example
+ * /v1/approvals/:id/approve and /v1/inbox/threads), only from this origin: other sites cannot
+ * make a signed-in browser spend its session here.
  */
 import type { ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
@@ -20,7 +20,7 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "sites"]);
+const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "sites"]);
 const SINGLE = new Set(["me", "members", "approvals", "sources", "sites"]);
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_HEADERS = ["accept", "content-type", "idempotency-key"];

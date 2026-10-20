@@ -22,14 +22,44 @@ describe("demo seed", () => {
     expect(first.bookings).toBe(6);
     const again = await seedDemo(deps);
     expect(again).toEqual(first);
-    const counts = (await database.pool.query<{ actions: number; deals: number; moved: number }>(
+    const counts = (await database.pool.query<{ actions: number; deals: number; moved: number; detailed: number }>(
       `SELECT (SELECT count(*)::int FROM actions WHERE tenant_id=$1) AS actions,
               (SELECT count(*)::int FROM crm_deals WHERE tenant_id=$1) AS deals,
-              (SELECT count(*)::int FROM crm_deals WHERE tenant_id=$1 AND revision=2) AS moved`,
+              (SELECT count(*)::int FROM actions WHERE tenant_id=$1 AND action_type='crm.deal.move-stage') AS moved,
+              (SELECT count(*)::int FROM actions WHERE tenant_id=$1 AND action_type='crm.deal.set-details') AS detailed`,
       [first.principal.tenantId],
     )).rows[0];
-    // 12 contacts + 8 deals + 6 stage moves + 6 bookings, each recorded once.
-    expect(counts).toEqual({ actions: 32, deals: 8, moved: 6 });
+    // 12 contacts + 8 deals + 6 stage moves + 4 deal details + 6 bookings, each recorded once.
+    expect(counts).toEqual({ actions: 36, deals: 8, moved: 6, detailed: 4 });
+    // H-2: the seed marks the won stage itself; the deal moved into it carries the seed clock's won date.
+    const stages = (await database.pool.query<{ name: string; outcome: string }>(
+      "SELECT name, outcome FROM crm_stages WHERE tenant_id=$1 ORDER BY position", [first.principal.tenantId],
+    )).rows;
+    expect(stages).toEqual([
+      { name: "Inquiry", outcome: "open" }, { name: "Consultation", outcome: "open" }, { name: "Design", outcome: "open" },
+      { name: "Deposit", outcome: "open" }, { name: "Delivered", outcome: "won" },
+    ]);
+    const deals = (await database.pool.query<{ title: string; revision: string; value: string | null; currency: string | null; source: string | null; won: Date | null }>(
+      `SELECT title, revision::text AS revision, value_minor::text AS value, currency, lead_source AS source, won_at AS won
+         FROM crm_deals WHERE tenant_id=$1 ORDER BY title`, [first.principal.tenantId],
+    )).rows;
+    const won = new Date(clock.now());
+    expect(deals).toEqual([
+      { title: "Anniversary eternity band", revision: "3", value: "465000", currency: "USD", source: "walk_in", won },
+      { title: "Custom pendant, mother's birthstones", revision: "2", value: "120000", currency: "USD", source: "social", won: null },
+      { title: "Diamond stud upgrade", revision: "1", value: null, currency: null, source: null, won: null },
+      { title: "Engagement ring, oval sapphire halo", revision: "3", value: "840000", currency: "USD", source: "website", won: null },
+      { title: "Heirloom brooch restoration", revision: "2", value: null, currency: null, source: null, won: null },
+      { title: "Matching wedding bands", revision: "3", value: "290000", currency: "USD", source: "referral", won: null },
+      { title: "Pearl strand restring and clasp", revision: "2", value: null, currency: null, source: null, won: null },
+      { title: "Signet ring with family crest", revision: "2", value: null, currency: null, source: null, won: null },
+    ]);
+    // A database seeded before stage outcomes existed gets the won stage on the next run.
+    await database.pool.query("UPDATE crm_stages SET outcome='open' WHERE tenant_id=$1", [first.principal.tenantId]);
+    expect(await seedDemo(deps)).toEqual(first);
+    const restored = await database.pool.query<{ name: string }>(
+      "SELECT name FROM crm_stages WHERE tenant_id=$1 AND outcome='won'", [first.principal.tenantId]);
+    expect(restored.rows).toEqual([{ name: "Delivered" }]);
     const page = (await database.pool.query<{ published: boolean; resources: number }>(
       `SELECT p.published, (SELECT count(*)::int FROM booking_page_resources r WHERE r.tenant_id=p.tenant_id AND r.page_id=p.id) AS resources
          FROM booking_pages p WHERE p.tenant_id=$1 AND p.id=$2`,
@@ -122,7 +152,7 @@ describe("hosted seed", () => {
     expect(again).toMatchObject({ seedMemberRemoved: true, bookings: 6 });
     expect(await members(tenantId)).toEqual([]);
     const actions = await hosted.pool.query<{ n: number }>("SELECT count(*)::int AS n FROM actions WHERE tenant_id=$1", [tenantId]);
-    expect(actions.rows[0]!.n).toBe(32);
+    expect(actions.rows[0]!.n).toBe(36);
   });
 
   it("names the tenant and the guarded db:hosted-provision-owner steps that give it an owner", () => {

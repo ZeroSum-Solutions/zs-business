@@ -18,14 +18,17 @@ export async function lastSignInLink(email = ownerEmail()): Promise<string | nul
   return ((await response.json()) as { link: string }).link;
 }
 
-/** Ask for a link on the /sign-in page as the owner does, then open it as the email would. */
-export async function signInThroughPage(page: Page, next = "/") {
-  const before = await lastSignInLink();
+/** The staff member global setup adds to the business. */
+export const STAFF_EMAIL = "staff@example.com";
+
+/** Ask for a link on the /sign-in page as a person does (the owner by default), then open it as the email would. */
+export async function signInThroughPage(page: Page, next = "/", email = ownerEmail()) {
+  const before = await lastSignInLink(email);
   await page.goto(next === "/" ? "/sign-in" : `/sign-in?next=${encodeURIComponent(next)}`);
-  await page.getByLabel("Email").fill(ownerEmail());
+  await page.getByLabel("Email").fill(email);
   await page.getByRole("button", { name: "Email me a sign-in link" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Check your email" })).toBeVisible();
-  const link = await lastSignInLink();
+  const link = await lastSignInLink(email);
   expect(link, "a new sign-in link").not.toBe(before);
   await page.goto(link!);
   await page.waitForURL((url) => url.pathname === next);

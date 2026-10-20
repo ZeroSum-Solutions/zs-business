@@ -17,6 +17,7 @@ afterAll(async () => { await Promise.all([h?.close(), mutant?.close()]); });
 
 /** Runs each transaction under an application_name only it carries, so its backend is identifiable. */
 const stamped = (harness: Harness, stamp: string): ScopedDatabase => ({
+  ...harness.database.db,
   tenant: (tenantId, work) => harness.database.db.tenant(tenantId, async (tx) => {
     await tx.query("SELECT pg_catalog.set_config('application_name', $1, true)", [stamp]);
     return work(tx);
