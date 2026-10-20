@@ -38,6 +38,8 @@ export function verifyOAuthState(secrets: OAuthStateSecrets, token: string, now:
   const parts = token.slice(PREFIX.length).split(".");
   if (parts.length !== 2 || !/^[A-Za-z0-9_-]+$/.test(parts[0]!) || !/^[A-Za-z0-9_-]{43}$/.test(parts[1]!)) return null;
   const [body, given] = [parts[0]!, Buffer.from(parts[1]!, "base64url")];
+  // 43 characters carry 258 bits; only the canonical spelling of the 256-bit tag is accepted.
+  if (given.toString("base64url") !== parts[1]) return null;
   let valid = false;
   for (const secret of [secrets.current, secrets.previous])
     if (secret !== undefined && timingSafeEqual(given, tag(secret, body))) valid = true;
@@ -66,6 +68,7 @@ export function channelToken(secret: string, channelId: string): string {
   return createHmac("sha256", secret).update(`zgc1:${channelId.toLowerCase()}`).digest().toString("base64url");
 }
 export function verifyChannelToken(secret: string, channelId: string, token: string | undefined): boolean {
-  if (!token || token.length !== 43 || !UUID.test(channelId)) return false;
+  // The alphabet check keeps a non-ASCII header from reaching timingSafeEqual at another byte length (it would throw).
+  if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token) || !UUID.test(channelId)) return false;
   return timingSafeEqual(Buffer.from(token), Buffer.from(channelToken(secret, channelId)));
 }

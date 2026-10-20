@@ -56,7 +56,8 @@ export function generateSealKeyPair(): { publicKey: string; privateKey: string }
 }
 
 export function sealRefreshToken(publicKey: KeyObject, context: SealContext, token: string): string {
-  if (token.length === 0 || token.length > 2000) throw new Error("A refresh token is 1 to 2000 characters");
+  // Bytes, not UTF-16 units: the sealed form must fit SEALED_PATTERN (and the column's check).
+  if (token.length === 0 || Buffer.byteLength(token, "utf8") > 2000) throw new Error("A refresh token is 1 to 2000 characters");
   const ephemeral = generateKeyPairSync("x25519");
   const ephemeralRaw = rawPublic(ephemeral.publicKey);
   const shared = diffieHellman({ privateKey: ephemeral.privateKey, publicKey });
