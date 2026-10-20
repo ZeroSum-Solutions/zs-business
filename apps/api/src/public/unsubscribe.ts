@@ -29,7 +29,7 @@ export interface UnsubscribeConfig {
    * one-click POSTs come from a few mailbox-provider servers shared by every recipient.
    */
   readonly limits?: Partial<RateLimits>;
-  /** Defaults to an in-memory limiter on the app clock. */
+  /** Defaults to an in-memory limiter on the app clock; servers pass the shared Postgres one. */
   readonly limiter?: RateLimiter;
 }
 
@@ -96,9 +96,9 @@ export function unsubscribeRoutes(
   /**
    * Charges the request before any database work. The token is checked first (HMAC only), so a
    * forged one costs its sender's address and a real one costs only its delivery; the session
-   * answers 404 for a forged token.
+   * answers 404 for a forged token. The charge runs within the request's deadline.
    */
-  const admit = (c: Context<AppEnv>, token: string, kind: "read" | "write") => {
+  const admit = async (c: Context<AppEnv>, token: string, kind: "read" | "write") => {
     const ref = verifyUnsubscribeToken(config.tokenSecrets, token);
     let charge;
     if (!ref) {
@@ -111,7 +111,10 @@ export function unsubscribeRoutes(
         ? { key: `unsubscribe-write:${delivery}`, rule: limits.addressWrites }
         : { key: `unsubscribe-read:${delivery}`, rule: limits.addressReads };
     }
-    const taken = limiter.take([charge]);
+    const taken = await limiter.take([charge], {
+      signal: c.var.signal,
+      remainingMs: () => c.var.deadline - edge.clock.now().getTime(),
+    });
     if (!taken.ok) throw new RateLimited(taken.retryAfterSeconds);
     return createUnsubscribeSession(requestEdge(c), config.tokenSecrets);
   };
@@ -127,7 +130,7 @@ export function unsubscribeRoutes(
     }))
     .get("/unsubscribe/:token", async (c) => {
       const token = c.req.param("token");
-      await admit(c, token, "read").check(token);
+      await (await admit(c, token, "read")).check(token);
       return c.html(CONFIRM_HTML, 200, PAGE_HEADERS);
     })
     // RFC 8058 sends `List-Unsubscribe=One-Click` (form-urlencoded or multipart); the page's form
@@ -135,7 +138,7 @@ export function unsubscribeRoutes(
     // not required. A repeat replays the stored action.
     .post("/unsubscribe/:token", async (c) => {
       const token = c.req.param("token");
-      const session = admit(c, token, "write");
+      const session = await admit(c, token, "write");
       await c.req.arrayBuffer();
       await session.unsubscribe(token);
       return c.html(DONE_HTML, 200, PAGE_HEADERS);
