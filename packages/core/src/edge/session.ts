@@ -7,6 +7,13 @@
 import {
   ROLE_PERMISSIONS,
   WALLET_TOPUP_CREATE_ACTION,
+  CALENDAR_GOOGLE_DISCONNECT_ACTION,
+  calendarConnectionSchema,
+  connectGoogleCalendarRequestSchema,
+  connectGoogleCalendarResponseSchema,
+  type CalendarConnection,
+  type CalendarConnectionList,
+  type ConnectGoogleCalendarResponse,
   createTopUpRequestSchema,
   type CreateTopUpResponse,
   type TopUp,
@@ -67,6 +74,7 @@ import {
   type WalletSummary,
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
+import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
@@ -87,6 +95,9 @@ import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } fro
 import { getWallet } from "../wallet/index.js";
 import { getTopUp, listTopUps, startTopUp, topUpHandlers } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
+import { calendarHandlers, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
+import { OAUTH_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signOAuthState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
+import type { GoogleClient } from "../calendar/types.js";
 import { derivedId } from "./ids.js";
 import { validationError } from "./errors.js";
 
@@ -99,6 +110,15 @@ export interface EdgeDependencies {
   readonly bookingKeys?: { readonly secret: string; readonly publicBaseUrl: string };
   /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means top-ups are off. */
   readonly billing?: { readonly stripe: StripeClient };
+  /**
+   * Google Calendar busy sync (google-calendar.md G-1..G-3); absent means connecting is off. The
+   * API holds only the public key that seals refresh tokens; the calendar worker opens them.
+   */
+  readonly calendar?: {
+    readonly google: GoogleClient;
+    readonly stateSecrets: OAuthStateSecrets;
+    readonly tokenPublicKey: KeyObject;
+  };
 }
 /** A verified caller. Never built from request bodies or tool input. */
 export interface Principal {
@@ -117,7 +137,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...topUpHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...topUpHandlers, ...calendarHandlers,
 });
 
 /**
@@ -144,6 +164,9 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "approval.reject": "approve",
   // stripe.md S-1: only owners add money.
   "wallet.topup.create": "billing",
+  // google-calendar.md G-1, G-5: a connected calendar decides what the public pages offer.
+  "calendar.google.connect": "publish",
+  "calendar.google.disconnect": "publish",
 });
 
 /** Registered actions whose permission depends on their payload (payloadPermission below). */
@@ -260,6 +283,17 @@ export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId
   };
 }
 
+/**
+ * The member session's write path: the principal's membership and the action's permission are
+ * re-checked inside the action's transaction. createSession writes through it, and so does the
+ * Google OAuth callback for the member its signed state names (google-calendar.md G-2).
+ */
+export function memberDispatch(deps: EdgeDependencies, principal: Principal) {
+  const tenantId = uuidSchema.parse(principal.tenantId);
+  const actorId = uuidSchema.parse(principal.actorId);
+  return directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId));
+}
+
 /** Optional fields a caller left out are absent from a payload, never `undefined` (JSON). */
 function defined<T extends Record<string, unknown>>(value: T): { [K in keyof T]: Exclude<T[K], undefined> } {
   return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as { [K in keyof T]: Exclude<T[K], undefined> };
@@ -283,12 +317,12 @@ export function bookingPageSnippets(publicBaseUrl: string, publicKey: string) {
   };
 }
 
-type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup";
+type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "calendar_connection";
 
 export function createSession(deps: EdgeDependencies, principal: Principal) {
   const tenantId = uuidSchema.parse(principal.tenantId);
   const actorId = uuidSchema.parse(principal.actorId);
-  const run = directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId));
+  const run = memberDispatch(deps, { tenantId, actorId });
   const runApproved = approvedDispatch(deps, tenantId, actorId);
   const writeContext = { dispatch: run };
 
@@ -513,6 +547,40 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         now: new Date(readClock(deps.clock)),
         ...(signal ? { signal } : {}),
       });
+    },
+
+    /** google-calendar.md G-5: the tenant's connections, never a token. */
+    listCalendarConnections: async (): Promise<CalendarConnectionList> =>
+      ({ items: await read("calendar", (tx) => listCalendarConnections(tx, tenantId)) }),
+    /**
+     * G-1: the consent URL for connecting one resource. Changes nothing: the connection ID derives
+     * from the tenant and the key, the signed state names who asked and for what, and the PKCE
+     * verifier derives from the state secret and the connection ID, so the callback rebuilds both.
+     */
+    async startGoogleConnect(body: unknown, key: unknown): Promise<ConnectGoogleCalendarResponse> {
+      const calendar = deps.calendar;
+      if (!calendar) throw new NotFound();
+      const request = parseInput(connectGoogleCalendarRequestSchema, body);
+      const { id: connectionId } = envelope(key, "calendar_connection");
+      const now = readClock(deps.clock);
+      await read("publish", async (tx) => {
+        if (!(await resourceInTenant(tx, tenantId, request.resourceId)))
+          throw new TenantDenied("Booking resource is not owned by this tenant");
+      });
+      const secret = calendar.stateSecrets.current;
+      const state = signOAuthState(secret, {
+        tenantId, actorId, resourceId: request.resourceId, connectionId, expiresAt: now + OAUTH_STATE_LIFETIME_MS,
+      });
+      return parseInput(connectGoogleCalendarResponseSchema, {
+        authorizeUrl: calendar.google.authorizeUrl({ state, codeChallenge: pkceChallenge(pkceVerifier(secret, connectionId)) }),
+      }, "result");
+    },
+    /** G-5: hand a connection to the worker for cleanup (G-9); a retired one answers as it is. */
+    async disconnectCalendar(connectionId: unknown, key: unknown): Promise<{ actionId: string; result: CalendarConnection }> {
+      const id = parseInput(uuidSchema, connectionId, "connection ID");
+      const { id: _id, ...rest } = envelope(key, "calendar_connection", id);
+      const outcome = await run({ actionType: CALENDAR_GOOGLE_DISCONNECT_ACTION, ...rest, payload: { connectionId: id } });
+      return { actionId: outcome.actionId, result: parseInput(calendarConnectionSchema, outcome.result, "result") };
     },
 
     async inviteMember(body: unknown, key: unknown): Promise<MemberOutput> {

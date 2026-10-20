@@ -20,7 +20,8 @@
     "build:vercel": "node scripts/build-vercel.mjs",
     "check:hosted": "tsx src/scripts/hosted-checks.ts",
     "delivery:worker": "tsx src/scripts/delivery-worker.ts",
-    "billing:worker": "tsx src/scripts/billing-worker.ts"
+    "billing:worker": "tsx src/scripts/billing-worker.ts",
+    "calendar:worker": "tsx src/scripts/calendar-worker.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",

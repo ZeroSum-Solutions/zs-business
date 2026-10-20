@@ -1,5 +1,5 @@
 // Bundles src/vercel.ts into one ESM file and writes Vercel's Build Output API layout
-// (.vercel/output): /cron/delivery and /cron/billing route to their own functions, every other
+// (.vercel/output): /cron/delivery, /cron/billing and /cron/calendar route to their own functions, every other
 // path to the API function. Workspace packages ship
 // TypeScript with NodeNext ".js" specifiers, which Vercel's own Node builder does not map,
 // so the bundle is made here. Run from apps/api: `pnpm build:vercel`.
@@ -11,8 +11,9 @@ const output = new URL("../.vercel/output/", import.meta.url);
 const fn = new URL("functions/index.func/", output);
 const cronFn = new URL("functions/cron/delivery.func/", output);
 const billingFn = new URL("functions/cron/billing.func/", output);
+const calendarFn = new URL("functions/cron/calendar.func/", output);
 await rm(output, { recursive: true, force: true });
-for (const dir of [fn, cronFn, billingFn]) await mkdir(dir, { recursive: true });
+for (const dir of [fn, cronFn, billingFn, calendarFn]) await mkdir(dir, { recursive: true });
 
 const bundle = (entry, outfile) => build({
   entryPoints: [new URL(entry, import.meta.url).pathname],
@@ -46,6 +47,9 @@ await bundle("../src/vercel.ts", fn);
 await bundle("../src/vercel-delivery.ts", cronFn);
 // stripe.md S-8: the billing worker likewise, the only code that moves wallet money.
 await bundle("../src/vercel-billing.ts", billingFn);
+// google-calendar.md G-3, G-6: the calendar worker likewise, the only code that holds the token
+// private key and writes external blocks.
+await bundle("../src/vercel-calendar.ts", calendarFn);
 
 // The hosted booking page and widget read these at start-up (src/public/assets.ts).
 await cp(new URL("../static/", import.meta.url), new URL("static/", fn), { recursive: true });
@@ -57,7 +61,7 @@ await writeFile(new URL(".vc-config.json", fn), JSON.stringify({
   maxDuration: 30,
 }, null, 2));
 await writeFile(new URL("package.json", fn), JSON.stringify({ type: "module" }));
-for (const dir of [cronFn, billingFn]) {
+for (const dir of [cronFn, billingFn, calendarFn]) {
   await writeFile(new URL(".vc-config.json", dir), JSON.stringify({
     runtime: "nodejs24.x",
     handler: "index.mjs",
@@ -68,8 +72,8 @@ for (const dir of [cronFn, billingFn]) {
   await writeFile(new URL("package.json", dir), JSON.stringify({ type: "module" }));
 }
 // No schedule unless the build sets one (for example "*/5 * * * *"), so a deploy never starts
-// sending or moving money by itself; DELIVERY_WORKER=on and BILLING_WORKER=on are the second
-// switches, at run time.
+// sending, moving money or calling Google by itself; DELIVERY_WORKER=on, BILLING_WORKER=on and
+// CALENDAR_WORKER=on are the second switches, at run time.
 const schedule = (name) => {
   const value = process.env[name];
   if (value !== undefined && !/^[0-9*/,-]+( [0-9*/,-]+){4}$/.test(value))
@@ -79,12 +83,14 @@ const schedule = (name) => {
 const crons = [
   ["/cron/delivery", schedule("DELIVERY_CRON_SCHEDULE")],
   ["/cron/billing", schedule("BILLING_CRON_SCHEDULE")],
+  ["/cron/calendar", schedule("CALENDAR_CRON_SCHEDULE")],
 ].filter(([, value]) => value).map(([path, value]) => ({ path, schedule: value }));
 await writeFile(new URL("config.json", output), JSON.stringify({
   version: 3,
   routes: [
     { src: "/cron/delivery", dest: "/cron/delivery" },
     { src: "/cron/billing", dest: "/cron/billing" },
+    { src: "/cron/calendar", dest: "/cron/calendar" },
     { src: "/(.*)", dest: "/index" },
   ],
   ...(crons.length > 0 ? { crons } : {}),

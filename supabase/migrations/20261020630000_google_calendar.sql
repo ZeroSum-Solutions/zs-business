@@ -22,7 +22,9 @@ CREATE TABLE public.calendar_connections (
   -- The connect action always names 'active'; the default is the state that holds no grant.
   status public.calendar_connection_status NOT NULL DEFAULT 'disconnected',
   -- G-3: zsg1.<ephemeral key>.<iv>.<ciphertext>; only the worker's private key opens it.
-  refresh_token_sealed text CONSTRAINT calendar_connections_sealed_shape CHECK (refresh_token_sealed ~ '^zsg1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22,2800}$'),
+  -- Postgres regular expressions repeat at most 255 times, so the length is its own test.
+  refresh_token_sealed text CONSTRAINT calendar_connections_sealed_shape CHECK (char_length(refresh_token_sealed) <= 2866
+    AND refresh_token_sealed ~ '^zsg1\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}[A-Za-z0-9_-]*$'),
   scope text NOT NULL DEFAULT '' CONSTRAINT calendar_connections_scope_length CHECK (char_length(scope) <= 2000),
   created_by uuid NOT NULL,
   -- G-6: sync state, the worker's.

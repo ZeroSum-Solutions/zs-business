@@ -8,6 +8,7 @@ import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { billingRoutes } from "./routes/billing.js";
+import { calendarRoutes } from "./routes/calendar.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { homeRoutes } from "./routes/home.js";
@@ -18,6 +19,7 @@ import { sourceRoutes } from "./routes/sources.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
 import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-webhook.js";
+import { googleCalendarRoutes, type GoogleCalendarConfig } from "./public/google-calendar.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 
 export interface AppConfig {
@@ -49,6 +51,12 @@ export interface AppDependencies {
   readonly stripe?: StripeClient;
   /** Signed Stripe events into the billing inbox (stripe.md S-3); absent means the route is off. */
   readonly stripeWebhook?: StripeWebhookConfig;
+  /**
+   * Google Calendar busy sync (google-calendar.md G-1, G-2, G-8): connecting, the OAuth callback
+   * and the push webhook. Absent means POST /v1/calendar/google/connect is 404 and both anonymous
+   * routes are off.
+   */
+  readonly googleCalendar?: GoogleCalendarConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -127,6 +135,7 @@ export function createApp(deps: AppDependencies) {
   app.use("/v1/*", deadline);
   app.use("/public/v1/*", deadline);
   app.use("/webhooks/*", deadline);
+  app.use("/oauth/*", deadline);
 
   const edge = {
     db: deps.db,
@@ -136,6 +145,13 @@ export function createApp(deps: AppDependencies) {
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
     ...(deps.stripe ? { billing: { stripe: deps.stripe } } : {}),
+    ...(deps.googleCalendar ? {
+      calendar: {
+        google: deps.googleCalendar.google,
+        stateSecrets: deps.googleCalendar.stateSecrets,
+        tokenPublicKey: deps.googleCalendar.tokenPublicKey,
+      },
+    } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
   const requestEdge = (c: Context<AppEnv>) =>
@@ -149,6 +165,7 @@ export function createApp(deps: AppDependencies) {
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
   if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
+  if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -172,6 +189,7 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
   app.route("/v1", billingRoutes);
+  app.route("/v1", calendarRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
@@ -191,8 +209,14 @@ export function createApp(deps: AppDependencies) {
     // An Auth outage answers 503 like a busy pool, but someone should hear about it.
     if (mapped.status === 500 || error instanceof AuthUnavailable) deps.onError?.(error);
     // A public route's own no-store header is not set when the deadline answers for it.
-    if (mapped.status === 503)
-      return c.json(mapped.body, 503, { "Retry-After": "1", ...(c.req.path.startsWith("/public/") ? { "Cache-Control": "no-store" } : {}) });
+    if (mapped.status === 503) {
+      const path = c.req.path;
+      return c.json(mapped.body, 503, {
+        "Retry-After": "1",
+        ...(path.startsWith("/public/") || path.startsWith("/oauth/") ? { "Cache-Control": "no-store" } : {}),
+        ...(path.startsWith("/oauth/") ? { "Referrer-Policy": "no-referrer" } : {}),
+      });
+    }
     return c.json(mapped.body, mapped.status);
   });
   return app;
@@ -202,5 +226,6 @@ export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/r
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
+export type { GoogleCalendarConfig } from "./public/google-calendar.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";

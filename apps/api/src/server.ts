@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createSessionCheckFromConfig, createStripeClient } from "@zs/core";
+import { createGoogleClient, createSessionCheckFromConfig, createStripeClient } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createVerifierFromConfig } from "./auth.js";
 import type { ServerEnv } from "./config.js";
@@ -69,6 +69,19 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
         ...env.stripe.webhook,
         report: ({ id, type, outcome }) => {
           if (outcome === "other_mode") console.warn("Stripe webhook from the other mode dropped", { id, type });
+        },
+      },
+    }),
+    ...(env.google === null ? {} : {
+      googleCalendar: {
+        google: createGoogleClient({ config: env.google.client }),
+        stateSecrets: env.google.stateSecrets,
+        tokenPublicKey: env.google.tokenPublicKey,
+        returnUrl: env.google.returnUrl,
+        channelSecret: env.google.channelSecret,
+        report: (event) => {
+          // A forged state or a refused grant may need an operator; the rest are routine.
+          if (event.route === "callback" && !["connected", "denied"].includes(event.outcome)) console.warn("Google OAuth callback", event);
         },
       },
     }),

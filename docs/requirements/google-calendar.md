@@ -117,7 +117,9 @@ insert into; it answers 200. The worker marks those connections due now. Notific
 calendar data, so a forged one could only cause an early sync.
 
 **G-9. Cleanup.** For a `disconnecting` connection the worker stops its channel, revokes the
-grant (an already invalid token counts as revoked), deletes its blocks under the B-21 lock, and
+grant (an already invalid token counts as revoked) unless another `active` or `reauthorize`
+connection shares it (the same resource, or the same Google account: Google revokes a whole grant,
+not one refresh token, so a revoke would end the reconnect that replaced this row), deletes its blocks under the B-21 lock, and
 sets `disconnected`, clearing the sealed token, sync token and channel. Events already pushed
 stay in the owner's calendar. A refresh that answers `invalid_grant` sets `reauthorize`: the
 blocks stay (a stale block refuses a slot; a missing one could double-book) until the owner
