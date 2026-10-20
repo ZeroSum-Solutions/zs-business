@@ -110,7 +110,7 @@ describe("request (A-5)", () => {
 
   it("refuses actions that cannot be approved, and actions the requester may not ask for", async () => {
     const session = sessionFor(owner.userId);
-    for (const actionType of ["approval.approve", "approval.request", "booking.public_request", "nope.never"])
+    for (const actionType of ["approval.approve", "approval.request", "booking.public_request", "wallet.topup.create", "nope.never"])
       await expect(session.requestApproval({ action: { ...bookingAction(), actionType }, summary: "x" }, randomUUID()))
         .rejects.toBeInstanceOf(ValidationFailed);
     // member.invite needs "members"; staff hold calendar, customers and inbox drafts.

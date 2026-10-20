@@ -1,6 +1,6 @@
 // Bundles src/vercel.ts into one ESM file and writes Vercel's Build Output API layout
-// (.vercel/output): /cron/delivery, /cron/activepieces and /cron/followup route to their own
-// functions, every other path to the API function. Workspace packages ship TypeScript with
+// (.vercel/output): /cron/delivery, /cron/billing, /cron/activepieces and /cron/followup route to
+// their own functions, every other path to the API function. Workspace packages ship TypeScript with
 // NodeNext ".js" specifiers, which Vercel's own Node builder does not map, so the bundle is made
 // here. Run from apps/api: `pnpm build:vercel`.
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -10,11 +10,13 @@ import { build } from "esbuild";
 const output = new URL("../.vercel/output/", import.meta.url);
 const fn = new URL("functions/index.func/", output);
 // Each cron is its own function, so the API's code never opens a service database login
-// (resend.md R-9, activepieces.md W-14, agents.md G-13). No schedule unless the build sets one,
-// so a deploy never starts sending, calling webhooks or drafting by itself; DELIVERY_WORKER=on,
-// ACTIVEPIECES_WEBHOOK_WORKER=on and FOLLOWUP_AGENT=on are the second switches, at run time.
+// (resend.md R-9, stripe.md S-8, activepieces.md W-14, agents.md G-13). No schedule unless the
+// build sets one, so a deploy never starts sending, moving money, calling webhooks or drafting by
+// itself; DELIVERY_WORKER=on, BILLING_WORKER=on, ACTIVEPIECES_WEBHOOK_WORKER=on and
+// FOLLOWUP_AGENT=on are the second switches, at run time.
 const crons = [
   { path: "/cron/delivery", entry: "../src/vercel-delivery.ts", scheduleVar: "DELIVERY_CRON_SCHEDULE" },
+  { path: "/cron/billing", entry: "../src/vercel-billing.ts", scheduleVar: "BILLING_CRON_SCHEDULE" },
   { path: "/cron/activepieces", entry: "../src/vercel-activepieces.ts", scheduleVar: "ACTIVEPIECES_CRON_SCHEDULE" },
   { path: "/cron/followup", entry: "../src/vercel-followup.ts", scheduleVar: "FOLLOWUP_CRON_SCHEDULE" },
 ].map((cron) => ({ ...cron, fn: new URL(`functions${cron.path}.func/`, output), schedule: process.env[cron.scheduleVar] }));

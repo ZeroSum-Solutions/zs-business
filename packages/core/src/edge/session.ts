@@ -6,6 +6,10 @@
 // M3b: stored approvals (approvals.md) run through approvedDispatch beside the direct path.
 import {
   ROLE_PERMISSIONS,
+  WALLET_TOPUP_CREATE_ACTION,
+  createTopUpRequestSchema,
+  type CreateTopUpResponse,
+  type TopUp,
   ValidationFailed,
   Conflict,
   approvalOutputSchema,
@@ -82,7 +86,7 @@ import {
   type SourceList,
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
-import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
+import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
@@ -107,6 +111,8 @@ import {
 } from "../sites/index.js";
 import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
+import { getTopUpForCheckout, listTopUps, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
+import type { StripeClient } from "../billing/stripe.js";
 import { derivedId } from "./ids.js";
 import { SiteStoreUnavailable, validationError } from "./errors.js";
 
@@ -117,6 +123,8 @@ export interface EdgeDependencies {
   readonly generateId: () => string;
   /** Signs public booking keys for the owner's page list (public-intake.md P-2, P-12). */
   readonly bookingKeys?: { readonly secret: string; readonly publicBaseUrl: string };
+  /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means top-ups are off. */
+  readonly billing?: { readonly stripe: StripeClient };
   /**
    * Site publishing (M4b): the object store releases go to and the compiler; absent means off.
    * `syncTimeoutMs` caps the edge projection after a committed write (default 5 s).
@@ -154,7 +162,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...automationHandlers, ...siteHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers,
 });
 
@@ -186,6 +194,8 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "site.release.activate": "publish",
   "approval.approve": "approve",
   "approval.reject": "approve",
+  // stripe.md S-1: only owners add money.
+  "wallet.topup.create": "billing",
   // agents.md G-2, G-3: owners change settings and resume; any member may stop the agent.
   ...AGENT_MEMBER_PERMISSIONS,
 });
@@ -285,7 +295,7 @@ export function approvedDispatch(deps: EdgeDependencies, tenantId: string, actor
  * that binding only for this command's own reference. Member sessions and the server-built public
  * principal (public-intake.md P-3) both dispatch through here, each with its own authorize.
  */
-export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId: string, authorize: Authorize) {
+export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId: string, authorize: Authorize, config: DispatchConfig = {}) {
   return (command: ActionCommand): Promise<ActionResult> => {
     const { idempotencyKey: _key, ...fields } = command;
     const approved: ActionBinding = { ...fields, tenantId, actorId };
@@ -294,7 +304,7 @@ export function directDispatch(deps: EdgeDependencies, tenantId: string, actorId
       actor: { id: actorId, tenantId },
       db: deps.db,
       clock: deps.clock,
-      config: {},
+      config,
       generateId: deps.generateId,
       resolveApproval: async (_tx, reference) =>
         reference.tenantId === tenantId && reference.id === command.approvalReference.id ? approved : null,
@@ -335,7 +345,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "site";
+  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "site";
   const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
     keyedEnvelope(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
   /** The envelope for a key the server built itself, such as a reserved `inbox:` step key. */
@@ -657,6 +667,27 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     listMembers: async (): Promise<MemberList> => ({ items: await read("members", (tx) => listMembers(tx, tenantId)) }),
     /** The prepaid wallet (delivery.md D-4); billing is an owner permission. */
     getWallet: (): Promise<WalletSummary> => read("billing", (tx) => getWallet(tx, tenantId)),
+    listTopUps: async (): Promise<{ items: TopUp[] }> => ({ items: await read("billing", (tx) => listTopUps(tx, tenantId)) }),
+
+    /** stripe.md S-1, S-2: a pending top-up and its Stripe Checkout URL. */
+    async createTopUp(body: unknown, key: unknown, signal?: AbortSignal): Promise<CreateTopUpResponse> {
+      const billing = deps.billing;
+      if (!billing) throw new NotFound();
+      const request = parseInput(createTopUpRequestSchema, body);
+      const { id, ...rest } = envelope(key, "wallet_topup");
+      const config = billing.stripe.config;
+      // S-1: the terms travel as dispatch config, never in the stored payload.
+      const terms: TopUpDispatchConfig = { topUp: { currency: config.currency, minAmount: config.minTopUp, maxAmount: config.maxTopUp } };
+      return startTopUp({
+        command: { actionType: WALLET_TOPUP_CREATE_ACTION, ...rest, payload: { topupId: id, amount: request.amount } },
+        dispatch: directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), terms),
+        read: (topupId) => read("billing", (tx) => getTopUpForCheckout(tx, tenantId, topupId)),
+        stripe: billing.stripe,
+        tenantId,
+        now: new Date(readClock(deps.clock)),
+        ...(signal ? { signal } : {}),
+      });
+    },
 
     async inviteMember(body: unknown, key: unknown): Promise<MemberOutput> {
       const request = parseInput(inviteMemberRequestSchema, body);
