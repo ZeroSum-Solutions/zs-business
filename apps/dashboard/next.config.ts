@@ -30,7 +30,12 @@ const config: NextConfig = {
   typescript: { ignoreBuildErrors: false },
   poweredByHeader: false,
   async headers() {
-    return [{ source: "/:path*", headers: SECURITY_HEADERS }];
+    return [
+      { source: "/:path*", headers: SECURITY_HEADERS },
+      // Google's code is in this address: the page it redirects to must not get it as a Referer.
+      // Later entries win for the same header (google-calendar.md G-2).
+      { source: "/api/calendar/google/callback", headers: [{ key: "Referrer-Policy", value: "no-referrer" }] },
+    ];
   },
   // e2e:live builds into its own folder so it can run next to the demo build.
   distDir: process.env.NEXT_DIST_DIR || ".next",

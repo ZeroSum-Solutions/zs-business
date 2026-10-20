@@ -2,6 +2,9 @@ import { z } from "zod";
 import {
   bookingPageSchema,
   bookingPageSummarySchema,
+  calendarConnectionListSchema,
+  calendarConnectionSchema,
+  connectGoogleCalendarResponseSchema,
   intakeItemOutputSchema,
   intakeItemPageSchema,
   contactPageSchema,
@@ -47,6 +50,7 @@ import {
   toUpsertContactRequest,
   type AgentsApi,
   type BookingApi,
+  type CalendarSyncApi,
   type CrmApi,
   type HomeApi,
   type InboxApi,
@@ -81,6 +85,8 @@ interface RequestSpec<T extends z.ZodType> {
 const resourceListSchema = z.object({ items: z.array(resourceSummarySchema) });
 const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
 const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema) });
+/** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
+const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
 
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
@@ -90,7 +96,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & CalendarSyncApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -356,6 +362,20 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     syncSite(siteId) {
       return request({ method: "POST", path: `/v1/sites/${encodeURIComponent(siteId)}/sync`, body: {}, readOnly: true, schema: siteSyncResponseSchema });
+    },
+
+    async listCalendarConnections(options = {}) {
+      return (await request({ method: "GET", path: "/v1/calendar/connections", schema: calendarConnectionListSchema, signal: options.signal })).items;
+    },
+
+    startGoogleConnect(resourceId, options) {
+      // Only the resource: the dashboard's server proxy adds what binds the flow to this browser.
+      return write("/v1/calendar/google/connect", { resourceId }, connectGoogleCalendarResponseSchema, options);
+    },
+
+    async disconnectCalendar(connectionId, options) {
+      const path = `/v1/calendar/connections/${encodeURIComponent(connectionId)}/disconnect`;
+      return (await write(path, {}, disconnectCalendarOutputSchema, options)).result;
     },
 
     getFollowUpStatus(options = {}) {

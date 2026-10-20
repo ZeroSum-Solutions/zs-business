@@ -2,6 +2,8 @@ import type {
   BookingPageSummary,
   BookingRecord,
   BookingSummary,
+  CalendarConnection,
+  CalendarConnectionStatus,
   ConsentEvidence,
   ContactRecord,
   CreateBookingRequest,
@@ -47,6 +49,8 @@ import type { WorkspaceApi } from "./workspace-types";
 export type {
   BookingPageSummary,
   BookingRecord,
+  CalendarConnection,
+  CalendarConnectionStatus,
   ConsentEvidence,
   ContactRecord,
   DealRecord,
@@ -349,12 +353,30 @@ export interface SitesApi {
   syncSite(siteId: string): Promise<SiteSyncResponse>;
 }
 
+/**
+ * Google Calendar busy sync (google-calendar.md G-1, G-5). Members with `calendar` read the
+ * connections; owners (`publish`) connect and disconnect. A connect changes nothing on the
+ * server: it answers the Google consent URL, and the connection is made when Google sends the
+ * owner back.
+ */
+export interface CalendarSyncApi {
+  /** Every connection of the business, retired ones included, never a token. */
+  listCalendarConnections(options?: ReadOptions): Promise<CalendarConnection[]>;
+  /**
+   * The URL that starts connecting this booking resource. Throws `not_found` when the server
+   * has no Google settings. It writes nothing, so each attempt takes a fresh key.
+   */
+  startGoogleConnect(resourceId: string, options: WriteOptions): Promise<{ authorizeUrl: string }>;
+  /** Hands the connection to the worker to clean up; a retired one answers as it is. */
+  disconnectCalendar(connectionId: string, options: WriteOptions): Promise<CalendarConnection>;
+}
+
 /** Customers per page of the customer list. */
 export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & WorkspaceApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & CalendarSyncApi & WorkspaceApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {
