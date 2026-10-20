@@ -101,9 +101,12 @@ function SiteEditor({ site, editing, writes, generation, onClose, onPublished }:
       api.publishSite(input, { idempotencyKey: writes.publish.keyFor(input) }),
     onSettled: (_result, error, attempt) => {
       writes.publish.settle(attempt.input, error);
-      // A lost answer is kept with its baseline for the retry; any real answer ends the doubt,
-      // since a publish from the same baseline would now be refused if the lost one had gone live.
-      writes.unsettled = isDefinitive(error) ? null : { spec: attempt.input.spec, expectedCurrentReleaseId: attempt.input.expectedCurrentReleaseId };
+      const request: UnsettledPublish = { spec: attempt.input.spec, expectedCurrentReleaseId: attempt.input.expectedCurrentReleaseId };
+      // A lost answer is kept with its baseline for the retry. Only an answer to that same
+      // request settles it: another attempt, such as an older one answering late, says
+      // nothing about whether the lost one went live.
+      if (!isDefinitive(error)) writes.unsettled = request;
+      else if (writes.unsettled && fingerprint(writes.unsettled) === fingerprint(request)) writes.unsettled = null;
     },
     onSuccess: (response, attempt) => onPublished(response, attempt.generation),
     onError: (error) => {

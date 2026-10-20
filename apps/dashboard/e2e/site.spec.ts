@@ -169,6 +169,38 @@ test("a publish retried after a lost answer replays instead of adding a second v
   await expect(editor.getByTestId("site-resume")).toHaveCount(0);
 });
 
+test("a late answer to an older publish does not drop a newer publish whose answer was lost", async ({ page }) => {
+  await openSite(page);
+  await page.getByRole("button", { name: "Edit site" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit site" });
+  // Publish A is slow; the owner closes the editor and opens it again meanwhile.
+  await editor.getByLabel("Tagline").fill("Draft A");
+  await page.evaluate(() => window.__zsDemo!.delayNextSiteWrite(1_500));
+  await editor.getByRole("button", { name: "Publish" }).click();
+  await page.keyboard.press("Escape");
+  await expect(editor).toBeHidden();
+  await page.getByRole("button", { name: "Edit site" }).click();
+
+  // Publish B goes live, but its answer is lost.
+  await editor.getByLabel("Tagline").fill("Draft B");
+  await page.evaluate(() => window.__zsDemo!.loseNextSiteAnswer());
+  await editor.getByRole("button", { name: "Publish" }).click();
+  await expect(editor.getByRole("alert")).toBeVisible();
+
+  // A then answers stale_release, and the page reloads onto B's version.
+  await expect(releases(page)).toHaveCount(3);
+  await expect(liveSummary(page)).toHaveText(/^Version 3 is live\./);
+
+  // B is still the unanswered publish: reopening offers it, and publishing replays it.
+  await editor.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Edit site" }).click();
+  await expect(editor.getByTestId("site-resume")).toBeVisible();
+  await expect(editor.getByLabel("Tagline")).toHaveValue("Draft B");
+  await editor.getByRole("button", { name: "Publish" }).click();
+  await expect(page.getByRole("status").getByText("Published. Your site is live.")).toBeVisible();
+  await expect(releases(page)).toHaveCount(3);
+});
+
 test("checks the site again when another owner makes a version live", async ({ page }) => {
   // Lists count as fresh for 30 s; the clock moves past that before the page is shown again.
   await page.clock.install();
