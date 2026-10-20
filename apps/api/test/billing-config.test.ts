@@ -1,7 +1,7 @@
 // M5 configuration (docs/requirements/stripe.md S-8, S-9): the STRIPE_* variables the API
 // function reads through parseServerEnv, and the billing runner's own environment.
 import { describe, expect, it } from "vitest";
-import { parseBillingEnv } from "../src/billing/config.js";
+import { assertBillingCronFits, parseBillingEnv } from "../src/billing/config.js";
 import { parseServerEnv } from "../src/config.js";
 import { PLACEHOLDER_CRON_SECRET } from "../src/delivery/config.js";
 import { SECRET } from "./helpers.js";
@@ -152,6 +152,14 @@ describe("parseBillingEnv (S-8, S-9)", () => {
       ["BILLING_CLAIM_LIMIT", "0"], ["BILLING_CLAIM_LIMIT", "501"], ["BILLING_RUN_BUDGET_MS", "999"],
       ["BILLING_RUN_BUDGET_MS", "600001"], ["BILLING_INTERVAL_MS", "abc"],
     ] as const) expect(billingError({ ...ON, [name]: value })).toMatch(new RegExp(name));
+  });
+
+  it("lets the Node worker take a long budget, but the cron entry at most 20 s inside its 30 s function", () => {
+    const long = parseBillingEnv({ ...ON, BILLING_RUN_BUDGET_MS: "60000" }).runner;
+    expect(long).toMatchObject({ budgetMs: 60_000 });
+    expect(() => assertBillingCronFits(long)).toThrow(/BILLING_RUN_BUDGET_MS must be at most 20000 for the cron function/);
+    expect(() => assertBillingCronFits(parseBillingEnv({ ...ON, BILLING_RUN_BUDGET_MS: "20000" }).runner)).not.toThrow();
+    expect(() => assertBillingCronFits(parseBillingEnv({}).runner)).not.toThrow();
   });
 
   it("with the switch on, requires BILLING_DATABASE_URL", () => {

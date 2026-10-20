@@ -607,7 +607,7 @@ and the wallet reserves nothing until it is repaid). Off unless `BILLING_WORKER=
 | `BILLING_WORKER` | Kill switch. `on` runs; anything else, or unset, runs nothing. |
 | `CRON_SECRET` | The same bearer as `/cron/delivery`. Unset, the route is 404. |
 | `BILLING_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
-| `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS` | Optional tuning: 50, 20000 and 30000 (Node worker only). |
+| `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS` | Optional tuning: 50, 20000 and 30000 (Node worker only). The cron function allows a budget of at most 20000. |
 | `BILLING_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/billing`. Unset, there is no cron. |
 
 `GET /cron/billing` answers like `/cron/delivery`, with `{ ran: true, passes, claimed,

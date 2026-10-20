@@ -4,11 +4,12 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
-import { parseBillingEnv } from "./billing/config.js";
+import { assertBillingCronFits, parseBillingEnv } from "./billing/config.js";
 import { startBillingRunner } from "./billing/start.js";
 import { cronRoutes } from "./delivery/cron.js";
 
 const env = parseBillingEnv(process.env);
+assertBillingCronFits(env.runner);
 const clock = { now: () => new Date() };
 const runner = env.runner === null ? null : startBillingRunner(env.runner, { clock, generateId: randomUUID }).runner;
 

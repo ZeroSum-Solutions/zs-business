@@ -1,6 +1,6 @@
 # M5: Stripe wallet top-ups
 
-Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 1. Code follows this file;
+Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 2. Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: owners add money to the M3d prepaid wallet (`delivery.md` D-4) through Stripe Checkout,
@@ -94,6 +94,8 @@ worker names `tenant_id` in every statement.
 **S-8. Running it.** `GET /cron/billing` is its own Vercel function, with the same Bearer
 `CRON_SECRET` check as `/cron/delivery`; `pnpm billing:worker` is the Node loop. The kill switch
 is `BILLING_WORKER=on`. The build adds a Vercel cron only when `BILLING_CRON_SCHEDULE` is set.
+A run stops starting passes once `BILLING_RUN_BUDGET_MS` is spent; the cron entry refuses a
+budget over 20 s, since Vercel stops its function at 30 s (the Node loop may run longer).
 
 **S-9. Configuration the Mac sets.** API function: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
 (optional `STRIPE_WEBHOOK_PREVIOUS_SECRET`), `STRIPE_LIVEMODE` (`true` or `false`),
@@ -103,7 +105,7 @@ is `BILLING_WORKER=on`. The build adds a Vercel cron only when `BILLING_CRON_SCH
 `BILLING_DATABASE_URL` (a login that may `SET ROLE service_role`). In Stripe: a webhook
 endpoint at `https://<api host>/webhooks/stripe` for the events listed above.
 
-## Known limits (revision 1)
+## Known limits (revision 2)
 
 - One currency, the wallet's. Taxes and receipts are Stripe's defaults.
 - The wallet summary does not show `owed` yet; the dashboard reads a strict shape.

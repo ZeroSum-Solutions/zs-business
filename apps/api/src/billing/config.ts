@@ -3,7 +3,7 @@
 // anything but `on` runs nothing and needs no other variable.
 import { parse } from "pg-connection-string";
 import { z } from "zod";
-import { PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
+import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
@@ -13,7 +13,7 @@ const onSchema = z.object({
   BILLING_DATABASE_URL: z.string().min(1),
   DATABASE_CA_CERT: z.string().includes("BEGIN CERTIFICATE").optional(),
   BILLING_CLAIM_LIMIT: int(1, 500).default(50),
-  // One cron run stops starting passes this long after it began.
+  // One run stops starting passes this long after it began; the cron entry allows at most 20 s.
   BILLING_RUN_BUDGET_MS: int(1_000, 600_000).default(20_000),
   // The Node worker's pause between runs.
   BILLING_INTERVAL_MS: int(1_000, 3_600_000).default(30_000),
@@ -32,6 +32,12 @@ export interface BillingEnv {
   readonly runner: BillingRunnerEnv | null;
   /** Null when CRON_SECRET is unset: the cron route answers 404. */
   readonly cronSecret: string | null;
+}
+
+/** S-8: the cron entry refuses a budget its Vercel function (stopped at 30 s) could not finish. */
+export function assertBillingCronFits(runner: BillingRunnerEnv | null): void {
+  if (runner !== null && runner.budgetMs > DELIVERY_CRON_BUDGET_LIMIT_MS)
+    throw new Error(`Invalid environment: BILLING_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
 
 const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
