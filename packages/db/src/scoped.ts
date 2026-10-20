@@ -280,6 +280,15 @@ async function transaction<T>(
 ): Promise<T> {
   const { signal } = options;
   const client = await checkout(pool, limits.maxWaiting, signal);
+  // pg-pool listens for a client's "error" only while it is idle. A backend lost while this
+  // transaction holds the client (a restart, failover or terminated backend) emits it now,
+  // and unheard it would end the process. The statement in flight rejects with the same
+  // error, which the caller gets; here the client is only marked for discarding.
+  let lost = false;
+  const onLost = () => { lost = true; };
+  // Simulated poolers in the hosted-probe tests hand out clients without an emitter.
+  const listens = typeof client.on === "function";
+  if (listens) client.on("error", onLost);
   // Which timeouts the caller's deadline shortened: only those report a cancellation as the deadline.
   const cutShort = new Set<string>();
   const state: Abandonment = { abandoned: false };
@@ -367,14 +376,15 @@ async function transaction<T>(
     // Belt and braces: on a direct or session-mode connection this reaches the same backend.
     // Work may also set session-scoped state that a commit keeps. A failed or slow reset
     // discards the client.
-    if (!discard) {
+    if (!discard && !lost) {
       try {
         await within(client.query(SESSION_RESET), CLEANUP_TIMEOUT_MS);
       } catch (error) {
         failed(error);
       }
     }
-    client.release(discard);
+    if (listens) client.removeListener("error", onLost);
+    client.release(discard || lost);
   }
 }
 

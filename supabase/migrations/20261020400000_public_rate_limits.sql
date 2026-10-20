@@ -67,6 +67,21 @@ DECLARE
   bucket record;
   retry_ms bigint := 0;
 BEGIN
+  -- Only the API's runtime login may charge or sweep buckets: an unprivileged LOGIN whose one
+  -- role membership is authenticated, the rule assertRuntimeLogin and every scoped
+  -- transaction enforce. EXECUTE has to go to authenticated, which Supabase-issued JWTs also
+  -- carry, so pg_graphql and PostgREST could reach this function. Their requests run under
+  -- the authenticator login, which belongs to anon, authenticated and service_role, and carry
+  -- JWT claims; both are refused, so a signed-in member cannot pick p_now and sweep or fill
+  -- buckets.
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = session_user
+      AND r.rolcanlogin AND NOT (r.rolsuper OR r.rolbypassrls OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication)
+      AND EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid AND m.roleid = 'authenticated'::regrole)
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid AND m.roleid <> 'authenticated'::regrole))
+    OR coalesce(current_setting('request.jwt.claims', true), '') <> ''
+    OR coalesce(current_setting('request.jwt.claim.sub', true), '') <> '' THEN
+    RAISE EXCEPTION 'rate_limit_take is for the API runtime login only' USING ERRCODE = '42501';
+  END IF;
   IF p_now IS NULL OR jsonb_typeof(p_charges) IS DISTINCT FROM 'array'
     OR jsonb_array_length(p_charges) NOT BETWEEN 1 AND 8 THEN
     RAISE EXCEPTION 'rate_limit_take needs a time and 1 to 8 charges' USING ERRCODE = '22023';

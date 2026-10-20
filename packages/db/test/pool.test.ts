@@ -122,6 +122,27 @@ describe("runtime pool bounds", () => {
     }
   });
 
+  it("survives a backend lost mid-transaction: the caller gets the error, the process keeps running", async () => {
+    // pg-pool hears a client's "error" only while it is idle; a checked-out one's would be uncaught.
+    const pool = createRuntimePool({ connectionString: runtimeUrl(), max: 1, connectionTimeoutMs: 2000, onError: () => undefined });
+    const db = createScopedDatabase(pool);
+    try {
+      const running = db.tenant(fixture.a.tenantId, (tx) => tx.query("SELECT pg_sleep(5)"));
+      let pid: number | undefined;
+      for (let i = 0; i < 100 && pid === undefined; i++) {
+        pid = (await database.pool.query<{ pid: number }>(
+          "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'SELECT pg_sleep(5)%' LIMIT 1")).rows[0]?.pid;
+        if (pid === undefined) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await database.pool.query("SELECT pg_terminate_backend($1)", [pid]);
+      await expect(running).rejects.toThrow();
+      // The lost client was discarded; the next transaction gets a new connection.
+      expect((await db.tenant(fixture.a.tenantId, (tx) => tx.query<{ ok: number }>("SELECT 1 AS ok"))).rows).toEqual([{ ok: 1 }]);
+    } finally {
+      await pool.end();
+    }
+  });
+
   it("reports pool errors without the URL and at a bounded rate", () => {
     const summary = summarizePoolError(Object.assign(new Error("connect failed for postgres://zs_runtime:hunter2@db.example:5432/app"), { code: "ECONNREFUSED" }));
     expect(summary).toEqual({ code: "ECONNREFUSED", message: "connect failed for [database-url]" });

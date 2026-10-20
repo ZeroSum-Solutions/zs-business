@@ -8,8 +8,11 @@ import {
   publicPageSchema,
 } from "@zs/contracts";
 import { signBookingKey, verifyBookingKey } from "@zs/core";
+import { createScopedDatabase } from "@zs/db";
+import { createPostgresRateLimiter, type RateLimiter } from "../src/app.js";
 import {
   call,
+  clock,
   createApiHarness,
   KEY_SECRET,
   NOW,
@@ -706,5 +709,35 @@ describe.each(["memory", "postgres"] as const)("abuse limits (P-10), counted in 
     const page = await provisionPage(limited, limited.b);
     const response = await post(page.key, body(limited.b.resourceId, 9, { botToken: "bot" }), "192.0.2.60");
     expect(response.status).toBe(400);
+  });
+});
+
+describe("shared limiter unavailable (P-10)", () => {
+  let outage: ApiHarness;
+  // Built once the harness database exists, with a short lock timeout.
+  let inner: RateLimiter | undefined;
+  beforeAll(async () => {
+    outage = await createApiHarness({
+      publicIntake: { limiter: { take: (charges, options) => inner!.take(charges, options) } },
+    });
+    inner = createPostgresRateLimiter(createScopedDatabase(outage.database.runtimePool, { lockTimeoutMs: 200 }), clock);
+  });
+  afterAll(async () => outage.close());
+
+  it("answers a retryable 503, not a 500, when the buckets stay locked past the lock timeout", async () => {
+    const page = await provisionPage(outage, outage.a);
+    const holder = await outage.database.pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("LOCK TABLE rate_limit_buckets IN EXCLUSIVE MODE");
+      const response = await call(outage.app, "GET", `/public/v1/pages/${page.key}`, { socket: "192.0.2.80" });
+      expect(response).toMatchObject({ status: 503, body: { error: { code: "Unavailable" } } });
+      expect(response.headers.get("retry-after")).toBe("1");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
+    expect((await call(outage.app, "GET", `/public/v1/pages/${page.key}`, { socket: "192.0.2.80" })).status).toBe(200);
   });
 });

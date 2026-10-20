@@ -144,11 +144,14 @@ never pass a limit and a refused request charges no bucket. The counters live in
 database, so the limits hold however many Vercel function instances serve. The table holds
 the SHA-256 of each bucket name, never a client address; the runtime role cannot read or write
 it and charges only through the `SECURITY DEFINER` function `public.rate_limit_take`, owned by
-the NOLOGIN role `zs_rate_limiter`. The API passes its own clock (instances whose clocks
+the NOLOGIN role `zs_rate_limiter`. The function refuses (42501) every caller but the API's
+runtime login (an unprivileged LOGIN whose one membership is `authenticated`) and any call
+carrying JWT claims, so a Supabase-issued token cannot reach it through pg_graphql or PostgREST. The API passes its own clock (instances whose clocks
 differ by a few seconds move a window edge by that much), and each charge sweeps at most 32
 expired buckets, so the table stays bounded by the live windows. The charge runs in its
-own runtime transaction under the request deadline; if the database cannot answer, the request
-gets 503 and is not served. `PUBLIC_RATE_LIMIT_STORE=memory` counts in the process instead and
+own runtime transaction under the request deadline. If the database cannot answer (no
+connection in time, a lock or statement timeout, a lost connection), the request gets 503
+with `Retry-After` and is not served. `PUBLIC_RATE_LIMIT_STORE=memory` counts in the process instead and
 is refused unless `DATABASE_URL` is a loopback host.
 The client address is the socket address, unless the deployment names another source:
 `PUBLIC_CLIENT_IP_HEADER`, a header the host overwrites (on Vercel `x-vercel-forwarded-for`

@@ -22,6 +22,8 @@ afterAll(async () => {
 /** Another API instance on the same database, with its own runtime pool. */
 function instance(): ScopedDatabase {
   const pool = new Pool({ connectionString: database.runtimePool.options.connectionString, max: 10 });
+  // A test terminates one of these backends; the pool reports it and replaces the client.
+  pool.on("error", () => undefined);
   pools.push(pool);
   return createScopedDatabase(pool);
 }
@@ -133,6 +135,71 @@ describe("shared Postgres limiter", () => {
       `SELECT proowner::regrole::text AS owner, prosecdef AS definer FROM pg_proc
         WHERE oid='public.rate_limit_take(timestamptz,jsonb)'::regprocedure`)).rows[0]);
     expect(definer).toEqual({ owner: "zs_rate_limiter", definer: true });
+  });
+
+  // pg_graphql and PostgREST run a signed-in member's request as the authenticator login with
+  // SET ROLE authenticated and the JWT claims set; neither may charge or sweep buckets.
+  it("refuses callers other than the API runtime login, such as a Supabase JWT request", async () => {
+    const login = `zs_test_authenticator_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    await database.pool.query(`CREATE ROLE ${login} LOGIN NOINHERIT; GRANT authenticated, service_role TO ${login}`);
+    const url = new URL(database.url);
+    url.username = login;
+    const authenticator = new Pool({ connectionString: url.href, max: 1 });
+    const call = `SELECT public.rate_limit_take($1, $2::jsonb)`;
+    const params = [new Date(NOW + 1e12).toISOString(), JSON.stringify([{ key: "b".repeat(64), limit: 1, windowMs: 1000 }])];
+    try {
+      for (const claims of ['{"sub":"00000000-0000-0000-0000-000000000001","role":"authenticated"}', ""]) {
+        const client = await authenticator.connect();
+        try {
+          await client.query("BEGIN");
+          await client.query("SELECT set_config('role','authenticated',true), set_config('request.jwt.claims',$1,true)", [claims]);
+          await expect(client.query(call, params), claims || "no claims").rejects.toMatchObject({ code: "42501" });
+        } finally {
+          await client.query("ROLLBACK").catch(() => undefined);
+          client.release();
+        }
+      }
+    } finally {
+      await authenticator.end();
+      await database.pool.query(`DROP ROLE ${login}`);
+    }
+    // The runtime login itself is refused too while a request's JWT claims are set.
+    for (const setting of ["request.jwt.claims", "request.jwt.claim.sub"])
+      await expect(database.db.withoutTenant(async (tx) => {
+        await tx.query("SELECT set_config($1, 'x', true)", [setting]);
+        return tx.query(call, params);
+      }), setting).rejects.toMatchObject({ code: "42501" });
+    // Nothing was charged or swept by the refused calls.
+    expect((await createPostgresRateLimiter(database.db, at(0)).take([{ key: `refused:${randomUUID()}`, rule: rule(1) }])).ok).toBe(true);
+  });
+
+  it("answers a lock wait past its timeout, and a lost connection, as an unavailable store", async () => {
+    const holder = await database.pool.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("LOCK TABLE rate_limit_buckets IN EXCLUSIVE MODE");
+      const impatient = createPostgresRateLimiter(createScopedDatabase(database.runtimePool, { lockTimeoutMs: 200 }), at(0));
+      // Well inside the request deadline: the lock timeout, not the deadline, ends the wait.
+      const started = performance.now();
+      await expect(impatient.take([{ key: randomUUID(), rule: rule(1) }], { remainingMs: () => 10_000 }))
+        .rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "busy", cause: { code: "55P03" } });
+      expect(performance.now() - started).toBeLessThan(5000);
+
+      const waiting = createPostgresRateLimiter(instance(), at(0)).take([{ key: randomUUID(), rule: rule(1) }]);
+      let pid: number | undefined;
+      for (let i = 0; i < 100 && pid === undefined; i++) {
+        pid = (await database.pool.query<{ pid: number }>(
+          `SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'
+             AND query LIKE '%rate_limit%' LIMIT 1`)).rows[0]?.pid;
+        if (pid === undefined) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(pid).toBeDefined();
+      await database.pool.query("SELECT pg_terminate_backend($1)", [pid]);
+      await expect(waiting).rejects.toMatchObject({ name: "DatabaseUnavailable", reason: "connect" });
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
   });
 
   it("refuses malformed charges", async () => {
