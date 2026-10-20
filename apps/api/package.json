@@ -21,6 +21,7 @@
     "check:hosted": "tsx src/scripts/hosted-checks.ts",
     "delivery:worker": "tsx src/scripts/delivery-worker.ts",
     "billing:worker": "tsx src/scripts/billing-worker.ts",
+    "calendar:worker": "tsx src/scripts/calendar-worker.ts",
     "sms:number": "tsx src/scripts/sms-number.ts",
     "activepieces:worker": "tsx src/scripts/activepieces-worker.ts"
   },

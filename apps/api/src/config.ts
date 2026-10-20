@@ -17,11 +17,13 @@ import {
 } from "@zs/core";
 import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
+import { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
 
 // The JWT_* variables (signing method, secret or JWKS URL, issuer, lifetime, skew) are parsed
 // by the schema in @zs/core, shared with the MCP server.
 export { jwtSecretSchema, PLACEHOLDER_JWT_SECRET } from "@zs/core";
 export { assertLocalDatabaseUrl, assertLocalPool, describeDatabase, type LocalDatabaseTarget } from "@zs/db";
+export { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 
@@ -154,6 +156,8 @@ export interface ServerEnv {
   readonly resendWebhook: ResendWebhookEnv | null;
   /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
   readonly stripe: StripeEnv | null;
+  /** google-calendar.md G-12: connecting, the OAuth callback and the push webhook; null (all off) when no API GOOGLE_ variable is set. */
+  readonly google: GoogleEnv | null;
   readonly twilioWebhook: TwilioWebhookEnv | null;
   readonly activepieces: ActivepiecesEnv | null;
 }
@@ -219,6 +223,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     unsubscribe: parseUnsubscribe(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
+    google: parseGoogleEnv(env),
     twilioWebhook: parseTwilioWebhook(parsed.data),
     activepieces: parseActivepieces(parsed.data),
   };
