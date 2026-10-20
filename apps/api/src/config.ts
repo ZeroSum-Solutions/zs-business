@@ -18,7 +18,12 @@ export const PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET = "replace-with-an-unsubscribe
 const signingSecretSchema = (what: string, placeholder: string) => z.string()
   .min(32, `${what} secrets must be at least 32 characters`)
   .refine((value) => value !== placeholder, `${what} secret is still the .env.example placeholder`);
+/** The .env.example value for the Activepieces key secret; refused like the others. */
+export const PLACEHOLDER_ACTIVEPIECES_KEY_SECRET = "replace-with-an-activepieces-key-secret-of-32-or-more-chars";
 const bookingKeySecretSchema = signingSecretSchema("booking key", PLACEHOLDER_BOOKING_KEY_SECRET);
+export const activepiecesKeySecretSchema = signingSecretSchema("Activepieces key", PLACEHOLDER_ACTIVEPIECES_KEY_SECRET);
+/** Loopback receivers (http://127.0.0.1) for local development; only with a loopback database. */
+export const activepiecesLoopbackSchema = z.enum(["on", "off"]).default("off");
 const unsubscribeTokenSecretSchema = signingSecretSchema("unsubscribe token", PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET);
 /** Headers that hosting platforms overwrite, so a caller cannot choose the value. */
 export const CLIENT_IP_HEADERS = ["x-vercel-forwarded-for", "x-real-ip", "cf-connecting-ip", "fly-client-ip"] as const;
@@ -54,6 +59,12 @@ const envSchema = z.object({
   // POST /webhooks/resend off. The previous secret keeps verifying during a rotation.
   RESEND_WEBHOOK_SECRET: resendWebhookSecretSchema.optional(),
   RESEND_WEBHOOK_PREVIOUS_SECRET: resendWebhookSecretSchema.optional(),
+  // activepieces.md W-14: derives webhook signing secrets and automation tokens. Unset turns the
+  // /v1/integrations/activepieces and /integrations/activepieces routes off. The previous secret
+  // keeps tokens and signatures valid during a rotation.
+  ACTIVEPIECES_KEY_SECRET: activepiecesKeySecretSchema.optional(),
+  ACTIVEPIECES_KEY_PREVIOUS_SECRET: activepiecesKeySecretSchema.optional(),
+  ACTIVEPIECES_ALLOW_LOOPBACK: activepiecesLoopbackSchema,
   // PEM of the CA that signs the database's TLS certificate (hosted Supabase: the Supabase
   // Root 2021 CA in supabase/hosted/). Set: TLS with full verification. Required for any
   // host other than loopback; only a loopback database may use plain TCP.
@@ -63,6 +74,16 @@ const envSchema = z.object({
   DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
   // Longest time one /v1 request may take; keep it under the dashboard proxy's 15 s.
   REQUEST_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
+  // M4b site publishing. Unset turns the /v1/sites routes off. `r2`: Cloudflare R2 through its
+  // S3 API (the R2_* variables); `memory`: an in-process store, loopback DATABASE_URL only.
+  SITES_STORE: z.enum(["r2", "memory"]).optional(),
+  // The compiler that turns a site spec into files. `plain` is built in; the Mish publisher
+  // is wired in code (createServer's siteCompiler) when the Mac adds it.
+  SITE_COMPILER: z.enum(["plain"]).default("plain"),
+  R2_ENDPOINT: z.url({ protocol: /^https$/ }).optional(),
+  R2_BUCKET: z.string().min(3).max(63).optional(),
+  R2_ACCESS_KEY_ID: z.string().min(1).optional(),
+  R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
 }).superRefine((env, ctx) => {
   const issue = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
   let host: string;
@@ -75,6 +96,11 @@ const envSchema = z.object({
     return;
   }
   const loopback = LOOPBACK.has(host);
+  if (env.SITES_STORE === "memory" && !loopback)
+    issue("SITES_STORE", "memory is for local runs: it needs a loopback DATABASE_URL");
+  if (env.SITES_STORE === "r2")
+    for (const name of ["R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"] as const)
+      if (env[name] === undefined) issue(name, "is required when SITES_STORE=r2");
   if (!loopback && env.DATABASE_CA_CERT === undefined)
     issue("DATABASE_CA_CERT", "is required when DATABASE_URL is not a loopback host (127.0.0.1, ::1, localhost)");
   // pg lets URL options (ssl, sslmode, also percent-encoded) replace the ssl config, which
@@ -100,13 +126,26 @@ export interface ServerEnv {
   /** P-10: where the public route limits count: one Postgres table shared by every instance, or this process. */
   readonly rateLimitStore: "postgres" | "memory";
   readonly publicIntake: PublicIntakeEnv | null;
+  readonly sites: SitesEnv | null;
   readonly unsubscribe: UnsubscribeEnv | null;
   readonly resendWebhook: ResendWebhookEnv | null;
   /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
   readonly stripe: StripeEnv | null;
+  readonly activepieces: ActivepiecesEnv | null;
+}
+export interface ActivepiecesEnv {
+  readonly keySecrets: { readonly current: string; readonly previous?: string };
+  /** True only on a loopback database: receiver URLs may then point at 127.0.0.1 over http. */
+  readonly allowLoopback: boolean;
 }
 export interface ResendWebhookEnv {
   readonly secrets: { readonly current: string; readonly previous?: string };
+}
+export interface SitesEnv {
+  readonly store:
+    | { readonly kind: "memory" }
+    | { readonly kind: "r2"; readonly endpoint: string; readonly bucket: string; readonly accessKeyId: string; readonly secretAccessKey: string };
+  readonly compiler: "plain";
 }
 export interface PublicIntakeEnv {
   readonly keySecrets: { readonly current: string; readonly previous?: string };
@@ -146,10 +185,51 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     requestTimeoutMs: parsed.data.REQUEST_TIMEOUT_MS,
     rateLimitStore: parsed.data.PUBLIC_RATE_LIMIT_STORE,
     publicIntake: parsePublicIntake(parsed.data),
+    sites: parseSites(parsed.data),
     unsubscribe: parseUnsubscribe(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
+    activepieces: parseActivepieces(parsed.data),
   };
+}
+
+function parseSites(data: z.infer<typeof envSchema>): SitesEnv | null {
+  if (data.SITES_STORE === undefined) return null;
+  if (data.SITES_STORE === "memory") return { store: { kind: "memory" }, compiler: data.SITE_COMPILER };
+  return {
+    store: {
+      kind: "r2", endpoint: data.R2_ENDPOINT!, bucket: data.R2_BUCKET!,
+      accessKeyId: data.R2_ACCESS_KEY_ID!, secretAccessKey: data.R2_SECRET_ACCESS_KEY!,
+    },
+    compiler: data.SITE_COMPILER,
+  };
+}
+
+function parseActivepieces(data: z.infer<typeof envSchema>): ActivepiecesEnv | null {
+  const loopback = data.ACTIVEPIECES_ALLOW_LOOPBACK === "on";
+  if (data.ACTIVEPIECES_KEY_SECRET === undefined) {
+    if (data.ACTIVEPIECES_KEY_PREVIOUS_SECRET !== undefined)
+      throw new Error("Invalid environment: ACTIVEPIECES_KEY_PREVIOUS_SECRET needs ACTIVEPIECES_KEY_SECRET");
+    if (loopback) throw new Error("Invalid environment: ACTIVEPIECES_ALLOW_LOOPBACK needs ACTIVEPIECES_KEY_SECRET");
+    return null;
+  }
+  if (loopback) assertLoopbackOnly("ACTIVEPIECES_ALLOW_LOOPBACK", data.DATABASE_URL);
+  return {
+    keySecrets: {
+      current: data.ACTIVEPIECES_KEY_SECRET,
+      ...(data.ACTIVEPIECES_KEY_PREVIOUS_SECRET === undefined ? {} : { previous: data.ACTIVEPIECES_KEY_PREVIOUS_SECRET }),
+    },
+    allowLoopback: loopback,
+  };
+}
+
+/** A local-development switch is refused unless the database is on this machine. */
+export function assertLoopbackOnly(name: string, databaseUrl: string): void {
+  try {
+    assertLocalDatabaseUrl(databaseUrl);
+  } catch {
+    throw new Error(`Invalid environment: ${name}=on needs a loopback database URL`);
+  }
 }
 
 function parseClientIp(data: z.infer<typeof envSchema>): ClientIpConfig {

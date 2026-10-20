@@ -121,6 +121,26 @@ describe("request (A-5)", () => {
       .rejects.toBeInstanceOf(TenantDenied);
   });
 
+  it("refuses site actions at the edge and in the handler: their publish path runs around the handler", async () => {
+    const siteAction = (actionType: string) => ({ actionType, target: { type: "site", id: randomUUID() }, payload: {} });
+    const dispatch = createDispatcher({ ...approvalHandlers });
+    const ctx: DispatchContext = {
+      tenantId, actor: { id: owner.userId, tenantId }, db: database.db, clock, config: {}, generateId: randomUUID,
+      resolveApproval: (tx, reference) => resolveStoredApproval(tx, tenantId, reference.id, clock.now),
+    };
+    for (const actionType of ["site.create", "site.release.publish", "site.release.activate"]) {
+      await expect(sessionFor(owner.userId).requestApproval({ action: siteAction(actionType), summary: "Publish" }, randomUUID()))
+        .rejects.toBeInstanceOf(ValidationFailed);
+      // A dispatcher without the edge's permission check refuses it too.
+      const approvalId = randomUUID();
+      await expect(dispatch(ctx, {
+        actionType: "approval.request", target: { type: "approval", id: approvalId }, idempotencyKey: randomUUID(),
+        payload: { approvalId, action: siteAction(actionType), summary: "Publish", expiresInMinutes: 60 },
+      })).rejects.toBeInstanceOf(ValidationFailed);
+    }
+    expect(await count("SELECT count(*) AS n FROM approvals WHERE tenant_id=$1 AND action_type LIKE 'site.%'", [tenantId])).toBe(0);
+  });
+
   it("bounds the expiry and the summary", async () => {
     const session = sessionFor(owner.userId);
     for (const body of [
