@@ -95,6 +95,16 @@ export async function getTopUp(tx: Transaction, tenantId: string, topupId: strin
   return row ? topUpFromRow(row) : null;
 }
 
+/** A stored top-up with its wallet's currency now (null before the first credit). */
+export async function getTopUpForCheckout(tx: Transaction, tenantId: string, topupId: string)
+  : Promise<{ topup: TopUp; walletCurrency: string | null } | null> {
+  const row = (await tx.query<TopUpRow & { wallet_currency: string | null }>(
+    `SELECT ${TOPUP_COLUMNS.split(",").map((column) => `t.${column.trim()}`).join(", ")}, w.currency AS wallet_currency
+       FROM wallet_topups t LEFT JOIN wallets w ON w.tenant_id=t.tenant_id
+      WHERE t.tenant_id=$1 AND t.id=$2`, [tenantId, topupId])).rows[0];
+  return row ? { topup: topUpFromRow(row), walletCurrency: row.wallet_currency } : null;
+}
+
 export async function listTopUps(tx: Transaction, tenantId: string, limit = 20): Promise<TopUp[]> {
   return (await tx.query<TopUpRow>(
     `SELECT ${TOPUP_COLUMNS} FROM wallet_topups WHERE tenant_id=$1 ORDER BY created_at DESC, id LIMIT $2`,
@@ -108,7 +118,7 @@ export async function listTopUps(tx: Transaction, tenantId: string, limit = 20):
 export async function startTopUp(input: {
   readonly command: ActionCommand;
   readonly dispatch: (command: ActionCommand) => Promise<ActionResult>;
-  readonly read: (topupId: string) => Promise<TopUp | null>;
+  readonly read: (topupId: string) => Promise<{ topup: TopUp; walletCurrency: string | null } | null>;
   readonly stripe: StripeClient;
   readonly tenantId: string;
   readonly now: Date;
@@ -116,11 +126,16 @@ export async function startTopUp(input: {
 }): Promise<{ topup: TopUp; checkoutUrl: string }> {
   const parsed = parseOrFail(createTopUpCommandSchema, input.command);
   await input.dispatch(parsed);
-  const topup = await input.read(parsed.payload.topupId);
-  if (!topup) throw new Conflict("The top-up is not available", { reason: "topup_closed" });
+  const found = await input.read(parsed.payload.topupId);
+  if (!found) throw new Conflict("The top-up is not available", { reason: "topup_closed" });
+  const { topup } = found;
   const createdAt = Date.parse(topup.createdAt);
   if (topup.status !== "pending" || input.now.getTime() - createdAt > CHECKOUT_RETRY_LIMIT_MS)
     throw new Conflict("The top-up can no longer be paid; start a new one", { reason: "topup_closed" });
+  // S-1: checked again before every Stripe call, a replay included: the wallet may have been
+  // created in another currency since this top-up was stored, and its payment could never be credited.
+  if (found.walletCurrency !== null && found.walletCurrency !== topup.currency)
+    throw new Conflict("The wallet holds another currency than this top-up", { reason: "wallet_currency" });
   const session = await input.stripe.createCheckoutSession({
     tenantId: input.tenantId,
     topupId: topup.id,
