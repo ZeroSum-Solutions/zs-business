@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { MESSAGE_SEND_REQUESTED } from "@zs/contracts";
-import { createFakeProvider, verifyUnsubscribeToken, type DeliveryReport } from "../../src/index.js";
+import { createFakeProvider, verifyUnsubscribeToken, type DeliveryProvider, type DeliveryReport } from "../../src/index.js";
 import { createDeliveryHarness, PRICES, UNSUBSCRIBE_SECRET, type DeliveryHarness } from "./helpers.js";
 
 let h: DeliveryHarness;
@@ -174,9 +174,10 @@ describe("producer settlement hook", () => {
     });
     const contactId = await h.contact(tenant);
     const { messageId } = await h.enqueue(tenant, { contactId });
-    await expect(worker.runOnce()).rejects.toThrow("producer refused");
-    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "leased", outcome_unknown: true });
-    h.clock.advance(60_001);
+    // The settlement rolls back; the row goes back as uncertain, the rest of the pass goes on.
+    expect((await worker.runOnce()).results).toEqual([{ outcome: "error", error: "producer refused" }]);
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "uncertain", outcome_unknown: true, step_errors: 1 });
+    h.clock.advance(1_001);
     await worker.runOnce();
     expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "sent" });
     expect(h.provider.delivered.filter((item) => item.request.tenantId === tenant)).toHaveLength(1);
@@ -185,6 +186,114 @@ describe("producer settlement hook", () => {
     await worker.runOnce();
     expect((await h.delivery(tenant, blocked.messageId)).status).toBe("blocked");
     expect(settled).toEqual([["sent", "sent"], ["failed", "blocked"]]);
+  });
+});
+
+describe("worker faults", () => {
+  /** Throws once from a non-async `send`, then delegates to the shared fake. */
+  const throwingOnce = (error: () => never): DeliveryProvider => {
+    let thrown = false;
+    return {
+      name: h.provider.name, dedupeWindowMs: h.provider.dedupeWindowMs,
+      send: (request, options) => {
+        if (!thrown) { thrown = true; error(); }
+        return h.provider.send(request, options);
+      },
+      lookup: (key, options) => h.provider.lookup!(key, options),
+    };
+  };
+
+  it("records an over-long, empty or synchronous provider error as uncertain instead of wedging the row", async () => {
+    await h.credit(tenant, 50);
+    const contactId = await h.contact(tenant);
+    for (const [error, expected] of [
+      [() => { throw new Error("x".repeat(300)); }, `provider_error: ${"x".repeat(300)}`.slice(0, 200)],
+      [() => { throw new Error(""); }, "provider_error:"],
+    ] as const) {
+      const { messageId } = await h.enqueue(tenant, { contactId });
+      expect((await h.worker({}, throwingOnce(error) as never).runOnce()).results).toEqual([{ outcome: "retry", status: "uncertain", reason: expect.any(String) }]);
+      const row = await h.delivery(tenant, messageId);
+      expect(row).toMatchObject({ status: "uncertain", outcome_unknown: true, last_error: expected });
+      expect(await h.rows("SELECT error_code FROM message_delivery_attempts WHERE tenant_id=$1 AND delivery_id=$2", [tenant, row.id]))
+        .toEqual([{ error_code: expected }]);
+    }
+  });
+
+  it("maps an empty failure code to unknown", async () => {
+    await h.credit(tenant, 50);
+    const contactId = await h.contact(tenant);
+    const { messageId } = await h.enqueue(tenant, { contactId });
+    const blank: DeliveryProvider = { ...h.provider, name: h.provider.name, dedupeWindowMs: h.provider.dedupeWindowMs,
+      send: async () => ({ status: "failed", code: "" }) };
+    await h.worker({}, blank as never).runOnce();
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "pending", last_error: "unknown" });
+  });
+
+  it("resends exactly what the first attempt sent, even after the unsubscribe secret rotates", async () => {
+    await h.credit(tenant, 50);
+    const contactId = await h.contact(tenant);
+    const { messageId } = await h.enqueue(tenant, { contactId });
+    h.provider.queue("lose-reply");
+    await h.worker().runOnce();
+    h.clock.advance(1_000);
+    const rotated = h.worker({ unsubscribe: { secret: "rotated-secret-rotated-secret-rotated", baseUrl: "https://other.example.test/u" } });
+    await rotated.runOnce();
+    const row = await h.delivery(tenant, messageId);
+    expect(row.status).toBe("sent");
+    const calls = h.provider.calls.filter((call) => call.deliveryId === row.id);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toEqual(calls[0]);
+    expect(calls[0]!.text).toContain("https://api.example.test/public/v1/unsubscribe/zsu1_");
+  });
+
+  it("never resends or looks up at another provider than the one an unknown outcome went to", async () => {
+    await h.credit(tenant, 50);
+    const before = await h.wallet(tenant);
+    const contactId = await h.contact(tenant);
+    const { messageId } = await h.enqueue(tenant, { contactId });
+    h.provider.queue("lose-reply");
+    await h.worker().runOnce();
+    const replacement = createFakeProvider({ clock: h.clock, name: "replacement" });
+    h.clock.advance(1_000);
+    await h.worker({}, replacement).runOnce();
+    expect(replacement.calls).toHaveLength(0);
+    expect(replacement.lookups).toHaveLength(0);
+    expect(await h.delivery(tenant, messageId)).toMatchObject({
+      status: "dead", final_reason: "outcome_unknown", outcome_unknown: true, last_error: "provider_changed" });
+    expect(await h.wallet(tenant)).toEqual({ balance: before.balance, reserved: before.reserved + PRICES.email });
+  });
+
+  it("a settlement hook that always fails stops at the step cap with the money held, and the batch goes on", async () => {
+    await h.credit(tenant, 50);
+    const before = await h.wallet(tenant);
+    const reports: DeliveryReport[] = [];
+    const base = h.worker();
+    const { createDeliveryWorker } = await import("../../src/index.js");
+    const worker = createDeliveryWorker({
+      service: h.service, providers: { email: h.provider, sms: h.provider }, approvals: h.approvals.port,
+      clock: h.clock, generateId: randomUUID, config: { ...base.config, maxStepErrors: 3 },
+      report: (event) => reports.push(event),
+      onSettled: async (_tx, _tenant, messageId) => { if (messageId === poison.messageId) throw new Error("producer row gone"); },
+    });
+    const contactId = await h.contact(tenant);
+    const poison = await h.enqueue(tenant, { contactId });
+    const healthy = await h.enqueue(tenant, { contactId: await h.contact(tenant) });
+    const first = await worker.runOnce();
+    expect(first.claimed).toBe(2);
+    expect(await h.delivery(tenant, healthy.messageId)).toMatchObject({ status: "sent" });
+    for (let i = 0; i < 4; i += 1) {
+      h.clock.advance(1_001);
+      await worker.runOnce();
+    }
+    const dead = await h.delivery(tenant, poison.messageId);
+    expect(dead).toMatchObject({ status: "dead", final_reason: "worker_error", outcome_unknown: true, step_errors: 3 });
+    // One real send for the poison row; its resends were deduped by key.
+    expect(h.provider.delivered.filter((item) => item.request.deliveryId === dead.id)).toHaveLength(1);
+    expect(reports.filter((event) => event.kind === "step_failed")).toHaveLength(3);
+    expect(await h.wallet(tenant)).toEqual({ balance: before.balance - PRICES.email, reserved: before.reserved + PRICES.email });
+    // An operator settles it once, through a worker whose hook works again.
+    await h.worker().settleUnknown({ tenantId: tenant, deliveryId: dead.id, outcome: "sent", providerMessageId: "checked-by-operator" });
+    expect(await h.wallet(tenant)).toEqual({ balance: before.balance - 2 * PRICES.email, reserved: before.reserved });
   });
 });
 

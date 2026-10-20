@@ -42,6 +42,8 @@ export const deliveryWorkerConfigSchema = z.strictObject({
   /** Longest wait for one provider call; it must end well inside the lease. */
   providerTimeoutMs: positiveMs.default(15_000),
   maxAttempts: z.number().int().min(1).max(50).default(6),
+  /** Steps that threw (a database error, a failing settlement hook) before a dead letter `worker_error`. */
+  maxStepErrors: z.number().int().min(1).max(50).default(5),
   backoffBaseMs: positiveMs.default(30_000),
   backoffMaxMs: positiveMs.default(30 * 60_000),
   /** No send starts this close to the end of the provider's dedupe window (D-8). */
@@ -64,7 +66,8 @@ type Config = z.infer<typeof deliveryWorkerConfigSchema>;
 
 export type DeliveryReport =
   | { readonly kind: "invalid_event"; readonly tenantId: string; readonly outboxId: string; readonly error: string }
-  | { readonly kind: "lost_lease"; readonly tenantId: string; readonly deliveryId: string };
+  | { readonly kind: "lost_lease"; readonly tenantId: string; readonly deliveryId: string }
+  | { readonly kind: "step_failed"; readonly tenantId: string; readonly deliveryId: string; readonly error: string };
 
 export interface DeliveryWorkerDeps {
   /** A service-role transaction: `(work) => asService(servicePool, work)`. */
@@ -95,7 +98,8 @@ export type StepResult =
   | { readonly outcome: "sent"; readonly providerMessageId: string }
   | { readonly outcome: "blocked" | "dead"; readonly reason: DeliveryFinalReason }
   | { readonly outcome: "retry"; readonly status: "pending" | "uncertain"; readonly reason: string }
-  | { readonly outcome: "lost_lease" };
+  | { readonly outcome: "lost_lease" }
+  | { readonly outcome: "error"; readonly error: string };
 
 interface DeliveryRow {
   tenant_id: string;
@@ -112,6 +116,16 @@ interface DeliveryRow {
   first_attempt_at: Date | null;
   idempotency_key: string;
   recipient_address: string | null;
+  provider: string | null;
+  request: StoredRequest | null;
+  step_errors: number;
+}
+
+/** What the first attempt sent; every later attempt under the same key replays it byte for byte (D-8). */
+interface StoredRequest {
+  subject: string | null;
+  text: string;
+  headers: Record<string, string>;
 }
 
 type Terminal = { readonly status: "blocked" | "dead"; readonly reason: DeliveryFinalReason };
@@ -120,7 +134,8 @@ type Plan =
   | { readonly kind: "send"; readonly attempt: number; readonly request: ProviderSendRequest }
   | { readonly kind: "lookup"; readonly onNotFound: Terminal; readonly channel: DeliveryChannel; readonly key: string; readonly startedAt: Date };
 
-const errorText = (code: string) => code.slice(0, 500);
+/** Provider and database text fits the error columns (1..200) and never carries NUL. */
+const errorText = (code: string) => (code.replaceAll("\u0000", "").trim() || "unknown").slice(0, 200);
 
 export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
   const parsed = deliveryWorkerConfigSchema.safeParse(deps.config);
@@ -147,7 +162,8 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     });
     try {
       return await Promise.race([
-        work(controller.signal).catch((error: unknown) => onError(error instanceof Error ? `provider_error: ${error.message}` : "provider_error")),
+        // An adapter that throws before returning a promise is uncertain too.
+        Promise.resolve().then(() => work(controller.signal)).catch((error: unknown) => onError(error instanceof Error ? `provider_error: ${error.message}` : "provider_error")),
         timedOut,
       ]);
     } finally {
@@ -221,11 +237,12 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     });
   }
 
+  const ROW_COLUMNS = `tenant_id, id, message_id, channel, purpose, contact_id, action_id, subject, body, outcome_unknown,
+    attempts, first_attempt_at, idempotency_key, recipient_address, provider, request, step_errors`;
   const lockLeased = async (tx: Transaction, lease: Claim): Promise<DeliveryRow | undefined> =>
     (await tx.query<DeliveryRow>(
-      `SELECT tenant_id, id, message_id, channel, purpose, contact_id, action_id, subject, body, outcome_unknown,
-              attempts, first_attempt_at, idempotency_key, recipient_address
-         FROM message_deliveries WHERE tenant_id=$1 AND id=$2 AND lease_token=$3 AND status='leased' FOR UPDATE`,
+      `SELECT ${ROW_COLUMNS} FROM message_deliveries
+        WHERE tenant_id=$1 AND id=$2 AND lease_token=$3 AND status='leased' FOR UPDATE`,
       [lease.tenantId, lease.deliveryId, lease.leaseToken])).rows[0];
 
   /** Ends the delivery without a send (or after a not-found lookup), releasing any held funds. */
@@ -247,7 +264,7 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       `UPDATE message_deliveries SET status='sent', provider_message_id=$3, outcome_unknown=false, final_reason=NULL,
          lease_token=NULL, lease_owner=NULL, lease_expires_at=NULL, last_error=NULL, updated_at=$4
         WHERE tenant_id=$1 AND id=$2`,
-      [row.tenant_id, row.id, providerMessageId.slice(0, 500), at]);
+      [row.tenant_id, row.id, (providerMessageId.trim() || "unknown").slice(0, 500), at]);
     await deps.onSettled?.(tx, row.tenant_id, row.message_id, "sent", at);
     return { outcome: "sent", providerMessageId };
   }
@@ -260,6 +277,19 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
          lease_expires_at=NULL, updated_at=$6 WHERE tenant_id=$1 AND id=$2`,
       [row.tenant_id, row.id, status, next, errorText(reason), at]);
     return { outcome: "retry", status, reason };
+  }
+
+  /**
+   * A dead letter that keeps any held reservation and the unknown outcome for an operator
+   * (D-8, settleUnknown). It does not call onSettled: the producer hears when it is settled.
+   */
+  async function deadLetterHeld(tx: Transaction, row: DeliveryRow, reason: "outcome_unknown" | "worker_error",
+    error: string, at: Date): Promise<StepResult> {
+    await tx.query(
+      `UPDATE message_deliveries SET status='dead', final_reason=$3, last_error=$4, lease_token=NULL,
+         lease_owner=NULL, lease_expires_at=NULL, updated_at=$5 WHERE tenant_id=$1 AND id=$2`,
+      [row.tenant_id, row.id, reason, errorText(error), at]);
+    return { outcome: "dead", reason };
   }
 
   /** D-6: the first reason the send may not happen now, or null. */
@@ -293,20 +323,14 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
   }
 
   /** What the provider receives: the approved text plus the opt-out the law and D-9 require. */
-  function buildRequest(row: DeliveryRow, address: string): ProviderSendRequest {
-    if (row.channel === "sms") {
-      return {
-        idempotencyKey: row.idempotency_key, channel: "sms", to: address, subject: null,
-        text: `${row.body}\n${config.smsOptOutText}`, headers: {}, tenantId: row.tenant_id, deliveryId: row.id,
-      };
-    }
+  function buildContent(row: DeliveryRow): StoredRequest {
+    if (row.channel === "sms") return { subject: null, text: `${row.body}\n${config.smsOptOutText}`, headers: {} };
     const token = signUnsubscribeToken(config.unsubscribe.secret, { tenantId: row.tenant_id, deliveryId: row.id });
     const url = `${config.unsubscribe.baseUrl.replace(/\/+$/, "")}/${token}`;
     return {
-      idempotencyKey: row.idempotency_key, channel: "email", to: address, subject: row.subject,
+      subject: row.subject,
       text: `${row.body}\n\n--\nTo stop these emails, unsubscribe: ${url}`,
       headers: { "List-Unsubscribe": `<${url}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
-      tenantId: row.tenant_id, deliveryId: row.id,
     };
   }
 
@@ -317,11 +341,21 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       if (!row) return { kind: "done", result: { outcome: "lost_lease" } };
       const at = now();
       const channelProvider = provider(row.channel);
+      // Each step gets a whole lease, however long the rows before it in the batch took.
+      await tx.query("UPDATE message_deliveries SET lease_expires_at=$3 WHERE tenant_id=$1 AND id=$2",
+        [row.tenant_id, row.id, new Date(at.getTime() + config.leaseMs)]);
       // An attempt left open by a holder whose lease ran out may have reached the provider.
       await tx.query(
         `UPDATE message_delivery_attempts SET outcome='uncertain', error_code='lease_lost', finished_at=$3
           WHERE tenant_id=$1 AND delivery_id=$2 AND outcome IS NULL`,
         [row.tenant_id, row.id, at]);
+      // A delivery that keeps failing inside the worker stops here instead of looping.
+      if (row.step_errors >= config.maxStepErrors)
+        return { kind: "done", result: await deadLetterHeld(tx, row, "worker_error", "step_errors", at) };
+      // Another provider has never seen this key: a resend would not be deduped and a lookup
+      // there proves nothing (D-8).
+      if (row.outcome_unknown && row.provider !== null && row.provider !== channelProvider.name)
+        return { kind: "done", result: await deadLetterHeld(tx, row, "outcome_unknown", "provider_changed", at) };
       const { reason, address } = await recheck(tx, row);
       const windowEnd = row.first_attempt_at
         ? row.first_attempt_at.getTime() + channelProvider.dedupeWindowMs - config.dedupeMarginMs
@@ -336,7 +370,11 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
         if (row.outcome_unknown) return { kind: "lookup", onNotFound: terminal, channel: row.channel, key: row.idempotency_key, startedAt: at };
         return { kind: "done", result: await finish(tx, row, terminal, at) };
       }
-      const request = buildRequest(row, address!);
+      const content = row.request ?? buildContent(row);
+      const request: ProviderSendRequest = {
+        idempotencyKey: row.idempotency_key, channel: row.channel, to: address!, ...content,
+        tenantId: row.tenant_id, deliveryId: row.id,
+      };
       if (!row.outcome_unknown && !(await heldReservation(tx, row.tenant_id, row.id))) {
         const reserved = await reserveFunds(tx, {
           tenantId: row.tenant_id, deliveryId: row.id, reservationId: deps.generateId(),
@@ -359,8 +397,8 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       // From here until a definite answer, a send may have happened.
       await tx.query(
         `UPDATE message_deliveries SET attempts=attempts+1, outcome_unknown=true, first_attempt_at=coalesce(first_attempt_at,$3),
-           recipient_address=$4, provider=$5, lease_expires_at=$6, updated_at=$3 WHERE tenant_id=$1 AND id=$2`,
-        [row.tenant_id, row.id, at, address, channelProvider.name, new Date(at.getTime() + config.leaseMs)]);
+           recipient_address=$4, provider=$5, request=coalesce(request,$6::json), updated_at=$3 WHERE tenant_id=$1 AND id=$2`,
+        [row.tenant_id, row.id, at, address, channelProvider.name, JSON.stringify(content)]);
       return { kind: "send", attempt, request };
     });
   }
@@ -410,11 +448,7 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       if (outcome.status === "accepted") return markSent(tx, row, outcome.providerMessageId, at);
       if (outcome.status === "not_found") return finish(tx, row, plan.onNotFound, at);
       // No answer: dead letter, with the reservation still held for an operator (D-8).
-      await tx.query(
-        `UPDATE message_deliveries SET status='dead', final_reason='outcome_unknown', last_error=$3, lease_token=NULL,
-           lease_owner=NULL, lease_expires_at=NULL, updated_at=$4 WHERE tenant_id=$1 AND id=$2`,
-        [row.tenant_id, row.id, errorText(outcome.code), at]);
-      return { outcome: "dead", reason: "outcome_unknown" };
+      return deadLetterHeld(tx, row, "outcome_unknown", outcome.code, at);
     });
   }
 
@@ -442,18 +476,42 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     return result;
   }
 
+  /**
+   * After a step threw: counts the error and gives the row back with backoff while this worker
+   * still holds the lease, so one bad row neither stalls the batch nor loops without end.
+   */
+  async function noteStepError(lease: Claim, error: unknown): Promise<StepResult> {
+    const text = errorText(error instanceof Error ? error.message : "step_failed");
+    deps.report?.({ kind: "step_failed", tenantId: lease.tenantId, deliveryId: lease.deliveryId, error: text });
+    try {
+      await deps.service(async (tx) => {
+        const at = now();
+        await tx.query(
+          `UPDATE message_deliveries SET step_errors=step_errors+1,
+             status=CASE WHEN outcome_unknown THEN 'uncertain' ELSE 'pending' END, next_attempt_at=$4, last_error=$5,
+             lease_token=NULL, lease_owner=NULL, lease_expires_at=NULL, updated_at=$3
+            WHERE tenant_id=$1 AND id=$2 AND lease_token=$6 AND status='leased'`,
+          [lease.tenantId, lease.deliveryId, at, new Date(at.getTime() + config.backoffBaseMs), text, lease.leaseToken]);
+      });
+    } catch {
+      // The lease runs out on its own; the next holder sees the same row.
+    }
+    return { outcome: "error", error: text };
+  }
+
   /** One pass: ingest new events, claim due deliveries, process each in turn. */
   async function runOnce(options: { ingestLimit?: number; claimLimit?: number } = {}) {
     const ingested = await ingest(options.ingestLimit ?? 100);
     const leases = await claim(options.claimLimit ?? 10);
     const results: StepResult[] = [];
-    for (const lease of leases) results.push(await step(lease));
+    for (const lease of leases) results.push(await step(lease).catch((error: unknown) => noteStepError(lease, error)));
     return { ...ingested, claimed: leases.length, results };
   }
 
   /**
-   * D-8: an operator settles a dead letter whose outcome stayed unknown, after checking the
-   * provider's own records. Exactly once: a second settlement finds nothing to settle.
+   * D-8: an operator settles a dead letter whose outcome stayed unknown (or that stopped on
+   * worker errors), after checking the provider's own records. Exactly once: a second settlement
+   * finds nothing to settle.
    */
   async function settleUnknown(input: {
     readonly tenantId: string;
@@ -464,13 +522,11 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     if (input.outcome === "sent" && !input.providerMessageId)
       throw new ValidationFailed("A sent settlement names the provider message ID");
     return deps.service(async (tx) => {
-      const row = (await tx.query<DeliveryRow & { status: string }>(
-        `SELECT tenant_id, id, message_id, channel, purpose, contact_id, action_id, subject, body, outcome_unknown,
-                attempts, first_attempt_at, idempotency_key, recipient_address, status
-           FROM message_deliveries WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
+      const row = (await tx.query<DeliveryRow & { status: string; final_reason: string | null }>(
+        `SELECT ${ROW_COLUMNS}, status, final_reason FROM message_deliveries WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
         [input.tenantId, input.deliveryId])).rows[0];
       if (!row) throw new NotFound();
-      if (row.status !== "dead" || !row.outcome_unknown)
+      if (row.status !== "dead" || !(row.outcome_unknown || row.final_reason === "worker_error"))
         throw new Conflict("The delivery has no unknown outcome to settle", { reason: "already_settled" });
       const at = now();
       return input.outcome === "sent"

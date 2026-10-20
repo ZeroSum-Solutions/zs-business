@@ -60,6 +60,13 @@ CREATE TABLE public.message_deliveries (
   -- Pinned when the first attempt starts, so a retry goes where the first try went.
   recipient_address text CONSTRAINT message_deliveries_recipient_length CHECK (char_length(recipient_address) BETWEEN 1 AND 254),
   provider text CONSTRAINT message_deliveries_provider_length CHECK (char_length(provider) BETWEEN 1 AND 100),
+  -- D-8: what the first attempt sent (subject, text, headers). Later attempts under the same key
+  -- replay it exactly, so a config change (an unsubscribe secret rotation) never alters a resend.
+  -- json, not jsonb, keeps the stored text as written.
+  request json CONSTRAINT message_deliveries_request_shape
+    CHECK (json_typeof(request) = 'object' AND octet_length(request::text) <= 65536),
+  -- Steps that threw inside the worker; at the cap the delivery is a dead letter `worker_error`.
+  step_errors integer NOT NULL DEFAULT 0 CONSTRAINT message_deliveries_step_errors CHECK (step_errors BETWEEN 0 AND 1000),
   provider_message_id text CONSTRAINT message_deliveries_provider_id_length CHECK (char_length(provider_message_id) BETWEEN 1 AND 500),
   last_error text CONSTRAINT message_deliveries_last_error_length CHECK (char_length(last_error) BETWEEN 1 AND 500),
   final_reason text CONSTRAINT message_deliveries_final_reason_length CHECK (char_length(final_reason) BETWEEN 1 AND 100),
@@ -170,6 +177,7 @@ GRANT SELECT, INSERT, UPDATE ON public.wallets, public.wallet_reservations, publ
 -- D-4: the ledger is append-only for every role.
 GRANT SELECT, INSERT ON public.wallet_ledger TO service_role;
 -- D-9: suppressions are added and lifted through the dispatcher (runtime) or by provider
--- feedback (service role, M5).
-GRANT SELECT, INSERT, DELETE ON public.suppressions TO service_role;
-GRANT INSERT (tenant_id, channel, address, reason, source, created_at), DELETE ON public.suppressions TO authenticated;
+-- feedback (service role, M5). A lasting reason may replace `stop` on an existing row.
+GRANT SELECT, INSERT, DELETE, UPDATE (reason, source) ON public.suppressions TO service_role;
+GRANT INSERT (tenant_id, channel, address, reason, source, created_at), UPDATE (reason, source), DELETE
+  ON public.suppressions TO authenticated;

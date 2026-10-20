@@ -6,7 +6,13 @@
 import { createHash } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { apiErrorBody, createUnsubscribeSession, type EdgeDependencies, type UnsubscribeSecrets } from "@zs/core";
+import {
+  apiErrorBody,
+  createUnsubscribeSession,
+  verifyUnsubscribeToken,
+  type EdgeDependencies,
+  type UnsubscribeSecrets,
+} from "@zs/core";
 import type { AppEnv } from "../app.js";
 import { addressBucket, createClientAddress, type ClientIpConfig } from "./client-ip.js";
 import { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./limiter.js";
@@ -17,7 +23,11 @@ export interface UnsubscribeConfig {
   readonly tokenSecrets: UnsubscribeSecrets;
   /** Where the caller's address comes from (P-10); by default the socket address. */
   readonly clientIp?: ClientIpConfig;
-  /** Uses the address read and write rules; the tenant rule does not apply. */
+  /**
+   * Forged tokens are charged to the caller's address (the address write rule). A valid token is
+   * charged to its own delivery (address read and write rules), never to the address: RFC 8058
+   * one-click POSTs come from a few mailbox-provider servers shared by every recipient.
+   */
   readonly limits?: Partial<RateLimits>;
   /** Defaults to an in-memory limiter on the app clock. */
   readonly limiter?: RateLimiter;
@@ -83,13 +93,25 @@ export function unsubscribeRoutes(
   const limiter = config.limiter ?? createMemoryRateLimiter(edge.clock);
   const clientAddress = createClientAddress(config.clientIp);
 
-  /** Charge the address before any database work; the session answers 404 for a forged token. */
-  const admit = (c: Context<AppEnv>, kind: "read" | "write") => {
-    const socket = (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress;
-    const bucket = addressBucket(clientAddress(socket, (name) => c.req.header(name)));
-    const taken = limiter.take([kind === "write"
-      ? { key: `unsubscribe-write:${bucket}`, rule: limits.addressWrites }
-      : { key: `unsubscribe-read:${bucket}`, rule: limits.addressReads }]);
+  /**
+   * Charges the request before any database work. The token is checked first (HMAC only), so a
+   * forged one costs its sender's address and a real one costs only its delivery; the session
+   * answers 404 for a forged token.
+   */
+  const admit = (c: Context<AppEnv>, token: string, kind: "read" | "write") => {
+    const ref = verifyUnsubscribeToken(config.tokenSecrets, token);
+    let charge;
+    if (!ref) {
+      const socket = (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress;
+      const bucket = addressBucket(clientAddress(socket, (name) => c.req.header(name)));
+      charge = { key: `unsubscribe-forged:${bucket}`, rule: limits.addressWrites };
+    } else {
+      const delivery = `${ref.tenantId}:${ref.deliveryId}`;
+      charge = kind === "write"
+        ? { key: `unsubscribe-write:${delivery}`, rule: limits.addressWrites }
+        : { key: `unsubscribe-read:${delivery}`, rule: limits.addressReads };
+    }
+    const taken = limiter.take([charge]);
     if (!taken.ok) throw new RateLimited(taken.retryAfterSeconds);
     return createUnsubscribeSession(requestEdge(c), config.tokenSecrets);
   };
@@ -104,16 +126,18 @@ export function unsubscribeRoutes(
       onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413),
     }))
     .get("/unsubscribe/:token", async (c) => {
-      await admit(c, "read").check(c.req.param("token"));
+      const token = c.req.param("token");
+      await admit(c, token, "read").check(token);
       return c.html(CONFIRM_HTML, 200, PAGE_HEADERS);
     })
     // RFC 8058 sends `List-Unsubscribe=One-Click` (form-urlencoded or multipart); the page's form
     // sends the same. The token alone authorizes, so the body is read (for the size limit) but
     // not required. A repeat replays the stored action.
     .post("/unsubscribe/:token", async (c) => {
-      const session = admit(c, "write");
+      const token = c.req.param("token");
+      const session = admit(c, token, "write");
       await c.req.arrayBuffer();
-      await session.unsubscribe(c.req.param("token"));
+      await session.unsubscribe(token);
       return c.html(DONE_HTML, 200, PAGE_HEADERS);
     });
 }

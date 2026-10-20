@@ -45,12 +45,15 @@ export const recordSuppressionHandler: ActionHandler = {
   async handle({ tx, command, binding, now }) {
     const { payload } = parseOrFail(recordSuppressionCommandSchema, command);
     requireTarget(command, binding.tenantId, payload.channel, payload.address);
-    // The first reason stays: a STOP after a bounce does not rewrite why the address is listed.
-    const inserted = await tx.query(
+    // The first reason stays, except that a lasting reason (bounce, complaint, manual,
+    // unsubscribe) replaces `stop`, so a later START cannot lift it.
+    const written = await tx.query(
       `INSERT INTO suppressions (tenant_id, channel, address, reason, source, created_at)
-       VALUES ($1,$2::crm_consent_channel,$3,$4,$5,$6) ON CONFLICT (tenant_id, channel, address) DO NOTHING`,
+       VALUES ($1,$2::crm_consent_channel,$3,$4,$5,$6)
+       ON CONFLICT (tenant_id, channel, address) DO UPDATE SET reason=EXCLUDED.reason, source=EXCLUDED.source
+         WHERE suppressions.reason='stop' AND EXCLUDED.reason<>'stop'`,
       [binding.tenantId, payload.channel, payload.address, payload.reason, payload.source, now]);
-    const result: SuppressionResult = { channel: payload.channel, suppressed: true, changed: inserted.rowCount === 1 };
+    const result: SuppressionResult = { channel: payload.channel, suppressed: true, changed: written.rowCount === 1 };
     return { result: { ...result } };
   },
 };
@@ -95,9 +98,18 @@ const STOP_WORDS = new Set(["stop", "stopall", "unsubscribe", "cancel", "end", "
 const START_WORDS = new Set(["start", "unstop", "yes"]);
 const HELP_WORDS = new Set(["help", "info"]);
 
+const EDGE_CHARACTER = /^[\s\p{P}]$/u;
+const KEYWORD_MAX_LENGTH = 64;
+
 /** D-9: the keyword an inbound SMS consists of, ignoring case, spaces and punctuation around it. */
 export function smsKeyword(body: string): "stop" | "start" | "help" | null {
-  const word = body.trim().toLowerCase().replace(/^[\s\p{P}]+|[\s\p{P}]+$/gu, "").replace(/[\s-]+/g, "");
+  // Linear scans, no backtracking regex: the body is whatever a sender typed.
+  if (body.length > KEYWORD_MAX_LENGTH) return null;
+  let start = 0;
+  let end = body.length;
+  while (start < end && EDGE_CHARACTER.test(body[start]!)) start += 1;
+  while (end > start && EDGE_CHARACTER.test(body[end - 1]!)) end -= 1;
+  const word = body.slice(start, end).toLowerCase().replace(/[\s-]/g, "");
   if (STOP_WORDS.has(word)) return "stop";
   if (START_WORDS.has(word)) return "start";
   if (HELP_WORDS.has(word)) return "help";

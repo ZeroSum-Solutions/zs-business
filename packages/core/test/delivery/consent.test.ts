@@ -1,12 +1,15 @@
 // M3d re-check at delivery and the stop paths (delivery.md D-6, D-9).
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ACTION_PERMISSIONS } from "../../src/edge/session.js";
+import { SUPPRESSION_RECORD_ACTION } from "@zs/contracts";
+import { ACTION_PERMISSIONS, directDispatch } from "../../src/edge/session.js";
 import {
   createInboundSmsSession,
   createUnsubscribeSession,
   DEFAULT_SMS_REPLIES,
+  recordSuppression,
   signUnsubscribeToken,
+  suppressionTargetId,
   type EdgeDependencies,
 } from "../../src/index.js";
 import { createDeliveryHarness, PRICES, UNSUBSCRIBE_SECRET, type DeliveryHarness } from "./helpers.js";
@@ -101,6 +104,30 @@ describe("consent and approval re-checked at delivery (D-6)", () => {
     expect(await h.delivery(tenant, notSent.messageId)).toMatchObject({ status: "blocked", final_reason: "consent_denied" });
     expect(await h.wallet(tenant)).toEqual({ balance: before.balance - PRICES.email, reserved: before.reserved - 2 * PRICES.email });
   });
+  it("re-checks before a retry: a suppression or a revoked approval after an uncertain attempt means ask the provider, never resend", async () => {
+    const worker = h.worker();
+    const suppressedContact = await h.contact(tenant);
+    const delivered = await h.enqueue(tenant, { contactId: suppressedContact });
+    h.provider.queue("lose-reply");
+    await worker.runOnce();
+    const revoked = await h.enqueue(tenant, { contactId: await h.contact(tenant) });
+    h.provider.queue("timeout");
+    await worker.runOnce();
+    const address = (await h.delivery(tenant, delivered.messageId)).recipient_address;
+    await h.service((tx) => tx.query(
+      "INSERT INTO suppressions (tenant_id,channel,address,reason,source,created_at) VALUES ($1,'email',$2,'complaint','test',$3)",
+      [tenant, address, h.clock.now()]));
+    h.approvals.revoke(tenant, revoked.approvalId);
+    const before = await h.wallet(tenant);
+    const calls = h.provider.calls.length;
+    h.clock.advance(5_000);
+    await worker.runOnce();
+    expect(h.provider.calls.length).toBe(calls);
+    expect(h.provider.lookups).toHaveLength(2);
+    expect(await h.delivery(tenant, delivered.messageId)).toMatchObject({ status: "sent" });
+    expect(await h.delivery(tenant, revoked.messageId)).toMatchObject({ status: "blocked", final_reason: "approval_revoked" });
+    expect(await h.wallet(tenant)).toEqual({ balance: before.balance - PRICES.email, reserved: before.reserved - 2 * PRICES.email });
+  });
 });
 
 describe("suppression and unsubscribe (D-9)", () => {
@@ -179,6 +206,25 @@ describe("suppression and unsubscribe (D-9)", () => {
     const sms = createInboundSmsSession(edge, tenant);
     expect(await sms.receive({ from: phone, body: "start", providerMessageId: "in-5" })).toEqual({ keyword: "start", reply: null });
     expect(await h.rows("SELECT reason FROM suppressions WHERE tenant_id=$1", [tenant])).toEqual([{ reason: "complaint" }]);
+  });
+
+  it("a lasting reason recorded after STOP replaces it, so START cannot lift it", async () => {
+    const phone = "+15555550145";
+    const sms = createInboundSmsSession(edge, tenant);
+    await sms.receive({ from: phone, body: "STOP", providerMessageId: "in-7" });
+    const run = directDispatch(edge, tenant, randomUUID(), async () => {});
+    const manual = (reason: "manual" | "stop") => recordSuppression({
+      actionType: SUPPRESSION_RECORD_ACTION,
+      target: { tenantId: tenant, type: "suppression", id: suppressionTargetId(tenant, "sms", phone) },
+      approvalReference: { tenantId: tenant, id: randomUUID() },
+      idempotencyKey: `operator:${randomUUID()}`,
+      payload: { channel: "sms", address: phone, reason, source: "operator" },
+    }, { dispatch: run });
+    expect(await manual("manual")).toEqual({ channel: "sms", suppressed: true, changed: true });
+    // A stop never downgrades a lasting reason.
+    expect(await manual("stop")).toEqual({ channel: "sms", suppressed: true, changed: false });
+    expect(await sms.receive({ from: phone, body: "START", providerMessageId: "in-8" })).toEqual({ keyword: "start", reply: null });
+    expect(await h.rows("SELECT reason, source FROM suppressions WHERE tenant_id=$1", [tenant])).toEqual([{ reason: "manual", source: "operator" }]);
   });
 
   it("keeps suppressions per tenant: a STOP to one business does not silence another", async () => {

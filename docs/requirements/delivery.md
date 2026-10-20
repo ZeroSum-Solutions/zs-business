@@ -1,6 +1,6 @@
 # M3d: prepaid wallet and message delivery
 
-Status: draft contract for M3d (2026-10-20), revision 1. Code follows this file; a change to
+Status: draft contract for M3d (2026-10-20), revision 2. Code follows this file; a change to
 a numbered rule needs a new revision of this file first.
 
 Scope: how an approved outbound message (an Inbox reply today, agent messages later) becomes
@@ -89,9 +89,19 @@ The producer learns the end state through an optional `onSettled(tx, tenantId, m
 "sent" | "failed", at)` hook, called inside the settling transaction; if it throws, the
 settlement rolls back and the next lease holder settles again.
 
+A step that throws inside the worker (a database error, a hook that keeps failing) is
+reported, counted on the delivery and handed back with backoff, and the rest of the batch goes
+on. At `maxStepErrors` the delivery becomes a dead letter `worker_error` that keeps any held
+reservation and does not call the hook; an operator settles it like `outcome_unknown`. Error
+text is stored cut to 200 characters, and an empty code is stored as `unknown`.
+
 **D-8. Exactly-once settlement and the dedupe window.** Every send of one delivery uses the
-same provider idempotency key, and every send happens before `first_attempt_at +
-dedupeWindow - margin`, so the provider drops any repeat. After the window no send happens:
+same provider idempotency key and the same request: the first attempt stores the subject, text
+and headers it sent, and every later attempt replays them, so a config change such as an
+unsubscribe secret rotation never alters a resend. Every send happens before `first_attempt_at +
+dedupeWindow - margin`, so the provider drops any repeat. An unknown outcome is only ever
+resolved at the provider that attempt went to: if the channel's provider has changed since, the
+delivery becomes a dead letter `outcome_unknown` (`provider_changed`) with the reservation held. After the window no send happens:
 an uncertain delivery is resolved by `provider.lookup(key)` (accepted: captured; not found:
 released, dead letter `dedupe_window_expired`) or, without an answer, becomes a dead letter
 `outcome_unknown` whose reservation stays held until an operator settles it as sent or not
@@ -101,12 +111,18 @@ index allows one captured reservation per delivery.
 **D-9. Suppression and stop.** `suppressions` holds (channel, address) pairs that must not be
 messaged, with a reason (`unsubscribe`, `stop`, `bounce`, `complaint`, `manual`). Writes go
 through the dispatcher with a server-built principal per tenant, like the public intake
-(P-3):
+(P-3). One row per address keeps its first reason, except that a lasting reason (`unsubscribe`,
+`bounce`, `complaint`, `manual`) replaces `stop`. Member and MCP idempotency keys may not use the
+prefixes the server builds for these actions (`public:`, `unsubscribe:`, `sms-inbound:`), so a
+member cannot take a recipient's key first:
 - Email: every email carries a `List-Unsubscribe` URL and `List-Unsubscribe-Post:
   List-Unsubscribe=One-Click` (RFC 8058). The URL holds an unsubscribe token: `zsu1_` and
   64 base64url characters encoding the tenant UUID, the delivery UUID and a 16-byte
   HMAC-SHA-256 tag over `zsu1:<tenantId>:<deliveryId>`. A POST with a valid token
-  suppresses the address that delivery went to. A GET never changes anything.
+  suppresses the address that delivery went to. A GET never changes anything. The endpoint
+  checks the token before any database work: a forged token is rate limited per caller
+  address, a valid one per delivery, because one-click POSTs come from a few mailbox-provider
+  servers that every recipient shares.
 - SMS: an inbound message whose whole text is a stop keyword (`STOP`, `STOPALL`,
   `UNSUBSCRIBE`, `CANCEL`, `END`, `QUIT`, `REVOKE`, `OPTOUT`, any case, surrounding
   space and punctuation ignored) suppresses the sender's number with reason `stop` and gets
@@ -117,7 +133,7 @@ through the dispatcher with a server-built principal per tenant, like the public
 catalog isolation test. The worker runs as the service role (the outbox processing entry
 point) and names `tenant_id` in every statement.
 
-## Known limits (revision 1)
+## Known limits (revision 2)
 
 - Claims are ordered by due time across tenants, with no per-tenant fairness yet.
 - Backoff has no jitter: core has no randomness source, and none is injected yet.

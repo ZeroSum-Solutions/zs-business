@@ -20,7 +20,7 @@ beforeAll(async () => {
     unsubscribe: {
       tokenSecrets: { current: UNSUBSCRIBE_SECRET, previous: PREVIOUS_UNSUBSCRIBE_SECRET },
       clientIp: { header: "x-real-ip" },
-      // Every test but the abuse one sends from a fresh address.
+      // Small limits so the abuse tests reach them.
       limits: { addressWrites: { limit: 3, windowMs: 600_000 }, addressReads: { limit: 3, windowMs: 600_000 } },
     },
   });
@@ -206,18 +206,32 @@ describe("forged and cross-tenant tokens (D-9)", () => {
 });
 
 describe("abuse limits", () => {
-  it("charges the caller's address before any database work, reads and writes apart", async () => {
+  it("charges forged tokens to the caller's address before any database work", async () => {
     const { token, address } = await sentDelivery(h.a);
     const from = "192.0.2.77";
     for (let i = 0; i < 3; i += 1) expect((await send("zsu1_forged", { method: "POST", from })).status).toBe(404);
-    const limited = await oneClick(token, from);
+    const limited = await send("zsu1_forged", { method: "GET", from });
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toMatch(/^\d+$/);
     expect(JSON.parse(limited.text).error.code).toBe("RateLimited");
-    expect((await suppressions(h.a.tenantId)).map((row) => row.address)).not.toContain(address);
-    // The read bucket is separate; another address may still write.
-    expect((await view(token, from)).status).toBe(200);
-    expect((await oneClick(token)).status).toBe(200);
+    // A real token from the same address is not charged there: one-click POSTs come from a few
+    // mailbox-provider servers shared by every recipient.
+    expect((await oneClick(token, from)).status).toBe(200);
+    expect((await suppressions(h.a.tenantId)).map((row) => row.address)).toContain(address);
+  });
+
+  it("charges a real token to its own delivery, reads and writes apart", async () => {
+    const mailboxProvider = "192.0.2.88";
+    const first = await sentDelivery(h.a);
+    for (let i = 0; i < 3; i += 1) expect((await oneClick(first.token, mailboxProvider)).status).toBe(200);
+    expect((await oneClick(first.token, mailboxProvider)).status).toBe(429);
+    expect((await oneClick(first.token)).status).toBe(429);
+    expect((await view(first.token, mailboxProvider)).status).toBe(200);
+    // Other recipients unsubscribing through the same server are unaffected.
+    for (let i = 0; i < 5; i += 1) {
+      const other = await sentDelivery(h.a);
+      expect((await oneClick(other.token, mailboxProvider)).status).toBe(200);
+    }
   });
 });
 
