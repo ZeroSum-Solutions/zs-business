@@ -276,10 +276,14 @@ Worker (`apps/site-worker`) serves each host's live release from R2.
 Rollback is `POST /v1/sites/:id/releases/:releaseId/activate` with the release the caller
 saw as live. It moves the pointer the same way. `site_activations` keeps who made which
 release live, and releases, their files and activations are append-only for every role.
+Site actions cannot be proposed through `/v1/approvals` (`ValidationFailed`): an approved
+action runs its handler alone, and a publish needs the compile, upload and edge steps around it.
 
 Host names are attached by the service role only (`attachSiteHost` in `@zs/core`), since a
-host belongs to one site in the whole system and must be verified first. Every attach and
-detach takes the next assignment number. Detaching is `detachSiteHost`, which returns the
+host belongs to one site in the whole system and must be verified first. Attaches and
+detaches of one host run one at a time (a transaction advisory lock on the host), and each
+takes the next assignment number under that lock, so a later owner always holds a higher
+number than the detach before it. Detaching is `detachSiteHost`, which returns the
 normalized host and the detach's number. After its commit, `retractHostPointer` writes a
 retired pointer under that number, and the Worker answers 404 for it. A pointer written later
 for the host's next site has a higher number and replaces it. A late sync or retraction from

@@ -383,6 +383,42 @@ describe("hosts", () => {
   });
 });
 
+describe("hosts racing", () => {
+  it("number the new owner above a detach that committed while its attach waited", async () => {
+    const a = await createSite(h.a);
+    const b = await createSite(h.b);
+    const host = hostName();
+    let attachedToA!: () => void;
+    const heldByA = new Promise<void>((resolve) => { attachedToA = resolve; });
+    let letGo!: () => void;
+    const gate = new Promise<void>((resolve) => { letGo = resolve; });
+    // One service transaction attaches the host to A, then detaches it before committing.
+    const first = h.fixture.service(async (tx) => {
+      await attachSiteHost(tx, { tenantId: h.a.tenantId, siteId: a.id, host }, clock.now());
+      attachedToA();
+      await gate;
+      return detachSiteHost(tx, { tenantId: h.a.tenantId, siteId: a.id, host });
+    });
+    await heldByA;
+    // B's attach starts meanwhile and has to wait for that transaction.
+    const second = attach(h.b, b.id, host);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    letGo();
+    const detached = await first;
+    expect(detached).not.toBeNull();
+    await second;
+
+    const row = await h.fixture.service((tx) => tx.query<{ assignment: string }>("SELECT assignment FROM site_hosts WHERE host=$1", [host]));
+    expect(Number(row.rows[0]!.assignment)).toBeGreaterThan(detached!.assignment);
+    // So the detach's retraction cannot hide B's site.
+    await retractHostPointer(store, detached!);
+    await published(h.b, b.id, "Tenant B after the race");
+    const page = await visit(host);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain("Tenant B after the race");
+  });
+});
+
 describe("tenant isolation", () => {
   it("serves each tenant's host from its own release only", async () => {
     const a = await createSite(h.a);
