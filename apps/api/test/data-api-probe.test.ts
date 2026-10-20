@@ -57,9 +57,9 @@ describe("tables to probe", () => {
       "public.actions", "public.approvals", "public.booking_external_blocks", "public.booking_page_disclosures", "public.booking_page_resources",
       "public.booking_pages", "public.booking_resources", "public.bookings",
       "public.crm_contact_consent", "public.crm_contacts", "public.crm_deals", "public.crm_pipelines", "public.crm_stages",
-      "public.intake_item_consent", "public.intake_items", "public.message_deliveries", "public.message_delivery_attempts",
-      "public.outbox", "public.rate_limit_buckets", "public.source_records", "public.suppressions", "public.tenant_members", "public.tenants",
-      "public.wallet_ledger", "public.wallet_reservations", "public.wallets",
+      "public.inbox_replies", "public.intake_item_consent", "public.intake_items", "public.message_deliveries",
+      "public.message_delivery_attempts", "public.outbox", "public.rate_limit_buckets", "public.source_records", "public.suppressions",
+      "public.tenant_members", "public.tenants", "public.wallet_ledger", "public.wallet_reservations", "public.wallets",
     ]);
   });
 

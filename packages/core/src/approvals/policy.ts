@@ -11,9 +11,11 @@ export interface ApprovalPolicy {
 /**
  * Action types with their own request rule. An action without an entry may be requested by
  * any member who holds its ACTION_PERMISSIONS entry and still runs directly as well.
- * M3c adds `"inbox.reply.send": { request: "inbox.drafts", required: true }`.
  */
-export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Object.freeze({});
+export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Object.freeze({
+  // inbox-home.md I-6: staff and owners propose sending a reply; it runs only once an owner approves.
+  "inbox.reply.send": Object.freeze({ request: "inbox.drafts", required: true }),
+});
 
 /** Never proposed through an approval: the approval actions themselves. */
 export const isApprovalAction = (actionType: string) => actionType.startsWith("approval.");

@@ -10,7 +10,8 @@ import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  approvalHandlers, bookingHandlers, createDispatcher, crmHandlers, intakeHandlers, memberHandlers, sourceHandlers, type DispatchContext,
+  approvalHandlers, bookingHandlers, createDispatcher, crmHandlers, dealDetailsHandlers, inboxHandlers, intakeHandlers, memberHandlers,
+  sourceHandlers, type DispatchContext,
 } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -24,6 +25,11 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
+  "crm.deal.set-details": "customers",
+  "inbox.reply.draft": "inbox.drafts",
+  "inbox.reply.discard": "inbox.drafts",
+  "inbox.reply.send": "inbox.drafts",
+  "inbox.reply.resume": "approve",
   "intake.item.link": "intake",
   "intake.item.reject": "intake",
   "member.invite": "members",
@@ -132,6 +138,11 @@ afterAll(async () => { await database?.close(); });
 /** Monday 09:00-17:00 UTC: each booking takes the next free hour. */
 let hour = 9;
 
+/** A draft by the owner, for steps any caller may then try on it. */
+async function ownerDraft(): Promise<string> {
+  return (await sessionFor(tenant.ownerId).draftReply({ contactId: tenant.contactId, body: "Thanks, see you soon." }, randomUUID())).result.id;
+}
+
 /** One call per session operation. Each builds fresh inputs, so it can run for any caller. */
 function operations(session: Session): Record<string, { permission: Permission | null; run: () => Promise<unknown> }> {
   return {
@@ -142,6 +153,21 @@ function operations(session: Session): Record<string, { permission: Permission |
       const contact = await sessionFor(tenant.ownerId).upsertContact({ email: `${randomUUID()}@example.com` }, randomUUID());
       return session.createDeal({ contactId: contact.result.contact.id, pipelineId: tenant.pipelineId, stageId: tenant.stages[0], title: "Band" }, randomUUID());
     } },
+    setDealDetails: { permission: "customers", run: async () => {
+      const deals = await sessionFor(tenant.ownerId).listDeals({ limit: 100 });
+      const current = deals.items.find((deal) => deal.id === tenant.dealId)!;
+      return session.setDealDetails(tenant.dealId,
+        { expectedRevision: current.revision, value: { amountMinor: 1_000, currency: "USD" }, leadSource: "referral" }, randomUUID());
+    } },
+    draftReply: { permission: "inbox.drafts", run: () => session.draftReply({ contactId: tenant.contactId, body: "Hello from the shop" }, randomUUID()) },
+    approveReply: { permission: "approve", run: async () => session.approveReply(await ownerDraft(), {}, randomUUID()) },
+    discardReply: { permission: "inbox.drafts", run: async () => session.discardReply(await ownerDraft(), {}, randomUUID()) },
+    listThreads: { permission: "inbox.drafts", run: () => session.listThreads({}) },
+    getThread: { permission: "inbox.drafts", run: async () => {
+      await ownerDraft();
+      return session.getThread(`c_${tenant.contactId}`);
+    } },
+    homeResults: { permission: "reports", run: () => session.homeResults({ zone: "America/New_York" }) },
     moveDealStage: { permission: "customers", run: async () => {
       const deals = await sessionFor(tenant.ownerId).listDeals({ limit: 100 });
       const current = deals.items.find((deal) => deal.id === tenant.dealId)!;
@@ -202,7 +228,10 @@ describe("permission map", () => {
   it("names a permission for every registered action, and only those", () => {
     // The public request is the one action no member session may run (public-intake.md P-1).
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
-    const registered = Object.keys({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers, ...approvalHandlers, ...sourceHandlers })
+    const registered = Object.keys({
+      ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
+      ...approvalHandlers, ...sourceHandlers,
+    })
       .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action)).sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);
@@ -210,9 +239,12 @@ describe("permission map", () => {
     expect({ ...ACTION_PERMISSIONS }).toEqual(EXPECTED_ACTIONS);
   });
 
-  it("leaves members, billing, plan, publish, intake review and approving to owners", () => {
+  it("leaves members, billing, plan, publish, intake review, approving and reports to owners", () => {
     expect(ROLE_PERMISSIONS.staff).toEqual(["calendar", "customers", "inbox.drafts"]);
-    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve"] as const) expect(roleCan("staff", permission)).toBe(false);
+    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports"] as const) {
+      expect(roleCan("staff", permission)).toBe(false);
+      expect(roleCan("owner", permission)).toBe(true);
+    }
   });
 });
 

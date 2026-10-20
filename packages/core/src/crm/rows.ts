@@ -18,7 +18,7 @@ export function parseOrFail<T>(schema: SafeParser<T>, value: unknown): T {
   return parsed.data;
 }
 
-export function idInUse(type: "contact" | "deal" | "member" | "approval" | "source record"): Conflict {
+export function idInUse(type: "contact" | "deal" | "member" | "approval" | "source record" | "reply"): Conflict {
   return new Conflict(`The ${type} ID is already in use`, { reason: "id_in_use" });
 }
 

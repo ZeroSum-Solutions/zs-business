@@ -10,6 +10,8 @@ import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
+import { homeRoutes } from "./routes/home.js";
+import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
 import { sourceRoutes } from "./routes/sources.js";
@@ -151,6 +153,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/booking", bookingRoutes);
   app.route("/v1/crm", crmRoutes);
   app.route("/v1/intake", intakeRoutes);
+  app.route("/v1/inbox", inboxRoutes);
+  app.route("/v1/home", homeRoutes);
   app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
