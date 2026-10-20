@@ -4,33 +4,44 @@ import { ArrowsClockwise } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/input";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isDealChanged, type DealRecord, type ListResult, type PipelineSummary } from "@/lib/api";
+import { isDealChanged, type DealSummary, type ListResult, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { useContactNames, useDeals, useKeys, usePipelines } from "@/lib/queries";
-import { cn, relativeTime, revealOnFocus } from "@/lib/utils";
+import { LEAD_SOURCE_LABELS } from "@/lib/lead-sources";
+import { useContactNames, useDeals, useDisplayZone, useKeys, usePipelines } from "@/lib/queries";
+import { formatDay } from "@/lib/time";
+import { cn, formatMinor, relativeTime, revealOnFocus } from "@/lib/utils";
+import { DealDetailsDialog } from "./deal-details-dialog";
 
 type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
 
 export const STALE_DEAL_MESSAGE = "Someone changed this deal. Reloaded.";
 export const RELOAD_FAILED_MESSAGE = "Someone changed this deal, but the board could not reload. You can move it again once it has.";
 
-function DealCard({ deal, pipeline, contactName, onMove, moving, blockedBy }: {
-  deal: DealRecord;
+function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blockedBy, zone }: {
+  deal: DealSummary;
   pipeline: PipelineSummary;
   contactName: string;
-  onMove: (deal: DealRecord, stageId: string) => void;
+  onMove: (deal: DealSummary, stageId: string) => void;
+  onEdit: (deal: DealSummary) => void;
   moving: boolean;
   /** Id of the note that says why this deal cannot move now. */
   blockedBy: string | null;
+  zone: string;
 }) {
   const selectId = `stage-${deal.id}`;
   return (
     <li className="rounded-md bg-surface p-3 shadow-ring" data-deal-id={deal.id} aria-busy={moving}>
       <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
+      <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-2">
+        <span className="tabular font-medium" data-testid="deal-value">{deal.value ? formatMinor(deal.value.amountMinor, deal.value.currency) : "No value yet"}</span>
+        <span data-testid="deal-source">{deal.leadSource ? `From ${LEAD_SOURCE_LABELS[deal.leadSource]}` : "Source not set"}</span>
+        {deal.wonAt ? <span className="text-success" data-testid="deal-won">Won {formatDay(deal.wonAt, zone)}</span> : null}
+      </p>
       <Link href={`/customers/${deal.contactId}`} className="mt-0.5 inline-flex min-h-11 max-w-full items-center text-sm break-words text-accent underline-offset-4 hover:underline">
         {contactName}
       </Link>
@@ -40,7 +51,10 @@ function DealCard({ deal, pipeline, contactName, onMove, moving, blockedBy }: {
           {pipeline.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
         </Select>
       </div>
-      <p className="mt-2 text-xs text-meta">Updated {relativeTime(deal.updatedAt)}</p>
+      <div className="mt-1 flex items-center justify-between gap-2">
+        <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt)}</p>
+        <Button variant="ghost" className="-mr-2" disabled={moving} aria-label={`Edit details of ${deal.title}`} onClick={() => onEdit(deal)}>Details</Button>
+      </div>
     </li>
   );
 }
@@ -94,6 +108,8 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   // A deal whose move hit a newer revision while the reload after it failed: its revision
   // on screen is known to be old, so it stays unmovable until a later read succeeds.
   const [reloadNeeded, setReloadNeeded] = useState<{ dealId: string; since: number } | null>(null);
+  const [editing, setEditing] = useState<{ dealId: string; open: boolean } | null>(null);
+  const zone = useDisplayZone();
 
   const names = useMemo(() => new Map(contacts.data?.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
 
@@ -106,13 +122,16 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
     onSettled: (_updated, error, request) => intents.settle(request, error),
     onSuccess: async (updated) => {
       setStale(false);
-      queryClient.setQueryData<ListResult<DealRecord>>(keys.deals(dealQuery), (current) => current && {
-        ...current, items: current.items.map((item) => (item.id === updated.id ? updated : item)),
+      // A move answers with the frozen record: keep the value and lead source on screen.
+      queryClient.setQueryData<ListResult<DealSummary>>(keys.deals(dealQuery), (current) => current && {
+        ...current, items: current.items.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
       });
       // Settle on the server's list before saying "Moved", so the next move reads its revision.
       // A refetch that started before this move cannot roll it back: useDeals keeps the
       // higher revision of each deal.
       await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
+      // A move into or out of a won stage changes Home's revenue (H-2).
+      void queryClient.invalidateQueries({ queryKey: keys.resultsAll });
       const stage = pipeline.stages.find((item) => item.id === updated.stageId)?.name ?? "the new stage";
       toast(`Moved to ${stage}.`);
     },
@@ -151,6 +170,8 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   if (deals.isError && !deals.data) return <ErrorNote error={deals.error} retry={() => deals.refetch()} />;
 
   const stages = pipeline.stages;
+  // The open dialog follows the deal in the list, so a reload brings in its new revision.
+  const editingDeal = editing ? deals.data.items.find((item) => item.id === editing.dealId) : undefined;
   // PipelineBoard renders this only for a pipeline with stages.
   const activeStage = stageFilter ?? stages[0]!.id;
   const moveError = move.isError && !isDealChanged(move.error) ? move.error : null;
@@ -219,7 +240,9 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
                       contactName={names.get(deal.contactId) ?? "Customer"}
                       moving={move.isPending && move.variables?.dealId === deal.id}
                       blockedBy={reloadNeeded?.dealId === deal.id ? "deal-reload-needed" : null}
+                      zone={zone}
                       onMove={(target, stageId) => move.mutate({ dealId: target.id, pipelineId: target.pipelineId, stageId, expectedRevision: target.revision })}
+                      onEdit={(target) => setEditing({ dealId: target.id, open: true })}
                     />
                   ))}
                 </ul>
@@ -228,6 +251,16 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
           );
         })}
       </div>
+      {editingDeal ? (
+        <DealDetailsDialog
+          deal={editingDeal}
+          open={editing?.open ?? false}
+          onOpenChange={(open) => setEditing((current) => current && { ...current, open })}
+          onSaved={(updated) => queryClient.setQueryData<ListResult<DealSummary>>(keys.deals(dealQuery), (current) => current && {
+            ...current, items: current.items.map((item) => (item.id === updated.id && item.revision < updated.revision ? updated : item)),
+          })}
+        />
+      ) : null}
     </div>
   );
 }

@@ -4,9 +4,9 @@ import {
   contactRecordSchema,
   createOrFindContactInputSchema,
   createDealInputSchema,
-  dealRecordSchema,
   moveDealStageInputSchema,
 } from "./crm.js";
+import { dealSummarySchema, stageOutcomeSchema } from "./home.js";
 import { bookingSummarySchema } from "./intake.js";
 import { isPostgresText, jsonValueSchema } from "./json.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
@@ -115,7 +115,8 @@ export type SlotsResponse = z.infer<typeof slotsResponseSchema>;
 export { pageQuerySchema, pageSchema, type PageQuery } from "./page.js";
 export const contactPageSchema = pageSchema(contactRecordSchema);
 export type ContactPage = z.infer<typeof contactPageSchema>;
-export const dealPageSchema = pageSchema(dealRecordSchema);
+/** Deals as lists show them: each record plus value, lead source and won date (inbox-home.md H-1). */
+export const dealPageSchema = pageSchema(dealSummarySchema);
 export type DealPage = z.infer<typeof dealPageSchema>;
 /** Bookings as the owner's lists show them: each record plus its source and customer (public-intake.md P-12). */
 export const bookingPageSchema = pageSchema(bookingSummarySchema);
@@ -124,7 +125,7 @@ export type BookingPage = z.infer<typeof bookingPageSchema>;
 export const pipelineSummarySchema = z.strictObject({
   id: idSchema,
   name: z.string(),
-  stages: z.array(z.strictObject({ id: idSchema, name: z.string(), position: z.number().int() })),
+  stages: z.array(z.strictObject({ id: idSchema, name: z.string(), position: z.number().int(), outcome: stageOutcomeSchema })),
 });
 export type PipelineSummary = z.infer<typeof pipelineSummarySchema>;
 export const resourceSummarySchema = z.strictObject({

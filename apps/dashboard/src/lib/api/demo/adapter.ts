@@ -8,35 +8,61 @@
 import type { z } from "zod";
 import {
   createBookingRequestSchema,
+  draftReplyRequestSchema,
   linkIntakeItemRequestSchema,
   listIntakeItemsQuerySchema,
+  listThreadsQuerySchema,
   uuidSchema,
   moveDealStageRequestSchema,
+  resultsQuerySchema,
+  setDealDetailsRequestSchema,
   slotsQuerySchema,
+  threadIdSchema,
+  THREAD_ENTRY_LIMIT,
   upsertContactRequestSchema,
   type BookingRecord,
   type ContactRecord,
   type DealRecord,
+  type DealSummary,
+  type HomeResults,
   type IntakeItemRecord,
   type PipelineSummary,
+  type ReplyRecord,
+  type RevenueSource,
+  type ThreadDetail,
+  type ThreadEntry,
+  type ThreadSummary,
 } from "@zs/contracts";
-import { addDays, localIso, wallTimeInstants, weekdayOf, zonedDateKey } from "../../time";
+import { addDays, localIso, wallTimeInstants, weekdayOf, weekRanges, zonedDateKey } from "../../time";
 import { newId as defaultNewId } from "../../id";
-import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError } from "../errors";
+import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError, threadNotFound } from "../errors";
 import {
   byContactName,
   completeList,
   CONTACT_PAGE_SIZE,
   matchesSearch,
+  THREAD_PAGE_SIZE,
   toUpsertContactRequest,
   type BookingApi,
   type BookingView,
   type ContactWriteResult,
   type CrmApi,
+  type HomeApi,
+  type InboxApi,
   type IntakeApi,
   type WriteOptions,
 } from "../types";
-import { buildSeed, DEMO_BOOKING_PAGE, DEMO_PIPELINE, DEMO_RESOURCES, DEMO_TENANT_ID, type DemoBooking, type DemoResource } from "./seed";
+import {
+  buildSeed,
+  DEMO_BOOKING_PAGE,
+  DEMO_BUSINESS_SUBJECT,
+  DEMO_OWNER,
+  DEMO_PIPELINE,
+  DEMO_RESOURCES,
+  DEMO_TENANT_ID,
+  type DemoBooking,
+  type DemoResource,
+} from "./seed";
 
 export interface DemoClock {
   now(): Date;
@@ -77,7 +103,11 @@ export interface DemoControls {
    * it with null, such as across the night clocks change.
    */
   setOpenHours(weekday: number, hours: [number, number] | null): void;
+  /** Another owner approves a draft first, so this screen's approve or discard is `not_draft`. */
+  approveReplyElsewhere(replyId: string): ReplyRecord;
 }
+
+export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & DemoControls;
 
 export interface DemoWrite {
   operation: string;
@@ -91,7 +121,16 @@ type StoredBooking = DemoBooking;
 
 const clone = <T>(value: T): T => structuredClone(value);
 
-export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi & CrmApi & IntakeApi & DemoControls {
+const PREVIEW_LENGTH = 140;
+const clip = (text: string | null) =>
+  text === null ? null : text.length <= PREVIEW_LENGTH ? text : `${text.slice(0, PREVIEW_LENGTH - 1)}…`;
+const latest = (...values: (string | null | undefined)[]) =>
+  values.reduce<string | null>((best, value) => (value && (!best || value > best) ? value : best), null);
+
+/** The frozen deal record a stage move answers with (crm.md C-14). */
+const toDealRecord = ({ value: _value, leadSource: _source, wonAt: _won, ...record }: DealSummary): DealRecord => record;
+
+export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   const clock = options.clock ?? { now: () => new Date() };
   const newId = options.newId ?? defaultNewId;
   const latency = options.latencyMs ?? 0;
@@ -100,6 +139,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
   const deals = new Map(seed.deals.map((item) => [item.id, item]));
   const bookings = new Map<string, StoredBooking>(seed.bookings.map((item) => [item.id, item]));
   const intakeItems = new Map(seed.intakeItems.map((item) => [item.id, item]));
+  const replies = new Map(seed.replies.map((item) => [item.id, item]));
   const replays = new Map<string, { fingerprint: string; result: unknown }>();
   const writes: DemoWrite[] = [];
   let offline = false;
@@ -255,6 +295,56 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     return item;
   }
 
+  /** I-1: customer threads (a request or a reply that is not discarded) and visitor threads. */
+  function allThreads(): ThreadSummary[] {
+    const customerIds = new Set<string>();
+    for (const item of intakeItems.values()) if (item.contactId) customerIds.add(item.contactId);
+    for (const reply of replies.values()) if (reply.status !== "discarded") customerIds.add(reply.contactId);
+    const threads: ThreadSummary[] = [...customerIds].map((id) => {
+      const contact = contacts.get(id)!;
+      const requests = [...intakeItems.values()].filter((item) => item.contactId === id);
+      const sent = [...replies.values()].filter((reply) => reply.contactId === id && reply.status !== "discarded");
+      const lastIn = latest(...requests.map((item) => item.createdAt));
+      const lastApproved = latest(...sent.map((reply) => reply.approvedAt));
+      const texts = [
+        ...requests.flatMap((item) => (item.submitted.notes === null ? [] : [{ at: item.createdAt, id: item.id, text: item.submitted.notes }])),
+        ...sent.map((reply) => ({ at: reply.createdAt, id: reply.id, text: reply.body })),
+      ].sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id));
+      return {
+        id: `c_${id}`,
+        kind: "customer",
+        contactId: id,
+        intakeItemId: null,
+        name: contact.displayName ?? contact.email ?? contact.phone ?? "Customer",
+        email: contact.email,
+        preview: clip(texts[0]?.text ?? null),
+        lastActivityAt: latest(lastIn, ...sent.flatMap((reply) => [reply.createdAt, reply.approvedAt, reply.settledAt]))!,
+        needsReply: lastIn !== null && (lastApproved === null || lastApproved < lastIn),
+        needsReview: false,
+        drafts: sent.filter((reply) => reply.status === "draft").length,
+      };
+    });
+    for (const item of intakeItems.values()) {
+      if (item.contactId) continue;
+      threads.push({
+        id: `v_${item.id}`, kind: "visitor", contactId: null, intakeItemId: item.id, name: item.submitted.name,
+        email: item.submitted.email, preview: clip(item.submitted.notes), lastActivityAt: item.createdAt,
+        needsReply: false, needsReview: item.status === "possible_match", drafts: 0,
+      });
+    }
+    const key = (thread: ThreadSummary) => thread.contactId ?? thread.intakeItemId!;
+    return threads.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt) || key(a).localeCompare(key(b)));
+  }
+
+  /** A reply this business holds; an unknown one is another tenant's (403, like TenantDenied). */
+  function draftOrThrow(replyId: string): ReplyRecord {
+    parse(uuidSchema, replyId);
+    const reply = replies.get(replyId);
+    if (!reply) throw demoError("Forbidden");
+    if (reply.status !== "draft") throw demoError("Conflict", { reason: "not_draft", status: reply.status });
+    return reply;
+  }
+
   return {
     async listResources() {
       await wait();
@@ -363,6 +453,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     async listDeals(query = {}) {
       await wait();
       if (dealReadsFail) throw networkError();
+      // The frozen record plus value, lead source and won date (H-1).
       const rows = [...deals.values()]
         .filter((item) => (!query.contactId || item.contactId === query.contactId) && (!query.pipelineId || item.pipelineId === query.pipelineId))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -382,7 +473,29 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
         if (move.expectedRevision !== deal.revision) {
           throw demoError("Conflict", { reason: "stale_revision", currentRevision: deal.revision });
         }
-        const updated: DealRecord = { ...deal, stageId: move.stageId, revision: deal.revision + 1, updatedAt: nowIso() };
+        // H-2: entering a won stage dates the win; moving between won stages keeps it; leaving clears it.
+        const outcome = (stageId: string) => pipeline.stages.find((stage) => stage.id === stageId)?.outcome ?? "open";
+        const updatedAt = nowIso();
+        const won = outcome(move.stageId) === "won";
+        const wonAt = won ? (outcome(deal.stageId) === "won" ? deal.wonAt : updatedAt) ?? updatedAt : null;
+        const updated: DealSummary = { ...deal, stageId: move.stageId, revision: deal.revision + 1, updatedAt, wonAt };
+        deals.set(updated.id, updated);
+        return toDealRecord(updated);
+      });
+    },
+
+    setDealDetails(input, options) {
+      return idempotent("crm.deal.set-details", input, options, () => {
+        const { dealId, ...body } = input;
+        const change = parse(setDealDetailsRequestSchema, body);
+        const deal = deals.get(dealId);
+        if (!deal) throw demoError("Forbidden");
+        if (change.expectedRevision !== deal.revision) {
+          throw demoError("Conflict", { reason: "stale_revision", currentRevision: deal.revision });
+        }
+        const updated: DealSummary = {
+          ...deal, value: change.value, leadSource: change.leadSource, revision: deal.revision + 1, updatedAt: nowIso(),
+        };
         deals.set(updated.id, updated);
         return updated;
       });
@@ -430,6 +543,134 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
       return [clone(DEMO_BOOKING_PAGE)];
     },
 
+    async listThreads(query = {}) {
+      await wait();
+      const { limit } = parse(listThreadsQuerySchema, { limit: query.limit ?? THREAD_PAGE_SIZE });
+      const rows = allThreads();
+      // Like the API's keyset cursor: the next page starts after the last thread shown.
+      const start = query.cursor ? rows.findIndex((item) => item.id === query.cursor) + 1 : 0;
+      const items = rows.slice(start, start + limit);
+      return { items: clone(items), nextCursor: start + limit < rows.length ? items.at(-1)!.id : null };
+    },
+
+    async getThread(id) {
+      await wait();
+      const parsed = threadIdSchema.safeParse(id);
+      if (!parsed.success) throw threadNotFound();
+      const summary = allThreads().find((thread) => thread.id === parsed.data);
+      if (!summary) throw threadNotFound();
+      const requests = [...intakeItems.values()].filter((item) =>
+        summary.kind === "customer" ? item.contactId === summary.contactId : item.id === summary.intakeItemId);
+      const entries: ThreadEntry[] = [
+        ...requests.map((item): ThreadEntry => ({
+          type: "request", id: item.id, at: item.createdAt, channel: item.channel, status: item.status,
+          name: item.submitted.name, notes: item.submitted.notes, booking: item.booking,
+        })),
+        ...(summary.kind === "customer"
+          ? [...replies.values()].filter((reply) => reply.contactId === summary.contactId && reply.status !== "discarded")
+            .map((reply): ThreadEntry => ({ type: "reply", at: reply.createdAt, reply }))
+          : []),
+      ].sort((a, b) => a.at.localeCompare(b.at));
+      const phone = summary.kind === "customer" ? contacts.get(summary.contactId!)?.phone ?? null : requests[0]?.submitted.phone ?? null;
+      const detail: ThreadDetail = {
+        ...summary, phone, entries: entries.slice(-THREAD_ENTRY_LIMIT), olderEntries: entries.length > THREAD_ENTRY_LIMIT,
+      };
+      return clone(detail);
+    },
+
+    draftReply(input, options) {
+      return idempotent("inbox.reply.draft", input, options, () => {
+        const request = parse(draftReplyRequestSchema, input);
+        // I-5: the contact must be this business's; anything else is TenantDenied (403).
+        if (!contacts.has(request.contactId)) throw demoError("Forbidden");
+        const reply: ReplyRecord = {
+          id: newId(), tenantId: DEMO_TENANT_ID, contactId: request.contactId, channel: "email",
+          subject: request.subject ?? DEMO_BUSINESS_SUBJECT, body: request.body, status: "draft",
+          draftedBy: DEMO_OWNER, createdAt: nowIso(), approvedBy: null, approvedAt: null, discardedAt: null, settledAt: null,
+        };
+        replies.set(reply.id, reply);
+        return reply;
+      });
+    },
+
+    approveReply(replyId, options) {
+      return idempotent("inbox.reply.approve", { replyId }, options, () => {
+        const draft = draftOrThrow(replyId);
+        // I-6: email is the only channel, so the customer needs an address. Nothing sends here.
+        if (!contacts.get(draft.contactId)?.email) throw demoError("Conflict", { reason: "no_email" });
+        const approved: ReplyRecord = { ...draft, status: "approved", approvedBy: DEMO_OWNER, approvedAt: nowIso() };
+        replies.set(replyId, approved);
+        return approved;
+      });
+    },
+
+    discardReply(replyId, options) {
+      return idempotent("inbox.reply.discard", { replyId }, options, () => {
+        const discarded: ReplyRecord = { ...draftOrThrow(replyId), status: "discarded", discardedAt: nowIso() };
+        replies.set(replyId, discarded);
+        return discarded;
+      });
+    },
+
+    async getResults(query) {
+      await wait();
+      const parsed = parse(resultsQuerySchema, query);
+      const { thisWeek, lastWeek } = weekRanges(clock.now().getTime(), parsed.zone, parsed.weekStart);
+      const weekOf = (instant: string | null): "thisWeek" | "lastWeek" | null => {
+        if (!instant) return null;
+        const ms = Date.parse(instant);
+        if (ms >= thisWeek.from && ms < thisWeek.to) return "thisWeek";
+        if (ms >= lastWeek.from && ms < lastWeek.to) return "lastWeek";
+        return null;
+      };
+      const tally = () => ({ thisWeek: 0, lastWeek: 0 });
+      const leads = { ...tally(), bySource: [{ source: "website" as const, ...tally() }, { source: "manual" as const, ...tally() }] };
+      for (const contact of contacts.values()) {
+        const week = weekOf(contact.createdAt);
+        if (!week) continue;
+        const website = [...intakeItems.values()].some((item) => item.contactId === contact.id && item.status === "new_contact");
+        leads[week] += 1;
+        leads.bySource[website ? 0 : 1]![week] += 1;
+      }
+      const taken = { ...tally(), bySource: [{ source: "website" as const, ...tally() }, { source: "owner" as const, ...tally() }] };
+      for (const booking of bookings.values()) {
+        const week = weekOf(booking.createdAt);
+        if (!week) continue;
+        taken[week] += 1;
+        taken.bySource[booking.source === "website" ? 0 : 1]![week] += 1;
+      }
+      const wonDeals = tally();
+      const revenue = new Map<string, { thisWeek: number; lastWeek: number; bySource: Map<RevenueSource, { thisWeek: number; lastWeek: number }> }>();
+      for (const deal of deals.values()) {
+        const week = weekOf(deal.wonAt);
+        if (!week) continue;
+        wonDeals[week] += 1;
+        if (!deal.value) continue;
+        const entry = revenue.get(deal.value.currency) ?? { ...tally(), bySource: new Map() };
+        const source = entry.bySource.get(deal.leadSource ?? "unset") ?? tally();
+        entry[week] += deal.value.amountMinor;
+        source[week] += deal.value.amountMinor;
+        entry.bySource.set(deal.leadSource ?? "unset", source);
+        revenue.set(deal.value.currency, entry);
+      }
+      const byThisWeek = <T extends { thisWeek: number; lastWeek: number }>(key: (item: T) => string) => (a: T, b: T) =>
+        b.thisWeek - a.thisWeek || b.lastWeek - a.lastWeek || key(a).localeCompare(key(b));
+      const results: HomeResults = {
+        zone: parsed.zone,
+        weekStart: parsed.weekStart,
+        thisWeek: { from: new Date(thisWeek.from).toISOString(), to: new Date(thisWeek.to).toISOString() },
+        lastWeek: { from: new Date(lastWeek.from).toISOString(), to: new Date(lastWeek.to).toISOString() },
+        leads,
+        bookings: taken,
+        wonDeals,
+        revenue: [...revenue].map(([currency, entry]) => ({
+          currency, thisWeek: entry.thisWeek, lastWeek: entry.lastWeek,
+          bySource: [...entry.bySource].map(([source, sums]) => ({ source, ...sums })).sort(byThisWeek((item) => item.source)),
+        })).sort(byThisWeek((item) => item.currency)),
+      };
+      return clone(results);
+    },
+
     bookAsSomeoneElse(resourceId, startsAt) {
       return toRecord(insertBooking(resourceOrThrow(resourceId), startsAt, newId(), "Booked by phone"));
     },
@@ -437,9 +678,16 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): BookingApi 
     editDealElsewhere(dealId) {
       const deal = deals.get(dealId);
       if (!deal) throw demoError("Forbidden");
-      const updated: DealRecord = { ...deal, revision: deal.revision + 1, updatedAt: nowIso() };
+      const updated: DealSummary = { ...deal, revision: deal.revision + 1, updatedAt: nowIso() };
       deals.set(updated.id, updated);
-      return clone(updated);
+      return toDealRecord(clone(updated));
+    },
+
+    approveReplyElsewhere(replyId) {
+      const draft = draftOrThrow(replyId);
+      const approved: ReplyRecord = { ...draft, status: "approved", approvedBy: DEMO_OWNER, approvedAt: nowIso() };
+      replies.set(replyId, approved);
+      return clone(approved);
     },
 
     loseNextResponse(options = {}) {

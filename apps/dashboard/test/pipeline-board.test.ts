@@ -16,9 +16,9 @@ const keys = scopeKeys(DEMO_TENANT_ID);
 const uuid = (n: number) => `2a4c6e80-1b3d-4f5a-9c7e-${String(n).padStart(12, "0")}`;
 const sales: PipelineSummary = {
   id: uuid(1), name: "Sales",
-  stages: [{ id: uuid(11), name: "Inquiry", position: 0 }, { id: uuid(12), name: "Won", position: 1 }],
+  stages: [{ id: uuid(11), name: "Inquiry", position: 0, outcome: "open" }, { id: uuid(12), name: "Won", position: 1, outcome: "won" }],
 };
-const repairs: PipelineSummary = { id: uuid(2), name: "Repairs", stages: [{ id: uuid(21), name: "Received", position: 0 }] };
+const repairs: PipelineSummary = { id: uuid(2), name: "Repairs", stages: [{ id: uuid(21), name: "Received", position: 0, outcome: "open" }] };
 const customer: ContactRecord = {
   id: uuid(31), tenantId: DEMO_TENANT_ID, displayName: "Maren Ashby", email: null, phone: "+16465550100",
   consent: { email: null, sms: null }, createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:00:00.000Z",

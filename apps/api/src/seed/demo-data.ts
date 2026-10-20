@@ -1,5 +1,7 @@
 // Made-up demo business for local development. Names, emails (example.com) and phone
 // numbers (555-01xx fictional range) are invented; no client data.
+import type { LeadSource } from "@zs/contracts";
+
 /** The demo owner's sign-in address. */
 export const DEMO_OWNER_EMAIL = "owner@example.com";
 export const DEMO_TENANT_NAME = "Halden & Rowe Fine Jewelry";
@@ -28,6 +30,9 @@ export const DEMO_RESOURCES = [
 
 export const DEMO_STAGES = ["Inquiry", "Consultation", "Design", "Deposit", "Delivered"] as const;
 export type DemoStage = (typeof DEMO_STAGES)[number];
+/** The stage a deal is won in (inbox-home.md H-2); every other demo stage is open. */
+export const DEMO_WON_STAGE: DemoStage = "Delivered";
+export const DEMO_CURRENCY = "USD";
 
 export const DEMO_CONTACTS = [
   { name: "Maren Ashby", email: "maren.ashby@example.com", phone: "+12025550101" },
@@ -44,12 +49,18 @@ export const DEMO_CONTACTS = [
   { name: "Jonah Petrakis", email: "jonah.petrakis@example.com", phone: "+12025550112" },
 ] as const;
 
-export const DEMO_DEALS: readonly { contact: number; title: string; stage: DemoStage }[] = [
-  { contact: 0, title: "Engagement ring, oval sapphire halo", stage: "Design" },
-  { contact: 1, title: "Matching wedding bands", stage: "Consultation" },
+/** `valueMinor` is in cents; deals without details keep value and lead source unset. */
+export const DEMO_DEALS: readonly {
+  contact: number;
+  title: string;
+  stage: DemoStage;
+  details?: { valueMinor: number; leadSource: LeadSource };
+}[] = [
+  { contact: 0, title: "Engagement ring, oval sapphire halo", stage: "Design", details: { valueMinor: 840000, leadSource: "website" } },
+  { contact: 1, title: "Matching wedding bands", stage: "Consultation", details: { valueMinor: 290000, leadSource: "referral" } },
   { contact: 2, title: "Heirloom brooch restoration", stage: "Deposit" },
-  { contact: 4, title: "Custom pendant, mother's birthstones", stage: "Inquiry" },
-  { contact: 5, title: "Anniversary eternity band", stage: "Delivered" },
+  { contact: 4, title: "Custom pendant, mother's birthstones", stage: "Inquiry", details: { valueMinor: 120000, leadSource: "social" } },
+  { contact: 5, title: "Anniversary eternity band", stage: "Delivered", details: { valueMinor: 465000, leadSource: "walk_in" } },
   { contact: 6, title: "Pearl strand restring and clasp", stage: "Consultation" },
   { contact: 8, title: "Signet ring with family crest", stage: "Design" },
   { contact: 10, title: "Diamond stud upgrade", stage: "Inquiry" },

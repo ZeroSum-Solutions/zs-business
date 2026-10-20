@@ -5,8 +5,9 @@ approvals and the owner dashboard. Mish (public, Apache-2.0) stays the front doo
 builder and calls this service over HTTP and MCP. No authoritative business records live in Mish.
 
 Status: the shared action path, booking (F1) and CRM (F2) are implemented. M1 adds the
-HTTP API (`apps/api`) and the MCP adapter (`packages/mcp`) over them. Requirements live in
-`docs/requirements/booking.md` and `docs/requirements/crm.md`.
+HTTP API (`apps/api`) and the MCP adapter (`packages/mcp`) over them. M3 adds public booking
+intake (`docs/requirements/public-intake.md`) and M3c the Inbox and Home results
+(`docs/requirements/inbox-home.md`). Requirements live in `docs/requirements/`.
 Plan: `/Users/zero-suminc./Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
 
 ## Hosting (M2b)
