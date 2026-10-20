@@ -6,6 +6,10 @@
 // M3b: stored approvals (approvals.md) run through approvedDispatch beside the direct path.
 import {
   ROLE_PERMISSIONS,
+  WALLET_TOPUP_CREATE_ACTION,
+  createTopUpRequestSchema,
+  type CreateTopUpResponse,
+  type TopUp,
   ValidationFailed,
   Conflict,
   approvalOutputSchema,
@@ -81,6 +85,8 @@ import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
 import { getWallet } from "../wallet/index.js";
+import { getTopUp, listTopUps, startTopUp, topUpHandlers } from "../billing/topups.js";
+import type { StripeClient } from "../billing/stripe.js";
 import { derivedId } from "./ids.js";
 import { validationError } from "./errors.js";
 
@@ -91,6 +97,8 @@ export interface EdgeDependencies {
   readonly generateId: () => string;
   /** Signs public booking keys for the owner's page list (public-intake.md P-2, P-12). */
   readonly bookingKeys?: { readonly secret: string; readonly publicBaseUrl: string };
+  /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means top-ups are off. */
+  readonly billing?: { readonly stripe: StripeClient };
 }
 /** A verified caller. Never built from request bodies or tool input. */
 export interface Principal {
@@ -109,7 +117,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...topUpHandlers,
 });
 
 /**
@@ -134,6 +142,8 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "member.remove": "members",
   "approval.approve": "approve",
   "approval.reject": "approve",
+  // stripe.md S-1: only owners add money.
+  "wallet.topup.create": "billing",
 });
 
 /** Registered actions whose permission depends on their payload (payloadPermission below). */
@@ -273,7 +283,7 @@ export function bookingPageSnippets(publicBaseUrl: string, publicKey: string) {
   };
 }
 
-type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval";
+type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup";
 
 export function createSession(deps: EdgeDependencies, principal: Principal) {
   const tenantId = uuidSchema.parse(principal.tenantId);
@@ -482,6 +492,28 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     listMembers: async (): Promise<MemberList> => ({ items: await read("members", (tx) => listMembers(tx, tenantId)) }),
     /** The prepaid wallet (delivery.md D-4); billing is an owner permission. */
     getWallet: (): Promise<WalletSummary> => read("billing", (tx) => getWallet(tx, tenantId)),
+    listTopUps: async (): Promise<{ items: TopUp[] }> => ({ items: await read("billing", (tx) => listTopUps(tx, tenantId)) }),
+
+    /** stripe.md S-1, S-2: a pending top-up and its Stripe Checkout URL. */
+    async createTopUp(body: unknown, key: unknown, signal?: AbortSignal): Promise<CreateTopUpResponse> {
+      const billing = deps.billing;
+      if (!billing) throw new NotFound();
+      const request = parseInput(createTopUpRequestSchema, body);
+      const { id, ...rest } = envelope(key, "wallet_topup");
+      const config = billing.stripe.config;
+      return startTopUp({
+        command: {
+          actionType: WALLET_TOPUP_CREATE_ACTION, ...rest,
+          payload: { topupId: id, amount: request.amount, currency: config.currency, minAmount: config.minTopUp, maxAmount: config.maxTopUp },
+        },
+        dispatch: run,
+        read: (topupId) => read("billing", (tx) => getTopUp(tx, tenantId, topupId)),
+        stripe: billing.stripe,
+        tenantId,
+        now: new Date(readClock(deps.clock)),
+        ...(signal ? { signal } : {}),
+      });
+    },
 
     async inviteMember(body: unknown, key: unknown): Promise<MemberOutput> {
       const request = parseInput(inviteMemberRequestSchema, body);

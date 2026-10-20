@@ -64,6 +64,11 @@ export interface ScopedDatabase {
     work: (tx: Transaction) => Promise<T>,
     options?: TransactionOptions,
   ): Promise<T>;
+  /**
+   * The runtime role with no tenant set: every tenant policy matches nothing. Only for platform
+   * tables whose own policy allows the runtime a narrow write (stripe_events intake, stripe.md S-3).
+   */
+  platform?<T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions): Promise<T>;
 }
 
 /**
@@ -390,6 +395,8 @@ export function createScopedDatabase(
         transactionOptions,
         onResetFailure,
       ),
+    platform: (work, transactionOptions = {}) =>
+      transaction(pool, "authenticated", null, work, limits, transactionOptions, onResetFailure),
   };
 }
 /** Separate privileged entry point for migrations, provisioning, and outbox workers. */

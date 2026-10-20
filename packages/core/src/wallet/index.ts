@@ -75,7 +75,8 @@ export interface Reservation {
 
 /**
  * D-5: holds `amount` for one delivery, or returns null when the wallet cannot cover it (no
- * wallet, too little available, or another currency). The
+ * wallet, too little available, another currency, or money owed after a refund or dispute,
+ * stripe.md S-6). The
  * conditional UPDATE takes the wallet row lock; a concurrent reservation waits for it and then
  * re-reads the committed balance, so two reservations can never spend the same funds. The
  * table constraints refuse any overdraw even if this condition were wrong.
@@ -92,7 +93,7 @@ export async function reserveFunds(tx: Transaction, input: {
   const amount = positiveAmount(input.amount);
   const reserved = await tx.query(
     `UPDATE wallets SET reserved = reserved + $2, updated_at = $3
-      WHERE tenant_id=$1 AND balance - reserved >= $2 AND currency = $4`,
+      WHERE tenant_id=$1 AND balance - reserved >= $2 AND currency = $4 AND owed = 0`,
     [input.tenantId, amount, input.now, input.currency ?? "usd"]);
   if (reserved.rowCount !== 1) return null;
   await tx.query(
@@ -151,4 +152,54 @@ export async function releaseReservation(tx: Transaction, input: {
   await tx.query("UPDATE wallets SET reserved = reserved - $2, updated_at = $3 WHERE tenant_id=$1",
     [input.tenantId, minorUnits(row.amount), input.now]);
   return "released";
+}
+
+/**
+ * stripe.md S-6: takes `amount` back without going negative. What is available (balance minus
+ * reserved) is debited now with one `adjustment` ledger row; the rest is added to `owed`.
+ * Reservations stay covered. The caller records the event once (wallet_billing_events).
+ */
+export async function debitWallet(tx: Transaction, input: {
+  readonly tenantId: string;
+  readonly ledgerId: string;
+  readonly amount: number;
+  readonly idempotencyKey: string;
+  readonly note?: string;
+  readonly now: Date;
+}): Promise<{ applied: number; owed: number }> {
+  const amount = positiveAmount(input.amount);
+  await tx.query(
+    "INSERT INTO wallets (tenant_id, updated_at) VALUES ($1,$2) ON CONFLICT (tenant_id) DO NOTHING", [input.tenantId, input.now]);
+  const wallet = (await tx.query<{ balance: string; reserved: string }>(
+    "SELECT balance, reserved FROM wallets WHERE tenant_id=$1 FOR UPDATE", [input.tenantId])).rows[0]!;
+  const available = minorUnits(wallet.balance) - minorUnits(wallet.reserved);
+  const applied = Math.max(0, Math.min(amount, available));
+  if (applied > 0)
+    await tx.query(
+      `INSERT INTO wallet_ledger (tenant_id, id, kind, amount, idempotency_key, note, created_at)
+       VALUES ($1,$2,'adjustment',$3,$4,$5,$6)`,
+      [input.tenantId, input.ledgerId, -applied, input.idempotencyKey, input.note ?? null, input.now]);
+  await tx.query("UPDATE wallets SET balance = balance - $2, owed = owed + $3, updated_at = $4 WHERE tenant_id=$1",
+    [input.tenantId, applied, amount - applied, input.now]);
+  return { applied, owed: amount - applied };
+}
+
+/** S-6: pays what the wallet owes from what is available, with one `adjustment` row. */
+export async function repayOwed(tx: Transaction, input: {
+  readonly tenantId: string;
+  readonly ledgerId: string;
+  readonly now: Date;
+}): Promise<number> {
+  const wallet = (await tx.query<{ balance: string; reserved: string; owed: string }>(
+    "SELECT balance, reserved, owed FROM wallets WHERE tenant_id=$1 FOR UPDATE", [input.tenantId])).rows[0];
+  if (!wallet) return 0;
+  const repay = Math.min(minorUnits(wallet.owed), minorUnits(wallet.balance) - minorUnits(wallet.reserved));
+  if (repay <= 0) return 0;
+  await tx.query(
+    `INSERT INTO wallet_ledger (tenant_id, id, kind, amount, idempotency_key, note, created_at)
+     VALUES ($1,$2,'adjustment',$3,$4,'repay owed',$5)`,
+    [input.tenantId, input.ledgerId, -repay, `repay:${input.ledgerId}`, input.now]);
+  await tx.query("UPDATE wallets SET balance = balance - $2, owed = owed - $2, updated_at = $3 WHERE tenant_id=$1",
+    [input.tenantId, repay, input.now]);
+  return repay;
 }

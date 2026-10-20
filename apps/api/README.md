@@ -115,6 +115,8 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
 | `RESEND_WEBHOOK_SECRET` | The signing secret of the Resend webhook endpoint, as Resend shows it (`whsec_` then base64, at least 24 bytes). Anything else is refused. Unset, `POST /webhooks/resend` is off. |
 | `RESEND_WEBHOOK_PREVIOUS_SECRET` | Optional, during a rotation: events signed with it still verify. Needs `RESEND_WEBHOOK_SECRET`. |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_LIVEMODE`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL` | Stripe wallet top-ups (stripe.md S-9), all or none. None set: top-ups and `POST /webhooks/stripe` are off. A secret or restricted key (`sk_`/`rk_`), the endpoint's `whsec_` secret, `true` or `false` matching the key's mode, and https return URLs. |
+| `STRIPE_WEBHOOK_PREVIOUS_SECRET`, `STRIPE_CURRENCY`, `STRIPE_TOPUP_MIN`, `STRIPE_TOPUP_MAX`, `STRIPE_API_VERSION`, `STRIPE_BASE_URL` | Optional: a rotation secret, `usd`, 500 and 50000 minor units, the account's default API version, `https://api.stripe.com`. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
 environment or the system clock. Everything else gets them through `createApp(deps)`.
@@ -206,6 +208,8 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `POST /v1/members/:id/role` `{ role }` | 200 member; 409 `last_owner` when it would leave no owner; owners only |
 | `DELETE /v1/members/:id` | 200 removed member; 409 `last_owner`; owners only |
 | `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
+| `GET /v1/wallet/top-ups` | `{ items: TopUp[] }`, newest first, at most 20; owners only |
+| `POST /v1/wallet/top-ups` | `{ amount }` in minor units with `Idempotency-Key`: 201 `{ topup, checkoutUrl }` (stripe.md S-1, S-2). The same key replays the same top-up and Checkout Session. 409 `topup_closed` once the top-up is no longer pending or 25 minutes old; 503 when Stripe is unreachable or busy (retry with the same key); 404 when Stripe is not configured. Owners only |
 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
 with no `user_id`; the runtime role cannot set `user_id` (binding an invite to a signed-up
@@ -284,6 +288,25 @@ redelivery with the same `svix-id` replays the stored action (one suppression, o
 | 413 `ValidationFailed` | Body over 256 KiB. |
 | 200 `{"handled":true}` | The suppression is recorded, or replayed. |
 | 200 `{"handled":false,"reason":…}` | Signed, but nothing to do: an event that suppresses nothing, a shape it does not read, no tags, or no matching delivery. Resend does not retry it. |
+
+## Stripe webhook (`/webhooks/stripe`, no auth)
+
+Stripe posts events here (stripe.md S-3). On only when the `STRIPE_*` variables are set.
+Subscribe the endpoint to `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+`checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`,
+`charge.dispute.funds_withdrawn` and `charge.dispute.funds_reinstated`.
+
+The route checks `Stripe-Signature` over the raw body (current or previous secret, 5 minutes of
+tolerance) before it parses anything or touches the database, then stores the event once by
+its ID in `stripe_events`. It moves no money: the billing runner does (below).
+
+| Answer | When |
+|---|---|
+| 401 `Unauthorized` | Missing, wrong or stale signature. One body for all of them. |
+| 400 `ValidationFailed` | Signed, but not a Stripe event. |
+| 413 `ValidationFailed` | Body over 256 KiB. |
+| 503 `Unavailable` | The database did not answer; Stripe delivers it again. |
+| 200 `{"received":true,"stored":…}` | Stored, already stored, or from the other mode (dropped). |
 
 ## Database pool and request limits
 
@@ -526,3 +549,21 @@ Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Of
 off, 200 `{ ran: true, passes, ingested, claimed, sent, retried, blocked, dead, errors,
 budgetSpent }` after a run, and 503 when a run fails (the next run picks the work up again).
 It is its own Vercel function; the API function never opens the service login.
+
+## Billing runner (`/cron/billing`, `pnpm billing:worker`)
+
+Applies stored Stripe events to wallets (stripe.md S-4..S-8): a paid top-up credits once, a
+refund or dispute takes money back without the balance going negative (the rest is `owed`,
+and the wallet reserves nothing until it is repaid). Off unless `BILLING_WORKER=on`.
+
+| Variable | Meaning |
+|---|---|
+| `BILLING_WORKER` | Kill switch. `on` runs; anything else, or unset, runs nothing. |
+| `CRON_SECRET` | The same bearer as `/cron/delivery`. Unset, the route is 404. |
+| `BILLING_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS` | Optional tuning: 50, 20000 and 30000 (Node worker only). |
+| `BILLING_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/billing`. Unset, there is no cron. |
+
+`GET /cron/billing` answers like `/cron/delivery`, with `{ ran: true, passes, claimed,
+outcomes, budgetSpent }` after a run. Events that end `mismatch`, `orphaned` or `not_ours` are
+logged for an operator.
