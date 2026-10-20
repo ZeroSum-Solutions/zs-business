@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import type { Transaction } from "../src/scoped.js";
 
 interface TenantTable {
@@ -55,7 +55,9 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
           timestamptz: /end|expires/.test(field.name) ? "2026-10-17T13:00:00Z" : "2026-10-17T12:00:00Z",
           tstzrange: "[2026-10-17T12:00:00Z,2026-10-17T13:00:00Z)",
         };
-        if (field.enum_value !== null) row[field.name] = field.enum_value;
+        // E.164 columns (sms_numbers.phone_number) are unique across tenants: a fresh test number each time.
+        if (field.name === "phone_number" && field.type === "text") row[field.name] = `+1555${String(randomInt(0, 10_000_000)).padStart(7, "0")}`;
+        else if (field.enum_value !== null) row[field.name] = field.enum_value;
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);
       }

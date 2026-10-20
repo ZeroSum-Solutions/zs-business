@@ -1,6 +1,6 @@
 # M3d: prepaid wallet and message delivery
 
-Status: draft contract for M3d (2026-10-20), revision 3. Code follows this file; a change to
+Status: draft contract for M3d (2026-10-20), revision 4. Code follows this file; a change to
 a numbered rule needs a new revision of this file first.
 
 Scope: how an approved outbound message (an Inbox reply today, agent messages later) becomes
@@ -113,13 +113,23 @@ released, dead letter `dedupe_window_expired`) or, without an answer, becomes a 
 sent. A reservation moves from `held` to `captured` or `released` once; a partial unique
 index allows one captured reservation per delivery.
 
+A provider that drops no repeats (Twilio, `twilio.md` T-2) declares `dedupeWindowMs: 0`: its
+window is closed from the first attempt, so an attempt whose outcome is unknown is never
+followed by another send. Every later turn asks `provider.lookup(key, { tenantId, deliveryId })`
+instead, as after any window: accepted captures (`sent`); not found releases the reservation and
+ends as the check that blocked it or `dedupe_window_expired`. Unlike after a closed window, no
+answer keeps the delivery `uncertain`, with backoff by the number of lookups, until
+`first_attempt_at + outcomeWaitMs` (evidence such as a status callback may still arrive), and only
+then is it a dead letter `outcome_unknown` with the reservation held. A send after a definite
+answer (`failed`) is not limited by the window, because it cannot repeat an accepted one.
+
 **D-9. Suppression and stop.** `suppressions` holds (channel, address) pairs that must not be
 messaged, with a reason (`unsubscribe`, `stop`, `bounce`, `complaint`, `manual`). Writes go
 through the dispatcher with a server-built principal per tenant, like the public intake
 (P-3). One row per address keeps its first reason, except that a lasting reason (`unsubscribe`,
 `bounce`, `complaint`, `manual`) replaces `stop`. Member and MCP idempotency keys may not use the
 prefixes the server builds for these actions (`public:`, `unsubscribe:`, `sms-inbound:`,
-`email-feedback:`), so a
+`sms-status:`, `email-feedback:`), so a
 member cannot take a recipient's key first:
 - Email: every email carries a `List-Unsubscribe` URL and `List-Unsubscribe-Post:
   List-Unsubscribe=One-Click` (RFC 8058). The URL holds an unsubscribe token: `zsu1_` and
@@ -142,10 +152,9 @@ member cannot take a recipient's key first:
 catalog isolation test. The worker runs as the service role (the outbox processing entry
 point) and names `tenant_id` in every statement.
 
-## Known limits (revision 3)
+## Known limits (revision 4)
 
 - Claims are ordered by due time across tenants, with no per-tenant fairness yet.
 - Backoff has no jitter: core has no randomness source, and none is injected yet.
-- Top-ups, the SMS provider and inbound SMS webhooks arrive with M5. The email provider is
-  Resend (`resend.md`). `creditWallet` and `createInboundSmsSession` are the seams they will
-  call.
+- Top-ups arrive with M5; `creditWallet` is the seam they call. The email provider is Resend
+  (`resend.md`); the SMS provider and inbound SMS webhooks are Twilio (`twilio.md`).

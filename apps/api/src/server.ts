@@ -81,6 +81,15 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         },
       },
     }),
+    ...(env.twilioWebhook === null ? {} : {
+      twilioWebhook: {
+        ...env.twilioWebhook,
+        report: (event) => {
+          if (!event.outcome.handled && event.outcome.reason !== "not_a_keyword")
+            console.warn("Twilio webhook not applied", { kind: event.kind, messageSid: event.messageSid, reason: event.outcome.reason });
+        },
+      },
+    }),
     ...(env.activepieces === null ? {} : {
       activepieces: { keySecrets: env.activepieces.keySecrets, urlPolicy: { allowLoopback: env.activepieces.allowLoopback } },
     }),

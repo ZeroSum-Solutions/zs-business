@@ -17,6 +17,7 @@ import {
   type App,
   type PublicIntakeConfig,
   type ResendWebhookConfig,
+  type TwilioWebhookConfig,
   type UnsubscribeConfig,
 } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
@@ -36,6 +37,11 @@ export const UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "u".repeat(32)].join("
 export const PREVIOUS_UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "q".repeat(32)].join("-");
 /** Synthetic Resend webhook secrets in the `whsec_<base64>` shape, built at runtime like SECRET. */
 export const RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "w".repeat(32)].join("-")).toString("base64");
+/** Test-only Twilio values: random-looking hex, never a real account. */
+export const TWILIO_AUTH_TOKEN = "0123456789abcdef".repeat(2);
+export const PREVIOUS_TWILIO_AUTH_TOKEN = "fedcba9876543210".repeat(2);
+export const TWILIO_ACCOUNT_SID = `AC${"a1".repeat(16)}`;
+export const TWILIO_WEBHOOK_BASE_URL = "https://api.example.test";
 export const ACTIVEPIECES_KEY_SECRET = ["test", "activepieces", "a".repeat(32)].join("-");
 export const PREVIOUS_RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "r".repeat(32)].join("-")).toString("base64");
 
@@ -120,6 +126,8 @@ export interface HarnessOptions {
   unsubscribe?: Partial<UnsubscribeConfig>;
   /** Turns POST /webhooks/resend on; the signing secret defaults to RESEND_WEBHOOK_SECRET. */
   resendWebhook?: Partial<ResendWebhookConfig>;
+  /** Turns the /webhooks/twilio routes on with the TWILIO_* test values below. */
+  twilioWebhook?: Partial<TwilioWebhookConfig>;
   /** Turns the Activepieces routes on; the key defaults to ACTIVEPIECES_KEY_SECRET. */
   activepieces?: Partial<AutomationEdgeConfig>;
   clock?: { now(): Date };
@@ -156,8 +164,11 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     ...(options.resendWebhook
       ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }
       : {}),
-    ...(options.resendWebhook
-      ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }
+    ...(options.twilioWebhook
+      ? { twilioWebhook: {
+        tokens: { current: TWILIO_AUTH_TOKEN }, accountSid: TWILIO_ACCOUNT_SID, webhookBaseUrl: TWILIO_WEBHOOK_BASE_URL,
+        ...options.twilioWebhook,
+      } }
       : {}),
     ...(options.activepieces
       ? { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET }, ...options.activepieces } }
