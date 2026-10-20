@@ -90,6 +90,7 @@ import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
+import { smsStatusHandlers } from "../delivery/sms-status.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
 import { automationHandlers } from "../automation/handlers.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
@@ -153,14 +154,16 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...automationHandlers, ...siteHandlers, ...agentHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...automationHandlers, ...siteHandlers,
+  ...agentHandlers,
 });
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
- * request (public-intake.md P-1), the suppression actions (delivery.md D-9), the Activepieces
- * actions (activepieces.md W-1, W-11, which authorize themselves) and the agent's own run actions
- * (agents.md G-1) are never reachable from a member session.
+ * request (public-intake.md P-1), the suppression actions (delivery.md D-9), the SMS status
+ * record (twilio.md T-6), the Activepieces actions (activepieces.md W-1, W-11, which authorize
+ * themselves) and the agent's own run actions (agents.md G-1) are never reachable from a member
+ * session.
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
