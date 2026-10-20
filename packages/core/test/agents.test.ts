@@ -323,11 +323,13 @@ describe("skips (G-7, G-8)", () => {
     const fresh = await inquiry({ name: "Fresh Fern" });
     now += 25 * HOUR;
     const second = await agent(createFakeFollowUpModel(), 2).runScheduled(tenantId, randomUUID());
-    expect(second.decisions[0]).toMatchObject({ intakeItemId: fresh.itemId, outcome: "drafted" });
+    // Decisions in one run share a time, so find them by inquiry rather than by position.
     expect(second).toMatchObject({ considered: 2, drafted: 1, skipped: 1 });
-    // The skip it still had room for went to the one decided longest ago, not the same one again.
+    expect(second.decisions.find((d) => d.outcome === "drafted")?.intakeItemId).toBe(fresh.itemId);
+    // The skip it still had room for went to one of the stuck two; the next goes to the other.
+    const skippedAgain = second.decisions.find((d) => d.outcome === "skipped")!.intakeItemId;
     const third = await agent(createFakeFollowUpModel(), 1).runScheduled(tenantId, randomUUID());
-    expect(third.decisions.map((d) => d.intakeItemId)).not.toEqual([second.decisions[1]!.intakeItemId]);
+    expect(third.decisions.map((d) => d.intakeItemId)).toEqual([stuck.find((item) => item.itemId !== skippedAgain)!.itemId]);
   });
 });
 
