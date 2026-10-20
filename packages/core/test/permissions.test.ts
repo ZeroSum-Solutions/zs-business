@@ -11,7 +11,8 @@ import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type Edg
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
   approvalHandlers, bookingHandlers, createDispatcher, createMemorySiteStore, crmHandlers, dealDetailsHandlers, inboxHandlers,
-  intakeHandlers, memberHandlers, plainSiteCompiler, siteHandlers, sourceHandlers, type DispatchContext,
+  intakeHandlers, memberHandlers, plainSiteCompiler, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers,
+  type DispatchContext, type StripeClient,
 } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -40,6 +41,7 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "site.release.activate": "publish",
   "approval.approve": "approve",
   "approval.reject": "approve",
+  "wallet.topup.create": "billing",
 };
 
 interface Tenant {
@@ -72,8 +74,15 @@ async function addMember(tenantId: string, role: MemberRole): Promise<{ userId: 
   return { userId, memberId };
 }
 
+/** A Stripe client that answers every Checkout request; the key is synthetic, built at runtime. */
+const stripe: StripeClient = {
+  config: stripeConfigSchema.parse({
+    secretKey: ["sk", "test", "x".repeat(24)].join("_"), successUrl: "https://app.test/paid", cancelUrl: "https://app.test/cancel",
+  }),
+  createCheckoutSession: async (request) => ({ id: `cs_test_${request.topupId.replaceAll("-", "")}`, url: "https://checkout.stripe.test/pay" }),
+};
 const sites = { store: createMemorySiteStore(), compiler: plainSiteCompiler };
-const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, sites });
+const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, billing: { stripe }, sites });
 const siteSpec = { kind: "plain", title: "Halden & Rowe" };
 const sessionFor = (actorId: string, tenantId = tenant.tenantId): Session => createSession(deps(), { tenantId, actorId });
 
@@ -203,6 +212,9 @@ function operations(session: Session): Record<string, { permission: Permission |
     listPipelines: { permission: "customers", run: () => session.listPipelines() },
     listMembers: { permission: "members", run: () => session.listMembers() },
     getWallet: { permission: "billing", run: () => session.getWallet() },
+    // stripe.md S-1: only owners add money.
+    listTopUps: { permission: "billing", run: () => session.listTopUps() },
+    createTopUp: { permission: "billing", run: () => session.createTopUp({ amount: 1_000 }, randomUUID()) },
     linkIntakeItem: { permission: "intake", run: async () => session.linkIntakeItem(await intakeItem(), { contactId: tenant.contactId }, randomUUID()) },
     rejectIntakeItem: { permission: "intake", run: async () => session.rejectIntakeItem(await intakeItem(), {}, randomUUID()) },
     listIntakeItems: { permission: "intake", run: () => session.listIntakeItems({}) },
@@ -251,7 +263,7 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...siteHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...siteHandlers,
     })
       .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action)).sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);

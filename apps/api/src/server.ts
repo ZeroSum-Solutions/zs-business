@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createMemorySiteStore, createSessionCheckFromConfig, plainSiteCompiler, type SiteCompiler } from "@zs/core";
+import { createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, plainSiteCompiler, type SiteCompiler } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
@@ -78,6 +78,15 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         report: ({ id, type, outcome }) => {
           if (!outcome.handled && outcome.reason !== "no_suppression")
             console.warn("Resend webhook not applied", { id, type, reason: outcome.reason });
+        },
+      },
+    }),
+    ...(env.stripe === null ? {} : {
+      stripe: createStripeClient({ config: env.stripe.client }),
+      stripeWebhook: {
+        ...env.stripe.webhook,
+        report: ({ id, type, outcome }) => {
+          if (outcome === "other_mode") console.warn("Stripe webhook from the other mode dropped", { id, type });
         },
       },
     }),

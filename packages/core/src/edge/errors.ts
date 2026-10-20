@@ -5,6 +5,7 @@ import {
   type JsonValue,
 } from "@zs/contracts";
 import { DatabaseUnavailable } from "@zs/db";
+import { StripeRequestFailed } from "../billing/stripe.js";
 
 export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 500 | 503;
 export interface MappedError {
@@ -63,7 +64,7 @@ export function validationError(message: string, issues: readonly { path: readon
 const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
-  "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other",
+  "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other", "topup_closed", "wallet_currency",
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
   "stale_release", "host_in_use",
@@ -124,6 +125,8 @@ export function mapError(error: unknown): MappedError {
   if (error instanceof DatabaseUnavailable) return mapped(503, "Unavailable");
   // Supabase Auth could not say whether the token or its session is good: retry later.
   if (error instanceof AuthUnavailable) return mapped(503, "Unavailable");
+  // stripe.md S-2: Stripe unreachable, busy or failing is retried with the same key; any other refusal is ours.
+  if (error instanceof StripeRequestFailed) return error.retry ? mapped(503, "Unavailable") : mapped(500, "Internal");
   // The release's files could not be stored, and the publish was not recorded: retry later.
   if (error instanceof SiteStoreUnavailable) return mapped(503, "Unavailable");
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
