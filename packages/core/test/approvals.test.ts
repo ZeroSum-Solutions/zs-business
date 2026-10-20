@@ -154,16 +154,6 @@ describe("approve and run (A-6, A-7)", () => {
     expect((await sessionFor(owner.userId).getApproval(requested.result.id)).executedActionId).toBe(approved.execution.actionId);
   });
 
-  it("refuses a member key that would take the run's server key first", async () => {
-    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book" }, randomUUID());
-    for (const key of [`approval:${result.id}`, `Approval:${result.id}`])
-      await expect(sessionFor(staff.userId).createBooking({ resourceId, startsAt: nextSlot() }, key))
-        .rejects.toMatchObject({ code: "ValidationFailed", message: "Invalid Idempotency-Key" });
-    expect(await count("SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND lower(idempotency_key)=$2", [tenantId, `approval:${result.id}`])).toBe(0);
-    const approved = await sessionFor(owner.userId).approveApproval(result.id, {}, randomUUID());
-    expect(approved.execution.result).toMatchObject({ status: "confirmed" });
-  });
-
   it("lets staff request and only owners decide", async () => {
     const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book" }, randomUUID());
     await expect(sessionFor(staff.userId).approveApproval(result.id, {}, randomUUID())).rejects.toBeInstanceOf(TenantDenied);

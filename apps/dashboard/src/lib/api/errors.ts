@@ -103,6 +103,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   member_exists: "That email is already on the team.",
   not_draft: "This reply is no longer a draft. Someone approved or discarded it first.",
   no_email: "This customer has no email address yet. Add one in Customers, then approve the reply.",
+  approved_by_other: "Another owner already approved this reply. They finish sending it, or revoke their approval first.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -185,10 +186,11 @@ export function demoValidationError(issues: readonly { path: readonly PropertyKe
 }
 
 /**
- * A reply step that hit a reply someone else already moved on (`not_draft`), or a customer
- * with no address to send to (`no_email`) (inbox-home.md I-6, I-7).
+ * A reply step that hit a reply someone else already moved on (`not_draft`), a customer with
+ * no address to send to (`no_email`), or a send another owner approved and must finish
+ * (`approved_by_other`) (inbox-home.md I-6, I-7).
  */
-export const REPLY_CONFLICT_REASONS: ReadonlySet<string> = new Set(["not_draft", "no_email"]);
+export const REPLY_CONFLICT_REASONS: ReadonlySet<string> = new Set(["not_draft", "no_email", "approved_by_other"]);
 
 export function isReplyConflict(error: unknown): error is ApiError {
   return isApiError(error, "conflict") && error.reason !== null && REPLY_CONFLICT_REASONS.has(error.reason);
