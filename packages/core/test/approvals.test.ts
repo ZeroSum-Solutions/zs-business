@@ -197,15 +197,48 @@ describe("approve and run (A-6, A-7)", () => {
     // Someone books that slot directly first.
     const taken = await sessionFor(owner.userId).createBooking({ resourceId, startsAt }, randomUUID());
     const key = randomUUID();
-    await expect(sessionFor(owner.userId).approveApproval(result.id, {}, key))
+    await expect(sessionFor(owner.userId).approveApproval(result.id, { note: "go" }, key))
       .rejects.toMatchObject({ code: "Conflict", details: { reason: "slot_unavailable" } });
     expect((await sessionFor(owner.userId).getApproval(result.id)).status).toBe("approved");
+    // The slot frees up. Another owner may not take over the run; the decider retries with a
+    // fresh key (a reloaded dashboard), skips the decision and runs the stored action once.
+    await fixture.service((tx) => tx.query("DELETE FROM bookings WHERE tenant_id=$1 AND id=$2", [tenantId, taken.result.id]));
+    const other = await addMember(tenantId, "owner");
+    await expect(sessionFor(other.userId).approveApproval(result.id, {}, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "approval_not_pending" } });
+    await expect(sessionFor(staff.userId).approveApproval(result.id, {}, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
+    const retried = await sessionFor(owner.userId).approveApproval(result.id, {}, randomUUID());
+    expect(retried.approval.result).toMatchObject({ status: "approved", decidedBy: owner.userId, decisionNote: "go" });
+    expect(retried.execution.result).toMatchObject({ startsAt, status: "confirmed" });
+    expect(await count("SELECT count(*) AS n FROM outbox WHERE tenant_id=$1 AND event_type='approval.approved' AND payload->>'approvalId'=$2", [tenantId, result.id])).toBe(1);
+    // Once it ran, another approve is refused and the first key replays both steps.
+    await expect(sessionFor(owner.userId).approveApproval(result.id, {}, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "approval_not_pending" } });
+    expect((await sessionFor(owner.userId).approveApproval(result.id, { note: "go" }, key)).execution).toEqual(retried.execution);
     // An invalid stored payload fails in the action's own handler the same way.
     const invalid = await sessionFor(staff.userId).requestApproval({
       action: { actionType: "booking.create", target: { type: "booking", id: randomUUID() }, payload: { bogus: true } }, summary: "x",
     }, randomUUID());
     await expect(sessionFor(owner.userId).approveApproval(invalid.result.id, {}, randomUUID())).rejects.toBeInstanceOf(ValidationFailed);
     expect(taken.result.status).toBe("confirmed");
+  });
+
+  it("reserves the run key: no member write may use approval:<id> (A-7)", async () => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book" }, randomUUID());
+    const runKey = `approval:${result.id}`;
+    // Case B: the requester knows its approval's ID and tries to take the run key first.
+    for (const write of [
+      () => sessionFor(staff.userId).upsertContact({ displayName: "Ada" }, runKey),
+      () => sessionFor(staff.userId).createBooking({ resourceId, startsAt: nextSlot() }, runKey.toUpperCase()),
+      () => sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "x" }, runKey),
+      () => sessionFor(staff.userId).revokeApproval(result.id, {}, runKey),
+      () => sessionFor(staff.userId).observeSource({ subject: { type: "booking_resource", id: resourceId }, source: "owner" }, runKey),
+    ]) await expect(write()).rejects.toMatchObject({ code: "ValidationFailed" });
+    // Case A: the owner approves with the run key as its own key.
+    await expect(sessionFor(owner.userId).approveApproval(result.id, {}, runKey)).rejects.toMatchObject({ code: "ValidationFailed" });
+    expect(await count("SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND idempotency_key ILIKE $2", [tenantId, runKey])).toBe(0);
+    const approved = await sessionFor(owner.userId).approveApproval(result.id, {}, randomUUID());
+    expect(approved.execution.result).toMatchObject({ status: "confirmed" });
   });
 
   it("allows one committed action per approval, whatever key carries it", async () => {
@@ -219,7 +252,7 @@ describe("approve and run (A-6, A-7)", () => {
     };
     const ctx: DispatchContext = {
       tenantId, actor: { id: owner.userId, tenantId }, db: database.db, clock, config: {}, generateId: randomUUID,
-      resolveApproval: (tx, reference) => resolveStoredApproval(tx, tenantId, reference.id, clock.now()),
+      resolveApproval: (tx, reference) => resolveStoredApproval(tx, tenantId, reference.id, clock.now),
     };
     await expect(dispatch(ctx, command)).rejects.toBeInstanceOf(Conflict);
   });
@@ -244,6 +277,45 @@ describe("expiry (A-3)", () => {
       .rejects.toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
     const check = await database.db.tenant(tenantId, (tx) => checkApproval(tx, tenantId, result.id, clock.now()));
     expect(check).toMatchObject({ kind: "stored", standing: "expired", binding: null });
+  });
+
+
+  it("reads the clock after the row lock: a wait past expiry stops the run", async () => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
+    await approveOnly(owner.userId, result.id);
+    // A writer (a revocation that fails, say) holds the row while the run starts, then rolls back.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let locked!: (pid: number) => void;
+    const holderPid = new Promise<number>((resolve) => { locked = resolve; });
+    const holder = fixture.service(async (tx) => {
+      const { rows } = await tx.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid FROM approvals WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, result.id]);
+      locked(rows[0]!.pid);
+      await released;
+      throw new Error("rolled back");
+    }).catch(() => undefined);
+    try {
+      const pid = await holderPid;
+      const outcome = approvedDispatch(deps(), tenantId, owner.userId)(result.id).then(() => null, (error: unknown) => error);
+      // The superuser pool sees every backend: wait until the run is queued behind the holder.
+      for (let tries = 0; ; tries += 1) {
+        const { rowCount } = await database.pool.query(
+          `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+             AND $1::int = ANY(pg_blocking_pids(pid))`, [pid]);
+        if (rowCount) break;
+        if (tries > 500) throw new Error("the run never waited on the row lock");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      now = START + 5 * 60_000;
+      release();
+      await holder;
+      expect(await outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await count("SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND approval_reference->>'id'=$2", [tenantId, result.id])).toBe(0);
   });
 });
 
@@ -383,6 +455,36 @@ describe("the table under the runtime role (A-2, A-4)", () => {
       .rejects.toMatchObject({ code: "23514" });
     await expect(fixture.a.run((tx) => tx.query("UPDATE approvals SET status='approved' WHERE id=$1", [result.id])))
       .rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("refuses partial revocations and decisions a withdrawal never made (A-2)", async () => {
+    const pending = (await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "P" }, randomUUID())).result.id;
+    const approved = (await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "A" }, randomUUID())).result.id;
+    await approveOnly(owner.userId, approved);
+    const rejected = (await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "R" }, randomUUID())).result.id;
+    await sessionFor(owner.userId).rejectApproval(rejected, {}, randomUUID());
+    const actor = owner.userId;
+    for (const id of [pending, approved])
+      for (const [sql, params] of [
+        ["UPDATE approvals SET revoked_by=$2 WHERE id=$1", [id, actor]],
+        ["UPDATE approvals SET revoked_at=now() WHERE id=$1", [id]],
+        ["UPDATE approvals SET revoke_note='x' WHERE id=$1", [id]],
+        ["UPDATE approvals SET revoked_by=$2, revoked_at=now() WHERE id=$1", [id, actor]],
+        ["UPDATE approvals SET status='revoked', revoked_by=$2 WHERE id=$1", [id, actor]],
+        ["UPDATE approvals SET status='revoked', revoked_at=now() WHERE id=$1", [id]],
+      ] as const) await expect(fixture.a.run((tx) => tx.query(sql, [...params])), `${sql} on ${id === pending ? "pending" : "approved"}`)
+        .rejects.toMatchObject({ code: "23514" });
+    await expect(fixture.a.run((tx) => tx.query("UPDATE approvals SET revoke_note='x' WHERE id=$1", [rejected])))
+      .rejects.toMatchObject({ code: "23514" });
+    // Withdrawing a pending request records no decision, not even a note.
+    for (const [sql, params] of [
+      ["UPDATE approvals SET status='revoked', revoked_by=$2, revoked_at=now(), decision_note='x' WHERE id=$1", [pending, actor]],
+      ["UPDATE approvals SET status='revoked', revoked_by=$2, revoked_at=now(), decided_by=$2, decided_at=now() WHERE id=$1", [pending, actor]],
+      ["UPDATE approvals SET status='revoked', revoked_by=$2, revoked_at=now(), decided_by=NULL, decided_at=NULL WHERE id=$1", [approved, actor]],
+    ] as const) await expect(fixture.a.run((tx) => tx.query(sql, [...params])), sql).rejects.toMatchObject({ code: "23514" });
+    // The consistent forms still pass.
+    await expect(fixture.a.run((tx) => tx.query(
+      "UPDATE approvals SET status='revoked', revoked_by=$2, revoked_at=now() WHERE id=$1", [pending, actor]))).resolves.toMatchObject({ rowCount: 1 });
   });
 
   it("refuses inconsistent states even from the service role", async () => {

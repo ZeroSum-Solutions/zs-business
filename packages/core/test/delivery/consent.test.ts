@@ -227,6 +227,14 @@ describe("suppression and unsubscribe (D-9)", () => {
     expect(await h.rows("SELECT reason, source FROM suppressions WHERE tenant_id=$1", [tenant])).toEqual([{ reason: "manual", source: "operator" }]);
   });
 
+  it("accepts a provider message ID up to 180 characters, so the key and source built from it stay valid", async () => {
+    const sms = createInboundSmsSession(edge, tenant);
+    expect(await sms.receive({ from: "+15555550146", body: "STOP", providerMessageId: "S".repeat(180) }))
+      .toEqual({ keyword: "stop", reply: DEFAULT_SMS_REPLIES.stop });
+    await expect(sms.receive({ from: "+15555550147", body: "STOP", providerMessageId: "S".repeat(181) }))
+      .rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
   it("keeps suppressions per tenant: a STOP to one business does not silence another", async () => {
     const phone = "+15555550144";
     const other = await h.tenant();

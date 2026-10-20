@@ -8,13 +8,14 @@ import type { DeliveryProvider, ProviderLookupOutcome, ProviderSendOutcome, Prov
  * What one call does when the key is not a repeat:
  * - accept: deliver and answer accepted;
  * - reject / fail: deliver nothing, answer rejected / failed;
+ * - edge-fail: answer failed before looking at the key, even for one already accepted (a rate limit);
  * - lose-reply: deliver, then answer uncertain (the reply was lost);
  * - timeout: deliver nothing, answer uncertain;
  * - throw: deliver nothing and throw;
  * - hold: wait for `release` and then act as `then`; `reached` resolves once the call arrives.
  */
 export type FakeBehaviour =
-  | "accept" | "reject" | "fail" | "lose-reply" | "timeout" | "throw"
+  | "accept" | "reject" | "fail" | "edge-fail" | "lose-reply" | "timeout" | "throw"
   | { readonly hold: Promise<void>; readonly then: Exclude<FakeBehaviour, { hold: Promise<void> }>; readonly reached?: () => void };
 
 export interface FakeDelivery {
@@ -74,7 +75,8 @@ export function createFakeProvider(options: {
     switch (behaviour) {
       case "accept": return { status: "accepted", providerMessageId: deliver(request).providerMessageId };
       case "reject": return { status: "rejected", code: "fake_rejected" };
-      case "fail": return { status: "failed", code: "fake_rate_limited" };
+      case "fail":
+      case "edge-fail": return { status: "failed", code: "fake_rate_limited" };
       case "lose-reply": deliver(request); return { status: "uncertain", code: "fake_reply_lost" };
       case "timeout": return { status: "uncertain", code: "fake_timeout" };
       case "throw": throw new Error("fake provider connection reset");
@@ -91,6 +93,8 @@ export function createFakeProvider(options: {
     async send(request) {
       calls.push(request);
       if (options.channels && !options.channels.includes(request.channel)) return { status: "rejected", code: "fake_channel" };
+      // A refusal at the edge (a rate limit) comes before the provider looks at the key.
+      if (script[0] === "edge-fail") return act(script.shift()!, request);
       const earlier = repeat(request.idempotencyKey);
       if (earlier) return { status: "accepted", providerMessageId: earlier.providerMessageId };
       return act(script.shift() ?? "accept", request);

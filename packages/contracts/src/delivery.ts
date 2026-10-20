@@ -53,7 +53,7 @@ export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
 export const deliveryFinalReasonSchema = z.enum([
   "suppressed", "consent_denied", "consent_missing", "approval_revoked", "approval_missing", "no_address",
   "provider_rejected", "max_attempts", "insufficient_funds", "dedupe_window_expired", "outcome_unknown",
-  "settled_not_sent", "worker_error",
+  "settled_not_sent", "worker_error", "address_changed",
 ]);
 export type DeliveryFinalReason = z.infer<typeof deliveryFinalReasonSchema>;
 
@@ -118,7 +118,8 @@ export const inboundSmsSchema = z.strictObject({
   from: contactPhoneSchema,
   body: z.string().max(SMS_BODY_MAX).refine(isPostgresText, "Invalid Postgres text"),
   /** The provider's ID for the inbound message; it keys the action, so a redelivered webhook replays. */
-  providerMessageId: postgresText(1, 200),
+  // Leaves room for the server's "sms-inbound:" key and "sms:" source prefixes within 200.
+  providerMessageId: postgresText(1, 180),
 });
 export type InboundSms = z.infer<typeof inboundSmsSchema>;
 export const inboundSmsReplySchema = z.strictObject({

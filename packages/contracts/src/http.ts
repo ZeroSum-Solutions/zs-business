@@ -16,14 +16,13 @@ const idSchema = z.uuid().toLowerCase();
 
 /** M1 edge boundary: request, response and error shapes shared by the HTTP API and MCP tools. */
 /**
- * Key prefixes the server builds for actions no member runs (public intake, unsubscribe,
- * inbound SMS), for the run of an approved action (`approval:<approval ID>`, approvals.md A-7)
- * for the steps of an inbox reply write (`inbox:`, inbox-home.md I-6) and for the follow-up
- * agent's steps (`agent:`, agents.md G-6). Keys are unique per
- * tenant, so a member key with one of them could take a recipient's key first and turn their
- * request into a conflict; approval IDs are visible to members, so `approval:` would be easy.
+ * Key prefixes only the server writes: `approval:<id>` runs a stored approval once
+ * (approvals.md A-7, A-14), `inbox:` keys the steps of an inbox reply write (inbox-home.md I-6),
+ * `agent:` keys the follow-up agent's steps (agents.md G-6), and public intake, unsubscribe and
+ * inbound SMS key the actions no member runs. Keys are unique per tenant, so a member key with
+ * one of them could take the server's key first and turn its run into a conflict.
  */
-export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["public:", "unsubscribe:", "sms-inbound:", "approval:", "inbox:", "agent:"] as const);
+export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "inbox:", "agent:", "public:", "unsubscribe:", "sms-inbound:"] as const);
 export const idempotencyKeySchema = z.string().min(1).max(200)
   .refine(isPostgresText, "Text is not valid in Postgres")
   .refine((key) => !SERVER_IDEMPOTENCY_PREFIXES.some((prefix) => key.toLowerCase().startsWith(prefix)),
