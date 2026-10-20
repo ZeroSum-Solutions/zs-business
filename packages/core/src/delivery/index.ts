@@ -36,3 +36,25 @@ export {
   suppressionTargetId,
 } from "./suppression.js";
 export { signUnsubscribeToken, verifyUnsubscribeToken, type UnsubscribeRef, type UnsubscribeSecrets } from "./unsubscribe.js";
+export {
+  classifyResendResponse,
+  createResendProvider,
+  parseResendEnv,
+  RESEND_DEDUPE_WINDOW_MS,
+  RESEND_DEFAULT_BASE_URL,
+  resendConfigSchema,
+  resendEnvSchema,
+  type ResendConfig,
+} from "./resend.js";
+export {
+  RESEND_WEBHOOK_TOLERANCE_MS,
+  resendEmailEventSchema,
+  resendSuppressionReason,
+  resendWebhookSecretSchema,
+  signResendWebhook,
+  verifyResendWebhook,
+  type ResendEmailEvent,
+  type ResendWebhookHeaders,
+  type ResendWebhookSecrets,
+  type ResendWebhookVerification,
+} from "./resend-webhook.js";

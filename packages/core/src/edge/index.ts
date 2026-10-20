@@ -17,6 +17,12 @@ export {
   unsubscribeActorId,
   type InboundSmsReplies,
 } from "./delivery-session.js";
+export {
+  createEmailFeedbackSession,
+  emailFeedbackActorId,
+  type EmailFeedbackOutcome,
+  type EmailFeedbackSession,
+} from "./email-feedback-session.js";
 export { apiErrorBody, mapError, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
 export {
   createHs256Verifier,

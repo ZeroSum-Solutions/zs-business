@@ -9,7 +9,14 @@ import {
   type TwoTenantFixture,
 } from "@zs/db/testing";
 import { createLocalStubSessionCheck, signBookingKey } from "@zs/core";
-import { createApp, createHs256Verifier, type App, type PublicIntakeConfig, type UnsubscribeConfig } from "../src/app.js";
+import {
+  createApp,
+  createHs256Verifier,
+  type App,
+  type PublicIntakeConfig,
+  type ResendWebhookConfig,
+  type UnsubscribeConfig,
+} from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
 /** Synthetic HS256 key, built at runtime so secret scanners do not flag a literal. */
@@ -25,6 +32,9 @@ export const PUBLIC_BASE_URL = "http://book.test";
 /** Synthetic unsubscribe token secrets, built at runtime like SECRET. */
 export const UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "u".repeat(32)].join("-");
 export const PREVIOUS_UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "q".repeat(32)].join("-");
+/** Synthetic Resend webhook secrets in the `whsec_<base64>` shape, built at runtime like SECRET. */
+export const RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "w".repeat(32)].join("-")).toString("base64");
+export const PREVIOUS_RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "r".repeat(32)].join("-")).toString("base64");
 
 /** A signed-in member: an auth user with a live session and a membership row. */
 export interface MemberSetup {
@@ -102,6 +112,8 @@ export interface HarnessOptions {
   publicIntake?: Partial<PublicIntakeConfig>;
   /** Turns the unsubscribe routes on; the token secret defaults to UNSUBSCRIBE_SECRET. */
   unsubscribe?: Partial<UnsubscribeConfig>;
+  /** Turns POST /webhooks/resend on; the signing secret defaults to RESEND_WEBHOOK_SECRET. */
+  resendWebhook?: Partial<ResendWebhookConfig>;
   clock?: { now(): Date };
 }
 
@@ -122,6 +134,9 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
       : {}),
     ...(options.unsubscribe
       ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...options.unsubscribe } }
+      : {}),
+    ...(options.resendWebhook
+      ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }
       : {}),
   });
   return {

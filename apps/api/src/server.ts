@@ -54,6 +54,15 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }) {
     config: { allowedOrigins: env.allowedOrigins, requestTimeoutMs: env.requestTimeoutMs },
     ...(publicIntake === undefined ? {} : { publicIntake }),
     ...(unsubscribe === undefined ? {} : { unsubscribe }),
+    ...(env.resendWebhook === null ? {} : {
+      resendWebhook: {
+        secrets: env.resendWebhook.secrets,
+        report: ({ id, type, outcome }) => {
+          if (!outcome.handled && outcome.reason !== "no_suppression")
+            console.warn("Resend webhook not applied", { id, type, reason: outcome.reason });
+        },
+      },
+    }),
     onError: (error) => console.error("Unhandled API error", error),
     ready: () => checkDatabase(pool),
   });
