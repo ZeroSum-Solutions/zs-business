@@ -4,12 +4,15 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiErrorCode } from "@zs/contracts";
 import { apiErrorBody, AuthUnavailable, authenticate, DatabaseUnavailable, mapError, type Session, type SessionCheck } from "@zs/core";
+import type { SiteObjectStore } from "@zs/contracts";
 import type { ScopedDatabase } from "@zs/db";
+import type { SiteCompiler } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { memberRoutes } from "./routes/members.js";
+import { siteRoutes } from "./routes/sites.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 
 export interface AppConfig {
@@ -33,6 +36,8 @@ export interface AppDependencies {
   readonly config: AppConfig;
   /** Public booking pages and the widget (public-intake.md); absent means the routes are off. */
   readonly publicIntake?: PublicIntakeConfig;
+  /** Site publishing (M4b): where releases are stored and how specs compile; absent means /v1/sites is off. */
+  readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler };
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -113,6 +118,7 @@ export function createApp(deps: AppDependencies) {
     ...(deps.publicIntake
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
+    ...(deps.sites ? { sites: deps.sites } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
   const requestEdge = (c: Context<AppEnv>) =>
@@ -141,6 +147,7 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/booking", bookingRoutes);
   app.route("/v1/crm", crmRoutes);
   app.route("/v1/intake", intakeRoutes);
+  app.route("/v1/sites", siteRoutes);
   app.route("/v1", memberRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));

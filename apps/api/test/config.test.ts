@@ -170,4 +170,21 @@ describe("parseServerEnv", () => {
     expect(message).toMatch(/DATABASE_URL/);
     expect(message).not.toContain("pw@");
   });
+
+  it("turns site publishing on with SITES_STORE, and needs every R2 variable for r2", () => {
+    expect(parseServerEnv(base).sites).toBeNull();
+    expect(parseServerEnv({ ...base, SITES_STORE: "memory" }).sites).toEqual({ store: { kind: "memory" }, compiler: "plain" });
+    expect(() => parseServerEnv({ ...base, SITES_STORE: "r2", R2_BUCKET: "zs-sites" }))
+      .toThrow(/R2_ENDPOINT: is required when SITES_STORE=r2.*R2_ACCESS_KEY_ID.*R2_SECRET_ACCESS_KEY/);
+    const r2 = { R2_ENDPOINT: "https://acct.r2.cloudflarestorage.com", R2_BUCKET: "zs-sites", R2_ACCESS_KEY_ID: "id", R2_SECRET_ACCESS_KEY: "s" };
+    expect(parseServerEnv({ ...base, SITES_STORE: "r2", ...r2 }).sites).toEqual({
+      store: { kind: "r2", endpoint: r2.R2_ENDPOINT, bucket: "zs-sites", accessKeyId: "id", secretAccessKey: "s" }, compiler: "plain",
+    });
+    expect(() => parseServerEnv({ ...base, SITES_STORE: "r2", ...r2, R2_ENDPOINT: "http://acct.r2.cloudflarestorage.com" })).toThrow(/R2_ENDPOINT/);
+  });
+
+  it("keeps the in-memory site store to loopback databases", () => {
+    const remote = { ...base, SESSION_CHECK: "supabase", SUPABASE_URL: "https://abcd.supabase.co", DATABASE_URL: "postgres://zs_runtime@db.example.com:5432/postgres", DATABASE_CA_CERT: "-----BEGIN CERTIFICATE-----x" };
+    expect(() => parseServerEnv({ ...remote, SITES_STORE: "memory" })).toThrow(/SITES_STORE: memory is for local runs/);
+  });
 });

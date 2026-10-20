@@ -33,6 +33,14 @@ import {
   type MemberOutput,
   type Permission,
   type RemoveMemberOutput,
+  activateSiteReleaseRequestSchema,
+  createSiteRequestSchema,
+  publishSiteRequestSchema,
+  type SiteList,
+  type SiteReleaseList,
+  type SiteReleaseResponse,
+  type SiteSyncResponse,
+  type SiteObjectStore,
 } from "@zs/contracts";
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import { createDispatcher, type DispatchContext } from "../actions/dispatch.js";
@@ -45,6 +53,10 @@ import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
 import { requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
+import {
+  activateSiteRelease, createSite, getRelease, getSite, listReleases, listSites, publishSiteRelease, siteHandlers,
+  storeReleaseFiles, syncSiteEdge, verifyCompiledSite, type SiteCompiler,
+} from "../sites/index.js";
 import { derivedId } from "./ids.js";
 import { validationError } from "./errors.js";
 
@@ -55,6 +67,8 @@ export interface EdgeDependencies {
   readonly generateId: () => string;
   /** Signs public booking keys for the owner's page list (public-intake.md P-2, P-12). */
   readonly bookingKeys?: { readonly secret: string; readonly publicBaseUrl: string };
+  /** Site publishing (M4b): the object store releases go to and the compiler; absent means off. */
+  readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler };
 }
 /** A verified caller. Never built from request bodies or tool input. */
 export interface Principal {
@@ -71,7 +85,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
   return parsed.data;
 }
 
-const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers });
+const dispatch = createDispatcher({ ...bookingHandlers, ...crmHandlers, ...intakeHandlers, ...memberHandlers, ...siteHandlers });
 
 /**
  * The permission each member action needs. An action missing here is refused, so the public
@@ -87,6 +101,9 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "member.invite": "members",
   "member.change-role": "members",
   "member.remove": "members",
+  "site.create": "publish",
+  "site.release.publish": "publish",
+  "site.release.activate": "publish",
 });
 
 /** Checks inside the action's transaction, before its idempotency lock, that the caller may run it. */
@@ -153,7 +170,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  const envelope = <Type extends "booking" | "contact" | "deal" | "intake_item" | "member">(rawKey: unknown, type: Type, targetId?: string) => {
+  const envelope = <Type extends "booking" | "contact" | "deal" | "intake_item" | "member" | "site">(rawKey: unknown, type: Type, targetId?: string) => {
     const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
     const id = targetId ?? derivedId(tenantId, idempotencyKey, type);
     return {
@@ -168,6 +185,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       await requireMember(tx, tenantId, actorId, permission);
       return work(tx);
     });
+
+  /** Project committed state to the edge, re-checking the caller's permission in that read. */
+  const syncSite = (store: SiteObjectStore, siteId: string) =>
+    syncSiteEdge(deps.db, store, tenantId, siteId, async (tx) => { await requireMember(tx, tenantId, actorId, "publish"); });
+  /** After a committed write the answer is that write's result: a failed projection is only `pending`. */
+  const syncAfterWrite = (store: SiteObjectStore, siteId: string) => syncSite(store, siteId).catch(() => "pending" as const);
 
   return {
     principal: { tenantId, actorId } as Principal,
@@ -248,6 +271,72 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const parsed = parseInput(slotsQuerySchema, query, "query");
       const now = new Date(readClock(deps.clock));
       return read("calendar", (tx) => findSlots(tx, tenantId, parsed, now));
+    },
+
+    // M4b sites: every read and write needs the publish permission (owners).
+    listSites: async (): Promise<SiteList> => ({ items: await read("publish", (tx) => listSites(tx, tenantId)) }),
+    getSite: (siteId: unknown) => {
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      return read("publish", (tx) => getSite(tx, tenantId, id));
+    },
+    listSiteReleases: async (siteId: unknown): Promise<SiteReleaseList> => {
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      return { items: await read("publish", (tx) => listReleases(tx, tenantId, id)) };
+    },
+    getSiteRelease: (siteId: unknown, releaseId: unknown) => {
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const release = parseInput(uuidSchema, releaseId, "release ID");
+      return read("publish", (tx) => getRelease(tx, tenantId, id, release));
+    },
+    async createSite(body: unknown, key: unknown) {
+      const request = parseInput(createSiteRequestSchema, body);
+      const { id, ...rest } = envelope(key, "site");
+      return createSite({ actionType: "site.create", ...rest, target: { tenantId, type: "site", id }, payload: { siteId: id, ...request } }, writeContext);
+    },
+    /**
+     * Compile the spec, store its files, record the release and make it live, then move the
+     * edge. Retried with its key, it rebuilds the same files and replays the recorded result.
+     */
+    async publishSite(siteId: unknown, body: unknown, key: unknown): Promise<SiteReleaseResponse> {
+      const sites = deps.sites;
+      if (!sites) throw new NotFound();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const request = parseInput(publishSiteRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "site", id);
+      // Permission and ownership first, so nobody else's request stores bytes under this tenant.
+      await read("publish", (tx) => getSite(tx, tenantId, id));
+      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      await storeReleaseFiles(sites.store, tenantId, release);
+      const output = await publishSiteRelease({
+        actionType: "site.release.publish", ...rest, target: { tenantId, type: "site", id },
+        payload: {
+          siteId: id, releaseId: derivedId(tenantId, rest.idempotencyKey, "site_release"), spec: request.spec,
+          entry: release.entry, digest: release.digest, files: [...release.files],
+        },
+      }, writeContext);
+      return { ...output, edge: await syncAfterWrite(sites.store, id) };
+    },
+    /** Make an earlier (or later) release live again: the rollback. */
+    async activateSiteRelease(siteId: unknown, releaseId: unknown, body: unknown, key: unknown): Promise<SiteReleaseResponse> {
+      const sites = deps.sites;
+      if (!sites) throw new NotFound();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const release = parseInput(uuidSchema, releaseId, "release ID");
+      const request = parseInput(activateSiteReleaseRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "site", id);
+      const output = await activateSiteRelease({
+        actionType: "site.release.activate", ...rest, target: { tenantId, type: "site", id },
+        payload: { siteId: id, releaseId: release, expectedCurrentReleaseId: request.expectedCurrentReleaseId },
+      }, writeContext);
+      return { ...output, edge: await syncAfterWrite(sites.store, id) };
+    },
+    /** Retry the edge projection after a `pending` answer. */
+    async syncSite(siteId: unknown): Promise<SiteSyncResponse> {
+      const sites = deps.sites;
+      if (!sites) throw new NotFound();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      const site = await read("publish", (tx) => getSite(tx, tenantId, id));
+      return { site, edge: await syncSite(sites.store, id) };
     },
 
     /** The caller's own membership; any member may ask. */

@@ -51,6 +51,9 @@ importers:
       '@types/pg':
         specifier: 8.23.1
         version: 8.23.1
+      '@zs/site-worker':
+        specifier: workspace:*
+        version: link:../site-worker
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
@@ -139,6 +142,19 @@ importers:
       vitest:
         specifier: 5.0.5
         version: 5.0.5(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  apps/site-worker:
+    dependencies:
+      '@zs/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@zs/core':
+        specifier: workspace:*
+        version: link:../../packages/core
 
   packages/contracts:
     dependencies:

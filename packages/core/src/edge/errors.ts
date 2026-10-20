@@ -52,7 +52,7 @@ export function validationError(message: string, issues: readonly { path: readon
 const CONFLICT_REASONS = new Set([
   "slot_unavailable", "overlap", "stale_revision", "id_in_use", "idempotency_key_reused",
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
-  "disclosure_changed", "already_reviewed",
+  "disclosure_changed", "already_reviewed", "stale_release", "host_in_use",
 ]);
 
 /** One fixed message per code, so database or handler text never reaches a response. */

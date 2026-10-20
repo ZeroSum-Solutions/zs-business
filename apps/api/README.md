@@ -109,6 +109,11 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `PUBLIC_CLIENT_IP_HEADER` | Optional: a header the host overwrites on every request (Vercel: `x-vercel-forwarded-for`), used for the per-address limits. Only when the API is reachable through that host alone. |
 | `PUBLIC_TRUSTED_PROXIES` | Optional, instead of the header: comma-separated CIDRs whose `X-Forwarded-For` entries count. |
 | `PUBLIC_RATE_ADDRESS_WRITES`, `PUBLIC_RATE_ADDRESS_READS`, `PUBLIC_RATE_TENANT_WRITES` | Optional overrides of the public rate limits. |
+| `SITES_STORE` | Optional: turns site publishing on. `r2` stores releases in Cloudflare R2 (needs the four `R2_*` variables); `memory` keeps them in the process, loopback `DATABASE_URL` only. Unset, publishing answers 404. |
+| `SITE_COMPILER` | `plain` (the default and only value): the built-in compiler for `{ kind: "plain" }` specs. The Mish publisher is passed to `createServer` in code, not named here. |
+| `R2_ENDPOINT` | `r2` only: `https://<account-id>.r2.cloudflarestorage.com`. https only. |
+| `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
 
 Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
 environment or the system clock. Everything else gets them through `createApp(deps)`.
@@ -190,6 +195,14 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
 | `POST /v1/members/:id/role` `{ role }` | 200 member; 409 `last_owner` when it would leave no owner; owners only |
 | `DELETE /v1/members/:id` | 200 removed member; 409 `last_owner`; owners only |
+| `GET /v1/sites` | `{ items: Site[] }`, owners only (as every `/v1/sites` route) |
+| `POST /v1/sites` `{ name }` | 201 site, not yet published |
+| `GET /v1/sites/:id` | one site with its live release, pointer version and hosts |
+| `POST /v1/sites/:id/releases` `{ spec }` | 201 `{ actionId, result: { site, release }, edge }`: compiled, stored and live |
+| `GET /v1/sites/:id/releases` | `{ items: Release[] }`, newest first, up to 100 |
+| `GET /v1/sites/:id/releases/:releaseId` | one release with its spec and files |
+| `POST /v1/sites/:id/releases/:releaseId/activate` `{ expectedCurrentReleaseId }` | 200, the rollback; 409 `stale_release` when another release went live since |
+| `POST /v1/sites/:id/sync` | `{ site, edge }`: writes the edge objects again |
 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
 with no `user_id`; the runtime role cannot set `user_id` (binding an invite to a signed-up
@@ -210,10 +223,63 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `Unauthorized` 401, `Forbidden` 403 (another tenant's row or an unknown ID, answered alike),
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
-`concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`;
+`concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
+`stale_release`;
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.
+
+## Sites (M4b)
+
+A site is published as an immutable release: the files one spec compiles to. The dispatch
+Worker (`apps/site-worker`) serves each host's live release from R2.
+
+1. **Compile.** `POST /v1/sites/:id/releases` hands the spec to the site compiler. The
+   compiler port (`SiteCompiler` in `@zs/core`) has the shape of `@mish/publisher`'s
+   `compile` result: `{ entry, files: [{ path, mediaType, bytes, sha256 }], digest }`. The API
+   recomputes every SHA-256 and the release digest, and refuses unsafe paths, over 500 files,
+   10 MB a file or 50 MB a release. Only owners get this far, and the check runs before any
+   bytes are stored.
+2. **Store.** Each file is stored once at `t/<tenant>/blobs/<sha256>`. Blobs never change.
+3. **Record and go live.** One dispatched action (`site.release.publish`) records the release,
+   its files and the spec, and moves the site pointer (`site_pointers`, one row update, version
+   +1) in the same transaction as the action record and its outbox event.
+4. **Project to the edge.** After the commit the API writes the release manifest
+   (`t/<tenant>/releases/<release>/manifest.json`, once) and each host's pointer
+   (`hosts/<host>`). A pointer moves only to a higher version, by compare-and-set on the R2
+   etag, so a slow or repeated sync never brings back an older release. If this step fails the
+   answer still says what committed, with `edge: "pending"`; the Worker keeps serving the
+   previous release until `POST /v1/sites/:id/sync` (or a later publish) succeeds.
+
+Rollback is `POST /v1/sites/:id/releases/:releaseId/activate` with the release the caller
+saw as live. It moves the pointer the same way. `site_activations` keeps who made which
+release live, and releases, their files and activations are append-only for every role.
+
+Host names are attached by the service role only (`attachSiteHost` in `@zs/core`), since a
+host belongs to one site in the whole system and must be verified first. Detaching is
+`detachSiteHost`, then `retractHostPointer` to stop the Worker serving it.
+
+### What the Mac sets up
+
+- An R2 bucket for site objects, and an R2 API token with object read and write on it.
+- On Vercel: `SITES_STORE=r2`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`.
+- The dispatch Worker, bound to the same bucket as `SITES` (`apps/site-worker/README.md`),
+  with a route or Custom Hostnames for each tenant host.
+- For each tenant domain, after DNS is verified: `attachSiteHost` in a service-role
+  transaction, then a sync.
+- To publish Mish recipes instead of plain specs: build and pack `@mish/publisher` in a Mish
+  checkout, install the tarball in the API's deploy, and pass an adapter as
+  `createServer(env, clock, { siteCompiler })`:
+
+  ```ts
+  import { compile } from "@mish/publisher";
+  import practice from "@mish/publisher/families/practice";
+  const siteCompiler = { compile: (spec) => compile({ compiler: practice, spec: { recipe: spec } }) };
+  ```
+
+  The Mish publisher's own refusals (`invalid-spec` and the family's validation errors)
+  should become `ValidationFailed` in the adapter, so a bad recipe is a 400.
 
 ## Database pool and request limits
 

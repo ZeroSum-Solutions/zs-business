@@ -8,7 +8,8 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, signBookingKey } from "@zs/core";
+import { createLocalStubSessionCheck, signBookingKey, type SiteCompiler } from "@zs/core";
+import type { SiteObjectStore } from "@zs/contracts";
 import { createApp, createHs256Verifier, type App, type PublicIntakeConfig } from "../src/app.js";
 import { signDevToken } from "../src/dev-token.js";
 
@@ -98,6 +99,8 @@ export interface HarnessOptions {
   /** Turns the public booking routes on; secrets and base URL default to the test values. */
   publicIntake?: Partial<PublicIntakeConfig>;
   clock?: { now(): Date };
+  /** Turns the /v1/sites routes on over this store and compiler. */
+  sites?: { store: SiteObjectStore; compiler: SiteCompiler };
 }
 
 export async function createApiHarness(options: HarnessOptions = {}): Promise<ApiHarness> {
@@ -115,6 +118,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     ...(options.publicIntake
       ? { publicIntake: { keySecrets: { current: KEY_SECRET }, publicBaseUrl: PUBLIC_BASE_URL, ...options.publicIntake } }
       : {}),
+    ...(options.sites ? { sites: options.sites } : {}),
   });
   return {
     database,

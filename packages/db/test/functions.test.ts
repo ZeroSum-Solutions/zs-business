@@ -44,6 +44,7 @@ const expectedPath: Record<string, string> = {
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_windows_valid(jsonb)": "pg_catalog, pg_temp",
+  "site_history_append_only()": "pg_catalog, pg_temp",
   "record_action_and_event(uuid,uuid,uuid,text,jsonb,jsonb,jsonb,text,jsonb,timestamp with time zone,uuid,text,jsonb)":
     "pg_catalog, pg_temp",
 };
