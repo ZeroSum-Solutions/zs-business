@@ -10,8 +10,8 @@ import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  approvalHandlers, bookingHandlers, createDispatcher, crmHandlers, dealDetailsHandlers, inboxHandlers, intakeHandlers, memberHandlers,
-  sourceHandlers, type DispatchContext,
+  approvalHandlers, bookingHandlers, createDispatcher, createMemorySiteStore, crmHandlers, dealDetailsHandlers, inboxHandlers,
+  intakeHandlers, memberHandlers, plainSiteCompiler, siteHandlers, sourceHandlers, type DispatchContext,
 } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -35,6 +35,9 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "member.invite": "members",
   "member.change-role": "members",
   "member.remove": "members",
+  "site.create": "publish",
+  "site.release.publish": "publish",
+  "site.release.activate": "publish",
   "approval.approve": "approve",
   "approval.reject": "approve",
 };
@@ -50,6 +53,9 @@ interface Tenant {
   /** A published booking page over its own every-day resource, for website requests. */
   pageId: string;
   publicResourceId: string;
+  /** A published site and its first release, for the site reads and the rollback. */
+  siteId: string;
+  releaseId: string;
 }
 
 let database: TestDatabase;
@@ -66,7 +72,9 @@ async function addMember(tenantId: string, role: MemberRole): Promise<{ userId: 
   return { userId, memberId };
 }
 
-const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys });
+const sites = { store: createMemorySiteStore(), compiler: plainSiteCompiler };
+const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, sites });
+const siteSpec = { kind: "plain", title: "Halden & Rowe" };
 const sessionFor = (actorId: string, tenantId = tenant.tenantId): Session => createSession(deps(), { tenantId, actorId });
 
 /** Each website request takes the next free hour, from Tuesday 09:00 UTC. */
@@ -124,13 +132,15 @@ beforeAll(async () => {
     await tx.query("INSERT INTO booking_page_resources (tenant_id,page_id,resource_id,position) VALUES ($1,$2,$3,0)", [tenantId, pageId, publicResourceId]);
   });
   const owner = await addMember(tenantId, "owner");
-  const ownerSession = createSession({ db: database.db, clock, generateId: randomUUID }, { tenantId, actorId: owner.userId });
+  const ownerSession = createSession(deps(), { tenantId, actorId: owner.userId });
   const contact = await ownerSession.upsertContact({ displayName: "Ada", email: "ada@example.com" }, randomUUID());
   const deal = await ownerSession.createDeal(
     { contactId: contact.result.contact.id, pipelineId, stageId: stages[0], title: "Ring" }, randomUUID());
+  const site = await ownerSession.createSite({ name: "Main" }, randomUUID());
+  const release = await ownerSession.publishSite(site.result.id, { spec: siteSpec }, randomUUID());
   tenant = {
     tenantId, resourceId, pipelineId, stages, ownerId: owner.userId, dealId: deal.result.id, contactId: contact.result.contact.id,
-    pageId, publicResourceId,
+    pageId, publicResourceId, siteId: site.result.id, releaseId: release.result.release.id,
   };
 });
 afterAll(async () => { await database?.close(); });
@@ -197,6 +207,17 @@ function operations(session: Session): Record<string, { permission: Permission |
     rejectIntakeItem: { permission: "intake", run: async () => session.rejectIntakeItem(await intakeItem(), {}, randomUUID()) },
     listIntakeItems: { permission: "intake", run: () => session.listIntakeItems({}) },
     listBookingPages: { permission: "publish", run: () => session.listBookingPages() },
+    listSites: { permission: "publish", run: () => session.listSites() },
+    getSite: { permission: "publish", run: () => session.getSite(tenant.siteId) },
+    listSiteReleases: { permission: "publish", run: () => session.listSiteReleases(tenant.siteId) },
+    getSiteRelease: { permission: "publish", run: () => session.getSiteRelease(tenant.siteId, tenant.releaseId) },
+    createSite: { permission: "publish", run: () => session.createSite({ name: "Another" }, randomUUID()) },
+    publishSite: { permission: "publish", run: () => session.publishSite(tenant.siteId, { spec: { ...siteSpec, tagline: randomUUID() } }, randomUUID()) },
+    activateSiteRelease: { permission: "publish", run: async () => {
+      const live = await sessionFor(tenant.ownerId).getSite(tenant.siteId);
+      return session.activateSiteRelease(tenant.siteId, tenant.releaseId, { expectedCurrentReleaseId: live.currentReleaseId }, randomUUID());
+    } },
+    syncSite: { permission: "publish", run: () => session.syncSite(tenant.siteId) },
     me: { permission: null, run: () => session.me() },
     // M3b approvals: anyone may request what they may do; owners decide (approvals.md A-5, A-6).
     requestApproval: { permission: "calendar", run: () => session.requestApproval({ action: proposal(), summary: "Book" }, randomUUID()) },
@@ -230,7 +251,7 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...siteHandlers,
     })
       .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action)).sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
@@ -239,9 +260,9 @@ describe("permission map", () => {
     expect({ ...ACTION_PERMISSIONS }).toEqual(EXPECTED_ACTIONS);
   });
 
-  it("leaves members, billing, plan, publish, intake review, approving and reports to owners", () => {
+  it("leaves members, billing, plan, publish, intake review, approving, reports and integrations to owners", () => {
     expect(ROLE_PERMISSIONS.staff).toEqual(["calendar", "customers", "inbox.drafts"]);
-    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports"] as const) {
+    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations"] as const) {
       expect(roleCan("staff", permission)).toBe(false);
       expect(roleCan("owner", permission)).toBe(true);
     }

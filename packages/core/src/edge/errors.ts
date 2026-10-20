@@ -37,6 +37,17 @@ export class AuthUnavailable extends Error {
   }
 }
 
+/**
+ * The site object store (R2) failed before anything was committed, so nothing changed and a
+ * retry with the same key is safe. Maps to 503 Unavailable. Its message is fixed text.
+ */
+export class SiteStoreUnavailable extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super("The site store did not answer", options);
+    this.name = "SiteStoreUnavailable";
+  }
+}
+
 export function apiErrorBody(code: ApiErrorCode, message: string, details: Record<string, JsonValue> = {}): ApiErrorBody {
   return { error: { code, message, details } };
 }
@@ -54,6 +65,8 @@ const CONFLICT_REASONS = new Set([
   "binding_mismatch", "concurrent_update", "split_identity", "identity_mismatch", "last_owner", "member_exists",
   "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other",
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
+  "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
+  "stale_release", "host_in_use",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
@@ -111,6 +124,8 @@ export function mapError(error: unknown): MappedError {
   if (error instanceof DatabaseUnavailable) return mapped(503, "Unavailable");
   // Supabase Auth could not say whether the token or its session is good: retry later.
   if (error instanceof AuthUnavailable) return mapped(503, "Unavailable");
+  // The release's files could not be stored, and the publish was not recorded: retry later.
+  if (error instanceof SiteStoreUnavailable) return mapped(503, "Unavailable");
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":

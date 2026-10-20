@@ -1,5 +1,5 @@
 export { approvalHandlers } from "./handlers.js";
-export { APPROVAL_POLICIES, approvalPolicy, isApprovalAction, type ApprovalPolicy } from "./policy.js";
+export { APPROVAL_POLICIES, approvalPolicy, cannotBeApproved, isApprovalAction, isSiteAction, type ApprovalPolicy } from "./policy.js";
 export {
   approvalForAction,
   approvalRecord,

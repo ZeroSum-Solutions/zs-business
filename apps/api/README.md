@@ -111,6 +111,11 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `PUBLIC_CLIENT_IP_HEADER` | Optional: a header the host overwrites on every request (Vercel: `x-vercel-forwarded-for`), used for the per-address limits. Only when the API is reachable through that host alone. |
 | `PUBLIC_TRUSTED_PROXIES` | Optional, instead of the header: comma-separated CIDRs whose `X-Forwarded-For` entries count. |
 | `PUBLIC_RATE_ADDRESS_WRITES`, `PUBLIC_RATE_ADDRESS_READS`, `PUBLIC_RATE_TENANT_WRITES` | Optional overrides of the public rate limits. |
+| `SITES_STORE` | Optional: turns site publishing on. `r2` stores releases in Cloudflare R2 (needs the four `R2_*` variables); `memory` keeps them in the process, loopback `DATABASE_URL` only. Unset, every `/v1/sites` route answers 404 and nothing is written. |
+| `SITE_COMPILER` | `plain` (the default and only value): the built-in compiler for `{ kind: "plain" }` specs. The Mish publisher is passed to `createServer` in code, not named here. |
+| `R2_ENDPOINT` | `r2` only: `https://<account-id>.r2.cloudflarestorage.com`. https only. |
+| `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
 | `PUBLIC_RATE_LIMIT_STORE` | Where the public booking and unsubscribe limits count. `postgres` (default): `public.rate_limit_buckets`, shared by every API instance on the database. `memory`: this process only, refused unless `DATABASE_URL` is a loopback host. |
 | `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets of the `PUBLIC_RATE_LIMIT_STORE` store. |
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
@@ -211,6 +216,14 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
 | `POST /v1/members/:id/role` `{ role }` | 200 member; 409 `last_owner` when it would leave no owner; owners only |
 | `DELETE /v1/members/:id` | 200 removed member; 409 `last_owner`; owners only |
+| `GET /v1/sites` | `{ items: Site[] }`, owners only (as every `/v1/sites` route) |
+| `POST /v1/sites` `{ name }` | 201 site, not yet published |
+| `GET /v1/sites/:id` | one site with its live release, pointer version and hosts |
+| `POST /v1/sites/:id/releases` `{ spec }` | 201 `{ actionId, result: { site, release }, edge }`: compiled, stored and live |
+| `GET /v1/sites/:id/releases` | `{ items: Release[] }`, newest first, up to 100 |
+| `GET /v1/sites/:id/releases/:releaseId` | one release with its spec and files |
+| `POST /v1/sites/:id/releases/:releaseId/activate` `{ expectedCurrentReleaseId }` | 200, the rollback; 409 `stale_release` when another release went live since |
+| `POST /v1/sites/:id/sync` | `{ site, edge }`: writes the edge objects again |
 | `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
@@ -233,11 +246,77 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
-`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`);
+`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`;
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.
 
+## Sites (M4b)
+
+A site is published as an immutable release: the files one spec compiles to. The dispatch
+Worker (`apps/site-worker`) serves each host's live release from R2.
+
+1. **Compile.** `POST /v1/sites/:id/releases` hands the spec to the site compiler. The
+   compiler port (`SiteCompiler` in `@zs/core`) has the shape of `@mish/publisher`'s
+   `compile` result: `{ entry, files: [{ path, mediaType, bytes, sha256 }], digest }`. The API
+   recomputes every SHA-256 and the release digest, and refuses unsafe paths, over 500 files,
+   10 MB a file or 50 MB a release. Only owners get this far, and the check runs before any
+   bytes are stored.
+2. **Store.** Each file is stored once at `t/<tenant>/blobs/<sha256>`, up to 12 checks or
+   uploads at a time. Blobs never change. If the store fails here nothing is recorded and the
+   answer is 503 `Unavailable`. A retry with a key that already committed skips this step and
+   replays the recorded result, so it works while the store is down.
+3. **Record and go live.** One dispatched action (`site.release.publish`) records the release,
+   its files and the spec, and moves the site pointer (`site_pointers`, one row update, version
+   +1) in the same transaction as the action record and its outbox event.
+4. **Project to the edge.** After the commit the API writes the release manifest
+   (`t/<tenant>/releases/<release>/manifest.json`, once) and each host's pointer
+   (`hosts/<host>`). No pointer moves until the manifest is in the store. Pointers move by
+   compare-and-set on the R2 etag and are ordered by the host's assignment number
+   (`site_hosts.assignment`, from `site_host_assignment_seq`), then by version. So a slow or
+   repeated sync never brings back an older release, and a sync from a site that has since
+   lost the host never takes it back. This step gets at most 5 seconds, and always leaves a
+   second before the request deadline. If it fails or runs out of time, the answer still says
+   what committed, with `edge: "pending"`. The Worker keeps serving the previous release until
+   `POST /v1/sites/:id/sync` (or a later publish) succeeds.
+
+Rollback is `POST /v1/sites/:id/releases/:releaseId/activate` with the release the caller
+saw as live. It moves the pointer the same way. `site_activations` keeps who made which
+release live, and releases, their files and activations are append-only for every role.
+Site actions cannot be proposed through `/v1/approvals` (`ValidationFailed`): an approved
+action runs its handler alone, and a publish needs the compile, upload and edge steps around it.
+
+Host names are attached by the service role only (`attachSiteHost` in `@zs/core`), since a
+host belongs to one site in the whole system and must be verified first. Attaches and
+detaches of one host run one at a time (a transaction advisory lock on the host), and each
+takes the next assignment number under that lock, so a later owner always holds a higher
+number than the detach before it. Detaching is `detachSiteHost`, which returns the
+normalized host and the detach's number. After its commit, `retractHostPointer` writes a
+retired pointer under that number, and the Worker answers 404 for it. A pointer written later
+for the host's next site has a higher number and replaces it. A late sync or retraction from
+the old site has a lower one and changes nothing. Retraction is safe to repeat.
+
+### What the Mac sets up
+
+- An R2 bucket for site objects, and an R2 API token with object read and write on it.
+- On Vercel: `SITES_STORE=r2`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`.
+- The dispatch Worker, bound to the same bucket as `SITES` (`apps/site-worker/README.md`),
+  with a route or Custom Hostnames for each tenant host.
+- For each tenant domain, after DNS is verified: `attachSiteHost` in a service-role
+  transaction, then a sync.
+- To publish Mish recipes instead of plain specs: build and pack `@mish/publisher` in a Mish
+  checkout, install the tarball in the API's deploy, and pass an adapter as
+  `createServer(env, clock, { siteCompiler })`:
+
+  ```ts
+  import { compile } from "@mish/publisher";
+  import practice from "@mish/publisher/families/practice";
+  const siteCompiler = { compile: (spec) => compile({ compiler: practice, spec: { recipe: spec } }) };
+  ```
+
+  The Mish publisher's own refusals (`invalid-spec` and the family's validation errors)
+  should become `ValidationFailed` in the adapter, so a bad recipe is a 400.
 ## Unsubscribe (`/public/v1/unsubscribe/:token`, no auth)
 
 Every email carries `List-Unsubscribe: <…/public/v1/unsubscribe/zsu1_…>` and
@@ -556,3 +635,25 @@ Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Of
 off, 200 `{ ran: true, passes, ingested, claimed, sent, retried, blocked, dead, errors,
 budgetSpent }` after a run, and 503 when a run fails (the next run picks the work up again).
 It is its own Vercel function; the API function never opens the service login.
+
+## Activepieces (`/v1/integrations/activepieces`, `/integrations/activepieces/v1`, `/cron/activepieces`)
+
+Owner-managed webhooks to Activepieces flows, and tokens a flow uses to propose actions an owner
+approves (docs/requirements/activepieces.md). Off unless `ACTIVEPIECES_KEY_SECRET` is set.
+
+| Variable | Meaning |
+|---|---|
+| `ACTIVEPIECES_KEY_SECRET` | 32+ characters, on the API and the worker. Derives each endpoint's `whsec_` secret and each `zsap1_` token; nothing secret is stored. Unset, the routes are 404. |
+| `ACTIVEPIECES_KEY_PREVIOUS_SECRET` | The old key during a rotation: tokens it signed still work and webhooks carry both signatures. |
+| `ACTIVEPIECES_ALLOW_LOOPBACK` | `on` lets receiver URLs be `http://127.0.0.1`. Refused unless the database is loopback. |
+| `ACTIVEPIECES_WEBHOOK_WORKER` | Kill switch for the worker. `on` sends; anything else, or unset, sends nothing. |
+| `ACTIVEPIECES_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `CRON_SECRET` | Shared with `/cron/delivery`. |
+| `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS`, `ACTIVEPIECES_WORKER_ID` | Optional tuning: 20000, 2, 5000, 8, 15000 (Node worker only) and `activepieces`. Limit × timeout must fit the budget. |
+| `ACTIVEPIECES_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/activepieces`. Unset, there is no cron. |
+
+Owner routes (Bearer member token, `integrations` permission, owners only): `GET|POST /webhooks`,
+`POST /webhooks/:id/update`, `POST /webhooks/:id/rotate`, `GET /webhooks/:id/deliveries`,
+`POST /deliveries/:id/replay`, `GET|POST /tokens`, `POST /tokens/:id/revoke`. Flow routes (Bearer
+`zsap1_…` token): `GET /me`, `POST /proposals` (Idempotency-Key), `GET /proposals/:id`.
+`GET /cron/activepieces` answers like `/cron/delivery`, with `delivered` in place of `sent`.
