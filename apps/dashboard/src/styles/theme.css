@@ -1,32 +1,33 @@
 /*
  * Theme: the one place design tokens live.
  * Structure from Mish "Neutral Product" (Apache-2.0, ours); values from the 2026-10 redesign
- * (design/DESIGN.md): warm paper, ink, one evergreen accent. Components use the Tailwind
- * names in @theme below, never raw hex.
+ * (design/DESIGN.md): black, white for actions, one pop of colour for good news. Black is the
+ * only theme. Components use the Tailwind names in @theme below, never raw hex.
  */
 :root {
+  color-scheme: dark;
   /* Surface */
-  --bg: #f5f4f0;
-  --surface: #ffffff;
-  --surface-warm: #efede7;
+  --bg: #0a0a0a;
+  --surface: #131313;
+  --surface-warm: #1c1c1c;
   /* Foreground */
-  --fg: #15171a;
-  --fg-2: #363a40;
-  --muted: #555a61;
-  --meta: #62666d;
+  --fg: #f5f5f4;
+  --fg-2: #d6d6d3;
+  --muted: #a6a6a2;
+  --meta: #8e8e8a;
   /* Border */
-  --border: #e2e0d9;
-  --border-soft: #ecebe5;
-  --border-strong: #868990;
+  --border: #262626;
+  --border-soft: #1d1d1d;
+  --border-strong: #6e6e6b;
   /* Accent */
-  --accent: #1f5a4c;
-  --accent-on: #ffffff;
-  --accent-hover: #194b3f;
-  --accent-active: #143d33;
-  /* Semantic */
-  --success: #1b7347;
-  --warn: #8a5300;
-  --danger: #b3261e;
+  --accent: #f5f5f4;
+  --accent-on: #0a0a0a;
+  --accent-hover: #e2e2df;
+  --accent-active: #cfcfcb;
+  /* Semantic. Success is the one pop of colour: good news only (up trends, connected). */
+  --success: #6f93ff;
+  --warn: #f2b84b;
+  --danger: #ff6b5f;
   /* Typography: fonts */
   --font-display: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
   --font-body: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
@@ -65,9 +66,9 @@
   /* Elevation */
   --elev-flat: none;
   --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 1px 2px rgba(22, 23, 26, 0.06), 0 4px 12px rgba(22, 23, 26, 0.06);
-  /* Card edge: Cult UI Minimal Card's layered hairline (MIT, see NOTICE) */
-  --elev-card: 0 0 0 1px rgba(17, 24, 28, 0.08), 0 1px 2px -1px rgba(17, 24, 28, 0.08), 0 2px 4px rgba(17, 24, 28, 0.04);
+  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
+  /* Card edge: Cult UI Minimal Card's layered hairline with its dark-mode top highlight (MIT, see NOTICE) */
+  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 1px rgba(255, 255, 255, 0.07), 0 2px 6px rgba(0, 0, 0, 0.4);
   /* Focus: inner gap in the surface color, outer ring in the accent */
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   /* Motion */
@@ -79,58 +80,6 @@
   --container-gutter-desktop: 32px;
   --container-gutter-tablet: 24px;
   --container-gutter-phone: 16px;
-}
-
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #101211;
-  --surface: #181a19;
-  --surface-warm: #202321;
-  --fg: #ecebe7;
-  --fg-2: #cfcfca;
-  --muted: #a8aba7;
-  --meta: #969a96;
-  --border: #2b2e2c;
-  --border-soft: #232624;
-  --border-strong: #6e736f;
-  --accent: #7cc8b2;
-  --accent-on: #081712;
-  --accent-hover: #95d4c1;
-  --accent-active: #acdfcf;
-  --success: #5cc995;
-  --warn: #e2ab4a;
-  --danger: #f0857a;
-  --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
-  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.24);
-  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg: #101211;
-    --surface: #181a19;
-    --surface-warm: #202321;
-    --fg: #ecebe7;
-    --fg-2: #cfcfca;
-    --muted: #a8aba7;
-    --meta: #969a96;
-    --border: #2b2e2c;
-    --border-soft: #232624;
-    --border-strong: #6e736f;
-    --accent: #7cc8b2;
-    --accent-on: #081712;
-    --accent-hover: #95d4c1;
-    --accent-active: #acdfcf;
-    --success: #5cc995;
-    --warn: #e2ab4a;
-    --danger: #f0857a;
-    --elev-ring: 0 0 0 1px var(--border);
-    --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
-    --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.24);
-    --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
