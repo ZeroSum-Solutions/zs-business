@@ -126,7 +126,7 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
         const items = bookings.data.items.filter((booking) => zonedDateKey(booking.startsAt, zone) === day);
         const [weekday, rest] = formatDateKey(day).split(", ");
         return (
-          <li key={day} className={cn("rounded-md bg-lit p-3 shadow-card lg:min-h-48", day === today && "shadow-[inset_0_0_0_2px_var(--accent)]")}>
+          <li key={day} className={cn("rounded-lg bg-lit p-3 shadow-card lg:min-h-48", day === today && "shadow-[inset_0_0_0_2px_var(--accent)]")}>
             <button type="button" onClick={() => onOpenDay(day)} className="-m-1 flex min-h-11 w-[calc(100%+8px)] items-baseline justify-between rounded-sm p-1 text-left hover:bg-surface-warm">
               <span className="text-sm font-semibold text-fg">{weekday} <span className="font-normal text-muted">{rest}</span></span>
               <span className="text-xs text-meta">{items.length === 0 ? "Free" : `${items.length} booked`}</span>

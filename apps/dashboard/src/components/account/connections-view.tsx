@@ -76,7 +76,7 @@ function OtherAccounts() {
   return (
     <section aria-labelledby="other-accounts-title">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h2 id="other-accounts-title" className="text-base font-semibold text-fg">Other accounts</h2>
+        <h2 id="other-accounts-title" className="text-lg leading-6 font-medium text-fg">Other accounts</h2>
         <SampleBadge />
       </div>
       {connections.isPending ? <LoadingRows rows={6} /> : connections.isError ? <ErrorNote error={connections.error} retry={() => connections.refetch()} /> : (

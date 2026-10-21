@@ -16,6 +16,7 @@ import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
 import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
+import { spotlight } from "@/lib/spotlight";
 import { formatDay, formatRange, formatTime } from "@/lib/time";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
 
@@ -182,7 +183,7 @@ function ResultsSection() {
   return (
     <>
       <div className="flex flex-wrap items-center justify-between gap-2 pt-2 lg:col-span-12">
-        <h2 className="text-xs font-medium tracking-[0.08em] text-muted uppercase">Results</h2>
+        <h2 className="text-[11px] leading-4 font-medium tracking-[0.08em] text-meta uppercase">Results</h2>
         {/* The full ranges are read out and shown on hover; the pill is the short form. */}
         <p className="rounded-pill bg-surface-warm px-2.5 py-1 text-xs text-fg-2 ring-1 ring-inset ring-border" title={ranges}>
           <span aria-hidden>Since {formatDay(data.thisWeek.from, data.zone)} · vs same time last week</span>
@@ -321,7 +322,7 @@ function NextAppointments() {
                   <p className="truncate text-sm font-medium text-fg">{booking.title ?? (booking.source === "website" ? "Website booking" : "Appointment")}</p>
                   <p className="truncate text-sm text-muted">{bookingCustomerName(booking) ?? "No customer linked"}</p>
                 </div>
-                {resource ? <Badge tone={resource.id === resources.data?.[0]?.id ? "accent" : "info"} className="hidden sm:inline-flex">{resourceLabel(resource)}</Badge> : null}
+                {resource ? <Badge tone={resource.id === resources.data?.[0]?.id ? "accent" : "neutral"}>{resourceLabel(resource)}</Badge> : null}
               </li>
             );
           })}
@@ -369,6 +370,7 @@ function NeedsYou() {
         <Link
           key={item.href}
           href={item.href}
+          onPointerMove={spotlight}
           className="card-live flex min-h-16 items-center gap-3 rounded-lg bg-lit p-3 shadow-card lg:p-4"
         >
           <span aria-hidden className={cn("flex size-10 shrink-0 items-center justify-center rounded-md ring-1 ring-inset", item.tone)}>

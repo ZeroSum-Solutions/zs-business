@@ -43,7 +43,7 @@ export function ContactList() {
         <ul className="divide-y divide-border-soft overflow-hidden rounded-lg bg-lit shadow-card" aria-busy={contacts.isFetching}>
           {items.map((contact) => (
             <li key={contact.id}>
-              <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-surface-warm">
+              <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-fg/[0.04]">
                 <Avatar name={contact.displayName ?? contact.email} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium text-fg">{contact.displayName ?? "Unnamed customer"}</span>

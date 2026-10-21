@@ -51,7 +51,7 @@ export function ContactDetail({ id }: { id: string }) {
           <header className="mb-6 flex items-center gap-4">
             <Avatar name={contact.data.displayName ?? contact.data.email} size="lg" />
             <div className="min-w-0">
-              <h1 className="truncate text-xl tracking-display lg:text-2xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
+              <h1 className="truncate text-2xl tracking-display lg:text-3xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
               <p className="text-sm text-muted">Customer since {formatDay(contact.data.createdAt, "America/New_York")}</p>
             </div>
           </header>

@@ -68,7 +68,7 @@ export function WebsiteRequests() {
   return (
     <section aria-labelledby="website-requests-title" className="mb-6 rounded-lg bg-lit p-4 shadow-card lg:p-6">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h2 id="website-requests-title" className="text-base font-semibold text-fg">Website bookings to review</h2>
+        <h2 id="website-requests-title" className="text-lg leading-6 font-medium text-fg">Website bookings to review</h2>
         <Badge tone="warn">{items.data.items.length}</Badge>
       </div>
       <p className="mb-4 text-sm text-muted">

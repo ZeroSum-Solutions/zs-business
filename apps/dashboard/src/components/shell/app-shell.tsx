@@ -114,7 +114,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                     {active ? <motion.span layoutId="tab-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-accent/12" /> : null}
                     <item.icon size={24} weight={active ? "fill" : "regular"} aria-hidden className="relative" />
                     {item.href === "/inbox" && waiting > 0 ? (
-                      <span className="absolute top-0 right-2 min-w-4 rounded-pill bg-accent px-1 text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${waiting} need attention`}>
+                      <span className="absolute top-0 right-2 min-w-4 rounded-pill bg-accent px-1 ring-2 ring-surface text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${waiting} need attention`}>
                         {waiting}
                       </span>
                     ) : null}

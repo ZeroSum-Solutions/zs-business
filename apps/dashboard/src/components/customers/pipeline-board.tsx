@@ -35,7 +35,7 @@ function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blocked
 }) {
   const selectId = `stage-${deal.id}`;
   return (
-    <li className="rounded-md bg-lit p-3 shadow-card" data-deal-id={deal.id} aria-busy={moving}>
+    <li className="rounded-lg bg-lit p-3 shadow-card" data-deal-id={deal.id} aria-busy={moving}>
       <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
       <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-2">
         <span className="tabular font-medium" data-testid="deal-value">{deal.value ? formatMinor(deal.value.amountMinor, deal.value.currency) : "No value yet"}</span>
