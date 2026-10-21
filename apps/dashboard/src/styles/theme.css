@@ -1,31 +1,37 @@
 /*
  * Theme: the one place design tokens live.
  * Structure from Mish "Neutral Product" (Apache-2.0, ours); values from the 2026-10 redesign
- * (design/DESIGN.md): black, white for actions, one pop of colour for good news. Black is the
- * only theme. Components use the Tailwind names in @theme below, never raw hex.
+ * (design/DESIGN.md): black, white for primary actions, violet for the current place and links,
+ * blue for good news. Black is the only theme. Components use the Tailwind names in @theme below, never raw hex.
  */
 :root {
   color-scheme: dark;
   /* Surface */
-  --bg: #0a0a0a;
-  --surface: #131313;
-  --surface-warm: #1c1c1c;
+  --bg: #060607;
+  --surface: #121316;
+  --surface-warm: #1b1c21;
   /* Foreground */
   --fg: #f5f5f4;
   --fg-2: #d6d6d3;
   --muted: #a6a6a2;
   --meta: #8e8e8a;
   /* Border */
-  --border: #262626;
-  --border-soft: #1d1d1d;
+  --border: #2a2b31;
+  --border-soft: #202126;
   --border-strong: #6e6e6b;
-  /* Accent */
-  --accent: #f5f5f4;
-  --accent-on: #0a0a0a;
-  --accent-hover: #e2e2df;
-  --accent-active: #cfcfcb;
-  /* Semantic. Success is the one pop of colour: good news only (up trends, connected). */
+  /* Primary: solid white action fills */
+  --primary: #f5f5f4;
+  --primary-on: #060607;
+  --primary-hover: #e2e2df;
+  --primary-active: #cfcfcb;
+  /* Accent: violet for the current place, links, focus, progress and selection */
+  --accent: #a58bff;
+  --accent-on: #060607;
+  --accent-hover: #b9a4ff;
+  --accent-active: #9179f0;
+  /* Semantic. Success is blue: good news (up trends, connected, sent). */
   --success: #6f93ff;
+  --info: #5cc8ff;
   --warn: #f2b84b;
   --danger: #ff6b5f;
   /* Typography: fonts */
@@ -66,10 +72,14 @@
   /* Elevation */
   --elev-flat: none;
   --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.6), 0 12px 32px rgba(0, 0, 0, 0.6);
   /* Card edge: Cult UI Minimal Card's layered hairline with its dark-mode top highlight (MIT, see NOTICE) */
-  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 12px 32px -8px rgba(0, 0, 0, 0.7);
-  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 1px rgba(255, 255, 255, 0.07), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.12), 0 16px 40px -8px rgba(0, 0, 0, 0.85);
+  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.08), 0 10px 28px -6px rgba(0, 0, 0, 0.72);
+  /* Top-lit card fill: a faint white wash fading down over the surface */
+  --surface-lit: linear-gradient(180deg, rgb(255 255 255 / 0.035), rgb(255 255 255 / 0) 160px), var(--surface);
+  /* Recessed wells for inputs */
+  --elev-well: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px var(--border);
   /* Focus: inner gap in the surface color, outer ring in the accent */
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   /* Motion */
@@ -112,11 +122,16 @@
   --color-border: var(--border);
   --color-border-soft: var(--border-soft);
   --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-on: var(--primary-on);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
   --color-accent: var(--accent);
   --color-accent-on: var(--accent-on);
   --color-accent-hover: var(--accent-hover);
   --color-accent-active: var(--accent-active);
   --color-success: var(--success);
+  --color-info: var(--info);
   --color-warn: var(--warn);
   --color-danger: var(--danger);
   --font-sans: var(--font-body);
@@ -139,6 +154,7 @@
   --shadow-ring: var(--elev-ring);
   --shadow-raised: var(--elev-raised);
   --shadow-card: var(--elev-card);
+  --shadow-well: var(--elev-well);
   --shadow-focus: var(--focus-ring);
   --ease-standard: var(--ease-standard);
   --container-content: var(--container-max);

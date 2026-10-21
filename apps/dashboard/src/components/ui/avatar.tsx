@@ -33,7 +33,7 @@ export function Avatar({ name, size = "md", className }: {
       aria-hidden
       data-slot="avatar"
       className={cn("relative isolate inline-flex shrink-0 select-none items-center justify-center rounded-pill font-semibold leading-none tracking-tight", className)}
-      initial={reduce ? false : { opacity: 0, scale: 0.85 }}
+      initial={reduce ? false : { opacity: 0, scale: 0.96 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={reduce ? INSTANT : SPRING_POP}
       style={{

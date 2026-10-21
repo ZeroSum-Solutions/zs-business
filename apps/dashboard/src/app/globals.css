@@ -51,6 +51,11 @@
   }
 }
 
+/* Card fill: the surface with a faint top light (theme --surface-lit). */
+@utility bg-lit {
+  background: var(--surface-lit);
+}
+
 @utility tabular {
   font-variant-numeric: tabular-nums;
 }
@@ -84,12 +89,12 @@
   }
   &::before {
     padding: 1px;
-    background: radial-gradient(240px circle at var(--spot-x, 50%) var(--spot-y, 0px), rgb(255 255 255 / 0.42), transparent 70%);
+    background: radial-gradient(240px circle at var(--spot-x, 50%) var(--spot-y, 0px), rgb(255 255 255 / 0.7), color-mix(in oklab, var(--accent), transparent 70%) 45%, transparent 75%);
     mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
   }
   &::after {
     z-index: -1;
-    background: radial-gradient(360px circle at var(--spot-x, 50%) var(--spot-y, 0px), rgb(255 255 255 / 0.05), transparent 70%);
+    background: radial-gradient(360px circle at var(--spot-x, 50%) var(--spot-y, 0px), rgb(255 255 255 / 0.06), transparent 70%);
   }
   @media (hover: hover) {
     &:hover {

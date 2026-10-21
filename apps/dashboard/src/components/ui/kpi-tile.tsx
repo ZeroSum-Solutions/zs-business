@@ -34,6 +34,8 @@ export type KpiTileProps = {
   /** Recent values, oldest first (the sparkline), and their names ("Oct 13"), shown and read. */
   trend?: readonly number[];
   trendLabels?: readonly string[];
+  /** Draw the line. Off when the trend has too few points to say more than the change chip. */
+  sparkline?: boolean;
   /** New values keep coming: the newest point pulses. */
   live?: boolean;
   /**
@@ -82,7 +84,7 @@ const SKELETON = "skeleton block";
 const VALUE =
   "min-w-0 break-all font-semibold text-2xl text-fg tabular-nums leading-none tracking-display sm:text-3xl";
 const TILE =
-  "card-live flex min-w-0 flex-col gap-3 rounded-lg bg-surface p-4 text-fg shadow-card lg:p-5";
+  "card-live flex min-w-0 flex-col gap-3 rounded-lg bg-lit p-4 text-fg shadow-card lg:p-5";
 const LABEL = "truncate font-medium text-muted text-sm";
 const BADGE =
   "inline-flex items-center gap-0.5 rounded-pill px-1.5 py-0.5 font-medium text-fg text-xs tabular-nums";
@@ -137,6 +139,7 @@ export function KpiTile({
   lowerIsBetter = false,
   trend = [],
   trendLabels,
+  sparkline = true,
   live = false,
   scrub = true,
   decoration,
@@ -266,7 +269,7 @@ export function KpiTile({
           <p className={CAPTION} data-slot="kpi-caption">
             {point ? point.label : isEmpty ? "No data yet" : deltaLabel}
           </p>
-          <div
+          {sparkline ? (<div
             className={cn(SPARK, hasDelta ? toneText : "text-accent")}
             data-slot="kpi-sparkline"
           >
@@ -356,7 +359,7 @@ export function KpiTile({
                 value={at ?? last}
               />
             ) : null}
-          </div>
+          </div>) : null}
           {children}
         </>
       )}

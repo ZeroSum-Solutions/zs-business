@@ -4,6 +4,7 @@ import { CaretLeft, CaretRight, Globe, Plus } from "@phosphor-icons/react";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 import { Segmented } from "@/components/ui/segmented";
+import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -34,17 +35,20 @@ function WebsiteBadge({ booking }: { booking: BookingView }) {
 function BookingRow({ booking, zone }: { booking: BookingView; zone: string }) {
   const customer = bookingCustomerName(booking);
   return (
-    <li className="flex gap-4 rounded-md bg-surface p-3 shadow-ring" data-source={booking.source ?? "owner"}>
+    <li className="flex items-center gap-4 rounded-lg bg-lit p-4 shadow-card" data-source={booking.source ?? "owner"}>
       <div className="w-20 shrink-0">
         <p className="tabular text-sm font-semibold text-fg">{formatTime(booking.startsAt, zone)}</p>
         <p className="tabular text-xs text-meta">to {formatTime(booking.endsAt, zone)}</p>
       </div>
-      <div className="min-w-0 flex-1 border-l-2 border-accent pl-3">
+      <div className="flex min-w-0 flex-1 items-center gap-3 border-l-2 border-accent pl-3">
+        <Avatar name={customer} size="sm" />
+        <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <p className="truncate text-sm font-medium text-fg">{booking.title ?? (fromWebsite(booking) ? "Website booking" : "Appointment")}</p>
           <WebsiteBadge booking={booking} />
         </div>
         <p className="truncate text-sm text-muted">{customer ?? "No customer linked"}</p>
+        </div>
       </div>
     </li>
   );
@@ -86,7 +90,7 @@ function DayView({ resource, dateKey, onPickSlot }: { resource: ResourceSummary;
                 key={slot.startsAt}
                 type="button"
                 onClick={() => onPickSlot(slot.startsAt)}
-                className="tabular min-h-11 rounded-sm bg-surface text-sm font-medium text-fg shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:bg-surface-warm hover:shadow-[inset_0_0_0_1px_var(--border-strong)]"
+                className="tabular min-h-11 rounded-sm bg-surface-warm/70 text-sm font-medium text-fg-2 shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:bg-accent/10 hover:text-fg hover:shadow-[inset_0_0_0_1px_var(--accent)]"
                 aria-label={`Book ${formatTime(slot.startsAt, zone)}`}
               >
                 {formatTime(slot.startsAt, zone)}
@@ -123,7 +127,7 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
         const items = bookings.data.items.filter((booking) => zonedDateKey(booking.startsAt, zone) === day);
         const [weekday, rest] = formatDateKey(day).split(", ");
         return (
-          <li key={day} className={cn("rounded-md bg-surface p-3 shadow-ring lg:min-h-48", day === today && "shadow-[inset_0_0_0_2px_var(--accent)]")}>
+          <li key={day} className={cn("rounded-md bg-lit p-3 shadow-card lg:min-h-48", day === today && "shadow-[inset_0_0_0_2px_var(--accent)]")}>
             <button type="button" onClick={() => onOpenDay(day)} className="-m-1 flex min-h-11 w-[calc(100%+8px)] items-baseline justify-between rounded-sm p-1 text-left hover:bg-surface-warm">
               <span className="text-sm font-semibold text-fg">{weekday} <span className="font-normal text-muted">{rest}</span></span>
               <span className="text-xs text-meta">{items.length === 0 ? "Free" : `${items.length} booked`}</span>

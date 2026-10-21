@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 export function Card({ className, onPointerMove, ...props }: ComponentProps<"section">) {
   return (
     <section
-      className={cn("card-live rounded-lg bg-surface p-4 shadow-card lg:p-6", className)}
+      className={cn("card-live rounded-lg bg-lit p-4 shadow-card lg:p-6", className)}
       onPointerMove={(event: PointerEvent<HTMLElement>) => {
         spotlight(event);
         onPointerMove?.(event);

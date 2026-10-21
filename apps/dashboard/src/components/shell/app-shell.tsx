@@ -5,8 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useApiRuntime } from "@/lib/api/react";
-import { useThreads } from "@/lib/queries";
-import { useTenantId } from "@/lib/session";
+import { useInboxCount } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { AccountMenu, OWNER } from "./account-menu";
 import { isActive, NAV_ITEMS } from "./nav";
@@ -17,20 +16,12 @@ import { useLayoutTransition, useReducedMotionLive } from "@/lib/motion";
 function Brand() {
   return (
     <Link href="/" className="flex min-h-11 items-center gap-3 rounded-sm">
-      <span aria-hidden className="flex size-8 items-center justify-center rounded-sm bg-accent text-[13px] font-semibold tracking-tight text-accent-on">
+      <span aria-hidden className="flex size-8 items-center justify-center rounded-sm bg-primary text-[13px] font-semibold tracking-tight text-primary-on">
         H&amp;R
       </span>
       <span className="text-[15px] font-semibold text-fg">{OWNER.business}<span className="sr-only">, home</span></span>
     </Link>
   );
-}
-
-/** Threads on the first page that wait for a reply or a review (inbox-home.md I-8). */
-function useInboxCount(): number {
-  const threads = useThreads();
-  // Signed out, the cache is empty and the count must not linger.
-  if (useTenantId() === null) return 0;
-  return threads.data?.pages[0]?.items.filter((thread) => thread.needsReply || thread.needsReview).length ?? 0;
 }
 
 export function AppShell({ children }: { children: ReactNode }) {

@@ -80,7 +80,7 @@ function OtherAccounts() {
         <SampleBadge />
       </div>
       {connections.isPending ? <LoadingRows rows={6} /> : connections.isError ? <ErrorNote error={connections.error} retry={() => connections.refetch()} /> : (
-        <ul className="divide-y divide-border-soft overflow-hidden rounded-md bg-surface shadow-ring">
+        <ul className="divide-y divide-border-soft overflow-hidden rounded-lg bg-lit shadow-card">
           {connections.data.map((connection) => {
             const status = STATUS[connection.status];
             return (

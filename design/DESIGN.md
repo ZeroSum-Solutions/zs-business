@@ -1,24 +1,25 @@
 ---
 version: "1.0"
 name: "zs-business dashboard"
-description: "Premium black owner dashboard: near-black surfaces, white for actions, one electric-blue pop for good news, Google Sans, hairline cards and short spring motion on navigation only."
+description: "Premium black owner dashboard: near-black page, top-lit cards, white for primary actions, violet for the current place, blue for good news, Google Sans, and short spring motion."
 provenance: "Redesign of apps/dashboard, 2026-10-20. Tokens live in apps/dashboard/src/styles/theme.css; this file records them and the reasons. Ported MIT components are listed in NOTICE."
 colors:
-  bg: "#0a0a0a"
-  surface: "#131313"
-  surface-warm: "#1c1c1c"
+  bg: "#060607"
+  surface: "#121316"
+  surface-warm: "#1b1c21"
   fg: "#f5f5f4"
   fg-2: "#d6d6d3"
   muted: "#a6a6a2"
   meta: "#8e8e8a"
-  border: "#262626"
-  border-soft: "#1d1d1d"
+  border: "#2a2b31"
+  border-soft: "#202126"
   border-strong: "#6e6e6b"
   primary: "#f5f5f4"
-  accent: "#f5f5f4"
-  accent-on: "#0a0a0a"
-  accent-hover: "#e2e2df"
-  accent-active: "#cfcfcb"
+  accent: "#a58bff"
+  accent-on: "#060607"
+  accent-hover: "#b9a4ff"
+  accent-active: "#9179f0"
+  info: "#5cc8ff"
   success: "#6f93ff"
   warn: "#f2b84b"
   danger: "#ff6b5f"
@@ -88,13 +89,20 @@ in `design/BRIEF.md` and `design/evidence/`.
 ## Colors
 
 Black, set by the owner on 2026-10-20 ("black, premium, high-class, a little fun"; no green,
-no warm paper). Near-black `bg` with slightly lifted `surface` cards and hairline white
-borders. Primary actions, the current place and the brand mark are white (`accent`), so the
-screen reads monochrome. The one pop of colour is `success`, electric blue #6f93ff, kept for
-good news only: up trends, connected services, the live dot. `warn` and `danger` are status
-only. Every text pair meets WCAG AA; `meta` (#8e8e8a on #131313) is the lowest-contrast text.
-Black is the only theme; the app no longer follows the system light setting. A violet pop
-(#a58bff) was rendered as the alternative.
+no warm paper). A near-black page (`bg`) under cards that are lifted and lit from the top.
+Colour has jobs, so the screen is never "white with a yellow tag":
+
+- `primary` (white): solid fills for the main action on a screen, and the brand mark.
+- `accent` (violet #a58bff): where you are and what you can follow: active nav, links, focus
+  rings, selected rows, progress bars, this-week bars, your own replies.
+- `success` (blue #6f93ff): good news: up trends, connected, sent.
+- `info` (cyan #5cc8ff): work waiting on the owner that is routine, such as "Needs reply".
+- `warn` (amber): something to review or fix. `danger` (coral): failed or down.
+- Avatars take one of eight pops picked from the name.
+
+Every text pair meets WCAG AA; `meta` is the lowest-contrast text. Black is the only theme.
+Revised 2026-10-20 after Gemini 3.8 Flash and Gemini 4 Argon visual audits found the
+white-accent version flat.
 
 ## Typography
 
@@ -117,8 +125,10 @@ by side on a phone.
 Three levels, all from `theme.css`:
 
 - **Page** (`bg`): flat black.
-- **Card** (`surface` + `--elev-card`): Cult UI Minimal Card's layered hairline, a white inner
-  top highlight and a soft drop shadow.
+- **Well** (`--elev-well`): inputs and switch tracks sit below the card, on `bg`.
+- **Card** (`bg-lit` + `--elev-card`): the surface with a faint top light, Cult UI Minimal
+  Card's layered hairline, a white inner top highlight and a deep drop shadow. Lists, threads,
+  bookings and review panels are cards too.
 - **Card on hover** (`--elev-card-hover`): a brighter hairline, a deeper shadow, a 2px spring
   lift, and a pointer light on the edge with a faint glow inside (Magic UI Magic Card).
 
@@ -139,9 +149,11 @@ badges, segmented switches and the tab-bar indicator.
 
 ## Components
 
-- **KPI tile** (21st.dev KPI Tile, MIT): value with a rolling number, a change chip and a
-  two-point sparkline for this week against the same span last week. Home turns scrubbing off
-  (`scrub={false}`): with two points, scrubbing put last week's value beside this week's change.
+- **KPI tile** (21st.dev KPI Tile, MIT): value with a rolling number and a change chip. Home
+  has only two points per number, so it turns the sparkline off and shows two bars (this week
+  in violet, the same time last week in grey) instead.
+- **Needs you** (Home): three linked cards first on every screen: waiting conversations, the
+  next appointment, and connections that need action.
 - **Card** (Cult UI Minimal Card + Magic UI Magic Card, MIT): hairline card with the pointer
   light and spring lift (`card-live`).
 - **Avatar** (Cult UI Collab Avatar, MIT): initials on a tinted pop colour picked from the
@@ -164,7 +176,7 @@ and the border beam is not drawn.
 
 ## Do's and Don'ts
 
-- Do keep the screen monochrome; colour is good news (`success`), status, or an avatar.
+- Do give colour a job from the list in Colors; never colour for decoration alone.
 - Do keep every label on the phone tab bar.
 - Don't add a second border beam or any other looping effect to a page.
 - Don't animate page entrances or whole lists; small things (avatars, values, pills) may spring.

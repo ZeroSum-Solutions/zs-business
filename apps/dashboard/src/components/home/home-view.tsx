@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, WarningCircle } from "@phosphor-icons/react";
 import Link from "next/link";
 import { type ReactNode, useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -13,18 +13,16 @@ import { SampleBadge } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader, Skeleton } from "@/components/ui/states";
 import { bookingCustomerName, type HomeResults } from "@/lib/api";
 import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
-import { useBookings, useChecklist, useDisplayZone, useResources, useResults, useUsage } from "@/lib/queries";
+import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
 import { formatDay, formatRange, formatTime } from "@/lib/time";
-import { currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
+import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
 
 interface WeekCompare {
   thisWeek: number;
   lastWeek: number;
 }
-
-const WEEK_POINTS = ["Same time last week", "This week"] as const;
 
 /** A count or an amount this week against the same span last week, as a KPI tile. */
 function WeekTile({ id, label, compare, format, valueTestId, step = 1, beam = false, className, children }: {
@@ -52,14 +50,35 @@ function WeekTile({ id, label, compare, format, valueTestId, step = 1, beam = fa
       {...(change === null ? {} : { delta: change })}
       formatDelta={(value) => `${Math.abs(value)}%`}
       deltaLabel={change === null ? "None in the same span last week" : "vs last week"}
-      trend={[compare.lastWeek, compare.thisWeek]}
-      trendLabels={WEEK_POINTS}
+      sparkline={false}
       {...(beam ? { decoration: <BorderBeam /> } : {})}
       {...(className ? { className } : {})}
     >
-      <p className="tabular -mt-1 text-xs text-meta">Same time last week {format(compare.lastWeek)}</p>
+      <WeekBars compare={compare} format={format} />
       {children}
     </KpiTile>
+  );
+}
+
+/** This week against last week as two bars: two points say more as lengths than as a line. */
+function WeekBars({ compare, format }: { compare: WeekCompare; format: (value: number) => string }) {
+  const max = Math.max(compare.thisWeek, compare.lastWeek, 1);
+  const rows = [
+    { label: "This week", value: compare.thisWeek, bar: "bg-accent" },
+    { label: "Same time last week", value: compare.lastWeek, bar: "bg-fg/20" },
+  ];
+  return (
+    <ul className="space-y-1.5 text-xs" aria-label="This week and last week">
+      {rows.map((row) => (
+        <li key={row.label} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1">
+          <span className="text-meta">{row.label}</span>
+          <span className="tabular text-fg-2">{format(row.value)}</span>
+          <span aria-hidden className="col-span-2 h-1.5 overflow-hidden rounded-pill bg-fg/6">
+            <span className={cn("block h-full rounded-pill", row.bar)} style={{ width: `${(row.value / max) * 100}%` }} />
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -72,7 +91,7 @@ function SourceRows({ label, bySource }: {
       {bySource.map((item) => (
         <li key={item.source} className="flex items-baseline justify-between gap-2" data-source={item.source}>
           <span className="min-w-0 text-fg-2">{ORIGIN_LABELS[item.source]}</span>
-          <span className="tabular shrink-0 whitespace-nowrap text-fg">{formatNumber(item.thisWeek)} <span className="text-meta">/ {formatNumber(item.lastWeek)}</span></span>
+          <span className="tabular shrink-0 whitespace-nowrap text-fg">{formatNumber(item.thisWeek)} <span className="text-meta">last {formatNumber(item.lastWeek)}</span></span>
         </li>
       ))}
     </ul>
@@ -108,7 +127,7 @@ function RevenueTile({ data }: { data: HomeResults }) {
       beam
       className="col-span-2 lg:col-span-6 lg:self-stretch"
     >
-      <p className="tabular -mt-2 text-xs text-meta">
+      <p className="tabular text-xs text-meta">
         {formatNumber(won.thisWeek)} won this week, {formatNumber(won.lastWeek)} last week.
       </p>
       <div className="border-t border-border-soft pt-3">
@@ -122,7 +141,7 @@ function RevenueTile({ data }: { data: HomeResults }) {
               </div>
               <div className="mt-1 space-y-0.5" aria-hidden>
                 <div className="h-1.5 rounded-pill bg-accent" style={{ width: `${(item.thisWeek / maxSource) * 100}%` }} />
-                <div className="h-1 rounded-pill bg-border-strong/50" style={{ width: `${(item.lastWeek / maxSource) * 100}%` }} />
+                <div className="h-1 rounded-pill bg-fg/20" style={{ width: `${(item.lastWeek / maxSource) * 100}%` }} />
               </div>
               <p className="sr-only">Same time last week {formatMinor(item.lastWeek, main.currency)}</p>
             </li>
@@ -130,7 +149,7 @@ function RevenueTile({ data }: { data: HomeResults }) {
         </ul>
         <p className="mt-3 flex items-center gap-4 text-xs text-meta">
           <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1.5 w-4 rounded-pill bg-accent" />This week</span>
-          <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1 w-4 rounded-pill bg-border-strong/50" />Last week</span>
+          <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1 w-4 rounded-pill bg-fg/20" />Last week</span>
         </p>
       </div>
       {others.length > 0 ? (
@@ -160,11 +179,17 @@ function ResultsSection() {
   if (results.isPending) return <div className="grid grid-cols-2 gap-3 lg:col-span-12 lg:grid-cols-3"><Skeleton className="h-40" /><Skeleton className="h-40" /><Skeleton className="col-span-2 h-40 lg:col-span-1" /></div>;
   if (results.isError) return <div className="lg:col-span-12"><ErrorNote error={results.error} retry={() => results.refetch()} /></div>;
   const data = results.data;
+  const ranges = `This week: ${formatRange(data.thisWeek.from, data.thisWeek.to, data.zone)}. Compared with the same span of last week: ${formatRange(data.lastWeek.from, data.lastWeek.to, data.zone)}. Times in ${data.zone.replaceAll("_", " ")}.`;
   return (
     <>
-      <p className="text-xs text-meta lg:col-span-12" data-testid="results-ranges">
-        This week: {formatRange(data.thisWeek.from, data.thisWeek.to, data.zone)}. Compared with the same span of last week: {formatRange(data.lastWeek.from, data.lastWeek.to, data.zone)}. Times in {data.zone.replaceAll("_", " ")}.
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 lg:col-span-12">
+        <h2 className="text-xs font-medium tracking-[0.08em] text-muted uppercase">Results</h2>
+        {/* The full ranges are read out and shown on hover; the pill is the short form. */}
+        <p className="rounded-pill bg-surface-warm px-2.5 py-1 text-xs text-fg-2 ring-1 ring-inset ring-border" title={ranges}>
+          <span aria-hidden>Since {formatDay(data.thisWeek.from, data.zone)} · vs same time last week</span>
+          <span className="sr-only" data-testid="results-ranges">{ranges}</span>
+        </p>
+      </div>
       <div className="grid grid-cols-2 items-start gap-3 lg:col-span-12 lg:grid-cols-12 lg:gap-4">
         {/* Side by side on a phone; stacked beside the taller revenue tile on a wide screen. */}
         <div className="col-span-2 grid grid-cols-2 items-start gap-3 lg:col-span-6 lg:grid-cols-1 lg:gap-4">
@@ -252,7 +277,7 @@ function ChecklistCard() {
                 <span className="sr-only">{item.status === "ok" ? "Connected" : "Needs action"}</span>
               </div>
               {item.actionLabel ? (
-                <Button asChild variant="secondary" className="shrink-0">
+                <Button asChild variant={item.status === "ok" ? "secondary" : "primary"} className="shrink-0">
                   <Link href="/account/connections">{item.actionLabel}</Link>
                 </Button>
               ) : null}
@@ -292,18 +317,72 @@ function NextAppointments() {
                   <p className="tabular text-sm font-semibold text-fg">{formatTime(booking.startsAt, zone)}</p>
                   <p className="text-xs text-meta">{formatDay(booking.startsAt, zone)}</p>
                 </div>
-                <Avatar name={bookingCustomerName(booking)} size="sm" className="hidden sm:inline-flex" />
+                <Avatar name={bookingCustomerName(booking)} size="sm" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-fg">{booking.title ?? (booking.source === "website" ? "Website booking" : "Appointment")}</p>
                   <p className="truncate text-sm text-muted">{bookingCustomerName(booking) ?? "No customer linked"}</p>
                 </div>
-                {resource ? <Badge tone={resource.id === resources.data?.[0]?.id ? "accent" : "neutral"}>{resourceLabel(resource)}</Badge> : null}
+                {resource ? <Badge tone={resource.id === resources.data?.[0]?.id ? "accent" : "info"} className="hidden sm:inline-flex">{resourceLabel(resource)}</Badge> : null}
               </li>
             );
           })}
         </ul>
       )}
     </Card>
+  );
+}
+
+/** What needs the owner now, first on every screen size (BRIEF: "what needs me now"). */
+function NeedsYou() {
+  const waiting = useInboxCount();
+  const checklist = useChecklist();
+  const from = useMemo(() => new Date().toISOString(), []);
+  const next = useBookings({ from, limit: 4 }).data?.items[0];
+  const resources = useResources();
+  const zone = resources.data?.find((item) => item.id === next?.resourceId)?.timeZone ?? "America/New_York";
+  const open = checklist.data?.filter((item) => item.status === "action").length ?? 0;
+  const items = [
+    {
+      href: "/inbox",
+      icon: ChatCircleDots,
+      tone: waiting > 0 ? "text-info bg-info/12 ring-info/25" : "text-success bg-success/12 ring-success/25",
+      title: waiting > 0 ? `${formatNumber(waiting)} waiting for you` : "Inbox clear",
+      detail: waiting > 0 ? "Replies and reviews in Inbox" : "No replies or reviews waiting",
+    },
+    {
+      href: "/calendar",
+      icon: CalendarBlank,
+      tone: "text-accent bg-accent/12 ring-accent/25",
+      title: next ? `${formatTime(next.startsAt, zone)}, ${formatDay(next.startsAt, zone)}` : "No appointments coming up",
+      detail: next ? (bookingCustomerName(next) ?? next.title ?? "Next appointment") : "Open slots are on the calendar",
+    },
+    {
+      href: "/account/connections",
+      icon: open > 0 ? WarningCircle : CheckCircle,
+      tone: open > 0 ? "text-warn bg-warn/12 ring-warn/25" : "text-success bg-success/12 ring-success/25",
+      title: open > 0 ? `${formatNumber(open)} connection${open === 1 ? "" : "s"} need${open === 1 ? "s" : ""} you` : "Everything is connected",
+      detail: open > 0 ? "Reconnect to keep requests coming in" : "Booking page, email and calendar",
+    },
+  ];
+  return (
+    <section aria-label="Needs you now" className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:col-span-12 lg:gap-4">
+      {items.map((item) => (
+        <Link
+          key={item.href}
+          href={item.href}
+          className="card-live flex min-h-16 items-center gap-3 rounded-lg bg-lit p-3 shadow-card lg:p-4"
+        >
+          <span aria-hidden className={cn("flex size-10 shrink-0 items-center justify-center rounded-md ring-1 ring-inset", item.tone)}>
+            <item.icon size={20} weight="fill" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="tabular block truncate text-sm font-semibold text-fg">{item.title}</span>
+            <span className="block truncate text-xs text-meta">{item.detail}</span>
+          </span>
+          <ArrowRight size={16} aria-hidden className="shrink-0 text-meta" />
+        </Link>
+      ))}
+    </section>
   );
 }
 
@@ -314,6 +393,7 @@ export function HomeView() {
     <>
       <PageHeader title="This week" description={reports ? "Results for Halden & Rowe, compared with the same time last week." : "Your next appointments at Halden & Rowe."} />
       <div className="grid grid-cols-1 gap-3 lg:grid-flow-dense lg:grid-cols-12 lg:gap-4">
+        <NeedsYou />
         {reports ? <ResultsSection /> : null}
         <NextAppointments />
         <UsageCard />

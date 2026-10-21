@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, CalendarBlank, Globe, Info, PaperPlaneTilt, Robot } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowRight, CalendarBlank, ChatCircleDots, Globe, Info, PaperPlaneTilt, Robot } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
@@ -55,7 +55,7 @@ function ThreadBadges({ thread }: { thread: ThreadSummary }) {
   return (
     <>
       {thread.kind === "visitor" ? <Badge><Globe aria-hidden />Website visitor</Badge> : null}
-      {thread.needsReply ? <Badge tone="warn">Needs reply</Badge> : null}
+      {thread.needsReply ? <Badge tone="info">Needs reply</Badge> : null}
       {thread.needsReview ? <Badge tone="warn">Needs review</Badge> : null}
       {thread.drafts > 0 ? <Badge tone="accent">{thread.drafts === 1 ? "1 draft" : `${thread.drafts} drafts`}</Badge> : null}
     </>
@@ -73,7 +73,7 @@ function ThreadList({ selectedId }: { selectedId: string | null }) {
   }
   return (
     <div>
-      <ul aria-label="Conversations" className="divide-y divide-border-soft overflow-hidden rounded-md bg-surface shadow-ring">
+      <ul aria-label="Conversations" className="divide-y divide-border-soft overflow-hidden rounded-lg bg-lit shadow-card">
         {items.map((thread) => {
           const active = thread.id === selectedId;
           return (
@@ -81,7 +81,10 @@ function ThreadList({ selectedId }: { selectedId: string | null }) {
               <Link
                 href={`/inbox/${thread.id}`}
                 aria-current={active ? "true" : undefined}
-                className={cn("focus-inset flex gap-3 px-4 py-3 transition-quick hover:bg-surface-warm", active && "bg-surface-warm shadow-[inset_2px_0_0_var(--accent)]")}
+                className={cn(
+                  "focus-inset relative flex gap-3 px-4 py-3 transition-quick hover:bg-fg/[0.04]",
+                  active && "bg-accent/10 before:absolute before:inset-y-3 before:left-1 before:w-1 before:rounded-pill before:bg-accent hover:bg-accent/12",
+                )}
               >
                 <Avatar name={thread.name} />
                 <span className="min-w-0 flex-1">
@@ -112,7 +115,7 @@ function RequestBubble({ entry, zone, resources }: { entry: RequestEntry; zone: 
   const bookingZone = resource?.timeZone ?? zone;
   return (
     <li className="flex flex-col items-start" data-entry="request">
-      <div className="max-w-[85%] rounded-lg bg-surface-warm px-3.5 py-2.5 text-sm text-fg">
+      <div className="max-w-[85%] rounded-2xl rounded-tl-sm bg-surface-warm px-4 py-3 text-sm text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_0_1px_var(--border)]">
         <p className="mb-1 flex flex-wrap items-center gap-1.5 text-xs font-medium text-fg-2">
           <Globe size={14} aria-hidden />Website request · {CHANNEL_LABELS[entry.channel]}
         </p>
@@ -122,16 +125,17 @@ function RequestBubble({ entry, zone, resources }: { entry: RequestEntry; zone: 
           <p className="text-muted">No message with this request.</p>
         )}
         {entry.booking ? (
-          <p className="mt-2 flex flex-wrap items-center gap-1.5 text-sm">
-            <CalendarBlank size={16} aria-hidden className="text-muted" />
-            <span>Booked {resource ? resourceLabel(resource) : "an appointment"} for</span>
-            <Link
-              href={`/calendar?date=${zonedDateKey(entry.booking.startsAt, bookingZone)}&calendar=${entry.booking.resourceId}`}
-              className="inline-flex min-h-11 items-center font-medium text-accent underline-offset-4 hover:underline"
-            >
-              {when(entry.booking.startsAt, bookingZone)}
-            </Link>
-          </p>
+          <Link
+            href={`/calendar?date=${zonedDateKey(entry.booking.startsAt, bookingZone)}&calendar=${entry.booking.resourceId}`}
+            className="mt-3 flex min-h-11 items-center gap-3 rounded-md bg-bg/60 px-3 py-2 shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:shadow-[inset_0_0_0_1px_var(--accent)]"
+          >
+            <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-sm bg-accent/14 text-accent"><CalendarBlank size={16} weight="fill" /></span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-xs text-meta">Booked {resource ? resourceLabel(resource) : "an appointment"} for</span>
+              <span className="block font-medium text-fg">{when(entry.booking.startsAt, bookingZone)}</span>
+            </span>
+            <ArrowRight size={16} aria-hidden className="shrink-0 text-accent" />
+          </Link>
         ) : null}
       </div>
       <p className="mt-1 text-xs text-meta">{entry.name}, {when(entry.at, zone)}</p>
@@ -144,7 +148,7 @@ export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: 
   const byAgent = agentId !== null && reply.draftedBy.userId === agentId;
   return (
     <li className="flex flex-col items-end" data-entry="reply" data-reply-id={reply.id} data-status={reply.status}>
-      <div className="max-w-[85%] rounded-lg bg-accent/10 px-3.5 py-2.5 text-sm text-fg">
+      <div className="max-w-[85%] rounded-2xl rounded-tr-sm bg-linear-to-b from-accent/16 to-accent/8 px-4 py-3 text-sm text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_0_1px_color-mix(in_oklab,var(--accent),transparent_70%)]">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
           <p className="min-w-0 text-xs font-medium break-words text-fg-2"><span className="sr-only">Subject: </span>{reply.subject}</p>
           {byAgent ? <Badge data-testid="agent-draft"><Robot aria-hidden />Follow-up agent</Badge> : null}
@@ -334,9 +338,9 @@ function VisitorNotice({ thread }: { thread: ThreadDetail }) {
         ) : (
           <>
             <p>This website request is not linked to a customer yet. Review it in Customers before replying: linking it moves it into that customer&apos;s thread.</p>
-            <Link href="/customers" className="mt-1 inline-flex min-h-11 items-center font-medium text-accent underline-offset-4 hover:underline">
-              Review in Customers
-            </Link>
+            <Button asChild className="mt-3">
+              <Link href="/customers">Review in Customers <ArrowRight aria-hidden /></Link>
+            </Button>
           </>
         )}
       </div>
@@ -367,12 +371,16 @@ function ThreadPane({ id }: { id: string }) {
   const data = thread.data;
   const reach = [data.email, formatPhone(data.phone)].filter(Boolean).join(" · ");
   return (
-    <article aria-labelledby="thread-title" className="flex flex-col rounded-md bg-surface shadow-ring" data-thread-kind={data.kind}>
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border-soft px-4 py-3">
-        <div className="min-w-0">
-          <h2 id="thread-title" ref={heading} tabIndex={-1} className="text-base font-semibold break-words">{data.name}</h2>
+    <article aria-labelledby="thread-title" className="flex flex-col rounded-lg bg-lit shadow-card" data-thread-kind={data.kind}>
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border-soft px-4 py-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <Avatar name={data.name} />
+          <div className="min-w-0">
+          {/* Focus lands here when a thread opens; it is a landing point, not a control, so no ring. */}
+          <h2 id="thread-title" ref={heading} tabIndex={-1} className="text-base font-semibold break-words outline-none">{data.name}</h2>
           {reach ? <p className="text-xs break-words text-meta">{reach}</p> : null}
           <p className="mt-1 flex flex-wrap gap-1.5"><ThreadBadges thread={data} /></p>
+          </div>
         </div>
         {data.contactId ? (
           <Link href={`/customers/${data.contactId}`} className="-my-1 inline-flex min-h-11 items-center text-sm font-medium text-accent underline-offset-4 hover:underline">
@@ -402,7 +410,11 @@ export function InboxView({ selectedId }: { selectedId: string | null }) {
               <ThreadPane id={selectedId} />
             </>
           ) : (
-            <EmptyState title="Pick a conversation">Select a conversation to read it.</EmptyState>
+            <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 rounded-lg bg-surface/50 px-6 text-center shadow-[inset_0_0_0_1px_var(--border-soft)]">
+              <span aria-hidden className="flex size-12 items-center justify-center rounded-pill bg-accent/12 text-accent ring-1 ring-inset ring-accent/25"><ChatCircleDots size={24} weight="fill" /></span>
+              <p className="font-medium text-fg">Pick a conversation</p>
+              <p className="max-w-64 text-sm text-muted">Select a conversation to read it and reply.</p>
+            </div>
           )}
         </div>
       </div>

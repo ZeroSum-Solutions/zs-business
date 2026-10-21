@@ -296,6 +296,14 @@ export function useThreads() {
   });
 }
 
+/** Threads on the first page that wait for a reply or a review (inbox-home.md I-8). */
+export function useInboxCount(): number {
+  const threads = useThreads();
+  // Signed out, the cache is empty and the count must not linger.
+  if (useTenantId() === null) return 0;
+  return threads.data?.pages[0]?.items.filter((thread) => thread.needsReply || thread.needsReview).length ?? 0;
+}
+
 export function useThread(id: string | null) {
   const api = useApi();
   const { keys, enabled } = useKeys();

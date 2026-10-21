@@ -40,7 +40,7 @@ export function ContactList() {
         </EmptyState>
       ) : (
         <>
-        <ul className="divide-y divide-border-soft overflow-hidden rounded-md bg-surface shadow-ring" aria-busy={contacts.isFetching}>
+        <ul className="divide-y divide-border-soft overflow-hidden rounded-lg bg-lit shadow-card" aria-busy={contacts.isFetching}>
           {items.map((contact) => (
             <li key={contact.id}>
               <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-surface-warm">
