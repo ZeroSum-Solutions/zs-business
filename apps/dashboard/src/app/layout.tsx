@@ -1,8 +1,19 @@
 import type { Metadata, Viewport } from "next";
+import { Google_Sans } from "next/font/google";
 import type { ReactNode } from "react";
 import { AppShell } from "@/components/shell/app-shell";
 import { Providers } from "./providers";
 import "./globals.css";
+
+// Self-hosted at build time (no runtime request to Google), so the offline PWA keeps its type.
+const googleSans = Google_Sans({
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-google-sans",
+  // next/font ships no fallback metrics for Google Sans; the theme stack supplies the fallback.
+  adjustFontFallback: false,
+  fallback: ["system-ui", "sans-serif"],
+});
 
 export const metadata: Metadata = {
   title: { default: "Halden & Rowe", template: "%s | Halden & Rowe" },
@@ -21,14 +32,14 @@ export const viewport: Viewport = {
   initialScale: 1,
   viewportFit: "cover",
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f8f8f7" },
-    { media: "(prefers-color-scheme: dark)", color: "#111214" },
+    { media: "(prefers-color-scheme: light)", color: "#f5f4f0" },
+    { media: "(prefers-color-scheme: dark)", color: "#101211" },
   ],
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en-US">
+    <html lang="en-US" className={googleSans.variable}>
       <body>
         <Providers>
           <AppShell>{children}</AppShell>

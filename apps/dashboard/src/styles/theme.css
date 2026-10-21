@@ -1,34 +1,35 @@
 /*
  * Theme: the one place design tokens live.
- * Values come from Mish "Neutral Product" (design-systems/neutral-product/tokens.css,
- * Apache-2.0, ours). Components use the Tailwind names in @theme below, never raw hex.
+ * Structure from Mish "Neutral Product" (Apache-2.0, ours); values from the 2026-10 redesign
+ * (design/DESIGN.md): warm paper, ink, one evergreen accent. Components use the Tailwind
+ * names in @theme below, never raw hex.
  */
 :root {
   /* Surface */
-  --bg: #f8f8f7;
+  --bg: #f5f4f0;
   --surface: #ffffff;
-  --surface-warm: #f0f0ee;
+  --surface-warm: #efede7;
   /* Foreground */
-  --fg: #16171a;
-  --fg-2: #3a3c41;
-  --muted: #55585f;
-  --meta: #65686f;
+  --fg: #15171a;
+  --fg-2: #363a40;
+  --muted: #555a61;
+  --meta: #62666d;
   /* Border */
-  --border: #dedfdb;
-  --border-soft: #ebebe8;
-  --border-strong: #878a90;
+  --border: #e2e0d9;
+  --border-soft: #ecebe5;
+  --border-strong: #868990;
   /* Accent */
-  --accent: #1e5a78;
+  --accent: #1f5a4c;
   --accent-on: #ffffff;
-  --accent-hover: #194c66;
-  --accent-active: #153f55;
+  --accent-hover: #194b3f;
+  --accent-active: #143d33;
   /* Semantic */
-  --success: #1d7348;
+  --success: #1b7347;
   --warn: #8a5300;
   --danger: #b3261e;
   /* Typography: fonts */
-  --font-display: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
-  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-display: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   /* Typography: scale */
   --text-xs: 12px;
@@ -42,7 +43,7 @@
   /* Typography: leading and tracking */
   --leading-body: 1.55;
   --leading-tight: 1.2;
-  --tracking-display: -0.015em;
+  --tracking-display: -0.022em;
   /* Spacing */
   --space-1: 4px;
   --space-2: 8px;
@@ -57,14 +58,16 @@
   --section-y-tablet: 72px;
   --section-y-phone: 48px;
   /* Radius */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
   --radius-pill: 9999px;
   /* Elevation */
   --elev-flat: none;
   --elev-ring: 0 0 0 1px var(--border);
   --elev-raised: 0 1px 2px rgba(22, 23, 26, 0.06), 0 4px 12px rgba(22, 23, 26, 0.06);
+  /* Card edge: Cult UI Minimal Card's layered hairline (MIT, see NOTICE) */
+  --elev-card: 0 0 0 1px rgba(17, 24, 28, 0.08), 0 1px 2px -1px rgba(17, 24, 28, 0.08), 0 2px 4px rgba(17, 24, 28, 0.04);
   /* Focus: inner gap in the surface color, outer ring in the accent */
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   /* Motion */
@@ -80,50 +83,52 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111214;
-  --surface: #191a1d;
-  --surface-warm: #212226;
-  --fg: #ededeb;
-  --fg-2: #cfd0cd;
-  --muted: #a9abb0;
-  --meta: #979a9f;
-  --border: #2d2f33;
-  --border-soft: #242629;
-  --border-strong: #6f727a;
-  --accent: #6cb4d9;
-  --accent-on: #0b1820;
-  --accent-hover: #86c2e2;
-  --accent-active: #9dcee8;
+  --bg: #101211;
+  --surface: #181a19;
+  --surface-warm: #202321;
+  --fg: #ecebe7;
+  --fg-2: #cfcfca;
+  --muted: #a8aba7;
+  --meta: #969a96;
+  --border: #2b2e2c;
+  --border-soft: #232624;
+  --border-strong: #6e736f;
+  --accent: #7cc8b2;
+  --accent-on: #081712;
+  --accent-hover: #95d4c1;
+  --accent-active: #acdfcf;
   --success: #5cc995;
   --warn: #e2ab4a;
   --danger: #f0857a;
   --elev-ring: 0 0 0 1px var(--border);
   --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
+  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.24);
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #111214;
-    --surface: #191a1d;
-    --surface-warm: #212226;
-    --fg: #ededeb;
-    --fg-2: #cfd0cd;
-    --muted: #a9abb0;
-    --meta: #979a9f;
-    --border: #2d2f33;
-    --border-soft: #242629;
-    --border-strong: #6f727a;
-    --accent: #6cb4d9;
-    --accent-on: #0b1820;
-    --accent-hover: #86c2e2;
-    --accent-active: #9dcee8;
+    --bg: #101211;
+    --surface: #181a19;
+    --surface-warm: #202321;
+    --fg: #ecebe7;
+    --fg-2: #cfcfca;
+    --muted: #a8aba7;
+    --meta: #969a96;
+    --border: #2b2e2c;
+    --border-soft: #232624;
+    --border-strong: #6e736f;
+    --accent: #7cc8b2;
+    --accent-on: #081712;
+    --accent-hover: #95d4c1;
+    --accent-active: #acdfcf;
     --success: #5cc995;
     --warn: #e2ab4a;
     --danger: #f0857a;
     --elev-ring: 0 0 0 1px var(--border);
     --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
+    --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.24);
     --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   }
 }
@@ -139,7 +144,7 @@
 :root {
   --tabbar-height: 64px;
   --topbar-height: 56px;
-  --sidebar-width: 248px;
+  --sidebar-width: 256px;
 }
 
 @theme inline {
@@ -179,6 +184,7 @@
   --radius-pill: var(--radius-pill);
   --shadow-ring: var(--elev-ring);
   --shadow-raised: var(--elev-raised);
+  --shadow-card: var(--elev-card);
   --shadow-focus: var(--focus-ring);
   --ease-standard: var(--ease-standard);
   --container-content: var(--container-max);
