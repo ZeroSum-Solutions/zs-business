@@ -87,7 +87,7 @@ function SourceRows({ label, bySource }: {
   bySource: { source: keyof typeof ORIGIN_LABELS; thisWeek: number; lastWeek: number }[];
 }) {
   return (
-    <ul className="space-y-0.5 border-t border-border-soft pt-2 text-xs" aria-label={`${label} by source`}>
+    <ul className="space-y-1.5 border-t border-border-soft pt-2 text-xs" aria-label={`${label} by source`}>
       {bySource.map((item) => (
         <li key={item.source} className="flex items-baseline justify-between gap-2" data-source={item.source}>
           <span className="min-w-0 text-fg-2">{ORIGIN_LABELS[item.source]}</span>
@@ -137,13 +137,12 @@ function RevenueTile({ data }: { data: HomeResults }) {
             <li key={item.source} data-source={item.source}>
               <div className="flex items-baseline justify-between gap-3 text-sm">
                 <span className="text-fg-2">{revenueSourceLabel(item.source)}</span>
-                <span className="tabular font-medium text-fg">{formatMinor(item.thisWeek, main.currency)}</span>
+                <span className="tabular font-medium text-fg">{formatMinor(item.thisWeek, main.currency)} <span className="text-xs font-normal text-meta">last {formatMinor(item.lastWeek, main.currency)}</span></span>
               </div>
               <div className="mt-1 space-y-0.5" aria-hidden>
                 <div className="h-1.5 rounded-pill bg-accent" style={{ width: `${(item.thisWeek / maxSource) * 100}%` }} />
                 <div className="h-1 rounded-pill bg-fg/20" style={{ width: `${(item.lastWeek / maxSource) * 100}%` }} />
               </div>
-              <p className="sr-only">Same time last week {formatMinor(item.lastWeek, main.currency)}</p>
             </li>
           ))}
         </ul>
@@ -277,7 +276,7 @@ function ChecklistCard() {
                 <span className="sr-only">{item.status === "ok" ? "Connected" : "Needs action"}</span>
               </div>
               {item.actionLabel ? (
-                <Button asChild variant={item.status === "ok" ? "secondary" : "primary"} className="shrink-0">
+                <Button asChild variant="secondary" className="shrink-0">
                   <Link href="/account/connections">{item.actionLabel}</Link>
                 </Button>
               ) : null}

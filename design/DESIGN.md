@@ -116,8 +116,8 @@ tabular figures (`tabular` utility) so counts do not shift as they change.
 ## Layout
 
 A 256px sidebar on wide screens; a six-tab bar with labels on phones. Content sits on a
-12-column grid at `lg`. Touch targets are at least 44px. Home puts the three week results
-first: leads and bookings stack beside the taller revenue tile on a wide screen and sit side
+12-column grid at `lg`. Touch targets are at least 44px. Home opens with a Needs you row,
+then the three week results: leads and bookings stack beside the taller revenue tile on a wide screen and sit side
 by side on a phone.
 
 ## Elevation & Depth

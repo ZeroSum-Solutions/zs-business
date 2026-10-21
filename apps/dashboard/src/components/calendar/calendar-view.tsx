@@ -7,7 +7,6 @@ import { Segmented } from "@/components/ui/segmented";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { bookingCustomerName, type BookingView, type ResourceSummary } from "@/lib/api";
 import { resourceLabel } from "@/lib/resources";
@@ -206,9 +205,7 @@ export function CalendarView() {
 
       <BookingPageCard />
 
-      <Card className="mt-6 bg-surface-warm shadow-none">
-        <p className="text-sm text-muted">Times show in {resource.timeZone.split("/").pop()?.replaceAll("_", " ")} time. A slot is only booked once it is saved, so two people can never take the same time.</p>
-      </Card>
+      <p className="mt-6 text-sm text-meta">Times show in {resource.timeZone.split("/").pop()?.replaceAll("_", " ")} time. A slot is only booked once it is saved, so two people can never take the same time.</p>
 
       <BookingDialog
         open={dialog.open}

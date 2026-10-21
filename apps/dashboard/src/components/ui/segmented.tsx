@@ -22,7 +22,7 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
   const transition = useLayoutTransition();
   return (
     <LayoutGroup id={id}>
-      <div role="group" aria-label={label} className={cn("inline-flex max-w-full overflow-x-auto rounded-pill bg-surface-warm p-1", className)}>
+      <div role="group" aria-label={label} className={cn("inline-flex max-w-full overflow-x-auto rounded-pill bg-bg p-1 shadow-well", className)}>
         {options.map((option) => {
           const active = value === option.value;
           return (
@@ -39,7 +39,7 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
               )}
             >
               {active ? (
-                <motion.span layoutId="pill" transition={transition} aria-hidden className="absolute inset-0 rounded-pill bg-fg/12 shadow-card" />
+                <motion.span layoutId="pill" transition={transition} aria-hidden className="absolute inset-0 rounded-pill bg-surface-warm ring-1 ring-inset ring-border-strong/60" />
               ) : null}
               <span className="relative">{option.label}</span>
             </button>

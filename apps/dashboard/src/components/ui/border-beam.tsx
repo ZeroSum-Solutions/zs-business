@@ -8,7 +8,7 @@ import type { CSSProperties } from "react";
 import { useReducedMotionLive } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
-export function BorderBeam({ size = 80, duration = 8, colorFrom = "var(--success)", colorTo = "#a58bff", borderWidth = 1, className }: {
+export function BorderBeam({ size = 80, duration = 8, colorFrom = "var(--success)", colorTo = "var(--accent)", borderWidth = 1, className }: {
   size?: number;
   duration?: number;
   colorFrom?: string;
@@ -25,7 +25,7 @@ export function BorderBeam({ size = 80, duration = 8, colorFrom = "var(--success
     >
       <motion.div
         className={cn("absolute aspect-square bg-linear-to-l from-(--color-from) via-(--color-to) to-transparent", className)}
-        style={{ width: size, offsetPath: `rect(0 auto auto 0 round ${size}px)`, "--color-from": colorFrom, "--color-to": colorTo } as MotionStyle}
+        style={{ width: size, offsetPath: "rect(0 auto auto 0 round var(--radius-lg))", "--color-from": colorFrom, "--color-to": colorTo } as MotionStyle}
         initial={{ offsetDistance: "0%" }}
         animate={{ offsetDistance: ["0%", "100%"] }}
         transition={{ repeat: Infinity, ease: "linear", duration }}

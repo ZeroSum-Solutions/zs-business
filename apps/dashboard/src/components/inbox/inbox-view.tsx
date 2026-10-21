@@ -319,7 +319,7 @@ function Composer({ thread }: { thread: ThreadDetail }) {
       {save.isError ? <ErrorNote error={save.error} /> : null}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p id="reply-help" className="text-xs text-meta">{help}</p>
-        <Button type="submit" disabled={save.isPending} aria-busy={save.isPending}>Save draft</Button>
+        <Button type="submit" variant="secondary" disabled={save.isPending} aria-busy={save.isPending}>Save draft</Button>
       </div>
     </form>
   );
@@ -410,7 +410,7 @@ export function InboxView({ selectedId }: { selectedId: string | null }) {
               <ThreadPane id={selectedId} />
             </>
           ) : (
-            <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 rounded-lg bg-surface/50 px-6 text-center shadow-[inset_0_0_0_1px_var(--border-soft)]">
+            <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 rounded-lg bg-lit px-6 text-center shadow-card">
               <span aria-hidden className="flex size-12 items-center justify-center rounded-pill bg-accent/12 text-accent ring-1 ring-inset ring-accent/25"><ChatCircleDots size={24} weight="fill" /></span>
               <p className="font-medium text-fg">Pick a conversation</p>
               <p className="max-w-64 text-sm text-muted">Select a conversation to read it and reply.</p>
