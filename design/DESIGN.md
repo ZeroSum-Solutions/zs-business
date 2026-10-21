@@ -136,8 +136,8 @@ Three levels, all from `theme.css`:
 - **Card** (`bg-lit` + `--elev-card`): the surface with a faint top light, Cult UI Minimal
   Card's layered hairline, a white inner top highlight and a deep drop shadow. Lists, threads,
   bookings and review panels are cards too.
-- **Card on hover** (`--elev-card-hover`): a brighter hairline, a deeper shadow, a 2px spring
-  lift, and a pointer light on the edge with a faint glow inside (Magic UI Magic Card).
+- **Card on hover** (`--elev-card-hover`): a brighter hairline, a deeper shadow and a 2px spring
+  lift. No light follows the pointer (removed at the owner's request, 2026-10-21).
 
 Rows inside a card use `border-soft` dividers, not their own shadows. Nothing else casts a
 shadow.
@@ -161,8 +161,7 @@ badges, segmented switches and the tab-bar indicator.
   in violet, the same time last week in grey) instead.
 - **Needs you** (Home): three linked cards first on every screen: waiting conversations, the
   next appointment, and connections that need action.
-- **Card** (Cult UI Minimal Card + Magic UI Magic Card, MIT): hairline card with the pointer
-  light and spring lift (`card-live`).
+- **Card** (Cult UI Minimal Card, MIT): hairline card with a spring lift on hover (`card-live`).
 - **Avatar** (Cult UI Collab Avatar, MIT): initials on a tinted pop colour picked from the
   name, glossy top light, spring entrance. Inbox, customers, appointments, account.
 - **Border beam** (Magic UI, MIT): a blue-to-violet light that travels the edge. One per page,

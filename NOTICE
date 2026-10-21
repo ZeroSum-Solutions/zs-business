@@ -11,8 +11,7 @@ Dashboard UI components (apps/dashboard), adapted under the MIT License below:
 
 - Magic UI (https://magicui.design, github.com/magicuidesign/magicui)
   Copyright (c) Magic UI
-  Ported: "Magic Card" pointer light (app/globals.css card-live, lib/spotlight.ts),
-  "Border Beam" (components/ui/border-beam.tsx).
+  Ported: "Border Beam" (components/ui/border-beam.tsx).
 
 - 21st.dev "Animated Sidebar" by @starc007 (https://21st.dev/starc007)
   Copyright (c) @starc007

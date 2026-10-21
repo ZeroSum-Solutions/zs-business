@@ -84,8 +84,6 @@
   /* Text fields: a well whose edge meets 3:1 against the card (WCAG 1.4.11). */
   --elev-field: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px var(--border-strong);
   /* Pointer light on live cards (globals.css card-live) */
-  --spot-edge: rgb(255 255 255 / 0.7);
-  --spot-glow: rgb(255 255 255 / 0.06);
   /* Avatar initials: how much ink is mixed into the pop so it reads on the fill */
   --avatar-ink: 0%;
   --avatar-drop: rgb(0 0 0 / 0.4);
@@ -150,8 +148,6 @@
   --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
   --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
   --elev-field: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px var(--border-strong);
-  --spot-edge: color-mix(in oklab, var(--accent), transparent 35%);
-  --spot-glow: color-mix(in oklab, var(--accent), transparent 88%);
   --avatar-ink: 60%;
   --avatar-drop: rgb(16 16 24 / 0.08);
   --overlay: rgb(11 11 13 / 0.35);
@@ -192,8 +188,6 @@
     --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
     --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
     --elev-field: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px var(--border-strong);
-    --spot-edge: color-mix(in oklab, var(--accent), transparent 35%);
-    --spot-glow: color-mix(in oklab, var(--accent), transparent 88%);
     --avatar-ink: 60%;
     --avatar-drop: rgb(16 16 24 / 0.08);
     --overlay: rgb(11 11 13 / 0.35);

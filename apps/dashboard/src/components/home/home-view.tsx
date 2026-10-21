@@ -16,7 +16,6 @@ import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
 import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
-import { spotlight } from "@/lib/spotlight";
 import { formatDay, formatRange, formatTime } from "@/lib/time";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
 
@@ -382,7 +381,6 @@ function NeedsYou() {
         <Link
           key={item.href}
           href={item.href}
-          onPointerMove={spotlight}
           className="card-live flex min-h-16 items-center gap-3 rounded-lg bg-lit p-3 shadow-card lg:p-4"
         >
           <span aria-hidden className={cn("flex size-10 shrink-0 items-center justify-center rounded-md ring-1 ring-inset", item.tone)}>

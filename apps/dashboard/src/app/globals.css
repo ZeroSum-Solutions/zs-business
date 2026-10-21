@@ -70,39 +70,16 @@
   transition-timing-function: var(--ease-standard);
 }
 
-/* Adapted from Magic UI "Magic Card" (MIT; see NOTICE): a light on the edge and a soft glow
-   inside that follow the pointer (CSS variables set by lib/spotlight.ts instead of motion values),
-   plus a spring lift. Pointer devices only; reduced motion keeps the light and drops the lift. */
+/* Hover on a pointer device: a deeper shadow and a 2px spring lift. Reduced motion keeps the
+   shadow and drops the lift. */
 @utility card-live {
+  /* Positioned so a border beam or badge inside can sit on the card's edge. */
   position: relative;
   isolation: isolate;
   transition: transform var(--motion-spring) var(--ease-spring), box-shadow var(--motion-base) var(--ease-standard);
-  &::before,
-  &::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity var(--motion-base) var(--ease-standard);
-  }
-  &::before {
-    padding: 1px;
-    background: radial-gradient(240px circle at var(--spot-x, 50%) var(--spot-y, 0px), var(--spot-edge), color-mix(in oklab, var(--accent), transparent 70%) 45%, transparent 75%);
-    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
-  }
-  &::after {
-    z-index: -1;
-    background: radial-gradient(360px circle at var(--spot-x, 50%) var(--spot-y, 0px), var(--spot-glow), transparent 70%);
-  }
   @media (hover: hover) {
     &:hover {
       box-shadow: var(--elev-card-hover);
-    }
-    &:hover::before,
-    &:hover::after {
-      opacity: 1;
     }
   }
   @media (hover: hover) and (prefers-reduced-motion: no-preference) {

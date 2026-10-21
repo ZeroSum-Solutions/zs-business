@@ -16,7 +16,6 @@ import {
   useState,
 } from "react";
 import { useReducedMotionLive } from "@/lib/motion";
-import { spotlight } from "@/lib/spotlight";
 import { cn } from "@/lib/utils";
 
 export type KpiTileProps = {
@@ -221,7 +220,6 @@ export function KpiTile({
       data-slot="kpi-tile"
       data-testid={testId}
       onPointerLeave={scrub ? letGo : undefined}
-      onPointerMove={spotlight}
     >
       {decoration}
       <h2 className={LABEL} id={`${id}-label`}>
