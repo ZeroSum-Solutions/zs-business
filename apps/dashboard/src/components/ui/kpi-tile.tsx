@@ -14,18 +14,9 @@ import {
   useEffect,
   useId,
   useState,
-  useSyncExternalStore,
 } from "react";
+import { useReducedMotionLive } from "@/lib/motion";
 import { cn } from "@/lib/utils";
-
-const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
-const reducesMotion = () => !!window.matchMedia?.(REDUCED_MOTION).matches;
-/** Follows the setting while mounted (Motion's own hook reads it once). */
-function watchMotion(change: () => void) {
-  const query = window.matchMedia?.(REDUCED_MOTION);
-  query?.addEventListener("change", change);
-  return () => query?.removeEventListener("change", change);
-}
 
 export type KpiTileProps = {
   /** What is measured, e.g. "Revenue"; also the tile's accessible name. */
@@ -44,6 +35,11 @@ export type KpiTileProps = {
   trendLabels?: readonly string[];
   /** New values keep coming: the newest point pulses. */
   live?: boolean;
+  /**
+   * Pointer and arrow keys on the line show a point's value in the headline. Off when the change
+   * chip would then describe another period than the headline. Default: on.
+   */
+  scrub?: boolean;
   /** Skeletons while the first numbers load. */
   loading?: boolean;
   className?: string;
@@ -81,7 +77,7 @@ const tween = (duration: number) => ({ duration, ease: EASE });
 const [ROLL, MORPH, DRAW] = [tween(0.6), tween(0.5), tween(0.9)] as const;
 const SKELETON = "skeleton block";
 const VALUE =
-  "font-semibold text-3xl text-fg tabular-nums leading-none tracking-display";
+  "min-w-0 break-all font-semibold text-2xl text-fg tabular-nums leading-none tracking-display sm:text-3xl";
 const TILE =
   "flex min-w-0 flex-col gap-3 rounded-lg bg-surface p-4 text-fg shadow-card lg:p-5";
 const LABEL = "truncate font-medium text-muted text-sm";
@@ -139,6 +135,7 @@ export function KpiTile({
   trend = [],
   trendLabels,
   live = false,
+  scrub = true,
   loading = false,
   className,
   formatDelta = (change) => `${Math.abs(change).toFixed(1)}%`,
@@ -147,7 +144,7 @@ export function KpiTile({
   children,
 }: KpiTileProps) {
   // The server cannot know it: hydration starts with motion, then follows the setting.
-  const reduced = useSyncExternalStore(watchMotion, reducesMotion, () => false);
+  const reduced = useReducedMotionLive();
   const id = useId();
   const [active, setActive] = useState(null as number | null);
   const points = placePoints(trend, trendLabels);
@@ -214,7 +211,7 @@ export function KpiTile({
       className={cn(TILE, className)}
       data-slot="kpi-tile"
       data-testid={testId}
-      onPointerLeave={letGo}
+      onPointerLeave={scrub ? letGo : undefined}
     >
       <h2 className={LABEL} id={`${id}-label`}>
         {label}
@@ -268,8 +265,8 @@ export function KpiTile({
             <svg
               aria-hidden="true"
               className="block size-full touch-pan-y overflow-visible"
-              onPointerDown={pick}
-              onPointerMove={pick}
+              onPointerDown={scrub ? pick : undefined}
+              onPointerMove={scrub ? pick : undefined}
               preserveAspectRatio="none"
               viewBox={`0 0 ${W} ${H}`}
             >
@@ -338,7 +335,7 @@ export function KpiTile({
                 style={spot(point)}
               />
             ) : null}
-            {points.length > 1 && read ? (
+            {scrub && points.length > 1 && read ? (
               <input
                 aria-label={`${label} trend`}
                 aria-valuetext={`${read.label}: ${format(read.value)}`}

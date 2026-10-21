@@ -99,7 +99,9 @@ danger #f0857a.
 
 ## Typography
 
-Google Sans for everything, self-hosted by `next/font` (no request to Google at run time).
+Google Sans for everything, self-hosted by `next/font` (no request to Google at run time). The
+offline service worker keeps pages, scripts and styles but not fonts, so a cold offline open
+shows the system font, which is what the dashboard used before this redesign.
 Page titles are 28px on a phone and 36px on a wide screen, with -0.022em tracking. Numbers use
 tabular figures (`tabular` utility) so counts do not shift as they change.
 
@@ -123,7 +125,8 @@ badges, segmented switches and the tab-bar indicator.
 ## Components
 
 - **KPI tile** (21st.dev KPI Tile, MIT): value with a rolling number, a change chip and a
-  two-point sparkline for this week against the same span last week.
+  two-point sparkline for this week against the same span last week. Home turns scrubbing off
+  (`scrub={false}`): with two points, scrubbing put last week's value beside this week's change.
 - **Navigation** (21st.dev Animated Sidebar, MIT): a hover pill that glides between items and
   a sliding indicator on the current item; the phone tab bar uses the same indicator.
 - **Segmented and view tabs** (Cult UI Halo Tabs, MIT): a sliding pill for pressed-button

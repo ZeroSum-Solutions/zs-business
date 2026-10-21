@@ -55,5 +55,9 @@ Rejected: 21st.dev Bottom Nav Bar (no licence stated).
 - Devin signs G4 on the rendered first journey (shell + Home + Connections), then G5.
 
 ## Open risks
+- G4 question for Devin: Home still leads with the week's results, as before the redesign. On a
+  390x844 phone, "Next appointments" starts below the first screen, so the "what needs me now"
+  criterion is not met yet. Leading with appointments and connections instead is a product
+  priority call, not a style fix, so it waits for G4.
 - Motion adds a dependency (`motion`); keep it to transform/opacity and honour reduced motion.
 - Snapshot-style e2e assertions on classes or layout may need updates; behaviour must not.

@@ -7,7 +7,6 @@ import {
   AnimatePresence,
   type HTMLMotionProps,
   motion,
-  useReducedMotion,
   type Variants,
 } from "motion/react";
 import {
@@ -23,7 +22,7 @@ import {
   useId,
   useState,
 } from "react";
-import { SPRING_LAYOUT } from "@/lib/motion";
+import { SPRING_LAYOUT, useReducedMotionLive } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 export interface SharedLayoutBgProps
@@ -68,7 +67,8 @@ export const SharedLayoutBg = forwardRef<HTMLElement, SharedLayoutBgProps>(
   ) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const uid = useId();
-  const reduce = useReducedMotion();
+  // Live, not useReducedMotion: that one reads the setting once at mount.
+  const reduce = useReducedMotionLive();
 
     const renderedChildren = Children.toArray(children)
       .filter(isValidElement)

@@ -7,7 +7,7 @@
 import { LayoutGroup, motion } from "motion/react";
 import Link from "next/link";
 import { useId } from "react";
-import { SPRING_LAYOUT } from "@/lib/motion";
+import { useLayoutTransition } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 
 /** A pressed-button group with a pill that slides to the chosen option. */
@@ -19,9 +19,10 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
   className?: string;
 }) {
   const id = useId();
+  const transition = useLayoutTransition();
   return (
     <LayoutGroup id={id}>
-      <div role="group" aria-label={label} className={cn("inline-flex rounded-pill bg-surface-warm p-1", className)}>
+      <div role="group" aria-label={label} className={cn("inline-flex max-w-full overflow-x-auto rounded-pill bg-surface-warm p-1", className)}>
         {options.map((option) => {
           const active = value === option.value;
           return (
@@ -31,12 +32,12 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
               aria-pressed={active}
               onClick={() => onChange(option.value)}
               className={cn(
-                "relative min-h-11 rounded-pill px-4 text-sm font-medium transition-quick",
+                "relative min-h-11 shrink-0 rounded-pill px-3 text-sm font-medium whitespace-nowrap transition-quick",
                 active ? "text-fg" : "text-muted hover:text-fg",
               )}
             >
               {active ? (
-                <motion.span layoutId="pill" transition={SPRING_LAYOUT} aria-hidden className="absolute inset-0 rounded-pill bg-surface shadow-card" />
+                <motion.span layoutId="pill" transition={transition} aria-hidden className="absolute inset-0 rounded-pill bg-surface shadow-card" />
               ) : null}
               <span className="relative">{option.label}</span>
             </button>
@@ -55,6 +56,7 @@ export function ViewTabs({ label, current, tabs, className }: {
   className?: string;
 }) {
   const id = useId();
+  const transition = useLayoutTransition();
   return (
     <LayoutGroup id={id}>
       <nav aria-label={label} className={cn("flex gap-1 border-b border-border", className)}>
@@ -72,7 +74,7 @@ export function ViewTabs({ label, current, tabs, className }: {
             >
               {tab.label}
               {active ? (
-                <motion.span layoutId="underline" transition={SPRING_LAYOUT} aria-hidden className="absolute inset-x-0 -bottom-px h-0.5 rounded-pill bg-accent" />
+                <motion.span layoutId="underline" transition={transition} aria-hidden className="absolute inset-x-0 -bottom-px h-0.5 rounded-pill bg-accent" />
               ) : null}
             </Link>
           );

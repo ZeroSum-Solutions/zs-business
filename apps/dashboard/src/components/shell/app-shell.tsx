@@ -12,7 +12,7 @@ import { AccountMenu, OWNER } from "./account-menu";
 import { isActive, NAV_ITEMS } from "./nav";
 import { SessionGate } from "./session-gate";
 import { SharedLayoutBg } from "@/components/ui/shared-layout-bg";
-import { SPRING_LAYOUT } from "@/lib/motion";
+import { useLayoutTransition } from "@/lib/motion";
 
 function Brand() {
   return (
@@ -35,6 +35,8 @@ function useInboxCount(): number {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  // MotionConfig reads reduced motion once; this follows a change made while the app is open.
+  const layoutTransition = useLayoutTransition();
   const waiting = useInboxCount();
   const { mode } = useApiRuntime();
 
@@ -65,7 +67,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               const active = isActive(pathname, item.href);
               return (
                 <li key={item.href}>
-                  {active ? <motion.span layoutId="nav-active" transition={SPRING_LAYOUT} aria-hidden className="absolute inset-0 rounded-md bg-accent/10" /> : null}
+                  {active ? <motion.span layoutId="nav-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-md bg-accent/10" /> : null}
                   <Link
                     href={item.href}
                     aria-current={active ? "page" : undefined}
@@ -117,7 +119,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   )}
                 >
                   <span className="relative flex h-8 w-14 items-center justify-center">
-                    {active ? <motion.span layoutId="tab-active" transition={SPRING_LAYOUT} aria-hidden className="absolute inset-0 rounded-pill bg-accent/12" /> : null}
+                    {active ? <motion.span layoutId="tab-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-accent/12" /> : null}
                     <item.icon size={24} weight={active ? "fill" : "regular"} aria-hidden className="relative" />
                     {item.href === "/inbox" && waiting > 0 ? (
                       <span className="absolute top-0 right-2 min-w-4 rounded-pill bg-accent px-1 text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${waiting} need attention`}>

@@ -1,6 +1,8 @@
 // Motion tokens from 21st.dev "Animated Sidebar" by @starc007 (MIT; see NOTICE). Springs for
 // shared-layout glides (nav pills and indicators); CSS durations live in theme.css.
 
+import { useSyncExternalStore } from "react";
+
 export const EASE_OUT = [0.16, 1, 0.3, 1] as const;
 export const EASE_IN_OUT = [0.77, 0, 0.175, 1] as const;
 export const EASE_DRAWER = [0.32, 0.72, 0, 1] as const;
@@ -54,3 +56,24 @@ export const SPRING_GLIDE = {
   damping: 50,
   mass: 0.5,
 } as const;
+
+const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
+const reducesMotion = () => !!window.matchMedia?.(REDUCED_MOTION).matches;
+/** Follows the setting while mounted (Motion's own hook and MotionConfig read it once). */
+function watchMotion(change: () => void) {
+  const query = window.matchMedia?.(REDUCED_MOTION);
+  query?.addEventListener("change", change);
+  return () => query?.removeEventListener("change", change);
+}
+
+/** Whether the owner asked for reduced motion, updated live. The server render assumes motion. */
+export function useReducedMotionLive(): boolean {
+  return useSyncExternalStore(watchMotion, reducesMotion, () => false);
+}
+
+const INSTANT = { duration: 0 } as const;
+
+/** SPRING_LAYOUT, or an instant move under reduced motion. */
+export function useLayoutTransition() {
+  return useReducedMotionLive() ? INSTANT : SPRING_LAYOUT;
+}

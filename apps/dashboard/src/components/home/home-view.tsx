@@ -37,6 +37,7 @@ function WeekTile({ id, label, compare, format, valueTestId, className, children
   const change = weekChange(compare.thisWeek, compare.lastWeek);
   return (
     <KpiTile
+      scrub={false}
       testId={`tile-${id}`}
       valueTestId={valueTestId}
       label={label}
