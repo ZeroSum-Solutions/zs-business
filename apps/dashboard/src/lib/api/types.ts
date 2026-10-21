@@ -2,6 +2,8 @@ import type {
   BookingPageSummary,
   BookingRecord,
   BookingSummary,
+  CalendarConnection,
+  CalendarConnectionStatus,
   ConsentEvidence,
   ContactRecord,
   CreateBookingRequest,
@@ -20,6 +22,7 @@ import type {
   IntakeItemRecord,
   IntakeStatus,
   LeadSource,
+  PendingGoogleConnect,
   PipelineSummary,
   ReplyEntry,
   ReplyRecord,
@@ -47,6 +50,8 @@ import type { WorkspaceApi } from "./workspace-types";
 export type {
   BookingPageSummary,
   BookingRecord,
+  CalendarConnection,
+  CalendarConnectionStatus,
   ConsentEvidence,
   ContactRecord,
   DealRecord,
@@ -63,6 +68,7 @@ export type {
   IntakeItemRecord,
   IntakeStatus,
   LeadSource,
+  PendingGoogleConnect,
   PipelineSummary,
   ReplyEntry,
   ReplyRecord,
@@ -349,12 +355,42 @@ export interface SitesApi {
   syncSite(siteId: string): Promise<SiteSyncResponse>;
 }
 
+/**
+ * Google Calendar busy sync (google-calendar.md G-1, G-2, G-5). Members with `calendar` read the
+ * connections; owners (`publish`) connect and disconnect. A connect changes nothing on the
+ * server: it answers the Google consent URL. When Google sends the owner back, the grant waits
+ * in this browser until the owner confirms the Google account it names on the Connections page.
+ */
+export interface CalendarSyncApi {
+  /** Every connection of the business, retired ones included, never a token. */
+  listCalendarConnections(options?: ReadOptions): Promise<CalendarConnection[]>;
+  /**
+   * The URL that starts connecting this booking resource. Throws `not_found` when the server
+   * has no Google settings. It writes nothing, so each attempt takes a fresh key.
+   */
+  startGoogleConnect(resourceId: string, options: WriteOptions): Promise<{ authorizeUrl: string }>;
+  /** The grant Google gave this browser that waits for the owner, or null when there is none. */
+  getPendingGoogleConnect(options?: ReadOptions): Promise<PendingGoogleConnect | null>;
+  /**
+   * Connects the waiting grant the owner was shown, named by its `grantId`. Throws `not_found`
+   * when it is gone or expired, `conflict` with reason `grant_changed` when another grant has
+   * replaced it (nothing connects; read the pending grant again), and `conflict` when its
+   * connection was retired or its calendar changed. Safe to repeat: the server keys it by the
+   * grant, so it takes no key from the caller.
+   */
+  confirmGoogleConnect(grantId: string): Promise<CalendarConnection>;
+  /** Drops the waiting grant; nothing is connected. */
+  discardGoogleConnect(): Promise<void>;
+  /** Hands the connection to the worker to clean up; a retired one answers as it is. */
+  disconnectCalendar(connectionId: string, options: WriteOptions): Promise<CalendarConnection>;
+}
+
 /** Customers per page of the customer list. */
 export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & WorkspaceApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & CalendarSyncApi & WorkspaceApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

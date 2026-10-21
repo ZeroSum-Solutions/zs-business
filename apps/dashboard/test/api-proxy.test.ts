@@ -138,11 +138,12 @@ describe("api proxy", () => {
     expect((await proxyApiRequest(request(behindProxy), contacts, trusted)).status).toBe(200);
   });
 
-  it("forwards only the booking, CRM, intake, member, approval, source, inbox, home, agent, site and /me routes, with GET, POST, PUT and DELETE", async () => {
+  it("forwards only the booking, CRM, intake, member, approval, source, inbox, home, agent, site, calendar and /me routes, with GET, POST, PUT and DELETE", async () => {
     const { harness, jar, get, post } = await signedIn();
     for (const path of [
       ["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"], ["v1", "me", "x"],
       ["v1", "approvals", ".."], ["v1", "approval"], ["v1", "inbox"], ["v1", "home"], ["v1", "agents"], ["v1", "agent", "followup"],
+      ["v1", "calendar"], ["oauth", "google", "callback"],
     ]) {
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(404);
     }
@@ -155,7 +156,7 @@ describe("api proxy", () => {
       ["v1", "me"], ["v1", "members"], ["v1", "approvals"], ["v1", "approvals", "a-1"], ["v1", "sources"],
       ["v1", "inbox", "threads"], ["v1", "inbox", "threads", "c_x"], ["v1", "home", "results"],
       ["v1", "agents", "followup"], ["v1", "agents", "followup", "runs"], ["v1", "agents", "followup", "runs", "r-1"],
-      ["v1", "sites"], ["v1", "sites", "s-1", "releases"],
+      ["v1", "sites"], ["v1", "sites", "s-1", "releases"], ["v1", "calendar", "connections"],
     ])
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
     const approve = await proxyApiRequest(post("v1/approvals/a-1/approve", {}, { "Idempotency-Key": "k-a", Origin: ORIGIN }), ["v1", "approvals", "a-1", "approve"], harness.setup);

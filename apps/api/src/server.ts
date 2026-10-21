@@ -99,7 +99,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         channelSecret: env.google.channelSecret,
         report: (event) => {
           // A forged state or a refused grant may need an operator; the rest are routine.
-          if (event.route === "callback" && !["connected", "denied"].includes(event.outcome)) console.warn("Google OAuth callback", event);
+          if (event.route === "callback" && !["connected", "staged", "denied"].includes(event.outcome)) console.warn("Google OAuth callback", event);
         },
       },
     }),

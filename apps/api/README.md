@@ -123,7 +123,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `RESEND_WEBHOOK_PREVIOUS_SECRET` | Optional, during a rotation: events signed with it still verify. Needs `RESEND_WEBHOOK_SECRET`. |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_LIVEMODE`, `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL` | Stripe wallet top-ups (stripe.md S-9), all or none. None set: top-ups and `POST /webhooks/stripe` are off. A secret or restricted key (`sk_`/`rk_`), the endpoint's `whsec_` secret, `true` or `false` matching the key's mode, and https return URLs. |
 | `STRIPE_WEBHOOK_PREVIOUS_SECRET`, `STRIPE_CURRENCY`, `STRIPE_TOPUP_MIN`, `STRIPE_TOPUP_MAX`, `STRIPE_API_VERSION`, `STRIPE_BASE_URL` | Optional: a rotation secret, `usd`, 500 and 50000 minor units, the account's default API version, `https://api.stripe.com`. |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY`, `GOOGLE_CHANNEL_SECRET` | Google Calendar busy sync (google-calendar.md G-12), all or none. None set: connecting, `GET /oauth/google/callback` and `POST /webhooks/google/calendar` are off. The OAuth web client's ID and secret; `https://<api host>/oauth/google/callback` (also registered in Google Cloud); the dashboard page the callback lands on; a state signing secret (32+ characters); base64 of the DER SPKI of the X25519 key whose private half only the calendar runner holds; the push channel secret (32+ characters, the same as the runner's). URLs must be https (plain http only on loopback). |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY`, `GOOGLE_CHANNEL_SECRET` | Google Calendar busy sync (google-calendar.md G-12), all or none. None set: connecting, `GET /oauth/google/callback` and `POST /webhooks/google/calendar` are off. The OAuth web client's ID and secret; `https://<dashboard host>/api/calendar/google/callback` (also registered in Google Cloud; the dashboard forwards to `/oauth/google/callback` here); `https://<dashboard host>/account/connections`; a state signing secret (32+ characters); base64 of the DER SPKI of the X25519 key whose private half only the calendar runner holds; the push channel secret (32+ characters, the same as the runner's). URLs must be https (plain http only on loopback). |
 | `GOOGLE_STATE_PREVIOUS_SECRET`, `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | Optional: a rotation secret (states it signed keep verifying for their 10 minutes), and base URLs for tests (`https://accounts.google.com`, `https://oauth2.googleapis.com`, `https://www.googleapis.com`). |
 | `TWILIO_AUTH_TOKEN` | The Twilio account's auth token (32 hex), which verifies `X-Twilio-Signature`. Unset, the `/webhooks/twilio` routes are off. Needs `TWILIO_ACCOUNT_SID` and `TWILIO_WEBHOOK_BASE_URL`. |
 | `TWILIO_PREVIOUS_AUTH_TOKEN` | Optional, during a rotation (Twilio's secondary token): webhooks signed with it still verify. |
@@ -232,8 +232,10 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
 | `GET /v1/wallet/top-ups` | `{ items: TopUp[] }`, newest first, at most 20; owners only |
 | `POST /v1/wallet/top-ups` | `{ amount }` in minor units with `Idempotency-Key`: 201 `{ topup, checkoutUrl }` (stripe.md S-1, S-2). The same key replays the same top-up and Checkout Session. 409 `topup_closed` once the top-up is no longer pending or 25 minutes old; 409 `wallet_currency` when the wallet already holds another currency; 503 when Stripe is unreachable or busy (retry with the same key); 404 when Stripe is not configured. Owners only |
-| `GET /v1/calendar/connections` | `{ items: CalendarConnection[] }`, newest first, at most 100: `{ id, provider, resourceId, calendarId, accountEmail, status, lastSyncedAt, lastError, createdAt }`, never a token (google-calendar.md G-5). Owners and staff |
-| `POST /v1/calendar/google/connect` `{ resourceId }` | With `Idempotency-Key`: 200 `{ authorizeUrl }`, `Cache-Control: no-store` (G-1). Changes nothing: send the browser there. The connection ID derives from the tenant and the key; the URL carries a signed state (10 minutes) and a PKCE challenge. 409 `idempotency_key_reused` once the key's connection exists for another resource or is no longer active; 403 for another tenant's resource; 404 when Google is not configured. Owners only (`publish`) |
+| `GET /v1/calendar/connections` | `{ items: CalendarConnection[] }`, newest first: every connection not `disconnected`, and the newest 100 `disconnected` ones: `{ id, provider, resourceId, calendarId, accountEmail, status, lastSyncedAt, lastError, createdAt }`, never a token (google-calendar.md G-5). Owners and staff |
+| `POST /v1/calendar/google/connect` `{ resourceId, browserBinding }` | With `Idempotency-Key`: 200 `{ authorizeUrl }`, `Cache-Control: no-store` (G-1). Changes nothing: send the browser there. `browserBinding` is the SHA-256 (base64url) of the key the dashboard keeps in the browser's cookie; the dashboard's proxy sets it. The connection ID derives from the tenant and the key; the URL carries a signed state (10 minutes, bound to that browser) and a PKCE challenge. 409 `idempotency_key_reused` once the key's connection exists for another resource or is no longer active; 403 for another tenant's resource; 404 when Google is not configured. Owners only (`publish`) |
+| `GET /v1/calendar/google/pending` | 200 `{ grantId, resourceId, accountEmail, expiresAt }` (`grantId`: SHA-256 of the grant's token), `Cache-Control: no-store`: the grant the OAuth callback staged, from the `X-Zs-Pending-Grant` header the dashboard's proxy sets from its `zs-calendar-grant` cookie (G-2). 404 for a missing, forged or expired grant, one that names another member or tenant, or when Google is not configured. Owners only |
+| `POST /v1/calendar/google/confirm` `{ grantId }` | No `Idempotency-Key`: 200 `CalendarConnection`. `grantId` names the grant the page showed; another grant in the header answers 409 `grant_changed` and connects nothing. Connects the staged grant (same header) by running `calendar.google.connect` as the signed-in member under the reserved key `oauth-google:<connection id>`, so a repeat replays (G-2). 409 `reason=conflict` when that connection exists but is no longer `active` for the grant's resource; 404 as for `pending`. Owners only |
 | `POST /v1/calendar/connections/:id/disconnect` | With `Idempotency-Key`: 200 `{ actionId, result: CalendarConnection }` (G-5). `active` or `reauthorize` becomes `disconnecting` (the calendar runner revokes the grant and removes its blocks); `disconnecting` and `disconnected` answer as they are. 404 for an unknown or another tenant's connection. Owners only |
 
 Staff cannot invite, remove or change roles, including their own. An invite is a pending row
@@ -256,7 +258,7 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
-`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`;
+`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`, `grant_changed` (a Google grant replaced since the page showed it);
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.
@@ -406,25 +408,32 @@ its ID in `stripe_events`. It moves no money: the billing runner does (below).
 
 ## Google OAuth callback (`/oauth/google/callback`, no auth)
 
-Google sends the owner's browser here after the consent screen (google-calendar.md G-2). On only
-when the `GOOGLE_*` variables are set. The request is anonymous: what it may do comes from the
-signed `state` alone (tenant, member, resource, connection ID, 10-minute expiry; current or
-previous `GOOGLE_STATE_SECRET`). With a valid state it exchanges the code with the PKCE verifier
+Google sends the owner's browser to the dashboard's `/api/calendar/google/callback`
+(`GOOGLE_REDIRECT_URL`), which calls this route with `state`, `code` and `error` and the browser
+key from that browser's `zs-calendar-connect` cookie in `X-Zs-Browser-Key` (google-calendar.md
+G-2). On only when the `GOOGLE_*` variables are set. The request is anonymous: what it may do
+comes from the signed `state` (tenant, member, resource, connection ID, browser binding, 10-minute
+expiry; current or previous `GOOGLE_STATE_SECRET`) and that key, whose SHA-256 must be the state's
+binding. With a valid state and key it exchanges the code with the PKCE verifier
 derived for that connection, seals the refresh token with `GOOGLE_TOKEN_PUBLIC_KEY` for that
-tenant and connection, drops the access token, and runs `calendar.google.connect` as the member
-the state names, under the reserved key `oauth-google:<connection id>`. That member must still be
-an owner. Connecting a resource that already has a connection moves the old one to
-`disconnecting`. Every answer is `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+tenant and connection, drops the access token, and stages the grant: a signed token (state secret,
+10 minutes) in the `X-Zs-Pending-Grant` header, never in the address. It connects nothing; the
+owner confirms the Google account it names on the Connections page (`POST
+/v1/calendar/google/confirm`), since a callback URL can be finished by someone else and relayed.
+Connecting a resource that already has a connection moves the old one to `disconnecting`. Every
+answer is `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 
 | Answer | When |
 |---|---|
 | 400 `ValidationFailed` | Missing, forged, tampered or expired `state`. No redirect: nothing proves where the caller came from. |
-| 303 to `GOOGLE_RETURN_URL?calendar=connected` | Connected, or a reload of a callback that already connected (the code is not sent again). |
-| 303 to `…?calendar=error&reason=denied` | Google sent `error` (the owner declined). |
+| 303 to `GOOGLE_RETURN_URL?calendar=confirm` | Google granted; the grant is staged in `X-Zs-Pending-Grant` for the owner to confirm. |
+| 303 to `GOOGLE_RETURN_URL?calendar=connected` | A reload of a callback whose connection is active (the code is not sent again). |
+| 303 to `…?calendar=error&reason=browser_mismatch` | No browser key, or not the one the state was bound to: the flow was finished in another browser. Checked before anything else, Google's `error` included. |
+| `reason=denied` | Google sent `error` (the owner declined). |
 | `reason=exchange_failed` | No code, or Google refused or did not answer the exchange. |
 | `reason=no_refresh_token`, `reason=scope_missing` | Google granted no refresh token, or not `calendar.events`. Nothing is stored. |
 | `reason=forbidden` | The member is no longer an owner of the tenant, or the resource is gone. Checked before the code is spent. |
-| `reason=conflict` | Another connect for the same resource committed at the same moment. |
+| `reason=conflict` | The connection already exists but is no longer active for this resource. |
 | 503 `Unavailable` | The database did not answer. |
 
 ## Google Calendar webhook (`/webhooks/google/calendar`, no auth)

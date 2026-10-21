@@ -2,6 +2,10 @@ import { z } from "zod";
 import {
   bookingPageSchema,
   bookingPageSummarySchema,
+  calendarConnectionListSchema,
+  calendarConnectionSchema,
+  connectGoogleCalendarResponseSchema,
+  pendingGoogleConnectSchema,
   intakeItemOutputSchema,
   intakeItemPageSchema,
   contactPageSchema,
@@ -47,6 +51,7 @@ import {
   toUpsertContactRequest,
   type AgentsApi,
   type BookingApi,
+  type CalendarSyncApi,
   type CrmApi,
   type HomeApi,
   type InboxApi,
@@ -64,7 +69,7 @@ export interface HttpClientConfig {
   fetch?: typeof fetch;
 }
 
-type Method = "GET" | "POST" | "PUT";
+type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 interface RequestSpec<T extends z.ZodType> {
   method: Method;
@@ -72,8 +77,13 @@ interface RequestSpec<T extends z.ZodType> {
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   idempotencyKey?: string;
-  /** A POST that changes nothing (a preview), so it takes no Idempotency-Key. */
-  readOnly?: boolean;
+  /**
+   * Why a request other than a GET takes no Idempotency-Key; every other write needs one from
+   * the caller. `read_only`: it changes nothing (a preview). `server_keyed`: the server runs it
+   * under a key it derives itself (confirming a staged Google grant uses the grant's). `repeatable`:
+   * repeating it leaves the same state (dropping a cookie).
+   */
+  keyless?: "read_only" | "server_keyed" | "repeatable";
   schema: T;
   signal?: AbortSignal | undefined;
 }
@@ -81,6 +91,8 @@ interface RequestSpec<T extends z.ZodType> {
 const resourceListSchema = z.object({ items: z.array(resourceSummarySchema) });
 const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
 const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema) });
+/** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
+const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
 
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
@@ -90,7 +102,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & CalendarSyncApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -106,7 +118,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     const token = config.getToken?.() ?? null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (spec.body !== undefined) headers["Content-Type"] = "application/json";
-    if (spec.method !== "GET" && !spec.readOnly) {
+    if (spec.method !== "GET" && !spec.keyless) {
       // The caller owns the key, so a retry can reuse it. A made-up key would turn a retry
       // after a lost answer into a second write.
       if (!spec.idempotencyKey) throw new TypeError(`${spec.method} ${spec.path} needs an Idempotency-Key from the caller`);
@@ -130,11 +142,14 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     }
 
     let json: unknown;
-    try {
-      json = await response.json();
-    } catch {
-      if (!response.ok) throw errorFromBody(response.status, null);
-      throw new ApiError("invalid_response", defaultMessage("invalid_response"), response.status);
+    // 204 has no body; the schema says whether that is the expected answer.
+    if (response.status !== 204) {
+      try {
+        json = await response.json();
+      } catch {
+        if (!response.ok) throw errorFromBody(response.status, null);
+        throw new ApiError("invalid_response", defaultMessage("invalid_response"), response.status);
+      }
     }
     if (!response.ok) throw errorFromBody(response.status, json);
 
@@ -341,7 +356,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     previewSite(siteId, spec) {
       const path = `/v1/sites/${encodeURIComponent(siteId)}/preview`;
-      return request({ method: "POST", path, body: { spec }, readOnly: true, schema: sitePreviewSchema });
+      return request({ method: "POST", path, body: { spec }, keyless: "read_only", schema: sitePreviewSchema });
     },
 
     publishSite(input, options) {
@@ -355,7 +370,43 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     },
 
     syncSite(siteId) {
-      return request({ method: "POST", path: `/v1/sites/${encodeURIComponent(siteId)}/sync`, body: {}, readOnly: true, schema: siteSyncResponseSchema });
+      return request({ method: "POST", path: `/v1/sites/${encodeURIComponent(siteId)}/sync`, body: {}, keyless: "read_only", schema: siteSyncResponseSchema });
+    },
+
+    async listCalendarConnections(options = {}) {
+      return (await request({ method: "GET", path: "/v1/calendar/connections", schema: calendarConnectionListSchema, signal: options.signal })).items;
+    },
+
+    startGoogleConnect(resourceId, options) {
+      // Only the resource: the dashboard's server proxy adds what binds the flow to this browser.
+      return write("/v1/calendar/google/connect", { resourceId }, connectGoogleCalendarResponseSchema, options);
+    },
+
+    async getPendingGoogleConnect(options = {}) {
+      try {
+        return await request({ method: "GET", path: "/v1/calendar/google/pending", schema: pendingGoogleConnectSchema, signal: options.signal });
+      } catch (error) {
+        // None waits in this browser: no cookie, expired, or another member's.
+        if (isApiError(error, "not_found")) return null;
+        throw error;
+      }
+    },
+
+    confirmGoogleConnect(grantId) {
+      // The server keys the connect by the staged grant, so a retry after a lost answer replays
+      // it; a key from here could not name the grant any better. The grant ID names the grant the
+      // owner was shown, so one that replaced it is refused rather than connected.
+      return request({ method: "POST", path: "/v1/calendar/google/confirm", body: { grantId }, keyless: "server_keyed", schema: calendarConnectionSchema });
+    },
+
+    async discardGoogleConnect() {
+      // The dashboard's own route (not the API's): it clears the cookie that holds the grant.
+      await request({ method: "DELETE", path: "/calendar/google/pending", keyless: "repeatable", schema: z.undefined() });
+    },
+
+    async disconnectCalendar(connectionId, options) {
+      const path = `/v1/calendar/connections/${encodeURIComponent(connectionId)}/disconnect`;
+      return (await write(path, {}, disconnectCalendarOutputSchema, options)).result;
     },
 
     getFollowUpStatus(options = {}) {

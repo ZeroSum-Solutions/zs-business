@@ -16,6 +16,11 @@
  * The API also serves the public booking page and widget (public-intake.md), with a random
  * per-run key secret and PUBLIC_BASE_URL set to its own loopback address.
  *
+ * Google Calendar connecting is on (google-calendar.md G-1, G-2) against the in-process fake
+ * Google from the core tests, on a free loopback port: its consent screen grants at once and
+ * redirects to the dashboard's callback route, as GOOGLE_REDIRECT_URL says. The state, channel
+ * and sealing keys are random per run. No calendar worker runs, so nothing is synced or pushed.
+ *
  * Children never inherit the shell's environment (see child-env.ts): each gets an allowlist
  * plus what is set here, and every database URL must name this run's zs_e2e_* database.
  *
@@ -24,13 +29,14 @@
  * After setup the seeded rows are snapshotted, and fixtures.ts puts them back before each test.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SignJWT, decodeJwt } from "jose";
 import pg from "pg";
+import { createFakeGoogle } from "../../../../packages/core/test/calendar/fake-google";
 import { findBundleLeaks } from "../../scripts/bundle-secrets";
 import { createFakeGoTrue, serveFakeGoTrue } from "./fake-gotrue";
 import { pgAuthStore } from "./pg-auth-store";
@@ -140,6 +146,15 @@ export default async function globalSetup() {
   const jwtSecret = randomBytes(32).toString("hex");
   // Signs this run's public booking keys; the API serves the booking page and widget with it.
   const bookingKeySecret = randomBytes(32).toString("hex");
+  // Google Calendar (G-12): this run's signing secrets and sealing key pair.
+  const googleStateSecret = randomBytes(32).toString("hex");
+  const googleChannelSecret = randomBytes(32).toString("hex");
+  // X25519, as the API's GOOGLE_TOKEN_PUBLIC_KEY wants it (G-3): base64 of the DER SPKI.
+  const sealPair = generateKeyPairSync("x25519");
+  const sealKeys = {
+    publicKey: sealPair.publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+    privateKey: sealPair.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+  };
   const children: ChildProcess[] = [];
   const closers: (() => Promise<void>)[] = [];
 
@@ -220,6 +235,9 @@ export default async function globalSetup() {
     const auth = await serveFakeGoTrue(gotrue);
     closers.push(auth.close);
 
+    const google = await createFakeGoogle({ clock: { now: () => new Date() } });
+    closers.push(google.close);
+
     const now = Math.floor(Date.now() / 1000);
     // Every token carries iat: the API requires it and checks exp - iat against the cap.
     const sign = async (sub: string, claims: { role: string; iss?: string; sessionId?: string }, ttlSeconds = MAX_TTL_SECONDS, withIat = true) => {
@@ -269,6 +287,16 @@ export default async function globalSetup() {
         PUBLIC_BASE_URL: LIVE.apiUrl,
         // Releases live in the API's memory: no R2 here. The DB rows are the real ones.
         SITES_STORE: "memory",
+        GOOGLE_CLIENT_ID: google.clientId,
+        GOOGLE_CLIENT_SECRET: google.clientSecret,
+        GOOGLE_OAUTH_BASE_URL: google.baseUrl,
+        GOOGLE_TOKEN_BASE_URL: google.baseUrl,
+        GOOGLE_API_BASE_URL: google.baseUrl,
+        GOOGLE_REDIRECT_URL: `${LIVE.webUrl}/api/calendar/google/callback`,
+        GOOGLE_RETURN_URL: `${LIVE.webUrl}/account/connections`,
+        GOOGLE_STATE_SECRET: googleStateSecret,
+        GOOGLE_TOKEN_PUBLIC_KEY: sealKeys.publicKey,
+        GOOGLE_CHANNEL_SECRET: googleChannelSecret,
       }),
     });
     children.push(api);
@@ -287,7 +315,9 @@ export default async function globalSetup() {
       NEXT_TELEMETRY_DISABLED: "1",
     });
     await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: webEnv });
-    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [ownerToken, otherToken, outsiderToken, token, jwtSecret, anonKey, bookingKeySecret]);
+    const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [
+      ownerToken, otherToken, outsiderToken, token, jwtSecret, anonKey, bookingKeySecret, googleStateSecret, googleChannelSecret, sealKeys.privateKey,
+    ]);
     if (leaks.length > 0) {
       throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);
     }

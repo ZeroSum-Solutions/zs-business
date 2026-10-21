@@ -34,8 +34,8 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     { id: "stripe", label: "Stripe deposits", detail: "Deposits land in your account in 2 days.", status: "ok", actionLabel: null },
   ];
 
+  // Google Calendar is live (CalendarSyncApi); these are the accounts still to come.
   const connections: Connection[] = [
-    { id: "gcal", name: "Google Calendar", purpose: "Keeps showroom and repair calendars in sync", status: "connected", detail: "Synced 4 minutes ago" },
     { id: "gmail", name: "Gmail", purpose: "Sends and receives customer email", status: "connected", detail: "hello@haldenrowe.example" },
     { id: "instagram", name: "Instagram", purpose: "Brings DMs into your inbox", status: "needs_reconnect", detail: "Access expired 2 days ago" },
     { id: "stripe", name: "Stripe", purpose: "Takes design deposits", status: "connected", detail: "Payouts every 2 days" },
