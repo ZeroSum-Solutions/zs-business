@@ -8,7 +8,7 @@ import { LayoutGroup, motion } from "motion/react";
 import Link from "next/link";
 import { useId } from "react";
 import { useLayoutTransition } from "@/lib/motion";
-import { cn } from "@/lib/utils";
+import { cn, revealOnFocus } from "@/lib/utils";
 
 /** A pressed-button group with a pill that slides to the chosen option. */
 export function Segmented<T extends string>({ label, value, options, onChange, className }: {
@@ -31,8 +31,10 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
               type="button"
               aria-pressed={active}
               onClick={() => onChange(option.value)}
+              onFocus={revealOnFocus}
               className={cn(
-                "relative min-h-11 shrink-0 rounded-pill px-3 text-sm font-medium whitespace-nowrap transition-quick",
+                // Inset ring: the scrolling pill would clip an outside one.
+                "relative min-h-11 shrink-0 rounded-pill px-3 text-sm font-medium whitespace-nowrap transition-quick focus-visible:-outline-offset-2",
                 active ? "text-fg" : "text-muted hover:text-fg",
               )}
             >

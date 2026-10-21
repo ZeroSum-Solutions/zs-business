@@ -26,14 +26,14 @@ typography:
   page-title:
     fontFamily: "Google Sans, system-ui, sans-serif"
     fontSize: 36px
-    fontWeight: 500
+    fontWeight: 600
     lineHeight: 40px
     letterSpacing: "-0.022em"
   kpi-value:
     fontFamily: "Google Sans, system-ui, sans-serif"
     fontSize: 36px
     fontWeight: 600
-    lineHeight: 40px
+    lineHeight: 36px
   card-title:
     fontFamily: "Google Sans, system-ui, sans-serif"
     fontSize: 18px
@@ -102,7 +102,8 @@ danger #f0857a.
 Google Sans for everything, self-hosted by `next/font` (no request to Google at run time). The
 offline service worker keeps pages, scripts and styles but not fonts, so a cold offline open
 shows the system font, which is what the dashboard used before this redesign.
-Page titles are 28px on a phone and 36px on a wide screen, with -0.022em tracking. Numbers use
+Page titles and KPI values are 28px on a phone and 36px from `sm` up (titles from `lg`), with
+-0.022em tracking on titles. Numbers use
 tabular figures (`tabular` utility) so counts do not shift as they change.
 
 ## Layout
@@ -137,7 +138,8 @@ badges, segmented switches and the tab-bar indicator.
 
 Motion marks a change of place only: nav indicators, segmented pills and KPI values. Springs
 come from `lib/motion.ts`; colour and shadow changes use `--motion-fast` (140ms). With reduced
-motion, `MotionConfig reducedMotion="user"` turns transforms off and the CSS durations drop to 0.
+motion, `MotionConfig` (driven by a live media-query hook) turns transforms off and the CSS
+durations drop to 0.
 
 ## Do's and Don'ts
 

@@ -5,7 +5,8 @@ import { AppShell } from "@/components/shell/app-shell";
 import { Providers } from "./providers";
 import "./globals.css";
 
-// Self-hosted at build time (no runtime request to Google), so the offline PWA keeps its type.
+// Self-hosted at build time (no runtime request to Google). The service worker does not cache
+// fonts, so a cold offline open falls back to the system font.
 const googleSans = Google_Sans({
   subsets: ["latin"],
   display: "swap",

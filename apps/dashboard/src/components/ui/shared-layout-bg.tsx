@@ -1,7 +1,7 @@
 "use client";
 
 // From 21st.dev "Animated Sidebar" by @starc007 (MIT; see NOTICE): the hover pill that glides
-// between rows. Changes: our motion tokens path and colour token.
+// between rows. Changes: our motion tokens path and colour token; opacity only (no blur filter).
 
 import {
   AnimatePresence,
@@ -39,13 +39,6 @@ export interface SharedLayoutBgProps
 }
 
 const variants: Variants = {
-  initial: { opacity: 0, filter: "blur(6px)" },
-  animate: { opacity: 1, filter: "blur(0px)" },
-  exit: (isActive: boolean) =>
-    !isActive ? { opacity: 0, filter: "blur(6px)" } : {},
-};
-
-const reducedVariants: Variants = {
   initial: { opacity: 0 },
   animate: { opacity: 1 },
   exit: (isActive: boolean) => (!isActive ? { opacity: 0 } : {}),
@@ -75,7 +68,7 @@ export const SharedLayoutBg = forwardRef<HTMLElement, SharedLayoutBgProps>(
       .map((child, index) => {
         const el = child as ReactElement<{
           className?: string;
-          onMouseEnter?: () => void;
+          onMouseEnter?: (event: MouseEvent<HTMLElement>) => void;
           children?: ReactNode;
         }>;
         const childKey = el.key ? String(el.key) : `item-${index}`;
@@ -84,8 +77,8 @@ export const SharedLayoutBg = forwardRef<HTMLElement, SharedLayoutBgProps>(
           {
             key: childKey,
             className: cn("relative", el.props.className),
-            onMouseEnter: () => {
-              el.props.onMouseEnter?.();
+            onMouseEnter: (event: MouseEvent<HTMLElement>) => {
+              el.props.onMouseEnter?.(event);
               setActiveId(childKey);
             },
           },
@@ -93,7 +86,7 @@ export const SharedLayoutBg = forwardRef<HTMLElement, SharedLayoutBgProps>(
             <AnimatePresence custom={activeId !== null}>
               {activeId !== null ? (
                 <motion.div
-                  variants={reduce ? reducedVariants : variants}
+                  variants={variants}
                   initial="initial"
                   animate="animate"
                   exit="exit"

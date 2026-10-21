@@ -12,7 +12,7 @@ import { AccountMenu, OWNER } from "./account-menu";
 import { isActive, NAV_ITEMS } from "./nav";
 import { SessionGate } from "./session-gate";
 import { SharedLayoutBg } from "@/components/ui/shared-layout-bg";
-import { useLayoutTransition } from "@/lib/motion";
+import { useLayoutTransition, useReducedMotionLive } from "@/lib/motion";
 
 function Brand() {
   return (
@@ -35,7 +35,8 @@ function useInboxCount(): number {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  // MotionConfig reads reduced motion once; this follows a change made while the app is open.
+  // MotionConfig's "user" mode reads the setting once; these follow a change made while the app is open.
+  const reduceMotion = useReducedMotionLive();
   const layoutTransition = useLayoutTransition();
   const waiting = useInboxCount();
   const { mode } = useApiRuntime();
@@ -51,7 +52,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <MotionConfig reducedMotion="user">
+    <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
     <div className="relative min-h-dvh lg:pl-[var(--sidebar-width)]">
       <a href="#main" className="sr-only z-[70] rounded-sm bg-surface focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:inline-flex focus:min-h-11 focus:items-center focus:px-4">
         Skip to content

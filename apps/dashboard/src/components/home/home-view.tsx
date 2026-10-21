@@ -15,7 +15,7 @@ import { useBookings, useChecklist, useDisplayZone, useResources, useResults, us
 import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
 import { formatDay, formatRange, formatTime } from "@/lib/time";
-import { formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
+import { currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
 
 interface WeekCompare {
   thisWeek: number;
@@ -25,12 +25,14 @@ interface WeekCompare {
 const WEEK_POINTS = ["Same time last week", "This week"] as const;
 
 /** A count or an amount this week against the same span last week, as a KPI tile. */
-function WeekTile({ id, label, compare, format, valueTestId, className, children }: {
+function WeekTile({ id, label, compare, format, valueTestId, step = 1, className, children }: {
   id: string;
   label: string;
   compare: WeekCompare;
   format: (value: number) => string;
   valueTestId: string;
+  /** Rolling frames snap to this many units, so a whole amount never flashes cents mid-roll. */
+  step?: number;
   className?: string;
   children: ReactNode;
 }) {
@@ -42,7 +44,7 @@ function WeekTile({ id, label, compare, format, valueTestId, className, children
       valueTestId={valueTestId}
       label={label}
       value={compare.thisWeek}
-      format={(value) => format(Math.round(value))}
+      format={(value) => format(Math.round(value / step) * step)}
       {...(change === null ? {} : { delta: change })}
       formatDelta={(value) => `${Math.abs(value)}%`}
       deltaLabel={change === null ? "None in the same span last week" : "vs last week"}
@@ -50,6 +52,7 @@ function WeekTile({ id, label, compare, format, valueTestId, className, children
       trendLabels={WEEK_POINTS}
       {...(className ? { className } : {})}
     >
+      <p className="tabular -mt-1 text-xs text-meta">Same time last week {format(compare.lastWeek)}</p>
       {children}
     </KpiTile>
   );
@@ -86,6 +89,8 @@ function RevenueTile({ data }: { data: HomeResults }) {
       </Card>
     );
   }
+  // Whole amounts roll in whole units; an amount with cents rolls in cents.
+  const scale = 10 ** currencyDigits(main.currency);
   const maxSource = Math.max(...main.bySource.map((item) => Math.max(item.thisWeek, item.lastWeek)), 1);
   return (
     <WeekTile
@@ -94,10 +99,11 @@ function RevenueTile({ data }: { data: HomeResults }) {
       compare={main}
       format={(value) => formatMinor(value, main.currency)}
       valueTestId="revenue-value"
+      step={main.thisWeek % scale === 0 ? scale : 1}
       className="col-span-2 lg:col-span-6 lg:self-stretch"
     >
-      <p className="tabular -mt-1 text-xs text-meta">
-        Same time last week {formatMinor(main.lastWeek, main.currency)}. {formatNumber(won.thisWeek)} won this week, {formatNumber(won.lastWeek)} last week.
+      <p className="tabular -mt-2 text-xs text-meta">
+        {formatNumber(won.thisWeek)} won this week, {formatNumber(won.lastWeek)} last week.
       </p>
       <div className="border-t border-border-soft pt-3">
         <h3 className="mb-2 text-xs font-medium text-fg-2">By lead source</h3>

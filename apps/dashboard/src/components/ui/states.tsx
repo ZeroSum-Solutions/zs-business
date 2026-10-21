@@ -61,11 +61,10 @@ export function EmptyState({ title, children, action }: { title: string; childre
 }
 
 /** `sample` marks a page whose content is the built-in sample workspace in live mode. */
-export function PageHeader({ title, description, actions, eyebrow, sample = false }: { title: string; description?: ReactNode; actions?: ReactNode; eyebrow?: ReactNode; sample?: boolean }) {
+export function PageHeader({ title, description, actions, sample = false }: { title: string; description?: ReactNode; actions?: ReactNode; sample?: boolean }) {
   return (
     <header className="mb-6 flex flex-wrap items-end justify-between gap-4 lg:mb-8">
       <div className="min-w-0">
-        {eyebrow ? <p className="mb-1 text-sm font-medium text-meta">{eyebrow}</p> : null}
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl tracking-display lg:text-3xl">{title}</h1>
           {sample ? <SampleBadge /> : null}

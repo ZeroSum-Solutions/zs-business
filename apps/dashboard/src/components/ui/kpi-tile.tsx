@@ -87,7 +87,7 @@ const ARROW =
   "size-3.5 transition-transform duration-500 motion-reduce:transition-none";
 const SPARK =
   "relative h-10 rounded-sm has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent";
-const CAPTION = "-mt-1.5 min-h-4 truncate text-meta text-xs";
+const CAPTION = "-mt-1.5 min-h-4 text-pretty text-meta text-xs";
 const PING =
   "absolute inset-0 animate-ping rounded-full bg-current motion-reduce:hidden";
 const DOT =
@@ -193,12 +193,14 @@ export function KpiTile({
     []
   );
   const onFocus = useCallback(() => setActive((now) => now ?? last), [last]);
+  const scrubbing = active !== null;
   useEffect(() => {
+    if (!scrubbing) return;
     const dismiss = ({ key }: globalThis.KeyboardEvent) =>
       key === "Escape" && setActive(null);
     document.addEventListener("keydown", dismiss);
     return () => document.removeEventListener("keydown", dismiss);
-  }, []);
+  }, [scrubbing]);
 
   const line = points.map((p, i) => `${i ? "L" : "M"}${p.x} ${p.y}`).join(" ");
   const area = end ? `${line} L${end.x} ${H} L${PAD} ${H} Z` : "";
