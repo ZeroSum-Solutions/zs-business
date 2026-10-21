@@ -1,34 +1,43 @@
 /*
  * Theme: the one place design tokens live.
- * Values come from Mish "Neutral Product" (design-systems/neutral-product/tokens.css,
- * Apache-2.0, ours). Components use the Tailwind names in @theme below, never raw hex.
+ * Structure from Mish "Neutral Product" (Apache-2.0, ours); values from the 2026-10 redesign
+ * (design/DESIGN.md): black, white for primary actions, violet for the current place and links,
+ * blue for good news. Black is the default; light is the owner's choice in Settings
+ * (`data-theme` on <html>: dark, light, or system, set before first paint by lib/theme.ts). Components use the Tailwind names in @theme below, never raw hex.
  */
 :root {
+  color-scheme: dark;
   /* Surface */
-  --bg: #f8f8f7;
-  --surface: #ffffff;
-  --surface-warm: #f0f0ee;
+  --bg: #060607;
+  --surface: #121316;
+  --surface-warm: #1b1c21;
   /* Foreground */
-  --fg: #16171a;
-  --fg-2: #3a3c41;
-  --muted: #55585f;
-  --meta: #65686f;
+  --fg: #f5f5f4;
+  --fg-2: #d6d6d3;
+  --muted: #a6a6a2;
+  --meta: #8e8e8a;
   /* Border */
-  --border: #dedfdb;
-  --border-soft: #ebebe8;
-  --border-strong: #878a90;
-  /* Accent */
-  --accent: #1e5a78;
-  --accent-on: #ffffff;
-  --accent-hover: #194c66;
-  --accent-active: #153f55;
-  /* Semantic */
-  --success: #1d7348;
-  --warn: #8a5300;
-  --danger: #b3261e;
+  --border: #2a2b31;
+  --border-soft: #202126;
+  --border-strong: #6e6e6b;
+  /* Primary: solid white action fills */
+  --primary: #f5f5f4;
+  --primary-on: #060607;
+  --primary-hover: #e2e2df;
+  --primary-active: #cfcfcb;
+  /* Accent: violet for the current place, links, focus, progress and selection */
+  --accent: #a58bff;
+  --accent-on: #060607;
+  --accent-hover: #b9a4ff;
+  --accent-active: #9179f0;
+  /* Semantic. Success is blue: good news (up trends, connected, sent). */
+  --success: #6f93ff;
+  --info: #5cc8ff;
+  --warn: #f2b84b;
+  --danger: #ff6b5f;
   /* Typography: fonts */
-  --font-display: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
-  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-display: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   /* Typography: scale */
   --text-xs: 12px;
@@ -42,7 +51,7 @@
   /* Typography: leading and tracking */
   --leading-body: 1.55;
   --leading-tight: 1.2;
-  --tracking-display: -0.015em;
+  --tracking-display: -0.022em;
   /* Spacing */
   --space-1: 4px;
   --space-2: 8px;
@@ -57,20 +66,43 @@
   --section-y-tablet: 72px;
   --section-y-phone: 48px;
   /* Radius */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
   --radius-pill: 9999px;
   /* Elevation */
   --elev-flat: none;
   --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 1px 2px rgba(22, 23, 26, 0.06), 0 4px 12px rgba(22, 23, 26, 0.06);
+  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.6), 0 12px 32px rgba(0, 0, 0, 0.6);
+  /* Card edge: Cult UI Minimal Card's layered hairline with its dark-mode top highlight (MIT, see NOTICE) */
+  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.12), 0 16px 40px -8px rgba(0, 0, 0, 0.85);
+  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.08), 0 10px 28px -6px rgba(0, 0, 0, 0.72);
+  /* Top-lit card fill: a faint white wash fading down over the surface */
+  --surface-lit: linear-gradient(180deg, rgb(255 255 255 / 0.035), rgb(255 255 255 / 0) 160px), var(--surface);
+  /* Recessed wells for inputs */
+  --elev-well: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px var(--border);
+  /* Text fields: a well whose edge meets 3:1 against the card (WCAG 1.4.11). */
+  --elev-field: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px var(--border-strong);
+  /* Avatar initials: how much ink is mixed into the pop so it reads on the fill */
+  --avatar-ink: 0%;
+  --avatar-drop: rgb(0 0 0 / 0.4);
+  /* Dims the page behind a dialog. */
+  --overlay: rgb(6 6 7 / 0.8);
+  /* Switch thumb and the selected segment: lifted controls that sit on a well. */
+  --control-thumb: var(--fg);
+  --control-on: var(--surface-warm);
+  --control-off: var(--surface-warm);
+  /* Recessed fill for inputs and segment tracks: below the card, and below the page too. */
+  --well: var(--bg);
   /* Focus: inner gap in the surface color, outer ring in the accent */
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   /* Motion */
   --motion-fast: 140ms;
   --motion-base: 200ms;
+  --motion-spring: 520ms;
   --ease-standard: cubic-bezier(0.23, 1, 0.32, 1);
+  /* A real spring (stiffness ~180, damping ~12) sampled for CSS: overshoots about 6% and settles. */
+  --ease-spring: linear(0, 0.06 2.4%, 0.23 5%, 0.66 10.6%, 0.88 14.6%, 1.01 19.2%, 1.06 23.4%, 1.065 26%, 1.05 30.6%, 1.01 39%, 0.995 47%, 0.998 60%, 1);
   /* Layout */
   --container-max: 1200px;
   --container-gutter-desktop: 32px;
@@ -78,60 +110,98 @@
   --container-gutter-phone: 16px;
 }
 
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #111214;
-  --surface: #191a1d;
-  --surface-warm: #212226;
-  --fg: #ededeb;
-  --fg-2: #cfd0cd;
-  --muted: #a9abb0;
-  --meta: #979a9f;
-  --border: #2d2f33;
-  --border-soft: #242629;
-  --border-strong: #6f727a;
-  --accent: #6cb4d9;
-  --accent-on: #0b1820;
-  --accent-hover: #86c2e2;
-  --accent-active: #9dcee8;
-  --success: #5cc995;
-  --warn: #e2ab4a;
-  --danger: #f0857a;
+/*
+ * Light: the same roles on cool white (no warm paper, per the owner). Black takes over the
+ * primary fill; the pops are darkened until text on white and on their own tints meets AA.
+ * The block is repeated for `system` under a light preference: CSS cannot share one block
+ * between a selector and a media query.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f3f5;
+  --surface: #ffffff;
+  --surface-warm: #ececf0;
+  --fg: #0b0b0d;
+  --fg-2: #2a2b30;
+  --muted: #55575e;
+  --meta: #606269;
+  --border: #e0e0e6;
+  --border-soft: #ebebef;
+  --border-strong: #7a7c84;
+  --primary: #0b0b0d;
+  --primary-on: #ffffff;
+  --primary-hover: #26272c;
+  --primary-active: #3a3b41;
+  --accent: #583bc9;
+  --accent-on: #ffffff;
+  --accent-hover: #4b30b5;
+  --accent-active: #3f269e;
+  --success: #2451cc;
+  --info: #066587;
+  --warn: #854b00;
+  --danger: #b82519;
   --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
-  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+  --elev-raised: 0 0 0 1px rgba(16, 16, 24, 0.06), 0 4px 8px rgba(16, 16, 24, 0.06), 0 16px 40px -8px rgba(16, 16, 24, 0.2);
+  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.07), 0 1px 2px rgba(16, 16, 24, 0.06), 0 8px 24px -10px rgba(16, 16, 24, 0.14);
+  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.1), 0 2px 4px rgba(16, 16, 24, 0.06), 0 18px 40px -12px rgba(16, 16, 24, 0.22);
+  --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
+  --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
+  --elev-field: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px var(--border-strong);
+  --avatar-ink: 60%;
+  --avatar-drop: rgb(16 16 24 / 0.08);
+  --overlay: rgb(11 11 13 / 0.35);
+  --control-thumb: #ffffff;
+  --control-on: #ffffff;
+  --control-off: #d4d5dc;
+  --well: #ebebef;
 }
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg: #111214;
-    --surface: #191a1d;
-    --surface-warm: #212226;
-    --fg: #ededeb;
-    --fg-2: #cfd0cd;
-    --muted: #a9abb0;
-    --meta: #979a9f;
-    --border: #2d2f33;
-    --border-soft: #242629;
-    --border-strong: #6f727a;
-    --accent: #6cb4d9;
-    --accent-on: #0b1820;
-    --accent-hover: #86c2e2;
-    --accent-active: #9dcee8;
-    --success: #5cc995;
-    --warn: #e2ab4a;
-    --danger: #f0857a;
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    color-scheme: light;
+    --bg: #f3f3f5;
+    --surface: #ffffff;
+    --surface-warm: #ececf0;
+    --fg: #0b0b0d;
+    --fg-2: #2a2b30;
+    --muted: #55575e;
+    --meta: #606269;
+    --border: #e0e0e6;
+    --border-soft: #ebebef;
+    --border-strong: #7a7c84;
+    --primary: #0b0b0d;
+    --primary-on: #ffffff;
+    --primary-hover: #26272c;
+    --primary-active: #3a3b41;
+    --accent: #583bc9;
+    --accent-on: #ffffff;
+    --accent-hover: #4b30b5;
+    --accent-active: #3f269e;
+    --success: #2451cc;
+    --info: #066587;
+    --warn: #854b00;
+    --danger: #b82519;
     --elev-ring: 0 0 0 1px var(--border);
-    --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.32);
-    --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
-  }
+    --elev-raised: 0 0 0 1px rgba(16, 16, 24, 0.06), 0 4px 8px rgba(16, 16, 24, 0.06), 0 16px 40px -8px rgba(16, 16, 24, 0.2);
+    --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.07), 0 1px 2px rgba(16, 16, 24, 0.06), 0 8px 24px -10px rgba(16, 16, 24, 0.14);
+    --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.1), 0 2px 4px rgba(16, 16, 24, 0.06), 0 18px 40px -12px rgba(16, 16, 24, 0.22);
+    --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
+    --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
+    --elev-field: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px var(--border-strong);
+    --avatar-ink: 60%;
+    --avatar-drop: rgb(16 16 24 / 0.08);
+    --overlay: rgb(11 11 13 / 0.35);
+    --control-thumb: #ffffff;
+    --control-on: #ffffff;
+    --control-off: #d4d5dc;
+    --well: #ebebef;
+}
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="full"]) {
     --motion-fast: 0ms;
     --motion-base: 0ms;
+    --motion-spring: 0ms;
   }
 }
 
@@ -139,13 +209,18 @@
 :root {
   --tabbar-height: 64px;
   --topbar-height: 56px;
-  --sidebar-width: 248px;
+  --sidebar-width: 256px;
 }
 
 @theme inline {
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-warm: var(--surface-warm);
+  --color-control-thumb: var(--control-thumb);
+  --color-control-on: var(--control-on);
+  --color-overlay: var(--overlay);
+  --color-control-off: var(--control-off);
+  --color-well: var(--well);
   --color-fg: var(--fg);
   --color-fg-2: var(--fg-2);
   --color-muted: var(--muted);
@@ -153,11 +228,16 @@
   --color-border: var(--border);
   --color-border-soft: var(--border-soft);
   --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-on: var(--primary-on);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
   --color-accent: var(--accent);
   --color-accent-on: var(--accent-on);
   --color-accent-hover: var(--accent-hover);
   --color-accent-active: var(--accent-active);
   --color-success: var(--success);
+  --color-info: var(--info);
   --color-warn: var(--warn);
   --color-danger: var(--danger);
   --font-sans: var(--font-body);
@@ -179,6 +259,9 @@
   --radius-pill: var(--radius-pill);
   --shadow-ring: var(--elev-ring);
   --shadow-raised: var(--elev-raised);
+  --shadow-card: var(--elev-card);
+  --shadow-well: var(--elev-well);
+  --shadow-field: var(--elev-field);
   --shadow-focus: var(--focus-ring);
   --ease-standard: var(--ease-standard);
   --container-content: var(--container-max);

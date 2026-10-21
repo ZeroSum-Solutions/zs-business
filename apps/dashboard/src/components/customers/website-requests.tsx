@@ -3,6 +3,7 @@
 import { Globe } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
+import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ErrorNote } from "@/components/ui/states";
@@ -65,9 +66,9 @@ export function WebsiteRequests() {
     resources.data?.find((resource) => resource.id === item.booking?.resourceId)?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   return (
-    <section aria-labelledby="website-requests-title" className="mb-6 rounded-md bg-surface p-4 shadow-ring lg:p-5">
+    <section aria-labelledby="website-requests-title" className="mb-6 rounded-lg bg-lit p-4 shadow-card lg:p-6">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h2 id="website-requests-title" className="text-base font-semibold text-fg">Website bookings to review</h2>
+        <h2 id="website-requests-title" className="text-lg leading-6 font-medium text-fg">Website bookings to review</h2>
         <Badge tone="warn">{items.data.items.length}</Badge>
       </div>
       <p className="mb-4 text-sm text-muted">
@@ -81,8 +82,9 @@ export function WebsiteRequests() {
           const zone = zoneFor(item);
           const busy = review.isPending && review.variables?.itemId === item.id;
           return (
-            <li key={item.id} data-testid="website-request" className="rounded-md border border-border-soft p-3">
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <li key={item.id} data-testid="website-request" className="rounded-md bg-surface-warm/60 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_0_0_1px_var(--border)]">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <Avatar name={item.submitted.name} size="sm" />
                 <p className="font-medium text-fg">{item.submitted.name}</p>
                 <Badge tone="accent"><Globe aria-hidden />Website</Badge>
                 {item.booking ? (
@@ -93,7 +95,7 @@ export function WebsiteRequests() {
                 {[item.submitted.email, formatPhone(item.submitted.phone)].filter(Boolean).join(" · ")}
               </p>
               {item.submitted.notes ? <p className="mt-1 text-sm text-muted">“{item.submitted.notes}”</p> : null}
-              <div className="mt-3 flex flex-wrap gap-2">
+              <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3">
                 {item.matchedContactIds.map((contactId) => {
                   const name = contactName(contacts.data, contactId) ?? "this customer";
                   return (

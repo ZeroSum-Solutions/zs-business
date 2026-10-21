@@ -35,7 +35,7 @@ function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blocked
 }) {
   const selectId = `stage-${deal.id}`;
   return (
-    <li className="rounded-md bg-surface p-3 shadow-ring" data-deal-id={deal.id} aria-busy={moving}>
+    <li className="rounded-lg bg-lit p-3 shadow-card" data-deal-id={deal.id} aria-busy={moving}>
       <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
       <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-2">
         <span className="tabular font-medium" data-testid="deal-value">{deal.value ? formatMinor(deal.value.amountMinor, deal.value.currency) : "No value yet"}</span>
@@ -210,11 +210,11 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
               onFocus={revealOnFocus}
               className={cn(
                 "flex min-h-11 shrink-0 items-center gap-2 rounded-pill px-4 text-sm font-medium transition-quick",
-                active ? "bg-fg text-bg" : "bg-surface text-fg-2 shadow-ring hover:bg-surface-warm",
+                active ? "bg-accent/14 text-accent ring-1 ring-inset ring-accent" : "bg-surface text-fg-2 shadow-ring hover:bg-surface-warm",
               )}
             >
               {stage.name}
-              <span className={cn("tabular text-xs", active ? "text-bg/70" : "text-meta")}>{count}</span>
+              <span className={cn("tabular text-xs", active ? "text-accent" : "text-meta")}>{count}</span>
             </button>
           );
         })}

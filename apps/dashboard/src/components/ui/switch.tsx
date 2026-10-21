@@ -14,8 +14,8 @@ export function Switch({ className, ...props }: ComponentProps<typeof SwitchPrim
       )}
       {...props}
     >
-      <span className="pointer-events-none flex h-6 w-11 items-center rounded-pill bg-border-strong p-0.5 transition-quick group-data-[state=checked]:bg-accent">
-        <SwitchPrimitive.Thumb className="block size-5 rounded-pill bg-surface shadow-raised transition-quick data-[state=checked]:translate-x-5" />
+      <span className="pointer-events-none flex h-6 w-11 items-center rounded-pill bg-control-off p-0.5 shadow-well ring-1 ring-border-strong ring-inset transition-quick group-data-[state=checked]:bg-accent group-data-[state=checked]:shadow-none group-data-[state=checked]:ring-0">
+        <SwitchPrimitive.Thumb className="block size-5 rounded-pill bg-control-thumb shadow-raised transition-quick data-[state=checked]:translate-x-5" />
       </span>
     </SwitchPrimitive.Root>
   );

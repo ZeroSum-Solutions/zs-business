@@ -9,7 +9,8 @@ import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components
 import type { ConsentEvidence } from "@/lib/api";
 import { useContact, useDeals, usePipelines } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
-import { formatPhone, initials, relativeTime } from "@/lib/utils";
+import { formatPhone, relativeTime } from "@/lib/utils";
+import { Avatar } from "@/components/ui/avatar";
 
 function ConsentLine({ label, evidence }: { label: string; evidence: ConsentEvidence | null }) {
   return (
@@ -48,11 +49,9 @@ export function ContactDetail({ id }: { id: string }) {
             </div>
           ) : null}
           <header className="mb-6 flex items-center gap-4">
-            <span aria-hidden className="flex size-14 shrink-0 items-center justify-center rounded-pill bg-accent/12 text-lg font-semibold text-accent">
-              {initials(contact.data.displayName ?? contact.data.email)}
-            </span>
+            <Avatar name={contact.data.displayName ?? contact.data.email} size="lg" />
             <div className="min-w-0">
-              <h1 className="truncate text-xl tracking-display lg:text-2xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
+              <h1 className="truncate text-2xl tracking-display lg:text-3xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
               <p className="text-sm text-muted">Customer since {formatDay(contact.data.createdAt, "America/New_York")}</p>
             </div>
           </header>

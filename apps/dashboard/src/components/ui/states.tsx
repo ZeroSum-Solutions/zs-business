@@ -63,10 +63,10 @@ export function EmptyState({ title, children, action }: { title: string; childre
 /** `sample` marks a page whose content is the built-in sample workspace in live mode. */
 export function PageHeader({ title, description, actions, sample = false }: { title: string; description?: ReactNode; actions?: ReactNode; sample?: boolean }) {
   return (
-    <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+    <header className="mb-6 flex flex-wrap items-start justify-between gap-4 sm:items-center lg:mb-8">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-xl tracking-display lg:text-2xl">{title}</h1>
+          <h1 className="text-2xl tracking-display lg:text-3xl">{title}</h1>
           {sample ? <SampleBadge /> : null}
         </div>
         {description ? <p className="mt-1 text-sm text-muted">{description}</p> : null}

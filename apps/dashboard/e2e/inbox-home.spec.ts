@@ -141,6 +141,10 @@ test("Home compares this week with last week, and counts a new booking and a won
   await mainNav(page).getByRole("link", { name: "Home" }).click();
   await expect(bookings.getByTestId("tile-value")).toHaveText(String(before + 1));
   await expect(revenue.getByTestId("revenue-value")).toHaveText("$28,250");
+  // The test ids sit on screen-reader copies; the numbers people see must count up to the same values.
+  await expect(bookings.locator('[data-slot="kpi-value"]')).toBeVisible();
+  await expect(bookings.locator('[data-slot="kpi-value"]')).toHaveText(String(before + 1));
+  await expect(revenue.locator('[data-slot="kpi-value"]')).toHaveText("$28,250");
   await expect(revenue.locator("[data-source=referral]")).toContainText("$14,500");
 });
 

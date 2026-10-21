@@ -1,20 +1,22 @@
 "use client";
 
+import { motion, MotionConfig } from "motion/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useApiRuntime } from "@/lib/api/react";
-import { useThreads } from "@/lib/queries";
-import { useTenantId } from "@/lib/session";
+import { useInboxCount } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { AccountMenu, OWNER } from "./account-menu";
 import { isActive, NAV_ITEMS } from "./nav";
 import { SessionGate } from "./session-gate";
+import { SharedLayoutBg } from "@/components/ui/shared-layout-bg";
+import { useLayoutTransition, useReducedMotionLive } from "@/lib/motion";
 
 function Brand() {
   return (
     <Link href="/" className="flex min-h-11 items-center gap-3 rounded-sm">
-      <span aria-hidden className="flex size-8 items-center justify-center rounded-sm bg-fg text-[13px] font-semibold tracking-tight text-bg">
+      <span aria-hidden className="flex size-8 items-center justify-center rounded-sm bg-primary text-[13px] font-semibold tracking-tight text-primary-on">
         H&amp;R
       </span>
       <span className="text-[15px] font-semibold text-fg">{OWNER.business}<span className="sr-only">, home</span></span>
@@ -22,16 +24,11 @@ function Brand() {
   );
 }
 
-/** Threads on the first page that wait for a reply or a review (inbox-home.md I-8). */
-function useInboxCount(): number {
-  const threads = useThreads();
-  // Signed out, the cache is empty and the count must not linger.
-  if (useTenantId() === null) return 0;
-  return threads.data?.pages[0]?.items.filter((thread) => thread.needsReply || thread.needsReview).length ?? 0;
-}
-
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  // MotionConfig's "user" mode reads the setting once; these follow a change made while the app is open.
+  const reduceMotion = useReducedMotionLive();
+  const layoutTransition = useLayoutTransition();
   const waiting = useInboxCount();
   const { mode } = useApiRuntime();
 
@@ -46,26 +43,29 @@ export function AppShell({ children }: { children: ReactNode }) {
   }
 
   return (
+    <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
     <div className="relative min-h-dvh lg:pl-[var(--sidebar-width)]">
       <a href="#main" className="sr-only z-[70] rounded-sm bg-surface focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:inline-flex focus:min-h-11 focus:items-center focus:px-4">
         Skip to content
       </a>
 
       {/* Desktop side nav */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[var(--sidebar-width)] flex-col border-r border-border bg-surface-warm/60 px-3 py-4 lg:flex">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[var(--sidebar-width)] flex-col border-r border-border bg-surface px-3 py-4 lg:flex">
         <div className="px-2"><Brand /></div>
-        <nav aria-label="Main" className="mt-6 flex-1">
-          <ul className="space-y-0.5">
+        <nav aria-label="Main" className="mt-8 flex-1">
+          <p aria-hidden className="mb-2 px-3 text-[11px] font-medium tracking-[0.08em] text-meta uppercase">Workspace</p>
+          <SharedLayoutBg as="ul" inset={0} className="gap-0.5">
             {NAV_ITEMS.map((item) => {
               const active = isActive(pathname, item.href);
               return (
                 <li key={item.href}>
+                  {active ? <motion.span layoutId="nav-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-md bg-accent/10" /> : null}
                   <Link
                     href={item.href}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "relative flex min-h-11 items-center gap-3 rounded-sm px-3 text-sm font-medium transition-quick",
-                      active ? "bg-surface text-accent shadow-ring" : "text-fg-2 hover:bg-surface hover:text-fg",
+                      "relative flex min-h-11 items-center gap-3 rounded-md px-3 text-sm font-medium transition-quick",
+                      active ? "text-accent" : "text-fg-2 hover:text-fg",
                     )}
                   >
                     <item.icon size={20} weight={active ? "fill" : "regular"} aria-hidden />
@@ -77,7 +77,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </li>
               );
             })}
-          </ul>
+          </SharedLayoutBg>
         </nav>
         <p className="px-3 pb-3 text-xs text-meta" data-testid="sample-note">
           {mode === "demo" ? "Sample data. Changes reset on reload." : "Some areas show sample data until their API ships."}
@@ -110,10 +110,11 @@ export function AppShell({ children }: { children: ReactNode }) {
                     active ? "text-accent" : "text-muted hover:text-fg",
                   )}
                 >
-                  <span className="relative">
-                    <item.icon size={24} weight={active ? "fill" : "regular"} aria-hidden />
+                  <span className="relative flex h-8 w-14 items-center justify-center">
+                    {active ? <motion.span layoutId="tab-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-accent/12" /> : null}
+                    <item.icon size={24} weight={active ? "fill" : "regular"} aria-hidden className="relative" />
                     {item.href === "/inbox" && waiting > 0 ? (
-                      <span className="absolute -top-1 -right-2 min-w-4 rounded-pill bg-accent px-1 text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${waiting} need attention`}>
+                      <span className="absolute top-0 right-2 min-w-4 rounded-pill bg-accent px-1 ring-2 ring-surface text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${waiting} need attention`}>
                         {waiting}
                       </span>
                     ) : null}
@@ -126,5 +127,6 @@ export function AppShell({ children }: { children: ReactNode }) {
         </ul>
       </nav>
     </div>
+    </MotionConfig>
   );
 }

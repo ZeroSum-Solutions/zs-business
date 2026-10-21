@@ -5,9 +5,12 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Segmented } from "@/components/ui/segmented";
 import { useToast } from "@/components/ui/toast";
 import type { BookingPageSummary } from "@/lib/api";
 import { useBookingPages } from "@/lib/queries";
+
+const EMBED_OPTIONS = [{ value: "embedScript", label: "Widget" }, { value: "embedIframe", label: "Plain iframe" }] as const;
 
 type Snippet = "embedScript" | "embedIframe";
 
@@ -44,37 +47,24 @@ function PageRow({ page }: { page: BookingPageSummary }) {
     }
   };
   return (
-    <li data-testid="booking-page" className="rounded-md border border-border-soft p-3">
+    <li data-testid="booking-page" className="rounded-md bg-surface-warm/60 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_0_0_1px_var(--border)]">
       <div className="flex flex-wrap items-center gap-2">
         <Globe size={20} aria-hidden className="text-meta" />
         <p className="font-medium text-fg">{page.title}</p>
-        <Badge tone={page.published ? "success" : "neutral"}>{page.published ? "Live" : "Not published"}</Badge>
+        <Badge tone={page.published ? "success" : "neutral"} live={page.published}>{page.published ? "Live" : "Not published"}</Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
-        <a
-          href={page.bookingUrl}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="inline-flex min-h-11 items-center gap-2 rounded-sm px-4 text-sm font-medium text-accent shadow-[inset_0_0_0_1px_var(--border-strong)] hover:bg-surface-warm"
-        >
-          <ArrowSquareOut size={20} aria-hidden />Open booking page
-        </a>
+        <Button asChild variant="secondary">
+          <a href={page.bookingUrl} target="_blank" rel="noreferrer noopener">
+            <ArrowSquareOut aria-hidden />Open booking page
+          </a>
+        </Button>
         <Button variant="secondary" onClick={() => copy(page.bookingUrl, "booking link")}><Copy aria-hidden />Copy link</Button>
       </div>
-      <div role="group" aria-label="Embed code" className="mt-4">
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <p className="text-sm font-medium text-fg-2">Embed code</p>
-          {(["embedScript", "embedIframe"] as const).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              aria-pressed={snippet === kind}
-              onClick={() => setSnippet(kind)}
-              className="min-h-11 rounded-sm px-3 text-sm text-muted aria-pressed:bg-surface-warm aria-pressed:text-fg"
-            >
-              {kind === "embedScript" ? "Widget" : "Plain iframe"}
-            </button>
-          ))}
+      <div className="mt-4">
+        <div className="mb-2 flex flex-wrap items-center gap-3">
+          <p aria-hidden className="text-sm font-medium text-fg-2">Embed code</p>
+          <Segmented label="Embed code" value={snippet} options={EMBED_OPTIONS} onChange={setSnippet} />
         </div>
         <label htmlFor={`embed-${page.id}`} className="sr-only">Embed code to paste into your website</label>
         <textarea
@@ -83,7 +73,7 @@ function PageRow({ page }: { page: BookingPageSummary }) {
           rows={3}
           value={page[snippet]}
           onFocus={(event) => event.currentTarget.select()}
-          className="w-full resize-none rounded-sm bg-surface-warm p-3 font-mono text-xs text-fg-2"
+          className="w-full resize-none rounded-sm bg-well p-3 font-mono shadow-field text-xs focus:shadow-[inset_0_0_0_1px_var(--accent)] text-fg-2"
         />
         <Button variant="secondary" className="mt-2" onClick={() => copy(page[snippet], "embed code")}><Copy aria-hidden />Copy embed code</Button>
       </div>

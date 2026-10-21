@@ -4,15 +4,15 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 
 export const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-sm font-medium text-sm transition-quick select-none disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress [&_svg]:size-5 [&_svg]:shrink-0",
+  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-sm font-medium text-sm transition-quick select-none enabled:motion-safe:active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress [&_svg]:size-5 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
-        primary: "bg-accent text-accent-on hover:bg-accent-hover active:bg-accent-active",
-        secondary: "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border-strong)] hover:bg-surface-warm",
+        primary: "bg-primary text-primary-on shadow-[inset_0_-1px_0_rgba(0,0,0,0.12)] hover:bg-primary-hover active:bg-primary-active",
+        secondary: "bg-control-on text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.06),inset_0_0_0_1px_var(--border)] hover:bg-fg/8 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.08),inset_0_0_0_1px_var(--border-strong)]",
         ghost: "text-fg-2 hover:bg-surface-warm hover:text-fg",
         danger: "bg-danger text-surface hover:opacity-90",
-        "danger-outline": "bg-surface text-danger shadow-[inset_0_0_0_1px_var(--danger)] hover:bg-danger/8",
+        "danger-outline": "bg-surface-warm text-danger shadow-[inset_0_0_0_1px_var(--danger)] hover:bg-danger/8",
       },
       size: {
         default: "min-h-11 px-4",
