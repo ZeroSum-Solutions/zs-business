@@ -37,16 +37,16 @@ dashboard (`apps/dashboard`) with real components from 21st.dev and Cult UI.
 3. Desktop sidebar is plain; the phone tab bar is a plain row of icons.
 4. KPI cards repeat the same row pattern with small, low-contrast comparison text.
 
-## Components (all MIT, licence checked 2026-10-21)
+## Components (all MIT, licence checked 2026-10-20)
 | Need | Component | Source |
 |---|---|---|
 | Desktop sidebar, phone sheet | Animated Sidebar | 21st.dev @starc007 (MIT) |
-| Phone tab bar / segmented switches | Expanding Tabs | 21st.dev @aicanvas (MIT) |
+| Phone tab bar / segmented switches | Expanding Tabs | 21st.dev @aicanvas (MIT). Not ported: an icon-only pill hides five of six labels; the tab bar keeps labels and uses the sidebar's sliding indicator. |
 | KPI tiles with sparkline | KPI Tile | 21st.dev @konsstepnov (MIT) |
-| Status pills (live dot) | Halo Badge | Cult UI (MIT) |
-| Tabs (Contacts / Pipeline) | Halo Tabs | Cult UI (MIT) |
+| Status pills (live dot) | Halo Badge | Cult UI (MIT). Live dot only; the animated gradient rim does not fit the brand. |
+| Tabs (Contacts / Pipeline), segmented switches | Halo Tabs | Cult UI (MIT). Sliding indicator on our own links and buttons; no @base-ui dependency. |
 | Quiet content cards | Minimal Card | Cult UI (MIT) |
-| Pipeline board | Kanban Board | Cult UI (MIT), only if it keeps keyboard moves |
+| Pipeline board | Kanban Board | Cult UI (MIT). Not ported: the board already has keyboard moves and tests; restyled with tokens only. |
 Rejected: 21st.dev Bottom Nav Bar (no licence stated).
 
 ## Success

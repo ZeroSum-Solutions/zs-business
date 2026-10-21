@@ -3,6 +3,7 @@
 import { CaretLeft, CaretRight, Globe, Plus } from "@phosphor-icons/react";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
+import { Segmented } from "@/components/ui/segmented";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -17,32 +18,6 @@ import { BookingPageCard } from "./booking-page-card";
 import { SlotsError } from "./slots-error";
 
 type View = "day" | "week";
-
-function Segmented<T extends string>({ label, value, options, onChange }: {
-  label: string;
-  value: T;
-  options: { value: T; label: string }[];
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div role="group" aria-label={label} className="inline-flex rounded-sm bg-surface-warm p-1">
-      {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          aria-pressed={value === option.value}
-          onClick={() => onChange(option.value)}
-          className={cn(
-            "min-h-11 rounded-[4px] px-3 text-sm font-medium transition-quick",
-            value === option.value ? "bg-surface text-fg shadow-ring" : "text-muted hover:text-fg",
-          )}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 const fromWebsite = (booking: BookingView) => booking.source === "website";
 

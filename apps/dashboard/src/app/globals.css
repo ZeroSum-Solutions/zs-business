@@ -78,6 +78,18 @@
   50% { opacity: 0.55; }
 }
 
+@keyframes live {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@utility animate-live {
+  animation: live 1.15s ease-in-out infinite;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
 @utility skeleton {
   background: var(--surface-warm);
   border-radius: var(--radius-sm);

@@ -5,9 +5,12 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Segmented } from "@/components/ui/segmented";
 import { useToast } from "@/components/ui/toast";
 import type { BookingPageSummary } from "@/lib/api";
 import { useBookingPages } from "@/lib/queries";
+
+const EMBED_OPTIONS = [{ value: "embedScript", label: "Widget" }, { value: "embedIframe", label: "Plain iframe" }] as const;
 
 type Snippet = "embedScript" | "embedIframe";
 
@@ -48,7 +51,7 @@ function PageRow({ page }: { page: BookingPageSummary }) {
       <div className="flex flex-wrap items-center gap-2">
         <Globe size={20} aria-hidden className="text-meta" />
         <p className="font-medium text-fg">{page.title}</p>
-        <Badge tone={page.published ? "success" : "neutral"}>{page.published ? "Live" : "Not published"}</Badge>
+        <Badge tone={page.published ? "success" : "neutral"} live={page.published}>{page.published ? "Live" : "Not published"}</Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
         <a
@@ -61,20 +64,10 @@ function PageRow({ page }: { page: BookingPageSummary }) {
         </a>
         <Button variant="secondary" onClick={() => copy(page.bookingUrl, "booking link")}><Copy aria-hidden />Copy link</Button>
       </div>
-      <div role="group" aria-label="Embed code" className="mt-4">
-        <div className="mb-2 flex flex-wrap items-center gap-2">
-          <p className="text-sm font-medium text-fg-2">Embed code</p>
-          {(["embedScript", "embedIframe"] as const).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              aria-pressed={snippet === kind}
-              onClick={() => setSnippet(kind)}
-              className="min-h-11 rounded-sm px-3 text-sm text-muted aria-pressed:bg-surface-warm aria-pressed:text-fg"
-            >
-              {kind === "embedScript" ? "Widget" : "Plain iframe"}
-            </button>
-          ))}
+      <div className="mt-4">
+        <div className="mb-2 flex flex-wrap items-center gap-3">
+          <p aria-hidden className="text-sm font-medium text-fg-2">Embed code</p>
+          <Segmented label="Embed code" value={snippet} options={EMBED_OPTIONS} onChange={setSnippet} />
         </div>
         <label htmlFor={`embed-${page.id}`} className="sr-only">Embed code to paste into your website</label>
         <textarea

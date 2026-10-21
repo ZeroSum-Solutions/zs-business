@@ -18,6 +18,13 @@ const badgeVariants = cva(
   },
 );
 
-export function Badge({ className, tone, ...props }: ComponentProps<"span"> & VariantProps<typeof badgeVariants>) {
-  return <span className={cn(badgeVariants({ tone }), className)} {...props} />;
+// The live dot is adapted from Cult UI "Halo Badge" (MIT; see NOTICE): an opacity-only pulse, still
+// under reduced motion. The gradient rim and moving glow were left out.
+export function Badge({ className, tone, live = false, children, ...props }: ComponentProps<"span"> & VariantProps<typeof badgeVariants> & { live?: boolean }) {
+  return (
+    <span className={cn(badgeVariants({ tone }), className)} {...props}>
+      {live ? <span aria-hidden className="animate-live size-1.5 shrink-0 rounded-full bg-current" /> : null}
+      {children}
+    </span>
+  );
 }

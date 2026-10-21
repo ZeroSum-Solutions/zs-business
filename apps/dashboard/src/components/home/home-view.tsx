@@ -75,7 +75,7 @@ function RevenueTile({ data }: { data: HomeResults }) {
   const won = data.wonDeals;
   if (!main) {
     return (
-      <Card className="col-span-2 lg:col-span-4" aria-labelledby="revenue-title">
+      <Card className="col-span-2 lg:col-span-6" aria-labelledby="revenue-title">
         <CardTitle id="revenue-title" className="text-sm font-medium text-muted">Revenue this week</CardTitle>
         <EmptyState title={won.thisWeek + won.lastWeek === 0 ? "No deals won yet this week" : "Won deals have no value yet"}>
           {won.thisWeek + won.lastWeek === 0
@@ -93,7 +93,7 @@ function RevenueTile({ data }: { data: HomeResults }) {
       compare={main}
       format={(value) => formatMinor(value, main.currency)}
       valueTestId="revenue-value"
-      className="col-span-2 lg:col-span-4"
+      className="col-span-2 lg:col-span-6 lg:self-stretch"
     >
       <p className="tabular -mt-1 text-xs text-meta">
         Same time last week {formatMinor(main.lastWeek, main.currency)}. {formatNumber(won.thisWeek)} won this week, {formatNumber(won.lastWeek)} last week.
@@ -153,12 +153,15 @@ function ResultsSection() {
         This week: {formatRange(data.thisWeek.from, data.thisWeek.to, data.zone)}. Compared with the same span of last week: {formatRange(data.lastWeek.from, data.lastWeek.to, data.zone)}. Times in {data.zone.replaceAll("_", " ")}.
       </p>
       <div className="grid grid-cols-2 items-start gap-3 lg:col-span-12 lg:grid-cols-12 lg:gap-4">
-        <WeekTile id="leads" label="New leads" compare={data.leads} format={formatNumber} valueTestId="tile-value" className="lg:col-span-4">
-          <SourceRows label="New leads" bySource={data.leads.bySource} />
-        </WeekTile>
-        <WeekTile id="bookings" label="Bookings" compare={data.bookings} format={formatNumber} valueTestId="tile-value" className="lg:col-span-4">
-          <SourceRows label="Bookings" bySource={data.bookings.bySource} />
-        </WeekTile>
+        {/* Side by side on a phone; stacked beside the taller revenue tile on a wide screen. */}
+        <div className="col-span-2 grid grid-cols-2 items-start gap-3 lg:col-span-6 lg:grid-cols-1 lg:gap-4">
+          <WeekTile id="leads" label="New leads" compare={data.leads} format={formatNumber} valueTestId="tile-value">
+            <SourceRows label="New leads" bySource={data.leads.bySource} />
+          </WeekTile>
+          <WeekTile id="bookings" label="Bookings" compare={data.bookings} format={formatNumber} valueTestId="tile-value">
+            <SourceRows label="Bookings" bySource={data.bookings.bySource} />
+          </WeekTile>
+        </div>
         <RevenueTile data={data} />
       </div>
     </>
