@@ -14,7 +14,7 @@ Dashboard UI components (apps/dashboard), adapted under the MIT License below:
   Ported: "Border Beam" (components/ui/border-beam.tsx).
 
 - 21st.dev "Animated Sidebar" by @starc007 (https://21st.dev/starc007)
-  Copyright (c) @starc007
+  Copyright (c) 2026 Saurabh Chauhan (MIT, https://github.com/starc007/ui-components)
   Ported: components/ui/shared-layout-bg.tsx, lib/motion.ts.
 
 - 21st.dev "KPI Tile" by @konsstepnov (https://21st.dev/konsstepnov)

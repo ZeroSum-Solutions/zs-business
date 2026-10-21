@@ -51,13 +51,18 @@ export function actorName(actor: ReplyRecord["draftedBy"] | null, agentId: strin
 
 const when = (instant: string, zone: string) => `${formatDay(instant, zone)}, ${formatTime(instant, zone)}`;
 
+// Badges tint a solid surface, so their text keeps its contrast on a hovered or selected row.
+function Solid({ children }: { children: ReactNode }) {
+  return <span className="inline-flex rounded-pill bg-surface">{children}</span>;
+}
+
 function ThreadBadges({ thread }: { thread: ThreadSummary }) {
   return (
     <>
-      {thread.kind === "visitor" ? <Badge><Globe aria-hidden />Website visitor</Badge> : null}
-      {thread.needsReply ? <Badge tone="info">Needs reply</Badge> : null}
-      {thread.needsReview ? <Badge tone="warn">Needs review</Badge> : null}
-      {thread.drafts > 0 ? <Badge tone="accent">{thread.drafts === 1 ? "1 draft" : `${thread.drafts} drafts`}</Badge> : null}
+      {thread.kind === "visitor" ? <Solid><Badge><Globe aria-hidden />Website visitor</Badge></Solid> : null}
+      {thread.needsReply ? <Solid><Badge tone="info">Needs reply</Badge></Solid> : null}
+      {thread.needsReview ? <Solid><Badge tone="warn">Needs review</Badge></Solid> : null}
+      {thread.drafts > 0 ? <Solid><Badge tone="accent">{thread.drafts === 1 ? "1 draft" : `${thread.drafts} drafts`}</Badge></Solid> : null}
     </>
   );
 }
@@ -90,7 +95,7 @@ function ThreadList({ selectedId }: { selectedId: string | null }) {
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
                     <span className={cn("truncate text-sm text-fg", thread.needsReply || thread.needsReview ? "font-semibold" : "font-medium")}>{thread.name}</span>
-                    <time dateTime={thread.lastActivityAt} className="shrink-0 text-xs text-meta">{relativeTime(thread.lastActivityAt)}</time>
+                    <time dateTime={thread.lastActivityAt} className={cn("shrink-0 text-xs", active ? "text-muted" : "text-meta")}>{relativeTime(thread.lastActivityAt)}</time>
                   </span>
                   <span className="block truncate text-sm text-muted">{thread.preview ?? "No message"}</span>
                   <span className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-meta"><ThreadBadges thread={thread} /></span>

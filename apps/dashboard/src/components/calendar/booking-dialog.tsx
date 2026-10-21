@@ -113,7 +113,7 @@ export function BookingDialog({
                   onFocus={revealOnFocus}
                   className={cn(
                     "flex min-h-14 min-w-16 shrink-0 flex-col items-center justify-center rounded-sm px-2 text-xs transition-quick",
-                    active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--accent),transparent_60%)]" : "bg-surface text-fg-2 shadow-[inset_0_0_0_1px_var(--border)] hover:bg-surface-warm",
+                    active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_var(--accent)]" : "bg-surface text-fg-2 shadow-[inset_0_0_0_1px_var(--border)] hover:bg-surface-warm",
                   )}
                 >
                   <span className="font-medium">{weekday}</span>
@@ -150,7 +150,7 @@ export function BookingDialog({
                     onClick={() => { setSelected(slot.startsAt); setConflict(false); }}
                     className={cn(
                       "tabular min-h-11 rounded-sm text-sm font-medium transition-quick",
-                      active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--accent),transparent_60%)]" : "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border)] hover:bg-accent/10 hover:shadow-[inset_0_0_0_1px_var(--accent)]",
+                      active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_var(--accent)]" : "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border)] hover:bg-accent/10 hover:shadow-[inset_0_0_0_1px_var(--accent)]",
                     )}
                   >
                     {formatTime(slot.startsAt, zone)}

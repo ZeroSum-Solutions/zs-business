@@ -210,7 +210,7 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
               onFocus={revealOnFocus}
               className={cn(
                 "flex min-h-11 shrink-0 items-center gap-2 rounded-pill px-4 text-sm font-medium transition-quick",
-                active ? "bg-accent/14 text-accent ring-1 ring-inset ring-accent/25" : "bg-surface text-fg-2 shadow-ring hover:bg-surface-warm",
+                active ? "bg-accent/14 text-accent ring-1 ring-inset ring-accent" : "bg-surface text-fg-2 shadow-ring hover:bg-surface-warm",
               )}
             >
               {stage.name}

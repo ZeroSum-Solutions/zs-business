@@ -19,8 +19,10 @@ async function open(page: Page, path: string, heading: string) {
   await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
   // Cards fill with a top-light gradient, and axe skips contrast over gradients ("bgGradient").
-  // Its stops sit within 1% of the solid surface, so check text against that surface instead.
-  await page.addStyleTag({ content: "html { --surface-lit: var(--surface) !important; }" });
+  // Check text against the brightest stop instead: a little over the surface in black, near white in light.
+  await page.addStyleTag({
+    content: "html { --surface-lit: color-mix(in srgb, var(--surface), white 3.5%) !important; } html[data-theme=light] { --surface-lit: #fbfbfc !important; }",
+  });
 }
 
 /** Interactive elements smaller than 44 by 44 CSS px (1px slop), ignoring hidden ones. */
@@ -116,6 +118,20 @@ test.describe("accessibility", () => {
       const axe = await new AxeBuilder({ page }).withRules(["color-contrast"]).analyze();
       const failures = axe.violations.flatMap((violation) => violation.nodes.slice(0, 5).map((node) => node.target.join(" ")));
       expect(failures, "light-theme contrast").toEqual([]);
+    });
+  }
+
+  // A selected row and the open thread's bubbles tint their fills, so check them in both themes.
+  for (const theme of ["dark", "light"]) {
+    test(`an open conversation meets text contrast in the ${theme} theme`, async ({ page }) => {
+      await page.addInitScript((value) => localStorage.setItem("zs-theme", value), theme);
+      await open(page, "/inbox", "Inbox");
+      await page.getByRole("main").getByRole("listitem").getByRole("link").first().click();
+      await expect(page).toHaveURL(/\/inbox\/.+/);
+      await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+      const axe = await new AxeBuilder({ page }).withRules(["color-contrast"]).analyze();
+      const failures = axe.violations.flatMap((violation) => violation.nodes.slice(0, 5).map((node) => node.target.join(" ")));
+      expect(failures, `${theme}-theme thread contrast`).toEqual([]);
     });
   }
 

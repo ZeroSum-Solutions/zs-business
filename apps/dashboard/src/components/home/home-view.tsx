@@ -303,7 +303,8 @@ function NextAppointments() {
           Calendar <ArrowRight size={16} aria-hidden />
         </Link>
       </CardHeader>
-      {bookings.isPending ? <LoadingRows rows={3} /> : bookings.isError ? <ErrorNote error={bookings.error} retry={() => bookings.refetch()} /> : upcoming.length === 0 ? (
+      {/* Times need the calendar's zone, so wait for the resources too. */}
+      {bookings.isPending || resources.isPending ? <LoadingRows rows={3} /> : bookings.isError ? <ErrorNote error={bookings.error} retry={() => bookings.refetch()} /> : resources.isError ? <ErrorNote error={resources.error} retry={() => resources.refetch()} /> : upcoming.length === 0 ? (
         <EmptyState title="No appointments coming up">Open slots show on the calendar.</EmptyState>
       ) : (
         <ul className="divide-y divide-border-soft">
@@ -348,16 +349,17 @@ function NeedsYou() {
     query.isPending ? { title: "Checking…", detail: "Loading" } : query.isError ? { title: "Couldn't check", detail: "Open to try again" } : null;
   const NEUTRAL = "text-muted bg-surface-warm ring-border";
   const inbox = unknown(threads);
-  const calendar = unknown(bookings);
+  // The time needs the calendar's zone, so it waits for the resources too.
+  const calendar = unknown(bookings) ?? (next ? unknown(resources) : null);
   const connections = unknown(checklist);
   const items = [
     {
       href: "/inbox",
       icon: ChatCircleDots,
-      tone: inbox ? NEUTRAL : waiting > 0 ? "text-info bg-info/12 ring-info/25" : "text-success bg-success/12 ring-success/25",
+      tone: inbox || (waiting === 0 && threads.hasNextPage) ? NEUTRAL : waiting > 0 ? "text-info bg-info/12 ring-info/25" : "text-success bg-success/12 ring-success/25",
       // The count reads the newest page of threads; with more pages, the claim says "recent".
       title: inbox?.title ?? (waiting > 0 ? `${formatNumber(waiting)} waiting for you` : threads.hasNextPage ? "No recent replies waiting" : "Inbox clear"),
-      detail: inbox?.detail ?? (waiting > 0 ? "Replies and reviews in Inbox" : "No replies or reviews waiting"),
+      detail: inbox?.detail ?? (waiting > 0 ? "Replies and reviews in Inbox" : threads.hasNextPage ? "Older conversations not checked" : "No replies or reviews waiting"),
     },
     {
       href: "/calendar",

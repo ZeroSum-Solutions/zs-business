@@ -7,7 +7,7 @@ const barColor = (page: Page) => page.locator('meta[name="theme-color"]').first(
 function collectErrors(page: Page) {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error" && /hydrat/i.test(message.text())) errors.push(message.text()); });
+  page.on("console", (message) => { if (message.type() === "error" && /hydrat|Minified React error #(418|422|423|425)/i.test(message.text())) errors.push(message.text()); });
   return errors;
 }
 
