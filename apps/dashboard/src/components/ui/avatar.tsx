@@ -40,10 +40,11 @@ export function Avatar({ name, size = "md", className }: {
         width: px,
         height: px,
         fontSize: px * 0.38,
-        color,
+        // Darkened on a light theme so the initials keep contrast on their pale fill.
+        color: `color-mix(in oklab, ${color}, black var(--avatar-ink))`,
         background: `linear-gradient(180deg, rgb(255 255 255 / 0.14) 0%, transparent 48%), linear-gradient(135deg, ${color}26, ${color}4d)`,
         border: `1px solid ${color}66`,
-        boxShadow: `0 0 0 1px ${color}1f, 0 1px 2px rgb(0 0 0 / 0.4), inset 0 1px 0 rgb(255 255 255 / 0.18)`,
+        boxShadow: `0 0 0 1px ${color}1f, 0 1px 2px var(--avatar-drop), inset 0 1px 0 rgb(255 255 255 / 0.18)`,
       }}
     >
       {initials(name)}

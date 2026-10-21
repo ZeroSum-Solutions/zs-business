@@ -95,7 +95,7 @@ export function WebsiteRequests() {
                 {[item.submitted.email, formatPhone(item.submitted.phone)].filter(Boolean).join(" · ")}
               </p>
               {item.submitted.notes ? <p className="mt-1 text-sm text-muted">“{item.submitted.notes}”</p> : null}
-              <div className="mt-3 flex flex-wrap gap-2 border-t border-border-soft pt-3">
+              <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3">
                 {item.matchedContactIds.map((contactId) => {
                   const name = contactName(contacts.data, contactId) ?? "this customer";
                   return (

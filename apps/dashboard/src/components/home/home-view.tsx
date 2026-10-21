@@ -66,7 +66,7 @@ function WeekBars({ compare, format }: { compare: WeekCompare; format: (value: n
   const max = Math.max(compare.thisWeek, compare.lastWeek, 1);
   const rows = [
     { label: "This week", value: compare.thisWeek, bar: "bg-accent" },
-    { label: "Same time last week", value: compare.lastWeek, bar: "bg-fg/20" },
+    { label: "Same time last week", value: compare.lastWeek, bar: "bg-border-strong" },
   ];
   return (
     <ul className="space-y-1.5 text-xs" aria-label="This week and last week">
@@ -142,14 +142,14 @@ function RevenueTile({ data }: { data: HomeResults }) {
               </div>
               <div className="mt-1 space-y-0.5" aria-hidden>
                 <div className="h-1.5 rounded-pill bg-accent" style={{ width: `${(item.thisWeek / maxSource) * 100}%` }} />
-                <div className="h-1 rounded-pill bg-fg/20" style={{ width: `${(item.lastWeek / maxSource) * 100}%` }} />
+                <div className="h-1 rounded-pill bg-border-strong" style={{ width: `${(item.lastWeek / maxSource) * 100}%` }} />
               </div>
             </li>
           ))}
         </ul>
         <p className="mt-3 flex items-center gap-4 text-xs text-meta">
           <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1.5 w-4 rounded-pill bg-accent" />This week</span>
-          <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1 w-4 rounded-pill bg-fg/20" />Last week</span>
+          <span className="inline-flex items-center gap-1.5"><span aria-hidden className="h-1 w-4 rounded-pill bg-border-strong" />Last week</span>
         </p>
       </div>
       {others.length > 0 ? (

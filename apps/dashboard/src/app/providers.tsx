@@ -6,6 +6,7 @@ import { ToastProvider } from "@/components/ui/toast";
 import { isApiError } from "@/lib/api";
 import { ApiProvider } from "@/lib/api/react";
 import { SessionProvider } from "@/lib/session";
+import { syncThemeColor } from "@/lib/theme";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -22,6 +23,14 @@ export function Providers({ children }: { children: ReactNode }) {
         },
       }),
   );
+
+  // The head script picked the theme; match the browser bars to it, and follow a system switch.
+  useEffect(() => {
+    syncThemeColor();
+    const query = window.matchMedia("(prefers-color-scheme: light)");
+    query.addEventListener("change", syncThemeColor);
+    return () => query.removeEventListener("change", syncThemeColor);
+  }, []);
 
   useEffect(() => {
     if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) {

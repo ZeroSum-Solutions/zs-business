@@ -214,7 +214,7 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
               )}
             >
               {stage.name}
-              <span className={cn("tabular text-xs", active ? "text-accent/80" : "text-meta")}>{count}</span>
+              <span className={cn("tabular text-xs", active ? "text-accent" : "text-meta")}>{count}</span>
             </button>
           );
         })}

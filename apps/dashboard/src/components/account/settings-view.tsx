@@ -6,9 +6,17 @@ import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
 import { DisabledReason, NOT_AVAILABLE, useSampleOnly } from "@/components/ui/sample";
 import { PageHeader } from "@/components/ui/states";
+import { Segmented } from "@/components/ui/segmented";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
 import { OWNER } from "@/components/shell/account-menu";
+import { setTheme, type Theme, useTheme } from "@/lib/theme";
+
+const THEME_OPTIONS = [
+  { value: "dark", label: "Dark" },
+  { value: "light", label: "Light" },
+  { value: "system", label: "Match device" },
+] as const satisfies readonly { value: Theme; label: string }[];
 
 const NOTIFY = [
   { id: "booking", label: "New booking", hint: "A text when someone books." },
@@ -20,10 +28,20 @@ export function SettingsView() {
   const toast = useToast();
   const sampleOnly = useSampleOnly();
   const [notify, setNotify] = useState<Record<string, boolean>>({ booking: true, approval: true, digest: false });
+  const theme = useTheme();
   return (
     <>
       <PageHeader title="Settings" description="Business details and how we reach you." sample />
       <div className="grid max-w-3xl gap-4">
+        <Card aria-labelledby="appearance-title">
+          <CardHeader>
+            <div>
+              <CardTitle id="appearance-title">Appearance</CardTitle>
+              <p className="text-sm text-muted">Saved on this device. Match device follows your phone or computer.</p>
+            </div>
+          </CardHeader>
+          <Segmented label="Theme" value={theme} options={THEME_OPTIONS} onChange={setTheme} />
+        </Card>
         <Card aria-labelledby="business-title">
           <CardHeader><CardTitle id="business-title">Business</CardTitle></CardHeader>
           <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); if (!sampleOnly) toast("Settings saved."); }}>

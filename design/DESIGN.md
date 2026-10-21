@@ -100,9 +100,16 @@ Colour has jobs, so the screen is never "white with a yellow tag":
 - `warn` (amber): something to review or fix. `danger` (coral): failed or down.
 - Avatars take one of eight pops picked from the name.
 
-Every text pair meets WCAG AA; `meta` is the lowest-contrast text. Black is the only theme.
-Revised 2026-10-20 after Gemini 3.8 Flash and Gemini 4 Argon visual audits found the
-white-accent version flat.
+Every text pair meets WCAG AA; `meta` is the lowest-contrast text. Revised 2026-10-20 after
+Gemini 3.8 Flash and Gemini 4 Argon visual audits found the white-accent version flat.
+
+**Light theme** (added 2026-10-20). Black stays the default. The owner can pick Light or Match
+device in Settings > Appearance; the choice is saved on the device and set before first paint
+(`lib/theme-script.ts`). Light keeps the same colour jobs on a cool grey page (#f3f3f5) with
+pure white cards: `primary` turns near-black, `accent` deepens to violet #583bc9, and the status
+colours darken until each meets AA on white. Cards keep their lift with a soft two-step shadow
+instead of the black theme's deep drop; avatars darken their initials. The token values live
+in `src/styles/theme.css` under `:root[data-theme="light"]`; the YAML above lists black only.
 
 ## Typography
 

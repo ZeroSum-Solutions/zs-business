@@ -73,7 +73,7 @@ function PageRow({ page }: { page: BookingPageSummary }) {
           rows={3}
           value={page[snippet]}
           onFocus={(event) => event.currentTarget.select()}
-          className="w-full resize-none rounded-sm bg-bg p-3 font-mono shadow-well text-xs text-fg-2"
+          className="w-full resize-none rounded-sm bg-well p-3 font-mono shadow-well text-xs text-fg-2"
         />
         <Button variant="secondary" className="mt-2" onClick={() => copy(page[snippet], "embed code")}><Copy aria-hidden />Copy embed code</Button>
       </div>

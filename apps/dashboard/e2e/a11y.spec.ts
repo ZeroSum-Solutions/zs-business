@@ -104,6 +104,18 @@ test.describe("accessibility", () => {
     });
   }
 
+  // The light theme has its own colour values, so every page gets a contrast pass in it too.
+  for (const { path, heading } of PAGES) {
+    test(`${path} meets text contrast in the light theme`, async ({ page }) => {
+      await page.addInitScript(() => localStorage.setItem("zs-theme", "light"));
+      await open(page, path, heading);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+      const axe = await new AxeBuilder({ page }).withRules(["color-contrast"]).analyze();
+      const failures = axe.violations.flatMap((violation) => violation.nodes.slice(0, 5).map((node) => node.target.join(" ")));
+      expect(failures, "light-theme contrast").toEqual([]);
+    });
+  }
+
   test("the site editor's labels all point at controls, and its disabled buttons say why", async ({ page }) => {
     await open(page, "/site", "Site");
     await page.getByRole("button", { name: "Edit site" }).click();

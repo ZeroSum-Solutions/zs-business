@@ -26,7 +26,7 @@ export function DialogContent({
   const opener = useRef<HTMLElement | null>(null);
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-bg/80 backdrop-blur-xs data-[state=open]:animate-enter" />
+      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-overlay backdrop-blur-xs data-[state=open]:animate-enter" />
       <DialogPrimitive.Content
         className={cn(
           "fixed inset-x-0 bottom-0 z-50 flex max-h-[92dvh] flex-col rounded-t-lg bg-lit shadow-raised ring-1 ring-inset ring-border pb-safe data-[state=open]:animate-enter",

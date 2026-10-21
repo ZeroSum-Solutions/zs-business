@@ -87,7 +87,7 @@ const TILE =
   "card-live flex min-w-0 flex-col gap-3 rounded-lg bg-lit p-4 text-fg shadow-card lg:p-5";
 const LABEL = "truncate font-medium text-muted text-sm";
 const BADGE =
-  "inline-flex items-center gap-0.5 rounded-pill px-1.5 py-0.5 font-medium text-fg text-xs tabular-nums";
+  "inline-flex items-center gap-0.5 rounded-pill px-1.5 py-0.5 font-medium text-xs tabular-nums";
 const ARROW =
   "size-3.5 transition-transform duration-500 motion-reduce:transition-none";
 const SPARK =
@@ -251,7 +251,7 @@ export function KpiTile({
             {isEmpty ? null : <span className="sr-only" data-testid={valueTestId}>{format(value)}</span>}
             {hasDelta ? (
               <span
-                className={cn(BADGE, toneTint)}
+                className={cn(BADGE, toneText, toneTint)}
                 data-direction={direction}
                 data-slot="kpi-delta"
                 data-tone={tone}

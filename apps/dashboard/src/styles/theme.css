@@ -2,7 +2,8 @@
  * Theme: the one place design tokens live.
  * Structure from Mish "Neutral Product" (Apache-2.0, ours); values from the 2026-10 redesign
  * (design/DESIGN.md): black, white for primary actions, violet for the current place and links,
- * blue for good news. Black is the only theme. Components use the Tailwind names in @theme below, never raw hex.
+ * blue for good news. Black is the default; light is the owner's choice in Settings
+ * (`data-theme` on <html>: dark, light, or system, set before first paint by lib/theme.ts). Components use the Tailwind names in @theme below, never raw hex.
  */
 :root {
   color-scheme: dark;
@@ -80,6 +81,20 @@
   --surface-lit: linear-gradient(180deg, rgb(255 255 255 / 0.035), rgb(255 255 255 / 0) 160px), var(--surface);
   /* Recessed wells for inputs */
   --elev-well: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px var(--border);
+  /* Pointer light on live cards (globals.css card-live) */
+  --spot-edge: rgb(255 255 255 / 0.7);
+  --spot-glow: rgb(255 255 255 / 0.06);
+  /* Avatar initials: how much ink is mixed into the pop so it reads on the fill */
+  --avatar-ink: 0%;
+  --avatar-drop: rgb(0 0 0 / 0.4);
+  /* Dims the page behind a dialog. */
+  --overlay: rgb(6 6 7 / 0.8);
+  /* Switch thumb and the selected segment: lifted controls that sit on a well. */
+  --control-thumb: var(--fg);
+  --control-on: var(--surface-warm);
+  --control-off: var(--surface-warm);
+  /* Recessed fill for inputs and segment tracks: below the card, and below the page too. */
+  --well: var(--bg);
   /* Focus: inner gap in the surface color, outer ring in the accent */
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   /* Motion */
@@ -94,6 +109,95 @@
   --container-gutter-desktop: 32px;
   --container-gutter-tablet: 24px;
   --container-gutter-phone: 16px;
+}
+
+/*
+ * Light: the same roles on cool white (no warm paper, per the owner). Black takes over the
+ * primary fill; the pops are darkened until text on white and on their own tints meets AA.
+ * The block is repeated for `system` under a light preference: CSS cannot share one block
+ * between a selector and a media query.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f3f5;
+  --surface: #ffffff;
+  --surface-warm: #ececf0;
+  --fg: #0b0b0d;
+  --fg-2: #2a2b30;
+  --muted: #55575e;
+  --meta: #606269;
+  --border: #e0e0e6;
+  --border-soft: #ebebef;
+  --border-strong: #8b8d95;
+  --primary: #0b0b0d;
+  --primary-on: #ffffff;
+  --primary-hover: #26272c;
+  --primary-active: #3a3b41;
+  --accent: #583bc9;
+  --accent-on: #ffffff;
+  --accent-hover: #4b30b5;
+  --accent-active: #3f269e;
+  --success: #2451cc;
+  --info: #066587;
+  --warn: #854b00;
+  --danger: #b82519;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: 0 0 0 1px rgba(16, 16, 24, 0.06), 0 4px 8px rgba(16, 16, 24, 0.06), 0 16px 40px -8px rgba(16, 16, 24, 0.2);
+  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.07), 0 1px 2px rgba(16, 16, 24, 0.06), 0 8px 24px -10px rgba(16, 16, 24, 0.14);
+  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.1), 0 2px 4px rgba(16, 16, 24, 0.06), 0 18px 40px -12px rgba(16, 16, 24, 0.22);
+  --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
+  --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
+  --spot-edge: color-mix(in oklab, var(--accent), transparent 35%);
+  --spot-glow: color-mix(in oklab, var(--accent), transparent 88%);
+  --avatar-ink: 60%;
+  --avatar-drop: rgb(16 16 24 / 0.08);
+  --overlay: rgb(11 11 13 / 0.35);
+  --control-thumb: #ffffff;
+  --control-on: #ffffff;
+  --control-off: #d4d5dc;
+  --well: #ebebef;
+}
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    color-scheme: light;
+    --bg: #f3f3f5;
+    --surface: #ffffff;
+    --surface-warm: #ececf0;
+    --fg: #0b0b0d;
+    --fg-2: #2a2b30;
+    --muted: #55575e;
+    --meta: #606269;
+    --border: #e0e0e6;
+    --border-soft: #ebebef;
+    --border-strong: #8b8d95;
+    --primary: #0b0b0d;
+    --primary-on: #ffffff;
+    --primary-hover: #26272c;
+    --primary-active: #3a3b41;
+    --accent: #583bc9;
+    --accent-on: #ffffff;
+    --accent-hover: #4b30b5;
+    --accent-active: #3f269e;
+    --success: #2451cc;
+    --info: #066587;
+    --warn: #854b00;
+    --danger: #b82519;
+    --elev-ring: 0 0 0 1px var(--border);
+    --elev-raised: 0 0 0 1px rgba(16, 16, 24, 0.06), 0 4px 8px rgba(16, 16, 24, 0.06), 0 16px 40px -8px rgba(16, 16, 24, 0.2);
+    --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.07), 0 1px 2px rgba(16, 16, 24, 0.06), 0 8px 24px -10px rgba(16, 16, 24, 0.14);
+    --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.1), 0 2px 4px rgba(16, 16, 24, 0.06), 0 18px 40px -12px rgba(16, 16, 24, 0.22);
+    --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
+    --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
+    --spot-edge: color-mix(in oklab, var(--accent), transparent 35%);
+    --spot-glow: color-mix(in oklab, var(--accent), transparent 88%);
+    --avatar-ink: 60%;
+    --avatar-drop: rgb(16 16 24 / 0.08);
+    --overlay: rgb(11 11 13 / 0.35);
+    --control-thumb: #ffffff;
+    --control-on: #ffffff;
+    --control-off: #d4d5dc;
+    --well: #ebebef;
+}
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -115,6 +219,11 @@
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-warm: var(--surface-warm);
+  --color-control-thumb: var(--control-thumb);
+  --color-control-on: var(--control-on);
+  --color-overlay: var(--overlay);
+  --color-control-off: var(--control-off);
+  --color-well: var(--well);
   --color-fg: var(--fg);
   --color-fg-2: var(--fg-2);
   --color-muted: var(--muted);

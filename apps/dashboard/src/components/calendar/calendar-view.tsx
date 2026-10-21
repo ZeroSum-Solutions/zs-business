@@ -89,7 +89,7 @@ function DayView({ resource, dateKey, onPickSlot }: { resource: ResourceSummary;
                 key={slot.startsAt}
                 type="button"
                 onClick={() => onPickSlot(slot.startsAt)}
-                className="tabular min-h-11 rounded-sm bg-surface-warm/70 text-sm font-medium text-fg-2 shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:bg-accent/10 hover:text-fg hover:shadow-[inset_0_0_0_1px_var(--accent)]"
+                className="tabular min-h-11 rounded-sm bg-surface text-sm font-medium text-fg shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:bg-accent/10 hover:text-fg hover:shadow-[inset_0_0_0_1px_var(--accent)]"
                 aria-label={`Book ${formatTime(slot.startsAt, zone)}`}
               >
                 {formatTime(slot.startsAt, zone)}
@@ -126,7 +126,7 @@ function WeekView({ resource, weekStart, today, onOpenDay }: {
         const items = bookings.data.items.filter((booking) => zonedDateKey(booking.startsAt, zone) === day);
         const [weekday, rest] = formatDateKey(day).split(", ");
         return (
-          <li key={day} className={cn("rounded-lg bg-lit p-3 shadow-card lg:min-h-48", day === today && "shadow-[inset_0_0_0_2px_var(--accent)]")}>
+          <li key={day} className={cn("rounded-lg bg-lit p-3 shadow-card lg:min-h-48", day === today && "ring-2 ring-inset ring-accent")}>
             <button type="button" onClick={() => onOpenDay(day)} className="-m-1 flex min-h-11 w-[calc(100%+8px)] items-baseline justify-between rounded-sm p-1 text-left hover:bg-surface-warm">
               <span className="text-sm font-semibold text-fg">{weekday} <span className="font-normal text-muted">{rest}</span></span>
               <span className="text-xs text-meta">{items.length === 0 ? "Free" : `${items.length} booked`}</span>

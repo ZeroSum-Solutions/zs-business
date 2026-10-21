@@ -150,7 +150,7 @@ export function BookingDialog({
                     onClick={() => { setSelected(slot.startsAt); setConflict(false); }}
                     className={cn(
                       "tabular min-h-11 rounded-sm text-sm font-medium transition-quick",
-                      active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--accent),transparent_60%)]" : "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border-strong)] hover:bg-surface-warm",
+                      active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--accent),transparent_60%)]" : "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border)] hover:bg-accent/10 hover:shadow-[inset_0_0_0_1px_var(--accent)]",
                     )}
                   >
                     {formatTime(slot.startsAt, zone)}

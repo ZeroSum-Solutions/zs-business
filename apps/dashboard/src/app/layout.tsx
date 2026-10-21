@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Google_Sans } from "next/font/google";
 import type { ReactNode } from "react";
 import { AppShell } from "@/components/shell/app-shell";
+import { THEME_SCRIPT } from "@/lib/theme-script";
 import { Providers } from "./providers";
 import "./globals.css";
 
@@ -40,7 +41,11 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en-US" className={googleSans.variable}>
+    // The theme script may set data-theme before React hydrates, hence the suppressed warning.
+    <html lang="en-US" className={googleSans.variable} data-theme="dark" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body>
         <Providers>
           <AppShell>{children}</AppShell>
