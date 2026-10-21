@@ -9,11 +9,11 @@ import { BorderBeam } from "@/components/ui/border-beam";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { KpiTile } from "@/components/ui/kpi-tile";
-import { SampleBadge } from "@/components/ui/sample";
+import { SampleBadge, useSampleOnly } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader, Skeleton } from "@/components/ui/states";
 import { bookingCustomerName, type HomeResults } from "@/lib/api";
 import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
-import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useUsage } from "@/lib/queries";
+import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
 import { spotlight } from "@/lib/spotlight";
@@ -335,33 +335,45 @@ function NextAppointments() {
 /** What needs the owner now, first on every screen size (BRIEF: "what needs me now"). */
 function NeedsYou() {
   const waiting = useInboxCount();
+  const threads = useThreads();
   const checklist = useChecklist();
+  const sampleOnly = useSampleOnly();
   const from = useMemo(() => new Date().toISOString(), []);
-  const next = useBookings({ from, limit: 4 }).data?.items[0];
+  const bookings = useBookings({ from, limit: 4 });
+  const next = bookings.data?.items[0];
   const resources = useResources();
   const zone = resources.data?.find((item) => item.id === next?.resourceId)?.timeZone ?? "America/New_York";
   const open = checklist.data?.filter((item) => item.status === "action").length ?? 0;
+  // Never claim "clear" or "nothing" before the answer is in: say so while loading or after a failure.
+  const unknown = (query: { isPending: boolean; isError: boolean }) =>
+    query.isPending ? { title: "Checking…", detail: "Loading" } : query.isError ? { title: "Couldn't check", detail: "Open to try again" } : null;
+  const NEUTRAL = "text-muted bg-surface-warm ring-border";
+  const inbox = unknown(threads);
+  const calendar = unknown(bookings);
+  const connections = unknown(checklist);
   const items = [
     {
       href: "/inbox",
       icon: ChatCircleDots,
-      tone: waiting > 0 ? "text-info bg-info/12 ring-info/25" : "text-success bg-success/12 ring-success/25",
-      title: waiting > 0 ? `${formatNumber(waiting)} waiting for you` : "Inbox clear",
-      detail: waiting > 0 ? "Replies and reviews in Inbox" : "No replies or reviews waiting",
+      tone: inbox ? NEUTRAL : waiting > 0 ? "text-info bg-info/12 ring-info/25" : "text-success bg-success/12 ring-success/25",
+      // The count reads the newest page of threads; with more pages, the claim says "recent".
+      title: inbox?.title ?? (waiting > 0 ? `${formatNumber(waiting)} waiting for you` : threads.hasNextPage ? "No recent replies waiting" : "Inbox clear"),
+      detail: inbox?.detail ?? (waiting > 0 ? "Replies and reviews in Inbox" : "No replies or reviews waiting"),
     },
     {
       href: "/calendar",
       icon: CalendarBlank,
-      tone: "text-accent bg-accent/12 ring-accent/25",
-      title: next ? `${formatTime(next.startsAt, zone)}, ${formatDay(next.startsAt, zone)}` : "No appointments coming up",
-      detail: next ? (bookingCustomerName(next) ?? next.title ?? "Next appointment") : "Open slots are on the calendar",
+      tone: calendar ? NEUTRAL : "text-accent bg-accent/12 ring-accent/25",
+      title: calendar?.title ?? (next ? `${formatTime(next.startsAt, zone)}, ${formatDay(next.startsAt, zone)}` : "No appointments coming up"),
+      detail: calendar?.detail ?? (next ? (bookingCustomerName(next) ?? next.title ?? "Next appointment") : "Open slots are on the calendar"),
     },
     {
       href: "/account/connections",
-      icon: open > 0 ? WarningCircle : CheckCircle,
-      tone: open > 0 ? "text-warn bg-warn/12 ring-warn/25" : "text-success bg-success/12 ring-success/25",
-      title: open > 0 ? `${formatNumber(open)} connection${open === 1 ? "" : "s"} need${open === 1 ? "s" : ""} you` : "Everything is connected",
-      detail: open > 0 ? "Reconnect to keep requests coming in" : "Booking page, email and calendar",
+      icon: !connections && open > 0 ? WarningCircle : CheckCircle,
+      tone: connections ? NEUTRAL : open > 0 ? "text-warn bg-warn/12 ring-warn/25" : "text-success bg-success/12 ring-success/25",
+      title: connections?.title ?? (open > 0 ? `${formatNumber(open)} connection${open === 1 ? "" : "s"} need${open === 1 ? "s" : ""} you` : "Everything is connected"),
+      // Live mode still reads the sample checklist (see SampleBadge); the tile says so too.
+      detail: connections?.detail ?? (sampleOnly ? "Sample data until connections ship" : open > 0 ? "Reconnect to keep requests coming in" : "Booking page, email and calendar"),
     },
   ];
   return (

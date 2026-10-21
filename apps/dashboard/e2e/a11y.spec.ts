@@ -18,6 +18,9 @@ async function open(page: Page, path: string, heading: string) {
   await page.goto(path);
   await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  // Cards fill with a top-light gradient, and axe skips contrast over gradients ("bgGradient").
+  // Its stops sit within 1% of the solid surface, so check text against that surface instead.
+  await page.addStyleTag({ content: "html { --surface-lit: var(--surface) !important; }" });
 }
 
 /** Interactive elements smaller than 44 by 44 CSS px (1px slop), ignoring hidden ones. */

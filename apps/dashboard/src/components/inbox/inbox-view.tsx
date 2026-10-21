@@ -127,7 +127,7 @@ function RequestBubble({ entry, zone, resources }: { entry: RequestEntry; zone: 
         {entry.booking ? (
           <Link
             href={`/calendar?date=${zonedDateKey(entry.booking.startsAt, bookingZone)}&calendar=${entry.booking.resourceId}`}
-            className="mt-3 flex min-h-11 items-center gap-3 rounded-md bg-bg/60 px-3 py-2 shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:shadow-[inset_0_0_0_1px_var(--accent)]"
+            className="mt-3 flex min-h-11 items-center gap-3 rounded-md bg-surface px-3 py-2 shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:shadow-[inset_0_0_0_1px_var(--accent)]"
           >
             <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-sm bg-accent/14 text-accent"><CalendarBlank size={16} weight="fill" /></span>
             <span className="min-w-0 flex-1">
@@ -151,9 +151,10 @@ export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: 
       <div className="max-w-[85%] rounded-2xl rounded-tr-sm bg-linear-to-b from-accent/16 to-accent/8 px-4 py-3 text-sm text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_0_1px_color-mix(in_oklab,var(--accent),transparent_70%)]">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
           <p className="min-w-0 text-xs font-medium break-words text-fg-2"><span className="sr-only">Subject: </span>{reply.subject}</p>
-          {byAgent ? <Badge data-testid="agent-draft"><Robot aria-hidden />Follow-up agent</Badge> : null}
+          {/* Badges sit on a solid surface: their tint over the violet bubble fell below AA. */}
+          {byAgent ? <span className="inline-flex rounded-pill bg-surface"><Badge data-testid="agent-draft"><Robot aria-hidden />Follow-up agent</Badge></span> : null}
           {/* Announced when it changes, such as a draft becoming approved and queued. */}
-          <span aria-live="polite">{status ? <Badge tone={status.tone} data-testid="reply-status">{status.label}</Badge> : null}</span>
+          <span aria-live="polite">{status ? <span className="inline-flex rounded-pill bg-surface"><Badge tone={status.tone} data-testid="reply-status">{status.label}</Badge></span> : null}</span>
         </div>
         <p className="break-words whitespace-pre-wrap">{reply.body}</p>
       </div>

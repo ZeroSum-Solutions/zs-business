@@ -1,3 +1,5 @@
+// Adapted from Magic UI "Magic Card" (MIT; see NOTICE). Changes: CSS variables on the card
+// instead of motion values, so the pointer light never re-renders React.
 import type { PointerEvent } from "react";
 
 /** Moves the `card-live` spotlight to the pointer through CSS variables, so React never re-renders. */

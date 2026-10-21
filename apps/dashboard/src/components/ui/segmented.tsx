@@ -39,7 +39,7 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
               )}
             >
               {active ? (
-                <motion.span layoutId="pill" transition={transition} aria-hidden className="absolute inset-0 rounded-pill bg-control-on shadow-card ring-1 ring-inset ring-border" />
+                <motion.span layoutId="pill" transition={transition} aria-hidden className="absolute inset-0 rounded-pill bg-control-on shadow-card ring-1 ring-inset ring-border-strong" />
               ) : null}
               <span className="relative">{option.label}</span>
             </button>
