@@ -1,8 +1,10 @@
 // docs/requirements/google-calendar.md G-2, G-8: the two anonymous Google routes. Original code.
-// The OAuth callback trusts only its signed state, and runs the connect action as the member the
-// state names. The push webhook checks the channel token before any database work and only stores
+// The OAuth callback trusts only its signed state and the browser key the dashboard's callback
+// route forwards from the starting browser's cookie, and stages the grant for the owner to confirm
+// (session.ts confirmGoogleConnect): the token goes back in a header, never in the redirect's URL. The push webhook checks the channel token before any database work and only stores
 // that a channel changed; the calendar worker (service role) does the rest.
 import type { KeyObject } from "node:crypto";
+import { CONNECT_BROWSER_KEY_HEADER, PENDING_GRANT_HEADER } from "@zs/contracts";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import {
@@ -32,7 +34,7 @@ export interface GoogleCalendarConfig {
   readonly channelSecret: string;
   /** Receives what each callback and push did, for logs; never a token. */
   readonly report?: (event:
-    | { readonly route: "callback"; readonly outcome: "connected" | "bad_state" | OAuthCallbackReason }
+    | { readonly route: "callback"; readonly outcome: "connected" | "staged" | "bad_state" | OAuthCallbackReason }
     | { readonly route: "webhook"; readonly outcome: "stored" | "duplicate" }) => void;
 }
 
@@ -48,6 +50,7 @@ export function googleCalendarRoutes(
     .get("/oauth/google/callback", async (c) => {
       const outcome = await createOAuthCallbackSession(requestEdge(c)).complete({
         state: c.req.query("state"), code: c.req.query("code"), error: c.req.query("error"),
+        browserKey: c.req.header(CONNECT_BROWSER_KEY_HEADER),
       }, c.var.signal);
       if (!outcome.ok) {
         config.report?.({ route: "callback", outcome: "bad_state" });
@@ -55,11 +58,14 @@ export function googleCalendarRoutes(
       }
       const target = new URL(config.returnUrl);
       if (outcome.connected) target.searchParams.set("calendar", "connected");
-      else {
+      else if ("pendingGrant" in outcome) {
+        target.searchParams.set("calendar", "confirm");
+        c.header(PENDING_GRANT_HEADER, outcome.pendingGrant);
+      } else {
         target.searchParams.set("calendar", "error");
         target.searchParams.set("reason", outcome.reason);
       }
-      config.report?.({ route: "callback", outcome: outcome.connected ? "connected" : outcome.reason });
+      config.report?.({ route: "callback", outcome: outcome.connected ? "connected" : "pendingGrant" in outcome ? "staged" : outcome.reason });
       for (const [name, value] of Object.entries(CALLBACK_HEADERS)) c.header(name, value);
       return c.redirect(target.toString(), 303);
     })

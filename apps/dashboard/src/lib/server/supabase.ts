@@ -7,6 +7,7 @@
  */
 import { createServerClient, parseCookieHeader, serializeCookieHeader, type CookieOptions } from "@supabase/ssr";
 import { isAuthRetryableFetchError, type Session, type SupabaseClient } from "@supabase/supabase-js";
+import { expiredCalendarCookies } from "./calendar-connect";
 import { isHttps, type LiveConfig } from "./live-config";
 
 /** Cookie name of the Supabase session (chunks are `zs-auth.0`, `zs-auth.1`, ...). */
@@ -17,13 +18,17 @@ export const PILOT_COOKIE = "zs_dashboard_session";
 const isAuthCookie = (name: string) => name === AUTH_COOKIE || name.startsWith(`${AUTH_COOKIE}.`) || name.startsWith(`${AUTH_COOKIE}-`);
 
 /**
- * Set-Cookie values that expire every auth cookie and the pilot cookie the request carries.
- * For when there is no Supabase client to sign out with (live mode not set up).
+ * Set-Cookie values that expire every auth cookie, the pilot cookie and the calendar connect
+ * cookies the request carries. For when there is no Supabase client to sign out with (live mode
+ * not set up).
  */
 export function expiredCookies(request: Request, secure: boolean): string[] {
-  return parseCookieHeader(request.headers.get("cookie") ?? "")
-    .filter((cookie) => isAuthCookie(cookie.name) || cookie.name === PILOT_COOKIE)
-    .map((cookie) => serializeCookieHeader(cookie.name, "", { path: "/", sameSite: "strict", httpOnly: true, secure, maxAge: 0 }));
+  return [
+    ...parseCookieHeader(request.headers.get("cookie") ?? "")
+      .filter((cookie) => isAuthCookie(cookie.name) || cookie.name === PILOT_COOKIE)
+      .map((cookie) => serializeCookieHeader(cookie.name, "", { path: "/", sameSite: "strict", httpOnly: true, secure, maxAge: 0 })),
+    ...expiredCalendarCookies(request, secure),
+  ];
 }
 
 /** True when the request carries a Supabase session cookie (not just the retired pilot cookie). */
@@ -35,7 +40,11 @@ export interface AuthContext {
   readonly client: SupabaseClient;
   /** True when the browser sent a session cookie or the old pilot cookie: a missing session then "ended". */
   readonly hadSession: boolean;
-  /** Expire every auth cookie the browser sent, for example after the API refused the session. */
+  /**
+   * Expire every auth cookie the browser sent, for example after the API refused the session, and
+   * the calendar connect cookies with them: a flow started or a grant staged under this session
+   * must not outlive it.
+   */
   clearAll(): void;
   /** Remember the cookie changes so far; the returned function drops any made after it. */
   checkpoint(): () => void;
@@ -78,6 +87,7 @@ export function authFor(request: Request, config: LiveConfig): AuthContext {
     hadSession,
     clearAll() {
       for (const name of [...jar.keys()]) expire(name);
+      for (const cookie of expiredCalendarCookies(request, forced.secure ?? false)) writes.set(cookie.slice(0, cookie.indexOf("=")), cookie);
     },
     checkpoint() {
       const [savedJar, savedWrites] = [new Map(jar), new Map(writes)];

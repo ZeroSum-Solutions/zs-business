@@ -38,6 +38,7 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
   // No token here: the proxy adds it on the server.
   const http = createHttpClient({ baseUrl: API_PROXY_PATH });
   // TODO(api): wallet and usage, the connections checklist, connections and plan have no routes
-  // yet. Inbox and Home results (inbox-home.md), the follow-up agent (agents.md) and the site are live.
+  // yet. Inbox and Home results (inbox-home.md), the follow-up agent (agents.md), the site and
+  // Google Calendar connections (google-calendar.md) are live.
   return { api: { ...createDemoWorkspace(), ...http }, mode: "live", demo: null };
 }

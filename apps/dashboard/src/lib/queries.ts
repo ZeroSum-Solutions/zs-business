@@ -8,6 +8,7 @@ import { useTenantId } from "./session";
 import {
   CONTACT_IDS_PER_CALL,
   type BookingListQuery,
+  type CalendarConnection,
   type ContactRecord,
   type DealListQuery,
   type DealSummary,
@@ -68,6 +69,10 @@ export const keys = {
    */
   siteEdge: (siteId: string, pointerVersion: number) => ["siteEdge", siteId, pointerVersion] as const,
   connections: ["ws", "connections"] as const,
+  /** Google Calendar connections, every resource's (google-calendar.md G-5). */
+  calendarConnections: ["calendarSync", "connections"] as const,
+  /** The Google grant waiting in this browser for the owner to confirm (G-2). */
+  calendarPending: ["calendarSync", "pending"] as const,
   plan: ["ws", "plan"] as const,
 };
 
@@ -407,6 +412,47 @@ export function useConnections() {
   const api = useApi();
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.connections, queryFn: () => api.listConnections() });
+}
+
+/** How often the connections are read again while the calendar worker has something to finish. */
+export const CALENDAR_POLL_MS = 5_000;
+
+/** Waiting on the worker: a disconnect to clean up, or a new connection's first sync. */
+export function calendarWorkPending(items: readonly CalendarConnection[] | undefined): boolean {
+  return items?.some((item) => item.status === "disconnecting" || (item.status === "active" && item.lastSyncedAt === null)) ?? false;
+}
+
+/**
+ * Every Google Calendar connection of the business, retired ones included. Read again every
+ * few seconds while the worker has something to finish, so "Disconnecting" and "Waiting for
+ * the first sync" move on by themselves.
+ */
+export function useCalendarConnections() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled,
+    queryKey: keys.calendarConnections,
+    queryFn: ({ signal }) => api.listCalendarConnections({ signal }),
+    refetchInterval: (query) => (calendarWorkPending(query.state.data) ? CALENDAR_POLL_MS : false),
+  });
+}
+
+/**
+ * The Google grant waiting in this browser for the owner to confirm, or null. Owners only (the
+ * API refuses staff). Read afresh whenever the page opens and never kept after it closes, so an
+ * old answer never offers a grant that is gone.
+ */
+export function usePendingGoogleConnect(canManage: boolean) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && canManage,
+    queryKey: keys.calendarPending,
+    queryFn: ({ signal }) => api.getPendingGoogleConnect({ signal }),
+    staleTime: 0,
+    gcTime: 0,
+  });
 }
 
 export function usePlan() {

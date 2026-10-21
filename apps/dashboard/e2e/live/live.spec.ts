@@ -438,7 +438,13 @@ test("labels sample areas and turns off writes that would not reach the API", as
   }
 
   const header = (name: string) => page.getByRole("main").locator("header").filter({ has: page.getByRole("heading", { level: 1, name }) });
-  for (const [path, name] of [["/account/settings", "Settings"], ["/account/connections", "Connections"], ["/account/plan", "Plan"]] as const) {
+  // Connections: Google Calendar is live (google-calendar.md); only the other accounts are a sample.
+  await page.goto("/account/connections");
+  await expect(header("Connections").getByTestId("sample-badge")).toHaveCount(0);
+  await expect(page.getByTestId("gcal-card").getByTestId("sample-badge")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Other accounts" }).getByTestId("sample-badge")).toBeVisible();
+  // Plan comes last: the checks below run on it.
+  for (const [path, name] of [["/account/settings", "Settings"], ["/account/plan", "Plan"]] as const) {
     await page.goto(path);
     await expect(header(name).getByTestId("sample-badge"), name).toBeVisible();
   }

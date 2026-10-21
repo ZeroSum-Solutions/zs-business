@@ -1,7 +1,7 @@
 /**
  * Seeded-row snapshot and reset for e2e:live. The snapshot lives in its own schema in the
  * throwaway database (the API's runtime role cannot see it). Resetting removes inbox replies,
- * bookings, website requests, customers and consent created after setup and puts every seeded
+ * Google Calendar connections, bookings, website requests, customers and consent created after setup and puts every seeded
  * deal back in its seeded stage, with its seeded value and lead source (the won date follows
  * the stage, inbox-home.md H-2).
  */
@@ -20,6 +20,9 @@ export const RESET_SQL = `
   BEGIN;
   DELETE FROM public.inbox_replies;
   DELETE FROM public.approvals;
+  DELETE FROM public.calendar_pushes;
+  DELETE FROM public.booking_external_blocks WHERE connection_id IS NOT NULL;
+  DELETE FROM public.calendar_connections;
   DELETE FROM public.bookings b WHERE NOT EXISTS (SELECT 1 FROM zs_e2e.bookings s WHERE s.tenant_id = b.tenant_id AND s.id = b.id);
   DELETE FROM public.intake_item_consent;
   DELETE FROM public.intake_items;

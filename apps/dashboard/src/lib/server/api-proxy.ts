@@ -4,13 +4,16 @@
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
  * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source, inbox, home, agent and site routes and /v1/me are forwarded (for example
- * /v1/approvals/:id/approve, /v1/inbox/threads and PUT /v1/agents/followup/settings), only from
- * this origin: other sites cannot make a signed-in browser spend its session here.
+ * approval, source, inbox, home, agent, site and calendar routes and /v1/me are forwarded (for
+ * example /v1/approvals/:id/approve, /v1/inbox/threads and PUT /v1/agents/followup/settings), only
+ * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
+ * Google Calendar connection also binds the flow to this browser, and reading or confirming a
+ * staged grant sends the API the grant this browser holds (calendar-connect.ts).
  */
-import type { ApiErrorCode } from "@zs/contracts";
+import { PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
 import { readBoundedBody, type BodyTiming } from "./body";
+import { bindConnectStart, expiredGrantCookie, isConnectStart, namesGrant, pendingGrantOf, readsPendingGrant } from "./calendar-connect";
 import { reportSetupProblem, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
 import { authFor, lookupSession, type AuthContext } from "./supabase";
@@ -20,7 +23,7 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites"]);
+const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar"]);
 const SINGLE = new Set(["me", "members", "approvals", "sources", "sites"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
@@ -61,6 +64,10 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
+  // Only from this browser's cookie; a caller's own header never gets through (REQUEST_HEADERS).
+  const readsGrant = readsPendingGrant(request.method, path);
+  const grant = readsGrant ? pendingGrantOf(request) : undefined;
+  if (grant !== undefined) headers.set(PENDING_GRANT_HEADER, grant);
 
   let body: Uint8Array<ArrayBuffer> | undefined;
   if (WITH_BODY.has(request.method)) {
@@ -70,6 +77,13 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
     const read = await readBoundedBody(request, { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
     if (!read.ok) return auth.finish(reply(BODY_REFUSED[read.reason], "ValidationFailed"));
     body = read.bytes;
+  }
+  let setCookie: string | null = null;
+  if (body && isConnectStart(request.method, path)) {
+    const bound = bindConnectStart(request, body, config.trustProxy);
+    if (!bound) return auth.finish(reply(400, "ValidationFailed"));
+    body = bound.body;
+    setCookie = bound.cookie;
   }
 
   const target = `${config.apiUrl}/${path.join("/")}${new URL(request.url).search}`;
@@ -85,7 +99,16 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
   } catch {
     return auth.finish(reply(502, "Internal"));
   }
-  return relay(upstream, auth);
+  const response = await relay(upstream, auth);
+  // The browser keeps its key only for a flow the API started.
+  if (setCookie && upstream.ok) response.headers.append("Set-Cookie", setCookie);
+  // A grant that connected, or that the API says is gone, foreign or no longer usable, is spent.
+  // An outage or a lost answer keeps it, so the owner can try again, and so does a confirm of a
+  // grant this one replaced: the page shows this one next.
+  const confirmsThis = request.method !== "POST" || namesGrant(body, grant ?? "");
+  if (grant !== undefined && confirmsThis && (upstream.ok && request.method === "POST" || [403, 404, 409].includes(upstream.status)))
+    response.headers.append("Set-Cookie", expiredGrantCookie(request, config.trustProxy));
+  return response;
 }
 
 async function relay(upstream: Response, auth: AuthContext): Promise<Response> {
