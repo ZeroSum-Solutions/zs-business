@@ -392,10 +392,11 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       }
     },
 
-    confirmGoogleConnect() {
+    confirmGoogleConnect(grantId) {
       // The server keys the connect by the staged grant, so a retry after a lost answer replays
-      // it; a key from here could not name the grant any better.
-      return request({ method: "POST", path: "/v1/calendar/google/confirm", body: {}, keyless: "server_keyed", schema: calendarConnectionSchema });
+      // it; a key from here could not name the grant any better. The grant ID names the grant the
+      // owner was shown, so one that replaced it is refused rather than connected.
+      return request({ method: "POST", path: "/v1/calendar/google/confirm", body: { grantId }, keyless: "server_keyed", schema: calendarConnectionSchema });
     },
 
     async discardGoogleConnect() {

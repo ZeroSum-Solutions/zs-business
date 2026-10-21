@@ -9,6 +9,7 @@ import {
   CONFIRM_EXPIRED_MESSAGE,
   confirmErrorNotice,
   connectErrorMessage,
+  GRANT_CHANGED_MESSAGE,
   CONNECTED_MESSAGE,
   currentConnection,
   RETURN_REASONS,
@@ -67,6 +68,7 @@ describe("confirmErrorNotice", () => {
     expect(CONFIRM_EXPIRED_MESSAGE).toBe("That connection request expired. Connect again.");
     expect(confirmErrorNotice(new ApiError("conflict", "x", 409, "Conflict", { reason: "conflict" }))).toEqual({ tone: "error", message: RETURN_REASONS.conflict });
     expect(confirmErrorNotice(new ApiError("forbidden", "x", 403))).toEqual({ tone: "error", message: RETURN_REASONS.forbidden });
+    expect(confirmErrorNotice(new ApiError("conflict", "x", 409, "Conflict", { reason: "grant_changed" }))).toEqual({ tone: "error", message: GRANT_CHANGED_MESSAGE });
     expect(confirmErrorNotice(new ApiError("validation", "Some details need another look.", 400))).toEqual({ tone: "error", message: "Some details need another look." });
   });
 
@@ -87,13 +89,16 @@ describe("busyTimesChanged", () => {
     expect(busyTimesChanged([synced], [{ ...synced, status: "disconnecting" }])).toBe(true);
     expect(busyTimesChanged([{ ...synced, status: "disconnecting" }], [{ ...synced, status: "disconnected" }])).toBe(true);
     expect(busyTimesChanged([synced], [])).toBe(true);
+    // A connection first seen already synced (the first sync landed between two reads).
+    expect(busyTimesChanged([], [synced])).toBe(true);
+    expect(busyTimesChanged([active], [active, { ...synced, id: OTHER }])).toBe(true);
   });
 
   it("is false when nothing that blocks slots changed, or a new connection has not synced yet", () => {
     const synced = { ...row("active", "2026-10-01T00:00:00.000Z"), lastSyncedAt: "2026-10-20T12:00:00.000Z" };
     expect(busyTimesChanged([synced], [{ ...synced }])).toBe(false);
     expect(busyTimesChanged([synced], [row("active", "2026-10-02T00:00:00.000Z", OTHER), synced])).toBe(false);
-    expect(busyTimesChanged([], [synced])).toBe(false);
+    expect(busyTimesChanged([], [row("active", "2026-10-02T00:00:00.000Z", OTHER)])).toBe(false);
   });
 });
 

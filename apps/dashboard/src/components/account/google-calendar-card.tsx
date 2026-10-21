@@ -17,6 +17,7 @@ import {
   busyTimesChanged,
   CANCELLED_MESSAGE,
   confirmErrorNotice,
+  isGrantChanged,
   CONNECTED_MESSAGE,
   connectErrorMessage,
   currentConnection,
@@ -80,7 +81,7 @@ export function GoogleCalendarCard({ notice, onNotice }: { notice: ReturnNotice 
           </CardDescription>
         </div>
       </CardHeader>
-      {pending.data && pendingName ? <ConfirmGrant key={pending.data.expiresAt} pending={pending.data} resourceName={pendingName} onDone={finish} /> : null}
+      {pending.data && pendingName ? <ConfirmGrant key={pending.data.grantId} pending={pending.data} resourceName={pendingName} onDone={finish} /> : null}
       {pending.isError ? <div className="mb-4"><ErrorNote error={pending.error} retry={() => pending.refetch()} /></div> : null}
       {notice ? (
         <div
@@ -146,12 +147,15 @@ function ConfirmGrant({ pending, resourceName, onDone }: { pending: PendingGoogl
 
   // No key from here: the server keys the confirm by the grant, so a retry replays it.
   const confirm = useMutation({
-    mutationFn: () => api.confirmGoogleConnect(),
+    mutationFn: () => api.confirmGoogleConnect(pending.grantId),
     onSuccess: () => settled({ tone: "success", message: CONNECTED_MESSAGE }),
     onError: (error) => {
-      // A lost answer leaves the grant waiting: the panel stays, with the error, for a retry.
       const notice = confirmErrorNotice(error);
-      if (notice) settled(notice);
+      // Another grant replaced this one: nothing connected, and the re-read below shows the new
+      // grant in a fresh panel for the owner to check.
+      if (notice && isGrantChanged(error)) onDone(notice);
+      // A lost answer leaves the grant waiting: the panel stays, with the error, for a retry.
+      else if (notice) settled(notice);
     },
     onSettled: async () => {
       // Read both again after every answer: a lost one may still have connected.

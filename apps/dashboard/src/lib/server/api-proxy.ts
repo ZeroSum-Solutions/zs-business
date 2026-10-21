@@ -13,7 +13,7 @@
 import { PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
 import { readBoundedBody, type BodyTiming } from "./body";
-import { bindConnectStart, expiredGrantCookie, isConnectStart, pendingGrantOf, readsPendingGrant } from "./calendar-connect";
+import { bindConnectStart, expiredGrantCookie, isConnectStart, namesGrant, pendingGrantOf, readsPendingGrant } from "./calendar-connect";
 import { reportSetupProblem, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
 import { authFor, lookupSession, type AuthContext } from "./supabase";
@@ -103,8 +103,10 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
   // The browser keeps its key only for a flow the API started.
   if (setCookie && upstream.ok) response.headers.append("Set-Cookie", setCookie);
   // A grant that connected, or that the API says is gone, foreign or no longer usable, is spent.
-  // An outage or a lost answer keeps it, so the owner can try again.
-  if (grant !== undefined && (upstream.ok && request.method === "POST" || [403, 404, 409].includes(upstream.status)))
+  // An outage or a lost answer keeps it, so the owner can try again, and so does a confirm of a
+  // grant this one replaced: the page shows this one next.
+  const confirmsThis = request.method !== "POST" || namesGrant(body, grant ?? "");
+  if (grant !== undefined && confirmsThis && (upstream.ok && request.method === "POST" || [403, 404, 409].includes(upstream.status)))
     response.headers.append("Set-Cookie", expiredGrantCookie(request, config.trustProxy));
   return response;
 }

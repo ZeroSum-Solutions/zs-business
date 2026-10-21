@@ -7,7 +7,8 @@ import { idempotencyKey, jsonBody } from "./request.js";
  * Google Calendar connections (google-calendar.md G-1, G-2, G-5). Listing needs "calendar";
  * connecting and disconnecting decide what the public pages offer, so they need the owner-only
  * "publish". A grant the callback staged arrives in a header (the dashboard keeps it in a Strict
- * cookie); confirming it takes no Idempotency-Key, since it runs under the key the grant derives.
+ * cookie); confirming it takes no Idempotency-Key, since it runs under the key the grant derives,
+ * and names the grant the owner was shown (`{ grantId }`).
  */
 export const calendarRoutes = new Hono<AppEnv>()
   .get("/calendar/connections", async (c) => c.json(await c.var.session.listCalendarConnections()))
@@ -22,6 +23,6 @@ export const calendarRoutes = new Hono<AppEnv>()
     return c.json(await c.var.session.pendingGoogleConnect(c.req.header(PENDING_GRANT_HEADER)));
   })
   .post("/calendar/google/confirm", async (c) =>
-    c.json(await c.var.session.confirmGoogleConnect(c.req.header(PENDING_GRANT_HEADER))))
+    c.json(await c.var.session.confirmGoogleConnect(c.req.header(PENDING_GRANT_HEADER), await jsonBody(c))))
   .post("/calendar/connections/:id/disconnect", async (c) =>
     c.json(await c.var.session.disconnectCalendar(c.req.param("id"), idempotencyKey(c))));

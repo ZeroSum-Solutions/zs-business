@@ -5,6 +5,8 @@ import { createHttpClient } from "../src/lib/api/http-client";
 
 const ACTION = "a1b2c3d4-1a3f-4b5c-9d7e-000000000001";
 const RESOURCE = "3c1e5a7b-9d2f-4e6a-8b1c-000000000001";
+/** A grant ID as `/pending` answers it (made up: only its form matters). */
+const GRANT_ID = "g".repeat(43);
 const CONNECTION = "b7d9f1a3-5c7e-4a9b-8d1f-000000000001";
 
 interface Call { url: URL; init: RequestInit }
@@ -78,7 +80,7 @@ describe("http client: Google Calendar", () => {
   });
 
   it("reads the waiting grant from GET /v1/calendar/google/pending, and a 404 as none", async () => {
-    const pending = { resourceId: RESOURCE, accountEmail: "owner@haldenrowe.example", expiresAt: "2026-10-20T13:10:00.000Z" };
+    const pending = { grantId: GRANT_ID, resourceId: RESOURCE, accountEmail: "owner@haldenrowe.example", expiresAt: "2026-10-20T13:10:00.000Z" };
     const { api, calls } = client([json(200, pending), apiError(404, "NotFound"), json(200, { ...pending, accountEmail: null })]);
     expect(await api.getPendingGoogleConnect()).toEqual(pending);
     expect(calls[0]!.url.pathname).toBe("/api/v1/calendar/google/pending");
@@ -89,26 +91,28 @@ describe("http client: Google Calendar", () => {
   });
 
   it("passes on a staff member's 403 and a grant out of contract shape", async () => {
-    const { api } = client([apiError(403, "Forbidden"), json(200, { resourceId: RESOURCE, accountEmail: null, expiresAt: "soon" })]);
+    const { api } = client([apiError(403, "Forbidden"), json(200, { grantId: GRANT_ID, resourceId: RESOURCE, accountEmail: null, expiresAt: "soon" })]);
     await expect(api.getPendingGoogleConnect()).rejects.toMatchObject({ kind: "forbidden", status: 403 });
     await expect(api.getPendingGoogleConnect()).rejects.toMatchObject({ kind: "invalid_response" });
   });
 
-  it("confirms with POST /v1/calendar/google/confirm, an empty body and no key, answering the connection", async () => {
+  it("confirms with POST /v1/calendar/google/confirm, naming the grant shown and no key, answering the connection", async () => {
     const { api, calls } = client([json(200, connection)]);
-    expect(await api.confirmGoogleConnect()).toEqual(connection);
+    expect(await api.confirmGoogleConnect(GRANT_ID)).toEqual(connection);
     expect(calls[0]!.url.pathname).toBe("/api/v1/calendar/google/confirm");
     expect(calls[0]!.init.method).toBe("POST");
-    expect(body(calls[0])).toEqual({});
+    expect(body(calls[0])).toEqual({ grantId: GRANT_ID });
     // The server keys it by the staged grant.
     expect(headers(calls[0])).not.toHaveProperty("Idempotency-Key");
   });
 
-  it("passes on a confirm with nothing waiting (404), from staff (403) or for a retired connection (409)", async () => {
-    const { api } = client([apiError(404, "NotFound"), apiError(403, "Forbidden"), apiError(409, "Conflict", { reason: "conflict" })]);
-    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "not_found", status: 404 });
-    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "forbidden", status: 403 });
-    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "conflict", status: 409, reason: "conflict" });
+  it("passes on a confirm with nothing waiting (404), from staff (403), for a retired connection or a replaced grant (409)", async () => {
+    const { api } = client([apiError(404, "NotFound"), apiError(403, "Forbidden"), apiError(409, "Conflict", { reason: "conflict" }),
+      apiError(409, "Conflict", { reason: "grant_changed" })]);
+    await expect(api.confirmGoogleConnect(GRANT_ID)).rejects.toMatchObject({ kind: "not_found", status: 404 });
+    await expect(api.confirmGoogleConnect(GRANT_ID)).rejects.toMatchObject({ kind: "forbidden", status: 403 });
+    await expect(api.confirmGoogleConnect(GRANT_ID)).rejects.toMatchObject({ kind: "conflict", status: 409, reason: "conflict" });
+    await expect(api.confirmGoogleConnect(GRANT_ID)).rejects.toMatchObject({ kind: "conflict", status: 409, reason: "grant_changed" });
   });
 
   it("cancels with DELETE on the dashboard's own /api/calendar/google/pending, reading the 204 without a body", async () => {
@@ -125,7 +129,7 @@ describe("http client: Google Calendar", () => {
 
   it("still reads a 204 on a route that answers a body as an unexpected answer", async () => {
     const { api } = client([new Response(null, { status: 204 })]);
-    await expect(api.confirmGoogleConnect()).rejects.toMatchObject({ kind: "invalid_response", status: 204 });
+    await expect(api.confirmGoogleConnect(GRANT_ID)).rejects.toMatchObject({ kind: "invalid_response", status: 204 });
   });
 
   it("refuses a write without a caller-owned key and sends nothing", async () => {

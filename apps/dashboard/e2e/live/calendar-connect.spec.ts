@@ -98,6 +98,37 @@ test("a consent URL finished elsewhere connects nothing: another browser is refu
   await expect(page.getByRole("region", { name: "Confirm Google account" })).toHaveCount(0);
 });
 
+test("a confirm connects only the account the owner was shown: a grant replaced in another tab is refused and shown instead", async ({ page }) => {
+  // Tab A: the owner is asked about the Showroom grant.
+  await page.goto(CONNECTIONS);
+  await row(page).getByRole("button", { name: `Connect ${NAME}` }).click();
+  const confirmA = page.getByRole("region", { name: "Confirm Google account" });
+  await expect(confirmA.getByTestId("gcal-confirm-question")).toHaveText(/ to Showroom appointments\?$/);
+  const shownA = await confirmA.getByTestId("gcal-confirm-question").textContent();
+
+  // Tab B, same browser: another consent finishes and its grant replaces the cookie's.
+  const tabB = await page.context().newPage();
+  await tabB.goto(CONNECTIONS);
+  await tabB.getByTestId("gcal-row").filter({ has: tabB.getByRole("heading", { name: "Repair intake" }) })
+    .getByRole("button", { name: "Connect Repair intake" }).click();
+  await expect(tabB.getByRole("region", { name: "Confirm Google account" }).getByTestId("gcal-confirm-question"))
+    .toHaveText(/^Connect owner-\d+@calendar\.test to Repair intake\?$/);
+  await tabB.close();
+
+  // Back in tab A, the owner confirms what they saw: refused, nothing connects, and the page now
+  // shows the grant that is really waiting.
+  await confirmA.getByRole("button", { name: "Connect calendar" }).click();
+  await expect(page.getByTestId("gcal-return")).toHaveText(
+    "Another Google account is now waiting here. Nothing was connected. Check the account below before you connect.");
+  const question = page.getByRole("region", { name: "Confirm Google account" }).getByTestId("gcal-confirm-question");
+  await expect(question).toHaveText(/^Connect owner-\d+@calendar\.test to Repair intake\?$/);
+  await expect(question).not.toHaveText(shownA!);
+  for (const name of [NAME, "Repair intake"])
+    await expect(page.getByTestId("gcal-row").filter({ has: page.getByRole("heading", { name, exact: true }) }).getByTestId("gcal-status"))
+      .toHaveText("Not connected");
+  expect(await grantCookie(page.context())).toBeDefined();
+});
+
 test("staff see the calendar status but cannot connect or disconnect", async ({ anonymousPage: page }) => {
   await signInThroughPage(page, CONNECTIONS, STAFF_EMAIL);
   const showroom = row(page);

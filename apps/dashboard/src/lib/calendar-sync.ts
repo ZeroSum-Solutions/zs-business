@@ -44,6 +44,10 @@ export const CONNECTED_MESSAGE = "Google Calendar connected. Busy times start bl
 const UNKNOWN_RETURN = "Google Calendar could not be connected. Try again from this page.";
 export const CONFIRM_EXPIRED_MESSAGE = "That connection request expired. Connect again.";
 export const CANCELLED_MESSAGE = "Nothing was connected.";
+export const GRANT_CHANGED_MESSAGE = "Another Google account is now waiting here. Nothing was connected. Check the account below before you connect.";
+
+/** A confirm refused because another grant replaced the one the owner was shown (G-2). */
+export const isGrantChanged = (error: unknown) => isApiError(error, "conflict") && error.reason === "grant_changed";
 
 /**
  * What `?calendar=connected` or `?calendar=error&reason=…` on the return URL means; null for
@@ -64,7 +68,8 @@ export function returnNotice(outcome: string | null, reason: string | null): Ret
  */
 export function confirmErrorNotice(error: unknown): ReturnNotice | null {
   if (!isDefinitive(error)) return null;
-  const message = isApiError(error, "not_found") ? CONFIRM_EXPIRED_MESSAGE
+  const message = isGrantChanged(error) ? GRANT_CHANGED_MESSAGE
+    : isApiError(error, "not_found") ? CONFIRM_EXPIRED_MESSAGE
     : isApiError(error, "conflict") ? RETURN_REASONS.conflict!
     : isApiError(error, "forbidden") ? RETURN_REASONS.forbidden!
     : isApiError(error) ? error.message : UNKNOWN_RETURN;
@@ -72,15 +77,17 @@ export function confirmErrorNotice(error: unknown): ReturnNotice | null {
 }
 
 /**
- * Whether busy times may block other slots now: a sync finished, or a connection moved to another
- * status or left the list. A new connection blocks nothing until its first sync.
+ * Whether busy times may block other slots now: a sync finished, a connection moved to another
+ * status or left the list, or one first seen has already synced. A new connection blocks nothing
+ * until its first sync.
  */
 export function busyTimesChanged(before: readonly CalendarConnection[], after: readonly CalendarConnection[]): boolean {
   const now = new Map(after.map((item) => [item.id, item]));
+  const seen = new Set(before.map((item) => item.id));
   return before.some((item) => {
     const next = now.get(item.id);
     return !next || next.status !== item.status || next.lastSyncedAt !== item.lastSyncedAt;
-  });
+  }) || after.some((item) => !seen.has(item.id) && item.lastSyncedAt !== null);
 }
 
 /** A connect the server refused before Google: no Google settings (404), or not an owner (403). */

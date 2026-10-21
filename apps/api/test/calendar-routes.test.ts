@@ -2,7 +2,7 @@
 // G-2, G-3, G-5): the consent URL, the OAuth callback against the in-process fake Google (real
 // client, real PKCE), the staged grant and the owner's confirmation, the sealed token, and the
 // owner's list and disconnect. No network.
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   apiErrorBodySchema, calendarConnectionListSchema, calendarConnectionSchema, CONNECT_BROWSER_KEY_HEADER, connectGoogleCalendarResponseSchema,
@@ -106,8 +106,11 @@ function stagedGrant(response: Awaited<ReturnType<typeof callback>>): string {
 const grantHeader = (grant: string | null) => (grant === null ? {} : { [PENDING_GRANT_HEADER]: grant });
 const readPending = (token: string | undefined, grant: string | null, target = app) =>
   call(target, "GET", "/v1/calendar/google/pending", { ...(token === undefined ? {} : { token }), headers: grantHeader(grant) });
-const confirmGrant = (token: string | undefined, grant: string | null, target = app) =>
-  call(target, "POST", "/v1/calendar/google/confirm", { ...(token === undefined ? {} : { token }), headers: grantHeader(grant) });
+/** The grant's ID, as `/pending` answers it and the page sends it back. */
+const grantIdOf = (grant: string | null) => (grant === null ? "x".repeat(43) : createHash("sha256").update(grant).digest("base64url"));
+/** The confirm the page sends: the grant the browser holds, and the ID of the one it showed (by default, the same). */
+const confirmGrant = (token: string | undefined, grant: string | null, target = app, shown: unknown = { grantId: grantIdOf(grant) }) =>
+  call(target, "POST", "/v1/calendar/google/confirm", { ...(token === undefined ? {} : { token }), headers: grantHeader(grant), body: shown });
 /** The callback in the starting browser, then the member's confirmation on the Connections page. */
 async function connectThrough(query: Record<string, string>, member: Pick<MemberSetup, "token"> = h.a, target = app) {
   return confirmGrant(member.token, stagedGrant(await callback(query, target)), target);
@@ -210,7 +213,7 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     // Nothing is stored until the owner confirms the account the page shows.
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
     const shown = await readPending(h.a.token, staged);
-    expect(shown).toMatchObject({ status: 200, body: { resourceId, accountEmail: "studio@calendar.test", expiresAt: new Date(now + 10 * 60_000).toISOString() } });
+    expect(shown).toMatchObject({ status: 200, body: { grantId: grantIdOf(staged), resourceId, accountEmail: "studio@calendar.test", expiresAt: new Date(now + 10 * 60_000).toISOString() } });
     expect(shown.headers.get("cache-control")).toBe("no-store");
     expect(JSON.stringify(shown.body)).not.toContain("zsg1.");
     const confirmed = await confirmGrant(h.a.token, staged);
@@ -558,6 +561,31 @@ describe("GET /v1/calendar/google/pending and POST /v1/calendar/google/confirm (
     expect((await confirmGrant(h.a.token, staged)).status).toBe(404);
     expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
     expect(grantOf(intruder).revoked).toBe(false);
+  });
+
+  it("connects only the grant the page showed: a grant that replaced it in the browser is refused, and confirmable once shown", async () => {
+    // The owner is shown grant A. Before they press Connect, a second consent finishes in the same
+    // browser (another tab, or a relayed callback URL) and the cookie now holds grant B.
+    const first = await consentFor(h.a, await newResource(h.a.tenantId));
+    const shownGrant = stagedGrant(await callback({ state: first.state, code: (await consent(first.authorizeUrl)).get("code")! }));
+    const shownId = ((await readPending(h.a.token, shownGrant)).body as { grantId: string }).grantId;
+    const second = await consentFor(h.a, await newResource(h.a.tenantId));
+    const other = uniqueEmail("other-tab");
+    const code = google.registerCode({ codeChallenge: second.query.get("code_challenge")!, redirectUri: REDIRECT_URL, email: other });
+    const replacing = stagedGrant(await callback({ state: second.state, code }));
+    const refused = await confirmGrant(h.a.token, replacing, app, { grantId: shownId });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ error: { code: "Conflict", details: { reason: "grant_changed" } } });
+    for (const flow of [first, second]) expect(await row(h.a.tenantId, flow.connectionId)).toBeUndefined();
+    // A confirm that names no grant is refused.
+    for (const body of [null, {}, { grantId: "short" }, { grantId: shownId, extra: 1 }])
+      expect((await confirmGrant(h.a.token, replacing, app, body)).status, JSON.stringify(body)).toBe(400);
+    expect((await call(app, "POST", "/v1/calendar/google/confirm", { token: h.a.token, headers: grantHeader(replacing) })).status).toBe(400);
+    // Re-read, the page shows grant B; confirmed by its own ID, it connects B.
+    const reread = (await readPending(h.a.token, replacing)).body as { grantId: string; accountEmail: string };
+    expect(reread).toMatchObject({ grantId: grantIdOf(replacing), accountEmail: other });
+    expect((await confirmGrant(h.a.token, replacing, app, { grantId: reread.grantId })).body).toMatchObject({ id: second.connectionId, accountEmail: other });
+    expect(await row(h.a.tenantId, first.connectionId)).toBeUndefined();
   });
 
   it("answers 404 for no grant, a malformed, forged or OAuth-state token, and without Google config", async () => {

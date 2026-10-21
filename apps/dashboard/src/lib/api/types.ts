@@ -372,11 +372,13 @@ export interface CalendarSyncApi {
   /** The grant Google gave this browser that waits for the owner, or null when there is none. */
   getPendingGoogleConnect(options?: ReadOptions): Promise<PendingGoogleConnect | null>;
   /**
-   * Connects the waiting grant. Throws `not_found` when it is gone or expired, and `conflict`
-   * when its connection was retired or its calendar changed. Safe to repeat: the server keys it
-   * by the grant, so it takes no key from the caller.
+   * Connects the waiting grant the owner was shown, named by its `grantId`. Throws `not_found`
+   * when it is gone or expired, `conflict` with reason `grant_changed` when another grant has
+   * replaced it (nothing connects; read the pending grant again), and `conflict` when its
+   * connection was retired or its calendar changed. Safe to repeat: the server keys it by the
+   * grant, so it takes no key from the caller.
    */
-  confirmGoogleConnect(): Promise<CalendarConnection>;
+  confirmGoogleConnect(grantId: string): Promise<CalendarConnection>;
   /** Drops the waiting grant; nothing is connected. */
   discardGoogleConnect(): Promise<void>;
   /** Hands the connection to the worker to clean up; a retired one answers as it is. */

@@ -28,10 +28,13 @@ let keys = 0;
 const key = () => ({ idempotencyKey: `calendar-key-${++keys}` });
 const failure = (promise: Promise<unknown>) => promise.then(() => null, (error: unknown) => error as ApiError);
 const list = async (api: ReturnType<typeof adapter>) => calendarConnectionListSchema.parse({ items: await api.listCalendarConnections() }).items;
+/** Confirm the grant the page would show (a made-up ID when none waits). */
+const confirm = async (api: ReturnType<typeof adapter>) =>
+  api.confirmGoogleConnect((await api.getPendingGoogleConnect())?.grantId ?? "x".repeat(43));
 /** Start, "allow" on Google, and confirm the account. */
 const connect = async (api: ReturnType<typeof adapter>, resourceId: string, options = key()) => {
   await api.startGoogleConnect(resourceId, options);
-  return calendarConnectionSchema.parse(await api.confirmGoogleConnect());
+  return calendarConnectionSchema.parse(await confirm(api));
 };
 
 afterEach(() => {
@@ -50,10 +53,10 @@ describe("demo adapter: Google Calendar connections", () => {
     // Nothing connects before the owner confirms.
     expect(await list(api)).toEqual([]);
     expect(pendingGoogleConnectSchema.parse(await api.getPendingGoogleConnect())).toEqual({
-      resourceId: SHOWROOM, accountEmail: DEMO_GOOGLE_ACCOUNT, expiresAt: new Date(NOW.getTime() + DEMO_PENDING_GRANT_MS).toISOString(),
+      grantId: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/), resourceId: SHOWROOM, accountEmail: DEMO_GOOGLE_ACCOUNT, expiresAt: new Date(NOW.getTime() + DEMO_PENDING_GRANT_MS).toISOString(),
     });
     expect(DEMO_PENDING_GRANT_MS).toBe(10 * 60_000);
-    const confirmed = calendarConnectionSchema.parse(await api.confirmGoogleConnect());
+    const confirmed = calendarConnectionSchema.parse(await confirm(api));
     expect(await api.getPendingGoogleConnect()).toBeNull();
     const [connection] = await list(api);
     expect(connection).toEqual(confirmed);
@@ -93,7 +96,7 @@ describe("demo adapter: Google Calendar connections", () => {
     await api.startGoogleConnect(SHOWROOM, key());
     // Waiting for the confirm changes nothing yet.
     expect((await list(api)).map((item) => item.status)).toEqual(["reauthorize"]);
-    await api.confirmGoogleConnect();
+    await confirm(api);
     const items = await list(api);
     expect(items.map((item) => item.status)).toEqual(["active", "disconnecting"]);
     expect(items.filter((item) => item.status === "active" || item.status === "reauthorize")).toHaveLength(1);
@@ -120,7 +123,7 @@ describe("demo adapter: Google Calendar connections", () => {
     await api.startGoogleConnect(SHOWROOM, key());
     await api.discardGoogleConnect();
     expect(await api.getPendingGoogleConnect()).toBeNull();
-    expect(await failure(api.confirmGoogleConnect())).toMatchObject({ kind: "not_found", status: 404 });
+    expect(await failure(confirm(api))).toMatchObject({ kind: "not_found", status: 404 });
     expect(await list(api)).toEqual([]);
     // Cancelling with nothing waiting is fine too.
     await expect(api.discardGoogleConnect()).resolves.toBeUndefined();
@@ -133,7 +136,7 @@ describe("demo adapter: Google Calendar connections", () => {
     expect(await api.getPendingGoogleConnect()).toMatchObject({ resourceId: SHOWROOM });
     api.advance(1);
     expect(await api.getPendingGoogleConnect()).toBeNull();
-    expect(await failure(api.confirmGoogleConnect())).toMatchObject({ kind: "not_found", status: 404 });
+    expect(await failure(confirm(api))).toMatchObject({ kind: "not_found", status: 404 });
     expect(await list(api)).toEqual([]);
     // The control the e2e uses runs it out at once.
     await api.startGoogleConnect(SHOWROOM, key());
@@ -146,8 +149,21 @@ describe("demo adapter: Google Calendar connections", () => {
     await api.startGoogleConnect(SHOWROOM, key());
     await api.startGoogleConnect(REPAIR, key());
     expect(await api.getPendingGoogleConnect()).toMatchObject({ resourceId: REPAIR });
-    expect(await api.confirmGoogleConnect()).toMatchObject({ resourceId: REPAIR });
+    expect(await confirm(api)).toMatchObject({ resourceId: REPAIR });
     expect((await list(api)).map((item) => item.resourceId)).toEqual([REPAIR]);
+  });
+
+  it("refuses a confirm of a grant another connect replaced, keeping the new one to show", async () => {
+    const api = adapter();
+    await api.startGoogleConnect(SHOWROOM, key());
+    const shown = (await api.getPendingGoogleConnect())!;
+    await api.startGoogleConnect(REPAIR, key());
+    expect(await failure(api.confirmGoogleConnect(shown.grantId))).toMatchObject({ kind: "conflict", status: 409, reason: "grant_changed" });
+    expect(await list(api)).toEqual([]);
+    const now = (await api.getPendingGoogleConnect())!;
+    expect(now).toMatchObject({ resourceId: REPAIR });
+    expect(now.grantId).not.toBe(shown.grantId);
+    expect(await api.confirmGoogleConnect(now.grantId)).toMatchObject({ resourceId: REPAIR });
   });
 
   it("answers a confirm whose connection retired since with a 409, and spends the grant", async () => {
@@ -157,7 +173,7 @@ describe("demo adapter: Google Calendar connections", () => {
     // The same key stages the same connection again; it is retired before the confirm.
     await api.startGoogleConnect(SHOWROOM, reused);
     await api.disconnectCalendar(connection.id, key());
-    expect(await failure(api.confirmGoogleConnect())).toMatchObject({ kind: "conflict", status: 409, reason: "conflict" });
+    expect(await failure(confirm(api))).toMatchObject({ kind: "conflict", status: 409, reason: "conflict" });
     expect(await api.getPendingGoogleConnect()).toBeNull();
     expect((await list(api)).map((item) => item.status)).toEqual(["disconnecting"]);
   });
@@ -166,12 +182,13 @@ describe("demo adapter: Google Calendar connections", () => {
     const api = adapter();
     const connection = await connect(api, SHOWROOM);
     await api.startGoogleConnect(REPAIR, key());
+    const { grantId } = (await api.getPendingGoogleConnect())!;
     api.actAs("staff");
     const start = await failure(api.startGoogleConnect(REPAIR, key()));
     const pending = await failure(api.getPendingGoogleConnect());
-    const confirm = await failure(api.confirmGoogleConnect());
+    const refused = await failure(api.confirmGoogleConnect(grantId));
     const disconnect = await failure(api.disconnectCalendar(connection.id, key()));
-    for (const error of [start, pending, confirm, disconnect]) {
+    for (const error of [start, pending, refused, disconnect]) {
       expect(error).toMatchObject({ kind: "forbidden", status: 403, code: "Forbidden" });
       expect(error!.details).toEqual(demoErrorBody("Forbidden").error.details);
     }

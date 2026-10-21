@@ -11,6 +11,7 @@ import {
   CALENDAR_GOOGLE_DISCONNECT_ACTION,
   calendarConnectionSchema,
   pendingGoogleConnectSchema,
+  confirmGoogleConnectRequestSchema,
   type PendingGoogleConnect,
   connectGoogleCalendarRequestSchema,
   connectGoogleCalendarResponseSchema,
@@ -130,7 +131,7 @@ import { getTopUpForCheckout, listTopUps, startTopUp, topUpHandlers, type TopUpD
 import type { StripeClient } from "../billing/stripe.js";
 import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
 import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
-import { verifyPendingGrant, type PendingGrant } from "../calendar/pending-grant.js";
+import { pendingGrantId, verifyPendingGrant, type PendingGrant } from "../calendar/pending-grant.js";
 import type { GoogleClient } from "../calendar/types.js";
 import { derivedId } from "./ids.js";
 import { SiteStoreUnavailable, validationError } from "./errors.js";
@@ -384,12 +385,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const actorId = uuidSchema.parse(principal.actorId);
   const run = memberDispatch(deps, { tenantId, actorId });
   /** A grant the callback staged for this member (G-2); anything else reads as nothing staged. */
-  const stagedGrant = (token: unknown): PendingGrant => {
+  const stagedGrant = (token: unknown): PendingGrant & { readonly grantId: string } => {
     const calendar = deps.calendar;
     if (!calendar) throw new NotFound();
     const grant = verifyPendingGrant(calendar.stateSecrets, typeof token === "string" ? token : undefined, new Date(readClock(deps.clock)));
     if (!grant || grant.tenantId !== tenantId.toLowerCase() || grant.actorId !== actorId.toLowerCase()) throw new NotFound("No Google Calendar connection waits for you");
-    return grant;
+    return { ...grant, grantId: pendingGrantId(token as string) };
   };
   const runApproved = approvedDispatch(deps, tenantId, actorId);
   const writeContext = { dispatch: run };
@@ -795,18 +796,22 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       await read("publish", async () => undefined);
       const grant = stagedGrant(token);
       return parseInput(pendingGoogleConnectSchema, {
-        resourceId: grant.resourceId, accountEmail: grant.accountEmail, expiresAt: new Date(grant.expiresAt).toISOString(),
+        grantId: grant.grantId, resourceId: grant.resourceId, accountEmail: grant.accountEmail, expiresAt: new Date(grant.expiresAt).toISOString(),
       }, "result");
     },
     /**
      * G-2: connect the staged grant, as the member it names, under the reserved key
      * `oauth-google:<connection ID>` (so a repeat replays). Only an active connection for the
      * grant's resource counts as connected; one since retired, or another tab's grant for another
-     * resource, is a conflict.
+     * resource, is a conflict. `body.grantId` names the grant the owner was shown: a grant that
+     * replaced it since is refused (409 `grant_changed`), never confirmed in its place.
      */
-    async confirmGoogleConnect(token: unknown): Promise<CalendarConnection> {
+    async confirmGoogleConnect(token: unknown, body: unknown): Promise<CalendarConnection> {
       await read("publish", async () => undefined);
+      const request = parseInput(confirmGoogleConnectRequestSchema, body);
       const grant = stagedGrant(token);
+      if (request.grantId !== grant.grantId)
+        throw new Conflict("Another Google account is waiting to be confirmed; check it again", { reason: "grant_changed" });
       const { connectionId, resourceId } = grant;
       const settled = async () => {
         const found = await read("publish", (tx) => getCalendarConnection(tx, tenantId, connectionId));

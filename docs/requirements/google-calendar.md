@@ -1,7 +1,8 @@
 # M5: Google Calendar busy sync
 
-Status: draft contract for M5, provider 3 (2026-10-20), revision 6 (the callback stages Google's
-grant and the owner confirms it; revision 5 added the browser binding and the connect screen). Code follows this file; a
+Status: draft contract for M5, provider 3 (2026-10-21), revision 7 (the confirm names the grant
+the owner was shown; revision 6 staged Google's grant for the owner to confirm, revision 5 added
+the browser binding and the connect screen). Code follows this file; a
 change to a numbered rule needs a new revision of this file first.
 
 Scope: an owner connects one Google Calendar to one booking resource. Busy time on that
@@ -87,14 +88,20 @@ Google account email, the scope, the sealed refresh token (G-3) and an expiry 10
 most 3500 characters. It travels in the `X-Zs-Pending-Grant` response header, never in the
 address; the dashboard keeps it in an httpOnly, `SameSite=Strict` cookie (`zs-calendar-grant`,
 path `/api`, 10 minutes). The Connections page reads it with `GET /v1/calendar/google/pending`
-(answers `{ resourceId, accountEmail, expiresAt }`) and shows the owner which Google account will
-be connected to which calendar. `POST /v1/calendar/google/confirm` (no `Idempotency-Key`) runs
+(answers `{ grantId, resourceId, accountEmail, expiresAt }`, `grantId` being the SHA-256
+(base64url) of the token) and shows the owner which Google account will be connected to which
+calendar. `POST /v1/calendar/google/confirm { grantId }` (no `Idempotency-Key`) names the grant
+the owner was shown; when the browser now holds another grant (a second consent finished in
+another tab, or a relayed callback URL opened since), it answers 409 `reason=grant_changed`,
+connects nothing and keeps the cookie, and the page reads the pending grant again and shows it.
+Otherwise it runs
 `calendar.google.connect` through the dispatcher as the signed-in member, under the reserved key
 `oauth-google:<connection id>`, so a repeat replays. Both take the grant from the header the
 dashboard's proxy sets from the cookie, need `publish`, and answer 404 for a grant that is
 missing, forged, expired, or names another member or tenant. The confirm answers the connection
 while it is `active` for the grant's resource and 409 (`reason=conflict`) otherwise. The proxy
-drops the cookie once the confirm answered 2xx, 403, 404 or 409, and after a 404 read; Cancel on
+drops the cookie once a confirm naming that grant answered 2xx, 403, 404 or 409, and after a 404
+read; Cancel on
 the page drops it with the dashboard's own `DELETE /api/calendar/google/pending`. Sign-out, and a
 session the API refuses, drop both calendar cookies. The action refuses any other key, so it never
 runs through an approval or with a payload the server did not build. When the callback fails
@@ -219,7 +226,7 @@ enabled, the consent screen with the three scopes, and the webhook domain verifi
   `browser_mismatch` and the owner starts it again. A tab that starts after the cookie is set
   shares its key.
 - A browser holds one staged grant: a second consent finished before the first is confirmed
-  replaces it.
+  replaces it, and the page asks about the second one instead.
 - A disconnect followed by a reconnect of the same account within one worker revoke call can lose
   the new grant; the new row then shows `reauthorize` and the owner connects again.
 - Vercel environment variables are project-wide: in one project the API function can also read

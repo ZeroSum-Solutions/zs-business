@@ -28,6 +28,7 @@ import {
   parseSealPublicKey,
   pkceChallenge,
   pkceVerifier,
+  pendingGrantId,
   sealRefreshToken,
   signPendingGrant,
   verifyConnectState,
@@ -315,6 +316,8 @@ describe("a grant the callback staged (G-2)", () => {
     };
     return { connectionId, token: signPendingGrant(STATE_SECRET, grant)! };
   }
+  /** What the page sends: the ID of the grant it showed. */
+  const shown = (token: unknown) => ({ grantId: typeof token === "string" ? pendingGrantId(token) : "x".repeat(43) });
   const as = (tenantId: string, actorId: string, withCalendar = true) => createSession(deps(withCalendar), { tenantId, actorId });
 
   it("shows the owner the Google account it names and connects nothing until they confirm", async () => {
@@ -322,17 +325,34 @@ describe("a grant the callback staged (G-2)", () => {
     const resourceId = await addResource(tenantId);
     const { connectionId, token } = staged(tenantId, ownerId, resourceId);
     expect(await as(tenantId, ownerId).pendingGoogleConnect(token)).toEqual({
-      resourceId, accountEmail: "someone@calendar.test", expiresAt: new Date(Date.parse(NOW) + 60_000).toISOString(),
+      grantId: pendingGrantId(token), resourceId, accountEmail: "someone@calendar.test", expiresAt: new Date(Date.parse(NOW) + 60_000).toISOString(),
     });
     expect(await storedRow(tenantId, connectionId)).toBeUndefined();
 
-    const connected = await as(tenantId, ownerId).confirmGoogleConnect(token);
+    const connected = await as(tenantId, ownerId).confirmGoogleConnect(token, shown(token));
     expect(connected).toMatchObject({ id: connectionId, resourceId, accountEmail: "someone@calendar.test", status: "active" });
     const row = (await storedRow(tenantId, connectionId))!;
     expect(row).toMatchObject({ status: "active", created_by: ownerId });
     expect(openRefreshToken(privateKey, { tenantId, connectionId }, row.refresh_token_sealed!)).toBe("1//staged");
     // A repeat (a lost answer, a double click) answers the same connection.
-    expect(await as(tenantId, ownerId).confirmGoogleConnect(token)).toEqual(connected);
+    expect(await as(tenantId, ownerId).confirmGoogleConnect(token, shown(token))).toEqual(connected);
+  });
+
+  it("connects only the grant the owner was shown: one replaced since is refused and nothing connects", async () => {
+    const { tenantId, ownerId } = tenants.a;
+    const reviewed = staged(tenantId, ownerId, await addResource(tenantId));
+    const replacing = staged(tenantId, ownerId, await addResource(tenantId), { accountEmail: "someone-else@calendar.test" });
+    // The page showed `reviewed`; the browser now holds `replacing`.
+    const refused = as(tenantId, ownerId).confirmGoogleConnect(replacing.token, shown(reviewed.token));
+    await expect(refused).rejects.toBeInstanceOf(Conflict);
+    await expect(refused).rejects.toMatchObject({ details: { reason: "grant_changed" } });
+    expect(await storedRow(tenantId, replacing.connectionId)).toBeUndefined();
+    expect(await storedRow(tenantId, reviewed.connectionId)).toBeUndefined();
+    // A body that names no grant is refused before anything is read.
+    for (const body of [undefined, {}, { grantId: "short" }, { grantId: pendingGrantId(replacing.token), extra: 1 }])
+      await expect(as(tenantId, ownerId).confirmGoogleConnect(replacing.token, body)).rejects.toMatchObject({ code: "ValidationFailed" });
+    // Shown the replacing grant, the owner can confirm it.
+    expect((await as(tenantId, ownerId).confirmGoogleConnect(replacing.token, shown(replacing.token))).accountEmail).toBe("someone-else@calendar.test");
   });
 
   it("is nothing to anyone but the member it names, in their tenant, before it expires", async () => {
@@ -342,16 +362,16 @@ describe("a grant the callback staged (G-2)", () => {
     const { connectionId, token } = staged(tenantId, ownerId, resourceId);
     for (const session of [as(tenantId, otherOwner), as(tenants.b.tenantId, tenants.b.ownerId), as(tenantId, ownerId, false)]) {
       await expect(session.pendingGoogleConnect(token)).rejects.toBeInstanceOf(NotFound);
-      await expect(session.confirmGoogleConnect(token)).rejects.toBeInstanceOf(NotFound);
+      await expect(session.confirmGoogleConnect(token, shown(token))).rejects.toBeInstanceOf(NotFound);
     }
     // Staff and outsiders are refused before the grant is read.
     for (const session of [as(tenantId, tenants.a.staffId), as(tenantId, randomUUID())])
-      await expect(session.confirmGoogleConnect(token)).rejects.toBeInstanceOf(TenantDenied);
+      await expect(session.confirmGoogleConnect(token, shown(token))).rejects.toBeInstanceOf(TenantDenied);
     const expired = staged(tenantId, ownerId, resourceId, { expiresAt: Date.parse(NOW) });
     const forged = staged(tenantId, ownerId, resourceId).token.replace(/.$/, (c) => (c === "A" ? "B" : "A"));
     for (const bad of [expired.token, forged, undefined, "zgg1.x.y", 42]) {
       await expect(as(tenantId, ownerId).pendingGoogleConnect(bad)).rejects.toBeInstanceOf(NotFound);
-      await expect(as(tenantId, ownerId).confirmGoogleConnect(bad)).rejects.toBeInstanceOf(NotFound);
+      await expect(as(tenantId, ownerId).confirmGoogleConnect(bad, shown(bad))).rejects.toBeInstanceOf(NotFound);
     }
     expect(await storedRow(tenantId, connectionId)).toBeUndefined();
     expect(await storedRow(tenantId, expired.connectionId)).toBeUndefined();
@@ -361,15 +381,15 @@ describe("a grant the callback staged (G-2)", () => {
     const { tenantId, ownerId } = tenants.a;
     const resourceId = await addResource(tenantId);
     const first = staged(tenantId, ownerId, resourceId);
-    await as(tenantId, ownerId).confirmGoogleConnect(first.token);
+    await as(tenantId, ownerId).confirmGoogleConnect(first.token, shown(first.token));
     await as(tenantId, ownerId).disconnectCalendar(first.connectionId, randomUUID());
-    await expect(as(tenantId, ownerId).confirmGoogleConnect(first.token)).rejects.toBeInstanceOf(Conflict);
+    await expect(as(tenantId, ownerId).confirmGoogleConnect(first.token, shown(first.token))).rejects.toBeInstanceOf(Conflict);
     expect((await storedRow(tenantId, first.connectionId))!.status).toBe("disconnecting");
     // A second grant for the same connection (Google answered twice) cannot replace the first one's token.
     const again = staged(tenantId, ownerId, resourceId);
-    await as(tenantId, ownerId).confirmGoogleConnect(again.token);
+    await as(tenantId, ownerId).confirmGoogleConnect(again.token, shown(again.token));
     const twin = staged(tenantId, ownerId, resourceId, { connectionId: again.connectionId, refreshTokenSealed: sealRefreshToken(publicKey, { tenantId, connectionId: again.connectionId }, "1//other") });
-    expect((await as(tenantId, ownerId).confirmGoogleConnect(twin.token)).id).toBe(again.connectionId);
+    expect((await as(tenantId, ownerId).confirmGoogleConnect(twin.token, shown(twin.token))).id).toBe(again.connectionId);
     expect(openRefreshToken(privateKey, { tenantId, connectionId: again.connectionId }, (await storedRow(tenantId, again.connectionId))!.refresh_token_sealed!)).toBe("1//staged");
   });
 });

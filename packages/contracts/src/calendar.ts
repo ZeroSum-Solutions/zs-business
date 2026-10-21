@@ -29,13 +29,22 @@ export const PENDING_GRANT_HEADER = "x-zs-pending-grant";
 /** A staged grant as the API signs it: at most 3500 characters (MAX_PENDING_GRANT_LENGTH in core). */
 export const PENDING_GRANT_PATTERN = /^zgg1\.[A-Za-z0-9_-]{1,3451}\.[A-Za-z0-9_-]{43}$/;
 
+/** The SHA-256 (base64url) of a staged grant's token: names the grant the owner reviewed. */
+export const grantIdSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 /** G-2: a grant Google gave that waits for the owner to confirm the account it names. */
 export const pendingGoogleConnectSchema = z.strictObject({
+  grantId: grantIdSchema,
   resourceId: idSchema,
   accountEmail: z.string().nullable(),
   expiresAt: instantSchema,
 });
 export type PendingGoogleConnect = z.infer<typeof pendingGoogleConnectSchema>;
+/**
+ * G-2: confirm the grant the owner was shown. A grant replaced since (another consent finished in
+ * this browser) answers 409 `grant_changed`, so the owner never connects an account they did not see.
+ */
+export const confirmGoogleConnectRequestSchema = z.strictObject({ grantId: grantIdSchema });
+export type ConfirmGoogleConnectRequest = z.infer<typeof confirmGoogleConnectRequestSchema>;
 export const connectGoogleCalendarResponseSchema = z.strictObject({
   authorizeUrl: z.url({ protocol: /^https?$/ }),
 });

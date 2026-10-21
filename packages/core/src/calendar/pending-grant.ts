@@ -4,7 +4,7 @@
 // instead: a token signed by the state secret, holding the sealed refresh token (useless without
 // the worker's key) and what the state named, kept by the dashboard in a Strict cookie. The owner
 // sees the Google account it names and connects it from a same-origin request with their session.
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { connectGoogleCalendarInputSchema } from "@zs/contracts";
 import type { OAuthStateSecrets } from "./oauth-state.js";
 
@@ -29,6 +29,12 @@ export interface PendingGrant {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // The prefix is part of what is signed, so a signed state never reads as a grant, nor the reverse.
 const tag = (secret: string, body: string) => createHmac("sha256", secret).update(`${PREFIX}${body}`).digest();
+
+/**
+ * The grant's ID: the SHA-256 (base64url) of its token. The page confirms by this ID, so a grant
+ * that replaced the one the owner reviewed is never confirmed in its place.
+ */
+export const pendingGrantId = (token: string) => createHash("sha256").update(token, "utf8").digest("base64url");
 
 /** The signed token, or null when it would not fit a cookie. */
 export function signPendingGrant(secret: string, grant: PendingGrant): string | null {

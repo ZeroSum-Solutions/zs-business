@@ -44,6 +44,8 @@ export const DEMO_PENDING_GRANT_MS = 10 * 60_000;
 
 /** A grant "Google" gave, waiting for the owner who started the connect (G-2). */
 interface StagedGrant {
+  /** Stands in for the SHA-256 of the API's signed token: new for every staging. */
+  grantId: string;
   connectionId: string;
   resourceId: string;
   accountEmail: string | null;
@@ -127,7 +129,7 @@ export function createDemoCalendar(ctx: DemoCalendarContext): CalendarSyncApi & 
       // What the callback does once Google answers (G-2): it stages the grant for this browser,
       // replacing any older one, and connects nothing until the owner confirms the account.
       staged = {
-        connectionId, resourceId: request.resourceId, accountEmail: DEMO_GOOGLE_ACCOUNT,
+        grantId: `g${ctx.newId().replaceAll("-", "")}`.padEnd(43, "0"), connectionId, resourceId: request.resourceId, accountEmail: DEMO_GOOGLE_ACCOUNT,
         expiresAtMs: ctx.now().getTime() + DEMO_PENDING_GRANT_MS, stagedBy: ctx.actor().userId,
       };
       return { authorizeUrl: `${pageOrigin()}/account/connections?calendar=confirm` };
@@ -139,15 +141,20 @@ export function createDemoCalendar(ctx: DemoCalendarContext): CalendarSyncApi & 
       const grant = stagedForActor();
       if (!grant) return null;
       const pending: PendingGoogleConnect = {
-        resourceId: grant.resourceId, accountEmail: grant.accountEmail, expiresAt: new Date(grant.expiresAtMs).toISOString(),
+        grantId: grant.grantId, resourceId: grant.resourceId, accountEmail: grant.accountEmail, expiresAt: new Date(grant.expiresAtMs).toISOString(),
       };
       return pending;
     },
 
-    async confirmGoogleConnect() {
+    async confirmGoogleConnect(grantId) {
       await ctx.wait();
       const grant = stagedForActor();
-      // Like the API's cookie, the grant is spent by any answer the server gives.
+      // Another grant replaced the one the owner was shown: refused, and the new one stays (G-2).
+      if (grant && grant.grantId !== grantId) {
+        requireOwner();
+        throw demoError("Conflict", { reason: "grant_changed" });
+      }
+      // Like the API's cookie, the grant is spent by any other answer the server gives.
       staged = null;
       requireOwner();
       if (!grant) throw demoError("NotFound");

@@ -200,8 +200,8 @@ describe("the staged grant (proxy, discard, sign-out)", () => {
     jar.values.set(CONNECT_COOKIE, "k".repeat(43));
     const pending = (cookie = jar.header(), headers: Record<string, string> = {}) =>
       proxyApiRequest(new Request(`${ORIGIN}/api/v1/calendar/google/pending`, { headers: { Cookie: cookie, ...headers } }), PENDING, harness.setup);
-    const confirm = (cookie = jar.header()) => proxyApiRequest(new Request(`${ORIGIN}/api/v1/calendar/google/confirm`, {
-      method: "POST", body: "{}", headers: { Cookie: cookie, "Content-Type": "application/json", Origin: ORIGIN },
+    const confirm = (cookie = jar.header(), grantId = sha256(GRANT)) => proxyApiRequest(new Request(`${ORIGIN}/api/v1/calendar/google/confirm`, {
+      method: "POST", body: JSON.stringify({ grantId }), headers: { Cookie: cookie, "Content-Type": "application/json", Origin: ORIGIN },
     }), CONFIRM, harness.setup);
     return { harness, jar, pending, confirm };
   }
@@ -237,6 +237,12 @@ describe("the staged grant (proxy, discard, sign-out)", () => {
     }
     harness.api = async () => { throw new TypeError("fetch failed"); };
     expect(setCookies(await confirm()).has(GRANT_COOKIE)).toBe(false);
+    // A confirm of a grant this one replaced: the API refuses it, and this grant stays for the page.
+    harness.api = async () => Response.json({ error: { code: "Conflict", message: "x", details: { reason: "grant_changed" } } }, { status: 409 });
+    const replaced = await confirm(undefined, sha256("an older grant"));
+    expect(replaced.status).toBe(409);
+    expect(setCookies(replaced).has(GRANT_COOKIE)).toBe(false);
+    expect(sentBody(harness.apiCalls.at(-1)!)).toEqual({ grantId: sha256("an older grant") });
     // Reading a grant the API no longer knows drops it too; a 200 read keeps it.
     harness.api = async () => Response.json({ error: { code: "NotFound", message: "x", details: {} } }, { status: 404 });
     expect(setCookies(await pending()).get(GRANT_COOKIE)?.value).toBeNull();

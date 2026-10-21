@@ -12,7 +12,7 @@ import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
   AGENT_ACTIONS, agentHandlers, approvalHandlers, bookingHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
-  plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
+  pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
 } from "../src/index.js";
 
@@ -265,7 +265,10 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     disconnectCalendar: { permission: "publish", run: async () => session.disconnectCalendar(await calendarConnection(), randomUUID()) },
     // G-2: the owner reads and confirms a grant the callback staged for them.
     pendingGoogleConnect: { permission: "publish", run: async () => session.pendingGoogleConnect(stagedGrant(actorId, await freshResource())) },
-    confirmGoogleConnect: { permission: "publish", run: async () => session.confirmGoogleConnect(stagedGrant(actorId, await freshResource())) },
+    confirmGoogleConnect: { permission: "publish", run: async () => {
+      const token = stagedGrant(actorId, await freshResource());
+      return session.confirmGoogleConnect(token, { grantId: pendingGrantId(token) });
+    } },
     // M6 follow-up agent: owners set it up and resume it; anyone who drafts may read it or stop it (agents.md G-11).
     getFollowUpStatus: { permission: "inbox.drafts", run: () => session.getFollowUpStatus() },
     updateFollowUpSettings: { permission: "agents", run: async () => {

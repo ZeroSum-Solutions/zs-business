@@ -60,6 +60,22 @@ const grantCookie = (value: string, secure: boolean, maxAge: number) => serializ
   secure,
   maxAge,
 });
+/**
+ * Whether a confirm body names this grant (`grantId` is its token's SHA-256). One naming another
+ * grant was shown a grant this one has since replaced: the API refuses it, and this grant stays
+ * for the page to show instead.
+ */
+export function namesGrant(bytes: Uint8Array | undefined, grant: string): boolean {
+  let body: unknown;
+  try {
+    body = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return false;
+  }
+  const grantId = body !== null && typeof body === "object" ? (body as { grantId?: unknown }).grantId : undefined;
+  return grantId === createHash("sha256").update(grant, "utf8").digest("base64url");
+}
+
 /** Set-Cookie that drops the staged grant. */
 export const expiredGrantCookie = (request: Request, trustProxy: boolean) => grantCookie("", isHttps(request, trustProxy), 0);
 
