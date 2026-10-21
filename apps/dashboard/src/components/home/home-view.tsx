@@ -4,6 +4,8 @@ import { ArrowRight, CheckCircle, WarningCircle } from "@phosphor-icons/react";
 import Link from "next/link";
 import { type ReactNode, useMemo } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Avatar } from "@/components/ui/avatar";
+import { BorderBeam } from "@/components/ui/border-beam";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { KpiTile } from "@/components/ui/kpi-tile";
@@ -25,7 +27,7 @@ interface WeekCompare {
 const WEEK_POINTS = ["Same time last week", "This week"] as const;
 
 /** A count or an amount this week against the same span last week, as a KPI tile. */
-function WeekTile({ id, label, compare, format, valueTestId, step = 1, className, children }: {
+function WeekTile({ id, label, compare, format, valueTestId, step = 1, beam = false, className, children }: {
   id: string;
   label: string;
   compare: WeekCompare;
@@ -33,6 +35,8 @@ function WeekTile({ id, label, compare, format, valueTestId, step = 1, className
   valueTestId: string;
   /** Rolling frames snap to this many units, so a whole amount never flashes cents mid-roll. */
   step?: number;
+  /** A light travels the edge: for the one headline number on the page. */
+  beam?: boolean;
   className?: string;
   children: ReactNode;
 }) {
@@ -50,6 +54,7 @@ function WeekTile({ id, label, compare, format, valueTestId, step = 1, className
       deltaLabel={change === null ? "None in the same span last week" : "vs last week"}
       trend={[compare.lastWeek, compare.thisWeek]}
       trendLabels={WEEK_POINTS}
+      {...(beam ? { decoration: <BorderBeam /> } : {})}
       {...(className ? { className } : {})}
     >
       <p className="tabular -mt-1 text-xs text-meta">Same time last week {format(compare.lastWeek)}</p>
@@ -100,6 +105,7 @@ function RevenueTile({ data }: { data: HomeResults }) {
       format={(value) => formatMinor(value, main.currency)}
       valueTestId="revenue-value"
       step={main.thisWeek % scale === 0 ? scale : 1}
+      beam
       className="col-span-2 lg:col-span-6 lg:self-stretch"
     >
       <p className="tabular -mt-2 text-xs text-meta">
@@ -281,11 +287,12 @@ function NextAppointments() {
             const resource = nameOf(booking.resourceId);
             const zone = resource?.timeZone ?? "America/New_York";
             return (
-              <li key={booking.id} className="flex items-center gap-4 py-3 first:pt-0 last:pb-0">
+              <li key={booking.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0 sm:gap-4">
                 <div className="w-20 shrink-0">
                   <p className="tabular text-sm font-semibold text-fg">{formatTime(booking.startsAt, zone)}</p>
                   <p className="text-xs text-meta">{formatDay(booking.startsAt, zone)}</p>
                 </div>
+                <Avatar name={bookingCustomerName(booking)} size="sm" className="hidden sm:inline-flex" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-fg">{booking.title ?? (booking.source === "website" ? "Website booking" : "Appointment")}</p>
                   <p className="truncate text-sm text-muted">{bookingCustomerName(booking) ?? "No customer linked"}</p>

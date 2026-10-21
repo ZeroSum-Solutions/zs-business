@@ -16,6 +16,7 @@ import {
   useState,
 } from "react";
 import { useReducedMotionLive } from "@/lib/motion";
+import { spotlight } from "@/lib/spotlight";
 import { cn } from "@/lib/utils";
 
 export type KpiTileProps = {
@@ -40,6 +41,8 @@ export type KpiTileProps = {
    * chip would then describe another period than the headline. Default: on.
    */
   scrub?: boolean;
+  /** Drawn first inside the tile, for edge effects such as a border beam. */
+  decoration?: ReactNode;
   /** Skeletons while the first numbers load. */
   loading?: boolean;
   className?: string;
@@ -79,7 +82,7 @@ const SKELETON = "skeleton block";
 const VALUE =
   "min-w-0 break-all font-semibold text-2xl text-fg tabular-nums leading-none tracking-display sm:text-3xl";
 const TILE =
-  "flex min-w-0 flex-col gap-3 rounded-lg bg-surface p-4 text-fg shadow-card lg:p-5";
+  "card-live flex min-w-0 flex-col gap-3 rounded-lg bg-surface p-4 text-fg shadow-card lg:p-5";
 const LABEL = "truncate font-medium text-muted text-sm";
 const BADGE =
   "inline-flex items-center gap-0.5 rounded-pill px-1.5 py-0.5 font-medium text-fg text-xs tabular-nums";
@@ -136,6 +139,7 @@ export function KpiTile({
   trendLabels,
   live = false,
   scrub = true,
+  decoration,
   loading = false,
   className,
   formatDelta = (change) => `${Math.abs(change).toFixed(1)}%`,
@@ -214,7 +218,9 @@ export function KpiTile({
       data-slot="kpi-tile"
       data-testid={testId}
       onPointerLeave={scrub ? letGo : undefined}
+      onPointerMove={spotlight}
     >
+      {decoration}
       <h2 className={LABEL} id={`${id}-label`}>
         {label}
       </h2>

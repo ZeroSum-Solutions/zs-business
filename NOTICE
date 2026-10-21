@@ -7,7 +7,12 @@ Dashboard UI components (apps/dashboard), adapted under the MIT License below:
 - Cult UI (https://www.cult-ui.com, github.com/nolly-studio/cult-ui)
   Copyright (c) 2023 Jordan-Gilliam
   Ported: "Minimal Card" (components/ui/card.tsx, styles/theme.css --elev-card), "Halo Tabs" (components/ui/segmented.tsx),
-  "Halo Badge" live dot (components/ui/badge.tsx).
+  "Halo Badge" live dot (components/ui/badge.tsx), "Collab Avatar" (components/ui/avatar.tsx).
+
+- Magic UI (https://magicui.design, github.com/magicuidesign/magicui)
+  Copyright (c) Magic UI
+  Ported: "Magic Card" pointer light (app/globals.css card-live, lib/spotlight.ts),
+  "Border Beam" (components/ui/border-beam.tsx).
 
 - 21st.dev "Animated Sidebar" by @starc007 (https://21st.dev/starc007)
   Copyright (c) @starc007

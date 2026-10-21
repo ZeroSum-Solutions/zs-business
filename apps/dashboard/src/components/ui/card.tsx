@@ -1,10 +1,23 @@
+"use client";
+
 // Adapted from Cult UI "Minimal Card" (MIT, nolly-studio/cult-ui; see NOTICE): its layered
-// hairline edge and large radius, on our tokens and a <section> root.
-import type { ComponentProps } from "react";
+// hairline edge and large radius, on our tokens and a <section> root. The pointer light and
+// spring lift (`card-live`) are adapted from Magic UI "Magic Card" (MIT; see NOTICE).
+import type { ComponentProps, PointerEvent } from "react";
+import { spotlight } from "@/lib/spotlight";
 import { cn } from "@/lib/utils";
 
-export function Card({ className, ...props }: ComponentProps<"section">) {
-  return <section className={cn("rounded-lg bg-surface p-4 shadow-card lg:p-6", className)} {...props} />;
+export function Card({ className, onPointerMove, ...props }: ComponentProps<"section">) {
+  return (
+    <section
+      className={cn("card-live rounded-lg bg-surface p-4 shadow-card lg:p-6", className)}
+      onPointerMove={(event: PointerEvent<HTMLElement>) => {
+        spotlight(event);
+        onPointerMove?.(event);
+      }}
+      {...props}
+    />
+  );
 }
 
 export function CardHeader({ className, ...props }: ComponentProps<"div">) {

@@ -3,6 +3,14 @@
 
 import { useSyncExternalStore } from "react";
 
+/** Small things arriving: avatars, badges. A quick spring with a little overshoot. */
+export const SPRING_POP = {
+  type: "spring",
+  stiffness: 520,
+  damping: 26,
+  mass: 0.6,
+} as const;
+
 /** Shared-layout glides — pills, indicators and panels morphing between positions. */
 export const SPRING_LAYOUT = {
   type: "spring",
@@ -25,7 +33,7 @@ export function useReducedMotionLive(): boolean {
   return useSyncExternalStore(watchMotion, reducesMotion, () => false);
 }
 
-const INSTANT = { duration: 0 } as const;
+export const INSTANT = { duration: 0 } as const;
 
 /** SPRING_LAYOUT, or an instant move under reduced motion. */
 export function useLayoutTransition() {

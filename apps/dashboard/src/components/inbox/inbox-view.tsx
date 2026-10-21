@@ -25,7 +25,8 @@ import { useAgentActorId, useDisplayZone, useKeys, useResources, useThread, useT
 import { resourceLabel } from "@/lib/resources";
 import { APPROVE_REPLIES, useCan } from "@/lib/session";
 import { formatDay, formatTime, zonedDateKey } from "@/lib/time";
-import { cn, formatPhone, initials, relativeTime } from "@/lib/utils";
+import { cn, formatPhone, relativeTime } from "@/lib/utils";
+import { Avatar } from "@/components/ui/avatar";
 
 export const QUEUED_MESSAGE = "Approved. The reply is queued for delivery.";
 const CHANNEL_LABELS: Record<RequestEntry["channel"], string> = { booking_page: "Booking page", widget: "Website widget" };
@@ -82,9 +83,7 @@ function ThreadList({ selectedId }: { selectedId: string | null }) {
                 aria-current={active ? "true" : undefined}
                 className={cn("focus-inset flex gap-3 px-4 py-3 transition-quick hover:bg-surface-warm", active && "bg-surface-warm shadow-[inset_2px_0_0_var(--accent)]")}
               >
-                <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-warm text-sm font-semibold text-fg-2">
-                  {initials(thread.name)}
-                </span>
+                <Avatar name={thread.name} />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
                     <span className={cn("truncate text-sm text-fg", thread.needsReply || thread.needsReview ? "font-semibold" : "font-medium")}>{thread.name}</span>

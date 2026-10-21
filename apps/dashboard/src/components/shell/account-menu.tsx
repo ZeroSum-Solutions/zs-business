@@ -4,6 +4,7 @@ import { CaretUpDown, CreditCard, GearSix, PlugsConnected, SignOut } from "@phos
 import Link from "next/link";
 import { DropdownMenu } from "radix-ui";
 import { useSession } from "@/lib/session";
+import { Avatar } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
 // TODO(api): owner and business profile come from the session once auth is wired.
@@ -26,9 +27,7 @@ export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
         )}
       >
         <span className="sr-only">Account menu</span>
-        <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-pill bg-accent/12 text-xs font-semibold text-accent">
-          {OWNER.initials}
-        </span>
+        <Avatar name={OWNER.name} size="sm" />
         {variant === "sidebar" ? (
           <>
             <span className="min-w-0 flex-1">

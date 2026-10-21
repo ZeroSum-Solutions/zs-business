@@ -68,13 +68,17 @@
   --elev-ring: 0 0 0 1px var(--border);
   --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
   /* Card edge: Cult UI Minimal Card's layered hairline with its dark-mode top highlight (MIT, see NOTICE) */
+  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 12px 32px -8px rgba(0, 0, 0, 0.7);
   --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 1px rgba(255, 255, 255, 0.07), 0 2px 6px rgba(0, 0, 0, 0.4);
   /* Focus: inner gap in the surface color, outer ring in the accent */
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
   /* Motion */
   --motion-fast: 140ms;
   --motion-base: 200ms;
+  --motion-spring: 520ms;
   --ease-standard: cubic-bezier(0.23, 1, 0.32, 1);
+  /* A real spring (stiffness ~180, damping ~12) sampled for CSS: overshoots about 6% and settles. */
+  --ease-spring: linear(0, 0.06 2.4%, 0.23 5%, 0.66 10.6%, 0.88 14.6%, 1.01 19.2%, 1.06 23.4%, 1.065 26%, 1.05 30.6%, 1.01 39%, 0.995 47%, 0.998 60%, 1);
   /* Layout */
   --container-max: 1200px;
   --container-gutter-desktop: 32px;
@@ -86,6 +90,7 @@
   :root:not([data-motion="full"]) {
     --motion-fast: 0ms;
     --motion-base: 0ms;
+    --motion-spring: 0ms;
   }
 }
 

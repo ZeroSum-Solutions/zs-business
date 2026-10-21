@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState, ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useContacts, useDebouncedValue } from "@/lib/queries";
-import { formatPhone, initials } from "@/lib/utils";
+import { formatPhone } from "@/lib/utils";
+import { Avatar } from "@/components/ui/avatar";
 
 export function ContactList() {
   const [search, setSearch] = useState("");
@@ -43,9 +44,7 @@ export function ContactList() {
           {items.map((contact) => (
             <li key={contact.id}>
               <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-surface-warm">
-                <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-pill bg-surface-warm text-sm font-semibold text-fg-2">
-                  {initials(contact.displayName ?? contact.email)}
-                </span>
+                <Avatar name={contact.displayName ?? contact.email} />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium text-fg">{contact.displayName ?? "Unnamed customer"}</span>
                   <span className="block truncate text-sm text-muted">{contact.email ?? formatPhone(contact.phone)}</span>

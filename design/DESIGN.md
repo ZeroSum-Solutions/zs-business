@@ -114,8 +114,23 @@ by side on a phone.
 
 ## Elevation & Depth
 
-Cards use `--elev-card`, a layered hairline from Cult UI Minimal Card: a 1px ring plus two
-soft shadows, with an inner top highlight in dark mode. No other card shadows.
+Three levels, all from `theme.css`:
+
+- **Page** (`bg`): flat black.
+- **Card** (`surface` + `--elev-card`): Cult UI Minimal Card's layered hairline, a white inner
+  top highlight and a soft drop shadow.
+- **Card on hover** (`--elev-card-hover`): a brighter hairline, a deeper shadow, a 2px spring
+  lift, and a pointer light on the edge with a faint glow inside (Magic UI Magic Card).
+
+Rows inside a card use `border-soft` dividers, not their own shadows. Nothing else casts a
+shadow.
+
+## Spacing
+
+A 4px base (`spacing` above). Card padding is 16px on a phone and 24px from `lg` (KPI tiles
+20px). Gaps between cards are 12px on a phone and 16px from `lg`. Inside a card: 12px between
+a value and its caption, 16px between groups, and a hairline before each new group. Page
+titles keep 24px (32px from `lg`) above the first card.
 
 ## Shapes
 
@@ -127,6 +142,12 @@ badges, segmented switches and the tab-bar indicator.
 - **KPI tile** (21st.dev KPI Tile, MIT): value with a rolling number, a change chip and a
   two-point sparkline for this week against the same span last week. Home turns scrubbing off
   (`scrub={false}`): with two points, scrubbing put last week's value beside this week's change.
+- **Card** (Cult UI Minimal Card + Magic UI Magic Card, MIT): hairline card with the pointer
+  light and spring lift (`card-live`).
+- **Avatar** (Cult UI Collab Avatar, MIT): initials on a tinted pop colour picked from the
+  name, glossy top light, spring entrance. Inbox, customers, appointments, account.
+- **Border beam** (Magic UI, MIT): a blue-to-violet light that travels the edge. One per page,
+  on the headline number (Home revenue). Not drawn under reduced motion.
 - **Navigation** (21st.dev Animated Sidebar, MIT): a hover pill that glides between items and
   a sliding indicator on the current item; the phone tab bar uses the same indicator.
 - **Segmented and view tabs** (Cult UI Halo Tabs, MIT): a sliding pill for pressed-button
@@ -135,15 +156,15 @@ badges, segmented switches and the tab-bar indicator.
 
 ## Motion
 
-Motion marks a change of place only: nav indicators, segmented pills and KPI values. Springs
-come from `lib/motion.ts`; colour and shadow changes use `--motion-fast` (140ms). With reduced
-motion, `MotionConfig` (driven by a live media-query hook) turns transforms off and the CSS
-durations drop to 0.
+Springs everywhere something moves: nav indicators, segmented pills, KPI values, avatars
+(`lib/motion.ts`), and the card lift (`--ease-spring`, a sampled spring for CSS). Colour and
+shadow changes use `--motion-fast` (140ms). With reduced motion, `MotionConfig` (driven by a
+live media-query hook) turns transforms off, the CSS durations drop to 0, the card lift stops
+and the border beam is not drawn.
 
 ## Do's and Don'ts
 
-- Do keep one accent; status colours mean status.
+- Do keep the screen monochrome; colour is good news (`success`), status, or an avatar.
 - Do keep every label on the phone tab bar.
-- Don't add gradient rims, glow or looping decoration; the ported components had them and they
-  were removed on purpose.
-- Don't animate lists, cards or page entrances.
+- Don't add a second border beam or any other looping effect to a page.
+- Don't animate page entrances or whole lists; small things (avatars, values, pills) may spring.
