@@ -30,7 +30,7 @@ test("shows the agent's state, that drafts wait for approval, and its recent run
   // Live data now: no sample marker, nothing switched off for that reason.
   await expect(page.getByRole("main").getByTestId("sample-badge")).toHaveCount(0);
   await expect(card(page).getByTestId("followup-state")).toHaveText(/^On(, waiting)?$/);
-  await expect(card(page).getByTestId("followup-blocked")).toHaveText(/^(It can draft now\.|Why it can't draft right now: It is quiet hours \(9:00 PM to 8:00 AM, America\/New York time\)\. It drafts again when they end\.)$/);
+  await expect(card(page).getByTestId("followup-blocked")).toHaveText(/^(It can draft now\.|Why it can't draft right now: It is quiet hours \(9:00 PM to 8:00 AM, Eastern Time \(New York\)\)\. It drafts again when they end\.)$/);
   await expect(card(page)).toContainText("nobody has answered after 24 hours");
   await expect(card(page).getByTestId("approval-note")).toContainText("Agent drafts wait in the Inbox for an owner's approval. Nothing is sent to a customer without it.");
   await expect(card(page).getByRole("link", { name: "Open the Inbox" })).toHaveAttribute("href", "/inbox");
@@ -42,7 +42,7 @@ test("shows the agent's state, that drafts wait for approval, and its recent run
   await expect(runs(page).nth(0)).toContainText("Drafted 0 follow-ups, skipped 2.");
   await expect(runs(page).nth(0)).toContainText("You started it");
   await expect(runs(page).nth(1)).toContainText("Stopped");
-  await expect(runs(page).nth(1).getByTestId("run-stop")).toHaveText("Stopped because someone stopped the agent.");
+  await expect(runs(page).nth(1).getByTestId("run-stop")).toHaveText("Stopped because the team stopped the agent.");
   await expect(runs(page).nth(2)).toContainText("Scheduled run");
 
   const newest = runs(page).nth(0);
@@ -61,13 +61,17 @@ test("shows the agent's state, that drafts wait for approval, and its recent run
   await expect(page.getByRole("article").getByRole("heading", { level: 2, name: "Marguerite Okafor" })).toBeVisible();
 });
 
-test("says when agents are stopped for every business", async ({ page }) => {
+test("says support paused the agent, without naming other businesses", async ({ page }) => {
   await openAgents(page);
   await page.evaluate(() => window.__zsDemo!.setGlobalAgentKill(true));
   await revisit(page);
-  await expect(card(page).getByTestId("followup-state")).toHaveText("Stopped for all businesses");
+  await expect(card(page).getByTestId("followup-state")).toHaveText("Paused by support");
   await expect(card(page).getByTestId("followup-blocked")).toHaveText(
-    "Why it can't draft right now: Agents are stopped for every business on this service. Nothing is drafted until the service turns them back on.");
+    "Why it can't draft right now: Support paused it. Nothing is drafted until support turns it back on.");
+  await expect(page.getByRole("main")).not.toContainText(/every business|all businesses|this service/);
+  const runNow = card(page).getByRole("button", { name: "Run now" });
+  await expect(runNow).toBeDisabled();
+  await expect(runNow).toHaveAccessibleDescription("Run now works when the agent can draft. See why above.");
 });
 
 test("staff can stop the agent but not resume it, change its settings or run it", async ({ page }) => {
@@ -83,7 +87,7 @@ test("staff can stop the agent but not resume it, change its settings or run it"
   await expect(page.getByRole("status").getByText("Agent stopped. It drafts nothing until an owner resumes it.")).toBeVisible();
   await expect(card(page).getByTestId("followup-state")).toHaveText("Stopped");
   await expect(card(page).getByTestId("followup-killed")).toHaveText(/^Stopped by you on .+\. Note: A customer asked us to pause$/);
-  await expect(card(page).getByTestId("followup-blocked")).toContainText("Someone stopped it. Nothing is drafted until an owner resumes it.");
+  await expect(card(page).getByTestId("followup-blocked")).toContainText("It is stopped. Nothing is drafted until an owner resumes it.");
   const resume = card(page).getByRole("button", { name: "Resume" });
   await expect(resume).toBeDisabled();
   await expect(resume).toHaveAccessibleDescription("Only an owner can resume the agent.");
@@ -160,21 +164,53 @@ test("a save after another owner's says so and reloads the latest settings", asy
 });
 
 test("Run now adds a run, and is off on a server without a model", async ({ page }) => {
+  // Wednesday 15:00 in New York: outside quiet hours, so Run now is offered.
+  await page.clock.setFixedTime(new Date("2026-10-21T19:00:00.000Z"));
   await openAgents(page);
   await expect(runs(page)).toHaveCount(3);
   const runNow = card(page).getByRole("button", { name: "Run now" });
   await expect(runNow).toHaveAccessibleDescription("Looks for unanswered requests once, now. Its drafts wait in the Inbox for approval.");
   await runNow.click();
-  await expect(page.getByRole("status").getByText(/^(Run finished\.|The agent did not draft: it was quiet hours\.)/)).toBeVisible();
+  await expect(page.getByRole("status").getByText(/^Run finished\./)).toBeVisible();
   await expect(runs(page)).toHaveCount(4);
   await expect(runs(page).nth(0)).toContainText("You started it");
 
   await page.evaluate(() => window.__zsDemo!.setFollowUpModel(false));
   await runNow.click();
   await expect(runNow).toBeDisabled();
-  await expect(runNow).toHaveAccessibleDescription("Run now is not available on this server.");
+  await expect(runNow).toHaveAccessibleDescription("Run now works when the agent can draft. See why above.");
+  // Without a model it drafts nothing, so it does not say "On".
+  await expect(card(page).getByTestId("followup-state")).toHaveText("Can't draft yet");
+  await expect(card(page).getByTestId("followup-blocked")).toHaveText("Why it can't draft right now: No writing service is connected yet, so it drafts nothing.");
   await expect(card(page).getByRole("alert")).toHaveCount(0);
   await expect(runs(page)).toHaveCount(4);
+});
+
+test("a double tap on Stop the agent stops it once, with one toast", async ({ page }) => {
+  await openAgents(page);
+  await card(page).getByRole("button", { name: "Stop the agent" }).dblclick();
+  await expect(card(page).getByTestId("followup-state")).toHaveText("Stopped");
+  // The button is gone; focus lands on why it cannot draft now.
+  await expect(card(page).getByTestId("followup-blocked")).toBeFocused();
+  await expect(page.getByTestId("toast").filter({ hasText: "Agent stopped." })).toHaveCount(1);
+  expect((await writes(page, "agent.kill")).map((write) => write.outcome)).toEqual(["applied"]);
+  // Resume is the next control; a double tap there resumes it once too.
+  await card(page).getByRole("button", { name: "Resume" }).dblclick();
+  await expect(card(page).getByRole("button", { name: "Stop the agent" })).toBeVisible();
+  await expect(page.getByTestId("toast").filter({ hasText: "Agent resumed." })).toHaveCount(1);
+  expect((await writes(page, "agent.resume")).map((write) => write.outcome)).toEqual(["applied"]);
+});
+
+test("turned off, it offers neither Stop nor Run now, and says why", async ({ page }) => {
+  await openAgents(page);
+  const form = settings(page);
+  await form.getByRole("switch", { name: "Draft follow-ups" }).click();
+  await form.getByRole("button", { name: "Save settings" }).click();
+  await expect(card(page).getByTestId("followup-state")).toHaveText("Off");
+  const stop = card(page).getByRole("button", { name: "Stop the agent" });
+  await expect(stop).toBeDisabled();
+  await expect(stop).toHaveAccessibleDescription("It is turned off, so there is nothing to stop.");
+  await expect(card(page).getByRole("button", { name: "Run now" })).toBeDisabled();
 });
 
 test("Run now drafts a follow-up that waits in the Inbox under the agent's name", async ({ page }) => {
