@@ -52,9 +52,21 @@ export function groupByDay<T extends { startsAt: string }>(items: T[], now: stri
   return [...days.values()];
 }
 
-/** Subscribes `onChange` to the wall clock's minute; returns the unsubscribe. */
-export function subscribeMinute(_onChange: () => void): () => void {
-  return () => {};
+/**
+ * Calls `onChange` at each minute boundary of the wall clock, so an idle Home rolls its date
+ * and week over at midnight. The timer is re-armed from the clock each time, so it never
+ * drifts; the returned function stops it.
+ */
+export function subscribeMinute(onChange: () => void): () => void {
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = () => {
+    timer = setTimeout(() => {
+      arm();
+      onChange();
+    }, 60_000 - (Date.now() % 60_000));
+  };
+  arm();
+  return () => clearTimeout(timer);
 }
 
 /** The current minute, as epoch ms. */
