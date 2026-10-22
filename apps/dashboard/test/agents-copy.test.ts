@@ -29,18 +29,18 @@ describe("agent copy", () => {
     for (const reason of followUpSkipReasonSchema.options) expect(SKIP_REASONS[reason]).toMatch(/\w/);
   });
 
-  it("states on, off, stopped and stopped everywhere, in that precedence", () => {
+  it("states on, off, stopped and paused by support, in that precedence", () => {
     expect(agentState(status())).toEqual({ label: "On", tone: "success" });
     expect(agentState(status({ canDraft: false, blockedBy: "quiet_hours" })).label).toBe("On, waiting");
     expect(agentState(status({ settings: { ...status().settings, enabled: false }, canDraft: false, blockedBy: "disabled" })).label).toBe("Off");
     const killed = { at: "2026-10-20T12:00:00.000Z", by: AGENT, note: null };
     expect(agentState(status({ killed, canDraft: false, blockedBy: "tenant_killed" })).label).toBe("Stopped");
-    expect(agentState(status({ killed, globalKilled: true, canDraft: false, blockedBy: "global_killed" })).label).toBe("Stopped for all businesses");
+    expect(agentState(status({ killed, globalKilled: true, canDraft: false, blockedBy: "global_killed" })).label).toBe("Paused by support");
   });
 
   it("says why it cannot draft now, with quiet hours in the agent's zone", () => {
     expect(blockedSentence(status())).toBeNull();
-    expect(blockedSentence(status({ canDraft: false, blockedBy: "quiet_hours" }))).toBe("It is quiet hours (9:00 PM to 8:00 AM, America/New York time). It drafts again when they end.");
+    expect(blockedSentence(status({ canDraft: false, blockedBy: "quiet_hours" }))).toBe("It is quiet hours (9:00 PM to 8:00 AM, Eastern Time (New York)). It drafts again when they end.");
     expect(blockedSentence(status({ canDraft: false, blockedBy: "daily_cap" }))).toMatch(/^It drafted 10 follow-ups in the last 24 hours/);
     expect(quietHoursLabel({ quietStartMinute: 600, quietEndMinute: 600, timeZone: "UTC" })).toBe("No quiet hours");
     expect([0, 59, 720, 1439].map(minuteLabel)).toEqual(["12:00 AM", "12:59 AM", "12:00 PM", "11:59 PM"]);
