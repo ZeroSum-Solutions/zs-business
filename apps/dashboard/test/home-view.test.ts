@@ -1,6 +1,6 @@
-// Home's words and states from the UI audit's visual review (UV-1, UV-22, UV-23, UV-25).
+// Home's words and states from the UI audit (U3-8) and its visual review (UV-1, UV-22, UV-23, UV-25).
 import { describe, expect, it } from "vitest";
-import { formatWeekChange, needsState, nextTitle, readStatus, resourceTone } from "../src/components/home/home-model";
+import { formatWeekChange, needsState, nextTitle, readStatus, resourceTone, walletCaption } from "../src/components/home/home-model";
 
 const NEW_YORK = "America/New_York";
 // Thursday Oct 22, 9:00 AM in New York.
@@ -38,5 +38,15 @@ describe("calendar chips", () => {
     expect(resourceTone("a", resources)).toBe("accent");
     expect(resourceTone("b", resources)).toBe("neutral");
     expect(resourceTone("a", undefined)).toBe("neutral");
+  });
+});
+
+describe("the wallet caption", () => {
+  // delivery.md D-5: a send waits whenever the balance cannot cover its price, not only at zero,
+  // and gives up after the attempt cap.
+  it("says what happens when the balance runs short, in the wallet's currency", () => {
+    const caption = walletCaption(20, "EUR");
+    expect(caption).toBe("Of your €20 top-up. Prepaid, so no surprise bills: a message the balance can't cover waits for a top-up, and fails if none comes in time.");
+    expect(caption).not.toContain("$0");
   });
 });
