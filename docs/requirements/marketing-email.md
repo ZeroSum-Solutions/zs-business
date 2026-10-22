@@ -9,8 +9,9 @@ contract: no slice starts until all of these hold:
 - `delivery.md` revision 5 is built: D-6 and D-9 (marketing-only unsubscribe) and D-11.
 
 Scope: an owner sends one approved newsletter (a campaign) to a frozen list of consenting
-customers. Each recipient becomes one ordinary `message.send_requested` event with purpose
-`marketing` (`delivery.md` D-1), so consent, suppression, approval re-check, wallet reservation
+customers. The approved send commits one campaign event; the delivery worker turns it into one
+ordinary message delivery per recipient with purpose `marketing` (`delivery.md` D-1, M-6), so
+consent, suppression, approval re-check, wallet reservation
 and exactly-once settlement all come from the delivery outbox. This contract adds what bulk
 mail needs on top: a verified sender per tenant, an audience snapshot, a legal footer, pacing
 that never delays booking mail, and a pause when bounces or complaints climb. Owner areas:
@@ -81,8 +82,8 @@ any reason, and an address whose local part is not a role name (`abuse`, `postma
 `noreply`, `no-reply`, `mailer-daemon`). The snapshot is frozen: later contacts are not added.
 A campaign holds at most 2,000 recipients; a larger audience fails `ValidationFailed`
 (`audience_too_large`). The D-6 checks still run for every recipient at delivery, so a consent
-withdrawn after the snapshot blocks that send. Each `message.send_requested` carries the
-snapshot address, and a marketing delivery goes only to that address: when the contact's
+withdrawn after the snapshot blocks that send. Each recipient's delivery carries the snapshot
+address, and a marketing delivery goes only to that address: when the contact's
 current address differs, the delivery blocks `address_changed` (`delivery.md` D-6) and is
 never sent to the new address. A test changes a recipient's address between approval and the
 first attempt and checks that nothing is sent to either address.
@@ -103,8 +104,15 @@ is in `APPROVAL_POLICIES` with `{ request: "customers", required: true }` (`appr
 so it runs only through an approved request (A-7). The approval binds the campaign ID, the
 subject, the SHA-256 digest of the body with footer, the recipient count, the digest of the
 recipient list and the estimated cost; the approver sees all of them (A-12). Once approved,
-the action commits one `message.send_requested` per recipient with purpose `marketing` in one
-transaction, and the campaign becomes `sending`.
+the action commits through the dispatcher with its one outbox event,
+`marketing.campaign.send_requested` (the outbox holds one event per action,
+`outbox_one_per_action`, `supabase/migrations/20261017150322_shared_actions.sql:54`), and the
+campaign becomes `sending`. The delivery worker (service role, `delivery.md` D-10) ingests that
+event by inserting one `message_deliveries` row per `marketing_campaign_recipients` row in one
+transaction: message id derived from tenant, campaign and contact, purpose `marketing`, the
+snapshot address, the campaign's action id, so D-5..D-9 and the approval re-check run for each
+delivery. A replayed event inserts nothing twice (unique message id). A test ingests a
+three-recipient campaign twice and finds three deliveries.
 
 **M-7. Wallet.** The estimated cost is recipient count × the email price (D-5). The send
 action fails `insufficient_funds` when the wallet's available amount is below it at run time,

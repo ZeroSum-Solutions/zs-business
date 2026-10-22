@@ -187,8 +187,11 @@ one template revision (`agents.md` G-19 owns the template tables):
 - A-10: for a send action, `approvalForAction` returns `{kind: "standing", standing, binding,
   current}` read from `standingApprovalId`, not `direct`. `approvalsFromRecords` answers
   `approved` only while the standing is `approved` and the revision is still current;
-  otherwise `approval_revoked`. A delivery whose content is not the revision rendered with the
-  recorded variable values answers `approval_missing`. So a revoke, an expiry or a new
+  otherwise `approval_revoked`. `approvalsFromRecords` passes the delivery's `contentDigest` to
+  `approvalForAction` for the standing kind (today it does not,
+  `packages/core/src/delivery/provider.ts:91-97`), and a delivery whose content is not the
+  revision rendered with the variable values recorded on the send action (`agents.md` G-19)
+  answers `approval_missing`. So a revoke, an expiry or a new
   revision stops every later delivery, including events already in the outbox.
 - Consent, suppression, address and wallet checks run on every send as for any message
   (`delivery.md` D-5, D-6, D-9). A standing approval never waives them.

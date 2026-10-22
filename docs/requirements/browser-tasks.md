@@ -6,7 +6,7 @@ lands; a change to a numbered rule needs a new revision of this file first.
 Scope: an assistant in the Agents area ("Website tasks") that does a chore on a website with
 no API, for one tenant, in a browser profile of its own. An owner sees each step. This
 revision turns on read-only tasks only, and the first one is downloading a supplier's invoices
-into document intake. Write tasks (a form submit) are specified here with their approval gate,
+as PDFs the owner can send to document intake (BT-13). Write tasks (a form submit) are specified here with their approval gate,
 but stay disabled until a later revision turns them on.
 
 Out of scope: write tasks in production (BT-11 keeps them off), vision (no approved lane),
@@ -152,9 +152,12 @@ still `running` past its deadline plus a grace is closed `stalled` (as `agents.m
 Browser tasks are off by default (`browser_task_settings.enabled`).
 
 **BT-13. Hand-off to document intake.** `supplier_invoice_download` accepts only PDF files up
-to 20 MB, at most 50 per run. Each becomes a document in `document-intake.md` with source
-`browser:<runId>`, in the same tenant, and goes through that contract's extraction and owner
-approval. The browser run never writes CRM, catalog or accounting rows itself.
+to 20 MiB, at most 50 per run, stored as run artifacts (BT-6). The run itself never creates
+intake jobs and never writes CRM, catalog or accounting rows. The owner sees the files on the
+run and may send one to document intake with `catalog.intake.upload` (`document-intake.md`
+DL-3), which copies the artifact into intake storage and records `source` `browser:<runId>`.
+`document-intake.md` has no invoice target yet (Known limits), so the first slice ends at the
+stored PDF.
 
 ## First slice
 
@@ -163,8 +166,9 @@ The tables (`browser_targets`, `browser_credentials`, `browser_task_settings`, `
 `supplier_invoice_download` against a local fixture supplier site on loopback.
 
 Acceptance test, under the runtime role, with the fake runner and then the Python service
-against the fixture site: a run on tenant A downloads two fixture invoices, and two documents
-appear in document intake with source `browser:<runId>`; a link to an origin outside the target
+against the fixture site: a run on tenant A downloads two fixture invoices, which appear as
+run artifacts and no intake job is created; the owner sends one to intake and its job records
+source `browser:<runId>`; a link to an origin outside the target
 stops the run `origin_denied` and loads nothing; tenant B cannot read A's runs, events,
 screenshots or profile path; a planted password appears nowhere outside the browser; a kill
 between steps stops the run before its next step; a fixture form other than sign-in ends the

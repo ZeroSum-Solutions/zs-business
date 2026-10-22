@@ -55,9 +55,10 @@ returns the first result, even after a later change.
 a link, `customer: { contactId, name, status: "linked" }`, where `name` is the contact's current
 name; with no link, `customer` stays null. Website bookings keep their P-12 customer.
 
-**BC-7. Contact deletion.** Deleting or erasing a contact sets `contact_id` to null on its
-`booking_contacts` rows and bumps their revisions in the same transaction; the bookings stay,
-with no customer.
+**BC-7. Contact deletion.** A `BEFORE DELETE` trigger on `crm_contacts` sets `contact_id` to
+null on the contact's `booking_contacts` rows and bumps their revisions in the same
+transaction; the bookings stay, with no customer. No contact delete action exists yet, so the
+test deletes a contact as the service role; a later erasure action inherits the trigger.
 
 **BC-8. Book and link in one step.** The booking dialog has an optional "Who is it for?"
 contact search. On submit it runs `booking.create`, then, when a contact was picked,

@@ -238,10 +238,13 @@ Each kind's settings hold `maxCostMicrosPerDay` (0..100000000, default 1000000):
   inserts the call's row as `started` at the worst case, so concurrent runs count it, and after
   the call records the reported usage; a call that fails or is aborted (G-17) with no reported
   usage keeps its worst case;
-- the call that first takes that 24-hour cost to 80% or more of the cap writes one
-  `agent.cost_warning` outbox event, keyed by kind and the tenant's local date, and G-11's
+- `agent_model_calls` rows are plain table writes in the caller's own transactions (no outbox
+  event). The call that first takes that 24-hour cost to 80% or more of the cap then commits the
+  direct action `agent.cost.warn` through the dispatcher, keyed
+  `agent:<kind>:cost-warn:<localDate>`, whose one outbox event is `agent.cost_warning`; a
+  template suggestion (G-19) that crosses the line commits it the same way. G-11's
   status read shows `costSpentMicros`, `costCapMicros` and `costWarning`.
-Templated kinds make no calls, so their cost is 0. Model cost is recorded and capped, not
+Templated kinds make no calls at run time; their only cost is wording suggestions (G-19). Model cost is recorded and capped, not
 charged to the wallet (Known limits).
 
 **G-16. Stalled runs.** The scheduler (G-13) closes a run that is still `running` when
@@ -282,13 +285,15 @@ fixtures and never call a vendor.
 **G-19. Templated kinds call no model.** `appointment_reminder` and `review_request` send text
 rendered from an approved template revision and never call a model at run time:
 - `message_templates (tenant_id, id, agent_kind, current_revision)` and
-  `message_template_revisions (tenant_id, template_id, revision, channel, purpose, subject,
-  body, variables, timing_hours, content_digest, standing_approval_id, created_by,
-  created_at)`, forced RLS, two-tenant test. `template.revision.create` (permission `agents`)
+  `message_template_revisions (tenant_id, id uuid, template_id, revision, channel, purpose,
+  subject, body, variables, timing_hours, content_digest, standing_approval_id, created_by,
+  created_at)`, `UNIQUE (tenant_id, template_id, revision)`, forced RLS, two-tenant test. `template.revision.create` (permission `agents`)
   writes a revision; nothing edits one. A body may use only its kind's variables
   (`{customer_first_name}`, `{business_name}`, `{booking_start_local}` for both,
   `{booking_link}` for reminders, `{review_link}` for review requests); any other placeholder
-  is `ValidationFailed`. Values are inserted as plain text.
+  is `ValidationFailed`. Values are inserted as plain text. The queue action records every
+  value it rendered, `{business_name}` included, so a later profile edit (`business-profile.md`
+  BP-9) cannot change what the approval check compares.
 - Sends run only under A-15's standing approval of the current revision; without it the
   decision is skipped `template_not_approved`. Each send is the kind's direct action
   (`agent.reminder.queue` or `agent.review.queue`), which writes `message.send_requested`
@@ -325,7 +330,11 @@ request: the kind has no setting, variable or step that asks about satisfaction 
 sentiment first. The review link is `config.reviewUrl` (an `https` URL the owner sets); without
 it the kind cannot be enabled (`ValidationFailed`).
 
-**G-21. Document intake treats documents as data.** `document_intake` turns a document that
+**G-21. Document intake treats documents as data.** Specified, not enabled: `document-intake.md`
+keeps any model out of its extraction path, so its first slice uses no agent. This rule applies
+once a revision of `document-intake.md` adds a model step (for `knowledge` documents) and names
+the action this kind's principal runs before a job reaches `review`; until then the kind cannot
+be turned on (`Conflict` `kind_not_available`). Then `document_intake` turns a document that
 `document-intake.md` has extracted into a proposed field diff. The document's text goes to the
 `personal_data` lane only in `input`, marked as document content; the fixed `system` text says
 it is data. The model has no tools; its output must pass the kind's diff schema (allowed
@@ -333,8 +342,8 @@ targets and fields only), or the decision is `model_invalid`. The kind's princip
 record a proposal: the diff goes to the owner as one approval under `document-intake.md`, and
 nothing is applied before an owner approves it. Text in a document that asks for anything else
 (send, delete, change settings) cannot cause another action, because no such action is
-admitted. Caps: `maxDocumentsPerDay` (1..500, default 50), `maxPagesPerDocument` (1..200,
-default 20; a longer document is skipped `too_long`), and G-15's cost cap.
+admitted. Caps: `maxDocumentsPerDay` (1..500, default 50), `maxPagesPerDocument` (1..50,
+the `document-intake.md` DL-8 limit, default 20; a longer document is skipped `too_long`), and G-15's cost cap.
 
 ## Known limits (revision 1)
 

@@ -55,7 +55,8 @@ place in the catalog isolation suite (`packages/db/test/isolation.test.ts`):
 - `knowledge_entries`: `tenant_id`, `id`, `slug`, `section_title`, `body_text`, `active`,
   `revision`, `created_at`, `updated_at`; `UNIQUE (tenant_id, slug)`.
 - `document_intake_jobs`: `tenant_id`, `id`, `target_kind` (`catalog` or `knowledge`),
-  `filename`, `file_sha256`, `byte_length`, `page_count`, `status`, `failure_reason`,
+  `source` (`upload`, or `browser:<runId>` when the owner sends a browser-task artifact,
+  `browser-tasks.md` BT-13), `filename`, `file_sha256`, `byte_length`, `page_count`, `status`, `failure_reason`,
   `parser_version`, `diff_digest`, `attempts`, `lease_token`, `lease_expires_at`,
   `created_by`, `created_at`, `finished_at`.
 - `document_intake_rows`: `tenant_id`, `id`, `job_id`, `row_index`, `diff_op`,
@@ -200,5 +201,7 @@ role cannot delete a `catalog_items` row.
   Settled before the knowledge slice.
 - Open question: where the worker runs in production once there is more than one pilot (the
   pilot Mac or a hosted container).
+- There is no invoice or accounting target kind. A supplier invoice sent from a browser task
+  (`browser-tasks.md` BT-13) can only be read as a catalog document until a revision adds one.
 - The worker sees every tenant's PDFs it is given; isolation between tenants rests on the
   server-side checks in DL-5 and DL-16, not on the worker.
