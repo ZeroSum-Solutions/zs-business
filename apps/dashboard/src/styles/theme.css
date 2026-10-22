@@ -58,6 +58,8 @@
   --nav-fg: #c9c9d2;
   --nav-fg-strong: #ffffff;
   --nav-focus: #9fb0ff;
+  /* Lighter than the accent: 3.95:1 against the bar, 4.52:1 for its white label */
+  --nav-lit: #5065ff;
   /* Typography: fonts */
   --font-display: var(--font-manrope), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-body: var(--font-manrope), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -179,6 +181,7 @@
   --nav-fg: #d0d0d9;
   --nav-fg-strong: #ffffff;
   --nav-focus: #b9c1ff;
+  --nav-lit: var(--accent);
   --elev-card: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 20px -10px rgba(0, 0, 0, 0.7);
   --elev-card-hover: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 4px rgba(0, 0, 0, 0.5), 0 16px 32px -12px rgba(0, 0, 0, 0.8);
   --elev-raised: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 14px 34px -10px rgba(0, 0, 0, 0.8), 0 3px 8px rgba(0, 0, 0, 0.5);
@@ -232,6 +235,7 @@
     --nav-fg: #d0d0d9;
     --nav-fg-strong: #ffffff;
     --nav-focus: #b9c1ff;
+    --nav-lit: var(--accent);
     --elev-card: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 20px -10px rgba(0, 0, 0, 0.7);
     --elev-card-hover: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 4px rgba(0, 0, 0, 0.5), 0 16px 32px -12px rgba(0, 0, 0, 0.8);
     --elev-raised: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 14px 34px -10px rgba(0, 0, 0, 0.8), 0 3px 8px rgba(0, 0, 0, 0.5);
@@ -304,6 +308,7 @@
   --color-nav: var(--nav);
   --color-nav-fg: var(--nav-fg);
   --color-nav-fg-strong: var(--nav-fg-strong);
+  --color-nav-lit: var(--nav-lit);
   --font-sans: var(--font-body);
   --font-display: var(--font-display);
   --font-mono: var(--font-mono);

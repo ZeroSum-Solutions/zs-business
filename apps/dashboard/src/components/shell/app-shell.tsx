@@ -73,7 +73,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               const active = isActive(pathname, item.href);
               return (
                 <li key={item.href} className="relative">
-                  {active ? <motion.span layoutId="nav-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-accent" /> : null}
+                  {active ? <motion.span layoutId="nav-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-nav-lit" /> : null}
                   <Link
                     href={item.href}
                     aria-current={active ? "page" : undefined}
@@ -116,7 +116,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             const active = isActive(pathname, item.href);
             return (
               <li key={item.href} className="relative">
-                {active ? <motion.span layoutId="tab-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-accent" /> : null}
+                {active ? <motion.span layoutId="tab-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-nav-lit" /> : null}
                 <Link
                   href={item.href}
                   aria-current={active ? "page" : undefined}

@@ -135,6 +135,29 @@ test.describe("accessibility", () => {
     });
   }
 
+  // The lit current item is the only cue for "you are here" in the nav: 3:1 against the bar (WCAG 1.4.11).
+  for (const theme of ["dark", "light"]) {
+    test(`the lit nav item stands out from the bar in the ${theme} theme`, async ({ page }) => {
+      await page.addInitScript((value) => localStorage.setItem("zs-theme", value), theme);
+      await open(page, "/", "This week");
+      const ratio = await page.getByRole("navigation", { name: "Main" }).filter({ visible: true }).evaluate((nav) => {
+        const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+        const luminance = (value: string) => {
+          const [r, g, b] = rgb(value).map((channel) => {
+            const c = channel / 255;
+            return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (b ?? 0);
+        };
+        const lit = nav.querySelector('[aria-current="page"]')?.parentElement?.querySelector("span[aria-hidden]");
+        if (!lit) return 0;
+        const [a, b] = [luminance(getComputedStyle(lit).backgroundColor), luminance(getComputedStyle(nav).backgroundColor)];
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      });
+      expect(ratio, "lit item against the nav bar").toBeGreaterThanOrEqual(3);
+    });
+  }
+
   test("the site editor's labels all point at controls, and its disabled buttons say why", async ({ page }) => {
     await open(page, "/site", "Site");
     await page.getByRole("button", { name: "Edit site" }).click();
