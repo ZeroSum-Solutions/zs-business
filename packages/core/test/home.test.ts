@@ -3,7 +3,7 @@
 // compare-and-set, and the won date that follows the stage.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ActionError, type MemberRole, type StageOutcome } from "@zs/contracts";
+import { ActionError, CURRENCY_CODES, type MemberRole, type StageOutcome } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createPublicSession } from "../src/edge/public-session.js";
 import { mapError } from "../src/edge/errors.js";
@@ -393,6 +393,9 @@ describe("crm.deal.set-details (H-1)", () => {
       { value: { currency: "USD" } },
       { value: { amountMinor: 100, currency: "usd" } },
       { value: { amountMinor: 100, currency: "USDX" } },
+      // Three capitals are not enough: the code must be an ISO 4217 currency.
+      { value: { amountMinor: 100, currency: "ZZZ" } },
+      { value: { amountMinor: 100, currency: "XXX" } },
       { value: { amountMinor: -1, currency: "USD" } },
       { value: { amountMinor: 1.5, currency: "USD" } },
       { value: { amountMinor: Number.MAX_SAFE_INTEGER + 1, currency: "USD" } },
@@ -409,7 +412,16 @@ describe("crm.deal.set-details (H-1)", () => {
     await expect(fixture.a.run((tx) => tx.query(
       "UPDATE crm_deals SET value_minor=5 WHERE tenant_id=$1 AND id=$2", [A.tenantId, deal.id]))).rejects.toMatchObject({ code: "23514" });
     await expect(fixture.a.run((tx) => tx.query(
+      "UPDATE crm_deals SET value_minor=5, currency='ZZZ' WHERE tenant_id=$1 AND id=$2", [A.tenantId, deal.id])))
+      .rejects.toMatchObject({ code: "23514", constraint: "crm_deals_currency_code" });
+    await expect(fixture.a.run((tx) => tx.query(
       "UPDATE crm_deals SET won_at=now() WHERE tenant_id=$1 AND id=$2", [A.tenantId, deal.id]))).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("the table's currency check holds the same ISO 4217 list as the contract", async () => {
+    const def = (await fixture.service((tx) => tx.query<{ def: string }>(
+      "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname='crm_deals_currency_code'"))).rows[0]!.def;
+    expect([...def.matchAll(/'([A-Z]{3})'/g)].map((match) => match[1]).sort()).toEqual([...CURRENCY_CODES].sort());
   });
 
   it("staff may set details; strangers and another tenant may not", async () => {
