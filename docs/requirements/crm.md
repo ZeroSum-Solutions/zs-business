@@ -1,12 +1,15 @@
 # F2: CRM transaction slice
 
-Status: implemented. The numbered rules below are the contract the code and tests
+Status: implemented, revision 2. The numbered rules below are the contract the code and tests
 follow. The three handlers, their wrappers, the schema and the migration ship in this
 repository. At the time of writing, `pnpm --filter @zs/core test:crm` runs 40 tests in
 five files (public examples, contact and deal acceptance, email uniqueness and the real
 Postgres seam), and all pass.
 This slice covers contact identity, consent storage, deal creation and stage moves.
 It provides no messaging, contact merge, general contact edit or pipeline editor.
+Revision 2 (2026-10-22 audit, B5-06): C-14 refuses to move a deal whose stored currency
+is not an ISO 4217 code, with `details.reason="invalid_currency"`; `inbox-home.md` H-1
+(revision 4) defines the deal value and the stored codes that rule applies to.
 
 ## Evidence and decisions
 
@@ -156,7 +159,12 @@ pipeline and destination membership, then compare revision. A wrong pipeline and
 stale revision together yield `ValidationFailed`; absent/foreign parents take
 precedence as `TenantDenied`. Once validation succeeds, a zero-row conditional
 update also raises `Conflict` with `details.reason="stale_revision"` and
-`details.currentRevision` re-read from owned state.
+`details.currentRevision` re-read from owned state. A deal whose stored `currency` is
+not an ISO 4217 code (stored under the earlier check, `inbox-home.md` H-1) raises
+`Conflict` with `details.reason="invalid_currency"` and `details.currency` set to the
+stored code. This check runs after pipeline and stage validation and before the
+revision compare, and writes nothing. The refusal holds until `crm.deal.set-details`
+replaces the value.
 
 **C-15. Desired, successful move.** The destination belongs to the deal's current
 pipeline; moving deals between pipelines is outside scope. A different supplied

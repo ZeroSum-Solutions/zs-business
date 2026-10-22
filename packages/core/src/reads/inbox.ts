@@ -17,12 +17,11 @@ import {
   type ThreadSummary,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { usableEmail } from "../delivery/policy.js";
 import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "./cursor.js";
 import { page } from "./page.js";
 
 const PREVIEW_LENGTH = 140;
-const PLACEHOLDER_EMAIL = /@placeholder\.invalid$/;
-const realEmail = (email: string | null) => (email === null || PLACEHOLDER_EMAIL.test(email) ? null : email);
 
 interface ReplyRow {
   id: string;
@@ -159,7 +158,7 @@ async function summaries(tx: Transaction, tenantId: string, rows: readonly Threa
     };
     if (row.kind === "customer") {
       const contact = contacts.get(row.id)!;
-      const email = realEmail(contact.normalized_email);
+      const email = usableEmail(contact.normalized_email);
       return {
         ...base, contactId: row.id, intakeItemId: null,
         name: contact.display_name ?? email ?? contact.e164_phone ?? "Customer",

@@ -1,8 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { THEME_KEY as KEY } from "./theme-script";
 
-/** Black is the default (the owner's pick); light and system are per-device choices. */
-export const THEMES = ["dark", "light", "system"] as const;
+/** Light is the default (Direction A); dark and system are per-device choices. */
+export const THEMES = ["light", "dark", "system"] as const;
 export type Theme = (typeof THEMES)[number];
 
 const isTheme = (value: unknown): value is Theme => THEMES.includes(value as Theme);
@@ -12,14 +12,16 @@ const listeners = new Set<() => void>();
 let current: Theme | null = null;
 
 function snapshot(): Theme {
-  current ??= isTheme(document.documentElement.dataset.theme) ? document.documentElement.dataset.theme : "dark";
+  current ??= isTheme(document.documentElement.dataset.theme) ? document.documentElement.dataset.theme : "light";
   return current;
 }
 
 /** Points the browser and home-screen bars at the page colour of the theme now showing. */
 export function syncThemeColor() {
-  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
-  if (!bg) return;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  if (!raw) return;
+  // The CSS minifier shortens #ffffff to #fff; the bars get the full form either way.
+  const bg = /^#[0-9a-f]{3}$/i.test(raw) ? `#${[...raw.slice(1)].map((c) => c + c).join("")}` : raw;
   for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) meta.content = bg;
 }
 
@@ -46,9 +48,9 @@ export function setTheme(theme: Theme) {
 export function watchTheme(): () => void {
   const onStorage = (event: StorageEvent) => {
     if (event.key !== KEY && event.key !== null) return;
-    apply(isTheme(event.newValue) ? event.newValue : "dark");
+    apply(isTheme(event.newValue) ? event.newValue : "light");
   };
-  const scheme = window.matchMedia("(prefers-color-scheme: light)");
+  const scheme = window.matchMedia("(prefers-color-scheme: dark)");
   window.addEventListener("storage", onStorage);
   scheme.addEventListener("change", syncThemeColor);
   syncThemeColor();
@@ -64,5 +66,5 @@ function subscribe(onChange: () => void) {
 }
 
 export function useTheme(): Theme {
-  return useSyncExternalStore(subscribe, snapshot, () => "dark");
+  return useSyncExternalStore(subscribe, snapshot, () => "light");
 }

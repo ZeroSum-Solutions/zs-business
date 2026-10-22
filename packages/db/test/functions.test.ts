@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
 import type { Transaction } from "../src/scoped.js";
 import { expectedOwner } from "./owners.js";
+import { plantedLoginName, plantedLoginPattern } from "./planted-login.js";
 
 let database: TestDatabase;
 let fixture: TwoTenantFixture;
@@ -22,22 +23,25 @@ interface FunctionRow {
 }
 /**
  * Every function our migrations own, outside system schemas and extensions. Runtime roles
- * resolve through pg_roles: pg_has_role throws for a role name that does not exist.
+ * resolve through pg_roles: pg_has_role throws for a role name that does not exist. Logins
+ * that other test files plant to prove a guard refuses them are not runtime logins.
  */
 async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "service_role"]): Promise<FunctionRow[]> {
   return (await tx.query<FunctionRow>(`
     SELECT p.oid::regprocedure::text AS fn, p.proconfig AS config, r.rolname AS owner, p.prosecdef AS definer,
       (r.rolcanlogin OR r.rolsuper OR r.rolbypassrls OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication
         OR EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid)) AS owner_unsafe,
-      EXISTS(SELECT 1 FROM pg_roles l WHERE l.rolcanlogin AND NOT l.rolsuper AND pg_has_role(l.oid, r.oid, 'MEMBER')
+      EXISTS(SELECT 1 FROM pg_roles l WHERE l.rolcanlogin AND NOT l.rolsuper AND l.rolname !~ $2 AND pg_has_role(l.oid, r.oid, 'MEMBER')
         AND EXISTS(SELECT 1 FROM pg_roles s WHERE s.rolname = ANY($1::text[]) AND pg_has_role(l.oid, s.oid, 'MEMBER'))) AS runtime_can_assume
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
     WHERE n.nspname NOT IN ('pg_catalog','information_schema','zs_local_auth') AND n.nspname !~ '^pg_(toast|temp)'
       AND NOT EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')
-    ORDER BY 1`, [runtimeRoles])).rows;
+    ORDER BY 1`, [runtimeRoles, plantedLoginPattern])).rows;
 }
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
+  // M6 revision 2 (20261022510000_agent_runs_guard.sql): runs only close, once.
+  "agent_runs_guard()": "pg_catalog, pg_temp",
   "approvals_transition()": "pg_catalog, pg_temp",
   "booking_overrides_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_pages_disclosure_versioned()": "pg_catalog, pg_temp",
@@ -94,6 +98,23 @@ it("owns every function by a NOLOGIN role no runtime login can assume", async ()
       owner_unsafe: false,
       runtime_can_assume: false,
     });
+  }
+});
+
+it("skips only planted logins: any other login that can reach an owner is caught", async () => {
+  // Rolled back, so concurrent test files never see these logins.
+  const client = await database.pool.connect();
+  const assumable = async () => (await ourFunctions(client)).filter((row) => row.runtime_can_assume).map((row) => row.fn);
+  try {
+    await client.query("BEGIN");
+    const planted = plantedLoginName();
+    await client.query(`CREATE ROLE ${planted} LOGIN; GRANT authenticated, zs_dispatcher TO ${planted}`);
+    expect(await assumable()).toEqual([]);
+    await client.query("CREATE ROLE zs_probe_login LOGIN; GRANT authenticated, zs_dispatcher TO zs_probe_login");
+    expect(await assumable()).toEqual([expect.stringMatching(/^record_action_and_event\(/)]);
+  } finally {
+    await client.query("ROLLBACK");
+    client.release();
   }
 });
 

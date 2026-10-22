@@ -21,16 +21,16 @@ export function ErrorNote({ error, retry, message: override }: { error: unknown;
   // Retrying cannot fix an ended session; offer the way back in instead.
   const signedOut = isApiError(error) && error.kind === "unauthorized";
   return (
-    <div role="alert" className="flex items-start gap-3 rounded-md bg-danger/8 p-4 text-sm text-fg-2">
+    <div role="alert" className="flex items-start gap-3 rounded-md bg-danger-tint p-4 text-sm text-fg-2">
       <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-danger" />
       <div className="flex-1">
         <p>{message}</p>
         {signedOut ? (
-          <button type="button" onClick={() => window.location.assign(readEnvConfig().mode === "live" ? "/sign-in" : "/")} className="mt-2 min-h-11 font-medium text-accent underline-offset-4 hover:underline">
+          <button type="button" onClick={() => window.location.assign(readEnvConfig().mode === "live" ? "/sign-in" : "/")} className="mt-2 min-h-11 font-bold text-accent-ink underline-offset-4 hover:underline">
             Sign in again
           </button>
         ) : retry ? (
-          <button type="button" onClick={retry} className="mt-2 min-h-11 font-medium text-accent underline-offset-4 hover:underline">
+          <button type="button" onClick={retry} className="mt-2 min-h-11 font-bold text-accent-ink underline-offset-4 hover:underline">
             Try again
           </button>
         ) : null}
@@ -43,7 +43,7 @@ export function ErrorNote({ error, retry, message: override }: { error: unknown;
 export function IncompleteNote({ list }: { list: { incomplete: boolean; loaded: number } | undefined }) {
   if (!list?.incomplete) return null;
   return (
-    <p role="status" data-testid="list-incomplete" className="mb-3 flex items-start gap-2 rounded-md bg-warn/10 p-3 text-sm text-fg-2">
+    <p role="status" data-testid="list-incomplete" className="mb-3 flex items-start gap-2 rounded-md bg-warn-tint p-3 text-sm text-fg-2">
       <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-warn" />
       <span>List incomplete — showing first {list.loaded.toLocaleString("en-US")}.</span>
     </p>
@@ -52,8 +52,8 @@ export function IncompleteNote({ list }: { list: { incomplete: boolean; loaded: 
 
 export function EmptyState({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
   return (
-    <div className="rounded-md border border-dashed border-border px-4 py-8 text-center">
-      <p className="font-medium text-fg">{title}</p>
+    <div className="rounded-lg border border-dashed border-border-strong bg-surface px-4 py-8 text-center">
+      <p className="font-bold text-fg">{title}</p>
       {children ? <p className="mt-1 text-sm text-muted">{children}</p> : null}
       {action ? <div className="mt-4">{action}</div> : null}
     </div>
@@ -66,10 +66,10 @@ export function PageHeader({ title, description, actions, sample = false }: { ti
     <header className="mb-6 flex flex-wrap items-start justify-between gap-4 sm:items-center lg:mb-8">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-2xl tracking-display lg:text-3xl">{title}</h1>
+          <h1 className="text-2xl leading-tight font-extrabold tracking-display lg:text-3xl">{title}</h1>
           {sample ? <SampleBadge /> : null}
         </div>
-        {description ? <p className="mt-1 text-sm text-muted">{description}</p> : null}
+        {description ? <p className="mt-2 text-body text-muted">{description}</p> : null}
       </div>
       {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
     </header>

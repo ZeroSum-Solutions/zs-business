@@ -3,7 +3,7 @@
 // compare-and-set, and the won date that follows the stage.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ActionError, type MemberRole, type StageOutcome } from "@zs/contracts";
+import { ActionError, CURRENCY_CODES, dealPageSchema, homeResultsSchema, type MemberRole, type StageOutcome } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createPublicSession } from "../src/edge/public-session.js";
 import { mapError } from "../src/edge/errors.js";
@@ -393,6 +393,9 @@ describe("crm.deal.set-details (H-1)", () => {
       { value: { currency: "USD" } },
       { value: { amountMinor: 100, currency: "usd" } },
       { value: { amountMinor: 100, currency: "USDX" } },
+      // Three capitals are not enough: the code must be an ISO 4217 currency.
+      { value: { amountMinor: 100, currency: "ZZZ" } },
+      { value: { amountMinor: 100, currency: "XXX" } },
       { value: { amountMinor: -1, currency: "USD" } },
       { value: { amountMinor: 1.5, currency: "USD" } },
       { value: { amountMinor: Number.MAX_SAFE_INTEGER + 1, currency: "USD" } },
@@ -409,7 +412,16 @@ describe("crm.deal.set-details (H-1)", () => {
     await expect(fixture.a.run((tx) => tx.query(
       "UPDATE crm_deals SET value_minor=5 WHERE tenant_id=$1 AND id=$2", [A.tenantId, deal.id]))).rejects.toMatchObject({ code: "23514" });
     await expect(fixture.a.run((tx) => tx.query(
+      "UPDATE crm_deals SET value_minor=5, currency='ZZZ' WHERE tenant_id=$1 AND id=$2", [A.tenantId, deal.id])))
+      .rejects.toMatchObject({ code: "23514", constraint: "crm_deals_currency_code" });
+    await expect(fixture.a.run((tx) => tx.query(
       "UPDATE crm_deals SET won_at=now() WHERE tenant_id=$1 AND id=$2", [A.tenantId, deal.id]))).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("the table's currency check holds the same ISO 4217 list as the contract", async () => {
+    const def = (await fixture.service((tx) => tx.query<{ def: string }>(
+      "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname='crm_deals_currency_code'"))).rows[0]!.def;
+    expect([...def.matchAll(/'([A-Z]{3})'/g)].map((match) => match[1]).sort()).toEqual([...CURRENCY_CODES].sort());
   });
 
   it("staff may set details; strangers and another tenant may not", async () => {
@@ -466,5 +478,42 @@ describe("lists (H-1, H-2)", () => {
         { id: A.stages.lost, name: "Lost", position: 3, outcome: "lost" },
       ],
     }]);
+  });
+});
+
+describe("a deal stored under the old three-capitals check (H-1 revision 4)", () => {
+  it("reads and Home show its code, writes stay strict, and a stage move conflicts until its value is fixed", async () => {
+    const deal = await move(A, await newDeal(A), "won", "2027-01-05T10:00:00.000Z");
+    // What an upgrade leaves when a stored deal breaks the ISO list: the row as it was, the check NOT VALID.
+    const def = (await database.pool.query<{ def: string }>(
+      "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname='crm_deals_currency_code'")).rows[0]!.def;
+    const owner = await database.pool.connect();
+    try {
+      await owner.query("BEGIN");
+      await owner.query("ALTER TABLE crm_deals DROP CONSTRAINT crm_deals_currency_code");
+      await owner.query("UPDATE crm_deals SET value_minor=1234, currency='ZZZ' WHERE tenant_id=$1 AND id=$2", [A.tenantId, deal.id]);
+      await owner.query(`ALTER TABLE crm_deals ADD CONSTRAINT crm_deals_currency_code ${def} NOT VALID`);
+      await owner.query("COMMIT");
+    } finally {
+      owner.release();
+    }
+    // Reads are tolerant: the list and Home show the stored code, and both parse under the contract.
+    expect((await listed(A, deal.id)).value).toEqual({ amountMinor: 1234, currency: "ZZZ" });
+    const page = await sessionFor(A).listDeals({ limit: 100 });
+    expect(dealPageSchema.parse(page).items.find((item) => item.id === deal.id)?.value).toEqual({ amountMinor: 1234, currency: "ZZZ" });
+    at("2027-01-06T10:00:00.000Z");
+    const results = await sessionFor(A).homeResults({ zone: "UTC" });
+    expect(homeResultsSchema.parse(results).revenue).toEqual([expect.objectContaining({ currency: "ZZZ", thisWeek: 1234 })]);
+
+    // Writes are strict: the code is refused as input, and a stage move names the stored code.
+    expect((await rejection(setDetails(A, deal.id, deal.revision, { amountMinor: 1234, currency: "ZZZ" }, null))).code).toBe("ValidationFailed");
+    const moved = await rejection(move(A, deal, "open", "2027-01-06T10:01:00.000Z"));
+    expect(mapError(moved)).toEqual({ status: 409, body: { error: expect.objectContaining({
+      code: "Conflict", details: { reason: "invalid_currency", currency: "ZZZ" } }) } });
+
+    // The owner sets a valid value; the deal moves again, and the check validates.
+    const fixed = await setDetails(A, deal.id, deal.revision, { amountMinor: 1234, currency: "USD" }, null);
+    expect((await move(A, fixed, "open", "2027-01-06T10:02:00.000Z")).revision).toBe(fixed.revision + 1);
+    await database.pool.query("ALTER TABLE crm_deals VALIDATE CONSTRAINT crm_deals_currency_code");
   });
 });

@@ -167,8 +167,8 @@ export const replayDeliveryHandler: ActionHandler = {
     const row = (await loadDelivery(tx, binding.tenantId, payload.deliveryId, true))!;
     if (row.status !== "dead") throw new Conflict("Only a dead letter can be replayed", { reason: "not_dead_letter" });
     await tx.query(
-      `UPDATE webhook_deliveries SET status='pending', attempts=0, step_errors=0, replays=replays+1, next_attempt_at=$3,
-         final_reason=NULL, last_error=NULL, updated_at=$3 WHERE tenant_id=$1 AND id=$2`,
+      `UPDATE webhook_deliveries SET status='pending', attempts=0, step_errors=0, replays=replays+1, replayed_at=$3,
+         next_attempt_at=$3, final_reason=NULL, last_error=NULL, updated_at=$3 WHERE tenant_id=$1 AND id=$2`,
       [binding.tenantId, row.id, now]);
     return { result: deliveryRecord((await loadDelivery(tx, binding.tenantId, row.id))!) };
   },

@@ -15,7 +15,7 @@ import {
   webhookEndpointWithSecretSchema,
 } from "@zs/contracts";
 import { verifyResendWebhook } from "@zs/core";
-import { parseActivepiecesWorkerEnv, type ActivepiecesRunnerEnv } from "../src/activepieces/config.js";
+import { assertActivepiecesCronFits, parseActivepiecesWorkerEnv, type ActivepiecesRunnerEnv } from "../src/activepieces/config.js";
 import { activepiecesCronRoutes } from "../src/activepieces/cron.js";
 import { createActivepiecesRunner, createWebhookWorkerFromEnv, type ActivepiecesRunSummary } from "../src/activepieces/runner.js";
 import { parseServerEnv, PLACEHOLDER_ACTIVEPIECES_KEY_SECRET } from "../src/config.js";
@@ -116,6 +116,17 @@ describe("webhook worker environment (W-14)", () => {
     expect(workerError({ ...WORKER_ON, ACTIVEPIECES_DATABASE_URL: REMOTE_DB, DATABASE_CA_CERT: CA_CERT, ACTIVEPIECES_ALLOW_LOOPBACK: "on" }))
       .toMatch(/needs a loopback database URL/);
     expect(workerError({ ...WORKER_ON, CRON_SECRET: "short" })).toMatch(/CRON_SECRET must be at least 32/);
+  });
+
+  it("lets the Node worker take a long budget, but the cron entry only one its 30 s function can finish", () => {
+    const long = parseActivepiecesWorkerEnv({ ...WORKER_ON, ACTIVEPIECES_RUN_BUDGET_MS: "600000" });
+    expect(long.runner).toMatchObject({ budgetMs: 600_000 });
+    expect(() => assertActivepiecesCronFits(long.runner)).toThrow(/ACTIVEPIECES_RUN_BUDGET_MS must be at most 20000 for the cron function/);
+    expect(() => assertActivepiecesCronFits(parseActivepiecesWorkerEnv({ ...WORKER_ON, ACTIVEPIECES_RUN_BUDGET_MS: "20001" }).runner))
+      .toThrow(/at most 20000/);
+    // The defaults fit, and so does the switch being off.
+    expect(() => assertActivepiecesCronFits(parseActivepiecesWorkerEnv(WORKER_ON).runner)).not.toThrow();
+    expect(() => assertActivepiecesCronFits(parseActivepiecesWorkerEnv({}).runner)).not.toThrow();
   });
 
   it("never puts a secret value in an error message", () => {

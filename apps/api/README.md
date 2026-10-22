@@ -207,7 +207,7 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages, each with its `outcome` (`open`, `won`, `lost`) |
 | `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals (`DealSummary`: the deal plus `value` `{ amountMinor, currency }` or null, `leadSource`, `wonAt`), most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
-| `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision`. Entering a `won` stage sets `wonAt` to the write's time; leaving it clears it |
+| `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision`; 409 `invalid_currency` for a deal whose stored currency predates the ISO 4217 check (set its value first). Entering a `won` stage sets `wonAt` to the write's time; leaving it clears it |
 | `POST /v1/crm/deals/:id/details` `{ expectedRevision, value, leadSource }` | 200 `DealSummary`, revision + 1; 409 `stale_revision` with `currentRevision`. `value` is null or `{ amountMinor, currency }` (ISO 4217); `leadSource` null or `website`, `referral`, `phone`, `email`, `walk_in`, `social`, `ads`, `other`. Owners and staff |
 | `GET /v1/inbox/threads?limit&(cursor|offset)` | page of `ThreadSummary`, latest activity first: one `customer` thread (`c_<contactId>`) per contact with a website request or a reply that is not discarded, one `visitor` thread (`v_<intakeItemId>`) per request not linked to a contact. Owners and staff |
 | `GET /v1/inbox/threads/:threadId` | the summary plus `phone`, `entries` (requests and replies, oldest first, the latest 200) and `olderEntries`; 400 for a malformed ID, 404 for an unknown or another tenant's thread. Owners and staff |
@@ -258,7 +258,7 @@ Errors always use `apiErrorBodySchema` from `@zs/contracts`:
 `NotFound` 404, `Conflict` 409 (`details.reason`: `slot_unavailable`, `overlap`,
 `stale_revision`, `id_in_use`, `idempotency_key_reused`, `binding_mismatch`,
 `concurrent_update`, `split_identity`, `identity_mismatch`, `last_owner`, `member_exists`,
-`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`, `grant_changed` (a Google grant replaced since the page showed it);
+`disclosure_changed`, `already_reviewed`, `not_draft` (with the reply's `status`), `no_email`, `approved_by_other` (with `approvedBy`), `stale_release`, `host_in_use`, `grant_changed` (a Google grant replaced since the page showed it), `invalid_currency` (with the deal's stored `currency`);
 anything else is `conflict`),
 `Internal` 500 with no internal detail, `Unavailable` 503 with `Retry-After: 1`. Each code has
 one fixed `message`.

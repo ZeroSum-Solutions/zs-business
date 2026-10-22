@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Pool } from "pg";
 import { expect, it } from "vitest";
+import { CURRENCY_CODES } from "@zs/contracts";
 import { migrate } from "../src/migrate.js";
 import { asService } from "../src/scoped.js";
 import { withTestDatabase } from "../src/testing.js";
@@ -133,7 +134,7 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(13);
+    expect(upgraded.functions).toHaveLength(14);
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });
@@ -341,3 +342,86 @@ it("a dry run rolls back, and an apply commits only the set the dry run reported
     await rm(atMain, { recursive: true, force: true });
   }
 }, 30000);
+
+const currencyIso = "20261022520000_deal_currency_iso.sql";
+const currencyPreflight = new URL("../../../supabase/preflight/20261022520000_deal_currency_iso.sql", import.meta.url);
+/**
+ * Applies migrations before the ISO currency check, stores one deal per currency (as the old
+ * three-capitals check allowed), then runs the rest as the non-superuser migrator.
+ */
+async function migrateOverStoredCurrencies(currencies: string[]) {
+  const partial = await mkdtemp(join(tmpdir(), "zs-migrations-pre-currency-"));
+  try {
+    for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql") && name < currencyIso))
+      await copyFile(new URL(name, migrations), join(partial, name));
+    return await withTestDatabase(async (database) => {
+      const tenantId = randomUUID();
+      const [contactId, pipelineId, stageId] = [randomUUID(), randomUUID(), randomUUID()];
+      const deals = Object.fromEntries(currencies.map((currency) => [currency, randomUUID()]));
+      await asService(database.servicePool, async (tx) => {
+        await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Tenant')", [tenantId]);
+        await tx.query(
+          `INSERT INTO crm_contacts (tenant_id,id,display_name,created_at,updated_at)
+           VALUES ($1,$2,'Mira Rowe','2026-10-18T09:00Z','2026-10-18T09:00Z')`, [tenantId, contactId]);
+        await tx.query("INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,'Sales')", [tenantId, pipelineId]);
+        await tx.query("INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position) VALUES ($1,$2,$3,'New',0)", [tenantId, stageId, pipelineId]);
+        for (const [currency, id] of Object.entries(deals))
+          await tx.query(
+            `INSERT INTO crm_deals (tenant_id,id,contact_id,pipeline_id,stage_id,title,revision,created_at,updated_at,value_minor,currency)
+             VALUES ($1,$2,$3,$4,$5,'Commission',1,'2026-10-18T09:00Z','2026-10-18T09:00Z',1234,$6)`,
+            [tenantId, id, contactId, pipelineId, stageId, currency]);
+      });
+      for (const name of (await readdir(migrations)).filter((name) => name.endsWith(".sql") && name >= currencyIso))
+        await copyFile(new URL(name, migrations), join(partial, name));
+      const url = new URL(database.url);
+      url.username = database.migrator!;
+      const migrator = new Pool({ connectionString: url.href, max: 1 });
+      const notices: string[] = [];
+      migrator.on("connect", (client) => client.on("notice", (notice) => notices.push(notice.message ?? "")));
+      try {
+        await migrate(migrator, pathToFileURL(`${partial}/`));
+      } finally {
+        await migrator.end();
+      }
+      const check = await database.pool.query<{ validated: boolean }>(
+        "SELECT convalidated AS validated FROM pg_constraint WHERE conrelid='public.crm_deals'::regclass AND conname='crm_deals_currency_code'");
+      const preflight = await readFile(currencyPreflight, "utf8");
+      return {
+        validated: check.rows[0]!.validated,
+        notices: notices.filter((message) => message.includes("crm_deals")),
+        // The owner's read-only preflight, as service_role (BYPASSRLS), the role it names.
+        offending: await asService(database.servicePool, async (tx) =>
+          (await tx.query<{ tenant_id: string; id: string; currency: string }>(preflight)).rows),
+        stored: await asService(database.servicePool, async (tx) =>
+          (await tx.query<{ id: string; currency: string }>("SELECT id, currency FROM crm_deals ORDER BY currency")).rows),
+        // New and updated rows are checked at once, validated or not.
+        write: await asService(database.servicePool, (tx) => tx.query(
+          "UPDATE crm_deals SET currency='QQQ' WHERE tenant_id=$1 AND id=$2", [tenantId, deals.USD])).then(() => "ok", (error: { code?: string }) => error.code),
+        tenantId,
+        deals,
+      };
+    }, undefined, { migrations: pathToFileURL(`${partial}/`), nonSuperuserMigrator: true });
+  } finally {
+    await rm(partial, { recursive: true, force: true });
+  }
+}
+
+it("upgrades over a deal with a non-ISO currency: the check stays unvalidated and the preflight lists the row", async () => {
+  const after = await migrateOverStoredCurrencies(["USD", "ZZZ"]);
+  expect(after.validated).toBe(false);
+  expect(after.notices).toEqual([expect.stringMatching(/^crm_deals holds 1 deal/)]);
+  expect(after.offending).toEqual([expect.objectContaining({ tenant_id: after.tenantId, id: after.deals.ZZZ, currency: "ZZZ" })]);
+  // The migration rewrites and deletes nothing.
+  expect(after.stored).toEqual([{ id: after.deals.USD, currency: "USD" }, { id: after.deals.ZZZ, currency: "ZZZ" }]);
+  expect(after.write).toBe("23514");
+}, 30000);
+
+it("validates the currency check at once when every stored deal passes", async () => {
+  const after = await migrateOverStoredCurrencies(["USD", "EUR"]);
+  expect(after).toMatchObject({ validated: true, notices: [], offending: [], write: "23514" });
+}, 30000);
+
+it("the currency preflight checks the same ISO 4217 list as the contract", async () => {
+  const preflight = await readFile(currencyPreflight, "utf8");
+  expect([...preflight.matchAll(/'([A-Z]{3})'/g)].map((match) => match[1]).sort()).toEqual([...CURRENCY_CODES].sort());
+});
