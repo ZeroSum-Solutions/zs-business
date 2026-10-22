@@ -596,21 +596,17 @@ describe("quiet hours (G-5)", () => {
     now = Math.floor(now / DAY) * DAY + DAY + 21 * HOUR - 60_000; // 20:59 UTC, a minute before quiet hours
     // While the model writes, another writer takes the settings row (the superuser pool), so the
     // draft waits on that lock; quiet hours begin during the wait.
-    let holder: Awaited<ReturnType<typeof database.pool.connect>> | undefined;
+    let release = async () => {};
     let held!: (pid: number) => void;
     const holderPid = new Promise<number>((resolve) => { held = resolve; });
     const model = createFakeFollowUpModel(async () => {
-      holder = await database.pool.connect();
+      const holder = await database.pool.connect();
+      release = async () => { release = async () => {}; await holder.query("ROLLBACK"); holder.release(); };
       await holder.query("BEGIN");
       held((await holder.query<{ pid: number }>(
         "SELECT pg_backend_pid() AS pid FROM agent_settings WHERE tenant_id=$1 FOR UPDATE", [tenantId])).rows[0]!.pid);
       return { subject: "Hello", body: "Checking in." };
     });
-    const release = async () => {
-      const client = holder;
-      holder = undefined;
-      if (client) { await client.query("ROLLBACK"); client.release(); }
-    };
     try {
       const run = agent(model).runScheduled(tenantId, randomUUID()).then((value) => value, (error: unknown) => error);
       const pid = await holderPid;
