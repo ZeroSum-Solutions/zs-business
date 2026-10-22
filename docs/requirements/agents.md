@@ -1,7 +1,8 @@
 # M6: inquiry follow-up agent
 
-Status: contract for M6 (2026-10-20), revision 1. Code follows this file; a change to a
-numbered rule needs a new revision of this file first.
+Status: contract for M6 (2026-10-20), revision 2 (audit B3 review round 2: G-4, G-5 read the
+draft's time after its locks). Code follows this file; a change to a numbered rule needs a new
+revision of this file first.
 
 Scope: one agent. It finds website inquiries nobody has answered, asks a model port for a
 follow-up email, and leaves it in the Inbox as a draft with a pending send proposal. An owner
@@ -63,13 +64,15 @@ needs an owner's approval to send.
   agent drafts for that customer in that window;
 - one agent draft per inquiry, ever (a unique index backs it).
 Because every draft for a tenant holds the settings row lock while it counts and inserts,
-concurrent runs cannot exceed a cap. The counts have no upper time bound: a draft whose time
-was read before it waited on the lock still counts a draft that committed meanwhile.
+concurrent runs cannot exceed a cap. The draft reads its time after the locks. The counts have
+no upper time bound: a run whose clock is behind another's still counts a draft that committed
+with a later time.
 
 **G-5. Quiet hours.** `quietStartMinute` and `quietEndMinute` (0..1439, local minutes past
 midnight in `timeZone`, defaults 21:00 and 08:00) name a window in which the agent drafts
 nothing. Equal values mean no quiet hours. A window may cross midnight. Local time comes from
-the injected clock and the IANA zone, never the host's zone.
+the injected clock and the IANA zone, never the host's zone. The draft action reads that clock
+after its locks (G-3), so a wait on them counts toward quiet hours.
 
 **G-6. Agent actions.** All run through the shared dispatcher as the agent principal:
 - `agent.run.start` `{runId, requestedBy}`: checks G-3 and G-5 and inserts the run, `running`,

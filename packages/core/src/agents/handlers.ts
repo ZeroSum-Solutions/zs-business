@@ -242,13 +242,15 @@ export const skipHandler: ActionHandler = {
  */
 export const draftHandler: ActionHandler = {
   resolveTarget: resolveNewDecision,
-  async handle({ tx, command, binding, now }) {
+  async handle({ tx, command, binding, clock }) {
     const { payload } = parseOrFail(draftFollowUpCommandSchema, command);
     const tenantId = binding.tenantId;
     // Lock order: global (shared advisory), then the tenant's settings row. Kills take the same.
     const globalKilled = await readGlobalKilled(tx, true);
     const controls = await loadControls(tx, tenantId, true);
     const inquiry = await requireOpenRunAndInquiry(tx, tenantId, payload);
+    // Read the clock once the locks are held, so a wait on them counts toward quiet hours.
+    const now = clock();
     let reason: FollowUpSkipReason | null = gate(controls, globalKilled, now);
     if (!reason && (await draftsToday(tx, tenantId, now)) >= controls.settings.maxDraftsPerDay) reason = "daily_cap";
     reason ??= await checkCandidate(tx, tenantId, inquiry, controls.settings, now);

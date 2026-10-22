@@ -119,9 +119,8 @@ export function gate(controls: AgentControls, globalKilled: boolean, now: Date):
 const HOUR_MS = 3_600_000;
 
 /**
- * G-4: agent drafts in the tenant in the 24 hours before now. No upper bound: a draft whose
- * `now` was read before it waited on the settings lock must still count a draft that committed
- * meanwhile with a later time.
+ * G-4: agent drafts in the tenant in the 24 hours before now. No upper bound: a run whose clock
+ * is behind another's must still count a draft that committed with a later time.
  */
 export async function draftsToday(tx: Transaction, tenantId: string, now: Date): Promise<number> {
   return Number((await tx.query<{ n: string }>(

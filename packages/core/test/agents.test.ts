@@ -381,8 +381,8 @@ describe("caps (G-4)", () => {
   });
 
   it("counts a draft that committed with a later time than the check's own", async () => {
-    // A draft reads its time before it waits on the settings lock, so another draft can commit
-    // meanwhile with a later time. Here the later draft commits first, then a run reads an
+    // Two runs' clocks can disagree, so another draft can commit with a later time than a
+    // check's own. Here the later draft commits first, then a run reads an
     // earlier time: the daily cap of one must still hold.
     await configure({ maxDraftsPerDay: 1 });
     await dueInquiries(2);
@@ -589,6 +589,48 @@ describe("quiet hours (G-5)", () => {
     expect(model.prompts).toHaveLength(0);
     now += 12 * HOUR; // mid-morning local
     expect(await agent(model).runScheduled(tenantId, randomUUID())).toMatchObject({ status: "completed", drafted: 1 });
+  });
+
+  it("checks quiet hours against the clock read after the settings lock: a wait into them is refused", async () => {
+    await dueInquiries(1);
+    now = Math.floor(now / DAY) * DAY + DAY + 21 * HOUR - 60_000; // 20:59 UTC, a minute before quiet hours
+    // While the model writes, another writer takes the settings row (the superuser pool), so the
+    // draft waits on that lock; quiet hours begin during the wait.
+    let holder: Awaited<ReturnType<typeof database.pool.connect>> | undefined;
+    let held!: (pid: number) => void;
+    const holderPid = new Promise<number>((resolve) => { held = resolve; });
+    const model = createFakeFollowUpModel(async () => {
+      holder = await database.pool.connect();
+      await holder.query("BEGIN");
+      held((await holder.query<{ pid: number }>(
+        "SELECT pg_backend_pid() AS pid FROM agent_settings WHERE tenant_id=$1 FOR UPDATE", [tenantId])).rows[0]!.pid);
+      return { subject: "Hello", body: "Checking in." };
+    });
+    const release = async () => {
+      const client = holder;
+      holder = undefined;
+      if (client) { await client.query("ROLLBACK"); client.release(); }
+    };
+    try {
+      const run = agent(model).runScheduled(tenantId, randomUUID()).then((value) => value, (error: unknown) => error);
+      const pid = await holderPid;
+      for (let tries = 0; ; tries += 1) {
+        const { rowCount } = await database.pool.query(
+          `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+             AND $1::int = ANY(pg_blocking_pids(pid))`, [pid]);
+        if (rowCount) break;
+        if (tries > 500) throw new Error("the draft never waited on the settings lock");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      now += 60_000; // 21:00 UTC
+      await release();
+      expect(await run).toMatchObject({ status: "stopped", stopReason: "quiet_hours", drafted: 0 });
+      expect(model.prompts).toHaveLength(1);
+      expect(await rows("SELECT 1 FROM inbox_replies WHERE tenant_id=$1 AND drafted_by=$2 AND created_at >= $3",
+        [tenantId, agentActorId(tenantId), new Date(now - 60_000)])).toHaveLength(0);
+    } finally {
+      await release();
+    }
   });
 });
 
