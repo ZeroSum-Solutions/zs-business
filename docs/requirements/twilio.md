@@ -1,6 +1,6 @@
 # M5: Twilio SMS provider
 
-Status: draft contract for M5, provider 3 of 5 (2026-10-20), revision 1. Code follows this file;
+Status: draft contract for M5, provider 3 of 5 (2026-10-20), revision 2 (audit 2026-10-22: T-8 stored replies). Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: the SMS provider behind the M3d provider port (`delivery.md` D-7, D-8). It turns one
@@ -121,7 +121,10 @@ sms:number`, run by an operator); the runtime role reads its own tenant's row.
   Reply STOP to opt out.` HELP: the number's `help_reply`, or `<name>: Reply STOP to opt out,
   START to resubscribe. Msg & data rates may apply.` `<name>` is the tenant's name.
 Either way the suppression list changes the same way (D-9). A repeat of the same inbound
-message replays the stored action and gets the same reply.
+message replays the stored action and gets the same reply: with `app`, each reply given (HELP
+included) is stored through the dispatcher (`sms.reply.record`, keyed
+`sms-inbound:<MessageSid>:reply`) and a repeat gets that text back, even after the business name
+or `help_reply` changed.
 
 **T-9. Configuration the Mac sets.**
 - Runner (delivery function or Node worker): `SMS_PROVIDER=twilio` (anything else keeps SMS

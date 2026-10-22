@@ -130,6 +130,22 @@ export const inboundSmsReplySchema = z.strictObject({
 export type InboundSmsReply = z.infer<typeof inboundSmsReplySchema>;
 
 /**
+ * twilio.md T-8: the reply given to one inbound keyword text, under the message's own key, so a
+ * repeat of the message gets the same text after the business name or HELP reply changes.
+ */
+export const SMS_REPLY_RECORD_ACTION = "sms.reply.record";
+export const smsReplyInputSchema = z.strictObject({
+  address: contactPhoneSchema,
+  keyword: z.enum(["stop", "start", "help"]),
+  reply: postgresText(1, 1000),
+});
+export const smsReplyCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal(SMS_REPLY_RECORD_ACTION),
+  target: targetSchema.extend({ type: z.literal("suppression") }),
+  payload: smsReplyInputSchema,
+}));
+
+/**
  * twilio.md T-5, T-6: one signed provider status for one SMS delivery, recorded as evidence that
  * the provider created the message. Only the server's status-callback principal runs it.
  */

@@ -32,6 +32,7 @@ export {
 } from "./policy.js";
 export {
   liftSuppression,
+  recordSmsReply,
   recordSuppression,
   smsKeyword,
   suppressionHandlers,

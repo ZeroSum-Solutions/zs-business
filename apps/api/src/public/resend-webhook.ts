@@ -10,6 +10,7 @@ import {
   createEmailFeedbackSession,
   resendEmailEventSchema,
   RESEND_SUPPRESSION_EVENT_TYPES,
+  retryableAsUnavailable,
   verifyResendWebhook,
   type EdgeDependencies,
   type EmailFeedbackOutcome,
@@ -28,6 +29,9 @@ export interface ResendWebhookConfig {
   /** Receives what each signed event did, for logs. */
   readonly report?: (event: { readonly id: string; readonly type: string; readonly outcome: EmailFeedbackOutcome }) => void;
 }
+
+/** R-8: a lock wait, deadlock or statement timeout answers 503 (Resend retries), not a 409 it would drop. */
+const retryable = (error: unknown): never => { throw retryableAsUnavailable(error); };
 
 export function resendWebhookRoutes(
   edge: EdgeDependencies,
@@ -72,7 +76,7 @@ export function resendWebhookRoutes(
       const session = createEmailFeedbackSession(requestEdge(c), {
         ...(config.providerName === undefined ? {} : { providerName: config.providerName }),
       });
-      const outcome = await session.receive(verified.id, event.data);
+      const outcome = await session.receive(verified.id, event.data).catch(retryable);
       config.report?.({ id: verified.id, type: event.data.type, outcome });
       return c.json(outcome.handled ? { handled: true } : { handled: false, reason: outcome.reason }, 200);
     });

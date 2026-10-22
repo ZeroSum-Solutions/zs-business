@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { idempotencyKeySchema, MESSAGE_SEND_REQUESTED, SUPPRESSION_RECORD_ACTION } from "@zs/contracts";
 import { signResendWebhook } from "@zs/core";
@@ -332,6 +332,38 @@ describe("the tenant comes from the email's tags, checked against the delivery r
       token: h.a.token, key: `email-feedback:${newId()}`, body: { displayName: "Ada", email: "ada@haldenrowe.example" },
     });
     expect(response.status).toBe(400);
+  });
+});
+
+describe("database errors answer 503 so Resend retries (R-8)", () => {
+  /** Makes suppression writes for one address fail with a SQLSTATE, as a lock wait past lock_timeout would. */
+  async function failSuppressions(address: string, sqlstate: string) {
+    const name = `fail_${randomBytes(4).toString("hex")}`;
+    await h.database.pool.query(`CREATE FUNCTION public.${name}() RETURNS trigger LANGUAGE plpgsql AS $f$
+      BEGIN
+        IF NEW.address = '${address}' THEN RAISE EXCEPTION 'injected' USING ERRCODE = '${sqlstate}'; END IF;
+        RETURN NEW;
+      END $f$`);
+    await h.database.pool.query(`CREATE TRIGGER ${name} BEFORE INSERT OR UPDATE ON public.suppressions FOR EACH ROW EXECUTE FUNCTION public.${name}()`);
+    return async () => {
+      await h.database.pool.query(`DROP TRIGGER ${name} ON public.suppressions`);
+      await h.database.pool.query(`DROP FUNCTION public.${name}()`);
+    };
+  }
+
+  it.each(["55P03", "40001", "40P01", "57014"])("a bounce that hits %s answers 503 and suppresses once on Resend's retry", async (sqlstate) => {
+    const delivery = await sentDelivery(h.a);
+    const id = newId();
+    const restore = await failSuppressions(delivery.address, sqlstate);
+    const first = await deliver(bounce(delivery), { id });
+    await restore();
+    expect(first).toMatchObject({ status: 503, body: { error: { code: "Unavailable" } } });
+    const mine = async () => (await suppressions(delivery.tenantId)).filter((row) => row.address === delivery.address);
+    expect(await mine()).toEqual([]);
+    expect(await deliver(bounce(delivery), { id })).toEqual({ status: 200, body: { handled: true } });
+    expect(await mine()).toEqual([
+      { channel: "email", address: delivery.address, reason: "bounce", source: `resend:email.bounced:${delivery.deliveryId}` },
+    ]);
   });
 });
 
