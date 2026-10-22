@@ -158,7 +158,8 @@
   --border-strong: #787883;
   --primary: #4d62ff;
   --primary-on: #ffffff;
-  --primary-hover: #6175ff;
+  /* Hover deepens rather than lifts: a lighter fill drops the white label under 4.5:1. */
+  --primary-hover: #4459f5;
   --primary-active: #3f53e6;
   --ink: #f4f4f6;
   --ink-on: #141418;
@@ -212,7 +213,7 @@
     --border-strong: #787883;
     --primary: #4d62ff;
     --primary-on: #ffffff;
-    --primary-hover: #6175ff;
+    --primary-hover: #4459f5;
     --primary-active: #3f53e6;
     --ink: #f4f4f6;
     --ink-on: #141418;
