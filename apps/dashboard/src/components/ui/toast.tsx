@@ -30,16 +30,16 @@ function Toast({ item, onDismiss }: { item: ToastItem; onDismiss: (id: number) =
       onFocus={() => setPaused(true)}
       onBlur={() => setPaused(false)}
       onKeyDown={(event) => event.key === "Escape" && onDismiss(item.id)}
-      className="pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-md bg-fg py-1 pr-1 pl-4 text-sm text-bg shadow-raised animate-enter"
+      className="pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg bg-ink py-1 pr-1 pl-4 text-sm font-semibold text-ink-on shadow-raised animate-enter"
     >
-      <Icon size={20} weight="regular" aria-hidden className={cn("mt-3 shrink-0", item.tone === "danger" ? "text-[color-mix(in_oklab,var(--danger),var(--bg)_55%)]" : "")} />
+      <Icon size={20} weight="regular" aria-hidden className={cn("mt-3 shrink-0", item.tone === "danger" ? "text-[color-mix(in_oklab,var(--danger),var(--ink-on)_55%)]" : "")} />
       <span className="min-w-0 flex-1 py-2.5 break-words">{item.message}</span>
       <button
         type="button"
         onClick={() => onDismiss(item.id)}
         aria-label="Dismiss"
-        className="flex size-11 shrink-0 items-center justify-center rounded-sm text-bg/80 hover:bg-bg/10 hover:text-bg"
-        style={{ outlineColor: "var(--bg)" }}
+        className="flex size-11 shrink-0 items-center justify-center rounded-pill text-ink-on/80 hover:bg-ink-on/10 hover:text-ink-on"
+        style={{ outlineColor: "var(--ink-on)" }}
       >
         <X size={18} aria-hidden />
       </button>

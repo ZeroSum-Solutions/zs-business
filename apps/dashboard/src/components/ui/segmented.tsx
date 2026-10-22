@@ -22,7 +22,7 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
   const transition = useLayoutTransition();
   return (
     <LayoutGroup id={id}>
-      <div role="group" aria-label={label} className={cn("inline-flex max-w-full overflow-x-auto rounded-pill bg-well p-1 shadow-well", className)}>
+      <div role="group" aria-label={label} className={cn("inline-flex max-w-full overflow-x-auto rounded-pill bg-tray-deep p-1", className)}>
         {options.map((option) => {
           const active = value === option.value;
           return (
@@ -34,12 +34,12 @@ export function Segmented<T extends string>({ label, value, options, onChange, c
               onFocus={revealOnFocus}
               className={cn(
                 // Inset ring: the scrolling pill would clip an outside one.
-                "relative min-h-11 shrink-0 rounded-pill px-3 text-sm font-medium whitespace-nowrap transition-quick focus-visible:-outline-offset-2",
+                "relative min-h-11 shrink-0 rounded-pill px-4 text-sm font-bold whitespace-nowrap transition-quick focus-visible:-outline-offset-2",
                 active ? "text-fg" : "text-muted hover:text-fg",
               )}
             >
               {active ? (
-                <motion.span layoutId="pill" transition={transition} aria-hidden className="absolute inset-0 rounded-pill bg-control-on shadow-card ring-1 ring-inset ring-border-strong" />
+                <motion.span layoutId="pill" transition={transition} aria-hidden className="absolute inset-0 rounded-pill bg-surface shadow-card ring-1 ring-inset ring-border-strong" />
               ) : null}
               <span className="relative">{option.label}</span>
             </button>
@@ -70,7 +70,7 @@ export function ViewTabs({ label, current, tabs, className }: {
               href={tab.href}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "relative inline-flex min-h-11 items-center px-3 text-sm font-medium transition-quick",
+                "relative inline-flex min-h-11 items-center px-3 text-sm font-bold transition-quick",
                 active ? "text-fg" : "text-muted hover:text-fg",
               )}
             >

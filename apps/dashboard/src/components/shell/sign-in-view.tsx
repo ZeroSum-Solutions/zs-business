@@ -62,18 +62,18 @@ export function SignInView() {
 
   return (
     <section aria-labelledby="sign-in-title" className="mx-auto w-full max-w-sm py-12">
-      <span aria-hidden className="mb-4 flex size-12 items-center justify-center rounded-pill bg-surface-warm text-muted">
+      <span aria-hidden className="mb-4 flex size-12 items-center justify-center rounded-pill bg-inset text-muted">
         {sentTo ? <EnvelopeSimple size={24} /> : <LockKey size={24} />}
       </span>
       {mode === "demo" ? (
         <>
-          <h1 id="sign-in-title" className="text-xl tracking-display">Sign in to {OWNER.business}</h1>
+          <h1 id="sign-in-title" className="text-2xl leading-tight font-extrabold tracking-display">Sign in to {OWNER.business}</h1>
           <p className="mt-2 text-sm text-muted">This is the demo with sample data. It needs no sign-in.</p>
           <a href="/" className={cn(buttonVariants(), "mt-6")}>Open the demo</a>
         </>
       ) : sentTo ? (
         <>
-          <h1 id="sign-in-title" className="text-xl tracking-display">Check your email</h1>
+          <h1 id="sign-in-title" className="text-2xl leading-tight font-extrabold tracking-display">Check your email</h1>
           <p role="status" className="mt-2 text-sm text-muted">
             If <span className="font-medium text-fg">{sentTo}</span> belongs to someone on the team, a sign-in link is on its way. Open it on any device to sign in. It works once and expires within the hour.
           </p>
@@ -81,7 +81,7 @@ export function SignInView() {
         </>
       ) : (
         <>
-          <h1 id="sign-in-title" className="text-xl tracking-display">Sign in to {OWNER.business}</h1>
+          <h1 id="sign-in-title" className="text-2xl leading-tight font-extrabold tracking-display">Sign in to {OWNER.business}</h1>
           <form onSubmit={submit} noValidate className="mt-6 space-y-4">
             <p className="text-sm text-muted">Enter the email address your invitation went to. We will email you a link that signs you in.</p>
             <div>
@@ -99,7 +99,7 @@ export function SignInView() {
               />
             </div>
             {problem ? (
-              <p id="sign-in-error" role="alert" className="rounded-md bg-danger/8 p-3 text-sm text-fg-2">{MESSAGES[problem.kind](problem)}</p>
+              <p id="sign-in-error" role="alert" className="rounded-md bg-danger-tint p-3 text-sm text-fg-2">{MESSAGES[problem.kind](problem)}</p>
             ) : null}
             <Button type="submit" className="w-full" disabled={pending || !email.trim()} aria-busy={pending}>Email me a sign-in link</Button>
           </form>

@@ -149,7 +149,7 @@ function SiteEditor({ site, editing, writes, generation, onClose, onPublished }:
   return (
     <DialogContent title="Edit site" description="Change the words, preview the page, then publish. Earlier versions stay in History.">
       {open && !publish.isPending ? (
-        <p className="mb-4 rounded-sm bg-warn/10 p-3 text-sm text-fg-2" role="status" data-testid="site-resume">
+        <p className="mb-4 rounded-sm bg-warn-tint p-3 text-sm text-fg-2" role="status" data-testid="site-resume">
           {open.inFlight
             ? "Your last publish is still on its way. You can publish again once it has an answer."
             : "Your last publish got no answer, so it may already be live. Publish it again as it was to finish it. It will not be added twice."}
@@ -351,13 +351,13 @@ function SitePanel({ site }: { site: SiteRecord }) {
       />
       <Card className="mb-5 space-y-3">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-base font-semibold">{site.name}</h2>
+          <h2 className="text-base font-bold">{site.name}</h2>
           {site.currentReleaseId ? <Badge tone="success">Live</Badge> : <Badge tone="warn">Not published</Badge>}
         </div>
         <p id="site-live-summary" className="text-sm text-muted" data-testid="site-live-summary">{liveSummary}</p>
         {live.isError ? <ErrorNote error={live.error} retry={() => live.refetch()} /> : null}
         {edgeBehind ? (
-          <div className="rounded-sm bg-warn/10 p-3 text-sm text-fg-2" role="status" data-testid="site-edge">
+          <div className="rounded-sm bg-warn-tint p-3 text-sm text-fg-2" role="status" data-testid="site-edge">
             <p>{edge.data === "pending"
               ? "Saved and live here, but your site still shows the previous version."
               : "Could not check whether your site shows the live version."}</p>
@@ -377,14 +377,14 @@ function SitePanel({ site }: { site: SiteRecord }) {
         </Button>
       </Card>
 
-      <section aria-labelledby="site-history-title">
-        <h2 id="site-history-title" className="mb-3 text-base font-semibold">History</h2>
+      <section aria-labelledby="site-history-title" className="tray">
+        <h2 id="site-history-title" className="px-3 pt-2 pb-2.5 text-base font-bold lg:px-4">History</h2>
         {releases.isPending ? <LoadingRows rows={3} label="Loading versions" /> : releases.isError ? (
           <ErrorNote error={releases.error} retry={() => releases.refetch()} />
         ) : releases.data.length === 0 ? (
-          <p className="text-sm text-muted">Each time you publish, the version you replaced stays here, ready to bring back.</p>
+          <p className="card p-4 text-sm text-muted">Each time you publish, the version you replaced stays here, ready to bring back.</p>
         ) : (
-          <ul className="space-y-2">
+          <ul className="grid gap-1.5 lg:gap-2">
             {releases.data.map((release) => {
               const isLive = release.id === site.currentReleaseId;
               return (

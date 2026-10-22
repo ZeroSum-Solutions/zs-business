@@ -3,9 +3,9 @@
 
 @layer base {
   html {
-    /* Keep scrolled-to and focused content clear of the phone's sticky top bar and fixed
-       tab bar; from lg up there is neither. */
-    scroll-padding-top: calc(var(--topbar-height) + 8px);
+    /* Keep scrolled-to and focused content clear of the phone's floating dock; from lg up
+       the navigation sits in the header. */
+    scroll-padding-top: 8px;
     scroll-padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom) + 8px);
     background: var(--bg);
     color: var(--fg);
@@ -26,12 +26,16 @@
   }
   body {
     min-height: 100dvh;
-    font-size: var(--text-base);
+    font-size: var(--text-body);
     line-height: var(--leading-body);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
   h1, h2, h3 {
     line-height: var(--leading-tight);
-    font-weight: 600;
+    font-weight: 700;
+    letter-spacing: -0.015em;
     color: var(--fg);
   }
   /* An outline, not a box-shadow: it survives forced-colors mode. Rows inside clipped lists
@@ -70,13 +74,13 @@
   transition-timing-function: var(--ease-standard);
 }
 
-/* Hover on a pointer device: a deeper shadow and a 2px spring lift. Reduced motion keeps the
+/* Hover on a pointer device: a deeper shadow and a 1px lift. Reduced motion keeps the
    shadow and drops the lift. */
 @utility card-live {
-  /* Positioned so a border beam or badge inside can sit on the card's edge. */
+  /* Positioned so a badge inside can sit on the card's edge. */
   position: relative;
   isolation: isolate;
-  transition: transform var(--motion-spring) var(--ease-spring), box-shadow var(--motion-base) var(--ease-standard);
+  transition: transform var(--motion-base) var(--ease-standard), box-shadow var(--motion-base) var(--ease-standard);
   @media (hover: hover) {
     &:hover {
       box-shadow: var(--elev-card-hover);
@@ -84,7 +88,36 @@
   }
   @media (hover: hover) and (prefers-reduced-motion: no-preference) {
     &:hover {
-      transform: translateY(-2px);
+      transform: translateY(-1px);
+    }
+  }
+}
+
+/* Direction A: a grey tray that holds white cards, with its header inside. */
+@utility tray {
+  background: var(--tray);
+  border-radius: var(--radius-tray);
+  padding: 6px;
+  @media (min-width: 64rem) {
+    padding: 8px;
+  }
+}
+
+/* A white card inside a tray (or on the page). */
+@utility card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-card);
+}
+
+/* Press feedback for buttons and links that act like them. */
+@utility press {
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-standard);
+  @media (prefers-reduced-motion: no-preference) {
+    &:active:not(:disabled):not([aria-disabled="true"]) {
+      transform: scale(0.97);
     }
   }
 }
@@ -115,10 +148,19 @@
 }
 
 @utility skeleton {
-  background: var(--surface-warm);
+  background: var(--tray-deep);
   border-radius: var(--radius-sm);
   animation: pulse-soft 1.4s ease-in-out infinite;
   @media (prefers-reduced-motion: reduce) {
     animation: none;
+  }
+}
+
+/* All motion off when the viewer asks for less. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
+    scroll-behavior: auto !important;
   }
 }

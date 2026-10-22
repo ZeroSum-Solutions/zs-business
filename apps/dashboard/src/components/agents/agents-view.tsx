@@ -51,12 +51,14 @@ export function AgentsView() {
   return (
     <>
       <PageHeader title="Agents" description="Helpers that work for you. Nothing they write reaches a customer until an owner approves it." />
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_420px]">
-        <div className="grid min-w-0 gap-4">
+      <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_420px] lg:gap-4">
+        <div className="tray grid min-w-0 gap-1.5 lg:gap-2">
           <FollowUpCard />
           <RunsCard />
         </div>
-        <SettingsCard />
+        <div className="tray min-w-0">
+          <SettingsCard />
+        </div>
       </div>
     </>
   );
@@ -167,7 +169,7 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
         {blocked ? <><span className="font-medium text-fg">Why it can&apos;t draft right now:</span> {blocked}</> : "It can draft now."}
       </p>
 
-      <div className="flex items-start gap-3 rounded-md bg-accent/8 p-3" data-testid="approval-note">
+      <div className="flex items-start gap-3 rounded-md bg-accent-tint p-3" data-testid="approval-note">
         <ShieldCheck size={20} aria-hidden className="mt-px shrink-0 text-accent" />
         <div>
           <p>Agent drafts wait in the Inbox for an owner&apos;s approval. Nothing is sent to a customer without it.</p>
@@ -373,7 +375,7 @@ function SettingsFormBody({ status, reload }: { status: FollowUpStatus; reload: 
 
   return (
     <form className="space-y-4" onSubmit={submit} noValidate aria-labelledby="settings-title">
-      {stale ? <p role="alert" data-testid="settings-stale" className="rounded-md bg-warn/10 p-3 text-sm text-fg-2">{STALE_SETTINGS_MESSAGE}</p> : null}
+      {stale ? <p role="alert" data-testid="settings-stale" className="rounded-md bg-warn-tint p-3 text-sm text-fg-2">{STALE_SETTINGS_MESSAGE}</p> : null}
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <Label htmlFor="agent-enabled" className="mb-0">Draft follow-ups</Label>
@@ -502,7 +504,7 @@ function RunDetail({ id }: { id: string }) {
   };
 
   return (
-    <div id={`run-${id}`} className="mt-1 rounded-md bg-surface-warm p-3 text-sm text-fg-2" data-testid="run-detail">
+    <div id={`run-${id}`} className="mt-1 rounded-md bg-inset p-3 text-sm text-fg-2" data-testid="run-detail">
       {run.isPending ? <LoadingRows rows={2} label="Loading the run" /> : run.isError ? (
         <ErrorNote error={run.error} retry={() => run.refetch()} />
       ) : run.data.decisions.length === 0 ? (

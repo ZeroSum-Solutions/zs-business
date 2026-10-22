@@ -3,16 +3,16 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center gap-1 rounded-pill px-2 py-0.5 text-xs font-medium whitespace-nowrap [&_svg]:size-3.5",
+  "inline-flex min-h-[26px] items-center gap-1 rounded-pill px-2.5 text-xs font-bold whitespace-nowrap [&_svg]:size-3.5",
   {
     variants: {
       tone: {
-        neutral: "bg-surface-warm text-fg-2 ring-1 ring-inset ring-border",
-        accent: "bg-accent/14 text-accent ring-1 ring-inset ring-accent/25",
-        info: "bg-info/12 text-info ring-1 ring-inset ring-info/25",
-        success: "bg-success/14 text-success ring-1 ring-inset ring-success/25",
-        warn: "bg-warn/12 text-warn ring-1 ring-inset ring-warn/25",
-        danger: "bg-danger/12 text-danger ring-1 ring-inset ring-danger/25",
+        neutral: "bg-tray text-fg-2",
+        accent: "bg-accent-tint text-accent-ink",
+        info: "bg-info-tint text-info",
+        success: "bg-success-tint text-success",
+        warn: "bg-warn-tint text-warn",
+        danger: "bg-danger-tint text-danger",
       },
     },
     defaultVariants: { tone: "neutral" },

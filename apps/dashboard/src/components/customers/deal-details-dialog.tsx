@@ -203,7 +203,7 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
               {LEAD_SOURCES.map((source) => <option key={source} value={source}>{LEAD_SOURCE_LABELS[source]}</option>)}
             </Select>
           </div>
-          {stale === "reloaded" ? <p role="alert" className="rounded-md bg-accent/8 p-3 text-sm text-fg">{STALE_DETAILS_MESSAGE}</p> : null}
+          {stale === "reloaded" ? <p role="alert" className="rounded-md bg-accent-tint p-3 text-sm text-fg">{STALE_DETAILS_MESSAGE}</p> : null}
           {stale === "failed" ? (
             <div id={`${prefix}-reload`}>
               <ErrorNote

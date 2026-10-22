@@ -43,7 +43,7 @@ export function ContactDetail({ id }: { id: string }) {
       ) : (
         <>
           {existing ? (
-            <div role="status" className="mb-4 flex items-start gap-3 rounded-md bg-accent/8 p-3 text-sm text-fg">
+            <div role="status" className="mb-4 flex items-start gap-3 rounded-md bg-accent-tint p-3 text-sm text-fg">
               <Info size={20} aria-hidden className="mt-px shrink-0 text-accent" />
               <p>Already a customer. This is their existing record, so nothing was duplicated.</p>
             </div>
@@ -51,7 +51,7 @@ export function ContactDetail({ id }: { id: string }) {
           <header className="mb-6 flex items-center gap-4">
             <Avatar name={contact.data.displayName ?? contact.data.email} size="lg" />
             <div className="min-w-0">
-              <h1 className="truncate text-2xl tracking-display lg:text-3xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
+              <h1 className="truncate text-2xl leading-tight font-extrabold tracking-display lg:text-3xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
               <p className="text-sm text-muted">Customer since {formatDay(contact.data.createdAt, "America/New_York")}</p>
             </div>
           </header>
