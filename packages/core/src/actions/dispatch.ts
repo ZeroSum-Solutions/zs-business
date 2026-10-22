@@ -51,6 +51,12 @@ export interface ActionHandler<Config = DispatchConfig> {
     command: ActionCommand;
     binding: ActionBinding;
     now: Date;
+    /**
+     * Reads the injected clock again, for a handler that waits on a row lock first. Never
+     * earlier than `now` or any previous read in the same dispatch. The action and its event
+     * are recorded at the latest read.
+     */
+    clock: () => Date;
     config: Config;
     generateId: () => string;
   }): Promise<HandlerResult>;
@@ -184,11 +190,19 @@ export function createDispatcher<Config = DispatchConfig>(
           throw new TenantDenied();
         if (canonical(approvedBinding.data) !== canonical(binding))
           throw new BindingMismatch();
-        const now = new Date(ctx.clock.now().getTime());
-        if (!Number.isFinite(now.getTime()))
-          throw new ValidationFailed("Clock returned an invalid instant");
+        // Reads never go backward within one dispatch: a clock that steps back is held at the
+        // latest instant seen, so an expiry an earlier read reached stays reached.
+        let latest = -Infinity;
+        const readClock = () => {
+          const instant = ctx.clock.now().getTime();
+          if (!Number.isFinite(instant))
+            throw new ValidationFailed("Clock returned an invalid instant");
+          latest = Math.max(latest, instant);
+          return new Date(latest);
+        };
+        const now = readClock();
         const handled = await runHandler(() =>
-          handler.handle({ tx, command, binding, now, config, generateId }),
+          handler.handle({ tx, command, binding, now, clock: readClock, config, generateId }),
         );
         // Handlers are trusted server code we write. This check catches a handler that leaves
         // the transaction scoped to another tenant; throwing rolls back. It sees only the final
@@ -212,12 +226,15 @@ export function createDispatcher<Config = DispatchConfig>(
         const eventPayload = jsonValueSchema.safeParse(event.payload);
         if (!eventType.success || !eventPayload.success)
           throw new ValidationFailed("Invalid outbox event");
+        // History takes the latest instant the dispatch read, the one the handler stored, with
+        // no further read.
+        const recordedAt = new Date(latest);
         const inserted = await tx.query<{ result: JsonValue }>(
           `SELECT public.record_action_and_event($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) AS result`,
           [
             binding.tenantId, actionId, binding.actorId, binding.actionType,
             JSON.stringify(binding.target), JSON.stringify(binding.payload),
-            JSON.stringify(binding.approvalReference), key, JSON.stringify(result), now,
+            JSON.stringify(binding.approvalReference), key, JSON.stringify(result), recordedAt,
             generateId(), eventType.data, JSON.stringify(eventPayload.data),
           ],
         );
