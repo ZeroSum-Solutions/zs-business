@@ -8,8 +8,10 @@ import {
   channelToken,
   createBooking,
   createDispatcher,
+  generateSealKeyPair,
   GoogleRequestFailed,
   lockBookingResource,
+  parseSealPrivateKey,
   type CalendarWorkerReport,
   type DispatchContext,
   type GoogleEvent,
@@ -558,20 +560,44 @@ describe("disconnect cleanup (G-9)", () => {
     expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ status: "disconnected", refresh_token_sealed: null });
   });
 
-  it("an already revoked grant or an unreadable token still cleans up", async () => {
+  it("an already revoked grant still cleans up", async () => {
     const { w, worker } = await connectedWithChannel();
     w.google.revokeGrant(w.token);
     await disconnect(w);
     expect((await worker.runOnce()).disconnected).toBe(1);
     expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+  });
 
-    const tenantId = await h.tenant();
-    const resource = await h.resource(tenantId);
-    const unreadable = await h.connection(resource, w.google.account(), START, { sealFor: randomUUID(), status: "disconnecting" });
+  it("a token the worker cannot open is not a revoked grant: it keeps disconnecting until the key opens it", async () => {
+    const { w, worker } = await connectedWithChannel();
+    await disconnect(w);
+    // A wrong worker key opens no token, though Google still honours the grant.
+    const wrongKey = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL, privateKey: parseSealPrivateKey(generateSealKeyPair().privateKey) });
     w.google.reset();
-    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(await wrongKey.runOnce()).toMatchObject({ disconnected: 0, disconnectRetries: 1 });
     expect(w.google.calls).toEqual([]);
-    expect((await h.connectionRow(tenantId, unreadable)).status).toBe("disconnected");
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ status: "disconnecting", last_error: "token_unreadable" });
+    expect(row.refresh_token_sealed).not.toBeNull();
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    // Not before the retry delay; then the repaired key revokes and cleans up.
+    expect((await worker.runOnce()).disconnected).toBe(0);
+    w.clock.advance(MINUTE);
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.isRevoked(w.token)).toBe(true);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ status: "disconnected", refresh_token_sealed: null });
+  });
+
+  it("an unopenable token on a grant another active connection shares lets go without a revoke", async () => {
+    const w = await world();
+    const worker = h.worker(w.google, w.clock);
+    const shared = "shared@haldenrowe.example";
+    await h.connection(await h.resource(w.resource.tenantId), w.google.account(), START, { email: shared });
+    const leaving = await h.connection(w.resource, w.google.account(), START, { email: shared, status: "disconnecting", sealFor: randomUUID() });
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.of("revoke")).toEqual([]);
+    expect(await h.connectionRow(w.resource.tenantId, leaving)).toMatchObject({ status: "disconnected", refresh_token_sealed: null });
   });
 });
 

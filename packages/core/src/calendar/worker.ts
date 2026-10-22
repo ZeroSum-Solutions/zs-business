@@ -358,7 +358,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     // replaced this row, or another resource or tenant. Without an email on either row, a
     // replacement on the same resource may be that account. Then the grant stays, and only this
     // row lets go of its token. A reauthorize row's grant is already gone, so it shares nothing.
-    const shared = refreshToken !== null && (await deps.service((tx) => tx.query(
+    const shared = row.refresh_token_sealed !== null && (await deps.service((tx) => tx.query(
       `SELECT 1 FROM calendar_connections leaving, calendar_connections other
         WHERE leaving.tenant_id=$1 AND leaving.id=$2
           AND other.status='active' AND NOT (other.tenant_id=$1 AND other.id=$2)
@@ -368,7 +368,12 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
         LIMIT 1`,
       [row.tenant_id, row.id, row.resource_id]))).rowCount === 1;
     if (shared) revoke = "shared_grant";
-    else if (refreshToken !== null) {
+    // A sealed token this key cannot open is not a revoked grant: Google may still honour it, so
+    // the row keeps it and its blocks, and tries again once the key opens it.
+    else if (refreshToken === null && row.refresh_token_sealed !== null) {
+      await retryDisconnect(row, counts, "token_unreadable");
+      return;
+    } else if (refreshToken !== null) {
       let sent = false;
       try {
         await call((signal) => { sent = true; return deps.google.revoke(refreshToken, { signal }); }, deadline);
@@ -381,15 +386,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
           report({ kind: "deadline_reached", tenantId: row.tenant_id, connectionId: row.id });
           return;
         }
-        // Keep disconnecting with the token: the lease is the not-before of the next try.
-        const { code } = classify(error);
-        const at = nowMs();
-        await deps.service((tx) => tx.query(
-          `UPDATE calendar_connections SET lease_until=$4, last_error=$5
-            WHERE tenant_id=$1 AND id=$2 AND lease_until=$3 AND status='disconnecting'`,
-          [row.tenant_id, row.id, row.lease_until, new Date(at + retryDelay(row.updated_at, at)), code]));
-        counts.disconnectRetries += 1;
-        report({ kind: "disconnect_retry", tenantId: row.tenant_id, connectionId: row.id, code });
+        await retryDisconnect(row, counts, classify(error).code);
         return;
       }
     }
@@ -421,6 +418,17 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     }
     counts.disconnected += 1;
     report({ kind: "disconnected", tenantId: row.tenant_id, connectionId: row.id, revoke });
+  }
+
+  /** Keep disconnecting with the token and the blocks: the lease is the not-before of the next try. */
+  async function retryDisconnect(row: ConnectionRow, counts: CalendarRunCounts, code: string): Promise<void> {
+    const at = nowMs();
+    await deps.service((tx) => tx.query(
+      `UPDATE calendar_connections SET lease_until=$4, last_error=$5
+        WHERE tenant_id=$1 AND id=$2 AND lease_until=$3 AND status='disconnecting'`,
+      [row.tenant_id, row.id, row.lease_until, new Date(at + retryDelay(row.updated_at, at)), code]));
+    counts.disconnectRetries += 1;
+    report({ kind: "disconnect_retry", tenantId: row.tenant_id, connectionId: row.id, code });
   }
 
   // ---------------------------------------------------------------- c. sync (G-6, G-7) and d. channels (G-8)
