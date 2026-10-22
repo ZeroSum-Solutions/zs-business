@@ -315,41 +315,60 @@ describe("expiry (A-3)", () => {
   it("reads the clock after the row lock: a wait past expiry stops the run", async () => {
     const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
     await approveOnly(owner.userId, result.id);
-    // A writer (a revocation that fails, say) holds the row while the run starts, then rolls back.
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
-    let locked!: (pid: number) => void;
-    const holderPid = new Promise<number>((resolve) => { locked = resolve; });
-    const holder = fixture.service(async (tx) => {
-      const { rows } = await tx.query<{ pid: number }>(
-        "SELECT pg_backend_pid() AS pid FROM approvals WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, result.id]);
-      locked(rows[0]!.pid);
-      await released;
-      throw new Error("rolled back");
-    }).catch(() => undefined);
-    try {
-      const pid = await holderPid;
-      const outcome = approvedDispatch(deps(), tenantId, owner.userId)(result.id).then(() => null, (error: unknown) => error);
-      // The superuser pool sees every backend: wait until the run is queued behind the holder.
-      for (let tries = 0; ; tries += 1) {
-        const { rowCount } = await database.pool.query(
-          `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
-             AND $1::int = ANY(pg_blocking_pids(pid))`, [pid]);
-        if (rowCount) break;
-        if (tries > 500) throw new Error("the run never waited on the row lock");
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      now = START + 5 * 60_000;
-      release();
-      await holder;
-      expect(await outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
-    } finally {
-      release();
-      await holder;
-    }
+    const outcome = await afterLockWait(result.id, () => approvedDispatch(deps(), tenantId, owner.userId)(result.id));
+    expect(outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
     expect(await count("SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND approval_reference->>'id'=$2", [tenantId, result.id])).toBe(0);
   });
+
+  it.each(["approve", "reject"] as const)("reads the clock after the row lock: %s, waiting past expiry, is refused", async (decision) => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
+    const decider = sessionFor(owner.userId);
+    const outcome = await afterLockWait(result.id, () => decision === "approve"
+      ? decider.approveApproval(result.id, {}, randomUUID())
+      : decider.rejectApproval(result.id, {}, randomUUID()));
+    expect(outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
+    expect(await decider.getApproval(result.id)).toMatchObject({ status: "pending", standing: "expired", decidedAt: null });
+  });
 });
+
+/**
+ * Starts `work` while another writer (a revocation that fails, say) holds the approval row, moves
+ * the clock to the approval's expiry once `work` waits on the lock, then rolls the holder back.
+ * Resolves with what `work` returned or threw.
+ */
+async function afterLockWait(approvalId: string, work: () => Promise<unknown>): Promise<unknown> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let locked!: (pid: number) => void;
+  const holderPid = new Promise<number>((resolve) => { locked = resolve; });
+  const holder = fixture.service(async (tx) => {
+    const { rows } = await tx.query<{ pid: number }>(
+      "SELECT pg_backend_pid() AS pid FROM approvals WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, approvalId]);
+    locked(rows[0]!.pid);
+    await released;
+    throw new Error("rolled back");
+  }).catch(() => undefined);
+  try {
+    const pid = await holderPid;
+    const outcome = work().then((value) => value, (error: unknown) => error);
+    // The superuser pool sees every backend: wait until the work is queued behind the holder.
+    for (let tries = 0; ; tries += 1) {
+      const { rowCount } = await database.pool.query(
+        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+           AND $1::int = ANY(pg_blocking_pids(pid))`, [pid]);
+      if (rowCount) break;
+      if (tries > 500) throw new Error("the work never waited on the row lock");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    now = START + 5 * 60_000;
+    release();
+    await holder;
+    return await outcome;
+  } finally {
+    release();
+    await holder;
+  }
+}
 
 describe("revoke (A-8) and delivery re-check (A-10)", () => {
   it("revokes after the run: the action stays, and the delivery check says revoked", async () => {

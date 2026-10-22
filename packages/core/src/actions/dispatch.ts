@@ -51,6 +51,8 @@ export interface ActionHandler<Config = DispatchConfig> {
     command: ActionCommand;
     binding: ActionBinding;
     now: Date;
+    /** Reads the injected clock again, for a handler that waits on a row lock first. */
+    clock: () => Date;
     config: Config;
     generateId: () => string;
   }): Promise<HandlerResult>;
@@ -177,11 +179,15 @@ export function createDispatcher<Config = DispatchConfig>(
           throw new TenantDenied();
         if (canonical(approvedBinding.data) !== canonical(binding))
           throw new BindingMismatch();
-        const now = new Date(ctx.clock.now().getTime());
-        if (!Number.isFinite(now.getTime()))
-          throw new ValidationFailed("Clock returned an invalid instant");
+        const readClock = () => {
+          const instant = new Date(ctx.clock.now().getTime());
+          if (!Number.isFinite(instant.getTime()))
+            throw new ValidationFailed("Clock returned an invalid instant");
+          return instant;
+        };
+        const now = readClock();
         const handled = await runHandler(() =>
-          handler.handle({ tx, command, binding, now, config, generateId }),
+          handler.handle({ tx, command, binding, now, clock: readClock, config, generateId }),
         );
         // Handlers are trusted server code we write. This check catches a handler that leaves
         // the transaction scoped to another tenant; throwing rolls back. It sees only the final
