@@ -42,6 +42,8 @@ export function requireType(target: Target, type: "contact" | "deal"): boolean {
 }
 
 export const iso = (value: Date): string => value.toISOString();
+/** Postgres has no year 0 and rejects it; ISO year 0000 is 1 BC, which Postgres writes with a BC suffix. */
+export const pgInstant = (instant: string): string => instant.startsWith("0000-") ? `0001${instant.slice(4)} BC` : instant;
 
 export interface ContactRow {
   id: string;

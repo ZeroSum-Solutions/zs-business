@@ -15,6 +15,7 @@ import {
   loadConsent,
   parseOrFail,
   pgCode,
+  pgInstant,
   tenantVisible,
   type ConsentRow,
   type ContactRow,
@@ -139,7 +140,7 @@ async function writeConsent(tx: Transaction, tenantId: string, contactId: string
      VALUES ($1,$2,$3::crm_consent_channel,$4::crm_consent_status,$5,$6)
      ON CONFLICT (tenant_id,contact_id,channel)
      DO UPDATE SET status=EXCLUDED.status, source=EXCLUDED.source, recorded_at=EXCLUDED.recorded_at`,
-    [tenantId, contactId, channel, evidence.status, evidence.source, evidence.recordedAt],
+    [tenantId, contactId, channel, evidence.status, evidence.source, pgInstant(evidence.recordedAt)],
   );
 }
 
