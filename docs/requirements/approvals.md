@@ -1,10 +1,12 @@
 # M3b: approval and source records
 
-Status: contract for M3b (2026-10-20), revision 4 (2026-10-22). Revision 2 (review round 1):
+Status: contract for M3b (2026-10-20), revision 5 (2026-10-22). Revision 2 (review round 1):
 A-2, A-6, A-7, A-14, F-5. Revision 3 (audit B1): F-4 limits `observedAt` to UTC years 0001
 through 9999, the range CRM consent (crm.md C-9) and booking instants also apply. Records and
 replays accept any stored UTC ISO instant, and a derived `fresh_until` or a clock outside the
-range fails with `ValidationFailed`. Revision 4 (audit B3-01): A-6.
+range fails with `ValidationFailed`. Revision 4 (audit B3-01): A-6. Revision 5 (phase 2 specs):
+adds A-15, a standing approval of one message template revision, for the templated agent kinds
+(`agents.md` G-19, G-20). A-1..A-14 and F-1..F-8 are unchanged. A-15 is not built yet.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: two tenant records the rest of M3 builds on.
@@ -18,7 +20,8 @@ Scope: two tenant records the rest of M3 builds on.
   require a fresh record instead of trusting whatever row is there.
 
 Out of scope: approval UI in the dashboard (M3c renders approvals next to inbox drafts),
-multi-step or quorum approvals, automatic expiry jobs, provider syncs (M5).
+multi-step or quorum approvals, automatic expiry jobs, provider syncs (M5), standing approvals
+of anything but a message template revision (A-15).
 
 ## Evidence and decisions
 
@@ -33,6 +36,19 @@ multi-step or quorum approvals, automatic expiry jobs, provider syncs (M5).
   command it submits). This file adds stored approvals beside it; the dispatcher is unchanged.
 - Permission matrix (M2a): `ROLE_PERMISSIONS` in `packages/contracts/src/members.ts` and
   `ACTION_PERMISSIONS` in `packages/core/src/edge/session.ts`.
+- Standing approval for reminder templates, decided 2026-10-22 (coordinator, standing
+  approval): an owner approves a template revision once; every send from it still goes through
+  the outbox with consent and suppression checks; any change to the template (wording,
+  variables, channel, timing) creates a new revision that needs approval again, and the old
+  approval no longer covers sends. A-15 writes this down; `agents.md` G-19 and G-20 use it.
+- A-1..A-14 checked for A-15 (2026-10-22): A-7's one committed action per approval and A-10's
+  `approvalForAction` both assume one approval covers one action. A-15 keeps both: the grant
+  is the one action its approval runs, and each send is a separate direct action that A-10
+  resolves to the standing approval through its payload. A-5's expiry range (at most 30 days)
+  applies to standing approvals unchanged.
+- `approvalForAction` today answers `direct` for every action with no `approval_reference`
+  (`packages/core/src/approvals/records.ts:139`). Without A-15's change, a templated send would
+  pass D-6 even after its template approval was revoked.
 
 ## Approval record
 
@@ -145,6 +161,43 @@ refuses any caller key that starts with a prefix in `SERVER_IDEMPOTENCY_PREFIXES
 (`packages/contracts/src/http.ts`, compared case-insensitively), with `ValidationFailed`, on
 every HTTP route and MCP tool. M3d adds its own server prefixes to the same list.
 
+**A-15. Standing approval of a message template.** One approval may cover every send from
+one template revision (`agents.md` G-19 owns the template tables):
+- A revision is immutable and carries `content_digest`, a SHA-256 over its kind, channel,
+  purpose, subject, body, variable names and timing. Any change to one of them writes a new
+  revision; nothing edits a revision in place (column grants, as A-4).
+- The grant is the action `template.standing.grant`, payload `{templateId, revision,
+  contentDigest}`, target `{type: "message_template_revision", id: revisionId}`. It goes
+  through A-5..A-7 like any proposal. `APPROVAL_POLICIES` holds `{request: "agents", required:
+  true}` for it, so only an owner's approval runs it. The run checks that the payload's digest
+  equals the revision's stored digest (`Conflict` `template_changed`) and that the revision is
+  the template's current one (`Conflict` `template_superseded`), then records the approval as
+  the revision's `standing_approval_id`. A later grant of the same revision may replace it
+  only once the recorded approval has expired or been revoked.
+- A send from a revision is a direct action of the kind's agent principal
+  (`agent.reminder.queue` or `agent.review.queue`, `agents.md` G-14, G-19).
+  Its payload names `templateRevisionId`, `standingApprovalId` and the variable values. Its
+  handler reads the approval and the template row `FOR SHARE` and refuses with `Conflict`
+  `template_not_approved` unless the approval's standing is `approved`, its binding names this
+  revision and digest, and the revision is the template's current one.
+- Writing a new revision makes it the template's current revision and, in the same
+  transaction, revokes every `pending` or `approved` grant of the previous revision (A-8, note
+  `superseded`). The writer holds `agents` (owners only), so A-8 allows it. From that commit
+  no send uses the old revision, and the new one sends nothing until an owner approves it.
+- A-10: for a send action, `approvalForAction` returns `{kind: "standing", standing, binding,
+  current}` read from `standingApprovalId`, not `direct`. `approvalsFromRecords` answers
+  `approved` only while the standing is `approved` and the revision is still current;
+  otherwise `approval_revoked`. `approvalsFromRecords` passes the delivery's `contentDigest` to
+  `approvalForAction` for the standing kind (today it does not,
+  `packages/core/src/delivery/provider.ts:91-97`), and a delivery whose content is not the
+  revision rendered with the variable values recorded on the send action (`agents.md` G-19)
+  answers `approval_missing`. So a revoke, an expiry or a new
+  revision stops every later delivery, including events already in the outbox.
+- Consent, suppression, address and wallet checks run on every send as for any message
+  (`delivery.md` D-5, D-6, D-9). A standing approval never waives them.
+- A standing approval appears in A-11 reads like any other, with `standing` and the count of
+  sends it covered.
+
 ## Source record
 
 **F-1. Table.** `source_records` (migration `20261020100100_source_records.sql`): `tenant_id`,
@@ -205,3 +258,25 @@ recently observed first, each with `fresh`. Same permission as F-2.
 - `packages/core/test/sources.test.ts`: observe, monotonic replays, freshness edges, subject
   ownership, permission per subject, `requireFresh`, lock order that differs from clock order.
 - API and MCP tests cover the routes and tools.
+- A-15 (not built): `packages/core/test/template-approvals.test.ts` under the runtime role: a
+  send before the grant runs is refused `template_not_approved`; an owner's grant covers many
+  sends; staff cannot approve the grant; a grant whose digest no longer matches is
+  `template_changed`; a new revision revokes the old approval, a send from the old revision is
+  refused, and an event already queued from it blocks `approval_revoked` at delivery; a revoked
+  or expired grant blocks queued deliveries; a delivery whose content differs from the
+  rendered revision blocks `approval_missing`; consent and suppression still block a covered
+  send; two-tenant denial on the template tables.
+
+## First slice (A-15)
+
+Lands with `agents.md` G-19's first kind, `appointment_reminder`. Acceptance test: an owner
+approves revision 1 of a reminder template; two bookings get reminders through the outbox; the
+owner changes one word, which writes revision 2; a third booking gets no reminder until the
+owner approves revision 2; a reminder from revision 1 still in the outbox is not delivered.
+
+## Known limits (A-15)
+
+- A standing approval expires like any approval, at most 30 days after it was requested (A-5).
+  An owner then approves the same revision again. Whether standing approvals may live longer is
+  an open question.
+- A-15 covers message templates only. Standing approvals of other actions need their own rule.

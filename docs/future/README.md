@@ -2,7 +2,9 @@
 
 Ideas we intend to build after the current milestones. Each file holds the idea, the
 research behind it, the feature list and the conditions to start. Nothing here is
-committed scope until it moves into `docs/requirements/`.
+committed scope until it moves into `docs/requirements/`. Outside projects that join the
+product (enrichment, voice, images, documents, browser tasks, marketing) are decided in
+[`docs/integrations.md`](../integrations.md).
 
 Rules for this folder:
 - Our own words only. Link to outside sources; never paste their text, code or assets

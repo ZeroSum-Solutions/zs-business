@@ -1,7 +1,14 @@
 # M3d: prepaid wallet and message delivery
 
-Status: draft contract for M3d (2026-10-20), revision 4. Code follows this file; a change to
-a numbered rule needs a new revision of this file first.
+Status: draft contract for M3d (2026-10-20), revision 5 (2026-10-22). Code follows this file;
+a change to a numbered rule needs a new revision of this file first. Revision 5 changes D-6 and
+D-9 so a one-click unsubscribe stops marketing email only, and adds D-11 (wallet reservations
+for any priced job). Neither change is built yet. Today the one-click POST records reason
+`unsubscribe` (`packages/core/src/edge/delivery-session.ts:63`), and any suppression row blocks
+every purpose (`packages/core/src/delivery/worker.ts:325-331`, `policy.ts:75`). Today
+`wallet_reservations` has only `delivery_id`, a foreign key to `message_deliveries`
+(`supabase/migrations/20261020300000_wallet_and_delivery.sql:117-132`), and
+`captureReservation` always captures the whole held amount (`packages/core/src/wallet/index.ts`).
 
 Scope: how an approved outbound message (an Inbox reply today, agent messages later) becomes
 exactly one provider send, paid from the tenant's prepaid wallet, and how a recipient stops
@@ -21,6 +28,18 @@ until then credits are a service-role call.
 - Provider behaviour (studied from public API docs, in our own words): providers accept an
   idempotency key and drop a repeat of the same key for a limited window (about a day for
   common email APIs). A repeat after the window may send again.
+- Marketing one-click unsubscribe stops marketing email only and keeps transactional (booking)
+  email; D-6 and D-9 change to match; decided 2026-10-22 (coordinator, standing approval).
+  Mailbox-provider bulk-sender rules and CAN-SPAM ask for a working unsubscribe on marketing
+  mail, not on booking notices. Bounces, complaints, manual suppressions and SMS `STOP` still
+  block every purpose: the first three mean the address is unsafe or the owner said no, and
+  carriers enforce `STOP` for every message.
+- A recorded consent denial is not used for the marketing opt-out: consent is per contact and
+  a denial blocks every purpose (D-6), while an unsubscribe names one address.
+- Wallet reservations cover any priced job (enrichment call, image job, voice minutes, browser
+  run), not only message deliveries: D-11 (`docs/integrations.md`, "Wallet spend beyond
+  messages"). Other contracts (`enrichment.md`, `image-port.md`, `voice-receptionist.md`)
+  cite D-11 by number.
 
 ## Numbered rules
 
@@ -67,7 +86,9 @@ worker re-checks, for every attempt:
 - suppression of the channel and address (D-9): blocked `suppressed`;
 - the contact's consent for the channel: `denied` blocks `consent_denied`; marketing, and
   every SMS, needs `granted`, or it blocks `consent_missing`; a transactional email needs no
-  recorded grant;
+  recorded grant. For a `marketing` delivery, a grant whose source starts with
+  `twilio-voice:` (`twilio.md` T-12, a caller asking for one booking-link text) does not count
+  and blocks `consent_missing` (revision 5);
 - the approval of the action that committed the event, through `DeliveryApprovals.check(tx,
   { tenantId, actionId, messageId, contentDigest })`, which must answer `approved`, or it
   blocks `approval_revoked` or `approval_missing`. `approvalsFromRecords` implements the port
@@ -75,11 +96,18 @@ worker re-checks, for every attempt:
   stands only while `approved`; revoked, expired and rejected block `approval_revoked`;
 - a usable address (`no_address`). The send goes to the contact's current address, except
   that while an outcome is unknown it may only be repeated to the address it went to; if the
-  contact's address changed, the delivery blocks `address_changed` (after a lookup, D-8).
+  contact's address changed, the delivery blocks `address_changed` (after a lookup, D-8). A
+  marketing campaign delivery (`marketing-email.md` M-6) is bound to its snapshot address on
+  every attempt and blocks `address_changed` as soon as the contact's address differs
+  (revision 5).
 A blocked delivery sends nothing and releases its reservation. A withdrawal that commits after
-an attempt has started does not stop that attempt; it stops every later one. Suppression
-blocks every purpose, transactional included: a person who opted out hears nothing more until
-they opt back in.
+an attempt has started does not stop that attempt; it stops every later one. What a suppression
+blocks depends on its reason (revision 5): `marketing_unsubscribe` blocks `marketing` deliveries
+only, so the person still gets booking notices and replies (`transactional`); `unsubscribe`,
+`stop`, `bounce`, `complaint` and `manual` block every purpose, transactional included, until
+the row is lifted. A test proves both: with a `marketing_unsubscribe` row for an address, a
+marketing delivery to it blocks `suppressed` and a transactional one is sent; with a `bounce`
+row, both block `suppressed`.
 
 **D-7. Outcomes.** The provider answers one of: `accepted` (captured, `sent`), `rejected`
 (permanent: released, dead letter `provider_rejected`), `failed` (this attempt was not
@@ -124,10 +152,14 @@ then is it a dead letter `outcome_unknown` with the reservation held. A send aft
 answer (`failed`) is not limited by the window, because it cannot repeat an accepted one.
 
 **D-9. Suppression and stop.** `suppressions` holds (channel, address) pairs that must not be
-messaged, with a reason (`unsubscribe`, `stop`, `bounce`, `complaint`, `manual`). Writes go
+messaged, with a reason (`marketing_unsubscribe`, `unsubscribe`, `stop`, `bounce`, `complaint`,
+`manual`); `marketing_unsubscribe` is valid on the email channel only. Writes go
 through the dispatcher with a server-built principal per tenant, like the public intake
 (P-3). One row per address keeps its first reason, except that a lasting reason (`unsubscribe`,
-`bounce`, `complaint`, `manual`) replaces `stop`. Member and MCP idempotency keys may not use the
+`bounce`, `complaint`, `manual`) replaces `stop` and `marketing_unsubscribe`, so an address that
+opted out of marketing and then bounces stops getting booking email too (revision 5). Rows
+recorded as `unsubscribe` before revision 5 keep that reason and keep blocking every purpose;
+the migration rewrites no row. Member and MCP idempotency keys may not use the
 prefixes the server builds for these actions (`public:`, `unsubscribe:`, `sms-inbound:`,
 `sms-status:`, `email-feedback:`), so a
 member cannot take a recipient's key first:
@@ -135,7 +167,9 @@ member cannot take a recipient's key first:
   List-Unsubscribe=One-Click` (RFC 8058). The URL holds an unsubscribe token: `zsu1_` and
   64 base64url characters encoding the tenant UUID, the delivery UUID and a 16-byte
   HMAC-SHA-256 tag over `zsu1:<tenantId>:<deliveryId>`. A POST with a valid token
-  suppresses the address that delivery went to. A GET never changes anything. The endpoint
+  suppresses the address that delivery went to with reason `marketing_unsubscribe`
+  (revision 5; `unsubscribe` before it), whatever the purpose of that delivery. A GET never
+  changes anything. The endpoint
   checks the token before any database work: a forged token is rate limited per caller
   address, a valid one per delivery, because one-click POSTs come from a few mailbox-provider
   servers that every recipient shares. The counts are shared by every API instance
@@ -152,9 +186,52 @@ member cannot take a recipient's key first:
 catalog isolation test. The worker runs as the service role (the outbox processing entry
 point) and names `tenant_id` in every statement.
 
-## Known limits (revision 4)
+**D-11. Reservations for any priced job (revision 5, not built).** A wallet reservation names a
+job by `job_kind` and `job_id` instead of only a message delivery. The kinds are
+`message_delivery`, `enrichment` (`enrichment.md` E-8), `image_job`, `voice_minutes` and
+`browser_run`; a new
+kind needs a revision of this file and a contract that names its job table and its price. The
+rules of D-4 and D-5 hold for every kind:
+- Reserve before the vendor call. `reserveForJob(tx, { tenantId, jobKind, jobId,
+  reservationId, amount, currency, now })` runs in the transaction that starts the job's
+  attempt, as one conditional update on the wallet row (`balance - reserved >= amount`, the
+  wallet's currency, `owed = 0`). It returns null without funds, and the job then makes no
+  vendor call; its own contract says whether it waits or ends `insufficient_funds`. Only the
+  service role reserves (D-4).
+- One hold, one capture. Partial unique indexes allow one `held` and one `captured`
+  reservation per (`tenant_id`, `job_kind`, `job_id`). A reservation moves from `held` to
+  `captured` or `released` once, and the capture writes one ledger row keyed
+  `capture:<reservationId>` (D-4).
+- Capture the real cost, release the rest. `captureReservation` takes an optional `amount` no
+  larger than the held amount; it captures that amount and returns the remainder to `available`
+  in the same transaction. A capture above the held amount is refused (`capture_exceeds_hold`)
+  and changes nothing. A job never spends past its hold: a voice call ends or hands off before
+  its reserved minutes run out, and a browser run stops at its reserved step count.
+- Release on failure. A definite failure (the vendor refused, or the job was blocked before
+  the call) releases the hold. An unknown outcome keeps the hold until the job's own lookup or
+  an operator settles it, as D-7 and D-8 say for messages.
+- Stale holds. A sweep reports `held` reservations older than 24 hours by the injected clock as
+  `stale_hold`, with tenant, kind and job. It never captures or releases them itself.
+Migration: `wallet_reservations` gains `job_kind` (text, checked against the list above) and
+`job_id` (uuid), both backfilled from existing rows as `message_delivery` and `delivery_id`, then
+`NOT NULL`. `delivery_id` stays, now nullable, with its foreign key to `message_deliveries`;
+a check keeps `delivery_id` set and equal to `job_id` exactly when `job_kind =
+'message_delivery'`. The two partial unique indexes move from `delivery_id` to (`job_kind`,
+`job_id`). Other kinds have no foreign key: `reserveForJob` locks the job's row in its own table
+under the same tenant (`FOR UPDATE`) and refuses `job_not_found` if it is absent. The delivery
+worker keeps its D-5 behaviour through `reserveFunds`, which calls `reserveForJob` with kind
+`message_delivery`. Tests: two concurrent reservations for different kinds can never overdraw;
+a second hold for the same job is refused by the index; a partial capture returns the rest to
+`available`; and a two-tenant denial test covers the new columns.
+
+## Known limits (revision 5)
 
 - Claims are ordered by due time across tenants, with no per-tenant fairness yet.
 - Backoff has no jitter: core has no randomness source, and none is injected yet.
 - Top-ups arrive with M5; `creditWallet` is the seam they call. The email provider is Resend
   (`resend.md`); the SMS provider and inbound SMS webhooks are Twilio (`twilio.md`).
+- An email opt-out from a booking notice stops marketing only (D-6). A recipient who wants no
+  email at all asks the business, and the owner records a `manual` suppression. A self-serve
+  "stop all email" choice on the unsubscribe page is an open question.
+- D-11 has no top-up of a running hold: a job that needs more than it reserved ends and starts a
+  new job with a new reservation. Per-kind prices live in each kind's contract.
