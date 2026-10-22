@@ -70,7 +70,7 @@ interface LeasedRow {
   endpoint_id: string;
   outbox_id: string;
   occurred_at: Date;
-  replays: number;
+  replayed_at: Date | null;
   event_id: string;
   body: string;
   attempts: number;
@@ -79,6 +79,9 @@ interface LeasedRow {
 type Plan =
   | { readonly kind: "done"; readonly result: WebhookStepResult }
   | { readonly kind: "send"; readonly attempt: number; readonly url: string; readonly headers: Record<string, string>; readonly body: string };
+
+/** Transport errors that are the URL policy's refusal, not a network failure: `address_refused`, `url_…`. */
+const URL_REFUSALS = /^(address_refused$|url_)/;
 
 const errorText = (code: string) => (code.replaceAll("\u0000", "").trim() || "unknown").slice(0, 200);
 
@@ -204,7 +207,7 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
   const lockLeased = async (tx: Transaction, lease: WebhookClaim): Promise<LeasedRow | undefined> =>
     (await tx.query<LeasedRow>(
       `SELECT d.tenant_id, d.id, d.endpoint_id, d.outbox_id, o.created_at AS occurred_at, d.event_id, d.body::text AS body,
-         d.attempts, d.step_errors, d.replays
+         d.attempts, d.step_errors, d.replayed_at
         FROM webhook_deliveries d JOIN outbox o ON o.tenant_id = d.tenant_id AND o.id = d.outbox_id
         WHERE d.tenant_id=$1 AND d.id=$2 AND d.lease_token=$3 AND d.status='leased' FOR UPDATE OF d`,
       [lease.tenantId, lease.deliveryId, lease.leaseToken])).rows[0];
@@ -235,8 +238,10 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
       const endpoint = (await tx.query<EndpointRow>(
         `SELECT ${ENDPOINT_COLUMNS} FROM webhook_endpoints WHERE tenant_id=$1 AND id=$2`, [row.tenant_id, row.endpoint_id])).rows[0];
       // W-7, W-8: switched off, or switched back on after this event happened (it was queued
-      // before). An owner's replay of a dead letter (W-14) is a choice to send it anyway.
-      if (!endpoint || !endpoint.enabled || (row.replays === 0 && row.occurred_at.getTime() < endpoint.activated_at.getTime()))
+      // before). An owner's replay of a dead letter (W-14) is a choice to send it anyway, under
+      // the activation it was made in: switched off and on again after it, the replay is dropped too.
+      const since = row.replayed_at ?? row.occurred_at;
+      if (!endpoint || !endpoint.enabled || since.getTime() < endpoint.activated_at.getTime())
         return { kind: "done", result: await deadLetter(tx, row, "endpoint_disabled", at) };
       const problem = webhookUrlProblem(endpoint.url, policy);
       if (problem) return { kind: "done", result: await deadLetter(tx, row, "url_refused", at, problem) };
@@ -272,7 +277,7 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
     });
   }
 
-  /** W-8: 2xx is delivered; 410 means the receiver is gone; anything else retries with backoff. */
+  /** W-8: 2xx is delivered; 410 means the receiver is gone; a refused URL stops; anything else retries with backoff. */
   async function record(lease: WebhookClaim, attempt: number, response: WebhookResponse): Promise<WebhookStepResult> {
     return deps.service(async (tx) => {
       const row = await lockLeased(tx, lease);
@@ -294,6 +299,8 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
       await tx.query("UPDATE webhook_deliveries SET last_status_code=coalesce($3,last_status_code), last_error=$4 WHERE tenant_id=$1 AND id=$2",
         [row.tenant_id, row.id, status, code]);
       if (status === 410) return deadLetter(tx, row, "endpoint_gone", at);
+      // W-8: a URL the transport refused (a name that resolves to a private address) is not retried.
+      if (code !== null && URL_REFUSALS.test(code)) return deadLetter(tx, row, "url_refused", at);
       if (row.attempts >= config.maxAttempts) return deadLetter(tx, row, "max_attempts", at);
       const next = new Date(at.getTime() + backoffMs(row.attempts, config.backoffBaseMs, config.backoffMaxMs));
       await tx.query(`UPDATE webhook_deliveries SET status='pending', next_attempt_at=$3, ${RELEASE}, updated_at=$4 WHERE tenant_id=$1 AND id=$2`,

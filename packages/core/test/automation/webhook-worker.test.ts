@@ -2,7 +2,7 @@
 // signed, at least once under a stable webhook-id, with leases, retries and dead letters.
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { webhookSigningSecret, type WebhookTransport } from "../../src/index.js";
+import { createNodeWebhookTransport, webhookSigningSecret, type WebhookTransport } from "../../src/index.js";
 import { startFakeActivepieces, type FakeActivepieces } from "./fake-activepieces.js";
 import { createAutomationHarness, KEY, OTHER_KEY, type AutomationHarness, type Tenant } from "./helpers.js";
 
@@ -224,6 +224,24 @@ describe("delivery semantics (W-7, W-8)", () => {
     expect((await deliveries(second.endpoint.id))[0]).toMatchObject({ status: "dead", final_reason: "url_refused" });
   });
 
+  it("dead-letters at once a URL whose name resolves to a private address, and keeps the refused attempt", async () => {
+    const { endpoint } = await subscribe(h.a, ["booking.created"]);
+    await h.database.pool.query("UPDATE webhook_endpoints SET url='https://hooks.rebind.example/flow' WHERE tenant_id=$1 AND id=$2",
+      [h.a.tenantId, endpoint.id]);
+    h.clock.advance(1_000);
+    await h.websiteRequest(h.a);
+    // A public-shaped name whose DNS answer is loopback: the socket never opens.
+    const transport = createNodeWebhookTransport({
+      lookup: (_host, _options, callback) => callback(null, [{ address: "127.0.0.1", family: 4 }]),
+    });
+    const results = await h.worker({ allowLoopback: false }, { transport }).runOnce();
+    expect(results.results).toEqual([{ outcome: "dead", reason: "url_refused" }]);
+    const [row] = await deliveries(endpoint.id);
+    expect(row).toMatchObject({ status: "dead", final_reason: "url_refused", attempts: 1 });
+    expect(await h.rows("SELECT outcome, error_code FROM webhook_delivery_attempts WHERE delivery_id=$1", [row!.id]))
+      .toEqual([{ outcome: "failed", error_code: "address_refused" }]);
+  });
+
   it("finds an event whose transaction committed after a later one was ingested (W-7 lookback)", async () => {
     const { flowId } = await subscribe(h.a, ["booking.created"]);
     h.clock.advance(5_000);
@@ -383,6 +401,37 @@ describe("decided from what happened, not from the live rows (W-4, W-7)", () => 
     await h.admin(h.a).replayDelivery(old!.id, {}, randomUUID());
     await drain();
     expect(ap.events(flowId)).toHaveLength(2);
+  });
+
+  it("binds a replay to the endpoint's activation: switched off and on again after it, the replay is dropped too", async () => {
+    const { flowId, endpoint } = await subscribe(h.a, ["booking.created"]);
+    ap.queue(flowId, { respond: 410 }, { respond: 503 });
+    h.clock.advance(1_000);
+    await h.websiteRequest(h.a);
+    const worker = h.worker();
+    await worker.runOnce();
+    const [dead] = await deliveries(endpoint.id);
+    expect(dead).toMatchObject({ status: "dead", final_reason: "endpoint_gone" });
+    h.clock.advance(1_000);
+    await h.admin(h.a).replayDelivery(dead!.id, {}, randomUUID());
+    await worker.runOnce();
+    expect((await deliveries(endpoint.id))[0]).toMatchObject({ status: "pending" });
+
+    h.clock.advance(1_000);
+    await h.admin(h.a).updateEndpoint(endpoint.id, { enabled: false, expectedRevision: 1 }, randomUUID());
+    h.clock.advance(1_000);
+    await h.admin(h.a).updateEndpoint(endpoint.id, { enabled: true, expectedRevision: 2 }, randomUUID());
+    h.clock.advance(60_000);
+    await worker.runOnce();
+    expect((await deliveries(endpoint.id))[0]).toMatchObject({ status: "dead", final_reason: "endpoint_disabled" });
+    expect(ap.received.filter((request) => request.flowId === flowId)).toHaveLength(2);
+
+    // A replay after the latest activation is the owner's choice to send it now.
+    h.clock.advance(1_000);
+    await h.admin(h.a).replayDelivery(dead!.id, {}, randomUUID());
+    await worker.runOnce();
+    expect((await deliveries(endpoint.id))[0]).toMatchObject({ status: "delivered" });
+    expect(ap.events(flowId)).toHaveLength(1);
   });
 
   it("reads a new endpoint first, so endpoints that were read before cannot starve it", async () => {
