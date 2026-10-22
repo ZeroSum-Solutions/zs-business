@@ -60,7 +60,7 @@ over HTTPS with its scoped token (BT-7) and opens no inbound port. It refuses to
 Browser Use Cloud. Each job runs a Chrome it launched itself.
 
 **BT-3. Targets and allowed origins.** `browser_targets` (`tenant_id, id, name, task_kind,
-allowed_origins, allowed_paths, sign_in_path, enabled, attested_by, attested_at, revision,
+allowed_origins, allowed_paths, asset_paths, sign_in_path, enabled, attested_by, attested_at, revision,
 updated_at`) holds what a task may
 visit. `allowed_origins` lists exact `https://host[:port]` origins, 1 to 5, with no wildcards. A
 navigation, redirect or new tab outside them ends the run `stopped` with reason
@@ -76,20 +76,26 @@ for claim status, payer portals or health records.
 
 **BT-5. Read-only means no change on the site.** The model picks steps; the runner, not the
 model, decides whether a step may run. For a read-only task kind:
-- Paths. Each target lists `allowed_paths` (1 to 10 path prefixes, set with the target, BT-3)
-  and its `sign_in_path`. A navigation or link whose path is outside them is not followed.
-- Requests. The runner intercepts every request the page makes. After sign-in, only `GET` and
-  `HEAD` requests to the allowed origins may leave; any other method (a JavaScript button that
-  posts, a fetch, a form) is aborted before it is sent. The one exception is the sign-in form's
-  own `POST` to `sign_in_path`, once per run.
+- Paths. Each target lists `allowed_paths` (1 to 10 path prefixes, set with the target, BT-3),
+  `asset_paths` (prefixes for scripts, styles, images and fonts) and its `sign_in_path`, all
+  reviewed by the owner when attesting the target.
+- Requests. The runner intercepts every request at the browser's network layer (the DevTools
+  request-interception hook, installed before the first page loads, so page scripts cannot
+  avoid it), whatever started it: a navigation, a link, a script's `fetch` or XHR, an image, a
+  form. A request may leave only when its method is `GET` or `HEAD`, its origin is allowed, and
+  its path starts with an `allowed_paths` or `asset_paths` prefix (asset prefixes only for
+  script, style, image and font requests). Everything else is aborted before it is sent. The
+  one exception is the sign-in form's own `POST` to `sign_in_path`, once per run.
 - Operations. The planner's actions are a fixed list per task kind: open an allowed URL, click a
   link whose resolved target is an allowed `GET` URL, set a date filter that changes only the
   query string, and download an `application/pdf` response. There is no free typing outside
   the sign-in fields and no generic click.
 Any refused step ends the run `stopped` with reason `write_refused`. The acceptance test serves
 a fake supplier site with a `GET` delete link outside `allowed_paths`, a JavaScript button that
-`POST`s to an allowed path and a second form; each attempt ends `write_refused`, and the fake
-site's log shows no request other than `GET`, `HEAD` and the one sign-in `POST`.
+`POST`s to an allowed path, an allowed invoice link whose click handler also calls
+`fetch('/delete?id=42')`, and a second form; each attempt ends `write_refused`, the delete
+endpoint receives nothing, and the fake site's log shows no request other than allowed `GET`s,
+`HEAD`s and the one sign-in `POST`.
 
 **BT-6. Profiles and files are per tenant.** Each (tenant, target) has its own profile at
 `<BROWSER_ROOT>/<tenantId>/<targetId>/profile`, built only from the server-derived tenant and a

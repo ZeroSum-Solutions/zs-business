@@ -111,8 +111,14 @@ campaign becomes `sending`. The delivery worker (service role, `delivery.md` D-1
 event by inserting one `message_deliveries` row per `marketing_campaign_recipients` row in one
 transaction: message id derived from tenant, campaign and contact, purpose `marketing`, the
 snapshot address, the campaign's action id, so D-5..D-9 and the approval re-check run for each
-delivery. A replayed event inserts nothing twice (unique message id). A test ingests a
-three-recipient campaign twice and finds three deliveries.
+delivery. A replayed event inserts nothing twice (unique message id). Migration:
+`message_deliveries` gains `campaign_id` (nullable, foreign key to `marketing_campaigns`), and
+its `UNIQUE (tenant_id, outbox_id)` constraint
+(`supabase/migrations/20261020300000_wallet_and_delivery.sql:77`) becomes a partial unique
+index `WHERE campaign_id IS NULL`, so an ordinary message keeps one delivery per outbox row,
+plus `UNIQUE (tenant_id, campaign_id, contact_id) WHERE campaign_id IS NOT NULL`. A test on the
+migrated schema ingests a three-recipient campaign twice and finds three deliveries, and a
+replayed ordinary message still makes one.
 
 **M-7. Wallet.** The estimated cost is recipient count × the email price (D-5). The send
 action fails `insufficient_funds` when the wallet's available amount is below it at run time,
@@ -149,8 +155,8 @@ Sending domain and the send gate, with the queue split; nothing reaches a real p
 `packages/core/test/marketing/domain-gate.test.ts` against real Postgres and the fake
 `EmailDomainProvider` proves: `marketing.campaign.send` for a tenant with a `pending` domain
 fails `domain_not_verified` and commits no outbox row; after the fake reports `verified` and a
-postal address is saved, an approved campaign of three consenting contacts commits three
-`marketing` events; a contact with a `marketing_unsubscribe` row is left out of the snapshot
+postal address is saved, an approved campaign of three consenting contacts commits one
+`marketing.campaign.send_requested` event that ingests into three `marketing` deliveries; a contact with a `marketing_unsubscribe` row is left out of the snapshot
 yet still gets a transactional reply; 20 marketing and 1 transactional deliveries due together
 settle the transactional one first; and tenant B cannot read tenant A's domain or campaign.
 

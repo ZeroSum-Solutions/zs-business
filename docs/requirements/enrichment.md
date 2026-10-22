@@ -117,10 +117,15 @@ new wallet grant.
 Every call sends `X-Treg-Route-Max-Cost` equal to that price, converted exactly to dollars, so
 Treg never bills more than was reserved. The token's own per-call cap is at least the top price.
 
-**E-9. Daily caps.** Before inserting, the request counts `enrichment_requests` created in the
-current UTC day (injected clock) for the tenant and for all tenants, under a transaction-scoped
-advisory lock. At `ENRICHMENT_TENANT_DAILY_CAP` or `ENRICHMENT_GLOBAL_DAILY_CAP` it is
-`Conflict` `enrichment_daily_cap`.
+**E-9. Daily caps.** Before inserting, the request counts its own tenant's
+`enrichment_requests` created in the current UTC day (injected clock) under a
+transaction-scoped advisory lock keyed by tenant; at `ENRICHMENT_TENANT_DAILY_CAP` it is
+`Conflict` `enrichment_daily_cap`. The runtime role cannot see other tenants, so the global cap
+is checked by the worker: in `enrichment.attempt.start` (service role), under one advisory lock
+for all tenants, it counts attempts started that day across tenants, and at
+`ENRICHMENT_GLOBAL_DAILY_CAP` the request ends `enrichment_daily_cap` with no hold and no call.
+A test starts attempts for two tenants concurrently at the global cap minus one and finds
+exactly one call.
 
 **E-10. Worker and re-check.** The worker (service role) claims `pending` or due `uncertain`
 requests with a lease token under `FOR UPDATE SKIP LOCKED`, as in `delivery.md` D-3. In

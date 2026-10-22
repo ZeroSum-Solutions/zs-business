@@ -101,11 +101,15 @@ Google refused it before acceptance; a timeout, a lost connection, any 5xx or a 
 **SP-9. Never twice.** Because the create call takes no idempotency key, an `uncertain` post is
 never sent again. The worker lists the location's posts created since the attempt opened and
 compares each with the complete approved content: `summary`, the photo's source URL and the
-call to action. Exactly one full match settles the post `published` with that remote ID. Two
-or more matches, or none after 30 minutes, end it `outcome_unknown`, which the owner sees with
+call to action. A remote ID belongs to at most one local post (`UNIQUE (tenant_id,
+connection_id, remote_post_id)`). Exactly one full match, not owned by another post, settles
+the post `published` with that remote ID, provided no other `uncertain` post on the location has
+the same content. Two or more matches, a match already owned, two indistinguishable uncertain
+posts, or no match after 30 minutes, end it `outcome_unknown`, which the owner sees with
 a link to check the profile; nothing is settled on a guess. A test creates two uncertain posts
 with the same summary and different photos and checks each settles only to its own remote
-post. Publishing it again needs a new draft and approval.
+post; a second test leaves two identical uncertain posts with one remote result and checks both
+end `outcome_unknown`. Publishing it again needs a new draft and approval.
 
 **SP-10. Disconnect.** `social.connection.disconnect` (permission `publish`) moves an `active`
 or `reauthorize` connection to `disconnecting`. Its posts still `scheduled` end blocked
