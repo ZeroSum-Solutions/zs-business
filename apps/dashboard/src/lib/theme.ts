@@ -18,8 +18,10 @@ function snapshot(): Theme {
 
 /** Points the browser and home-screen bars at the page colour of the theme now showing. */
 export function syncThemeColor() {
-  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
-  if (!bg) return;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  if (!raw) return;
+  // The CSS minifier shortens #ffffff to #fff; the bars get the full form either way.
+  const bg = /^#[0-9a-f]{3}$/i.test(raw) ? `#${[...raw.slice(1)].map((c) => c + c).join("")}` : raw;
   for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) meta.content = bg;
 }
 

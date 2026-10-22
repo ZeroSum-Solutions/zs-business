@@ -36,5 +36,5 @@ export function TrayTitle({ className, ...props }: ComponentProps<"h2">) {
 }
 
 export function TrayBody({ className, ...props }: ComponentProps<"div">) {
-  return <div className={cn("grid min-w-0 gap-1.5 lg:gap-2", className)} {...props} />;
+  return <div className={cn("grid min-w-0 grid-cols-1 gap-1.5 lg:gap-2", className)} {...props} />;
 }
