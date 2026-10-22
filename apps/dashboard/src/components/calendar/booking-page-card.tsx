@@ -4,7 +4,7 @@ import { ArrowSquareOut, Copy, Globe } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tray, TrayHeader, TrayTitle } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
 import { useToast } from "@/components/ui/toast";
 import type { BookingPageSummary } from "@/lib/api";
@@ -23,15 +23,15 @@ export function BookingPageCard() {
   // A business without pages, or an API without public booking, shows nothing here.
   if (!pages.isSuccess || pages.data.length === 0) return null;
   return (
-    <Card className="mt-6" aria-labelledby="booking-pages-title">
-      <CardHeader>
+    <Tray className="mt-4" aria-labelledby="booking-pages-title">
+      <TrayHeader>
         <div>
-          <CardTitle id="booking-pages-title">Booking on your website</CardTitle>
-          <CardDescription>Customers can book on this page or in a widget on any site. Their bookings show here, marked Website.</CardDescription>
+          <TrayTitle id="booking-pages-title">Booking on your website</TrayTitle>
+          <p className="text-caption text-muted">Customers can book on this page or in a widget on any site. Their bookings show here, marked Website.</p>
         </div>
-      </CardHeader>
-      <ul className="space-y-4">{pages.data.map((page) => <PageRow key={page.id} page={page} />)}</ul>
-    </Card>
+      </TrayHeader>
+      <ul className="grid gap-1.5 lg:gap-2">{pages.data.map((page) => <PageRow key={page.id} page={page} />)}</ul>
+    </Tray>
   );
 }
 
@@ -47,10 +47,10 @@ function PageRow({ page }: { page: BookingPageSummary }) {
     }
   };
   return (
-    <li data-testid="booking-page" className="rounded-md bg-surface-warm/60 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_0_0_1px_var(--border)]">
+    <li data-testid="booking-page" className="card p-4 lg:px-6 lg:py-5">
       <div className="flex flex-wrap items-center gap-2">
         <Globe size={20} aria-hidden className="text-meta" />
-        <p className="font-medium text-fg">{page.title}</p>
+        <p className="font-bold text-fg">{page.title}</p>
         <Badge tone={page.published ? "success" : "neutral"} live={page.published}>{page.published ? "Live" : "Not published"}</Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -63,7 +63,7 @@ function PageRow({ page }: { page: BookingPageSummary }) {
       </div>
       <div className="mt-4">
         <div className="mb-2 flex flex-wrap items-center gap-3">
-          <p aria-hidden className="text-sm font-medium text-fg-2">Embed code</p>
+          <p aria-hidden className="text-sm font-bold text-fg-2">Embed code</p>
           <Segmented label="Embed code" value={snippet} options={EMBED_OPTIONS} onChange={setSnippet} />
         </div>
         <label htmlFor={`embed-${page.id}`} className="sr-only">Embed code to paste into your website</label>
@@ -73,7 +73,7 @@ function PageRow({ page }: { page: BookingPageSummary }) {
           rows={3}
           value={page[snippet]}
           onFocus={(event) => event.currentTarget.select()}
-          className="w-full resize-none rounded-sm bg-well p-3 font-mono shadow-field text-xs focus:shadow-[inset_0_0_0_1px_var(--accent)] text-fg-2"
+          className="w-full resize-none rounded-md bg-well p-3 font-mono shadow-field text-xs focus:shadow-[inset_0_0_0_1px_var(--accent)] text-fg-2"
         />
         <Button variant="secondary" className="mt-2" onClick={() => copy(page[snippet], "embed code")}><Copy aria-hidden />Copy embed code</Button>
       </div>

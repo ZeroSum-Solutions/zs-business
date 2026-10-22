@@ -80,13 +80,12 @@ export function classifyTwilioResponse(status: number, body: unknown): ProviderS
       // Created, but with no SID to record; the status callback names it.
       : { status: "uncertain", code: "twilio_unreadable_success" };
   }
-  // A timeout or conflict on Twilio's side: the message may exist all the same.
-  if (status === 408 || status === 409) return { status: "uncertain", code };
   // The request itself is wrong (a bad number, an opted-out recipient, a sender Twilio will not
   // use); replaying the same request cannot fix it.
   if (status === 400 || status === 413 || status === 422) return { status: "rejected", code };
-  // Refused before a message was created: rate limits, credentials, a wrong account path.
-  // Retrying with backoff is safe and bounded by the attempt cap.
+  // Refused before a message was created: rate limits, credentials, a wrong account path, and a
+  // 408 or 409 (the request never fully arrived, or was not applied). Retrying with backoff is
+  // safe and bounded by the attempt cap.
   if (status >= 400 && status < 500) return { status: "failed", code };
   // A server error, a gateway, a redirect: the message may have been created.
   return { status: "uncertain", code };

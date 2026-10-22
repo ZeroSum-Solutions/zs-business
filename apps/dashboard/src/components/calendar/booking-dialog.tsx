@@ -113,7 +113,7 @@ export function BookingDialog({
                   onFocus={revealOnFocus}
                   className={cn(
                     "flex min-h-14 min-w-16 shrink-0 flex-col items-center justify-center rounded-sm px-2 text-xs transition-quick",
-                    active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_var(--accent)]" : "bg-surface text-fg-2 shadow-[inset_0_0_0_1px_var(--border)] hover:bg-surface-warm",
+                    active ? "bg-accent-tint text-accent-ink shadow-[inset_0_0_0_2px_var(--accent)]" : "bg-surface text-fg-2 shadow-[inset_0_0_0_1px_var(--border)] hover:bg-inset",
                   )}
                 >
                   <span className="font-medium">{weekday}</span>
@@ -125,7 +125,7 @@ export function BookingDialog({
         </fieldset>
 
         {conflict ? (
-          <div role="alert" className="mt-4 flex items-start gap-3 rounded-md bg-warn/12 p-3 text-sm text-fg">
+          <div role="alert" className="mt-4 flex items-start gap-3 rounded-md bg-warn-tint p-3 text-sm text-fg">
             <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-warn" />
             <p>{CONFLICT_MESSAGE}</p>
           </div>
@@ -136,7 +136,7 @@ export function BookingDialog({
           {slots.isPending ? <LoadingRows rows={2} label="Loading open times" /> : slots.isError ? (
             <SlotsError error={slots.error} retry={() => slots.refetch()} />
           ) : slots.data.slots.length === 0 ? (
-            <p className="rounded-md bg-surface-warm p-4 text-sm text-muted">No open times this day. Try another day.</p>
+            <p className="rounded-md bg-inset p-4 text-sm text-muted">No open times this day. Try another day.</p>
           ) : (
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4" data-testid="slot-list">
               {slots.data.slots.map((slot) => {
@@ -150,7 +150,7 @@ export function BookingDialog({
                     onClick={() => { setSelected(slot.startsAt); setConflict(false); }}
                     className={cn(
                       "tabular min-h-11 rounded-sm text-sm font-medium transition-quick",
-                      active ? "bg-accent/14 text-accent shadow-[inset_0_0_0_1px_var(--accent)]" : "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border)] hover:bg-accent/10 hover:shadow-[inset_0_0_0_1px_var(--accent)]",
+                      active ? "bg-accent-tint text-accent-ink shadow-[inset_0_0_0_2px_var(--accent)]" : "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border)] hover:bg-accent-tint hover:shadow-[inset_0_0_0_1px_var(--accent)]",
                     )}
                   >
                     {formatTime(slot.startsAt, zone)}

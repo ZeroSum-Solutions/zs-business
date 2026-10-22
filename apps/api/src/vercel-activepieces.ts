@@ -4,11 +4,12 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
-import { parseActivepiecesWorkerEnv } from "./activepieces/config.js";
+import { assertActivepiecesCronFits, parseActivepiecesWorkerEnv } from "./activepieces/config.js";
 import { activepiecesCronRoutes } from "./activepieces/cron.js";
 import { startActivepiecesRunner } from "./activepieces/start.js";
 
 const env = parseActivepiecesWorkerEnv(process.env);
+assertActivepiecesCronFits(env.runner);
 const clock = { now: () => new Date() };
 const runner = env.runner === null ? null : startActivepiecesRunner(env.runner, { clock, generateId: randomUUID }).runner;
 

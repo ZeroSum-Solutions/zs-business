@@ -150,6 +150,20 @@ describe("Twilio as the worker's SMS provider", () => {
     expect(await captures()).toBe(1);
   });
 
+  it.each([[408, 20001], [409, 20409]])("a %i is a refusal like any other 4xx (T-4): the money goes back and the retry sends once", async (status, code) => {
+    await h.credit(tenant, 100);
+    const { messageId } = await smsSend();
+    const worker = twilioWorker();
+    server.queue({ respond: status, body: { code, message: "Refused" } });
+    await worker.runOnce();
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "pending", outcome_unknown: false, last_error: `twilio_${status}_${code}` });
+    h.clock.advance(60_000);
+    await worker.runOnce();
+    expect(await h.delivery(tenant, messageId)).toMatchObject({ status: "sent" });
+    expect(server.delivered).toHaveLength(1);
+    expect(await captures()).toBe(1);
+  });
+
   it("a recipient who opted out at Twilio is a permanent rejection and the money goes back", async () => {
     await h.credit(tenant, 100);
     const before = await h.wallet(tenant);

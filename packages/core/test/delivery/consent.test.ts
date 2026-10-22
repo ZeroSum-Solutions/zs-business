@@ -74,10 +74,14 @@ describe("consent and approval re-checked at delivery (D-6)", () => {
   it("blocks a contact with no usable address", async () => {
     const placeholder = await h.contact(tenant, { email: `unset-${randomUUID()}@placeholder.invalid` });
     const noPhone = await h.contact(tenant, { consent: { sms: "granted" } });
+    // Any address under the reserved .invalid name is a placeholder, not only the column default's.
+    const reserved = await h.contact(tenant, { email: `someone-${randomUUID().slice(0, 8)}@example.invalid` });
     const email = await h.enqueue(tenant, { contactId: placeholder });
+    const reservedEmail = await h.enqueue(tenant, { contactId: reserved });
     const sms = await h.enqueue(tenant, { contactId: noPhone, channel: "sms" });
     await h.worker().runOnce();
     expect(await h.delivery(tenant, email.messageId)).toMatchObject({ status: "blocked", final_reason: "no_address" });
+    expect(await h.delivery(tenant, reservedEmail.messageId)).toMatchObject({ status: "blocked", final_reason: "no_address" });
     expect(await h.delivery(tenant, sms.messageId)).toMatchObject({ status: "blocked", final_reason: "no_address" });
   });
 
@@ -196,6 +200,19 @@ describe("suppression and unsubscribe (D-9)", () => {
     const allowed = await h.enqueue(tenant, { contactId, channel: "sms" });
     await h.worker().runOnce();
     expect(await h.delivery(tenant, allowed.messageId)).toMatchObject({ status: "sent" });
+  });
+
+  it("a STOP padded past 64 characters still suppresses, and the next SMS is blocked (D-9)", async () => {
+    const phone = "+15555550143";
+    const contactId = await h.contact(tenant, { phone, consent: { sms: "granted" } });
+    const sms = createInboundSmsSession(edge, tenant);
+    expect(await sms.receive({ from: phone, body: " ".repeat(65) + "STOP", providerMessageId: "in-pad-1" }))
+      .toEqual({ keyword: "stop", reply: DEFAULT_SMS_REPLIES.stop });
+    expect(await h.rows("SELECT reason, source FROM suppressions WHERE tenant_id=$1 AND address=$2", [tenant, phone]))
+      .toEqual([{ reason: "stop", source: "sms:in-pad-1" }]);
+    const blocked = await h.enqueue(tenant, { contactId, channel: "sms" });
+    await h.worker().runOnce();
+    expect(await h.delivery(tenant, blocked.messageId)).toMatchObject({ status: "blocked", final_reason: "suppressed" });
   });
 
   it("START does not lift a suppression recorded for another reason", async () => {

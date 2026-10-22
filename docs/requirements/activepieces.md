@@ -1,6 +1,6 @@
 # M5: Activepieces automations
 
-Status: draft contract for M5, provider 5 of 5 (2026-10-20), revision 2 (hub review r1: W-2, W-4, W-7, W-8). Code follows this file;
+Status: draft contract for M5, provider 5 of 5 (2026-10-20), revision 3 (hub review r1: W-2, W-4, W-7, W-8; audit 2026-10-22: W-7, W-8). Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: let an owner connect Activepieces flows to their business in two directions. Outbound,
@@ -72,7 +72,8 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
   to one hour (configurable) before now, so a transaction that committed late is still found.
   A new or re-enabled endpoint starts at the time of that change and never receives older
   events: a delivery queued before it was switched off is dead-lettered (`endpoint_disabled`)
-  unless an owner replays it. Each pass reads the least recently read endpoints first, so a new
+  unless an owner replays it after that change. A replay holds only for the activation it was
+  made under: switched off and on again later, the endpoint drops the replay too. Each pass reads the least recently read endpoints first, so a new
   endpoint is never starved by older ones.
 - **W-8 Delivery.** Workers lease due deliveries (`FOR UPDATE SKIP LOCKED`) and check the
   lease on every write, so two workers never send one attempt and a crashed holder's attempt
@@ -80,7 +81,7 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
   delivered. 410 stops at once (`endpoint_gone`). Anything else, a timeout, a network error or
   a redirect retries with exponential backoff (from 30 s, at most 6 h) until the attempt
   cap (8), then dead-letters (`max_attempts`). A disabled endpoint or a refused URL
-  dead-letters at once. As for email (`approvals.md` A-8, A-10), an event whose action ran under
+  dead-letters at once (`url_refused`), including a name whose DNS answer is a refused address. As for email (`approvals.md` A-8, A-10), an event whose action ran under
   a stored approval is queued and sent only while that approval stands; once it is revoked or
   expired, the next attempt dead-letters it (`approval_withdrawn`). Every attempt is recorded with its status or error code; the reply
   body is never stored.

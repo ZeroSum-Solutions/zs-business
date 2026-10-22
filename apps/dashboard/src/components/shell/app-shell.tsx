@@ -9,18 +9,32 @@ import { useInboxCount } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { AccountMenu, OWNER } from "./account-menu";
 import { isActive, NAV_ITEMS } from "./nav";
+import { NewMenu } from "./new-menu";
 import { SessionGate } from "./session-gate";
-import { SharedLayoutBg } from "@/components/ui/shared-layout-bg";
 import { useLayoutTransition, useReducedMotionLive } from "@/lib/motion";
 
-function Brand() {
+function Brand({ compact = false }: { compact?: boolean }) {
   return (
-    <Link href="/" className="flex min-h-11 items-center gap-3 rounded-sm">
-      <span aria-hidden className="flex size-8 items-center justify-center rounded-sm bg-primary text-[13px] font-semibold tracking-tight text-primary-on">
+    <Link href="/" className="flex min-h-11 shrink-0 items-center gap-2.5 rounded-md">
+      <span aria-hidden className="flex size-9 items-center justify-center rounded-[11px] bg-ink text-xs font-extrabold tracking-[-0.02em] text-ink-on">
         H&amp;R
       </span>
-      <span className="text-[15px] font-semibold text-fg">{OWNER.business}<span className="sr-only">, home</span></span>
+      <span className={cn("text-base font-bold tracking-[-0.01em] text-fg", compact && "sr-only xl:not-sr-only")}>
+        {OWNER.business}<span className="sr-only">, home</span>
+      </span>
     </Link>
+  );
+}
+
+function InboxBadge({ waiting, className }: { waiting: number; className?: string }) {
+  if (waiting <= 0) return null;
+  return (
+    <span
+      className={cn("tabular min-w-[18px] rounded-pill bg-white px-[5px] text-center text-[11px] leading-[18px] font-extrabold text-[#141418]", className)}
+      aria-label={`${waiting} need attention`}
+    >
+      {waiting}
+    </span>
   );
 }
 
@@ -35,8 +49,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Sign-in stands alone: no navigation into areas the visitor cannot open yet.
   if (pathname === "/sign-in") {
     return (
-      <main id="main" className="mx-auto min-h-dvh w-full max-w-content px-4 pt-5 sm:px-6 lg:px-8">
-        <div className="pt-2"><Brand /></div>
+      <main id="main" className="mx-auto min-h-dvh w-full max-w-content px-4 pt-3 sm:px-6 lg:px-10 lg:pt-6">
+        <div className="pb-4"><Brand /></div>
         {children}
       </main>
     );
@@ -44,82 +58,77 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? "always" : "never"}>
-    <div className="relative min-h-dvh lg:pl-[var(--sidebar-width)]">
-      <a href="#main" className="sr-only z-[70] rounded-sm bg-surface focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:inline-flex focus:min-h-11 focus:items-center focus:px-4">
+    <div className="relative mx-auto flex min-h-dvh w-full max-w-content flex-col px-4 sm:px-6 lg:px-10">
+      <a href="#main" className="sr-only z-[70] rounded-pill bg-surface font-bold focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:inline-flex focus:min-h-11 focus:items-center focus:px-4">
         Skip to content
       </a>
 
-      {/* Desktop side nav */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[var(--sidebar-width)] flex-col border-r border-border bg-surface px-3 py-4 lg:flex">
-        <div className="px-2"><Brand /></div>
-        <nav aria-label="Main" className="mt-8 flex-1">
-          <p aria-hidden className="mb-2 px-3 text-[11px] font-medium tracking-[0.08em] text-meta uppercase">Workspace</p>
-          <SharedLayoutBg as="ul" inset={0} className="gap-0.5">
+      {/* Phone: brand, a round +, the account. Desktop: brand, the pill nav centred, New and the account. */}
+      <header className="flex h-[var(--topbar-height)] items-center justify-between gap-3 lg:grid lg:h-[88px] lg:grid-cols-[1fr_auto_1fr]">
+        <div className="lg:hidden"><Brand /></div>
+        <div className="hidden lg:block"><Brand compact /></div>
+        <nav aria-label="Main" className="hidden rounded-pill bg-nav p-[5px] shadow-[0_8px_22px_-12px_rgba(20,20,24,.5)] ring-1 ring-border/40 lg:block">
+          <ul className="flex gap-0.5">
             {NAV_ITEMS.map((item) => {
               const active = isActive(pathname, item.href);
               return (
-                <li key={item.href}>
-                  {active ? <motion.span layoutId="nav-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-md bg-accent/10" /> : null}
+                <li key={item.href} className="relative">
+                  {active ? <motion.span layoutId="nav-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-nav-lit" /> : null}
                   <Link
                     href={item.href}
                     aria-current={active ? "page" : undefined}
+                    style={{ outlineColor: "var(--nav-focus)" }}
                     className={cn(
-                      "relative flex min-h-11 items-center gap-3 rounded-md px-3 text-sm font-medium transition-quick",
-                      active ? "text-accent" : "text-fg-2 hover:text-fg",
+                      "press relative flex min-h-11 items-center gap-2 rounded-pill pr-4 pl-3.5 text-sm font-bold whitespace-nowrap transition-quick",
+                      active ? "text-accent-on" : "text-nav-fg hover:text-nav-fg-strong",
                     )}
                   >
-                    <item.icon size={20} weight={active ? "fill" : "regular"} aria-hidden />
-                    <span className="flex-1">{item.label}</span>
-                    {item.href === "/inbox" && waiting > 0 ? (
-                      <span className="tabular rounded-pill bg-accent px-1.5 text-xs font-semibold text-accent-on" aria-label={`${waiting} need attention`}>{waiting}</span>
-                    ) : null}
+                    <item.icon size={19} weight={active ? "fill" : "regular"} aria-hidden />
+                    {item.label}
+                    {item.href === "/inbox" ? <InboxBadge waiting={waiting} className="ml-0.5" /> : null}
                   </Link>
                 </li>
               );
             })}
-          </SharedLayoutBg>
+          </ul>
         </nav>
-        <p className="px-3 pb-3 text-xs text-meta" data-testid="sample-note">
-          {mode === "demo" ? "Sample data. Changes reset on reload." : "Some areas show sample data until their API ships."}
-        </p>
-        <div className="border-t border-border pt-3"><AccountMenu variant="sidebar" /></div>
-      </aside>
-
-      {/* Phone top bar */}
-      <header className="sticky top-0 z-30 flex h-[var(--topbar-height)] items-center justify-between border-b border-border bg-bg/90 px-4 backdrop-blur-sm lg:hidden">
-        <Brand />
-        <AccountMenu variant="topbar" />
+        <div className="flex items-center gap-2 lg:justify-self-end">
+          <NewMenu />
+          <div className="lg:hidden"><AccountMenu variant="topbar" /></div>
+          <div className="hidden lg:block"><AccountMenu variant="header" /></div>
+        </div>
       </header>
 
-      <main id="main" className="mx-auto w-full max-w-content px-4 pt-5 pb-[calc(var(--tabbar-height)+env(safe-area-inset-bottom)+32px)] sm:px-6 lg:px-8 lg:pt-8 lg:pb-12">
+      <main id="main" className="w-full flex-1 pt-3 pb-8 lg:pt-6 lg:pb-12">
         <SessionGate>{children}</SessionGate>
       </main>
 
-      {/* Phone bottom tabs */}
-      <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-surface/95 pb-safe backdrop-blur-sm lg:hidden">
-        <ul className="grid h-[var(--tabbar-height)] grid-cols-6">
+      <footer className="pb-[calc(var(--tabbar-height)+env(safe-area-inset-bottom)+24px)] text-center lg:pb-10">
+        <p className="text-caption text-meta" data-testid="sample-note">
+          {mode === "demo" ? "Sample data. Changes reset on reload." : "Some areas show sample data until their API ships."}
+        </p>
+      </footer>
+
+      {/* Phone: a floating ink dock, 16px off the bottom edge. */}
+      <nav aria-label="Main" className="fixed inset-x-4 bottom-[calc(16px+env(safe-area-inset-bottom))] z-30 rounded-pill bg-nav p-1.5 shadow-raised ring-1 ring-border/40 lg:hidden">
+        <ul className="grid grid-cols-6 gap-0.5">
           {NAV_ITEMS.map((item) => {
             const active = isActive(pathname, item.href);
             return (
-              <li key={item.href}>
+              <li key={item.href} className="relative">
+                {active ? <motion.span layoutId="tab-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-nav-lit" /> : null}
                 <Link
                   href={item.href}
                   aria-current={active ? "page" : undefined}
+                  style={{ outlineColor: "var(--nav-focus)" }}
                   className={cn(
-                    "relative flex h-full flex-col items-center justify-center gap-1 text-[11px] font-medium transition-quick",
-                    active ? "text-accent" : "text-muted hover:text-fg",
+                    "press relative flex min-h-[52px] flex-col items-center justify-center gap-[3px] rounded-pill text-[10.5px] font-semibold tracking-[-0.01em] whitespace-nowrap transition-quick",
+                    active ? "text-accent-on" : "text-nav-fg hover:text-nav-fg-strong",
                   )}
                 >
-                  <span className="relative flex h-8 w-14 items-center justify-center">
-                    {active ? <motion.span layoutId="tab-active" transition={layoutTransition} aria-hidden className="absolute inset-0 rounded-pill bg-accent/12" /> : null}
-                    <item.icon size={24} weight={active ? "fill" : "regular"} aria-hidden className="relative" />
-                    {item.href === "/inbox" && waiting > 0 ? (
-                      <span className="absolute top-0 right-2 min-w-4 rounded-pill bg-accent px-1 ring-2 ring-surface text-center text-[10px] leading-4 font-semibold text-accent-on" aria-label={`${waiting} need attention`}>
-                        {waiting}
-                      </span>
-                    ) : null}
-                  </span>
+                  <item.icon size={21} weight={active ? "fill" : "regular"} aria-hidden />
                   {item.label}
+                  {item.href === "/inbox" ? <InboxBadge waiting={waiting} className="absolute top-1 left-[calc(50%+6px)]" /> : null}
                 </Link>
               </li>
             );

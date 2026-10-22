@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { assertRuntimeLogin } from "../src/runtime-login.js";
 import { createTestDatabase, type TestDatabase } from "../src/testing.js";
+import { plantedLoginName } from "./planted-login.js";
 
 let database: TestDatabase;
 beforeAll(async () => { database = await createTestDatabase(); });
@@ -76,7 +76,7 @@ it("fails closed when the backend's pg_stat_activity row is missing", async () =
 
 /** A throwaway LOGIN member of authenticated (cluster roles are shared, so the name is unique). */
 async function withLogin(attributes: string, setup: (role: string) => string, check: (pool: Pool) => Promise<void>) {
-  const role = `zs_guard_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const role = plantedLoginName();
   await database.pool.query(`CREATE ROLE ${role} LOGIN ${attributes}; GRANT authenticated TO ${role}; ${setup(role)}`);
   const url = new URL(database.url);
   url.username = role;

@@ -46,7 +46,7 @@ export function PlanView() {
     <>
       <PageHeader title="Plan" description="One price, clear limits, and you can leave any time." sample />
       {plan.isPending ? <LoadingRows rows={4} /> : plan.isError ? <ErrorNote error={plan.error} retry={() => plan.refetch()} /> : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="tray grid grid-cols-1 gap-1.5 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-2">
           <Card aria-labelledby="plan-title">
             <CardHeader>
               <div>
@@ -55,7 +55,7 @@ export function PlanView() {
                   {plan.data.status === "active" ? <Badge tone="success">Active</Badge> : <Badge tone="warn">Ends soon</Badge>}
                 </div>
                 <p className="mt-2">
-                  <span className="tabular text-3xl font-semibold tracking-display text-fg">{formatMoney(plan.data.pricePerMonth, plan.data.currency)}</span>
+                  <span className="tabular text-3xl font-extrabold tracking-display text-fg">{formatMoney(plan.data.pricePerMonth, plan.data.currency)}</span>
                   <span className="text-sm text-muted"> a month</span>
                 </p>
                 <p className="text-sm text-muted">
