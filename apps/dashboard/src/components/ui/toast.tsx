@@ -1,8 +1,8 @@
 "use client";
 
 import { CheckCircle, Info, WarningCircle, X } from "@phosphor-icons/react";
-import { usePathname } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
+import { createContext, Suspense, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 type Tone = "success" | "info" | "danger";
@@ -21,8 +21,9 @@ export interface ToastOptions { topic?: string; keepOnNavigate?: boolean }
 
 /** Long enough to read twice. Errors stay until dismissed. */
 export const TOAST_MS = 10_000;
-/** Toasts shown at once in one place (the page or a sheet); phones show the newest only. */
+/** Toasts shown at once on the page. A sheet, or the page on a phone, shows the newest only. */
 export const MAX_TOASTS = 2;
+const capFor = (sheet: string | null, phone: boolean) => (sheet === null && !phone ? MAX_TOASTS : 1);
 
 const sticky = (item: ToastItem) => item.tone === "danger";
 
@@ -30,30 +31,33 @@ const sticky = (item: ToastItem) => item.tone === "danger";
  * What `sheet`'s place shows: the newest toast always, then the newest errors, then the rest, up
  * to the cap. `waiting` counts the errors held back until one shown is dismissed.
  */
-export function shownToasts(items: readonly ToastItem[], sheet: string | null): { toasts: ToastItem[]; waiting: number } {
+export function shownToasts(items: readonly ToastItem[], sheet: string | null, phone = false): { toasts: ToastItem[]; waiting: number } {
   const here = items.filter((item) => item.sheet === sheet);
   const older = here.slice(0, -1).reverse();
-  const picked = [...here.slice(-1), ...older.filter(sticky), ...older.filter((item) => !sticky(item))].slice(0, MAX_TOASTS);
+  const picked = [...here.slice(-1), ...older.filter(sticky), ...older.filter((item) => !sticky(item))].slice(0, capFor(sheet, phone));
   const toasts = here.filter((item) => picked.includes(item));
   return { toasts, waiting: here.length - toasts.length };
 }
 
 /** Over the cap, errors wait their turn; a toast that would close by itself goes, so it never shows late. */
-function capped(items: ToastItem[], sheet: string | null): ToastItem[] {
-  const { toasts } = shownToasts(items, sheet);
+function capped(items: ToastItem[], sheet: string | null, phone: boolean): ToastItem[] {
+  const { toasts } = shownToasts(items, sheet, phone);
   return items.filter((item) => item.sheet !== sheet || sticky(item) || toasts.includes(item));
 }
 
 /** Adds a toast. The same words in the same place, or the same topic, replace the earlier one. */
-export function addToast(items: readonly ToastItem[], next: ToastItem): ToastItem[] {
+export function addToast(items: readonly ToastItem[], next: ToastItem, phone = false): ToastItem[] {
   const kept = items.filter((item) => {
     if (next.topic !== undefined && item.topic === next.topic) return false;
     return !(item.sheet === next.sheet && item.message === next.message && item.tone === next.tone);
   });
-  return capped([...kept, next], next.sheet);
+  return capped([...kept, next], next.sheet, phone);
 }
 
 export const clearTopic = (items: readonly ToastItem[], topic: string): ToastItem[] => items.filter((item) => item.topic !== topic);
+
+/** The page an address names. Pipeline and Contacts share a path, so the query counts too. */
+export const pageKey = (pathname: string, search: string) => (search ? `${pathname}?${search}` : pathname);
 
 /** A new page: what the last page said no longer applies, unless it was said for this page. */
 export const afterRouteChange = (items: readonly ToastItem[]): ToastItem[] =>
@@ -63,8 +67,20 @@ export const afterRouteChange = (items: readonly ToastItem[]): ToastItem[] =>
 export const afterSheetOpened = (items: readonly ToastItem[]): ToastItem[] => items.filter((item) => item.sheet !== null || sticky(item));
 
 /** A sheet closed: its toasts (often the one raised as it closed) move to the sheet below, or the page. */
-export function afterSheetClosed(items: readonly ToastItem[], sheet: string, under: string | null): ToastItem[] {
-  return capped(items.map((item) => (item.sheet === sheet ? { ...item, sheet: under } : item)), under);
+export function afterSheetClosed(items: readonly ToastItem[], sheet: string, under: string | null, phone = false): ToastItem[] {
+  return capped(items.map((item) => (item.sheet === sheet ? { ...item, sheet: under } : item)), under, phone);
+}
+
+/** The page became phone-sized: page toasts it has no room for go, errors wait. */
+export const afterScreenChange = (items: readonly ToastItem[], phone: boolean): ToastItem[] => capped([...items], null, phone);
+
+// Tailwind's `max-sm`. The server render assumes a wider screen; no toast exists before hydration.
+const PHONE = "(width < 40rem)";
+const isPhone = () => !!window.matchMedia?.(PHONE).matches;
+function watchPhone(change: () => void) {
+  const query = window.matchMedia?.(PHONE);
+  query?.addEventListener("change", change);
+  return () => query?.removeEventListener("change", change);
 }
 
 type Push = (message: string, tone?: Tone, options?: ToastOptions) => void;
@@ -78,16 +94,12 @@ interface ToastState {
 }
 const ToastStateContext = createContext<ToastState | null>(null);
 
-const waitingWords = (count: number) => `${count} more ${count === 1 ? "message" : "messages"}. Dismiss one to see the next.`;
-
-/** Toasts held back, so the owner knows to dismiss one: `wide` on larger screens, `narrow` where only the newest shows. */
-function Waiting({ wide, narrow, className }: { wide: number; narrow: number; className?: string }) {
-  if (narrow <= 0) return null;
+/** Toasts held back, so the owner knows to dismiss one. */
+function Waiting({ count, className }: { count: number; className?: string }) {
+  if (count <= 0) return null;
   return (
-    <p data-testid="toast-waiting" className={cn("w-full max-w-sm rounded-pill bg-ink px-4 py-1.5 text-xs font-semibold text-ink-on shadow-raised", wide === 0 && "sm:hidden", className)}>
-      {wide === narrow ? waitingWords(wide) : (
-        <><span className="sm:hidden">{waitingWords(narrow)}</span><span className="max-sm:hidden">{waitingWords(wide)}</span></>
-      )}
+    <p data-testid="toast-waiting" className={cn("w-full max-w-sm rounded-pill bg-ink px-4 py-1.5 text-xs font-semibold text-ink-on shadow-raised", className)}>
+      {`${count} more ${count === 1 ? "message" : "messages"}. Dismiss one to see the next.`}
     </p>
   );
 }
@@ -134,6 +146,9 @@ function Toast({ item, onDismiss, className }: { item: ToastItem; onDismiss: (id
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const next = useRef(0);
+  // Phones show one page toast: the cap decides what is kept, so nothing waits hidden with its timer running.
+  const phone = useSyncExternalStore(watchPhone, isPhone, () => false);
+  const onPhone = useRef(phone);
   // Open sheets, innermost last. A ref so a toast raised in the same tick a sheet opens or
   // closes lands in the right place; the count re-renders the page dock.
   const sheets = useRef<string[]>([]);
@@ -146,7 +161,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       ...(options?.topic ? { topic: options.topic } : {}),
       ...(options?.keepOnNavigate ? { keepOnNavigate: true } : {}),
     };
-    setItems((current) => addToast(current, item));
+    setItems((current) => addToast(current, item, onPhone.current));
   }, []);
   const openSheet = useCallback((sheet: string) => {
     sheets.current = [...sheets.current, sheet];
@@ -157,23 +172,25 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     sheets.current = sheets.current.filter((open) => open !== sheet);
     setSheetCount(sheets.current.length);
     const under = sheets.current.at(-1) ?? null;
-    setItems((current) => afterSheetClosed(current, sheet, under));
+    setItems((current) => afterSheetClosed(current, sheet, under, onPhone.current));
   }, []);
-
-  const pathname = usePathname();
-  const shownPath = useRef(pathname);
+  const routeChanged = useCallback(() => setItems(afterRouteChange), []);
   useEffect(() => {
-    if (shownPath.current === pathname) return;
-    shownPath.current = pathname;
-    setItems(afterRouteChange);
-  }, [pathname]);
+    if (onPhone.current === phone) return;
+    onPhone.current = phone;
+    setItems((current) => afterScreenChange(current, phone));
+  }, [phone]);
 
   const state = useMemo(() => ({ items, dismiss, clear, openSheet, closeSheet }), [items, dismiss, clear, openSheet, closeSheet]);
-  const page = shownToasts(items, null);
+  const page = shownToasts(items, null, phone);
   return (
     <ToastContext.Provider value={push}>
       <ToastStateContext.Provider value={state}>
         {children}
+        {/* Its own boundary: reading the query keeps only this watcher, not the page, out of the static render. */}
+        <Suspense fallback={null}>
+          <PageWatch onChange={routeChanged} />
+        </Suspense>
         <div
           role="status"
           aria-live="polite"
@@ -181,14 +198,26 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         >
           {sheetCount > 0 ? null : (
             <>
-              <Waiting wide={page.waiting} narrow={page.toasts.length + page.waiting - 1} />
-              {page.toasts.map((item) => <Toast key={item.id} item={item} onDismiss={dismiss} className="max-sm:not-last:hidden" />)}
+              <Waiting count={page.waiting} />
+              {page.toasts.map((item) => <Toast key={item.id} item={item} onDismiss={dismiss} />)}
             </>
           )}
         </div>
       </ToastStateContext.Provider>
     </ToastContext.Provider>
   );
+}
+
+/** Calls `onChange` when the address moves to another page: a new path or a new query. The same address again changes nothing. */
+function PageWatch({ onChange }: { onChange: () => void }) {
+  const page = pageKey(usePathname(), useSearchParams().toString());
+  const shownPage = useRef(page);
+  useEffect(() => {
+    if (shownPage.current === page) return;
+    shownPage.current = page;
+    onChange();
+  }, [page, onChange]);
+  return null;
 }
 
 /** The toasts raised while this sheet is open, in its flow. `DialogContent` renders it. */
@@ -206,8 +235,8 @@ export function SheetToasts() {
   const mine = shownToasts(state?.items ?? [], sheet);
   return (
     <div role="status" aria-live="polite" data-slot="sheet-toasts" className="flex flex-col gap-2 px-4 sm:px-6 [&:not(:empty)]:py-3">
-      <Waiting wide={mine.toasts.length + mine.waiting - 1} narrow={mine.toasts.length + mine.waiting - 1} className="max-w-none" />
-      {mine.toasts.map((item) => <Toast key={item.id} item={item} onDismiss={state!.dismiss} className="max-w-none not-last:hidden" />)}
+      <Waiting count={mine.waiting} className="max-w-none" />
+      {mine.toasts.map((item) => <Toast key={item.id} item={item} onDismiss={state!.dismiss} className="max-w-none" />)}
     </div>
   );
 }

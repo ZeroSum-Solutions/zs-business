@@ -6,9 +6,11 @@ import {
   TOAST_MS,
   addToast,
   afterRouteChange,
+  afterScreenChange,
   afterSheetClosed,
   afterSheetOpened,
   clearTopic,
+  pageKey,
   shownToasts,
   type ToastItem,
 } from "../src/components/ui/toast";
@@ -108,6 +110,33 @@ describe("toast queue", () => {
     items = addToast(items, item("Booked Thu, Oct 22 at 11:00 AM.", { sheet: "booking" }));
     items = addToast(items, item("Booked Thu, Oct 22 at 2:00 PM.", { sheet: "booking" }));
     expect(items.filter((entry) => entry.sheet === null)).toEqual([error]);
-    expect(items.filter((entry) => entry.sheet === "booking")).toHaveLength(MAX_TOASTS);
+    expect(messages(items.filter((entry) => entry.sheet === "booking"))).toEqual(["Booked Thu, Oct 22 at 2:00 PM."]);
+  });
+
+  it("counts a new query as a new page, since Pipeline and Contacts share a path", () => {
+    expect(pageKey("/customers", "view=pipeline")).not.toBe(pageKey("/customers", ""));
+    expect(pageKey("/customers/ines", "existing=1")).not.toBe(pageKey("/customers/ines", ""));
+    // The same address again is the same page.
+    expect(pageKey("/customers", "view=pipeline")).toBe(pageKey("/customers", "view=pipeline"));
+  });
+
+  it("keeps only what a phone or a sheet shows, so no hidden toast runs out its time", () => {
+    const moved = item("Moved to Deposit.");
+    const design = item("Moved to Design.");
+    // A phone shows the newest only: the older one goes instead of waiting hidden.
+    expect(messages(addToast(addToast([], moved, true), design, true))).toEqual(["Moved to Design."]);
+    expect(messages(addToast(addToast([], moved), design))).toEqual(["Moved to Deposit.", "Moved to Design."]);
+    // A sheet shows one on every screen.
+    const saved = addToast(addToast([], item("Saved A.", { sheet: "editor" })), item("Saved B.", { sheet: "editor" }));
+    expect(messages(saved)).toEqual(["Saved B."]);
+    // Errors still wait their turn, and are counted.
+    const error = item("Could not copy. Select the link and copy it by hand.", { tone: "danger" });
+    const items = addToast(addToast([], error, true), design, true);
+    expect(items).toEqual([error, design]);
+    expect(shownToasts(items, null, true)).toEqual({ toasts: [design], waiting: 1 });
+    // The screen narrows to a phone: what it cannot show goes, errors stay.
+    expect(afterScreenChange([moved, error, design], true)).toEqual([error, design]);
+    // A sheet closing on a phone hands the page one toast too.
+    expect(messages(afterSheetClosed([moved, { ...design, sheet: "editor" }], "editor", null, true))).toEqual(["Moved to Design."]);
   });
 });
