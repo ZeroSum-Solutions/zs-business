@@ -288,7 +288,7 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
         ) : leavingStatus?.stuck ? (
           <>
             <Warning>{leavingStatus.message}</Warning>
-            {canManage ? <p className="text-xs text-meta" data-testid="gcal-recovery">To end it now, remove Zero Sum from your Google account&apos;s third-party access.</p> : null}
+            {canManage ? <p className="text-xs text-meta" data-testid="gcal-recovery">To end Google&apos;s access now, remove Zero Sum from your Google account&apos;s third-party access.</p> : null}
           </>
         ) : leavingStatus ? (
           <p className="text-xs text-meta">{leavingStatus.message}</p>

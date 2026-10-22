@@ -126,6 +126,9 @@ describe("disconnectingStatus (G-9)", () => {
       expect(status.message, code).toMatch(/^[A-Z].*\.$/);
     }
     expect(disconnectingStatus("token_unreadable").message).toMatch(/could not read the saved Google access/);
+    // Unread, the grant's state at Google is unknown: it may already be gone (G-9).
+    expect(disconnectingStatus("token_unreadable").message).toMatch(/cannot confirm/);
+    expect(disconnectingStatus("token_unreadable").message).not.toMatch(/has not ended/);
     expect(disconnectingStatus("google_403").message).toMatch(/Google has not confirmed the disconnect/);
     expect(new URL(GOOGLE_ACCESS_URL).origin).toBe("https://myaccount.google.com");
   });
