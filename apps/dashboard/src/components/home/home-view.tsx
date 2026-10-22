@@ -179,7 +179,8 @@ function ResultsSection() {
         {results.isSuccess ? <RangesNote data={results.data} /> : null}
       </TrayHeader>
       {results.isPending ? (
-        <div className="grid grid-cols-2 gap-1.5 lg:grid-cols-[2fr_1fr_1fr] lg:gap-2"><Skeleton className="col-span-2 h-40 lg:col-span-1" /><Skeleton className="h-40" /><Skeleton className="h-40" /></div>
+        // Busy, so the layout below waits for the real tiles, which are taller than these.
+        <div aria-busy="true" aria-label="Loading results" className="grid grid-cols-2 gap-1.5 lg:grid-cols-[2fr_1fr_1fr] lg:gap-2"><Skeleton className="col-span-2 h-40 lg:col-span-1" /><Skeleton className="h-40" /><Skeleton className="h-40" /></div>
       ) : results.isError ? (
         <ErrorNote error={results.error} retry={() => results.refetch()} />
       ) : (
