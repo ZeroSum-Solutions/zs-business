@@ -43,8 +43,9 @@ const isObject = (value: JsonValue | undefined): value is JsonObject =>
 
 /**
  * Results stored before P-8's disclosure text joined the owner view lack `disclosureText` on
- * their consent rows. Fill it from the saved intake_item_consent evidence, so an identical
- * retry still replays.
+ * their consent rows. Fill it from the saved intake_item_consent evidence, or, once that row
+ * is gone, from the page's append-only disclosure history for the stored version, so an
+ * identical retry still replays.
  */
 async function addDisclosureText(tx: Transaction, result: JsonValue, binding: ActionBinding): Promise<JsonValue> {
   if (!isObject(result) || !isObject(result.consent)) return result;
@@ -55,9 +56,15 @@ async function addDisclosureText(tx: Transaction, result: JsonValue, binding: Ac
     `SELECT channel::text AS channel, disclosure_text FROM intake_item_consent
       WHERE tenant_id=$1 AND intake_item_id=$2`, [binding.tenantId, binding.target.id],
   )).rows.map((row) => [row.channel, row.disclosure_text]));
+  const history = async (version: JsonValue | undefined) => typeof result.pageId !== "string" || typeof version !== "string"
+    ? undefined
+    : (await tx.query<{ text: string }>(
+      "SELECT text FROM booking_page_disclosures WHERE tenant_id=$1 AND page_id=$2 AND version=$3",
+      [binding.tenantId, result.pageId, version],
+    )).rows[0]?.text;
   const consent = { ...result.consent };
   for (const [channel, row] of missing) {
-    const text = texts.get(channel);
+    const text = texts.get(channel) ?? await history(row.disclosureVersion);
     if (text !== undefined) consent[channel] = { ...row, disclosureText: text };
   }
   return { ...result, consent };
