@@ -15,13 +15,33 @@ describe("site status", () => {
     expect(siteStatus({ published: true, live, edge: "synced", open: null, now: NOW })).toEqual({
       badge: { tone: "success", label: "Live" },
       summary: "Version 4 is live. First published 30 days ago.",
+      note: null,
+      current: { tone: "success", label: "Live" },
     });
   });
 
   it("says Updating, not Live, while the site still shows the previous version", () => {
     const status = siteStatus({ published: true, live, edge: "pending", open: null, now: NOW });
     expect(status.badge).toEqual({ tone: "info", label: "Updating" });
-    expect(status.summary).toBe("Version 4 is live. Your site will show it in a moment.");
+    expect(status.summary).toBe("Your site still shows the previous version. Version 4 is on its way.");
+    expect(status.note).toBe("Saved, but your site still shows the previous version.");
+    expect(status.current).toEqual({ tone: "neutral", label: "Current" });
+  });
+
+  it("never says Live when the site could not be checked or is still being checked", () => {
+    const failed = siteStatus({ published: true, live, edge: "error", open: null, now: NOW });
+    expect(failed.badge).toEqual({ tone: "neutral", label: "Not checked" });
+    expect(failed.summary).toBe("Version 4 is published. Your site could not be checked.");
+    expect(failed.note).toBe("Could not check whether your site shows the current version.");
+    expect(failed.current).toEqual({ tone: "neutral", label: "Current" });
+    const checking = siteStatus({ published: true, live, edge: "loading", open: null, now: NOW });
+    expect(checking.badge).toEqual({ tone: "neutral", label: "Checking" });
+    expect(checking.summary).toBe("Version 4 is published. Checking your site.");
+    expect(checking.note).toBeNull();
+    expect(checking.current.label).toBe("Current");
+    for (const value of ["loading", "error"] as const) {
+      expect(siteStatus({ published: true, live: value, edge: "synced", open: null, now: NOW }).badge.label).not.toBe("Live");
+    }
   });
 
   it("does not call the site settled while a publish is on its way or got no answer", () => {
@@ -37,10 +57,13 @@ describe("site status", () => {
 
   it("keeps the not-yet-published and loading states", () => {
     expect(siteStatus({ published: false, live: "loading", edge: "loading", open: null, now: NOW })).toEqual({
-      badge: { tone: "warn", label: "Not published" }, summary: "Write your first page and publish it.",
+      badge: { tone: "warn", label: "Not published" }, summary: "Write your first page and publish it.", note: null,
+      current: { tone: "neutral", label: "Current" },
     });
-    expect(siteStatus({ published: true, live: "loading", edge: "loading", open: null, now: NOW }).summary).toBe("Loading the live version.");
-    expect(siteStatus({ published: true, live: "error", edge: "loading", open: null, now: NOW }).summary).toBe("Could not load the live version.");
+    const loading = siteStatus({ published: true, live: "loading", edge: "loading", open: null, now: NOW });
+    expect(loading).toMatchObject({ badge: { tone: "neutral", label: "Checking" }, summary: "Loading the current version." });
+    const failed = siteStatus({ published: true, live: "error", edge: "loading", open: null, now: NOW });
+    expect(failed).toMatchObject({ badge: { tone: "neutral", label: "Not checked" }, summary: "Could not load the current version." });
   });
 
   it("labels a version by when it was first published, which stays true after a rollback", () => {

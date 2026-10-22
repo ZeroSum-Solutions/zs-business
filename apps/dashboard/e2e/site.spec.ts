@@ -80,11 +80,13 @@ test("says when the site has not caught up yet, and updates it on request", asyn
   await editor.getByLabel("Tagline").fill("Closed for inventory this Monday");
   await editor.getByRole("button", { name: "Publish" }).click();
   await expect(page.getByRole("status").getByText("Published. Your site will show it in a moment.")).toBeVisible();
-  const behind = page.getByText("Saved and live here, but your site still shows the previous version.");
+  const behind = page.getByText("Saved, but your site still shows the previous version.");
   await expect(behind).toBeVisible();
-  // One status: the badge and summary say it is updating, not that the site is live (U3 A-2).
+  // One status: the badge, summary and History say it is updating, not that the site is live (U3 A-2).
   await expect(page.getByTestId("site-badge")).toHaveText("Updating");
-  await expect(liveSummary(page)).toHaveText("Version 3 is live. Your site will show it in a moment.");
+  await expect(liveSummary(page)).toHaveText("Your site still shows the previous version. Version 3 is on its way.");
+  await expect(releases(page).first()).toContainText("Current");
+  await expect(releases(page).first()).not.toContainText("Live");
 
   // Leaving the page and coming back keeps the warning and its button.
   await mainNav(page).getByRole("link", { name: "Customers" }).click();
@@ -101,8 +103,10 @@ test("says when the site has not caught up yet, and updates it on request", asyn
   await page.evaluate(() => window.__zsDemo!.setSiteEdgeDown(false));
   await page.getByRole("button", { name: "Update the site now" }).click();
   await expect(page.getByRole("status").getByText("Your site shows the live version now.")).toBeVisible();
-  await expect(page.getByText("Saved and live here, but your site still shows the previous version.")).toBeHidden();
+  await expect(page.getByText("Saved, but your site still shows the previous version.")).toBeHidden();
   await expect(page.getByTestId("site-badge")).toHaveText("Live");
+  await expect(liveSummary(page)).toHaveText(/^Version 3 is live\./);
+  await expect(releases(page).first()).toContainText("Live");
   await expect(page.getByTestId("toast")).toHaveCount(1);
 });
 
@@ -218,7 +222,7 @@ test("checks the site again when another owner makes a version live", async ({ p
   // Lists count as fresh for 30 s; the clock moves past that before the page is shown again.
   await page.clock.install();
   await openSite(page);
-  const behind = page.getByText("Saved and live here, but your site still shows the previous version.");
+  const behind = page.getByText("Saved, but your site still shows the previous version.");
   await expect(page.getByRole("button", { name: "Edit site" })).toBeEnabled();
   await expect(behind).toHaveCount(0);
   // Another owner makes version 1 live while the site host is down.

@@ -399,7 +399,6 @@ function SitePanel({ site }: { site: SiteRecord }) {
     void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
   };
   const host = site.hosts[0] ?? null;
-  const edgeBehind = site.currentReleaseId !== null && (edge.data === "pending" || edge.isError);
   const open = useOpenPublish(writes);
   const status = siteStatus({
     published: site.currentReleaseId !== null,
@@ -427,11 +426,9 @@ function SitePanel({ site }: { site: SiteRecord }) {
         </div>
         <p id="site-live-summary" className="text-sm text-muted" data-testid="site-live-summary">{status.summary}</p>
         {live.isError ? <ErrorNote error={live.error} retry={() => live.refetch()} /> : null}
-        {edgeBehind ? (
+        {status.note ? (
           <div className="rounded-sm bg-warn-tint p-3 text-sm text-fg-2" role="status" data-testid="site-edge">
-            <p>{edge.data === "pending"
-              ? "Saved and live here, but your site still shows the previous version."
-              : "Could not check whether your site shows the live version."}</p>
+            <p>{status.note}</p>
             {sync.data?.edge === "pending" && edge.data === "pending" ? (
               <p className="mt-1" data-testid="site-edge-checked">Checked again just now. Try again in a moment.</p>
             ) : null}
@@ -467,7 +464,7 @@ function SitePanel({ site }: { site: SiteRecord }) {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <p className="font-medium">Version {release.number}</p>
-                        {isLive ? <Badge tone="success">Live</Badge> : null}
+                        {isLive ? <Badge tone={status.current.tone}>{status.current.label}</Badge> : null}
                       </div>
                       <p className="text-xs text-meta">{releaseMeta(release, Date.now())}</p>
                     </div>

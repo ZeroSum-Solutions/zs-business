@@ -11,9 +11,15 @@ export interface SiteStatusInput {
   now: number;
 }
 
+type Tone = "success" | "info" | "warn" | "neutral";
+
 export interface SiteStatus {
-  badge: { tone: "success" | "info" | "warn"; label: string };
+  badge: { tone: Tone; label: string };
   summary: string;
+  /** The warning above "Update the site now", or null when the site host needs nothing. */
+  note: string | null;
+  /** The live version's badge in History. */
+  current: { tone: Tone; label: string };
 }
 
 /** "First published …": a version keeps that date when it is made live again. */
@@ -22,31 +28,47 @@ export function releaseMeta(release: { createdAt: string }, now: number): string
 }
 
 /**
- * The one thing the Site card says about the site. A publish on its way or without an answer,
- * and a site host still showing the previous version, each override "Live", so the badge, the
- * summary and the notes below never disagree.
+ * The one thing the Site card says about the site. "Live" means the site host was checked and
+ * shows the live version. A publish on its way or without an answer, a host still showing the
+ * previous version, and a host not checked yet each override it, so the badge, the summary, the
+ * note and History never disagree.
  */
 export function siteStatus({ published, live, edge, open, now }: SiteStatusInput): SiteStatus {
+  // What visitors see, as far as anyone knows: only a host check proves the live version.
+  const shown = live === "loading" ? "loading" : live === "error" ? "error" : edge;
   const badge: SiteStatus["badge"] = open?.inFlight ? { tone: "info", label: "Publishing" }
     : open ? { tone: "warn", label: "Not confirmed" }
       : !published ? { tone: "warn", label: "Not published" }
-        : edge === "pending" ? { tone: "info", label: "Updating" }
-          : { tone: "success", label: "Live" };
+        : shown === "pending" ? { tone: "info", label: "Updating" }
+          : shown === "error" ? { tone: "neutral", label: "Not checked" }
+            : shown === "loading" ? { tone: "neutral", label: "Checking" }
+              : { tone: "success", label: "Live" };
+  const current: SiteStatus["current"] = published && shown === "synced" ? { tone: "success", label: "Live" } : { tone: "neutral", label: "Current" };
+  const note = !published ? null
+    : edge === "pending" ? "Saved, but your site still shows the previous version."
+      : edge === "error" ? "Could not check whether your site shows the current version."
+        : null;
   if (!published) {
     return {
       badge,
       summary: open?.inFlight ? "Your first page is on its way."
         : open ? "Your first publish got no answer. Open Edit site to finish it."
           : "Write your first page and publish it.",
+      note,
+      current,
     };
   }
-  if (live === "loading") return { badge, summary: "Loading the live version." };
-  if (live === "error") return { badge, summary: "Could not load the live version." };
-  const then = open?.inFlight ? "Your changes are on their way."
-    : open ? "Your last publish got no answer. Open Edit site to finish it."
-      : edge === "pending" ? "Your site will show it in a moment."
-        : `${releaseMeta(live, now)}.`;
-  return { badge, summary: `Version ${live.number} is live. ${then}` };
+  if (live === "loading") return { badge, summary: "Loading the current version.", note, current };
+  if (live === "error") return { badge, summary: "Could not load the current version.", note, current };
+  const state = edge === "synced" ? `Version ${live.number} is live.`
+    : edge === "pending" ? `Your site still shows the previous version. Version ${live.number} is on its way.`
+      : edge === "error" ? `Version ${live.number} is published. Your site could not be checked.`
+        : `Version ${live.number} is published. Checking your site.`;
+  const then = open?.inFlight ? " Your changes are on their way."
+    : open ? " Your last publish got no answer. Open Edit site to finish it."
+      : edge === "synced" ? ` ${releaseMeta(live, now)}.`
+        : "";
+  return { badge, summary: `${state}${then}`, note, current };
 }
 
 /**
