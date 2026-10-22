@@ -167,3 +167,30 @@ describe("GET /v1/booking/slots", () => {
     apiErrorBodySchema.parse(response.body);
   });
 });
+
+describe("instants outside UTC years 0001..9999 (B-3)", () => {
+  const YEAR_ZERO = "0000-12-31T23:00:00.000Z";
+  const written = async () => h.fixture.service(async (tx) => (await tx.query<{ bookings: string; actions: string; outbox: string }>(
+    `SELECT (SELECT count(*) FROM bookings WHERE tenant_id=$1) AS bookings, (SELECT count(*) FROM actions WHERE tenant_id=$1) AS actions,
+       (SELECT count(*) FROM outbox WHERE tenant_id=$1) AS outbox`, [h.a.tenantId])).rows[0]);
+  const refused = (response: { status: number; body: unknown }) => {
+    expect(response.status).toBe(400);
+    expect(apiErrorBodySchema.parse(response.body).error.code).toBe("ValidationFailed");
+  };
+
+  it("refuses year 0000 at create, slot search and list filters with 400, writing nothing", async () => {
+    const before = await written();
+    refused(await book(YEAR_ZERO));
+    refused(await call(h.app, "GET", `/v1/booking/slots?resourceId=${h.a.resourceId}&from=${YEAR_ZERO}&to=0001-01-01T01:00:00.000Z`, { token: h.a.token }));
+    refused(await call(h.app, "GET", `/v1/booking/bookings?from=${YEAR_ZERO}`, { token: h.a.token }));
+    refused(await call(h.app, "GET", `/v1/booking/bookings?to=${YEAR_ZERO}`, { token: h.a.token }));
+    expect(await written()).toEqual(before);
+  });
+
+  it("reads slots and bookings at the first and last supported instants", async () => {
+    for (const [from, to] of [["0001-01-01T00:00:00.000Z", "0001-01-01T01:00:00.000Z"], ["9999-12-31T00:00:00.000Z", "9999-12-31T23:59:59.999Z"]]) {
+      expect((await call(h.app, "GET", `/v1/booking/slots?resourceId=${h.a.resourceId}&from=${from}&to=${to}`, { token: h.a.token })).status).toBe(200);
+      expect((await call(h.app, "GET", `/v1/booking/bookings?from=${from}&to=${to}`, { token: h.a.token })).status).toBe(200);
+    }
+  });
+});

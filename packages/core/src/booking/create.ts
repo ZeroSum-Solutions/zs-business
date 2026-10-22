@@ -24,7 +24,8 @@ export const currentTenant = async (tx: Transaction): Promise<string | undefined
     "SELECT tenant_id FROM tenants WHERE tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid",
   )).rows[0]?.tenant_id;
 
-const isSupportedInstant = (instant: number): boolean => {
+/** A derived instant the booking schema would accept (B-3: UTC years 0001..9999). */
+export const isSupportedInstant = (instant: number): boolean => {
   const date = new Date(instant);
   return Number.isFinite(date.getTime()) && bookingInstantSchema.safeParse(date.toISOString()).success;
 };
