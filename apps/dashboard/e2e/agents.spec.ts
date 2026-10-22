@@ -238,6 +238,6 @@ test("Run now drafts a follow-up that waits in the Inbox under the agent's name"
   await expect(draft).toContainText("Drafted by the follow-up agent");
   // Nothing was sent: it waits for an owner like any other draft.
   await expect(draft.getByTestId("reply-status")).toHaveText("Draft");
-  await expect(draft.getByRole("button", { name: "Approve and send" })).toBeVisible();
+  await expect(draft.getByRole("button", { name: "Approve and queue" })).toBeVisible();
   expect((await page.evaluate(() => window.__zsDemo!.writeLog())).map((write) => write.operation)).toEqual(["agent.run.start"]);
 });

@@ -315,41 +315,105 @@ describe("expiry (A-3)", () => {
   it("reads the clock after the row lock: a wait past expiry stops the run", async () => {
     const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
     await approveOnly(owner.userId, result.id);
-    // A writer (a revocation that fails, say) holds the row while the run starts, then rolls back.
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
-    let locked!: (pid: number) => void;
-    const holderPid = new Promise<number>((resolve) => { locked = resolve; });
-    const holder = fixture.service(async (tx) => {
-      const { rows } = await tx.query<{ pid: number }>(
-        "SELECT pg_backend_pid() AS pid FROM approvals WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, result.id]);
-      locked(rows[0]!.pid);
-      await released;
-      throw new Error("rolled back");
-    }).catch(() => undefined);
-    try {
-      const pid = await holderPid;
-      const outcome = approvedDispatch(deps(), tenantId, owner.userId)(result.id).then(() => null, (error: unknown) => error);
-      // The superuser pool sees every backend: wait until the run is queued behind the holder.
-      for (let tries = 0; ; tries += 1) {
-        const { rowCount } = await database.pool.query(
-          `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
-             AND $1::int = ANY(pg_blocking_pids(pid))`, [pid]);
-        if (rowCount) break;
-        if (tries > 500) throw new Error("the run never waited on the row lock");
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      now = START + 5 * 60_000;
-      release();
-      await holder;
-      expect(await outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
-    } finally {
-      release();
-      await holder;
-    }
+    const outcome = await afterLockWait(result.id, () => approvedDispatch(deps(), tenantId, owner.userId)(result.id));
+    expect(outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
     expect(await count("SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND approval_reference->>'id'=$2", [tenantId, result.id])).toBe(0);
   });
+
+  it.each(["approve", "reject"] as const)("reads the clock after the row lock: %s, waiting past expiry, is refused", async (decision) => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
+    const decider = sessionFor(owner.userId);
+    const outcome = await afterLockWait(result.id, () => decision === "approve"
+      ? decider.approveApproval(result.id, {}, randomUUID())
+      : decider.rejectApproval(result.id, {}, randomUUID()));
+    expect(outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
+    expect(await decider.getApproval(result.id)).toMatchObject({ status: "pending", standing: "expired", decidedAt: null });
+  });
+
+  it.each(["approve", "reject"] as const)("never reads the clock backward within a dispatch: %s at expiry, then a minute earlier, is refused", async (decision) => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
+    // The dispatch's first read lands on the expiry; every later read steps back a minute.
+    let reads = 0;
+    const stepBack = { now: () => new Date(START + (reads++ === 0 ? 5 : 4) * 60_000) };
+    const run = directDispatch({ ...deps(), clock: stepBack }, tenantId, owner.userId, memberAuthorize(tenantId, owner.userId));
+    await expect(run({
+      actionType: `approval.${decision}`,
+      target: { tenantId, type: "approval", id: result.id },
+      approvalReference: { tenantId, id: randomUUID() },
+      idempotencyKey: randomUUID(),
+      payload: { approvalId: result.id },
+    })).rejects.toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
+    expect(reads).toBeGreaterThan(1);
+    expect(await sessionFor(owner.userId).getApproval(result.id)).toMatchObject({ status: "pending", decidedAt: null });
+  });
+
+  it.each(["approve", "reject"] as const)("records %s, its action and its event at the instant read after the row lock", async (decision) => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
+    // Every read is a minute after the last, so the dispatch's first read and the decision's differ.
+    let at = now;
+    const ticking = { now: () => new Date((at += 60_000)) };
+    const run = directDispatch({ ...deps(), clock: ticking }, tenantId, owner.userId, memberAuthorize(tenantId, owner.userId));
+    const command = {
+      actionType: `approval.${decision}`,
+      target: { tenantId, type: "approval", id: result.id },
+      approvalReference: { tenantId, id: randomUUID() },
+      idempotencyKey: randomUUID(),
+      payload: { approvalId: result.id },
+    };
+    const output = await run(command);
+    const stamps = (await fixture.service((tx) => tx.query<{ decided_at: Date; action_at: Date; event_at: Date }>(
+      `SELECT a.decided_at, x.created_at AS action_at, o.created_at AS event_at
+         FROM actions x JOIN outbox o ON o.tenant_id=x.tenant_id AND o.action_id=x.id
+         JOIN approvals a ON a.tenant_id=x.tenant_id AND a.id::text=x.target->>'id'
+        WHERE x.tenant_id=$1 AND x.id=$2`, [tenantId, output.actionId]))).rows;
+    expect(stamps).toHaveLength(1);
+    expect(stamps[0]!.action_at).toEqual(stamps[0]!.decided_at);
+    expect(stamps[0]!.event_at).toEqual(stamps[0]!.decided_at);
+    expect(output.result).toMatchObject({ decidedAt: stamps[0]!.decided_at.toISOString() });
+    // A replay returns the stored result and writes nothing more.
+    expect(await run(command)).toEqual(output);
+    expect(await count("SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, command.idempotencyKey])).toBe(1);
+  });
 });
+
+/**
+ * Starts `work` while another writer (a revocation that fails, say) holds the approval row, moves
+ * the clock to the approval's expiry once `work` waits on the lock, then rolls the holder back.
+ * Resolves with what `work` returned or threw.
+ */
+async function afterLockWait(approvalId: string, work: () => Promise<unknown>): Promise<unknown> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let locked!: (pid: number) => void;
+  const holderPid = new Promise<number>((resolve) => { locked = resolve; });
+  const holder = fixture.service(async (tx) => {
+    const { rows } = await tx.query<{ pid: number }>(
+      "SELECT pg_backend_pid() AS pid FROM approvals WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, approvalId]);
+    locked(rows[0]!.pid);
+    await released;
+    throw new Error("rolled back");
+  }).catch(() => undefined);
+  try {
+    const pid = await holderPid;
+    const outcome = work().then((value) => value, (error: unknown) => error);
+    // The superuser pool sees every backend: wait until the work is queued behind the holder.
+    for (let tries = 0; ; tries += 1) {
+      const { rowCount } = await database.pool.query(
+        `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+           AND $1::int = ANY(pg_blocking_pids(pid))`, [pid]);
+      if (rowCount) break;
+      if (tries > 500) throw new Error("the work never waited on the row lock");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    now = START + 5 * 60_000;
+    release();
+    await holder;
+    return await outcome;
+  } finally {
+    release();
+    await holder;
+  }
+}
 
 describe("revoke (A-8) and delivery re-check (A-10)", () => {
   it("revokes after the run: the action stays, and the delivery check says revoked", async () => {

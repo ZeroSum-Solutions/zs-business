@@ -8,8 +8,10 @@ import {
   channelToken,
   createBooking,
   createDispatcher,
+  generateSealKeyPair,
   GoogleRequestFailed,
   lockBookingResource,
+  parseSealPrivateKey,
   type CalendarWorkerReport,
   type DispatchContext,
   type GoogleEvent,
@@ -542,20 +544,60 @@ describe("disconnect cleanup (G-9)", () => {
     expect((await h.connectionRow(tenantId, leaving)).status).toBe("disconnected");
   });
 
-  it("an already revoked grant or an unreadable token still cleans up", async () => {
+  it("a revoke Google refuses keeps disconnecting with the token, the blocks and the error, then finishes", async () => {
+    const { w, worker } = await connectedWithChannel();
+    await disconnect(w);
+    w.google.fail("revoke", new GoogleRequestFailed("google_403", false, 403));
+    expect(await worker.runOnce()).toMatchObject({ disconnected: 0, disconnectRetries: 1 });
+    expect(w.google.isRevoked(w.token)).toBe(false);
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ status: "disconnecting", last_error: "google_403" });
+    expect(row.refresh_token_sealed).not.toBeNull();
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    w.clock.advance(MINUTE);
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.isRevoked(w.token)).toBe(true);
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ status: "disconnected", refresh_token_sealed: null });
+  });
+
+  it("an already revoked grant still cleans up", async () => {
     const { w, worker } = await connectedWithChannel();
     w.google.revokeGrant(w.token);
     await disconnect(w);
     expect((await worker.runOnce()).disconnected).toBe(1);
     expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+  });
 
-    const tenantId = await h.tenant();
-    const resource = await h.resource(tenantId);
-    const unreadable = await h.connection(resource, w.google.account(), START, { sealFor: randomUUID(), status: "disconnecting" });
+  it("a token the worker cannot open is not a revoked grant: it keeps disconnecting until the key opens it", async () => {
+    const { w, worker } = await connectedWithChannel();
+    await disconnect(w);
+    // A wrong worker key opens no token, though Google still honours the grant.
+    const wrongKey = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL, privateKey: parseSealPrivateKey(generateSealKeyPair().privateKey) });
     w.google.reset();
-    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(await wrongKey.runOnce()).toMatchObject({ disconnected: 0, disconnectRetries: 1 });
     expect(w.google.calls).toEqual([]);
-    expect((await h.connectionRow(tenantId, unreadable)).status).toBe("disconnected");
+    const row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ status: "disconnecting", last_error: "token_unreadable" });
+    expect(row.refresh_token_sealed).not.toBeNull();
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    // Not before the retry delay; then the repaired key revokes and cleans up.
+    expect((await worker.runOnce()).disconnected).toBe(0);
+    w.clock.advance(MINUTE);
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.isRevoked(w.token)).toBe(true);
+    expect(await h.blocks(w.resource.tenantId)).toEqual([]);
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ status: "disconnected", refresh_token_sealed: null });
+  });
+
+  it("an unopenable token on a grant another active connection shares lets go without a revoke", async () => {
+    const w = await world();
+    const worker = h.worker(w.google, w.clock);
+    const shared = "shared@haldenrowe.example";
+    await h.connection(await h.resource(w.resource.tenantId), w.google.account(), START, { email: shared });
+    const leaving = await h.connection(w.resource, w.google.account(), START, { email: shared, status: "disconnecting", sealFor: randomUUID() });
+    expect((await worker.runOnce()).disconnected).toBe(1);
+    expect(w.google.of("revoke")).toEqual([]);
+    expect(await h.connectionRow(w.resource.tenantId, leaving)).toMatchObject({ status: "disconnected", refresh_token_sealed: null });
   });
 });
 
@@ -870,6 +912,62 @@ describe("deadline (G-10)", () => {
     expect(await worker.runOnce({ deadline: new Date(START + 50) })).toMatchObject({ synced: 0, syncFailed: 1 });
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ lease_until: null, last_error: "run_deadline" });
+  });
+
+  it("bounds a token refresh by the time the run has left", async () => {
+    const w = await world();
+    w.google.fail("refreshAccessToken", () => new Promise<void>(() => {}));
+    const worker = h.worker(w.google, w.clock, { requestTimeoutMs: 400 });
+    const started = Date.now();
+    expect(await worker.runOnce({ deadline: new Date(START + 40) })).toMatchObject({ synced: 0, syncFailed: 1 });
+    expect(Date.now() - started).toBeLessThan(400);
+    expect(await h.connectionRow(w.resource.tenantId, w.connectionId)).toMatchObject({ lease_until: null, last_error: "run_deadline" });
+  });
+
+  it("a disconnect starts no Google call once the run has no time left, and goes back as it was", async () => {
+    const w = await world();
+    w.google.put(w.token, timed("busy", "2026-10-21T10:00:00Z", "2026-10-21T11:00:00Z"));
+    const worker = h.worker(w.google, w.clock, { webhookUrl: WEBHOOK_URL });
+    await worker.runOnce();
+    await h.service((tx) => tx.query("UPDATE calendar_connections SET status='disconnecting', updated_at=$3 WHERE tenant_id=$1 AND id=$2",
+      [w.resource.tenantId, w.connectionId, w.clock.now()]));
+    // The refresh for the channel stop uses up the run: no stop and no revoke.
+    w.google.reset();
+    w.google.fail("refreshAccessToken", () => { w.clock.advance(MINUTE); });
+    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 1_000) }))
+      .toMatchObject({ disconnected: 0, disconnectRetries: 0, deadlineStops: 1 });
+    expect(w.google.count("stopChannel")).toBe(0);
+    expect(w.google.count("revoke")).toBe(0);
+    let row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ status: "disconnecting", lease_until: null, last_error: null });
+    expect(row.refresh_token_sealed).not.toBeNull();
+    expect((await h.blocks(w.resource.tenantId)).length).toBe(1);
+    // The channel stop uses up the run: no revoke.
+    w.google.reset();
+    w.google.fail("stopChannel", () => { w.clock.advance(MINUTE); });
+    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 1_000) }))
+      .toMatchObject({ disconnected: 0, channelsStopped: 1, deadlineStops: 1 });
+    expect(w.google.count("revoke")).toBe(0);
+    row = await h.connectionRow(w.resource.tenantId, w.connectionId);
+    expect(row).toMatchObject({ status: "disconnecting", lease_until: null });
+    // The next run finishes it.
+    expect((await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + MINUTE) })).disconnected).toBe(1);
+  });
+
+  it("a push starts no insert once the run has no time left, and goes back with its attempt", async () => {
+    const w = await world();
+    const worker = h.worker(w.google, w.clock);
+    await worker.runOnce();
+    // Not due for a sync, so the push step refreshes the token itself.
+    w.clock.advance(MINUTE);
+    const bookingId = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    w.google.reset();
+    w.google.fail("refreshAccessToken", () => { w.clock.advance(MINUTE); });
+    expect(await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 1_000) }))
+      .toMatchObject({ pushesQueued: 1, pushed: 0, pushRetries: 0, pushesFailed: 0 });
+    expect(w.google.count("insertEvent")).toBe(0);
+    expect(await h.push(w.resource.tenantId, bookingId)).toMatchObject({ status: "pending", attempts: 0, lease_until: null, last_error: null });
+    expect((await worker.runOnce({ deadline: new Date(w.clock.now().getTime() + MINUTE) })).pushed).toBe(1);
   });
 });
 

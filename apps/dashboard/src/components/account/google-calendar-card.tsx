@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowsClockwise, CalendarCheck, CheckCircle, Clock, Info, LinkBreak, MinusCircle, PlugsConnected, WarningCircle } from "@phosphor-icons/react";
+import { ArrowsClockwise, ArrowSquareOut, CalendarCheck, CheckCircle, Clock, Info, LinkBreak, MinusCircle, PlugsConnected, WarningCircle } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -21,6 +21,8 @@ import {
   CONNECTED_MESSAGE,
   connectErrorMessage,
   currentConnection,
+  disconnectingStatus,
+  GOOGLE_ACCESS_URL,
   MANAGE_CALENDARS,
   syncErrorMessage,
   type ReturnNotice,
@@ -226,6 +228,7 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
   const liveId = connection && (connection.status === "active" || connection.status === "reauthorize") ? connection.id : null;
   const confirming = confirmingId !== null && confirmingId === liveId;
   const shown = STATE[state === "disconnected" ? "none" : state];
+  const leavingStatus = connection?.status === "disconnecting" ? disconnectingStatus(connection.lastError) : null;
   const rowId = `gcal-${resource.id}`;
   const errorId = `${rowId}-error`;
 
@@ -282,14 +285,29 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
           </>
         ) : connection?.status === "reauthorize" ? (
           <Warning>Google access ended. Busy times already read still block slots until you reconnect or disconnect.</Warning>
-        ) : connection?.status === "disconnecting" ? (
-          <p className="text-xs text-meta">Removing its busy times. Events already added stay in Google.</p>
+        ) : leavingStatus?.stuck ? (
+          <>
+            <Warning>{leavingStatus.message}</Warning>
+            {canManage ? <p className="text-xs text-meta" data-testid="gcal-recovery">To end Google&apos;s access now, remove Zero Sum from your Google account&apos;s third-party access.</p> : null}
+          </>
+        ) : leavingStatus ? (
+          <p className="text-xs text-meta">{leavingStatus.message}</p>
         ) : (
           <p className="text-xs text-meta">Not syncing with Google.</p>
         )}
         {connectError ? <p id={errorId} role="alert" className="text-sm text-danger" data-testid="gcal-connect-error">{connectError}</p> : null}
       </div>
-      {state === "disconnecting" ? null : (
+      {state === "disconnecting" ? (
+        leavingStatus?.stuck && canManage ? (
+          <div className="flex w-full sm:w-auto sm:justify-end">
+            <Button asChild variant="secondary">
+              <a href={GOOGLE_ACCESS_URL} target="_blank" rel="noreferrer noopener">
+                <ArrowSquareOut aria-hidden />Google account access<span className="sr-only"> (opens in a new tab)</span>
+              </a>
+            </Button>
+          </div>
+        ) : null
+      ) : (
         <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
           {state === "active" ? null : (
             <Button

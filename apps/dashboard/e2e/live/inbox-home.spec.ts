@@ -119,7 +119,7 @@ test("a website booking shows in Calendar, Customers, Inbox and Home, and an own
     const staffDraft = staffPane.locator("[data-entry=reply]").filter({ hasText: "front desk" });
     await expect(staffDraft.getByTestId("reply-status")).toHaveText("Draft");
     await expect(staffDraft).toContainText("Waiting for an owner to approve it before it is queued to send.");
-    await expect(staffDraft.getByRole("button", { name: "Approve and send" })).toHaveCount(0);
+    await expect(staffDraft.getByRole("button", { name: "Approve and queue" })).toHaveCount(0);
     await expect(staffDraft.getByRole("button", { name: "Discard" })).toBeVisible();
     expect(resultsCalls, "staff requests for Home results").toEqual([]);
   } finally {
@@ -136,7 +136,7 @@ test("a website booking shows in Calendar, Customers, Inbox and Home, and an own
   await expect(mine.getByTestId("reply-status")).toHaveText("Draft");
   await expect(mine).toContainText("Emerald settings");
   await expect(mine).toContainText(`Drafted by ${ownerEmail()}`);
-  await mine.getByRole("button", { name: "Approve and send" }).click();
+  await mine.getByRole("button", { name: "Approve and queue" }).click();
   await expect(page.getByRole("status").getByText("Approved. The reply is queued for delivery.")).toBeVisible();
   await expect(mine.getByTestId("reply-status")).toHaveText("Approved and queued");
   await expect(mine).toContainText(`Approved by ${ownerEmail()}`);

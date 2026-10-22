@@ -1,19 +1,20 @@
 import type { Metadata, Viewport } from "next";
-import { Manrope } from "next/font/google";
+import localFont from "next/font/local";
 import type { ReactNode } from "react";
 import { AppShell } from "@/components/shell/app-shell";
 import { THEME_SCRIPT } from "@/lib/theme-script";
 import { Providers } from "./providers";
 import "./globals.css";
 
-// Self-hosted at build time (no runtime request to Google). The service worker does not cache
+// Manrope (SIL OFL 1.1, fonts/Manrope-OFL.txt), Direction A's one typeface: the latin variable
+// file from @fontsource-variable/manrope 5.3.0, kept in the repo so a build never fetches from
+// Google (a failed fetch broke a CI build on 2026-10-22). The service worker does not cache
 // fonts, so a cold offline open falls back to the system font.
-// Manrope (SIL OFL 1.1), Direction A's one typeface.
-const manrope = Manrope({
-  subsets: ["latin"],
+const manrope = localFont({
+  src: "./fonts/manrope-latin-wght-normal.woff2",
   display: "swap",
   variable: "--font-manrope",
-  weight: ["400", "500", "600", "700", "800"],
+  weight: "200 800",
   fallback: ["ui-sans-serif", "system-ui", "sans-serif"],
 });
 

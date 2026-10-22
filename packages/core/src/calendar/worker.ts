@@ -9,11 +9,11 @@
 // value, so it doubles as the token: a second claim needs lease_until <= its own now, which is
 // later than the first claim's, so two holders never share a value.
 //
-// Disconnect decision (G-9): a revoke that fails with a retryable error (network, 5xx, 429,
-// timeout) leaves the connection `disconnecting` with its blocks and token, and retries after a
-// delay (lease_until doubles as the not-before). A non-retryable refusal cannot get better by
-// retrying, so cleanup goes ahead. Blocks are deleted in the same transaction that sets
-// `disconnected`, so a disconnected connection never has blocks.
+// Disconnect decision (G-9): the grant is cleared only once Google revoked it (an already invalid
+// token counts), or when another active connection may share it. Any other revoke failure, a
+// refusal included, leaves the connection `disconnecting` with its blocks, token and error, and
+// retries after a delay (lease_until doubles as the not-before). Blocks are deleted in the same
+// transaction that sets `disconnected`, so a disconnected connection never has blocks.
 import { KeyObject } from "node:crypto";
 import { z } from "zod";
 import { ValidationFailed } from "@zs/contracts";
@@ -240,14 +240,15 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
 
   /** Access tokens for one pass, by connection; a failed refresh is remembered for the pass too. */
   type Tokens = Map<string, Promise<string>>;
-  function accessToken(tokens: Tokens, row: { tenant_id: string; id: string; refresh_token_sealed: string | null }): Promise<string> {
+  function accessToken(tokens: Tokens, row: { tenant_id: string; id: string; refresh_token_sealed: string | null },
+    deadline?: Date): Promise<string> {
     const key = `${row.tenant_id}:${row.id}`;
     let found = tokens.get(key);
     if (!found) {
       const refreshToken = refreshTokenOf(row);
       found = refreshToken === null
         ? Promise.reject(new GoogleRequestFailed("token_unreadable", false))
-        : call((signal) => deps.google.refreshAccessToken(refreshToken, { signal })).then((grant) => grant.accessToken);
+        : call((signal) => deps.google.refreshAccessToken(refreshToken, { signal }), deadline).then((grant) => grant.accessToken);
       found.catch(() => undefined);
       tokens.set(key, found);
     }
@@ -332,7 +333,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
         break;
       }
       try {
-        await disconnectOne(row, counts, tokens);
+        await disconnectOne(row, counts, tokens, deadline);
       } catch (error) {
         report({ kind: "step_failed", step: "disconnects", tenantId: row.tenant_id, connectionId: row.id, error: errorMessage(error) });
       }
@@ -340,14 +341,14 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     return counts;
   }
 
-  async function disconnectOne(row: ConnectionRow, counts: CalendarRunCounts, tokens: Tokens): Promise<void> {
+  async function disconnectOne(row: ConnectionRow, counts: CalendarRunCounts, tokens: Tokens, deadline?: Date): Promise<void> {
     const refreshToken = refreshTokenOf(row);
     // The channel would expire on its own; stopping it is a courtesy and its errors are ignored.
     if (refreshToken !== null && row.channel_id !== null && row.channel_resource_id !== null) {
       try {
-        const access = await accessToken(tokens, row);
+        const access = await accessToken(tokens, row, deadline);
         await call((signal) => deps.google.stopChannel(access,
-          { channelId: row.channel_id!, resourceId: row.channel_resource_id! }, { signal }));
+          { channelId: row.channel_id!, resourceId: row.channel_resource_id! }, { signal }), deadline);
         counts.channelsStopped += 1;
       } catch { /* ignored (G-9) */ }
     }
@@ -357,7 +358,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     // replaced this row, or another resource or tenant. Without an email on either row, a
     // replacement on the same resource may be that account. Then the grant stays, and only this
     // row lets go of its token. A reauthorize row's grant is already gone, so it shares nothing.
-    const shared = refreshToken !== null && (await deps.service((tx) => tx.query(
+    const shared = row.refresh_token_sealed !== null && (await deps.service((tx) => tx.query(
       `SELECT 1 FROM calendar_connections leaving, calendar_connections other
         WHERE leaving.tenant_id=$1 AND leaving.id=$2
           AND other.status='active' AND NOT (other.tenant_id=$1 AND other.id=$2)
@@ -367,24 +368,26 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
         LIMIT 1`,
       [row.tenant_id, row.id, row.resource_id]))).rowCount === 1;
     if (shared) revoke = "shared_grant";
-    else if (refreshToken !== null) {
+    // A sealed token this key cannot open is not a revoked grant: Google may still honour it, so
+    // the row keeps it and its blocks, and tries again once the key opens it.
+    else if (refreshToken === null && row.refresh_token_sealed !== null) {
+      await retryDisconnect(row, counts, "token_unreadable");
+      return;
+    } else if (refreshToken !== null) {
+      let sent = false;
       try {
-        await call((signal) => deps.google.revoke(refreshToken, { signal }));
+        await call((signal) => { sent = true; return deps.google.revoke(refreshToken, { signal }); }, deadline);
         revoke = "revoked";
       } catch (error) {
-        const { code, retry } = classify(error);
-        if (retry) {
-          // Keep disconnecting: the lease is the not-before of the next try.
-          const at = nowMs();
-          await deps.service((tx) => tx.query(
-            `UPDATE calendar_connections SET lease_until=$4, last_error=$5
-              WHERE tenant_id=$1 AND id=$2 AND lease_until=$3 AND status='disconnecting'`,
-            [row.tenant_id, row.id, row.lease_until, new Date(at + retryDelay(row.updated_at, at)), code]));
-          counts.disconnectRetries += 1;
-          report({ kind: "disconnect_retry", tenantId: row.tenant_id, connectionId: row.id, code });
+        // G-10: a revoke the deadline kept from starting goes back as it was, for the next run.
+        if (error instanceof DeadlineReached && !sent) {
+          await releaseConnections([row]);
+          counts.deadlineStops += 1;
+          report({ kind: "deadline_reached", tenantId: row.tenant_id, connectionId: row.id });
           return;
         }
-        revoke = code;
+        await retryDisconnect(row, counts, classify(error).code);
+        return;
       }
     }
     const done = await deps.service(async (tx) => {
@@ -415,6 +418,17 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     }
     counts.disconnected += 1;
     report({ kind: "disconnected", tenantId: row.tenant_id, connectionId: row.id, revoke });
+  }
+
+  /** Keep disconnecting with the token and the blocks: the lease is the not-before of the next try. */
+  async function retryDisconnect(row: ConnectionRow, counts: CalendarRunCounts, code: string): Promise<void> {
+    const at = nowMs();
+    await deps.service((tx) => tx.query(
+      `UPDATE calendar_connections SET lease_until=$4, last_error=$5
+        WHERE tenant_id=$1 AND id=$2 AND lease_until=$3 AND status='disconnecting'`,
+      [row.tenant_id, row.id, row.lease_until, new Date(at + retryDelay(row.updated_at, at)), code]));
+    counts.disconnectRetries += 1;
+    report({ kind: "disconnect_retry", tenantId: row.tenant_id, connectionId: row.id, code });
   }
 
   // ---------------------------------------------------------------- c. sync (G-6, G-7) and d. channels (G-8)
@@ -503,7 +517,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
 
   async function syncOne(row: ConnectionRow, lease: { until: Date }, counts: CalendarRunCounts, tokens: Tokens,
     deadline?: Date): Promise<void> {
-    const access = await accessToken(tokens, row);
+    const access = await accessToken(tokens, row, deadline);
     const startedAt = nowMs();
     const incremental = row.sync_token !== null && row.last_full_sync_at !== null
       && startedAt - row.last_full_sync_at.getTime() < config.fullSyncIntervalMs;
@@ -705,24 +719,27 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     });
     for (const [index, push] of claimed.entries()) {
       if (past(deadline)) {
-        // Not attempted: the lease goes back and so does the attempt the claim counted.
-        const rest = claimed.slice(index);
-        await deps.service((tx) => tx.query(
-          `UPDATE calendar_pushes p SET lease_until=NULL, attempts=p.attempts-1
-             FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::timestamptz[]) AS u(tenant_id, connection_id, booking_id, lease_until)
-            WHERE p.tenant_id=u.tenant_id AND p.connection_id=u.connection_id AND p.booking_id=u.booking_id
-              AND p.lease_until=u.lease_until AND p.status='pending'`,
-          [rest.map((entry) => entry.tenant_id), rest.map((entry) => entry.connection_id), rest.map((entry) => entry.booking_id),
-            rest.map((entry) => entry.lease_until)]));
+        await releasePushes(claimed.slice(index));
         break;
       }
       try {
-        await pushOne(push, counts, tokens);
+        await pushOne(push, counts, tokens, deadline);
       } catch (error) {
         report({ kind: "step_failed", step: "pushes", tenantId: push.tenant_id, connectionId: push.connection_id, error: errorMessage(error) });
       }
     }
     return counts;
+  }
+
+  /** Claimed pushes not attempted: the lease goes back and so does the attempt the claim counted. */
+  async function releasePushes(rows: readonly PushRow[]): Promise<void> {
+    await deps.service((tx) => tx.query(
+      `UPDATE calendar_pushes p SET lease_until=NULL, attempts=p.attempts-1
+         FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::timestamptz[]) AS u(tenant_id, connection_id, booking_id, lease_until)
+        WHERE p.tenant_id=u.tenant_id AND p.connection_id=u.connection_id AND p.booking_id=u.booking_id
+          AND p.lease_until=u.lease_until AND p.status='pending'`,
+      [rows.map((entry) => entry.tenant_id), rows.map((entry) => entry.connection_id), rows.map((entry) => entry.booking_id),
+        rows.map((entry) => entry.lease_until)]));
   }
 
   /** The push still holds its lease and its connection is still active. */
@@ -735,10 +752,12 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     return found.rowCount === 1;
   }
 
-  async function pushOne(push: PushRow, counts: CalendarRunCounts, tokens: Tokens): Promise<void> {
+  async function pushOne(push: PushRow, counts: CalendarRunCounts, tokens: Tokens, deadline?: Date): Promise<void> {
     let outcome: { status: "pushed" } | { status: "pending" | "failed"; code: string };
+    let sent = false;
     try {
-      const access = await accessToken(tokens, { tenant_id: push.tenant_id, id: push.connection_id, refresh_token_sealed: push.refresh_token_sealed });
+      const access = await accessToken(tokens,
+        { tenant_id: push.tenant_id, id: push.connection_id, refresh_token_sealed: push.refresh_token_sealed }, deadline);
       // G-10: push only for an active connection. A disconnect during this batch fails the push
       // (G-9) or retires the connection; either way the claimed push is not sent.
       if (!(await stillPushable(push))) {
@@ -746,16 +765,24 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
         report({ kind: "lost_lease", tenantId: push.tenant_id, connectionId: push.connection_id, bookingId: push.booking_id });
         return;
       }
-      await call((signal) => deps.google.insertEvent(access, push.calendar_id, {
-        id: push.google_event_id,
-        summary: config.eventTitle,
-        start: push.starts_at.toISOString(),
-        end: push.ends_at.toISOString(),
-        // G-7: a sync of this resource skips the event; one of another resource sharing the calendar blocks it.
-        privateProperties: { zs_booking: push.booking_id, zs_tenant: push.tenant_id, zs_resource: push.resource_id },
-      }, { signal }));
+      await call((signal) => {
+        sent = true;
+        return deps.google.insertEvent(access, push.calendar_id, {
+          id: push.google_event_id,
+          summary: config.eventTitle,
+          start: push.starts_at.toISOString(),
+          end: push.ends_at.toISOString(),
+          // G-7: a sync of this resource skips the event; one of another resource sharing the calendar blocks it.
+          privateProperties: { zs_booking: push.booking_id, zs_tenant: push.tenant_id, zs_resource: push.resource_id },
+        }, { signal });
+      }, deadline);
       outcome = { status: "pushed" };
     } catch (error) {
+      // G-10: an insert the deadline kept from starting goes back with its attempt.
+      if (error instanceof DeadlineReached && !sent) {
+        await releasePushes([push]);
+        return;
+      }
       const { code, retry } = classify(error);
       if (GRANT_GONE.has(code)) {
         // The push waits for the owner; the connection stops being claimed until then.
