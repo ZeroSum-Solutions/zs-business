@@ -35,7 +35,7 @@ function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blocked
 }) {
   const selectId = `stage-${deal.id}`;
   return (
-    <li className="rounded-lg bg-lit p-3 shadow-card" data-deal-id={deal.id} aria-busy={moving}>
+    <li className="card p-3" data-deal-id={deal.id} aria-busy={moving}>
       <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
       <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-2">
         <span className="tabular font-medium" data-testid="deal-value">{deal.value ? formatMinor(deal.value.amountMinor, deal.value.currency) : "No value yet"}</span>
@@ -182,7 +182,7 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
     // data-fetching lets tests wait out a background refetch before acting as someone else.
     <div data-fetching={deals.isFetching || undefined}>
       {stale ? (
-        <div role="alert" className="mb-4 flex items-center gap-3 rounded-md bg-accent/8 p-3 text-sm text-fg">
+        <div role="alert" className="mb-4 flex items-center gap-3 rounded-md bg-accent-tint p-3 text-sm text-fg">
           <ArrowsClockwise size={20} aria-hidden className="shrink-0 text-accent" />
           <p>{STALE_DEAL_MESSAGE}</p>
         </div>
@@ -210,7 +210,7 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
               onFocus={revealOnFocus}
               className={cn(
                 "flex min-h-11 shrink-0 items-center gap-2 rounded-pill px-4 text-sm font-medium transition-quick",
-                active ? "bg-accent/14 text-accent ring-1 ring-inset ring-accent" : "bg-surface text-fg-2 shadow-ring hover:bg-surface-warm",
+                active ? "bg-accent-tint text-accent-ink ring-2 ring-inset ring-accent" : "bg-surface text-fg-2 shadow-ring hover:bg-inset",
               )}
             >
               {stage.name}

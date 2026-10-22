@@ -40,20 +40,22 @@ export function ContactList() {
         </EmptyState>
       ) : (
         <>
-        <ul className="divide-y divide-border-soft overflow-hidden rounded-lg bg-lit shadow-card" aria-busy={contacts.isFetching}>
+        <div className="tray">
+        <ul className="card divide-y divide-border overflow-hidden" aria-busy={contacts.isFetching}>
           {items.map((contact) => (
             <li key={contact.id}>
-              <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-fg/[0.04]">
+              <Link href={`/customers/${contact.id}`} className="focus-inset flex min-h-16 items-center gap-3 px-4 py-3 transition-quick hover:bg-inset">
                 <Avatar name={contact.displayName ?? contact.email} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium text-fg">{contact.displayName ?? "Unnamed customer"}</span>
-                  <span className="block truncate text-sm text-muted">{contact.email ?? formatPhone(contact.phone)}</span>
+                  <span className="block truncate text-body font-bold text-fg">{contact.displayName ?? "Unnamed customer"}</span>
+                  <span className="block truncate text-caption text-muted">{contact.email ?? formatPhone(contact.phone)}</span>
                 </span>
                 <CaretRight size={16} aria-hidden className="text-meta" />
               </Link>
             </li>
           ))}
         </ul>
+        </div>
         {contacts.isFetchNextPageError ? <div className="mt-3"><ErrorNote error={contacts.error} retry={() => contacts.fetchNextPage()} /></div> : null}
         {contacts.hasNextPage ? (
           <div className="mt-3 flex justify-center">

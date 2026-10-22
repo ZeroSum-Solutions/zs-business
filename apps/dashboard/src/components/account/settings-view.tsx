@@ -32,7 +32,7 @@ export function SettingsView() {
   return (
     <>
       <PageHeader title="Settings" description="Business details and how we reach you." sample />
-      <div className="grid max-w-3xl gap-4">
+      <div className="tray grid max-w-3xl gap-1.5 lg:gap-2">
         <Card aria-labelledby="appearance-title">
           <CardHeader>
             <div>
