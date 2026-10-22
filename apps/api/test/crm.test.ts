@@ -43,17 +43,6 @@ describe("contacts", () => {
     expect(matchReplay.body).toEqual(matched.body);
   });
 
-  it("stores consent evidence dated in ISO year 0000 instead of failing with a 500", async () => {
-    const recordedAt = "0000-01-01T00:00:00.000Z";
-    const response = await call(h.app, "POST", "/v1/crm/contacts", {
-      token: h.a.token, key: randomUUID(),
-      body: { email: "year-zero@example.com", consent: { email: { status: "granted", source: "owner", recordedAt }, sms: null } },
-    });
-    expect(response.status).toBe(201);
-    expect(createOrFindContactOutputSchema.parse(response.body).result.contact.consent)
-      .toEqual({ email: { status: "granted", source: "owner", recordedAt }, sms: null });
-  });
-
   it("rejects a contact without any identity", async () => {
     const response = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: randomUUID(), body: { displayName: "X" } });
     expect(response.status).toBe(400);

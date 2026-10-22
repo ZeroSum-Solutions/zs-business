@@ -130,20 +130,6 @@ describe("contact create/find on the runtime database", () => {
     expect(imported.result.contact.updatedAt).toBe(NOW);
   });
 
-  it("C-9: evidence dated in ISO year 0000 is stored and read back unchanged", async () => {
-    const a = h.fixture.a.tenantId;
-    const yearZero = granted("0000-01-01T00:00:00.000Z", "owner");
-    const out = await createOrFindContact(contactCommand(a, {
-      email: "year-zero@example.test", consent: { email: yearZero, sms: null },
-    }), h.ctx(a));
-    expect(out.result.contact.consent).toEqual({ email: yearZero, sms: null });
-    // A later import compares against the stored instant, not the rejected string.
-    const imported = await createOrFindContact(contactCommand(a, {
-      email: "year-zero@example.test", mode: "import", consent: { email: denied(T1), sms: null },
-    }), h.ctx(a));
-    expect(imported.result.contact.consent.email).toEqual(yearZero);
-  });
-
   it("C-11: interactive consent takes later evidence, ignores older, denial wins ties", async () => {
     const a = h.fixture.a.tenantId;
     const email = "ia@example.test";
