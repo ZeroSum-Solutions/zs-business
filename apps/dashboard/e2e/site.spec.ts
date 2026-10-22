@@ -12,7 +12,7 @@ async function openSite(page: Page) {
 
 test("edits, previews and publishes the site, then rolls back to an earlier version", async ({ page }, info) => {
   await openSite(page);
-  await expect(page.getByText("haldenrowe.example")).toBeVisible();
+  await expect(page.getByText("haldenrowe.example", { exact: true })).toBeVisible();
   await expect(releases(page)).toHaveCount(2);
   await shot(page, "21-site", info.project.name);
 

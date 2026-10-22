@@ -213,7 +213,7 @@ test("Home's Try again brings back the needs-you line and the tray together", as
   // Every bookings read fails, so Home cannot tell whether an appointment is today.
   await page.evaluate(() => window.__zsDemo!.failBookingReads(true));
   await mainNav(page).getByRole("link", { name: "Home" }).click();
-  const lede = page.getByRole("main").locator("p").filter({ hasText: /^(Good (morning|afternoon|evening)|Hello), / });
+  const lede = page.getByRole("main").locator("p").filter({ hasText: /^(Good (morning|afternoon|evening)|Hello)\./ });
   // Each read retries twice before it gives up.
   await expect(lede).toContainText("Couldn't check everything.", { timeout: 10_000 });
   const tray = page.getByRole("region", { name: "Needs you now" });

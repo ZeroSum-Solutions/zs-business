@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { PageHeader } from "@/components/ui/states";
+import { PageHeader } from "@/components/ui/page-header";
 
 export const metadata: Metadata = { title: "Page not found" };
 
