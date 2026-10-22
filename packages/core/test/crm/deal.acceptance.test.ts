@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Conflict, TenantDenied, ValidationFailed } from "@zs/contracts";
-import { createDeal, createOrFindContact, moveDealStage } from "../../src/index.js";
+import { createDeal, createOrFindContact, moveDealStage, setDealDetails } from "../../src/index.js";
 import { inLosAngeles } from "../zoned.js";
-import { contactCommand, createHarness, dealCommand, moveCommand, NOW, rejection, type Harness } from "./helpers.js";
+import { contactCommand, createHarness, dealCommand, detailsCommand, moveCommand, NOW, rejection, type Harness } from "./helpers.js";
 
 let h: Harness;
 let a: string;
@@ -87,6 +87,10 @@ describe("deal clock range", () => {
         dealId: deal.id, pipelineId: pipe.pipelineId, stageId: pipe.stages[1], expectedRevision: 1,
       }), h.ctx(a, clock, db))).result;
       expect(moved).toMatchObject({ revision: 2, createdAt: clock, updatedAt: clock });
+      const detailed = (await setDealDetails(detailsCommand(a, {
+        dealId: deal.id, expectedRevision: 2, value: { amountMinor: 500, currency: "USD" }, leadSource: null,
+      }), h.ctx(a, clock, db))).result;
+      expect(detailed).toMatchObject({ revision: 3, createdAt: clock, updatedAt: clock });
     });
   });
 
@@ -100,6 +104,9 @@ describe("deal clock range", () => {
       }), h.ctx(a, clock)))).toBeInstanceOf(ValidationFailed);
       expect(await rejection(moveDealStage(moveCommand(a, {
         dealId: deal.id, pipelineId: pipe.pipelineId, stageId: pipe.stages[1], expectedRevision: 1,
+      }), h.ctx(a, clock)))).toBeInstanceOf(ValidationFailed);
+      expect(await rejection(setDealDetails(detailsCommand(a, {
+        dealId: deal.id, expectedRevision: 1, value: null, leadSource: null,
       }), h.ctx(a, clock)))).toBeInstanceOf(ValidationFailed);
     }
     expect(await counts()).toEqual(before);

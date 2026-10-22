@@ -3,9 +3,9 @@
 import { describe, expect, it } from "vitest";
 import { ValidationFailed, type ActionBinding, type ActionCommand } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
-import { crmHandlers, intakeHandlers, sourceHandlers } from "../src/index.js";
+import { crmHandlers, dealDetailsHandlers, intakeHandlers, sourceHandlers } from "../src/index.js";
 
-const writers = { ...crmHandlers, ...intakeHandlers, ...sourceHandlers };
+const writers = { ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...sourceHandlers };
 
 describe("clock range in CRM, intake and source writers", () => {
   it.each(Object.keys(writers))("%s refuses a clock outside UTC years 0001-9999 before any query", async (actionType) => {
