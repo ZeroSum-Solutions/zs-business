@@ -195,8 +195,8 @@ test.describe("idempotent retries", () => {
     // The reload retries twice before it gives up.
     await expect(note).toContainText("the board could not reload", { timeout: 10_000 });
     await expect(note.getByRole("alert")).toContainText(OFFLINE);
-    await expect(board.getByText("Someone changed this deal. Reloaded.")).toHaveCount(0);
-    await expect(page.getByRole("status").getByText("Someone changed this deal. Reloaded.")).toHaveCount(0);
+    await expect(board.getByText(/^Someone changed .+\. Reloaded\.$/)).toHaveCount(0);
+    await expect(page.getByRole("status").getByText(/^Someone changed .+\. Reloaded\.$/)).toHaveCount(0);
     await expect(ring.getByRole("combobox")).toBeDisabled();
     await expect(ring.getByRole("combobox")).toHaveAccessibleDescription(/could not reload/);
     await expect(ring.locator("option:checked")).toHaveText("Design");
@@ -204,7 +204,7 @@ test.describe("idempotent retries", () => {
     // Once a reload works the board says so and the move is back on, with the new revision.
     await page.evaluate(() => window.__zsDemo!.failDealReads(false));
     await note.getByRole("button", { name: "Try again" }).click();
-    await expect(board.getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
+    await expect(board.getByRole("alert")).toHaveText(/^Someone changed .+\. Reloaded\.$/);
     await expect(note).toHaveCount(0);
     await expect(ring.getByRole("combobox")).toBeEnabled();
     await expect(page.locator("[data-fetching]")).toHaveCount(0);

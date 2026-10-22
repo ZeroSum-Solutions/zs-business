@@ -59,7 +59,12 @@ export function WebsiteRequests() {
   });
 
   if (items.isPending || items.isError || items.data.items.length === 0) {
-    return items.isError ? <div className="mb-5"><ErrorNote error={items.error} retry={() => items.refetch()} /></div> : null;
+    // Offline, the customer list below already says so: name what is missing instead of repeating it.
+    return items.isError ? (
+      <div className="mb-5">
+        <ErrorNote error={items.error} retry={() => items.refetch()} {...(isApiError(items.error, "network") ? { message: "Website bookings to review could not load." } : {})} />
+      </div>
+    ) : null;
   }
 
   const zoneFor = (item: IntakeItemRecord) =>
@@ -92,7 +97,8 @@ export function WebsiteRequests() {
                 ) : null}
               </div>
               <p className="mt-1 text-sm text-fg-2">
-                {[item.submitted.email, formatPhone(item.submitted.phone)].filter(Boolean).join(" · ")}
+                <span className="break-words">{item.submitted.email}</span>
+                {item.submitted.phone ? <> · <span className="whitespace-nowrap">{formatPhone(item.submitted.phone)}</span></> : null}
               </p>
               {item.submitted.notes ? <p className="mt-1 text-sm text-muted">“{item.submitted.notes}”</p> : null}
               <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3">

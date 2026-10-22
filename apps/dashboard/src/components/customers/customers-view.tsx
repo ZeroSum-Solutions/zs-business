@@ -20,7 +20,7 @@ export function CustomersView() {
     <>
       <PageHeader
         title="Customers"
-        description="Everyone you work with, and where each commission stands."
+        description="Everyone you work with, and where each deal stands."
         actions={<Button onClick={() => setAdding(true)}><Plus aria-hidden />Add customer</Button>}
       />
       <ViewTabs
@@ -29,7 +29,7 @@ export function CustomersView() {
         tabs={[{ id: "contacts", label: "Contacts", href: "/customers" }, { id: "pipeline", label: "Pipeline", href: "/customers?view=pipeline" }]}
         className="mb-5"
       />
-      {view === "pipeline" ? <PipelineBoard /> : <><WebsiteRequests /><ContactList /></>}
+      {view === "pipeline" ? <PipelineBoard /> : <ContactList queue={<WebsiteRequests />} />}
       <AddContactDialog open={adding} onOpenChange={setAdding} />
     </>
   );

@@ -6,18 +6,19 @@ import { useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
-import type { ConsentEvidence } from "@/lib/api";
-import { useContact, useDeals, usePipelines } from "@/lib/queries";
+import { isApiError, type ConsentEvidence } from "@/lib/api";
+import { browserZone, useContact, useDeals, usePipelines } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatPhone, relativeTime } from "@/lib/utils";
 import { Avatar } from "@/components/ui/avatar";
 
+// No business time zone exists yet, so dates show in the viewer's own zone.
 function ConsentLine({ label, evidence }: { label: string; evidence: ConsentEvidence | null }) {
   return (
     <div className="flex items-start justify-between gap-3 py-3 first:pt-0 last:pb-0">
       <div>
         <p className="text-sm font-medium text-fg">{label}</p>
-        <p className="text-xs text-meta">{evidence ? `${evidence.source}, ${formatDay(evidence.recordedAt, "America/New_York")}` : "No record yet"}</p>
+        <p className="text-xs text-meta">{evidence ? `${evidence.source}, ${formatDay(evidence.recordedAt, browserZone())}` : "No record yet"}</p>
       </div>
       {evidence === null ? <Badge>Not asked</Badge> : evidence.status === "granted" ? <Badge tone="success">Allowed</Badge> : <Badge tone="danger">Declined</Badge>}
     </div>
@@ -39,7 +40,7 @@ export function ContactDetail({ id }: { id: string }) {
         <ArrowLeft size={16} aria-hidden /> Customers
       </Link>
       {contact.isPending ? <LoadingRows rows={4} label="Loading customer" /> : contact.isError ? (
-        <ErrorNote error={contact.error} retry={() => contact.refetch()} />
+        isMissing(contact.error) ? <ContactMissing /> : <ErrorNote error={contact.error} retry={() => contact.refetch()} />
       ) : (
         <>
           {existing ? (
@@ -51,15 +52,15 @@ export function ContactDetail({ id }: { id: string }) {
           <header className="mb-6 flex items-center gap-4">
             <Avatar name={contact.data.displayName ?? contact.data.email} size="lg" />
             <div className="min-w-0">
-              <h1 className="truncate text-2xl leading-tight font-extrabold tracking-display lg:text-3xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
-              <p className="text-sm text-muted">Customer since {formatDay(contact.data.createdAt, "America/New_York")}</p>
+              <h1 className="text-2xl leading-tight font-extrabold break-words tracking-display lg:text-3xl">{contact.data.displayName ?? "Unnamed customer"}</h1>
+              <p className="text-sm text-muted">Customer since {formatDay(contact.data.createdAt, browserZone())}</p>
             </div>
           </header>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
             <Card aria-labelledby="deals-title">
-              <CardHeader><CardTitle id="deals-title">Commissions</CardTitle></CardHeader>
+              <CardHeader><CardTitle id="deals-title">Deals</CardTitle></CardHeader>
               {deals.isPending ? <LoadingRows rows={2} /> : deals.isError ? <ErrorNote error={deals.error} retry={() => deals.refetch()} /> : deals.data.items.length === 0 ? (
-                <EmptyState title="No commissions yet">Deals for this customer show here.</EmptyState>
+                <EmptyState title="No deals yet">Deals for this customer show here.</EmptyState>
               ) : (
                 <>
                 <IncompleteNote list={deals.data} />
@@ -68,7 +69,7 @@ export function ContactDetail({ id }: { id: string }) {
                     <li key={deal.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
                       <div className="min-w-0">
                         <p className="text-sm font-medium break-words text-fg">{deal.title}</p>
-                        <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt)}</p>
+                        <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt).toLowerCase()}</p>
                       </div>
                       <Badge tone="accent">{stageName(deal.pipelineId, deal.stageId)}</Badge>
                     </li>
@@ -100,6 +101,20 @@ export function ContactDetail({ id }: { id: string }) {
           </div>
         </>
       )}
+    </>
+  );
+}
+
+/** A record this account cannot see, or an address that names none: retrying will not change it. */
+const isMissing = (error: unknown) => isApiError(error, "forbidden") || isApiError(error, "not_found") || isApiError(error, "validation");
+
+function ContactMissing() {
+  return (
+    <>
+      <h1 className="mb-4 text-2xl leading-tight font-extrabold tracking-display lg:text-3xl">Customer not found</h1>
+      <EmptyState title="We could not find that customer" action={<Link href="/customers" className="inline-flex min-h-11 items-center font-bold text-accent-ink underline-offset-4 hover:underline">Back to customers</Link>}>
+        The link may be wrong, or this account cannot open that record.
+      </EmptyState>
     </>
   );
 }
