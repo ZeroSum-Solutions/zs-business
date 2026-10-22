@@ -22,6 +22,31 @@ export function needsLine(state: NeedsState, count: number): string | null {
   return count === 0 ? "Nothing needs you right now." : `${count === 1 ? "One thing needs" : `${count === 2 ? "Two" : "Three"} things need`} you today.`;
 }
 
+export interface NeedsInput<A, B> {
+  /** Threads waiting for a reply or a review, on the inbox's first page. */
+  waiting: number;
+  /** The status of every read the count rests on. */
+  statuses: QueryStatus[];
+  checklist: A[] | undefined;
+  threads: { name: string; needsReply: boolean; needsReview: boolean }[] | undefined;
+  /** The next appointments, in start order. */
+  bookings: B[] | undefined;
+  resources: { id: string; timeZone: string }[] | undefined;
+  /** When the bookings were read from. */
+  from: string;
+}
+
+/** Who and what needs the owner now: Home's lede counts the same items as the tray shows. */
+export function needsModel<A extends { status: string }, B extends { startsAt: string; resourceId: string }>(input: NeedsInput<A, B>) {
+  const next = input.bookings?.[0];
+  const zone = input.resources?.find((item) => item.id === next?.resourceId)?.timeZone ?? "America/New_York";
+  const actions = input.checklist?.filter((item) => item.status === "action") ?? [];
+  const people = input.threads?.filter((thread) => thread.needsReply || thread.needsReview).map((thread) => thread.name) ?? [];
+  const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(input.from, zone) : false;
+  const count = (input.waiting > 0 ? 1 : 0) + (actions.length > 0 ? 1 : 0) + (nextToday ? 1 : 0);
+  return { next, zone, actions, people, state: needsState(input.statuses), count };
+}
+
 /** "Later today", "Tomorrow" or the weekday, for a day group of appointments. */
 export function dayHeading(dayKey: string, todayKey: string): string {
   if (dayKey === todayKey) return "Later today";

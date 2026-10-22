@@ -18,7 +18,7 @@ import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
 import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey, zonedParts } from "@/lib/time";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
-import { appointmentsPhrase, currentMinute, groupByDay, needsLine, needsState, subscribeMinute, weekStripDays, weekStripQuery } from "./home-model";
+import { appointmentsPhrase, currentMinute, groupByDay, needsLine, needsModel, subscribeMinute, weekStripDays, weekStripQuery } from "./home-model";
 
 interface WeekCompare {
   thisWeek: number;
@@ -376,19 +376,21 @@ function useNeeds() {
   const from = useMemo(() => new Date().toISOString(), []);
   const bookings = useBookings({ from, limit: 4 });
   const resources = useResources();
-  const next = bookings.data?.items[0];
-  const zone = resources.data?.find((item) => item.id === next?.resourceId)?.timeZone ?? "America/New_York";
-  const actions = checklist.data?.filter((item) => item.status === "action") ?? [];
-  const people = threads.data?.pages[0]?.items.filter((thread) => thread.needsReply || thread.needsReview).map((thread) => thread.name) ?? [];
-  const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(from, zone) : false;
   // Every read the count rests on: the inbox count is the threads' first page.
   const reads = [threads, checklist, bookings, resources];
-  const state = needsState(reads.map((read) => read.status));
+  const model = needsModel({
+    waiting,
+    statuses: reads.map((read) => read.status),
+    checklist: checklist.data,
+    threads: threads.data?.pages[0]?.items,
+    bookings: bookings.data?.items,
+    resources: resources.data,
+    from,
+  });
   const retry = () => {
     for (const read of reads) if (read.isError) void read.refetch();
   };
-  const count = (waiting > 0 ? 1 : 0) + (actions.length > 0 ? 1 : 0) + (nextToday ? 1 : 0);
-  return { waiting, threads, checklist, bookings, resources, next, zone, actions, people, state, retry, count };
+  return { ...model, waiting, threads, checklist, bookings, resources, retry };
 }
 
 /** "Teo, Linnea, Noor and 2 more": first names, as the owner would say them. */
