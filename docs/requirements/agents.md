@@ -17,13 +17,14 @@ Scope: one agent. It finds website inquiries nobody has answered, asks a model p
 follow-up email, and leaves it in the Inbox as a draft with a pending send proposal. An owner
 reads it and approves, edits by discarding and redrafting, or discards it. The agent never
 approves and never sends. Caps, quiet hours and two kill switches bound what it may draft; every
-run and every decision it makes is recorded. Revision 4 adds three more agent kinds on the same
+run and every decision it makes is recorded. Revision 4 adds four more agent kinds on the same
 tables, switches and records (G-14): appointment reminders and review requests sent from an
-owner-approved template, and document intake proposals for an owner to approve.
+owner-approved template, document intake proposals for an owner to approve (not enabled yet,
+G-21), and the voice receptionist's usage and caps (`voice-receptionist.md`).
 
 Out of scope: SMS follow-ups by the inquiry agent, a vision lane, an agent org chart or
 agent-to-agent delegation, billing model usage to the wallet. The scheduler that runs the agent
-on a timer is G-13. Revision 4 adds three more kinds and real model adapters (G-14..G-21).
+on a timer is G-13. Revision 4 adds four more kinds and real model adapters (G-14..G-21).
 
 ## Evidence and decisions
 
@@ -216,7 +217,7 @@ file. It keys:
   in the catalog two-tenant test. `agent_followups` does not change;
 - actors: each kind has its own principal, `derivedId(tenantId, "<kind>-agent", "actor")`,
   except that `inquiry_followup` keeps G-1's `followup-agent` ID. Its `authorize` admits only
-  its own kind's actions; an `appointment_reminder` actor running an `inquiry_followup` or
+  its own kind's actions and `agent.cost.warn` for its own kind (G-15); an `appointment_reminder` actor running an `inquiry_followup` or
   `document_intake` action is `TenantDenied`. Keys are `agent:<kind>:<step>:<runId>[:...]`,
   which cannot collide with G-6's `agent:<step>:` keys.
 Settings, kill and resume for a new kind use `/v1/agents/:agentKind` with G-11's routes and
@@ -224,9 +225,12 @@ permissions; `/v1/agents/followup` stays as it is. G-3's locks, G-5's quiet hour
 run guard apply to every kind, each on its own settings row.
 
 **G-15. Usage and a daily cost cap per kind.** Every model call writes one `agent_model_calls`
-row (`tenant_id, id, run_id, agent_kind, subject_id, lane, model, input_tokens,
-output_tokens, cost_micros, provider_request_id, outcome, created_at`), forced RLS, keyed
-`agent:<kind>:model:<runId>:<subjectId>` so a replay writes nothing twice. It is append-only
+row (`tenant_id, id, call_key, run_id, agent_kind, subject_id, lane, model, input_tokens,
+output_tokens, cost_micros, provider_request_id, outcome, created_at`), forced RLS, with
+`UNIQUE (tenant_id, call_key)` so a replay writes nothing twice. `run_id` and `subject_id` are
+null for calls outside a run. `call_key` is `agent:<kind>:model:<runId>:<subjectId>` in a run,
+`agent:<kind>:suggestion:<idempotencyKey>` for a G-19 suggestion and
+`voice:<CallSid>:model:<n>` for the receptionist (`voice-receptionist.md` V-12). It is append-only
 apart from one move of `outcome` from `started` to `ok`, `error` or `invalid`.
 `cost_micros` is USD millionths from the injected price table (`modelPrices`); the server
 refuses to start when a configured lane's model has no price. `agent_runs` gains `model`,
@@ -311,7 +315,9 @@ rendered from an approved template revision and never call a model at run time:
   under G-15: it writes an `agent_model_calls` row (the requested kind, no `run_id`, key
   `agent:<kind>:suggestion:<idempotencyKey>`) and counts against that kind's
   `maxCostMicrosPerDay`, so a templated kind's cap is not zero once suggestions are used. At the
-  cap it is refused with `Conflict` `cost_cap` before any provider call. It writes nothing else.
+  cap it is refused with `Conflict` `cost_cap` before any provider call. Apart from that row
+  and, when it crosses 80%, G-15's `agent.cost.warn` (which the server dispatches as the kind's
+  principal, not as the owner), it writes nothing.
 
 **G-20. Review requests need marketing consent.** `review_request` sends with purpose
 `marketing` and only to a customer whose consent for the channel is `granted`. Contact consent

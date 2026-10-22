@@ -124,7 +124,10 @@ the `/worker/v1/voice/*` routes. Settle runs through the dispatcher as
 **V-12. Local speech, Cerebras words.** The service's speech-to-text is local whisper
 (mlx-whisper or faster-whisper) and its text-to-speech a local model such as kokoro; the model
 is Cerebras through its approved key. At start, the service refuses any other STT, TTS or model
-service in its configuration. No call audio and no turn transcript is stored; the session keeps
+service in its configuration. Each Cerebras call writes an `agent_model_calls` row (kind
+`voice_receptionist`, no `run_id`, `call_key` `voice:<CallSid>:model:<n>`, `agents.md` G-15),
+so the kind's daily cost cap that V-4 checks counts receptionist usage. No call audio and no
+turn transcript is stored; the session keeps
 times, duration, cost, outcome and the callback fields.
 
 **V-13. No health or medical calls.** Turning the receptionist on needs the owner's attestation

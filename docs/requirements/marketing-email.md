@@ -119,6 +119,18 @@ index `WHERE campaign_id IS NULL`, so an ordinary message keeps one delivery per
 plus `UNIQUE (tenant_id, campaign_id, contact_id) WHERE campaign_id IS NOT NULL`. A test on the
 migrated schema ingests a three-recipient campaign twice and finds three deliveries, and a
 replayed ordinary message still makes one.
+The same slice changes three things in the delivery worker for rows with a `campaign_id`
+(`packages/core/src/delivery/worker.ts`, today `recheck` and `buildContent`):
+- the snapshot address is written to `recipient_address` at ingestion, and the D-6 re-check
+  blocks `address_changed` whenever that address differs from the contact's current one, on
+  every attempt, not only after an unknown outcome (M-4);
+- `buildContent` replaces the body's `{{unsubscribe_url}}` with the delivery's D-9 URL and adds
+  no second footer; the `List-Unsubscribe` headers stay (M-5);
+- the approval re-check compares the campaign's approved body digest (with the placeholder) and
+  checks that the contact is in `marketing_campaign_recipients`, instead of a per-delivery
+  digest.
+Tests cover each: a changed address sends nothing, a delivered body has exactly one
+unsubscribe URL, and a body edited after approval blocks `approval_missing`.
 
 **M-7. Wallet.** The estimated cost is recipient count × the email price (D-5). The send
 action fails `insufficient_funds` when the wallet's available amount is below it at run time,

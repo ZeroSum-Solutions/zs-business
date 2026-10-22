@@ -70,7 +70,10 @@ false`. `revision` starts at 1 and grows by one on every write. A test proves th
 `review` leaves both tables untouched.
 
 **DL-3. Upload: `catalog.intake.upload`.** Needs `publish` (`knowledge.intake.upload` needs
-`agents`). Accepts one file whose declared type is `application/pdf` and whose bytes start with
+`agents`). Its input is either uploaded bytes (`source` `upload`) or `{ browserRunId,
+artifactId }` (`source` `browser:<runId>`, `browser-tasks.md` BT-13): the run and its artifact
+must belong to the caller's tenant (`TenantDenied` otherwise), and the server copies the
+artifact's bytes from that tenant's storage, then applies the same checks. It accepts one file whose declared type is `application/pdf` and whose bytes start with
 `%PDF-`, at most 20 MiB (20,971,520 bytes); anything else, including `.xlsx` and `.docx`, is
 `ValidationFailed` before any byte is stored. The filename is kept only as display text (1 to
 200 characters, `isPostgresText`). The server stores the bytes at

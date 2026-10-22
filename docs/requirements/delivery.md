@@ -96,7 +96,10 @@ worker re-checks, for every attempt:
   stands only while `approved`; revoked, expired and rejected block `approval_revoked`;
 - a usable address (`no_address`). The send goes to the contact's current address, except
   that while an outcome is unknown it may only be repeated to the address it went to; if the
-  contact's address changed, the delivery blocks `address_changed` (after a lookup, D-8).
+  contact's address changed, the delivery blocks `address_changed` (after a lookup, D-8). A
+  marketing campaign delivery (`marketing-email.md` M-6) is bound to its snapshot address on
+  every attempt and blocks `address_changed` as soon as the contact's address differs
+  (revision 5).
 A blocked delivery sends nothing and releases its reservation. A withdrawal that commits after
 an attempt has started does not stop that attempt; it stops every later one. What a suppression
 blocks depends on its reason (revision 5): `marketing_unsubscribe` blocks `marketing` deliveries
