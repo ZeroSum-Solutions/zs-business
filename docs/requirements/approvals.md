@@ -76,7 +76,8 @@ may decide. The row is locked `FOR UPDATE`; it must be `pending` and unexpired, 
 `Conflict` with reason `approval_not_pending` or `approval_expired`. Expiry and
 `decided_at` use `now` read from the injected clock after the lock is granted; within one
 dispatch a clock read is never earlier than a previous one (a clock that steps back is held
-at the latest instant seen). The decider is
+at the latest instant seen). The decision's action and outbox event are recorded at that
+same instant. The decider is
 recorded in `decided_by` and becomes the **executor**: the approved binding's actor is
 `decided_by`. An owner may approve their own request.
 Retry: when the caller is the recorded decider of an `approved` approval whose action has

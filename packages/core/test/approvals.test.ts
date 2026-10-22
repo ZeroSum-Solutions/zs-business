@@ -346,6 +346,34 @@ describe("expiry (A-3)", () => {
     expect(reads).toBeGreaterThan(1);
     expect(await sessionFor(owner.userId).getApproval(result.id)).toMatchObject({ status: "pending", decidedAt: null });
   });
+
+  it.each(["approve", "reject"] as const)("records %s, its action and its event at the instant read after the row lock", async (decision) => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
+    // Every read is a minute after the last, so the dispatch's first read and the decision's differ.
+    let at = now;
+    const ticking = { now: () => new Date((at += 60_000)) };
+    const run = directDispatch({ ...deps(), clock: ticking }, tenantId, owner.userId, memberAuthorize(tenantId, owner.userId));
+    const command = {
+      actionType: `approval.${decision}`,
+      target: { tenantId, type: "approval", id: result.id },
+      approvalReference: { tenantId, id: randomUUID() },
+      idempotencyKey: randomUUID(),
+      payload: { approvalId: result.id },
+    };
+    const output = await run(command);
+    const stamps = (await fixture.service((tx) => tx.query<{ decided_at: Date; action_at: Date; event_at: Date }>(
+      `SELECT a.decided_at, x.created_at AS action_at, o.created_at AS event_at
+         FROM actions x JOIN outbox o ON o.tenant_id=x.tenant_id AND o.action_id=x.id
+         JOIN approvals a ON a.tenant_id=x.tenant_id AND a.id::text=x.target->>'id'
+        WHERE x.tenant_id=$1 AND x.id=$2`, [tenantId, output.actionId]))).rows;
+    expect(stamps).toHaveLength(1);
+    expect(stamps[0]!.action_at).toEqual(stamps[0]!.decided_at);
+    expect(stamps[0]!.event_at).toEqual(stamps[0]!.decided_at);
+    expect(output.result).toMatchObject({ decidedAt: stamps[0]!.decided_at.toISOString() });
+    // A replay returns the stored result and writes nothing more.
+    expect(await run(command)).toEqual(output);
+    expect(await count("SELECT count(*) AS n FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, command.idempotencyKey])).toBe(1);
+  });
 });
 
 /**

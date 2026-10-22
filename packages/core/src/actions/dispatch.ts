@@ -53,7 +53,8 @@ export interface ActionHandler<Config = DispatchConfig> {
     now: Date;
     /**
      * Reads the injected clock again, for a handler that waits on a row lock first. Never
-     * earlier than `now` or any previous read in the same dispatch.
+     * earlier than `now` or any previous read in the same dispatch. The action and its event
+     * are recorded at the latest read.
      */
     clock: () => Date;
     config: Config;
@@ -218,12 +219,15 @@ export function createDispatcher<Config = DispatchConfig>(
         const eventPayload = jsonValueSchema.safeParse(event.payload);
         if (!eventType.success || !eventPayload.success)
           throw new ValidationFailed("Invalid outbox event");
+        // History takes the latest instant the dispatch read, the one the handler stored, with
+        // no further read.
+        const recordedAt = new Date(latest);
         const inserted = await tx.query<{ result: JsonValue }>(
           `SELECT public.record_action_and_event($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) AS result`,
           [
             binding.tenantId, actionId, binding.actorId, binding.actionType,
             JSON.stringify(binding.target), JSON.stringify(binding.payload),
-            JSON.stringify(binding.approvalReference), key, JSON.stringify(result), now,
+            JSON.stringify(binding.approvalReference), key, JSON.stringify(result), recordedAt,
             generateId(), eventType.data, JSON.stringify(eventPayload.data),
           ],
         );

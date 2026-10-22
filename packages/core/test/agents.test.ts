@@ -630,6 +630,39 @@ describe("quiet hours (G-5)", () => {
   });
 });
 
+describe("the draft's instant (G-5)", () => {
+  it("records a draft, its action and its event at the instant read after the draft's locks", async () => {
+    await dueInquiries(1);
+    // Every read in a dispatch is a second after the last, so its first read and the draft's differ.
+    let at = now;
+    const real = directDispatch({ ...deps(), clock: { now: () => new Date((at += 1_000)) } }, tenantId, agentActorId(tenantId), agentAuthorize);
+    const drafts: { command: ActionCommand; output: Awaited<ReturnType<typeof real>> }[] = [];
+    const dispatch = async (command: ActionCommand) => {
+      const output = await real(command);
+      if (command.actionType === "agent.followup.draft") drafts.push({ command, output });
+      return output;
+    };
+    const run = await runFollowUps({ db: database.db, clock, model: createFakeFollowUpModel(), config: { maxCandidatesPerRun: 1 }, dispatch },
+      tenantId, { key: `schedule:${randomUUID()}`, requestedBy: null });
+    expect(run).toMatchObject({ status: "completed", drafted: 1 });
+    expect(drafts).toHaveLength(1);
+    const { command, output } = drafts[0]!;
+    const stamps = await rows<Record<string, Date>>(
+      `SELECT x.created_at AS action_at, o.created_at AS event_at, f.created_at AS decision_at, r.created_at AS reply_at, a.requested_at
+         FROM actions x JOIN outbox o ON o.tenant_id=x.tenant_id AND o.action_id=x.id
+         JOIN agent_followups f ON f.tenant_id=x.tenant_id AND f.id::text=x.payload->>'followupId'
+         JOIN inbox_replies r ON r.tenant_id=f.tenant_id AND r.id=f.reply_id
+         JOIN approvals a ON a.tenant_id=f.tenant_id AND a.id=f.approval_id
+        WHERE x.tenant_id=$1 AND x.id=$2`, [tenantId, output.actionId]);
+    expect(stamps).toHaveLength(1);
+    const { action_at: actionAt, ...stored } = stamps[0]!;
+    for (const value of Object.values(stored)) expect(value).toEqual(actionAt);
+    // A replay returns the stored decision and writes nothing more.
+    expect(await real(command)).toEqual(output);
+    expect(await rows("SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, command.idempotencyKey])).toHaveLength(1);
+  });
+});
+
 describe("settings (G-2)", () => {
   it("compare-and-set on the revision, and validated values", async () => {
     const session = sessionFor(owner);

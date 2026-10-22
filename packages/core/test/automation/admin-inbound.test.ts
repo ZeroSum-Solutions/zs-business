@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ActionError, TenantDenied } from "@zs/contracts";
-import { AUTOMATION_LIMITS, automationActorId, Unauthenticated, webhookSigningSecret } from "../../src/index.js";
+import { AUTOMATION_LIMITS, automationActorId, createAutomationInbound, Unauthenticated, webhookSigningSecret } from "../../src/index.js";
 import { createAutomationHarness, KEY, OTHER_KEY, START, type AutomationHarness } from "./helpers.js";
 
 let h: AutomationHarness;
@@ -247,5 +247,32 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
       await release();
       h.clock.set(START);
     }
+  });
+
+  it("records the proposal, its action and its event at the instant read after the token lock", async () => {
+    h.clock.set(START);
+    const { secret } = await h.admin(h.a).createToken({ name: "Ticking", scopes: ["contacts:propose"] }, randomUUID());
+    // Every read is a minute after the last, so the dispatch's first read and the proposal's differ.
+    let at = START;
+    const inbound = createAutomationInbound({ ...h.deps(), clock: { now: () => new Date((at += 60_000)) } }, { keySecrets: { current: KEY } });
+    const principal = await inbound.authenticate(`Bearer ${secret}`);
+    const body = { ...contactProposal(), expiresInMinutes: 5 };
+    const flowKey = randomUUID();
+    const proposal = await inbound.propose(principal, body, flowKey);
+    const stamps = await h.rows<{ requested_at: Date; expires_at: Date; action_at: Date; event_at: Date }>(
+      `SELECT a.requested_at, a.expires_at, x.created_at AS action_at, o.created_at AS event_at
+         FROM actions x JOIN outbox o ON o.tenant_id=x.tenant_id AND o.action_id=x.id
+         JOIN approvals a ON a.tenant_id=x.tenant_id AND a.id::text=x.target->>'id'
+        WHERE x.tenant_id=$1 AND x.action_type='automation.proposal.create' AND a.id=$2`, [h.a.tenantId, proposal.id]);
+    expect(stamps).toHaveLength(1);
+    const { requested_at: requestedAt, expires_at: expiresAt, action_at: actionAt, event_at: eventAt } = stamps[0]!;
+    expect(actionAt).toEqual(requestedAt);
+    expect(eventAt).toEqual(requestedAt);
+    expect(expiresAt.getTime() - requestedAt.getTime()).toBe(5 * 60_000);
+    expect(proposal).toMatchObject({ requestedAt: requestedAt.toISOString(), expiresAt: expiresAt.toISOString() });
+    // A replay returns the stored proposal and writes nothing more.
+    expect(await inbound.propose(principal, body, flowKey)).toEqual(proposal);
+    expect(await h.rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND requested_by=$2", [h.a.tenantId, principal.actorId])).toHaveLength(1);
+    h.clock.set(START);
   });
 });
