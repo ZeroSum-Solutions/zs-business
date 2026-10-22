@@ -12,7 +12,7 @@ import { isDealChanged, type DealSummary, type ListResult, type PipelineSummary 
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { LEAD_SOURCE_LABELS } from "@/lib/lead-sources";
-import { useContactNames, useDeals, useDisplayZone, useKeys, usePipelines } from "@/lib/queries";
+import { browserZone, useContactNames, useDeals, useKeys, usePipelines } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { cn, formatMinor, relativeTime } from "@/lib/utils";
 import { DealDetailsDialog } from "./deal-details-dialog";
@@ -112,7 +112,8 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   // The deal whose stage select had focus when it moved: the card re-mounts, so focus goes back to it.
   const [refocus, setRefocus] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ dealId: string; open: boolean } | null>(null);
-  const zone = useDisplayZone();
+  // CRM dates show in the viewer's zone; only bookings carry a calendar's own.
+  const zone = browserZone();
 
   const names = useMemo(() => new Map(contacts.data?.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
 

@@ -314,7 +314,7 @@ test("moves a deal, and reloads when someone else changed it", async ({ page, re
   await expect(target).toBeVisible();
   await someoneElse(request).touchDeal(stale.title);
   await target.getByRole("combobox").selectOption({ label: "Delivered" });
-  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(/^Someone changed .+\. Reloaded\.$/);
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(`Someone changed ${stale.title}. Reloaded.`);
   await expect(target.locator("option:checked")).toHaveText(stale.from);
   await viewportShot(page, "15-deal-conflict", info.project.name, PREFIX);
 
@@ -481,7 +481,7 @@ test("reloads and allows a retry when the API reports a concurrent update", asyn
   const reloaded = waitForDealsRead(page);
   await card.getByRole("combobox").selectOption({ label: "Deposit" });
   await reloaded;
-  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(/^Someone changed .+\. Reloaded\.$/);
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(`Someone changed ${title}. Reloaded.`);
   await expect(card.locator("option:checked")).toHaveText("Design");
   await expect(card.getByRole("combobox")).toBeEnabled();
 
@@ -514,7 +514,7 @@ test("keeps a deal unmovable, and says so, when the reload after a conflict fail
   abort = false;
   await page.unroute(stage);
   await note.getByRole("button", { name: "Try again" }).click();
-  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(/^Someone changed .+\. Reloaded\.$/);
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(`Someone changed ${title}. Reloaded.`);
   await expect(card.getByRole("combobox")).toBeEnabled();
   await expect(page.locator("[data-fetching]")).toHaveCount(0);
   await card.getByRole("combobox").selectOption({ label: "Deposit" });

@@ -6,6 +6,7 @@ process.env.TZ = "Asia/Tokyo";
 import { createElement as h } from "react";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { ContactDetail } from "../src/components/customers/contact-detail";
+import { PipelineBoard } from "../src/components/customers/pipeline-board";
 import { CustomersView } from "../src/components/customers/customers-view";
 import { WebsiteRequests } from "../src/components/customers/website-requests";
 import { amountHint } from "../src/components/customers/deal-details-dialog";
@@ -121,6 +122,33 @@ describe("customers page", () => {
     expect(html).not.toContain(offline.message);
     expect(html).toContain("Website bookings to review could not load.");
     expect(html).toContain("Try again");
+  });
+});
+
+// The business's calendar is in New York; the viewer is in Tokyo.
+const newYork = { id: uuid(71), tenantId: DEMO_TENANT_ID, name: "Front desk", timeZone: "America/New_York" } as never;
+const sales = { id: uuid(1), name: "Sales", stages: [{ id: uuid(11), name: "Inquiry", position: 0, outcome: "open" }, { id: uuid(12), name: "Won", position: 1, outcome: "won" }] };
+
+describe("pipeline board", () => {
+  it("shows when a deal was won in the viewer's time zone, not the calendar's (U2-1)", () => {
+    const won = { id: uuid(42), tenantId: DEMO_TENANT_ID, contactId: customer.id, pipelineId: sales.id, stageId: uuid(12), title: "Wedding set", revision: 2, createdAt: customer.createdAt, updatedAt: customer.updatedAt, value: null, leadSource: null, wonAt: "2026-10-01T02:00:00.000Z" };
+    const html = renderScreen(h(PipelineBoard), { fill: (client) => {
+      client.setQueryData(keys.resources, [newYork]);
+      client.setQueryData(keys.pipelines, [sales]);
+      client.setQueryData(keys.deals({ pipelineId: sales.id }), { items: [won], incomplete: false, loaded: 1 });
+      client.setQueryData(keys.contactNames([customer.id]), [customer]);
+    } }).replaceAll("<!-- -->", "");
+    expect(html).toContain("Won Thu, Oct 1");
+  });
+
+  it("keeps a website booking in its calendar's time zone", () => {
+    const booked = { ...request, booking: { resourceId: uuid(71), startsAt: "2026-10-01T02:00:00.000Z", endsAt: "2026-10-01T03:00:00.000Z" } } as IntakeItemRecord;
+    const html = renderScreen(h(WebsiteRequests), { fill: (client) => {
+      client.setQueryData(keys.resources, [newYork]);
+      client.setQueryData(keys.intake("possible_match"), { items: [booked], incomplete: false, loaded: 1 });
+      client.setQueryData(keys.contactNames([]), []);
+    } }).replaceAll("<!-- -->", "");
+    expect(html).toContain("Wed, Sep 30, 10:00 PM");
   });
 });
 

@@ -179,7 +179,8 @@ test.describe("idempotent retries", () => {
   test("a failed reload after a deal conflict says so and keeps the move off until a reload works", async ({ page }, info) => {
     await page.goto("/customers?view=pipeline");
     if (info.project.name === "phone") await page.getByRole("button", { name: /^Design/ }).click();
-    const ring = page.locator("[data-deal-id]").filter({ hasText: "Custom engagement ring, 2 ct oval" });
+    const title = "Custom engagement ring, 2 ct oval";
+    const ring = page.locator("[data-deal-id]").filter({ hasText: title });
     await expect(ring).toBeVisible();
     await expect(page.locator("[data-fetching]")).toHaveCount(0);
     const board = page.getByRole("region", { name: "Pipeline" });
@@ -204,7 +205,7 @@ test.describe("idempotent retries", () => {
     // Once a reload works the board says so and the move is back on, with the new revision.
     await page.evaluate(() => window.__zsDemo!.failDealReads(false));
     await note.getByRole("button", { name: "Try again" }).click();
-    await expect(board.getByRole("alert")).toHaveText(/^Someone changed .+\. Reloaded\.$/);
+    await expect(board.getByRole("alert")).toHaveText(`Someone changed ${title}. Reloaded.`);
     await expect(note).toHaveCount(0);
     await expect(ring.getByRole("combobox")).toBeEnabled();
     await expect(page.locator("[data-fetching]")).toHaveCount(0);
