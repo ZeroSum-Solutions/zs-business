@@ -76,7 +76,7 @@ describe("POST /v1/wallet/top-ups (S-1, S-2)", () => {
     expect(await topUpRows(h.a.tenantId)).toEqual(before);
   });
 
-  it("replays the same top-up and the same Stripe request for the same key", async () => {
+  it("replays the same top-up and its stored Checkout URL for the same key", async () => {
     const key = randomUUID();
     const first = createTopUpResponseSchema.parse((await topUp(h.a.token, 1_200, key)).body);
     now += 5 * 60_000;
@@ -84,10 +84,8 @@ describe("POST /v1/wallet/top-ups (S-1, S-2)", () => {
     expect(retry.status).toBe(201);
     const second = createTopUpResponseSchema.parse(retry.body);
     expect(second).toEqual(first);
-    // Both requests are byte-identical, so Stripe replays its first session.
-    expect(stripe.calls).toHaveLength(2);
-    expect(stripe.calls[1]!.body).toBe(stripe.calls[0]!.body);
-    expect(stripe.calls[1]!.headers["Idempotency-Key"]).toBe(stripe.calls[0]!.headers["Idempotency-Key"]);
+    // S-2: the session URL was stored, so the retry answers it without asking Stripe again.
+    expect(stripe.calls).toHaveLength(1);
     expect((await topUpRows(h.a.tenantId)).filter((row) => row.id === first.topup.id)).toHaveLength(1);
 
     // Another key names another top-up.
@@ -176,14 +174,14 @@ describe("POST /v1/wallet/top-ups (S-1, S-2)", () => {
   it("refuses a retry past the retry window with 409 topup_closed, without asking Stripe again", async () => {
     const key = randomUUID();
     expect((await topUp(h.a.token, 1_000, key)).status).toBe(201);
-    // At the limit itself the retry still goes through.
+    // At the limit itself the retry still goes through, with the stored session URL.
     now += CHECKOUT_RETRY_LIMIT_MS;
     expect((await topUp(h.a.token, 1_000, key)).status).toBe(201);
     now += 1;
     const late = await topUp(h.a.token, 1_000, key);
     expect(late.status).toBe(409);
     expect(apiErrorBodySchema.parse(late.body).error).toMatchObject({ code: "Conflict", details: { reason: "topup_closed" } });
-    expect(stripe.calls).toHaveLength(2);
+    expect(stripe.calls).toHaveLength(1);
   });
 
   it("refuses a retry for a top-up that is no longer pending with 409 topup_closed", async () => {

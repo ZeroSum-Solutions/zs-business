@@ -3,7 +3,7 @@
 import { CheckCircle, MinusCircle, Play, Prohibit, Robot, ShieldCheck } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useRef, useState, type FormEvent } from "react";
 import type { FollowUpRunDetail, FollowUpStatus, KillFollowUpRequest, UpdateFollowUpSettingsRequest } from "@zs/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,18 +26,22 @@ import {
   STOP_REASONS,
   timeZoneChoices,
   toSettingsForm,
+  zoneName,
   type SettingsField,
   type SettingsForm,
 } from "@/lib/agents";
 import { useIntentKey } from "@/lib/intent-key";
 import { useContactNames, useDisplayZone, useFollowUpRun, useFollowUpRuns, useFollowUpStatus, useKeys } from "@/lib/queries";
 import { MANAGE_AGENTS, useCan, useSession } from "@/lib/session";
+import { singleFlight } from "@/lib/single-flight";
 import { formatDay, formatTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 const linkClass = "inline-flex min-h-11 items-center font-medium text-accent underline-offset-4 hover:underline";
 const when = (instant: string, zone: string) => `${formatDay(instant, zone)}, ${formatTime(instant, zone)}`;
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+/** A stop note longer than this shows three lines until the reader asks for the rest. */
+const LONG_NOTE = 140;
 
 export const STOPPED_MESSAGE = "Agent stopped. It drafts nothing until an owner resumes it.";
 export const STALE_SETTINGS_MESSAGE = "Someone else saved these settings while you were editing. The latest settings are loaded below. Check them and save again.";
@@ -67,6 +71,9 @@ export function AgentsView() {
 /** The agent's state in words, the stop and resume switches, and Run now (agents.md G-3, G-11). */
 function FollowUpCard() {
   const status = useFollowUpStatus();
+  // agents.md G-11: without a model on the server `POST /runs` is a 404; only Run now finds out.
+  const [runnable, setRunnable] = useState(true);
+  const state = status.data ? agentState(status.data, { runnable }) : null;
   return (
     <Card aria-labelledby="followup-title" data-testid="followup-card">
       <CardHeader>
@@ -75,7 +82,7 @@ function FollowUpCard() {
             <Robot size={20} aria-hidden className="text-muted" />
             <CardTitle id="followup-title">Inquiry follow-up</CardTitle>
             <span aria-live="polite">
-              {status.data ? <Badge tone={agentState(status.data).tone} data-testid="followup-state">{agentState(status.data).label}</Badge> : null}
+              {state ? <Badge tone={state.tone} data-testid="followup-state">{state.label}</Badge> : null}
             </span>
           </div>
           <CardDescription className="mt-1">
@@ -87,12 +94,12 @@ function FollowUpCard() {
       </CardHeader>
       {status.isPending ? <LoadingRows rows={2} label="Loading the agent" /> : status.isError ? (
         <ErrorNote error={status.error} retry={() => status.refetch()} />
-      ) : <FollowUpControls status={status.data} />}
+      ) : <FollowUpControls status={status.data} runnable={runnable} onUnrunnable={() => setRunnable(false)} />}
     </Card>
   );
 }
 
-function FollowUpControls({ status }: { status: FollowUpStatus }) {
+function FollowUpControls({ status, runnable, onUnrunnable }: { status: FollowUpStatus; runnable: boolean; onUnrunnable: () => void }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
@@ -104,7 +111,14 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
   const resumeKeys = useIntentKey();
   const runKeys = useIntentKey();
   const [note, setNote] = useState("");
-  const [runUnavailable, setRunUnavailable] = useState(false);
+  const [wholeNote, setWholeNote] = useState(false);
+  // One write of each kind at a time: a double tap must not send twice or toast twice.
+  const [stopOnce] = useState(singleFlight);
+  const [resumeOnce] = useState(singleFlight);
+  const [runOnce] = useState(singleFlight);
+  // Stop and Resume replace each other, and Run now turns off: focus moves to what changed.
+  const stateLine = useRef<HTMLParagraphElement>(null);
+  const focusState = () => stateLine.current?.focus();
 
   const showStatus = (next: FollowUpStatus) => queryClient.setQueryData(keys.followUp, next);
   const refreshStatus = () => queryClient.invalidateQueries({ queryKey: keys.followUp });
@@ -119,6 +133,7 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
       showStatus(next);
       setNote("");
       toast(STOPPED_MESSAGE, "info");
+      focusState();
     },
   });
   const resume = useMutation({
@@ -130,6 +145,7 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
     onSuccess: (next) => {
       showStatus(next);
       toast(next.canDraft ? "Agent resumed." : "Agent resumed. It still cannot draft right now; see why above.");
+      focusState();
     },
   });
   const run = useMutation({
@@ -144,28 +160,44 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
     },
     onSuccess: (detail) => toast(runToast(detail), detail.status === "stopped" ? "info" : "success"),
     // agents.md G-11: without a model on the server the route does not exist.
-    onError: (error) => setRunUnavailable(isApiError(error, "not_found")),
+    onError: (error) => {
+      if (!isApiError(error, "not_found")) return;
+      onUnrunnable();
+      focusState();
+    },
   });
 
   const submitStop = (event: FormEvent) => {
     event.preventDefault();
     const trimmed = note.trim();
-    stop.mutate(trimmed ? { note: trimmed } : {});
+    stopOnce(() => stop.mutateAsync(trimmed ? { note: trimmed } : {}));
   };
 
-  const blocked = blockedSentence(status);
+  const blocked = blockedSentence(status, { runnable });
   const busy = stop.isPending || resume.isPending;
-  const failure = [stop, resume].find((step) => step.isError)?.error ?? (run.isError && !runUnavailable ? run.error : null);
+  const failure = [stop, resume].find((step) => step.isError)?.error ?? (run.isError && runnable ? run.error : null);
+  // Stop stays open while it is off: a stop latches, so turning it on later still needs a Resume (G-3).
+  // A run while it cannot draft only reports why it stopped (the reason is shown above).
+  const runBlocked = !runnable || !status.canDraft;
+  const killedNote = status.killed?.note ?? null;
+  const clampNote = killedNote !== null && killedNote.length > LONG_NOTE && !wholeNote;
 
   return (
     <div className="space-y-4 text-sm text-fg-2">
       {status.killed ? (
-        <p data-testid="followup-killed">
-          Stopped by {status.killed.by === userId ? "you" : "a team member"} on {when(status.killed.at, zone)}.
-          {status.killed.note ? <> Note: <q className="break-words">{status.killed.note}</q></> : null}
-        </p>
+        <div>
+          <p data-testid="followup-killed">
+            Stopped by {status.killed.by === userId ? "you" : "a team member"} on {when(status.killed.at, zone)}.
+            {killedNote ? <> Note: <q id="stop-note-text" className={cn("break-words", clampNote && "line-clamp-3")}>{killedNote}</q></> : null}
+          </p>
+          {killedNote && killedNote.length > LONG_NOTE ? (
+            <Button variant="ghost" className="-ml-3 px-3" aria-expanded={wholeNote} aria-controls="stop-note-text" onClick={() => setWholeNote(!wholeNote)}>
+              {wholeNote ? "Show less of the note" : "Show the whole note"}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
-      <p data-testid="followup-blocked">
+      <p ref={stateLine} tabIndex={-1} className="outline-none" data-testid="followup-blocked">
         {blocked ? <><span className="font-medium text-fg">Why it can&apos;t draft right now:</span> {blocked}</> : "It can draft now."}
       </p>
 
@@ -180,7 +212,9 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
       {status.killed ? (
         <div className="space-y-2">
           <Button
-            onClick={() => resume.mutate()}
+            // Staff cannot resume: a filled primary button reads as live even when disabled.
+            variant={canManage ? "primary" : "secondary"}
+            onClick={() => resumeOnce(() => resume.mutateAsync())}
             disabled={!canManage || busy}
             aria-busy={resume.isPending}
             aria-describedby={canManage ? undefined : "resume-reason"}
@@ -195,7 +229,13 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
             <Label htmlFor="stop-note">Note for the team (optional)</Label>
             <Input id="stop-note" maxLength={500} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why you stopped it" />
           </div>
-          <Button type="submit" variant="danger-outline" disabled={busy} aria-busy={stop.isPending} aria-describedby="stop-help">
+          <Button
+            type="submit"
+            variant="danger-outline"
+            disabled={busy}
+            aria-busy={stop.isPending}
+            aria-describedby="stop-help"
+          >
             <Prohibit aria-hidden />Stop the agent
           </Button>
           <p id="stop-help" className="text-xs text-meta">Stops new drafts at once. Drafts already in the Inbox stay there until someone approves or discards them.</p>
@@ -206,15 +246,15 @@ function FollowUpControls({ status }: { status: FollowUpStatus }) {
         <div className="space-y-2 border-t border-border-soft pt-4">
           <Button
             variant="secondary"
-            onClick={() => run.mutate()}
-            disabled={runUnavailable || run.isPending}
+            onClick={() => runOnce(() => run.mutateAsync())}
+            disabled={runBlocked || run.isPending}
             aria-busy={run.isPending}
-            aria-describedby={runUnavailable ? "run-reason" : "run-help"}
+            aria-describedby={runBlocked ? "run-reason" : "run-help"}
           >
             Run now
           </Button>
-          {runUnavailable ? (
-            <DisabledReason id="run-reason">Run now is not available on this server.</DisabledReason>
+          {runBlocked ? (
+            <DisabledReason id="run-reason">Run now works when the agent can draft. See why above.</DisabledReason>
           ) : (
             <p id="run-help" className="text-xs text-meta">Looks for unanswered requests once, now. Its drafts wait in the Inbox for approval.</p>
           )}
@@ -294,12 +334,16 @@ function SettingsSummary({ status }: { status: FollowUpStatus }) {
   );
 }
 
-const NUMBER_FIELDS: { field: SettingsField; id: string; label: string; min: number; max: number }[] = [
+type NumberField = { field: SettingsField; id: string; label: string; min: number; max: number };
+const NUMBER_FIELDS: NumberField[] = [
   { field: "maxDraftsPerDay", id: "agent-per-day", label: "Drafts per day, at most", min: 1, max: 200 },
-  { field: "maxDraftsPerContact", id: "agent-per-customer", label: "Drafts per customer, at most", min: 1, max: 10 },
-  { field: "contactWindowHours", id: "agent-window", label: "…within this many hours", min: 1, max: 2160 },
   { field: "waitHours", id: "agent-wait", label: "Wait before following up (hours)", min: 1, max: 720 },
   { field: "lookbackDays", id: "agent-lookback", label: "Look back (days)", min: 1, max: 90 },
+];
+/** The per-customer limit and its window read as one rule, so they share a fieldset. */
+const PER_CUSTOMER_FIELDS: NumberField[] = [
+  { field: "maxDraftsPerContact", id: "agent-per-customer", label: "Drafts at most", min: 1, max: 10 },
+  { field: "contactWindowHours", id: "agent-window", label: "Within this many hours", min: 1, max: 2160 },
 ];
 /**
  * Chromium makes a time input's clock button a tab stop of its own that never shows a focus
@@ -307,7 +351,7 @@ const NUMBER_FIELDS: { field: SettingsField; id: string; label: string; min: num
  */
 const TIME_INPUT = "[&::-webkit-calendar-picker-indicator]:hidden";
 const FIELD_IDS: Record<SettingsField, string> = {
-  ...Object.fromEntries(NUMBER_FIELDS.map((item) => [item.field, item.id])) as Record<SettingsField, string>,
+  ...Object.fromEntries([...NUMBER_FIELDS, ...PER_CUSTOMER_FIELDS].map((item) => [item.field, item.id])) as Record<SettingsField, string>,
   quietStart: "agent-quiet-start",
   quietEnd: "agent-quiet-end",
   timeZone: "agent-zone",
@@ -326,6 +370,7 @@ function SettingsFormBody({ status, reload }: { status: FollowUpStatus; reload: 
   const [draft, setDraft] = useState<{ revision: number; form: SettingsForm } | null>(null);
   const [invalid, setInvalid] = useState<SettingsField[]>([]);
   const [stale, setStale] = useState(false);
+  const [saveOnce] = useState(singleFlight);
   const form = draft?.form ?? toSettingsForm(status.settings);
   const revision = draft?.revision ?? status.revision;
   const zones = useMemo(() => timeZoneChoices(form.timeZone), [form.timeZone]);
@@ -359,7 +404,7 @@ function SettingsFormBody({ status, reload }: { status: FollowUpStatus; reload: 
     }
     setInvalid([]);
     setStale(false);
-    save.mutate({ ...read.settings, expectedRevision: revision });
+    saveOnce(() => save.mutateAsync({ ...read.settings, expectedRevision: revision }));
   };
 
   const hintId = (field: SettingsField) => (field === "quietStart" || field === "quietEnd" ? "agent-quiet-hint" : `${FIELD_IDS[field]}-hint`);
@@ -372,6 +417,22 @@ function SettingsFormBody({ status, reload }: { status: FollowUpStatus; reload: 
     <p id={hintId(field)} className={cn("mt-1 text-xs", invalid.includes(field) ? "text-danger" : "text-meta")}>{text}</p>
   );
   const quietInvalid = invalid.includes("quietStart") || invalid.includes("quietEnd");
+  const numberField = ({ field, label, min, max }: NumberField, inGroup = false) => (
+    <div key={field}>
+      <Label htmlFor={FIELD_IDS[field]} className={inGroup ? "font-normal" : undefined}>{label}</Label>
+      <Input
+        {...fieldProps(field)}
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        step={1}
+        value={form[field]}
+        onChange={(event) => edit({ [field]: event.target.value })}
+      />
+      {hint(field)}
+    </div>
+  );
 
   return (
     <form className="space-y-4" onSubmit={submit} noValidate aria-labelledby="settings-title">
@@ -384,23 +445,14 @@ function SettingsFormBody({ status, reload }: { status: FollowUpStatus; reload: 
         <Switch id="agent-enabled" checked={form.enabled} onCheckedChange={(enabled) => edit({ enabled })} aria-describedby="agent-enabled-help" />
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-1">
-        {NUMBER_FIELDS.map(({ field, label, min, max }) => (
-          <div key={field}>
-            <Label htmlFor={FIELD_IDS[field]}>{label}</Label>
-            <Input
-              {...fieldProps(field)}
-              type="number"
-              inputMode="numeric"
-              min={min}
-              max={max}
-              step={1}
-              value={form[field]}
-              onChange={(event) => edit({ [field]: event.target.value })}
-            />
-            {hint(field)}
-          </div>
-        ))}
+        {NUMBER_FIELDS.map((item) => numberField(item))}
       </div>
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium text-fg-2">Per customer</legend>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {PER_CUSTOMER_FIELDS.map((item) => numberField(item, true))}
+        </div>
+      </fieldset>
       <fieldset className="space-y-2">
         <legend className="text-sm font-medium text-fg-2">Quiet hours</legend>
         <div className="grid grid-cols-2 gap-3">
@@ -420,7 +472,7 @@ function SettingsFormBody({ status, reload }: { status: FollowUpStatus; reload: 
       <div>
         <Label htmlFor={FIELD_IDS.timeZone}>Time zone</Label>
         <Select {...fieldProps("timeZone")} className="w-full" value={form.timeZone} onChange={(event) => edit({ timeZone: event.target.value })}>
-          {zones.map((zone) => <option key={zone} value={zone}>{zone.replaceAll("_", " ")}</option>)}
+          {zones.map((zone) => <option key={zone} value={zone}>{zoneName(zone)}</option>)}
         </Select>
         {hint("timeZone", "Quiet hours follow this zone.")}
       </div>
@@ -471,7 +523,8 @@ function RunsCard() {
                   </p>
                   <Button
                     variant="ghost"
-                    className="mt-1"
+                    // Text lines up with the run's words above, not with the button's padding.
+                    className="mt-1 -ml-3 px-3"
                     aria-expanded={isOpen}
                     aria-controls={isOpen ? `run-${run.id}` : undefined}
                     onClick={() => setOpen(isOpen ? null : run.id)}

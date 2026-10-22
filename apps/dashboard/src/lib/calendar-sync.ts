@@ -107,3 +107,19 @@ const SYNC_ERRORS: Readonly<Record<string, string>> = {
 export function syncErrorMessage(code: string): string {
   return Object.hasOwn(SYNC_ERRORS, code) ? SYNC_ERRORS[code]! : "The last sync did not finish. It tries again by itself; busy times from before still apply.";
 }
+
+/** Where an owner removes Zero Sum's access to their Google account by hand. */
+export const GOOGLE_ACCESS_URL = "https://myaccount.google.com/permissions";
+
+const NOT_CONFIRMED = "Google has not confirmed the disconnect yet, so its busy times still block slots. It tries again by itself.";
+const TOKEN_UNREADABLE = "We could not read the saved Google access, so we cannot confirm it has ended. Its busy times still block slots until we fix this on our side. It tries again by itself.";
+
+/**
+ * What a `disconnecting` connection says (G-9). Busy times go only once Google ends the grant,
+ * so a try that failed says the blocks stay, and `stuck` offers the owner Google's own page to
+ * end the access now. After a refused revoke, the next try then finds the grant gone and finishes.
+ */
+export function disconnectingStatus(lastError: string | null): { message: string; stuck: boolean } {
+  if (lastError === null) return { message: "Removing its busy times. Events already added stay in Google.", stuck: false };
+  return { message: lastError === "token_unreadable" ? TOKEN_UNREADABLE : NOT_CONFIRMED, stuck: true };
+}

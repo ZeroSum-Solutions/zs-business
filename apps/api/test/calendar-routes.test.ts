@@ -275,7 +275,10 @@ describe("GET /oauth/google/callback (G-2, G-3)", () => {
     const flow = await consentFor(h.a, await newResource(h.a.tenantId));
     const forged = signConnectState(["forged", "x".repeat(40)].join("-"), verifyConnectState({ current: STATE_SECRET }, flow.state, clock.now())!);
     const [body, tag] = flow.state.slice("zgs1.".length).split(".");
-    const tampered = `zgs1.${body!.slice(0, -2)}AA.${tag}`;
+    // Change the next-to-last character so the body always differs (a fixed "AA" suffix could
+    // match a body that already ended in "AA").
+    const tampered = `zgs1.${body!.slice(0, -2)}${body!.at(-2) === "A" ? "B" : "A"}${body!.at(-1)}.${tag}`;
+    expect(tampered).not.toBe(flow.state);
     const calls = tokenCalls();
     for (const query of [{ code: "c" }, { state: "", code: "c" }, { state: forged, code: "c" }, { state: tampered, code: "c" }, { state: "garbage", error: "access_denied" }]) {
       const response = await callback(query);
