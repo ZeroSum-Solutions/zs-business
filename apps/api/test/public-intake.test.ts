@@ -120,6 +120,18 @@ describe("public reads", () => {
   });
 });
 
+describe("instants outside UTC years 0001..9999 (booking.md B-3)", () => {
+  it("refuses year 0000 in a public slot read and a public request with 400, writing nothing", async () => {
+    const page = await freshPage(h.a);
+    const before = await tenantCounts(h.a.tenantId);
+    const slots = await call(h.app, "GET", `/public/v1/pages/${page.key}/slots?resourceId=${page.resourceId}&from=0000-12-31T23:00:00.000Z&to=0001-01-01T01:00:00.000Z`);
+    expect(slots.status).toBe(400);
+    const request = await book(page.key, visitor(page.resourceId, { startsAt: "0000-12-31T23:00:00.000Z" }));
+    expect(request.status).toBe(400);
+    expect(await tenantCounts(h.a.tenantId)).toEqual(before);
+  });
+});
+
 describe("forged tenant, page and resource references (P-2, P-4)", () => {
   let page: PageSetup & { resourceId: string };
   beforeAll(async () => { page = await freshPage(h.a); });

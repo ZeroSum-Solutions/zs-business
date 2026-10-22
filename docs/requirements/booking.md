@@ -8,6 +8,12 @@ time of writing, `pnpm --filter @zs/core test:booking` runs 81 tests in four fil
 all pass. The public examples cover a small part of the contract; the acceptance tests
 cover the rest.
 
+Revision 2 (2026-10-22): B-3 accepts client-supplied instants in UTC years 0001 through 9999
+only. The frozen booking instant schema refuses anything outside that range, so every booking
+boundary (create, the availability recheck, slot search, availability and list range filters)
+answers 400 `ValidationFailed` and writes nothing. CRM consent instants and source observations
+follow the same rule.
+
 ## Evidence and decisions
 
 All prose and schemas here are original. No implementation was ported.
@@ -53,7 +59,8 @@ replays and boundary tests have one definition of now.
 
 **B-3. Desired, data boundary.** Validate with the frozen schemas. IDs are UUIDs
 and normalize to lowercase. Instants use UTC `YYYY-MM-DDTHH:mm:ss.sssZ` with exactly
-three fractional digits. Reject invalid calendar dates, nonpositive intervals,
+three fractional digits, in UTC years 0001 through 9999 (Postgres has no year zero).
+Reject invalid calendar dates, instants outside that range, nonpositive intervals,
 unknown fields and invalid numbers with `ValidationFailed`; do not coerce them.
 Each feature function uses schema `safeParse` and maps parse failures to
 `ValidationFailed`. Calling an exported schema's `parse` directly still raises a

@@ -77,11 +77,22 @@ describe("B-2/B-3/B-4 boundary", () => {
     ["zero step", input(resource({ slotStepMinutes: 0 }), "2026-10-19T00:00:00.000Z", "2026-10-20T00:00:00.000Z")],
     ["fractional length", input(resource({ slotLengthMinutes: 1.5 }), "2026-10-19T00:00:00.000Z", "2026-10-20T00:00:00.000Z")],
     ["instant without milliseconds", day("2026-10-19T00:00:00Z", "2026-10-20T00:00:00.000Z")],
+    ["range in year 0000", day("0000-12-31T00:00:00.000Z", "0001-01-01T00:00:00.000Z")],
+    ["busy entry in year 0000", input(resource(), "0001-01-01T00:00:00.000Z", "0001-01-02T00:00:00.000Z",
+      [external("0000-12-31T23:00:00.000Z", "0001-01-01T10:00:00.000Z")])],
     ["foreign busy entry", input(resource(), "2026-10-19T00:00:00.000Z", "2026-10-20T00:00:00.000Z",
       [{ ...external("2026-10-19T09:00:00.000Z", "2026-10-19T10:00:00.000Z"), tenantId: resourceId }])],
   ])("rejects %s with ValidationFailed", (_name, value) => {
     expect(validationFailure(() => getAvailableSlots(value as GetAvailableSlotsInput, clockAt("2026-10-01T00:00:00.000Z"))))
       .toBe("ValidationFailed");
+  });
+
+  it("computes slots at the first and last supported instants", () => {
+    const everyDay = resource({ weekly: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, windows: [{ startMinute: 0, endMinute: 1440 }] })) });
+    expect(starts(input(everyDay, "0001-01-01T00:00:00.000Z", "0001-01-01T01:00:00.000Z"), "0001-01-01T00:00:00.000Z"))
+      .toEqual(["0001-01-01T00:00:00.000Z", "0001-01-01T00:30:00.000Z"]);
+    expect(starts(input(everyDay, "9999-12-31T23:00:00.000Z", "9999-12-31T23:59:59.999Z"), "9999-12-31T00:00:00.000Z"))
+      .toEqual(["9999-12-31T23:00:00.000Z"]);
   });
 
   it("accepts exactly 31 days with a 1-minute step quickly", () => {
