@@ -508,6 +508,29 @@ describe("owner review (P-12)", () => {
     expect(intakeItemOutputSchema.parse(linked.body).result.consent.email).toMatchObject(agreed);
   });
 
+  it("replays a link or reject stored before results carried the disclosure text", async () => {
+    const page = await freshPage(h.a);
+    for (const verb of ["link", "reject"] as const) {
+      const tag = randomUUID().slice(0, 8);
+      const contact = await ownerContact(h.a, { email: `old.${tag}@haldenrowe.example` });
+      const response = await book(page.key, visitor(page.resourceId, {
+        email: `old.${tag}@haldenrowe.example`, startsAt: at(verb === "link" ? 11 : 12), consent: { email: true, sms: true },
+      }));
+      expect(response.status).toBe(201);
+      const key = randomUUID();
+      const request = { token: h.a.token, key, body: verb === "link" ? { contactId: contact.id } : {} };
+      const path = `/v1/intake/items/${response.body.requestId}/${verb}`;
+      const first = await call(h.app, "POST", path, request);
+      expect(first.status).toBe(200);
+      // An earlier release stored the consent rows without disclosureText.
+      await h.database.pool.query(
+        `UPDATE actions SET result = result #- '{consent,email,disclosureText}' #- '{consent,sms,disclosureText}'
+          WHERE tenant_id=$1 AND idempotency_key=$2`, [h.a.tenantId, key]);
+      const replayed = await call(h.app, "POST", path, request);
+      expect(replayed).toMatchObject({ status: 200, body: first.body });
+    }
+  });
+
   it("rejects an item once and refuses a second review", async () => {
     const page = await freshPage(h.a);
     const { itemId, contactId } = await possibleMatch(page, at(9));

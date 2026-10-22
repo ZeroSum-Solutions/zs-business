@@ -6,6 +6,8 @@ import {
   rejectIntakeItemCommandSchema,
   TenantDenied,
   ValidationFailed,
+  type ActionBinding,
+  type JsonValue,
   type Target,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
@@ -35,8 +37,35 @@ async function itemResult(tx: Transaction, tenantId: string, id: string) {
   return { result: { ...item } };
 }
 
+type JsonObject = { [key: string]: JsonValue };
+const isObject = (value: JsonValue | undefined): value is JsonObject =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * Results stored before P-8's disclosure text joined the owner view lack `disclosureText` on
+ * their consent rows. Fill it from the saved intake_item_consent evidence, so an identical
+ * retry still replays.
+ */
+async function addDisclosureText(tx: Transaction, result: JsonValue, binding: ActionBinding): Promise<JsonValue> {
+  if (!isObject(result) || !isObject(result.consent)) return result;
+  const missing = Object.entries(result.consent)
+    .filter((entry): entry is [string, JsonObject] => isObject(entry[1]) && !("disclosureText" in entry[1]));
+  if (missing.length === 0) return result;
+  const texts = new Map((await tx.query<{ channel: string; disclosure_text: string }>(
+    `SELECT channel::text AS channel, disclosure_text FROM intake_item_consent
+      WHERE tenant_id=$1 AND intake_item_id=$2`, [binding.tenantId, binding.target.id],
+  )).rows.map((row) => [row.channel, row.disclosure_text]));
+  const consent = { ...result.consent };
+  for (const [channel, row] of missing) {
+    const text = texts.get(channel);
+    if (text !== undefined) consent[channel] = { ...row, disclosureText: text };
+  }
+  return { ...result, consent };
+}
+
 export const linkIntakeItemHandler: ActionHandler = {
   resolveTarget: resolveItem,
+  upgradeStoredResult: addDisclosureText,
   async handle({ tx, command, binding, now }) {
     const { payload } = parseOrFail(linkIntakeItemCommandSchema, command);
     const tenantId = binding.tenantId;
@@ -68,6 +97,7 @@ export const linkIntakeItemHandler: ActionHandler = {
 
 export const rejectIntakeItemHandler: ActionHandler = {
   resolveTarget: resolveItem,
+  upgradeStoredResult: addDisclosureText,
   async handle({ tx, command, binding, now }) {
     const { payload } = parseOrFail(rejectIntakeItemCommandSchema, command);
     const tenantId = binding.tenantId;
