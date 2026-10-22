@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { sessionForRequest } from "../src/lib/server/session";
 import { PILOT_COOKIE } from "../src/lib/server/supabase";
-import { createLiveHarness, forwardedClaims, ORIGIN, setCookies, signInThroughLink } from "./helpers/live";
+import { createLiveHarness, forwardedClaims, LIVE_BUSINESS, ORIGIN, setCookies, signInThroughLink } from "./helpers/live";
 
 const request = (cookie?: string) => new Request(`${ORIGIN}/api/session`, { headers: cookie ? { Cookie: cookie } : {} });
 
@@ -12,9 +12,37 @@ describe("GET /api/session", () => {
     const response = await sessionForRequest(request(jar.header()), harness.setup);
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toEqual({ tenantId: harness.tenantId, userId: harness.owner.id, role: "owner" });
-    expect(harness.apiCalls.map((call) => call.url)).toEqual(["http://api.internal:8787/v1/me"]);
+    expect(await response.json()).toEqual({
+      tenantId: harness.tenantId, userId: harness.owner.id, role: "owner", businessName: LIVE_BUSINESS, email: harness.owner.email,
+    });
+    expect(harness.apiCalls.map((call) => call.url)).toEqual(["http://api.internal:8787/v1/me?include=profile"]);
     expect(forwardedClaims(harness.apiCalls[0]!).sub).toBe(harness.owner.id);
+  });
+
+  it("works with an older API that does not name the business or the email", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    const live = harness.api;
+    harness.api = async (call) => {
+      const answer = await live(call);
+      const { businessName: _name, email: _email, ...older } = await answer.json();
+      return Response.json(older, { status: answer.status });
+    };
+    const response = await sessionForRequest(request(jar.header()), harness.setup);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ tenantId: harness.tenantId, userId: harness.owner.id, role: "owner" });
+  });
+
+  it("ignores keys a newer API adds", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    const live = harness.api;
+    harness.api = async (call) => Response.json({ ...(await (await live(call)).json()), timeZone: "UTC" });
+    const response = await sessionForRequest(request(jar.header()), harness.setup);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      tenantId: harness.tenantId, userId: harness.owner.id, role: "owner", businessName: LIVE_BUSINESS, email: harness.owner.email,
+    });
   });
 
   it("is signed out with no cookie, and expired with the retired pilot cookie, which it expires", async () => {

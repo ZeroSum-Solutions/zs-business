@@ -88,12 +88,35 @@ export type ChangeMemberRoleRequest = z.infer<typeof changeMemberRoleRequestSche
 export const memberListSchema = z.strictObject({ items: z.array(memberRecordSchema) });
 export type MemberList = z.infer<typeof memberListSchema>;
 
-/** GET /v1/me: who the token belongs to in its tenant, and what they may do. */
+/**
+ * GET /v1/me: who the token belongs to in its tenant, and what they may do. With
+ * `?include=profile` it adds `businessName` (the tenant's name) and `email` (the membership's
+ * own address), so screens name the right business and person; members have no display name
+ * yet. Without it the answer keeps its original five keys, which a dashboard built before the
+ * profile fields reads strictly, so the API can deploy first.
+ */
 export const meResponseSchema = z.strictObject({
   tenantId: idSchema,
   userId: idSchema,
   memberId: idSchema,
   role: memberRoleSchema,
   permissions: z.array(permissionSchema),
+  businessName: z.string().optional(),
+  email: z.string().optional(),
 });
 export type MeResponse = z.infer<typeof meResponseSchema>;
+/**
+ * How a client reads /v1/me: the membership must be there, but an older API may leave out the
+ * profile fields, a newer one may add keys (dropped here) or permissions, so neither order of
+ * a rolling deploy locks anyone out. The API answers with `meResponseSchema`.
+ */
+export const meReadSchema = z.object({
+  tenantId: idSchema,
+  userId: idSchema,
+  memberId: idSchema,
+  role: memberRoleSchema,
+  permissions: z.array(z.string()),
+  businessName: z.string().optional(),
+  email: z.string().optional(),
+});
+export type MeRead = z.infer<typeof meReadSchema>;

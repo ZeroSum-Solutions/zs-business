@@ -4,7 +4,7 @@ import { idempotencyKey, jsonBody } from "./request.js";
 
 /** Membership routes. Any member may read /me; only owners hold the "members" permission. */
 export const memberRoutes = new Hono<AppEnv>()
-  .get("/me", async (c) => c.json(await c.var.session.me()))
+  .get("/me", async (c) => c.json(await c.var.session.me({ profile: c.req.query("include") === "profile" })))
   .get("/members", async (c) => c.json(await c.var.session.listMembers()))
   .post("/members", async (c) =>
     c.json(await c.var.session.inviteMember(await jsonBody(c), idempotencyKey(c)), 201))

@@ -5,22 +5,32 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useApiRuntime } from "@/lib/api/react";
+import { PRODUCT_NAME } from "@/lib/product";
 import { useInboxCount } from "@/lib/queries";
+import { type Identity, useIdentity } from "@/lib/session";
 import { cn } from "@/lib/utils";
-import { AccountMenu, OWNER } from "./account-menu";
+import { AccountMenu } from "./account-menu";
 import { isActive, NAV_ITEMS } from "./nav";
 import { NewMenu } from "./new-menu";
 import { SessionGate } from "./session-gate";
 import { useLayoutTransition, useReducedMotionLive } from "@/lib/motion";
 
-function Brand({ compact = false }: { compact?: boolean }) {
+/** The first letters of a name's first two words ("Corner Bakery" → "CB"); "ZS" when it has none. */
+export function brandMark(name: string): string {
+  const words = name.match(/[\p{L}\p{N}]+/gu) ?? [];
+  return words.slice(0, 2).map((word) => word[0]!.toUpperCase()).join("") || "ZS";
+}
+
+/** The signed-in business, or the product's own name before any session (sign-in names no business). */
+export function Brand({ identity, compact = false }: { identity: Identity | null; compact?: boolean }) {
+  const name = identity?.businessName || PRODUCT_NAME;
   return (
-    <Link href="/" className="flex min-h-11 shrink-0 items-center gap-2.5 rounded-md">
-      <span aria-hidden className="flex size-9 items-center justify-center rounded-[11px] bg-ink text-xs font-extrabold tracking-[-0.02em] text-ink-on">
-        H&amp;R
+    <Link href="/" className="flex min-h-11 min-w-0 items-center gap-2.5 rounded-md">
+      <span aria-hidden className="flex size-9 shrink-0 items-center justify-center rounded-[11px] bg-ink text-xs font-extrabold tracking-[-0.02em] text-ink-on">
+        {brandMark(name)}
       </span>
-      <span className={cn("text-base font-bold tracking-[-0.01em] text-fg", compact && "sr-only xl:not-sr-only")}>
-        {OWNER.business}<span className="sr-only">, home</span>
+      <span className={cn("min-w-0 truncate text-base font-bold tracking-[-0.01em] text-fg", compact && "sr-only xl:not-sr-only")}>
+        {name}<span className="sr-only">, home</span>
       </span>
     </Link>
   );
@@ -45,12 +55,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const layoutTransition = useLayoutTransition();
   const waiting = useInboxCount();
   const { mode } = useApiRuntime();
+  const identity = useIdentity();
 
   // Sign-in stands alone: no navigation into areas the visitor cannot open yet.
   if (pathname === "/sign-in") {
     return (
       <main id="main" className="mx-auto min-h-dvh w-full max-w-content px-4 pt-3 sm:px-6 lg:px-10 lg:pt-6">
-        <div className="pb-4"><Brand /></div>
+        <div className="pb-4"><Brand identity={null} /></div>
         {children}
       </main>
     );
@@ -65,8 +76,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
       {/* Phone: brand, a round +, the account. Desktop: brand, the pill nav centred, New and the account. */}
       <header className="flex h-[var(--topbar-height)] items-center justify-between gap-3 lg:grid lg:h-[88px] lg:grid-cols-[1fr_auto_1fr]">
-        <div className="lg:hidden"><Brand /></div>
-        <div className="hidden lg:block"><Brand compact /></div>
+        <div className="min-w-0 lg:hidden"><Brand identity={identity} /></div>
+        <div className="hidden min-w-0 lg:block"><Brand identity={identity} compact /></div>
         <nav aria-label="Main" className="hidden rounded-pill bg-nav p-[5px] shadow-[0_8px_22px_-12px_rgba(20,20,24,.5)] ring-1 ring-border/40 lg:block">
           <ul className="flex gap-0.5">
             {NAV_ITEMS.map((item) => {

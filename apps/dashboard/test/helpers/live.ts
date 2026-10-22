@@ -31,6 +31,9 @@ export interface LiveHarness {
   setup: LiveSetup;
 }
 
+/** The tenant name the fake API's /v1/me reports. */
+export const LIVE_BUSINESS = "Tenant A";
+
 export function createLiveHarness(overrides: { ttlSeconds?: number; trustProxy?: boolean } = {}): LiveHarness {
   const tenantId = randomUUID();
   const owner: FakeUser = { id: randomUUID(), email: "owner@example.com", appMetadata: { tenant_id: tenantId } };
@@ -51,7 +54,10 @@ export function createLiveHarness(overrides: { ttlSeconds?: number; trustProxy?:
         return Response.json({ error: { code: "Unauthorized", message: "Session has ended", details: {} } }, { status: 401 });
       }
       if (new URL(call.url).pathname === "/v1/me") {
-        return Response.json({ tenantId, userId: claims.sub, memberId: randomUUID(), role: "owner", permissions: ["calendar"] });
+        return Response.json({
+          tenantId, userId: claims.sub, memberId: randomUUID(), role: "owner", permissions: ["calendar"],
+          businessName: LIVE_BUSINESS, email: owner.email,
+        });
       }
       return Response.json({ items: [] });
     },

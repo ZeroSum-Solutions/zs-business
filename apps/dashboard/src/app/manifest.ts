@@ -1,11 +1,12 @@
 import type { MetadataRoute } from "next";
+import { PRODUCT_NAME } from "@/lib/product";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: "/",
-    name: "Halden & Rowe Business",
-    short_name: "Halden & Rowe",
-    description: "Results, inbox, calendar, customers, site and agents for Halden & Rowe Fine Jewelry.",
+    name: PRODUCT_NAME,
+    short_name: "ZS Business",
+    description: "Results, inbox, calendar, customers, site and agents for your business.",
     start_url: "/",
     scope: "/",
     display: "standalone",

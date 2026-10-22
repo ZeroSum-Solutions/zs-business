@@ -1,4 +1,8 @@
-/** Made-up read-only content for areas without an HTTP route yet (wallet, site, connections, plan). TODO(api). */
+/**
+ * Made-up read-only content for areas without an HTTP route yet (wallet, site, connections, plan). TODO(api).
+ * It keeps to the contracts: Stripe only takes wallet top-ups (stripe.md), email goes out through
+ * the email provider (resend.md), and nothing in v1 sends texts (twilio.md).
+ */
 import type {
   ChecklistItem,
   Connection,
@@ -21,7 +25,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     walletTopUp: 60,
     periodLabel: "October",
     lines: [
-      { id: "sms", label: "Text messages", used: 312, cap: 500, unit: "texts", unitPrice: 0.012 },
       { id: "ai", label: "Agent replies", used: 1184, cap: 2000, unit: "replies", unitPrice: 0.004 },
       { id: "email", label: "Emails", used: 2950, cap: 5000, unit: "emails", unitPrice: 0.001 },
     ],
@@ -31,15 +34,13 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     { id: "instagram", label: "Reconnect Instagram", detail: "Access expired 2 days ago. New DMs are not reaching your inbox.", status: "action", actionLabel: "Reconnect" },
     { id: "gbp", label: "Allow Google Business Profile", detail: "Grant review access so review requests can link to your profile.", status: "action", actionLabel: "Allow access" },
     { id: "calendar", label: "Google Calendar", detail: "Syncing both calendars.", status: "ok", actionLabel: null },
-    { id: "stripe", label: "Stripe deposits", detail: "Deposits land in your account in 2 days.", status: "ok", actionLabel: null },
+    { id: "stripe", label: "Stripe", detail: "Ready for wallet top-ups.", status: "ok", actionLabel: null },
   ];
 
   // Google Calendar is live (CalendarSyncApi); these are the accounts still to come.
   const connections: Connection[] = [
-    { id: "gmail", name: "Gmail", purpose: "Sends and receives customer email", status: "connected", detail: "hello@haldenrowe.example" },
     { id: "instagram", name: "Instagram", purpose: "Brings DMs into your inbox", status: "needs_reconnect", detail: "Access expired 2 days ago" },
-    { id: "stripe", name: "Stripe", purpose: "Takes design deposits", status: "connected", detail: "Payouts every 2 days" },
-    { id: "sms", name: "Text number", purpose: "Your business number for texts", status: "connected", detail: "+1 212 555 0100" },
+    { id: "stripe", name: "Stripe", purpose: "Takes wallet top-ups", status: "connected", detail: "Top-ups go to your wallet" },
     { id: "gbp", name: "Google Business Profile", purpose: "Links review requests to your profile", status: "needs_permission", detail: "Review access not granted" },
     { id: "domain", name: "haldenrowe.example", purpose: "Your website address", status: "verifying", detail: "DNS change seen, finishing checks" },
   ];
@@ -53,7 +54,6 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     endsOn: null,
     includes: ["Six areas, all features", "Two team seats", "Website and booking pages", "Agents with approval"],
     caps: [
-      { label: "Text messages", value: "500 a month, then from your wallet" },
       { label: "Agent replies", value: "2,000 a month, then from your wallet" },
       { label: "Wallet", value: "Prepaid, so no surprise bills. A message the balance can't cover waits for a top-up, and fails if none comes in time." },
     ],

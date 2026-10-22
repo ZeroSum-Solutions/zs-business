@@ -30,6 +30,22 @@ export async function findMembership(tx: Transaction, tenantId: string, userId: 
   return row ? { memberId: row.id, role: row.role } : null;
 }
 
+/** The caller's own membership address and the tenant's name, for GET /v1/me. */
+export async function memberProfile(
+  tx: Transaction,
+  tenantId: string,
+  memberId: string,
+): Promise<{ businessName: string; email: string }> {
+  const row = (await tx.query<{ business_name: string; email: string }>(
+    `SELECT t.name AS business_name, m.email FROM tenant_members m
+       JOIN tenants t ON t.tenant_id = m.tenant_id
+      WHERE m.tenant_id=$1 AND m.id=$2`,
+    [tenantId, memberId],
+  )).rows[0];
+  if (!row) throw new TenantDenied();
+  return { businessName: row.business_name, email: row.email };
+}
+
 /** Lock, then require a membership whose role grants `permission` (null: any member). */
 export async function requireMember(
   tx: Transaction,

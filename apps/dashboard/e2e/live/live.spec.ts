@@ -125,7 +125,8 @@ test("refuses anonymous callers and old pilot cookies with 401, and never spends
   expect((await request.get(`${LIVE.webUrl}/api/v1/crm/contacts`)).status()).toBe(200);
   const session = await request.get(`${LIVE.webUrl}/api/session`);
   expect(session.status()).toBe(200);
-  expect(await session.json()).toMatchObject({ role: "owner" });
+  // The seeded tenant's own name and the owner's address, from /v1/me.
+  expect(await session.json()).toMatchObject({ role: "owner", businessName: "Halden & Rowe Fine Jewelry", email: ownerEmail() });
 });
 
 test("signs an anonymous visitor in by email link, and out again for good", async ({ anonymousPage: page }, info) => {
@@ -135,7 +136,9 @@ test("signs an anonymous visitor in by email link, and out again for good", asyn
   const link = page.getByRole("link", { name: "Sign in", exact: true });
   await expect(link).toHaveAttribute("href", "/sign-in?next=%2Fcustomers");
   await link.click();
-  await expect(page.getByRole("heading", { level: 1, name: "Sign in to Halden & Rowe" })).toBeVisible();
+  // Sign-in comes before any session, so it names no business.
+  await expect(page.getByRole("heading", { level: 1, name: "Sign in", exact: true })).toBeVisible();
+  await expect(page.getByRole("main")).not.toContainText("Halden");
   await expect(page.getByRole("navigation", { name: "Main" })).toHaveCount(0);
   await shot(page, "18-sign-in", info.project.name, PREFIX);
   const serious = async () => (await new AxeBuilder({ page }).analyze()).violations

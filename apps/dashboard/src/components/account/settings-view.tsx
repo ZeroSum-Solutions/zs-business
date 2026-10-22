@@ -1,6 +1,5 @@
 "use client";
 
-import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
@@ -8,8 +7,7 @@ import { DisabledReason, NOT_AVAILABLE, useSampleOnly } from "@/components/ui/sa
 import { PageHeader } from "@/components/ui/states";
 import { Segmented } from "@/components/ui/segmented";
 import { Switch } from "@/components/ui/switch";
-import { useToast } from "@/components/ui/toast";
-import { OWNER } from "@/components/shell/account-menu";
+import { useIdentity } from "@/lib/session";
 import { setTheme, type Theme, useTheme } from "@/lib/theme";
 
 const THEME_OPTIONS = [
@@ -18,16 +16,19 @@ const THEME_OPTIONS = [
   { value: "system", label: "Match device" },
 ] as const satisfies readonly { value: Theme; label: string }[];
 
+// Nothing sends these yet, so they stay off and say so.
 const NOTIFY = [
-  { id: "booking", label: "New booking", hint: "A text when someone books." },
-  { id: "approval", label: "Agent needs approval", hint: "A push when a draft is waiting." },
-  { id: "digest", label: "Monday results", hint: "An email with last week's numbers." },
+  { id: "booking", label: "New booking", hint: "When someone books." },
+  { id: "approval", label: "Agent needs approval", hint: "When a draft is waiting." },
+  { id: "digest", label: "Monday results", hint: "Last week's numbers." },
 ];
 
+/** Demo mode keeps no business details, so its form says so instead of looking saved. */
+export const DEMO_SAVE_NOTE = "The demo does not save business details.";
+
 export function SettingsView() {
-  const toast = useToast();
   const sampleOnly = useSampleOnly();
-  const [notify, setNotify] = useState<Record<string, boolean>>({ booking: true, approval: true, digest: false });
+  const identity = useIdentity();
   const theme = useTheme();
   return (
     <>
@@ -44,19 +45,21 @@ export function SettingsView() {
         </Card>
         <Card aria-labelledby="business-title">
           <CardHeader><CardTitle id="business-title">Business</CardTitle></CardHeader>
-          <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); if (!sampleOnly) toast("Settings saved."); }}>
+          {/* No settings route exists yet (and no business time zone in the data model), so nothing here saves. */}
+          <form className="space-y-4" onSubmit={(event) => event.preventDefault()}>
             <div>
               <Label htmlFor="biz-name">Business name</Label>
-              <Input id="biz-name" defaultValue={OWNER.legalName} />
+              <Input id="biz-name" key={identity?.businessName ?? ""} defaultValue={identity?.businessName ?? ""} />
             </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <Label htmlFor="biz-phone">Business phone</Label>
-                <Input id="biz-phone" type="tel" defaultValue="+1 212 555 0100" />
+                <Input id="biz-phone" type="tel" />
               </div>
               <div>
                 <Label htmlFor="biz-zone">Time zone</Label>
-                <Select id="biz-zone" defaultValue="America/New_York" className="w-full">
+                <Select id="biz-zone" defaultValue="" className="w-full">
+                  <option value="">Not set</option>
                   <option value="America/New_York">Eastern (New York)</option>
                   <option value="America/Chicago">Central (Chicago)</option>
                   <option value="America/Denver">Mountain (Denver)</option>
@@ -65,14 +68,18 @@ export function SettingsView() {
               </div>
             </div>
             <div className="space-y-2">
-              <Button type="submit" disabled={sampleOnly} aria-describedby={sampleOnly ? "settings-unavailable" : undefined}>Save changes</Button>
-              {sampleOnly ? <DisabledReason id="settings-unavailable">{NOT_AVAILABLE}</DisabledReason> : null}
+              <Button type="submit" disabled aria-describedby="settings-unavailable">Save changes</Button>
+              <DisabledReason id="settings-unavailable">{sampleOnly ? NOT_AVAILABLE : DEMO_SAVE_NOTE}</DisabledReason>
             </div>
           </form>
         </Card>
         <Card aria-labelledby="notify-title">
-          <CardHeader><CardTitle id="notify-title">Notifications</CardTitle></CardHeader>
-          {sampleOnly ? <DisabledReason id="notify-unavailable">{NOT_AVAILABLE}</DisabledReason> : null}
+          <CardHeader>
+            <div>
+              <CardTitle id="notify-title">Notifications</CardTitle>
+              <p id="notify-unavailable" className="text-sm text-muted">Coming soon. Nothing sends these yet.</p>
+            </div>
+          </CardHeader>
           <ul className="divide-y divide-border-soft">
             {NOTIFY.map((item) => (
               <li key={item.id} className="flex items-center gap-4 py-2">
@@ -80,7 +87,7 @@ export function SettingsView() {
                   <p id={`n-${item.id}`} className="text-sm font-medium text-fg">{item.label}</p>
                   <p className="text-sm text-muted">{item.hint}</p>
                 </div>
-                <Switch aria-labelledby={`n-${item.id}`} disabled={sampleOnly} aria-describedby={sampleOnly ? "notify-unavailable" : undefined} checked={notify[item.id] ?? false} onCheckedChange={(checked) => setNotify({ ...notify, [item.id]: checked })} />
+                <Switch aria-labelledby={`n-${item.id}`} disabled aria-describedby="notify-unavailable" checked={false} />
               </li>
             ))}
           </ul>
