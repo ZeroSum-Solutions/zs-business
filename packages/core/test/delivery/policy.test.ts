@@ -49,6 +49,9 @@ it.each([
   ["end", "stop"], ["QUIT", "stop"], ["revoke", "stop"], ["opt out", "stop"], ["opt-out", "stop"],
   ["START", "start"], ["unstop", "start"], ["Yes!", "start"], ["HELP", "help"], ["info", "help"],
   ["please stop texting me", null], ["stopping by later", null], ["", null],
+  // D-9: the bound applies to what is left once surrounding spaces and punctuation are gone.
+  [" ".repeat(65) + "STOP", "stop"], ["\n".repeat(200) + "start!!!" + " ".repeat(200), "start"], [".".repeat(100) + "HELP?", "help"],
+  [" ".repeat(65) + "x".repeat(65), null], ["stop " + "x".repeat(70), null],
 ])("smsKeyword(%j) is %s", (body, keyword) => {
   expect(smsKeyword(body)).toBe(keyword);
 });

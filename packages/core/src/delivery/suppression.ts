@@ -124,12 +124,13 @@ const KEYWORD_MAX_LENGTH = 64;
 
 /** D-9: the keyword an inbound SMS consists of, ignoring case, spaces and punctuation around it. */
 export function smsKeyword(body: string): "stop" | "start" | "help" | null {
-  // Linear scans, no backtracking regex: the body is whatever a sender typed.
-  if (body.length > KEYWORD_MAX_LENGTH) return null;
+  // Linear scans, no backtracking regex: the body is whatever a sender typed (its length is
+  // capped at ingress). The bound applies to what is left once the padding is gone.
   let start = 0;
   let end = body.length;
   while (start < end && EDGE_CHARACTER.test(body[start]!)) start += 1;
   while (end > start && EDGE_CHARACTER.test(body[end - 1]!)) end -= 1;
+  if (end - start > KEYWORD_MAX_LENGTH) return null;
   const word = body.slice(start, end).toLowerCase().replace(/[\s-]/g, "");
   if (STOP_WORDS.has(word)) return "stop";
   if (START_WORDS.has(word)) return "start";
