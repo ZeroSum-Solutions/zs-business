@@ -158,6 +158,7 @@ export const DEMO_PAGE_ID = "7c9e1b3d-5f7a-4b9c-8d1e-2f3a4b5c6d01";
 /** A key-shaped placeholder; demo mode has no signing secret and no public route. */
 const DEMO_PAGE_KEY = `zsb1_${"DemoHaldenRoweBookingPage".padEnd(64, "0")}`;
 const DEMO_BOOKING_HOST = "https://book.example.com";
+const DEMO_DISCLOSURE_TEXT = "We may send you occasional updates. You can opt out at any time.";
 
 export const DEMO_BOOKING_PAGE: BookingPageSummary = {
   id: DEMO_PAGE_ID,
@@ -357,7 +358,8 @@ export function buildSeed(now: Date): DemoSeed {
     });
     if (!booking) return;
     const consent = (ticked: boolean) => ticked
-      ? { status: "granted" as const, purpose: "marketing_updates", disclosureVersion: DEMO_BOOKING_PAGE.disclosureVersion, source: `widget:${DEMO_PAGE_ID}`, recordedAt: createdAt }
+      ? { status: "granted" as const, purpose: "marketing_updates", disclosureVersion: DEMO_BOOKING_PAGE.disclosureVersion,
+        disclosureText: DEMO_DISCLOSURE_TEXT, source: `widget:${DEMO_PAGE_ID}`, recordedAt: createdAt }
       : null;
     intakeItems.push({
       id,

@@ -8,13 +8,17 @@ import {
   type ActionError,
   type ActionResult,
 } from "./index.js";
+import { storedInstantSchema, supportedInstantSchema } from "./instant.js";
 import { isPostgresText } from "./json.js";
 
 // Root re-exports this module; defer access to the shared schema until parsing.
 const idSchema = z.lazy(() => uuidSchema);
 
-/** F2 frozen boundary. Parse and normalize commands BEFORE approving their binding. */
-export const crmInstantSchema = z.iso.datetime({ precision: 3 });
+/**
+ * F2 frozen boundary. Parse and normalize commands BEFORE approving their binding. This is the
+ * instant on a CRM record or result; client-supplied instants use `supportedInstantSchema`.
+ */
+export const crmInstantSchema = storedInstantSchema;
 export type CrmInstant = z.infer<typeof crmInstantSchema>;
 const textSchema = z.string().min(1).max(200).refine(isPostgresText, "Invalid Postgres text");
 export const contactEmailInputSchema = z.string().trim().max(254)
@@ -26,10 +30,11 @@ export const normalizedContactEmailSchema = z.email().max(254).refine((email) =>
 export type NormalizedContactEmail = z.infer<typeof normalizedContactEmailSchema>;
 export const contactPhoneSchema = z.string().regex(/^\+[1-9]\d{1,14}$/, "Expected E.164 phone");
 export type ContactPhone = z.infer<typeof contactPhoneSchema>;
+/** C-9: client evidence, dated in the supported years. */
 export const consentEvidenceSchema = z.strictObject({
   status: z.enum(["granted", "denied"]),
   source: textSchema,
-  recordedAt: crmInstantSchema,
+  recordedAt: supportedInstantSchema,
 });
 export type ConsentEvidence = z.infer<typeof consentEvidenceSchema>;
 /** null means no evidence; it never means permission or a request to erase evidence. */
@@ -38,6 +43,12 @@ export const contactConsentSchema = z.strictObject({
   sms: consentEvidenceSchema.nullable(),
 });
 export type ContactConsent = z.infer<typeof contactConsentSchema>;
+/** Stored evidence as a record returns it; an earlier release may have stored any instant. */
+export const storedConsentEvidenceSchema = consentEvidenceSchema.extend({ recordedAt: crmInstantSchema });
+export const storedContactConsentSchema = z.strictObject({
+  email: storedConsentEvidenceSchema.nullable(),
+  sms: storedConsentEvidenceSchema.nullable(),
+});
 export const createOrFindContactInputSchema = z.strictObject({
   contactId: idSchema,
   displayName: textSchema.nullable(),
@@ -60,7 +71,7 @@ export const contactRecordSchema = z.strictObject({
   displayName: textSchema.nullable(),
   email: normalizedContactEmailSchema.nullable(),
   phone: contactPhoneSchema.nullable(),
-  consent: contactConsentSchema,
+  consent: storedContactConsentSchema,
   createdAt: crmInstantSchema,
   updatedAt: crmInstantSchema,
 }).refine((value) => value.email !== null || value.phone !== null, "At least one identity is required");

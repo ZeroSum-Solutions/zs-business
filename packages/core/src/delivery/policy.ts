@@ -78,9 +78,12 @@ export function consentBlock(input: {
   return null;
 }
 
-/** Placeholder addresses (crm.md) are never a real recipient. */
+/**
+ * Placeholder addresses (crm.md) are never a real recipient: any address under the reserved
+ * `.invalid` name (RFC 6761), not only the column default's `@placeholder.invalid`.
+ */
 export function usableEmail(address: string | null): string | null {
-  return address && !address.endsWith("@placeholder.invalid") ? address : null;
+  return address && !/[@.]invalid$/i.test(address) ? address : null;
 }
 
 /** Exponential backoff from the attempt count (1-based), capped. Deterministic: no jitter source is injected. */

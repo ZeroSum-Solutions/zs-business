@@ -7,6 +7,7 @@ import {
   draftReplyCommandSchema,
   MAX_SUBJECT_LENGTH,
   MESSAGE_SEND_REQUESTED,
+  replySubjectSchema,
   resumeReplyCommandSchema,
   sendReplyCommandSchema,
   uuidSchema,
@@ -20,6 +21,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { idInUse, parseOrFail, pgCode } from "../crm/rows.js";
+import { usableEmail } from "../delivery/policy.js";
 import { loadReply } from "../reads/inbox.js";
 
 export const DRAFT_REPLY_ACTION = "inbox.reply.draft";
@@ -28,15 +30,12 @@ export const SEND_REPLY_ACTION = "inbox.reply.send";
 export const DISCARD_REPLY_ACTION = "inbox.reply.discard";
 export const RESUME_REPLY_ACTION = "inbox.reply.resume";
 
-/** A placeholder address (crm_contacts' column default) is no address to reply to. */
-const PLACEHOLDER_EMAIL = /@placeholder\.invalid$/;
-
 /** I-6: email is the only reply channel in v1, so the customer needs a real address. */
 export async function requireEmail(tx: Transaction, tenantId: string, contactId: string): Promise<void> {
   const email = (await tx.query<{ normalized_email: string | null }>(
     "SELECT normalized_email FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, contactId],
   )).rows[0]?.normalized_email ?? null;
-  if (email === null || PLACEHOLDER_EMAIL.test(email))
+  if (usableEmail(email) === null)
     throw new Conflict("The customer has no email address to reply to", { reason: "no_email" });
 }
 
@@ -62,6 +61,13 @@ async function replyResult(tx: Transaction, tenantId: string, replyId: string): 
   return { result: reply };
 }
 
+/** I-5: "Message from <business name>", on one line like any subject: a name's line breaks become spaces. */
+function defaultSubject(businessName: string): string {
+  const subject = replySubjectSchema.safeParse(`Message from ${businessName.replace(/\s+/g, " ").trim()}`.slice(0, MAX_SUBJECT_LENGTH));
+  if (!subject.success) throw new ValidationFailed("The business name cannot make a subject");
+  return subject.data;
+}
+
 export const draftReplyHandler: ActionHandler = {
   async resolveTarget(tx, target) {
     if (target.type !== "inbox_reply") throw new ValidationFailed("Inbox reply actions require an inbox_reply target");
@@ -78,8 +84,8 @@ export const draftReplyHandler: ActionHandler = {
     // I-5: the customer must be this tenant's (the insert's FK then holds the contact row).
     const contact = await tx.query("SELECT 1 FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [tenantId, payload.contactId]);
     if (contact.rowCount !== 1) throw new TenantDenied("Contact is not owned by this tenant");
-    const subject = payload.subject ?? `Message from ${(await tx.query<{ name: string }>(
-      "SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows[0]!.name}`.slice(0, MAX_SUBJECT_LENGTH);
+    const subject = payload.subject ?? defaultSubject((await tx.query<{ name: string }>(
+      "SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows[0]!.name);
     try {
       await tx.query(
         `INSERT INTO inbox_replies (tenant_id,id,contact_id,channel,subject,body,drafted_by,created_at)

@@ -1,11 +1,13 @@
 # M3c: Inbox v1 and Home
 
-Status: contract for M3c (2026-10-20), revision 3. Code follows this file; a change to a
+Status: contract for M3c (2026-10-20), revision 4. Code follows this file; a change to a
 numbered rule needs a new revision of this file first. Revision 2 sends replies through M3b's
 approval records (`approvals.md`): I-5..I-8, H-6 and H-8 changed, and `inbox.approve` gave way
 to M3b's `approve`. Revision 3 (hub review): I-4 keeps each step's record through later steps,
 I-6 binds a resumed send to the caller's key and leaves another owner's approval to them, and
-I-9 limits runtime inserts to drafts.
+I-9 limits runtime inserts to drafts. Revision 4 (2026-10-22 audit, B5-06): H-1 checks
+currencies against ISO 4217, not the shape alone, and says what happens to deals stored under the
+earlier check.
 
 Scope: the owner's Inbox (one thread per customer, built from what people send through the
 website forms and the bookings they make, plus the business's replies) and Home (leads,
@@ -149,6 +151,16 @@ with `currency` (ISO 4217 code, both set or both null), `lead_source` (`website`
 permission `customers`, sets value and lead source with the same compare-and-set as C-14:
 a stale revision is 409 `stale_revision` with `currentRevision`; success bumps the revision
 by one and sets `updatedAt`. It is registered outside `crmHandlers` (C-23 keeps three keys).
+A currency is one of the ISO 4217 codes in `CURRENCY_CODES` (`@zs/contracts`); the
+`crm_deals_currency_code` check holds the same list. Writes accept only those codes. Deals stored
+under the earlier three-capitals check keep their code: migration `20261022520000` adds the check
+`NOT VALID`, so every new or updated row is checked, validates it when no stored row breaks it,
+and otherwise leaves it `NOT VALID` with a NOTICE giving the count; it never rewrites or deletes a
+deal. The read-only `supabase/preflight/20261022520000_deal_currency_iso.sql` (as `service_role`)
+lists those deals; once their values are fixed, a later migration validates the check. Until
+then reads stay tolerant: lists and Home show any stored three-capital code
+(`storedCurrencyCodeSchema`), and a stage move of such a deal is 409 `invalid_currency` with its
+`currency`, before anything changes, until `crm.deal.set-details` gives it a valid value.
 
 **H-2. Won date follows the stage.** `crm_stages.outcome` is `open`, `won` or `lost`
 (default `open`; the migration marks stages named Won/Lost once). A deal entering a won stage

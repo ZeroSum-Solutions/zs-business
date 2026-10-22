@@ -84,13 +84,18 @@ export const updateSettingsHandler: ActionHandler = {
     const values = [payload.enabled, payload.maxDraftsPerDay, payload.maxDraftsPerContact, payload.contactWindowHours,
       payload.waitHours, payload.lookbackDays, payload.quietStartMinute, payload.quietEndMinute, payload.timeZone, binding.actorId, now];
     if (current.revision === 0) {
-      // A concurrent first save makes this a unique violation, which answers as a conflict.
-      await tx.query(
+      // No row to lock yet: a concurrent first save (or a kill's default row) that commits first
+      // makes this insert wait and then do nothing. Its row is then the current revision.
+      const inserted = await tx.query(
         `INSERT INTO agent_settings (enabled, max_drafts_per_day, max_drafts_per_contact, contact_window_hours, wait_hours,
            lookback_days, quiet_start_minute, quiet_end_minute, time_zone, updated_by, updated_at, tenant_id, revision)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1) ON CONFLICT (tenant_id) DO NOTHING`,
         [...values, binding.tenantId],
       );
+      if (inserted.rowCount === 0)
+        throw new Conflict("The agent settings changed", {
+          reason: "stale_revision", currentRevision: (await loadControls(tx, binding.tenantId, false)).revision,
+        });
     } else {
       await tx.query(
         `UPDATE agent_settings SET enabled=$1, max_drafts_per_day=$2, max_drafts_per_contact=$3, contact_window_hours=$4,
@@ -249,6 +254,9 @@ export const draftHandler: ActionHandler = {
     const globalKilled = await readGlobalKilled(tx, true);
     const controls = await loadControls(tx, tenantId, true);
     const inquiry = await requireOpenRunAndInquiry(tx, tenantId, payload);
+    // G-7: hold the customer while checking that this is still their latest request. Linking a
+    // request to them locks the same row, so none can land between the check and the draft.
+    await tx.query("SELECT 1 FROM crm_contacts WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, payload.contactId]);
     let reason: FollowUpSkipReason | null = gate(controls, globalKilled, now);
     if (!reason && (await draftsToday(tx, tenantId, now)) >= controls.settings.maxDraftsPerDay) reason = "daily_cap";
     reason ??= await checkCandidate(tx, tenantId, inquiry, controls.settings, now);
