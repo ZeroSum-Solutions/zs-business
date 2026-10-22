@@ -147,6 +147,21 @@ describe("observe (F-4, F-5)", () => {
     expect((await sessionFor(owner).listSources({ subjectType: "contact", subjectId: subject.id })).items).toEqual([]);
   });
 
+  it("refuses a fresh_until past year 9999 and writes nothing", async () => {
+    const subject = { type: "contact" as const, id: await newContact() };
+    const actions = () => fixture.service(async (tx) => (await tx.query("SELECT 1 FROM actions WHERE tenant_id=$1", [tenantId])).rowCount);
+    const before = await actions();
+    const last = "9999-12-31T23:59:59.999Z";
+    now = Date.parse(last);
+    for (const body of [{ observedAt: last, freshForMinutes: 1 }, { freshForMinutes: 1 }])
+      await expect(sessionFor(owner).observeSource({ subject, source: "website", ...body }, randomUUID()))
+        .rejects.toMatchObject({ code: "ValidationFailed" });
+    // Without a freshness window the last supported instant is stored as is.
+    const out = await sessionFor(owner).observeSource({ subject, source: "website", observedAt: last }, randomUUID());
+    expect(out.result.record).toMatchObject({ observedAt: last, freshUntil: null, recordedAt: last });
+    expect(await actions()).toBe((before ?? 0) + 1);
+  });
+
   it("stores the first supported instant and a leap day exactly under a non-UTC time zone", async () => {
     // Postgres and Node both give 0001-01-01 a local mean time offset with seconds; a bound
     // Date is written at whole-minute offset precision and lands 58 seconds off.

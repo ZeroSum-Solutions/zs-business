@@ -3,11 +3,11 @@
 import { describe, expect, it } from "vitest";
 import { ValidationFailed, type ActionBinding, type ActionCommand } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
-import { crmHandlers, intakeHandlers } from "../src/index.js";
+import { crmHandlers, intakeHandlers, sourceHandlers } from "../src/index.js";
 
-const writers = { ...crmHandlers, ...intakeHandlers };
+const writers = { ...crmHandlers, ...intakeHandlers, ...sourceHandlers };
 
-describe("clock range in CRM and intake writers", () => {
+describe("clock range in CRM, intake and source writers", () => {
   it.each(Object.keys(writers))("%s refuses a clock outside UTC years 0001-9999 before any query", async (actionType) => {
     for (const clock of ["0000-06-01T00:00:00.000Z", "+010000-01-01T00:00:00.000Z"]) {
       const queries: string[] = [];
