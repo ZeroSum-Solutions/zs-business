@@ -73,7 +73,8 @@ function PageRow({ page }: { page: BookingPageSummary }) {
           rows={3}
           value={page[snippet]}
           onFocus={(event) => event.currentTarget.select()}
-          className="w-full resize-none rounded-md bg-well p-3 font-mono shadow-field text-xs focus:shadow-[inset_0_0_0_1px_var(--accent)] text-fg-2"
+          // Grows to fit the code, so nothing is cut off on a phone; three rows where browsers cannot size to content.
+          className="field-sizing-content w-full resize-none rounded-md bg-well p-3 font-mono shadow-field text-xs focus:shadow-[inset_0_0_0_1px_var(--accent)] text-fg-2"
         />
         <Button variant="secondary" className="mt-2" onClick={() => copy(page[snippet], "embed code")}><Copy aria-hidden />Copy embed code</Button>
       </div>
