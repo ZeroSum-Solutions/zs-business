@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ActionError, TenantDenied } from "@zs/contracts";
 import { AUTOMATION_LIMITS, automationActorId, Unauthenticated, webhookSigningSecret } from "../../src/index.js";
-import { createAutomationHarness, KEY, OTHER_KEY, type AutomationHarness } from "./helpers.js";
+import { createAutomationHarness, KEY, OTHER_KEY, START, type AutomationHarness } from "./helpers.js";
 
 let h: AutomationHarness;
 beforeAll(async () => { h = await createAutomationHarness(); });
@@ -214,5 +214,38 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
     expect(after).toHaveLength(0);
     expect(revoked.revokedAt).not.toBeNull();
     for (const result of proposals) if (result.status === "rejected") expect(result.reason).toBeInstanceOf(TenantDenied);
+  });
+
+  it("checks token expiry against the clock read after the token lock: a wait past expiry is refused", async () => {
+    h.clock.set(START);
+    const { token, secret } = await h.admin(h.a).createToken({ name: "Late", scopes: ["contacts:propose"], expiresInDays: 1 }, randomUUID());
+    const principal = await h.inbound().authenticate(`Bearer ${secret}`);
+    h.clock.set(START + 86_400_000 - 1);
+    // Another writer holds the token row (the superuser pool: the service role has no grant on
+    // tokens), so the proposal waits on the lock while the token expires.
+    const holder = await h.database.pool.connect();
+    await holder.query("BEGIN");
+    const pid = (await holder.query<{ pid: number }>(
+      "SELECT pg_backend_pid() AS pid FROM automation_tokens WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [h.a.tenantId, token.id])).rows[0]!.pid;
+    let released = false;
+    const release = async () => { if (!released) { released = true; await holder.query("ROLLBACK"); holder.release(); } };
+    try {
+      const outcome = h.inbound().propose(principal, contactProposal(), randomUUID()).then((value) => value, (error: unknown) => error);
+      for (let tries = 0; ; tries += 1) {
+        const { rowCount } = await h.database.pool.query(
+          `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'
+             AND $1::int = ANY(pg_blocking_pids(pid))`, [pid]);
+        if (rowCount) break;
+        if (tries > 500) throw new Error("the proposal never waited on the token lock");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      h.clock.set(START + 86_400_000);
+      await release();
+      expect(await outcome).toBeInstanceOf(TenantDenied);
+      expect(await h.rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND requested_by=$2", [h.a.tenantId, principal.actorId])).toHaveLength(0);
+    } finally {
+      await release();
+      h.clock.set(START);
+    }
   });
 });
