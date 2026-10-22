@@ -74,12 +74,14 @@ export function currentMinute(): number {
   return Math.floor(Date.now() / 60_000) * 60_000;
 }
 
-/** Monday to Sunday of the week holding `today`, read as one range of bookings. */
+/**
+ * Monday to Sunday from `monday`, as one range of bookings. No `limit`: the client pages through
+ * the whole week by cursor and flags the list incomplete only if it reaches its page cap.
+ */
 export function weekStripQuery(monday: string, zone: string): BookingListQuery {
   return {
     from: startOfZonedDay(monday, zone).toISOString(),
     to: startOfZonedDay(addDays(monday, 7), zone).toISOString(),
-    limit: 100,
   };
 }
 
@@ -90,17 +92,28 @@ export interface StripDay {
   known: "exact" | "atLeast" | "unknown";
 }
 
-/** Bookings per local day of the week strip. */
+/**
+ * Bookings per local day of the week strip. The list comes in start order, so when it stopped
+ * early, days before its last booking are whole, that day is a floor and later days are unread.
+ */
 export function weekStripDays(list: ListResult<BookingView>, days: string[], zone: string): StripDay[] {
   const counts = new Map<string, number>();
   for (const booking of list.items) {
     const key = zonedDateKey(booking.startsAt, zone);
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  return days.map((key) => ({ key, count: counts.get(key) ?? 0, known: "exact" }));
+  const lastBooking = list.items.at(-1);
+  const lastKey = list.incomplete ? (lastBooking ? zonedDateKey(lastBooking.startsAt, zone) : "") : null;
+  return days.map((key) => ({
+    key,
+    count: counts.get(key) ?? 0,
+    known: lastKey === null || key < lastKey ? "exact" : key === lastKey ? "atLeast" : "unknown",
+  }));
 }
 
 /** ", 3 appointments" for a day's accessible name; nothing on a day with none. */
 export function appointmentsPhrase(day: StripDay): string {
-  return day.count > 0 ? `, ${day.count} appointment${day.count === 1 ? "" : "s"}` : "";
+  if (day.known === "unknown") return ", appointments not checked";
+  if (day.count === 0) return "";
+  return `, ${day.count}${day.known === "atLeast" ? "+" : ""} appointment${day.count === 1 && day.known === "exact" ? "" : "s"}`;
 }

@@ -526,15 +526,24 @@ function WeekDays({ now, zone, className }: { now: number; zone: string; classNa
   const monday = addDays(today, 1 - weekdayOf(today));
   const query = useMemo(() => weekStripQuery(monday, zone), [monday, zone]);
   const bookings = useBookings(query);
+  if (bookings.isError) {
+    return (
+      <div className={cn("tray p-1.5!", className)}>
+        <ErrorNote error={bookings.error} message="Couldn't load this week's appointments." retry={() => bookings.refetch()} />
+      </div>
+    );
+  }
   const days = weekStripDays(bookings.data ?? { items: [], incomplete: false, loaded: 0 }, Array.from({ length: 7 }, (_, index) => addDays(monday, index)), zone);
+  // Until the week is read, no day claims to be free: the dots wait and the list says it is busy.
+  const loading = bookings.isPending;
   return (
-    <ol aria-label="Days this week" className={cn("tray grid grid-cols-7 gap-0.5 p-1.5!", className)}>
+    <ol aria-label="Days this week" aria-busy={loading || undefined} className={cn("tray grid grid-cols-7 gap-0.5 p-1.5!", className)}>
       {days.map((day) => {
         const { key, count } = day;
         const isToday = key === today;
         const past = key < today;
         const [weekday = "", rest = ""] = formatDateKey(key, "long").split(", ");
-        const label = `${weekday}, ${rest}${isToday ? ", today" : ""}${appointmentsPhrase(day)}`;
+        const label = `${weekday}, ${rest}${isToday ? ", today" : ""}${loading ? "" : appointmentsPhrase(day)}`;
         return (
           <li
             key={key}
@@ -547,7 +556,7 @@ function WeekDays({ now, zone, className }: { now: number; zone: string; classNa
           >
             <span aria-hidden>{weekday.slice(0, 3)}</span>
             <b aria-hidden className={cn("tabular text-lg leading-6 font-extrabold tracking-normal", isToday ? "text-accent-ink" : past ? "text-muted" : "text-fg")}>{Number(key.slice(8))}</b>
-            <i aria-hidden className={cn("size-1.5 rounded-pill", count > 0 ? "bg-primary" : "bg-transparent")} />
+            <i aria-hidden className={cn("size-1.5 rounded-pill", loading ? "skeleton" : day.known === "unknown" ? "ring-1 ring-border-strong ring-inset" : count > 0 ? "bg-primary" : "bg-transparent")} />
           </li>
         );
       })}
