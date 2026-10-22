@@ -99,6 +99,7 @@ export * from "./booking.js";
 export * from "./crm.js";
 export * from "./home.js";
 export * from "./http.js";
+export * from "./instant.js";
 export * from "./inbox.js";
 export * from "./intake.js";
 export * from "./members.js";

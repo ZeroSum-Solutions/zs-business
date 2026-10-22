@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Conflict, ValidationFailed, type ContactConsent } from "@zs/contracts";
-import type { ScopedDatabase, Transaction } from "@zs/db";
+import { createScopedDatabase, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createDispatcher, createOrFindContact, crmHandlers, type DispatchContext } from "../../src/index.js";
 import { shouldWriteConsent } from "../../src/crm/contact.js";
+import { zonedRuntimePool } from "../zoned.js";
 import { contactCommand, createHarness, NOW, rejection, type Harness } from "./helpers.js";
 
 let h: Harness;
@@ -128,6 +129,42 @@ describe("contact create/find on the runtime database", () => {
     expect(imported.result.contact.consent).toEqual({ email: granted(T1, "opt-in"), sms: denied(T2, "import-file") });
     expect(imported.result.contact.id).toBe(created.result.contact.id);
     expect(imported.result.contact.updatedAt).toBe(NOW);
+  });
+
+  it("C-9: evidence dated in year 0000 is refused and nothing is written", async () => {
+    const a = h.fixture.a.tenantId;
+    const counts = async () => Promise.all((["actions", "crm_contacts", "crm_contact_consent"] as const).map((table) => h.count(table, a)));
+    const before = await counts();
+    for (const recordedAt of ["0000-01-01T00:00:00.000Z", "0000-02-29T12:34:56.789Z"]) {
+      const command = contactCommand(a, { email: "year-zero@example.test" });
+      const yearZero = { ...command, payload: { ...command.payload, consent: { email: granted(recordedAt, "owner"), sms: null } } };
+      expect(await rejection(createOrFindContact(yearZero, h.ctx(a)))).toBeInstanceOf(ValidationFailed);
+    }
+    expect(await counts()).toEqual(before);
+  });
+
+  it("C-9: the first supported instant and a leap day read back exactly under a non-UTC time zone", async () => {
+    const a = h.fixture.a.tenantId;
+    const zone = process.env.TZ;
+    process.env.TZ = "America/Los_Angeles";
+    const zoned = zonedRuntimePool(h.database);
+    try {
+      for (const recordedAt of ["0001-01-01T00:00:00.000Z", "2024-02-29T12:34:56.789Z"]) {
+        const email = `edge-${recordedAt.slice(0, 4)}@example.test`;
+        const evidence = granted(recordedAt, "owner");
+        const out = await createOrFindContact(contactCommand(a, { email, consent: { email: evidence, sms: null } }),
+          h.ctx(a, NOW, createScopedDatabase(zoned)));
+        expect(out.result.contact.consent).toEqual({ email: evidence, sms: null });
+        // C-11 compares against the stored instant: the same instant with a denial wins the tie.
+        const tie = await createOrFindContact(contactCommand(a, { email, consent: { email: denied(recordedAt), sms: null } }),
+          h.ctx(a, NOW, createScopedDatabase(zoned)));
+        expect(tie.result.contact.consent.email).toEqual(denied(recordedAt));
+      }
+    } finally {
+      await zoned.end();
+      if (zone === undefined) delete process.env.TZ;
+      else process.env.TZ = zone;
+    }
   });
 
   it("C-11: interactive consent takes later evidence, ignores older, denial wins ties", async () => {

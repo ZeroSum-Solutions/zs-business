@@ -5,6 +5,11 @@ follow. The three handlers, their wrappers, the schema and the migration ship in
 repository. At the time of writing, `pnpm --filter @zs/core test:crm` runs 40 tests in
 five files (public examples, contact and deal acceptance, email uniqueness and the real
 Postgres seam), and all pass.
+Revision 2026-10-22 (audit B1-02): C-9 limits `recordedAt` to the supported instant range,
+UTC years 0001 through 9999. A time outside it is refused with `ValidationFailed` and
+nothing is written; before this, year 0000 passed the boundary and Postgres failed the
+request with a 500. Source observations (approvals.md F-4) and booking instants
+(booking.md) apply the same range.
 This slice covers contact identity, consent storage, deal creation and stage moves.
 It provides no messaging, contact merge, general contact edit or pipeline editor.
 
@@ -108,9 +113,9 @@ dispatcher's stored result.
 
 **C-9. Desired, stored consent.** Store email and SMS independently. Each channel
 contains either null (no recorded evidence) or `{status,source,recordedAt}` with
-status `granted` or `denied`, a nonempty source, and a valid recorded time no later
-than the dispatcher's injected now. Never derive permission from having an address,
-a phone, a deal or a booking. This slice stores evidence; it never sends messages.
+status `granted` or `denied`, a nonempty source, and a valid recorded time in UTC years
+0001 through 9999 (`supportedInstantSchema`) no later than the dispatcher's injected
+now. Never derive permission from having an address, a phone, a deal or a booking. This slice stores evidence; it never sends messages.
 
 **C-10. Desired, import preservation.** For mode `import`, preserve every existing
 non-null channel record byte-for-byte, including status, source and recorded time,

@@ -181,6 +181,13 @@ describe("source routes", () => {
     expect(future.status).toBe(400);
     expect(errorOf(future).code).toBe("ValidationFailed");
 
+    // Years outside 0001-9999 are refused at the boundary and leave no row behind.
+    const yearZero = await observe(h.a.token, { subject: { type: "contact", id: contactId }, source: "website", observedAt: "0000-01-01T00:00:00.000Z" });
+    expect(yearZero.status).toBe(400);
+    expect(errorOf(yearZero).code).toBe("ValidationFailed");
+    expect((await h.fixture.service((tx) => tx.query("SELECT 1 FROM source_records WHERE tenant_id=$1 AND subject_id=$2",
+      [h.a.tenantId, contactId]))).rowCount).toBe(0);
+
     // Another tenant cannot see or record against this contact.
     expect((await call(h.app, "GET", `/v1/sources?subjectType=contact&subjectId=${contactId}`, { token: h.b.token })).status).toBe(404);
   });

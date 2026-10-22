@@ -107,6 +107,8 @@ export const publicRequestHandler: ActionHandler = {
         input.phone, input.notes, claim.matched, claim.contactId, now],
     );
     const source = `${input.channel}:${input.pageId}`;
+    // Consent instants are bound as exact ISO strings, as the CRM consent writes are.
+    const recordedAt = now.toISOString();
     for (const channel of CHANNELS) {
       if (!input.consent[channel]) continue;
       await tx.query(
@@ -114,14 +116,14 @@ export const publicRequestHandler: ActionHandler = {
            disclosure_text,source,recorded_at)
          VALUES ($1,$2,$3::crm_consent_channel,'granted',$4,$5,$6,$7,$8)`,
         [tenantId, input.intakeItemId, channel, intakeConsentPurpose, page.disclosure_version, page.disclosure_text,
-          source, now],
+          source, recordedAt],
       );
       // A contact created in this transaction has no recorded evidence to override.
       if (claim.outcome === "new_contact")
         await tx.query(
           `INSERT INTO crm_contact_consent (tenant_id,contact_id,channel,status,source,recorded_at)
            VALUES ($1,$2,$3::crm_consent_channel,'granted',$4,$5)`,
-          [tenantId, claim.contactId, channel, `intake:${input.intakeItemId}`, now],
+          [tenantId, claim.contactId, channel, `intake:${input.intakeItemId}`, recordedAt],
         );
     }
 

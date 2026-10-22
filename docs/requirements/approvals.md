@@ -1,6 +1,8 @@
 # M3b: approval and source records
 
-Status: contract for M3b (2026-10-20), revision 2 (review round 1: A-2, A-6, A-7, A-14, F-5).
+Status: contract for M3b (2026-10-20), revision 3 (2026-10-22). Revision 2 (review round 1):
+A-2, A-6, A-7, A-14, F-5. Revision 3 (audit B1): F-4 limits `observedAt` to UTC years 0001
+through 9999, the range CRM consent (crm.md C-9) and booking instants also apply.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: two tenant records the rest of M3 builds on.
@@ -158,8 +160,10 @@ contacts and deals, `calendar` for bookings and resources, `intake` for intake i
 sourceRef?, observedAt?, freshForMinutes?}`; target `{type: "source_record", id:
 sourceRecordId}`. The edge derives `sourceRecordId` from tenant, subject and source, so the
 same subject and source always name the same record. `observedAt` defaults to the
-dispatcher's clock and may not be later than it (`ValidationFailed`). `freshForMinutes` is 1
-to 525600 (one year); absent means the fact does not go stale (`fresh_until` NULL).
+dispatcher's clock and may not be later than it (`ValidationFailed`). It must lie in UTC
+years 0001 through 9999 (`supportedInstantSchema`); a time outside is refused with
+`ValidationFailed` and nothing is written. `freshForMinutes` is 1 to 525600 (one year);
+absent means the fact does not go stale (`fresh_until` NULL).
 `fresh_until = observedAt + freshForMinutes`.
 
 **F-5. Monotonic.** The first observation inserts the row with `revision = 1`. A later one

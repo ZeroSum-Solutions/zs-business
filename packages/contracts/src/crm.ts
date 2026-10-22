@@ -8,13 +8,14 @@ import {
   type ActionError,
   type ActionResult,
 } from "./index.js";
+import { supportedInstantSchema } from "./instant.js";
 import { isPostgresText } from "./json.js";
 
 // Root re-exports this module; defer access to the shared schema until parsing.
 const idSchema = z.lazy(() => uuidSchema);
 
 /** F2 frozen boundary. Parse and normalize commands BEFORE approving their binding. */
-export const crmInstantSchema = z.iso.datetime({ precision: 3 });
+export const crmInstantSchema = supportedInstantSchema;
 export type CrmInstant = z.infer<typeof crmInstantSchema>;
 const textSchema = z.string().min(1).max(200).refine(isPostgresText, "Invalid Postgres text");
 export const contactEmailInputSchema = z.string().trim().max(254)

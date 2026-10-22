@@ -43,6 +43,22 @@ describe("contacts", () => {
     expect(matchReplay.body).toEqual(matched.body);
   });
 
+  it("refuses consent evidence dated outside years 0001-9999 with a 400 and writes nothing", async () => {
+    const count = () => h.fixture.service(async (tx) => (await tx.query(
+      "SELECT (SELECT count(*) FROM actions WHERE tenant_id=$1) + (SELECT count(*) FROM crm_contacts WHERE tenant_id=$1) AS n",
+      [h.a.tenantId])).rows[0].n);
+    const before = await count();
+    for (const recordedAt of ["0000-01-01T00:00:00.000Z", "0000-02-29T12:34:56.789Z"]) {
+      const response = await call(h.app, "POST", "/v1/crm/contacts", {
+        token: h.a.token, key: randomUUID(),
+        body: { email: "year-zero@example.com", consent: { email: { status: "granted", source: "owner", recordedAt }, sms: null } },
+      });
+      expect(response.status).toBe(400);
+      expect(apiErrorBodySchema.parse(response.body).error.code).toBe("ValidationFailed");
+    }
+    expect(await count()).toBe(before);
+  });
+
   it("rejects a contact without any identity", async () => {
     const response = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: randomUUID(), body: { displayName: "X" } });
     expect(response.status).toBe(400);
