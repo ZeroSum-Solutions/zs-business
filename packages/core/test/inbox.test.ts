@@ -257,6 +257,21 @@ describe("draft (I-5)", () => {
     expect((await approvedEvents(drafted.result.id))[0]?.payload).toMatchObject({ subject: "Your booking on Friday", body: "Body text" });
   });
 
+  it("fills the default subject on one line when the business name has a line break", async () => {
+    const rename = (name: string) => fixture.service((tx) => tx.query("UPDATE tenants SET name=$2 WHERE tenant_id=$1", [fixture.a.tenantId, name]));
+    await rename("Studio\nBookings");
+    try {
+      const customer = await contact(a, { displayName: "Nell Ford", email: "nell@example.com" });
+      const drafted = await draft(a, customer, "Hello");
+      expect(drafted.result.subject).toBe("Message from Studio Bookings");
+      const sent = await approve(a, drafted.result.id);
+      expect(sent.result.subject).toBe("Message from Studio Bookings");
+      expect(await approvedEvents(drafted.result.id)).toEqual([{ payload: expect.objectContaining({ subject: "Message from Studio Bookings" }) }]);
+    } finally {
+      await rename("Tenant A");
+    }
+  });
+
   it("refuses an empty or whitespace body and a body over 5000 characters", async () => {
     const customer = await contact(a, { displayName: "Pell Ward", email: "pell@example.com" });
     for (const body of ["", "   ", "\n\t ", "x".repeat(5001)])
@@ -337,6 +352,15 @@ describe("approve and discard (I-6, I-7)", () => {
     // The thread still shows the draft, and the summary names the customer by phone-less name.
     const thread = await a.getThread(`c_${phoneOnly}`);
     expect(thread).toMatchObject({ email: null, phone: "+15555550123", name: "Tamsin Hale", drafts: 1 });
+  });
+
+  it("treats any .invalid address as none: approval refuses it and the thread shows no email", async () => {
+    const reserved = await contact(a, { displayName: "Ivo Lane", email: "ivo@example.invalid" });
+    const drafted = await draft(a, reserved, "Placeholder address?");
+    expect((await rejection(approve(a, drafted.result.id))).details).toMatchObject({ reason: "no_email" });
+    expect(await replyRow(drafted.result.id)).toMatchObject({ status: "draft", approved_at: null });
+    expect(await approvedEvents(drafted.result.id)).toHaveLength(0);
+    expect((await a.getThread(`c_${reserved}`)).email).toBeNull();
   });
 
   it("staff draft and discard but cannot approve; a stranger is refused everything", async () => {
@@ -649,6 +673,18 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     await approve(a, stale.result.id);
     expect((await proposals(stale.result.id)).map((row) => row.status)).toEqual(["pending", "approved"]);
     expect(await approvedEvents(stale.result.id)).toHaveLength(1);
+  });
+
+  it("a retry of an approval replays after the proposal's expiry", async () => {
+    const customer = await contact(a, { displayName: "Cleo Rand", email: "cleo@example.com" });
+    const drafted = await draft(a, customer, "See you Friday.");
+    tick();
+    const key = randomUUID();
+    const sent = await a.approveReply(drafted.result.id, {}, key);
+    now += 8 * 24 * 60 * 60_000;
+    expect(await a.approveReply(drafted.result.id, {}, key)).toEqual(sent);
+    expect((await rejection(a.approveReply(drafted.result.id, {}, randomUUID()))).details).toMatchObject({ reason: "not_draft", status: "approved" });
+    expect(await approvedEvents(drafted.result.id)).toHaveLength(1);
   });
 
   /** An owner approves through the approvals route while the customer has no address, so the run fails after the decision. */

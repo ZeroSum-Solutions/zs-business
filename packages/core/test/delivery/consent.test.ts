@@ -74,10 +74,14 @@ describe("consent and approval re-checked at delivery (D-6)", () => {
   it("blocks a contact with no usable address", async () => {
     const placeholder = await h.contact(tenant, { email: `unset-${randomUUID()}@placeholder.invalid` });
     const noPhone = await h.contact(tenant, { consent: { sms: "granted" } });
+    // Any address under the reserved .invalid name is a placeholder, not only the column default's.
+    const reserved = await h.contact(tenant, { email: `someone-${randomUUID().slice(0, 8)}@example.invalid` });
     const email = await h.enqueue(tenant, { contactId: placeholder });
+    const reservedEmail = await h.enqueue(tenant, { contactId: reserved });
     const sms = await h.enqueue(tenant, { contactId: noPhone, channel: "sms" });
     await h.worker().runOnce();
     expect(await h.delivery(tenant, email.messageId)).toMatchObject({ status: "blocked", final_reason: "no_address" });
+    expect(await h.delivery(tenant, reservedEmail.messageId)).toMatchObject({ status: "blocked", final_reason: "no_address" });
     expect(await h.delivery(tenant, sms.messageId)).toMatchObject({ status: "blocked", final_reason: "no_address" });
   });
 
