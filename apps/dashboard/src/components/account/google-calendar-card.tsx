@@ -93,7 +93,7 @@ export function GoogleCalendarCard({ notice, onNotice }: { notice: ReturnNotice 
           data-testid="gcal-return"
           className={cn(
             "mb-4 flex items-start gap-3 rounded-md p-3 text-sm text-fg-2 outline-none",
-            notice.tone === "success" ? "bg-success/10" : notice.tone === "info" ? "bg-surface-warm" : "bg-danger/8",
+            notice.tone === "success" ? "bg-success-tint" : notice.tone === "info" ? "bg-inset" : "bg-danger-tint",
           )}
         >
           {notice.tone === "success" ? <CheckCircle size={20} aria-hidden className="mt-px shrink-0 text-success" />
@@ -182,10 +182,10 @@ function ConfirmGrant({ pending, resourceName, onDone }: { pending: PendingGoogl
       aria-labelledby="gcal-confirm-label"
       aria-describedby="gcal-confirm-hint"
       data-testid="gcal-confirm"
-      className="mb-4 rounded-md bg-surface-warm p-4"
+      className="mb-4 rounded-md bg-inset p-4"
     >
       <p id="gcal-confirm-label" className="text-xs font-medium text-meta">Confirm Google account</p>
-      <h3 className="mt-1 text-sm font-semibold break-words text-fg" data-testid="gcal-confirm-question">Connect {account} to {resourceName}?</h3>
+      <h3 className="mt-1 text-sm font-bold break-words text-fg" data-testid="gcal-confirm-question">Connect {account} to {resourceName}?</h3>
       <p id="gcal-confirm-hint" className="mt-1 text-sm text-fg-2">
         Check that this is your Google account. If you did not just connect a calendar, choose Cancel.
       </p>
@@ -272,7 +272,7 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
     <li aria-labelledby={`${rowId}-name`} data-testid="gcal-row" className="flex flex-wrap items-start gap-3 px-4 py-4 sm:flex-nowrap lg:px-6">
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <h3 id={`${rowId}-name`} className="text-sm font-semibold">{resource.name}</h3>
+          <h3 id={`${rowId}-name`} className="text-sm font-bold">{resource.name}</h3>
           <Badge tone={shown.tone} data-testid="gcal-status"><shown.icon aria-hidden />{shown.label}</Badge>
         </div>
         {connection?.status === "active" ? (

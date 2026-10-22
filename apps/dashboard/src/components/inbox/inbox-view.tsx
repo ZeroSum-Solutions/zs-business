@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Textarea } from "@/components/ui/input";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
+import { Tray, TrayHeader, TrayTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast";
 import {
   isApiError,
@@ -68,17 +69,28 @@ function ThreadBadges({ thread }: { thread: ThreadSummary }) {
 }
 
 function ThreadList({ selectedId }: { selectedId: string | null }) {
+  return (
+    <Tray aria-labelledby="conversations-title">
+      <TrayHeader>
+        <TrayTitle id="conversations-title">Conversations</TrayTitle>
+      </TrayHeader>
+      <ThreadRows selectedId={selectedId} />
+    </Tray>
+  );
+}
+
+function ThreadRows({ selectedId }: { selectedId: string | null }) {
   const threads = useThreads();
-  if (threads.isPending) return <LoadingRows rows={6} label="Loading conversations" />;
+  if (threads.isPending) return <div className="card p-4"><LoadingRows rows={6} label="Loading conversations" /></div>;
   // A failed "Show more" keeps the pages already shown, with the error under them.
-  if (threads.isError && !threads.isFetchNextPageError) return <ErrorNote error={threads.error} retry={() => threads.refetch()} />;
+  if (threads.isError && !threads.isFetchNextPageError) return <div className="card p-4"><ErrorNote error={threads.error} retry={() => threads.refetch()} /></div>;
   const items = threads.data.pages.flatMap((page) => page.items);
   if (items.length === 0) {
     return <EmptyState title="No conversations yet">Website requests and your replies show here, one thread per customer.</EmptyState>;
   }
   return (
     <div>
-      <ul aria-label="Conversations" className="divide-y divide-border-soft overflow-hidden rounded-lg bg-lit shadow-card">
+      <ul aria-label="Conversations" className="grid gap-1.5">
         {items.map((thread) => {
           const active = thread.id === selectedId;
           return (
@@ -87,27 +99,27 @@ function ThreadList({ selectedId }: { selectedId: string | null }) {
                 href={`/inbox/${thread.id}`}
                 aria-current={active ? "true" : undefined}
                 className={cn(
-                  "focus-inset relative flex gap-3 px-4 py-3 transition-quick hover:bg-fg/[0.04]",
-                  active && "bg-accent/10 before:absolute before:inset-y-3 before:left-1 before:w-1 before:rounded-pill before:bg-accent hover:bg-accent/12",
+                  "relative flex gap-3 rounded-lg bg-surface p-3.5 transition-quick",
+                  active ? "shadow-[0_0_0_2px_var(--accent),var(--elev-card)]" : "shadow-card hover:shadow-card-hover",
                 )}
               >
                 <Avatar name={thread.name} />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
-                    <span className={cn("truncate text-sm text-fg", thread.needsReply || thread.needsReview ? "font-semibold" : "font-medium")}>{thread.name}</span>
-                    <time dateTime={thread.lastActivityAt} className={cn("shrink-0 text-xs", active ? "text-muted" : "text-meta")}>{relativeTime(thread.lastActivityAt)}</time>
+                    <span className={cn("truncate text-sm tracking-[-0.01em] text-fg", thread.needsReply || thread.needsReview ? "font-extrabold" : "font-bold")}>{thread.name}</span>
+                    <time dateTime={thread.lastActivityAt} className="shrink-0 text-xs font-semibold text-meta">{relativeTime(thread.lastActivityAt)}</time>
                   </span>
-                  <span className="block truncate text-sm text-muted">{thread.preview ?? "No message"}</span>
-                  <span className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-meta"><ThreadBadges thread={thread} /></span>
+                  <span className="mt-0.5 line-clamp-2 block text-caption text-muted">{thread.preview ?? "No message"}</span>
+                  <span className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-meta empty:hidden"><ThreadBadges thread={thread} /></span>
                 </span>
               </Link>
             </li>
           );
         })}
       </ul>
-      {threads.isFetchNextPageError ? <div className="mt-3"><ErrorNote error={threads.error} retry={() => threads.fetchNextPage()} /></div> : null}
+      {threads.isFetchNextPageError ? <div className="mt-2"><ErrorNote error={threads.error} retry={() => threads.fetchNextPage()} /></div> : null}
       {threads.hasNextPage ? (
-        <Button variant="secondary" className="mt-3 w-full" disabled={threads.isFetchingNextPage} aria-busy={threads.isFetchingNextPage} onClick={() => threads.fetchNextPage()}>
+        <Button variant="secondary" className="mt-2 w-full" disabled={threads.isFetchingNextPage} aria-busy={threads.isFetchingNextPage} onClick={() => threads.fetchNextPage()}>
           Show more conversations
         </Button>
       ) : null}
@@ -120,8 +132,8 @@ function RequestBubble({ entry, zone, resources }: { entry: RequestEntry; zone: 
   const bookingZone = resource?.timeZone ?? zone;
   return (
     <li className="flex flex-col items-start" data-entry="request">
-      <div className="max-w-[85%] rounded-2xl rounded-tl-sm bg-surface-warm px-4 py-3 text-sm text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_0_1px_var(--border)]">
-        <p className="mb-1 flex flex-wrap items-center gap-1.5 text-xs font-medium text-fg-2">
+      <div className="max-w-[85%] rounded-[20px] rounded-tl-md bg-tray px-4 py-3 text-body text-fg">
+        <p className="mb-1 flex flex-wrap items-center gap-1.5 text-xs font-bold text-fg-2">
           <Globe size={14} aria-hidden />Website request · {CHANNEL_LABELS[entry.channel]}
         </p>
         {entry.notes ? (
@@ -132,18 +144,18 @@ function RequestBubble({ entry, zone, resources }: { entry: RequestEntry; zone: 
         {entry.booking ? (
           <Link
             href={`/calendar?date=${zonedDateKey(entry.booking.startsAt, bookingZone)}&calendar=${entry.booking.resourceId}`}
-            className="mt-3 flex min-h-11 items-center gap-3 rounded-md bg-surface px-3 py-2 shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:shadow-[inset_0_0_0_1px_var(--accent)]"
+            className="mt-3 flex min-h-11 items-center gap-3 rounded-md bg-surface px-3 py-2.5 shadow-[inset_0_0_0_1px_var(--border)] transition-quick hover:shadow-[inset_0_0_0_1px_var(--accent)]"
           >
-            <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-sm bg-accent/14 text-accent"><CalendarBlank size={16} weight="fill" /></span>
+            <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-md bg-accent-tint text-accent-ink"><CalendarBlank size={18} /></span>
             <span className="min-w-0 flex-1">
-              <span className="block text-xs text-meta">Booked {resource ? resourceLabel(resource) : "an appointment"} for</span>
-              <span className="block font-medium text-fg">{when(entry.booking.startsAt, bookingZone)}</span>
+              <span className="block text-xs font-bold tracking-[0.04em] text-muted uppercase">Booked {resource ? resourceLabel(resource) : "an appointment"} for</span>
+              <span className="block font-bold text-accent-ink">{when(entry.booking.startsAt, bookingZone)}</span>
             </span>
-            <ArrowRight size={16} aria-hidden className="shrink-0 text-accent" />
+            <ArrowRight size={16} aria-hidden className="shrink-0 text-accent-ink" />
           </Link>
         ) : null}
       </div>
-      <p className="mt-1 text-xs text-meta">{entry.name}, {when(entry.at, zone)}</p>
+      <p className="mt-1.5 text-xs font-semibold text-meta">{entry.name}, {when(entry.at, zone)}</p>
     </li>
   );
 }
@@ -153,9 +165,9 @@ export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: 
   const byAgent = agentId !== null && reply.draftedBy.userId === agentId;
   return (
     <li className="flex flex-col items-end" data-entry="reply" data-reply-id={reply.id} data-status={reply.status}>
-      <div className="max-w-[85%] rounded-2xl rounded-tr-sm bg-linear-to-b from-accent/16 to-accent/8 px-4 py-3 text-sm text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_0_1px_color-mix(in_oklab,var(--accent),transparent_70%)]">
+      <div className="max-w-[85%] rounded-[20px] rounded-tr-md bg-accent-tint px-4 py-3 text-body text-fg">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-          <p className="min-w-0 text-xs font-medium break-words text-fg-2"><span className="sr-only">Subject: </span>{reply.subject}</p>
+          <p className="min-w-0 text-xs font-bold break-words text-fg-2"><span className="sr-only">Subject: </span>{reply.subject}</p>
           {/* Badges sit on a solid surface: their tint over the violet bubble fell below AA. */}
           {byAgent ? <span className="inline-flex rounded-pill bg-surface"><Badge data-testid="agent-draft"><Robot aria-hidden />Follow-up agent</Badge></span> : null}
           {/* Announced when it changes, such as a draft becoming approved and queued. */}
@@ -163,7 +175,7 @@ export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: 
         </div>
         <p className="break-words whitespace-pre-wrap">{reply.body}</p>
       </div>
-      <p className="mt-1 text-right text-xs text-meta">
+      <p className="mt-1.5 text-right text-xs font-semibold text-meta">
         Drafted by {actorName(reply.draftedBy, agentId)}, {when(reply.createdAt, zone)}
         {reply.approvedAt ? <><br />Approved by {actorName(reply.approvedBy)}, {when(reply.approvedAt, zone)}</> : null}
         {reply.settledAt ? <><br />{reply.status === "failed" ? "Delivery failed" : "Delivered"} {when(reply.settledAt, zone)}</> : null}
@@ -200,13 +212,13 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
 
   return (
     <>
-      {thread.olderEntries ? <p className="px-4 pt-4 text-xs text-meta">Older messages are not shown. This shows the latest 200.</p> : null}
+      {thread.olderEntries ? <p className="pb-3 text-xs text-meta">Older messages are not shown. This shows the latest 200.</p> : null}
       {step.isError ? (
-        <div className="px-4 pt-4" data-testid="reply-step-error">
+        <div className="pb-3" data-testid="reply-step-error">
           <ErrorNote error={step.error} message={isApiError(step.error, "conflict") ? `${step.error.message} The thread was reloaded.` : undefined} />
         </div>
       ) : null}
-      <ol aria-label="Messages" className="flex-1 space-y-4 px-4 py-4">
+      <ol aria-label="Messages" className="flex-1 space-y-5 px-1 py-1 lg:px-2">
         {thread.entries.map((entry) => entry.type === "request" ? (
           <RequestBubble key={`r-${entry.id}`} entry={entry} zone={zone} resources={resources.data} />
         ) : (
@@ -297,9 +309,9 @@ function Composer({ thread }: { thread: ThreadDetail }) {
     ? "Saved as a draft first. You approve it before it is queued to send."
     : "Saved as a draft. An owner approves it before it is queued to send.";
   return (
-    <form className="space-y-2 border-t border-border-soft p-3" onSubmit={submit} noValidate>
+    <form className="card space-y-3 p-4 lg:px-5" onSubmit={submit} noValidate>
       {thread.email === null ? (
-        <p className="flex items-start gap-2 rounded-md bg-warn/10 p-3 text-sm text-fg-2">
+        <p className="flex items-start gap-2 rounded-md bg-warn-tint p-3 text-sm text-fg-2">
           <Info size={20} aria-hidden className="mt-px shrink-0 text-warn" />
           <span>This customer has no email address yet. You can draft a reply, but it can only be approved once their record has an email.</span>
         </p>
@@ -324,8 +336,8 @@ function Composer({ thread }: { thread: ThreadDetail }) {
       {empty ? <p role="alert" className="text-sm text-danger">Write a reply first.</p> : null}
       {save.isError ? <ErrorNote error={save.error} /> : null}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p id="reply-help" className="text-xs text-meta">{help}</p>
-        <Button type="submit" variant="secondary" disabled={save.isPending} aria-busy={save.isPending}>Save draft</Button>
+        <p id="reply-help" className="min-w-0 flex-1 basis-56 text-xs text-meta">{help}</p>
+        <Button type="submit" disabled={save.isPending} aria-busy={save.isPending}>Save draft</Button>
       </div>
     </form>
   );
@@ -336,8 +348,8 @@ function VisitorNotice({ thread }: { thread: ThreadDetail }) {
   const request = thread.entries.find((entry): entry is RequestEntry => entry.type === "request");
   const rejected = request?.status === "rejected";
   return (
-    <div className="flex items-start gap-3 border-t border-border-soft p-4 text-sm text-fg-2" data-testid="visitor-notice">
-      <Info size={20} aria-hidden className="mt-px shrink-0 text-accent" />
+    <div className="card flex items-start gap-3 p-4 text-sm text-fg-2 lg:px-5" data-testid="visitor-notice">
+      <span aria-hidden className="flex size-10 shrink-0 items-center justify-center rounded-md bg-accent-tint text-accent-ink"><Info size={20} /></span>
       <div>
         {rejected ? (
           <p>You kept this visitor apart from your customers. Replies go to customers, so there is nothing to reply to here.</p>
@@ -363,10 +375,10 @@ function ThreadPane({ id }: { id: string }) {
   useEffect(() => {
     if (loaded) heading.current?.focus();
   }, [id, loaded]);
-  if (thread.isPending) return <LoadingRows rows={4} label="Loading conversation" />;
+  if (thread.isPending) return <div className="tray"><div className="card p-4"><LoadingRows rows={4} label="Loading conversation" /></div></div>;
   if (thread.isError) {
     return (
-      <div className="space-y-3">
+      <div className="card space-y-3 p-4">
         <ErrorNote error={thread.error} retry={isApiError(thread.error, "not_found") ? undefined : () => thread.refetch()} />
         {isApiError(thread.error, "not_found") ? (
           <Link href="/inbox" className="inline-flex min-h-11 items-center text-sm font-medium text-accent underline-offset-4 hover:underline">Back to all conversations</Link>
@@ -377,24 +389,24 @@ function ThreadPane({ id }: { id: string }) {
   const data = thread.data;
   const reach = [data.email, formatPhone(data.phone)].filter(Boolean).join(" · ");
   return (
-    <article aria-labelledby="thread-title" className="flex flex-col rounded-lg bg-lit shadow-card" data-thread-kind={data.kind}>
-      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border-soft px-4 py-4">
+    <article aria-labelledby="thread-title" className="tray flex flex-col gap-1.5 lg:gap-2" data-thread-kind={data.kind}>
+      <header className="flex flex-wrap items-start justify-between gap-3 px-2 pt-2 pb-2 lg:px-4 lg:pt-3">
         <div className="flex min-w-0 items-start gap-3">
-          <Avatar name={data.name} />
+          <Avatar name={data.name} size="lg" />
           <div className="min-w-0">
           {/* Focus lands here when a thread opens; it is a landing point, not a control, so no ring. */}
-          <h2 id="thread-title" ref={heading} tabIndex={-1} className="text-base font-semibold break-words outline-none">{data.name}</h2>
-          {reach ? <p className="text-xs break-words text-meta">{reach}</p> : null}
-          <p className="mt-1 flex flex-wrap gap-1.5"><ThreadBadges thread={data} /></p>
+          <h2 id="thread-title" ref={heading} tabIndex={-1} className="text-xl leading-tight font-extrabold tracking-[-0.02em] break-words outline-none">{data.name}</h2>
+          {reach ? <p className="mt-0.5 text-caption break-words text-muted">{reach}</p> : null}
+          <p className="mt-2 flex flex-wrap gap-1.5 empty:hidden"><ThreadBadges thread={data} /></p>
           </div>
         </div>
         {data.contactId ? (
-          <Link href={`/customers/${data.contactId}`} className="-my-1 inline-flex min-h-11 items-center text-sm font-medium text-accent underline-offset-4 hover:underline">
+          <Link href={`/customers/${data.contactId}`} className="-my-1 inline-flex min-h-11 items-center text-sm font-bold text-accent-ink underline-offset-4 hover:underline">
             Customer record
           </Link>
         ) : null}
       </header>
-      <ThreadEntries thread={data} zone={zone} />
+      <section aria-label="Conversation" className="card p-4 lg:p-5"><ThreadEntries thread={data} zone={zone} /></section>
       {data.kind === "customer" ? <Composer key={data.id} thread={data} /> : <VisitorNotice thread={data} />}
     </article>
   );
@@ -405,20 +417,20 @@ export function InboxView({ selectedId }: { selectedId: string | null }) {
     <>
       {/* One visible h1 at every width, also with a conversation open on a phone. */}
       <PageHeader title="Inbox" description="Website requests and your replies, one thread per customer." />
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
         <div className={cn(selectedId && "hidden lg:block")}><ThreadList selectedId={selectedId} /></div>
         <div className={cn(!selectedId && "hidden lg:block")}>
           {selectedId ? (
             <>
-              <Link href="/inbox" className="-ml-2 mb-3 inline-flex min-h-11 items-center gap-2 rounded-sm px-2 text-sm font-medium text-muted hover:text-fg lg:hidden">
+              <Link href="/inbox" className="-ml-2 mb-2 inline-flex min-h-11 items-center gap-2 rounded-pill px-3 text-sm font-bold text-muted hover:bg-tray hover:text-fg lg:hidden">
                 <ArrowLeft size={16} aria-hidden /> Inbox
               </Link>
               <ThreadPane id={selectedId} />
             </>
           ) : (
-            <div className="flex min-h-[520px] flex-col items-center justify-center gap-3 rounded-lg bg-lit px-6 text-center shadow-card">
-              <span aria-hidden className="flex size-12 items-center justify-center rounded-pill bg-accent/12 text-accent ring-1 ring-inset ring-accent/25"><ChatCircleDots size={24} weight="fill" /></span>
-              <p className="font-medium text-fg">Pick a conversation</p>
+            <div className="tray flex min-h-[520px] flex-col items-center justify-center gap-3 px-6 text-center">
+              <span aria-hidden className="flex size-12 items-center justify-center rounded-md bg-surface text-accent-ink shadow-card"><ChatCircleDots size={24} /></span>
+              <p className="font-bold text-fg">Pick a conversation</p>
               <p className="max-w-64 text-sm text-muted">Select a conversation to read it and reply.</p>
             </div>
           )}

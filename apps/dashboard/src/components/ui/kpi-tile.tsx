@@ -66,9 +66,9 @@ export function deltaTone(delta: number, lowerIsBetter = false) {
 
 /** Theme roles only: good news in `success`, bad news in `danger` (text, tint). */
 const TONES = {
-  negative: ["text-danger", "bg-danger/10"],
-  neutral: ["text-muted", "bg-surface-warm"],
-  positive: ["text-success", "bg-success/10"],
+  negative: ["text-danger", "bg-danger-tint"],
+  neutral: ["text-muted", "bg-tray"],
+  positive: ["text-success", "bg-success-tint"],
 } as const;
 const TURN = { down: "rotate-90", flat: "rotate-45", up: "rotate-0" } as const;
 const WORD = { down: "Down", flat: "No change", up: "Up" } as const;
@@ -81,12 +81,12 @@ const tween = (duration: number) => ({ duration, ease: EASE });
 const [ROLL, MORPH, DRAW] = [tween(0.6), tween(0.5), tween(0.9)] as const;
 const SKELETON = "skeleton block";
 const VALUE =
-  "min-w-0 break-all font-semibold text-2xl text-fg tabular-nums leading-none tracking-display sm:text-3xl";
+  "min-w-0 break-all font-extrabold text-[32px] text-fg tabular-nums leading-none tracking-display lg:text-[40px]";
 const TILE =
-  "card-live flex min-w-0 flex-col gap-3 rounded-lg bg-lit p-4 text-fg shadow-card lg:p-5";
-const LABEL = "truncate font-medium text-muted text-sm";
+  "card card-live flex min-w-0 flex-col gap-3 p-4 text-fg lg:px-6 lg:py-5";
+const LABEL = "truncate font-bold text-muted text-sm";
 const BADGE =
-  "inline-flex items-center gap-0.5 rounded-pill px-1.5 py-0.5 font-medium text-xs tabular-nums";
+  "inline-flex min-h-[26px] items-center gap-0.5 rounded-pill px-2.5 font-bold text-xs tabular-nums";
 const ARROW =
   "size-3.5 transition-transform duration-500 motion-reduce:transition-none";
 const SPARK =

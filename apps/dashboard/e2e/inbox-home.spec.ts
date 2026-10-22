@@ -148,6 +148,31 @@ test("Home compares this week with last week, and counts a new booking and a won
   await expect(revenue.locator("[data-source=referral]")).toContainText("$14,500");
 });
 
+test("Home's Try again brings back the needs-you line and the tray together", async ({ page }) => {
+  await page.goto("/inbox");
+  await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
+  // Every bookings read fails, so Home cannot tell whether an appointment is today.
+  await page.evaluate(() => window.__zsDemo!.failBookingReads(true));
+  await mainNav(page).getByRole("link", { name: "Home" }).click();
+  const lede = page.getByRole("main").locator("p").filter({ hasText: /^(Good (morning|afternoon|evening)|Hello), / });
+  // Each read retries twice before it gives up.
+  await expect(lede).toContainText("Couldn't check everything.", { timeout: 10_000 });
+  const tray = page.getByRole("region", { name: "Needs you now" });
+  const calendar = tray.locator('a[href="/calendar"]');
+  await expect(calendar).toContainText("Couldn't check", { timeout: 10_000 });
+  const next = page.getByRole("region", { name: "Next appointments" });
+  await expect(next.getByRole("alert")).toBeVisible({ timeout: 10_000 });
+
+  // One retry from the lede re-reads what the tray and Next appointments show as well.
+  await page.evaluate(() => window.__zsDemo!.failBookingReads(false));
+  await lede.getByRole("button", { name: "Try again" }).click();
+  await expect(lede).toContainText(/Nothing needs you right now\.|(One thing needs|(Two|Three) things need) you today\./);
+  await expect(lede.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await expect(calendar).not.toContainText("Couldn't check");
+  await expect(calendar).toContainText(/Next: |No appointments coming up/);
+  await expect(next.getByRole("alert")).toHaveCount(0);
+});
+
 test("sets a deal's value and lead source, and reloads when someone else changed it", async ({ page }, info) => {
   const phone = info.project.name === "phone";
   await page.goto("/customers?view=pipeline");

@@ -1,6 +1,6 @@
 "use client";
 
-import { CaretUpDown, CreditCard, GearSix, PlugsConnected, SignOut } from "@phosphor-icons/react";
+import { CaretDown, CreditCard, GearSix, PlugsConnected, SignOut } from "@phosphor-icons/react";
 import Link from "next/link";
 import { DropdownMenu } from "radix-ui";
 import { useSession } from "@/lib/session";
@@ -16,41 +16,42 @@ const ITEMS = [
   { href: "/account/plan", label: "Plan", icon: CreditCard },
 ];
 
-export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
+/** `header`: the desktop header (name and role from xl up). `topbar`: the phone bar, avatar only. */
+export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
   const { signOut } = useSession();
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
         className={cn(
-          "flex items-center gap-3 rounded-sm text-left transition-quick hover:bg-surface-warm data-[state=open]:bg-surface-warm",
-          variant === "sidebar" ? "min-h-12 w-full px-2" : "size-11 justify-center",
+          "flex min-h-11 min-w-11 items-center justify-center gap-2.5 rounded-pill p-1 text-left transition-quick hover:bg-tray data-[state=open]:bg-tray",
+          variant === "header" && "xl:pr-3",
         )}
       >
         <span className="sr-only">Account menu</span>
         <Avatar name={OWNER.name} size="sm" />
-        {variant === "sidebar" ? (
+        {variant === "header" ? (
           <>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium text-fg">{OWNER.name}</span>
+            <span className="hidden min-w-0 leading-tight xl:block">
+              <span className="block truncate text-sm font-bold text-fg">{OWNER.name}</span>
               <span className="block truncate text-xs text-meta">Owner</span>
             </span>
-            <CaretUpDown size={16} aria-hidden className="text-meta" />
+            <CaretDown size={16} aria-hidden className="hidden text-meta xl:block" />
           </>
         ) : null}
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
-          align={variant === "sidebar" ? "start" : "end"}
-          side={variant === "sidebar" ? "top" : "bottom"}
+          align="end"
+          side="bottom"
           sideOffset={8}
-          className="z-50 min-w-56 rounded-md bg-surface p-1 shadow-raised ring-1 ring-border data-[state=open]:animate-enter"
+          className="z-50 min-w-56 rounded-[18px] bg-surface p-1.5 shadow-raised ring-1 ring-border data-[state=open]:animate-enter"
         >
-          <DropdownMenu.Label className="px-3 py-2 text-xs text-meta">{OWNER.business}</DropdownMenu.Label>
+          <DropdownMenu.Label className="px-3 pt-2.5 pb-2 text-xs text-meta">{OWNER.name}, Owner · {OWNER.business}</DropdownMenu.Label>
           {ITEMS.map((item) => (
             <DropdownMenu.Item key={item.href} asChild>
               <Link
                 href={item.href}
-                className="flex min-h-11 items-center gap-3 rounded-sm px-3 text-sm text-fg data-[highlighted]:bg-surface-warm"
+                className="flex min-h-11 items-center gap-3 rounded-md px-3 text-sm font-semibold text-fg data-[highlighted]:bg-tray"
               >
                 <item.icon size={20} aria-hidden className="text-muted" />
                 {item.label}
@@ -60,7 +61,7 @@ export function AccountMenu({ variant }: { variant: "sidebar" | "topbar" }) {
           <DropdownMenu.Separator className="my-1 h-px bg-border-soft" />
           <DropdownMenu.Item
             onSelect={() => signOut("signed_out")}
-            className="flex min-h-11 cursor-default items-center gap-3 rounded-sm px-3 text-sm text-fg data-[highlighted]:bg-surface-warm"
+            className="flex min-h-11 cursor-default items-center gap-3 rounded-md px-3 text-sm font-semibold text-fg data-[highlighted]:bg-tray"
           >
             <SignOut size={20} aria-hidden className="text-muted" />
             Sign out

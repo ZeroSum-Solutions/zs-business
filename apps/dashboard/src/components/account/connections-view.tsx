@@ -74,20 +74,20 @@ function GoogleReturn({ onNotice }: { onNotice: (notice: ReturnNotice | null) =>
 function OtherAccounts() {
   const connections = useConnections();
   return (
-    <section aria-labelledby="other-accounts-title">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h2 id="other-accounts-title" className="text-lg leading-6 font-medium text-fg">Other accounts</h2>
+    <section aria-labelledby="other-accounts-title" className="tray">
+      <div className="flex min-h-11 flex-wrap items-center gap-2 px-3 pt-2 pb-2.5 lg:px-4">
+        <h2 id="other-accounts-title" className="text-base font-bold text-fg">Other accounts</h2>
         <SampleBadge />
       </div>
       {connections.isPending ? <LoadingRows rows={6} /> : connections.isError ? <ErrorNote error={connections.error} retry={() => connections.refetch()} /> : (
-        <ul className="divide-y divide-border-soft overflow-hidden rounded-lg bg-lit shadow-card">
+        <ul className="card divide-y divide-border-soft overflow-hidden">
           {connections.data.map((connection) => {
             const status = STATUS[connection.status];
             return (
               <li key={connection.id} className="flex flex-wrap items-center gap-3 px-4 py-4 sm:flex-nowrap">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-sm font-semibold">{connection.name}</h3>
+                    <h3 className="text-sm font-bold">{connection.name}</h3>
                     <Badge tone={status.tone}><status.icon aria-hidden />{status.label}</Badge>
                   </div>
                   <p className="text-sm text-muted">{connection.purpose}</p>

@@ -1,12 +1,24 @@
 # F2: CRM transaction slice
 
-Status: implemented. The numbered rules below are the contract the code and tests
+Status: implemented, revision 2. The numbered rules below are the contract the code and tests
 follow. The three handlers, their wrappers, the schema and the migration ship in this
 repository. At the time of writing, `pnpm --filter @zs/core test:crm` runs 40 tests in
 five files (public examples, contact and deal acceptance, email uniqueness and the real
 Postgres seam), and all pass.
+Revision 2026-10-22 (audit B1-02): C-9 limits `recordedAt` to the supported instant range,
+UTC years 0001 through 9999. A time outside it is refused with `ValidationFailed` and
+nothing is written; before this, year 0000 passed the boundary and Postgres failed the
+request with a 500. Source observations (approvals.md F-4) and booking instants
+(booking.md) apply the same range. The range binds client input only: records, reads and
+replayed results accept any UTC ISO instant with milliseconds (`storedInstantSchema`), so a
+result an earlier release stored outside it still replays unchanged. Server timestamps
+(`createdAt`, `updatedAt`, consent `recordedAt` on intake) come from the injected clock, which
+must also lie in the range; outside it the write fails with `ValidationFailed`, nothing written.
 This slice covers contact identity, consent storage, deal creation and stage moves.
 It provides no messaging, contact merge, general contact edit or pipeline editor.
+Revision 2 (2026-10-22 audit, B5-06): C-14 refuses to move a deal whose stored currency
+is not an ISO 4217 code, with `details.reason="invalid_currency"`; `inbox-home.md` H-1
+(revision 4) defines the deal value and the stored codes that rule applies to.
 
 ## Evidence and decisions
 
@@ -108,9 +120,9 @@ dispatcher's stored result.
 
 **C-9. Desired, stored consent.** Store email and SMS independently. Each channel
 contains either null (no recorded evidence) or `{status,source,recordedAt}` with
-status `granted` or `denied`, a nonempty source, and a valid recorded time no later
-than the dispatcher's injected now. Never derive permission from having an address,
-a phone, a deal or a booking. This slice stores evidence; it never sends messages.
+status `granted` or `denied`, a nonempty source, and a valid recorded time in UTC years
+0001 through 9999 (`supportedInstantSchema`) no later than the dispatcher's injected
+now. Never derive permission from having an address, a phone, a deal or a booking. This slice stores evidence; it never sends messages.
 
 **C-10. Desired, import preservation.** For mode `import`, preserve every existing
 non-null channel record byte-for-byte, including status, source and recorded time,
@@ -156,7 +168,12 @@ pipeline and destination membership, then compare revision. A wrong pipeline and
 stale revision together yield `ValidationFailed`; absent/foreign parents take
 precedence as `TenantDenied`. Once validation succeeds, a zero-row conditional
 update also raises `Conflict` with `details.reason="stale_revision"` and
-`details.currentRevision` re-read from owned state.
+`details.currentRevision` re-read from owned state. A deal whose stored `currency` is
+not an ISO 4217 code (stored under the earlier check, `inbox-home.md` H-1) raises
+`Conflict` with `details.reason="invalid_currency"` and `details.currency` set to the
+stored code. This check runs after pipeline and stage validation and before the
+revision compare, and writes nothing. The refusal holds until `crm.deal.set-details`
+replaces the value.
 
 **C-15. Desired, successful move.** The destination belongs to the deal's current
 pipeline; moving deals between pipelines is outside scope. A different supplied

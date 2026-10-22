@@ -42,10 +42,10 @@ function SignedOut({ reason }: { reason: SignedOutReason }) {
   const href = mode === "live" ? `/sign-in${pathname && pathname !== "/" ? `?next=${encodeURIComponent(pathname)}` : ""}` : "/";
   return (
     <section aria-labelledby="signed-out-title" data-testid="signed-out" className="mx-auto max-w-md py-12 text-center">
-      <span aria-hidden className="mx-auto mb-4 flex size-12 items-center justify-center rounded-pill bg-surface-warm text-muted">
+      <span aria-hidden className="mx-auto mb-4 flex size-12 items-center justify-center rounded-pill bg-inset text-muted">
         <SignOut size={24} />
       </span>
-      <h1 id="signed-out-title" className="text-xl tracking-display">{COPY[reason].title}</h1>
+      <h1 id="signed-out-title" className="text-2xl leading-tight font-extrabold tracking-display">{COPY[reason].title}</h1>
       <p className="mt-2 text-sm text-muted">{COPY[reason].body}</p>
       <a href={href} className={cn(buttonVariants(), "mt-6")}>{COPY[reason].action}</a>
     </section>
@@ -61,12 +61,12 @@ function SigningOut({ failed }: { failed: boolean }) {
   const pending = !failed;
   return (
     <section aria-labelledby="signing-out-title" data-testid="signing-out" className="mx-auto max-w-md py-12 text-center">
-      <span aria-hidden className="mx-auto mb-4 flex size-12 items-center justify-center rounded-pill bg-surface-warm text-muted">
+      <span aria-hidden className="mx-auto mb-4 flex size-12 items-center justify-center rounded-pill bg-inset text-muted">
         <SignOut size={24} />
       </span>
-      <h1 id="signing-out-title" className="text-xl tracking-display">Signing out</h1>
+      <h1 id="signing-out-title" className="text-2xl leading-tight font-extrabold tracking-display">Signing out</h1>
       {failed ? (
-        <p role="alert" className="mt-4 flex items-start gap-3 rounded-md bg-danger/8 p-4 text-left text-sm text-fg-2">
+        <p role="alert" className="mt-4 flex items-start gap-3 rounded-md bg-danger-tint p-4 text-left text-sm text-fg-2">
           <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-danger" />
           <span>Sign-out did not finish. Try again.</span>
         </p>

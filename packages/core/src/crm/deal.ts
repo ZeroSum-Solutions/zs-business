@@ -3,11 +3,13 @@ import {
   TenantDenied,
   ValidationFailed,
   createDealCommandSchema,
+  currencyCodeSchema,
   moveDealStageCommandSchema,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import {
+  clockInstant,
   dealColumns,
   dealRecord,
   idInUse,
@@ -39,6 +41,7 @@ export const createDealHandler: ActionHandler = {
     return { tenantId: target.tenantId, type: "deal", id: target.id };
   },
   async handle({ tx, command, binding, now }) {
+    const at = clockInstant(now);
     const { payload: input } = parseOrFail(createDealCommandSchema, command);
     const tenantId = binding.tenantId;
     // C-13: every parent's ownership first (TenantDenied), then stage membership (ValidationFailed).
@@ -52,7 +55,7 @@ export const createDealHandler: ActionHandler = {
     const row = (await tx.query<DealRow>(
       `INSERT INTO crm_deals (tenant_id,id,contact_id,pipeline_id,stage_id,title,revision,created_at,updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,1,$7,$7) RETURNING ${dealColumns}`,
-      [tenantId, input.dealId, input.contactId, input.pipelineId, input.stageId, input.title, now],
+      [tenantId, input.dealId, input.contactId, input.pipelineId, input.stageId, input.title, at],
     )).rows[0]!;
     return { result: dealRecord(row) };
   },
@@ -81,11 +84,12 @@ export const moveDealStageHandler: ActionHandler = {
     return owned ? { tenantId: target.tenantId, type: "deal", id: target.id } : null;
   },
   async handle({ tx, command, binding, now }) {
+    const at = clockInstant(now);
     const { payload: input } = parseOrFail(moveDealStageCommandSchema, command);
     const tenantId = binding.tenantId;
     // C-14 order: ownership, then pipeline/stage membership, then the revision compare-and-set.
-    const deal = (await tx.query<{ pipeline_id: string }>(
-      "SELECT pipeline_id FROM crm_deals WHERE tenant_id=$1 AND id=$2", [tenantId, input.dealId],
+    const deal = (await tx.query<{ pipeline_id: string; currency: string | null }>(
+      "SELECT pipeline_id, currency FROM crm_deals WHERE tenant_id=$1 AND id=$2", [tenantId, input.dealId],
     )).rows[0];
     const pipelineFound = await pipelineOwned(tx, tenantId, input.pipelineId);
     const stagePipelineId = await stagePipeline(tx, tenantId, input.stageId);
@@ -94,11 +98,17 @@ export const moveDealStageHandler: ActionHandler = {
       throw new ValidationFailed("Deals cannot move between pipelines");
     if (stagePipelineId !== input.pipelineId)
       throw new ValidationFailed("The stage does not belong to the deal's pipeline");
+    // inbox-home.md H-1 revision 4: the table checks every updated row's currency, and a deal
+    // stored under the earlier check may hold a code outside ISO 4217 until its value is fixed.
+    if (deal.currency !== null && !currencyCodeSchema.safeParse(deal.currency).success)
+      throw new Conflict("The deal's currency is not an ISO 4217 code; set its value first", {
+        reason: "invalid_currency", currency: deal.currency,
+      });
     const row = (await tx.query<DealRow>(
       `UPDATE crm_deals SET stage_id=$4, revision=revision+1, updated_at=$6
        WHERE tenant_id=$1 AND id=$2 AND pipeline_id=$3 AND revision=$5 AND revision < 9007199254740991
        RETURNING ${dealColumns}`,
-      [tenantId, input.dealId, input.pipelineId, input.stageId, input.expectedRevision, now],
+      [tenantId, input.dealId, input.pipelineId, input.stageId, input.expectedRevision, at],
     )).rows[0];
     if (!row)
       throw new Conflict("The deal revision changed", {

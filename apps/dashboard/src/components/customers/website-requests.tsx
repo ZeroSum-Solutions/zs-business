@@ -66,26 +66,26 @@ export function WebsiteRequests() {
     resources.data?.find((resource) => resource.id === item.booking?.resourceId)?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   return (
-    <section aria-labelledby="website-requests-title" className="mb-6 rounded-lg bg-lit p-4 shadow-card lg:p-6">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h2 id="website-requests-title" className="text-lg leading-6 font-medium text-fg">Website bookings to review</h2>
+    <section aria-labelledby="website-requests-title" className="tray mb-4">
+      <div className="flex flex-wrap items-center gap-2 px-3 pt-2 lg:px-4">
+        <h2 id="website-requests-title" className="text-base leading-6 font-bold text-fg">Website bookings to review</h2>
         <Badge tone="warn">{items.data.items.length}</Badge>
       </div>
-      <p className="mb-4 text-sm text-muted">
+      <p className="mb-2.5 px-3 text-caption text-muted lg:px-4">
         These people booked on your website with an email or phone you already have. The time is held. Confirm who they are, or keep them separate.
       </p>
       {review.isError && !(isApiError(review.error, "conflict") && review.error.reason === "already_reviewed") ? (
-        <div className="mb-4"><ErrorNote error={review.error} /></div>
+        <div className="mb-2"><ErrorNote error={review.error} /></div>
       ) : null}
-      <ul className="space-y-3">
+      <ul className="grid gap-1.5 lg:gap-2">
         {items.data.items.map((item) => {
           const zone = zoneFor(item);
           const busy = review.isPending && review.variables?.itemId === item.id;
           return (
-            <li key={item.id} data-testid="website-request" className="rounded-md bg-surface-warm/60 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),inset_0_0_0_1px_var(--border)]">
+            <li key={item.id} data-testid="website-request" className="card p-4 lg:px-6 lg:py-5">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <Avatar name={item.submitted.name} size="sm" />
-                <p className="font-medium text-fg">{item.submitted.name}</p>
+                <p className="font-bold text-fg">{item.submitted.name}</p>
                 <Badge tone="accent"><Globe aria-hidden />Website</Badge>
                 {item.booking ? (
                   <p className="tabular text-sm text-muted">{formatDay(item.booking.startsAt, zone)}, {formatTime(item.booking.startsAt, zone)}</p>

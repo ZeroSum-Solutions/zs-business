@@ -1,7 +1,11 @@
 # M6: inquiry follow-up agent
 
-Status: contract for M6 (2026-10-20), revision 1. Code follows this file; a change to a
-numbered rule needs a new revision of this file first.
+Status: contract for M6 (2026-10-20), revision 2. Code follows this file; a change to a
+numbered rule needs a new revision of this file first. Revision 2 (2026-10-22 audit, B5-01,
+B5-02): G-8 adds the skip reason `superseded`, for an inquiry the customer followed with a newer
+request before its draft committed (the draft action re-checks G-7's latest-request condition
+under the customer's row lock), and G-10 names the database guard that keeps closed runs as
+they are.
 
 Scope: one agent. It finds website inquiries nobody has answered, asks a model port for a
 follow-up email, and leaves it in the Inbox as a draft with a pending send proposal. An owner
@@ -104,8 +108,9 @@ together decide more.
 
 **G-8. Skips.** A candidate is skipped, with its reason recorded, when the customer has no
 real email (`no_email`), the email is suppressed (`suppressed`), email consent is `denied`
-(`consent_denied`), the customer reached the per-customer cap (`contact_cap`), or a reply was
-drafted since the request (`answered`). The run checks these before calling the model, so a
+(`consent_denied`), the customer reached the per-customer cap (`contact_cap`), a reply was
+drafted since the request (`answered`), or the customer has made a newer request since
+(`superseded`; that request is the candidate now, G-7). The run checks these before calling the model, so a
 skipped customer's details are never sent to it; the draft action checks them again under its
 locks. A model error or an answer that fails validation is `model_error` and
 `model_invalid`. Reasons that apply to the whole tenant (`global_killed`, `disabled`,
@@ -120,6 +125,8 @@ cloud use `createFakeFollowUpModel`, which is deterministic; no real model or ke
 **G-10. Records.** `agent_runs` (one row per run: requester, start, finish, status, stop
 reason, counts) and `agent_followups` (one row per decision: run, inquiry, customer, outcome,
 reason, reply, approval, time) are append-only for the runtime role apart from closing a run.
+A run moves once from `running` to `completed` or `stopped`, and a closed run never changes
+(`agent_runs_guard`, for every role).
 Both have `tenant_id`, forced RLS with the tenant policy, and the catalog two-tenant denial
 test.
 

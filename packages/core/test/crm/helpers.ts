@@ -3,18 +3,20 @@ import {
   createDealCommandSchema,
   createOrFindContactCommandSchema,
   moveDealStageCommandSchema,
+  setDealDetailsCommandSchema,
   type ActionCommand,
   type CreateDealInput,
   type CreateOrFindContactInput,
   type MoveDealStageInput,
+  type SetDealDetailsInput,
 } from "@zs/contracts";
 import type { ScopedDatabase } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { createDispatcher, crmHandlers, type DispatchContext } from "../../src/index.js";
+import { createDispatcher, crmHandlers, dealDetailsHandlers, type DispatchContext } from "../../src/index.js";
 import type { CrmWriteContext } from "@zs/contracts";
 
 export const NOW = "2026-10-19T08:00:00.000Z";
-const dispatch = createDispatcher({ ...crmHandlers });
+const dispatch = createDispatcher({ ...crmHandlers, ...dealDetailsHandlers });
 
 export interface Harness {
   database: TestDatabase;
@@ -104,6 +106,12 @@ export function dealCommand(tenantId: string, payload: Omit<CreateDealInput, "de
 export function moveCommand(tenantId: string, payload: MoveDealStageInput) {
   return moveDealStageCommandSchema.parse({
     actionType: "crm.deal.move-stage", ...envelope(tenantId, "deal", payload.dealId), payload,
+  });
+}
+
+export function detailsCommand(tenantId: string, payload: SetDealDetailsInput) {
+  return setDealDetailsCommandSchema.parse({
+    actionType: "crm.deal.set-details", ...envelope(tenantId, "deal", payload.dealId), payload,
   });
 }
 
