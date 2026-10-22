@@ -92,10 +92,19 @@ async function clippedFocusRings(page: Page, maxTabs = 45) {
   return [...problems];
 }
 
+/** Light is the default; every check names its theme, so a change of default never drops one. */
+const THEMES = ["dark", "light"] as const;
+
+async function pickTheme(page: Page, theme: (typeof THEMES)[number]) {
+  await page.addInitScript((value) => localStorage.setItem("zs-theme", value), theme);
+}
+
 test.describe("accessibility", () => {
   for (const { path, heading } of PAGES) {
     test(`${path} has no serious axe issues, small targets, broken labels, silent disabled buttons or clipped focus`, async ({ page }) => {
+      await pickTheme(page, "light");
       await open(page, path, heading);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
       // The default rule set: every WCAG A and AA rule axe ships as stable, plus best practices.
       const axe = await new AxeBuilder({ page }).analyze();
       const serious = axe.violations
@@ -109,22 +118,24 @@ test.describe("accessibility", () => {
     });
   }
 
-  // The light theme has its own colour values, so every page gets a contrast pass in it too.
-  for (const { path, heading } of PAGES) {
-    test(`${path} meets text contrast in the light theme`, async ({ page }) => {
-      await page.addInitScript(() => localStorage.setItem("zs-theme", "light"));
-      await open(page, path, heading);
-      await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-      const axe = await new AxeBuilder({ page }).withRules(["color-contrast"]).analyze();
-      const failures = axe.violations.flatMap((violation) => violation.nodes.slice(0, 5).map((node) => node.target.join(" ")));
-      expect(failures, "light-theme contrast").toEqual([]);
-    });
+  // Each theme has its own colour values, so every page gets a contrast pass in both.
+  for (const theme of THEMES) {
+    for (const { path, heading } of PAGES) {
+      test(`${path} meets text contrast in the ${theme} theme`, async ({ page }) => {
+        await pickTheme(page, theme);
+        await open(page, path, heading);
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+        const axe = await new AxeBuilder({ page }).withRules(["color-contrast"]).analyze();
+        const failures = axe.violations.flatMap((violation) => violation.nodes.slice(0, 5).map((node) => node.target.join(" ")));
+        expect(failures, `${theme}-theme contrast`).toEqual([]);
+      });
+    }
   }
 
   // A selected row and the open thread's bubbles tint their fills, so check them in both themes.
-  for (const theme of ["dark", "light"]) {
+  for (const theme of THEMES) {
     test(`an open conversation meets text contrast in the ${theme} theme`, async ({ page }) => {
-      await page.addInitScript((value) => localStorage.setItem("zs-theme", value), theme);
+      await pickTheme(page, theme);
       await open(page, "/inbox", "Inbox");
       await page.getByRole("main").getByRole("listitem").getByRole("link").first().click();
       await expect(page).toHaveURL(/\/inbox\/.+/);
@@ -136,9 +147,9 @@ test.describe("accessibility", () => {
   }
 
   // The lit current item is the only cue for "you are here" in the nav: 3:1 against the bar (WCAG 1.4.11).
-  for (const theme of ["dark", "light"]) {
+  for (const theme of THEMES) {
     test(`the lit nav item stands out from the bar in the ${theme} theme`, async ({ page }) => {
-      await page.addInitScript((value) => localStorage.setItem("zs-theme", value), theme);
+      await pickTheme(page, theme);
       await open(page, "/", "This week");
       const ratio = await page.getByRole("navigation", { name: "Main" }).filter({ visible: true }).evaluate((nav) => {
         const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
