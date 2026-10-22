@@ -64,7 +64,7 @@
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   /* Typography: scale. Body copy is 15px; form fields stay 16px so phones do not zoom. */
   --text-xs: 12px;
-  --text-meta: 13px;
+  --text-caption: 13px;
   --text-sm: 14px;
   --text-body: 15px;
   --text-base: 16px;
@@ -257,7 +257,6 @@
 /* Dashboard layout. The phone dock is 64px tall and floats 16px off the bottom edge. */
 :root {
   --tabbar-height: 80px;
-  --sidebar-width: 256px;
   --topbar-height: 68px;
 }
 
@@ -309,7 +308,7 @@
   --font-display: var(--font-display);
   --font-mono: var(--font-mono);
   --text-xs: var(--text-xs);
-  --text-meta: var(--text-meta);
+  --text-caption: var(--text-caption);
   --text-sm: var(--text-sm);
   --text-body: var(--text-body);
   --text-base: var(--text-base);
