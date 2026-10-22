@@ -10,33 +10,38 @@ export interface ToastItem {
   id: number;
   tone: Tone;
   message: string;
-  /** When it was raised, by the provider's clock. */
-  at: number;
   /** The open sheet it was raised in, or null for the page. */
   sheet: string | null;
   /** A later toast on the same topic replaces this one, so two answers about one thing never disagree. */
   topic?: string;
+  /** Raised for the page about to open ("Added …", then the record opens): it survives that one page change. */
+  keepOnNavigate?: boolean;
 }
-export interface ToastOptions { topic?: string }
+export interface ToastOptions { topic?: string; keepOnNavigate?: boolean }
 
 /** Long enough to read twice. Errors stay until dismissed. */
 export const TOAST_MS = 10_000;
 /** Toasts shown at once in one place (the page or a sheet); phones show the newest only. */
 export const MAX_TOASTS = 2;
-/** A toast raised this soon before the page changed reports the move ("Added …", then the record opens), so it stays. */
-export const ARRIVAL_MS = 2_000;
 
 const sticky = (item: ToastItem) => item.tone === "danger";
 
-/** Over the cap in `sheet`'s place, the oldest toast that would close by itself goes first. */
+/**
+ * What `sheet`'s place shows: the newest toast always, then the newest errors, then the rest, up
+ * to the cap. `waiting` counts the errors held back until one shown is dismissed.
+ */
+export function shownToasts(items: readonly ToastItem[], sheet: string | null): { toasts: ToastItem[]; waiting: number } {
+  const here = items.filter((item) => item.sheet === sheet);
+  const older = here.slice(0, -1).reverse();
+  const picked = [...here.slice(-1), ...older.filter(sticky), ...older.filter((item) => !sticky(item))].slice(0, MAX_TOASTS);
+  const toasts = here.filter((item) => picked.includes(item));
+  return { toasts, waiting: here.length - toasts.length };
+}
+
+/** Over the cap, errors wait their turn; a toast that would close by itself goes, so it never shows late. */
 function capped(items: ToastItem[], sheet: string | null): ToastItem[] {
-  let result = items;
-  while (result.filter((item) => item.sheet === sheet).length > MAX_TOASTS) {
-    const here = result.filter((item) => item.sheet === sheet);
-    const drop = here.find((item) => !sticky(item)) ?? here[0]!;
-    result = result.filter((item) => item !== drop);
-  }
-  return result;
+  const { toasts } = shownToasts(items, sheet);
+  return items.filter((item) => item.sheet !== sheet || sticky(item) || toasts.includes(item));
 }
 
 /** Adds a toast. The same words in the same place, or the same topic, replace the earlier one. */
@@ -50,9 +55,9 @@ export function addToast(items: readonly ToastItem[], next: ToastItem): ToastIte
 
 export const clearTopic = (items: readonly ToastItem[], topic: string): ToastItem[] => items.filter((item) => item.topic !== topic);
 
-/** A new page: what the last page said no longer applies, unless it was said for the move itself. */
-export const afterRouteChange = (items: readonly ToastItem[], now: number): ToastItem[] =>
-  items.filter((item) => now - item.at < ARRIVAL_MS);
+/** A new page: what the last page said no longer applies, unless it was said for this page. */
+export const afterRouteChange = (items: readonly ToastItem[]): ToastItem[] =>
+  items.filter((item) => item.keepOnNavigate).map(({ keepOnNavigate: _kept, ...item }) => item);
 
 /** A sheet opened over the page: page toasts that would close by themselves go; errors wait. */
 export const afterSheetOpened = (items: readonly ToastItem[]): ToastItem[] => items.filter((item) => item.sheet !== null || sticky(item));
@@ -72,6 +77,20 @@ interface ToastState {
   closeSheet: (sheet: string) => void;
 }
 const ToastStateContext = createContext<ToastState | null>(null);
+
+const waitingWords = (count: number) => `${count} more ${count === 1 ? "message" : "messages"}. Dismiss one to see the next.`;
+
+/** Toasts held back, so the owner knows to dismiss one: `wide` on larger screens, `narrow` where only the newest shows. */
+function Waiting({ wide, narrow, className }: { wide: number; narrow: number; className?: string }) {
+  if (narrow <= 0) return null;
+  return (
+    <p data-testid="toast-waiting" className={cn("w-full max-w-sm rounded-pill bg-ink px-4 py-1.5 text-xs font-semibold text-ink-on shadow-raised", wide === 0 && "sm:hidden", className)}>
+      {wide === narrow ? waitingWords(wide) : (
+        <><span className="sm:hidden">{waitingWords(narrow)}</span><span className="max-sm:hidden">{waitingWords(wide)}</span></>
+      )}
+    </p>
+  );
+}
 
 function Toast({ item, onDismiss, className }: { item: ToastItem; onDismiss: (id: number) => void; className?: string }) {
   // The countdown stops while the pointer or focus is on the toast, so it never vanishes mid-read.
@@ -112,7 +131,7 @@ function Toast({ item, onDismiss, className }: { item: ToastItem; onDismiss: (id
  * Toasts dock at the bottom of the page. While a sheet is open they show inside it, in its
  * flow above the actions (`SheetToasts`), so they never cover a sheet's buttons or field errors.
  */
-export function ToastProvider({ children, now = Date.now }: { children: ReactNode; now?: () => number }) {
+export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const next = useRef(0);
   // Open sheets, innermost last. A ref so a toast raised in the same tick a sheet opens or
@@ -122,9 +141,13 @@ export function ToastProvider({ children, now = Date.now }: { children: ReactNod
   const dismiss = useCallback((id: number) => setItems((current) => current.filter((item) => item.id !== id)), []);
   const clear = useCallback((topic: string) => setItems((current) => clearTopic(current, topic)), []);
   const push = useCallback<Push>((message, tone = "success", options) => {
-    const item: ToastItem = { id: ++next.current, tone, message, at: now(), sheet: sheets.current.at(-1) ?? null, ...(options?.topic ? { topic: options.topic } : {}) };
+    const item: ToastItem = {
+      id: ++next.current, tone, message, sheet: sheets.current.at(-1) ?? null,
+      ...(options?.topic ? { topic: options.topic } : {}),
+      ...(options?.keepOnNavigate ? { keepOnNavigate: true } : {}),
+    };
     setItems((current) => addToast(current, item));
-  }, [now]);
+  }, []);
   const openSheet = useCallback((sheet: string) => {
     sheets.current = [...sheets.current, sheet];
     setSheetCount(sheets.current.length);
@@ -142,10 +165,11 @@ export function ToastProvider({ children, now = Date.now }: { children: ReactNod
   useEffect(() => {
     if (shownPath.current === pathname) return;
     shownPath.current = pathname;
-    setItems((current) => afterRouteChange(current, now()));
-  }, [pathname, now]);
+    setItems(afterRouteChange);
+  }, [pathname]);
 
   const state = useMemo(() => ({ items, dismiss, clear, openSheet, closeSheet }), [items, dismiss, clear, openSheet, closeSheet]);
+  const page = shownToasts(items, null);
   return (
     <ToastContext.Provider value={push}>
       <ToastStateContext.Provider value={state}>
@@ -155,9 +179,12 @@ export function ToastProvider({ children, now = Date.now }: { children: ReactNod
           aria-live="polite"
           className="pointer-events-none fixed inset-x-0 bottom-[calc(var(--tabbar-height)+env(safe-area-inset-bottom)+12px)] z-[60] flex flex-col items-center gap-2 px-4 lg:bottom-6 lg:items-end lg:px-8"
         >
-          {sheetCount > 0 ? null : items.filter((item) => item.sheet === null).map((item) => (
-            <Toast key={item.id} item={item} onDismiss={dismiss} className="max-sm:not-last:hidden" />
-          ))}
+          {sheetCount > 0 ? null : (
+            <>
+              <Waiting wide={page.waiting} narrow={page.toasts.length + page.waiting - 1} />
+              {page.toasts.map((item) => <Toast key={item.id} item={item} onDismiss={dismiss} className="max-sm:not-last:hidden" />)}
+            </>
+          )}
         </div>
       </ToastStateContext.Provider>
     </ToastContext.Provider>
@@ -176,10 +203,11 @@ export function SheetToasts() {
     openSheet(sheet);
     return () => closeSheet(sheet);
   }, [sheet, openSheet, closeSheet]);
-  const mine = state?.items.filter((item) => item.sheet === sheet) ?? [];
+  const mine = shownToasts(state?.items ?? [], sheet);
   return (
     <div role="status" aria-live="polite" data-slot="sheet-toasts" className="flex flex-col gap-2 px-4 sm:px-6 [&:not(:empty)]:py-3">
-      {mine.map((item) => <Toast key={item.id} item={item} onDismiss={state!.dismiss} className="max-w-none not-last:hidden" />)}
+      <Waiting wide={mine.toasts.length + mine.waiting - 1} narrow={mine.toasts.length + mine.waiting - 1} className="max-w-none" />
+      {mine.toasts.map((item) => <Toast key={item.id} item={item} onDismiss={state!.dismiss} className="max-w-none not-last:hidden" />)}
     </div>
   );
 }

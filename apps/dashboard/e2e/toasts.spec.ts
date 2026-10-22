@@ -12,15 +12,28 @@ async function publishTagline(page: Page, tagline: string) {
   await expect(editor).toBeHidden();
 }
 
-test("a toast stays on its page: moving to another page clears it", async ({ page }) => {
-  await page.clock.install();
+test("a toast stays on its page: moving to another page clears it at once", async ({ page }) => {
   await page.goto("/site");
   await publishTagline(page, "Open late on Fridays");
   const toast = page.getByTestId("toast").filter({ hasText: "Published. Your site is live." });
   await expect(toast).toBeVisible();
-  await page.clock.fastForward(3_000);
+  // Straight away, not after a grace period: the answer was about the last page.
   await mainNav(page).getByRole("link", { name: "Customers" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Customers" })).toBeVisible();
+  await expect(page.getByTestId("toast")).toHaveCount(0);
+});
+
+test("a toast raised for the next page follows the owner there, once", async ({ page }) => {
+  await page.goto("/customers");
+  await page.getByRole("button", { name: "Add customer" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add a customer" });
+  await dialog.getByLabel("Name").fill("Ines Varga");
+  await dialog.getByLabel("Email").fill("ines.varga@example.com");
+  await dialog.getByRole("button", { name: "Save customer" }).click();
+  await expect(page).toHaveURL(/\/customers\/[^/?]+$/);
+  await expect(page.getByTestId("toast").filter({ hasText: "Added Ines Varga." })).toBeVisible();
+  await mainNav(page).getByRole("link", { name: "Site" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Site" })).toBeVisible();
   await expect(page.getByTestId("toast")).toHaveCount(0);
 });
 

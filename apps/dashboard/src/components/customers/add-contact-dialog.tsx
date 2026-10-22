@@ -44,10 +44,10 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
       onOpenChange(false);
       setForm({ name: "", email: "", phone: "" });
       if (created) {
-        toast(`Added ${name}.`);
+        toast(`Added ${name}.`, "success", { keepOnNavigate: true });
         router.push(`/customers/${contact.id}`);
       } else {
-        toast(`${contact.displayName ?? "This person"} is already a customer. Opened their record.`, "info");
+        toast(`${contact.displayName ?? "This person"} is already a customer. Opened their record.`, "info", { keepOnNavigate: true });
         router.push(`/customers/${contact.id}?existing=1`);
       }
     },
