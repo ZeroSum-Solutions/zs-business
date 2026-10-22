@@ -8,6 +8,9 @@ Revision 4 (review r4): P-14 puts public requests under the request deadline and
 busy idempotency key with a retryable 503. Revision 5 (review r5): P-10 keeps public intake
 off in hosted deploys until a shared limiter exists. Revision 6 (2026-10-20): P-10 counts in
 one Postgres table shared by every API instance, so hosted public intake may be turned on.
+Revision 7 (2026-10-22, audit B1): P-12 consent rows carry the `disclosureText` the visitor
+saw. A replay of a link or reject stored before that fills it from the consent row, or, once
+that row is gone, from the page's append-only disclosure history for the stored version.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -176,11 +179,14 @@ end instants. No read returns bookings, contacts or intake items.
 role model they are owner-only: review needs the `intake` permission and the page list
 `publish`; staff get 403 `Forbidden`:
 - `GET /v1/intake/items?status&limit&offset|cursor`: intake items, newest first (keyset `nextCursor` as on every list), with submitted
-  details, matched contact IDs, linked contact, consent rows and the booking.
+  details, matched contact IDs, linked contact, consent rows (with the disclosure version and
+  text the visitor saw) and the booking.
 - `POST /v1/intake/items/:id/link` `{ contactId }`: `possible_match` → `linked`; the
   contact must belong to the tenant; applies P-8 fill-only consent.
 - `POST /v1/intake/items/:id/reject` `{}`: `possible_match` → `rejected`; the booking
   stays, without a contact.
+A replay of a link or reject whose stored result predates `disclosureText` fills the text
+from the consent row, else from `booking_page_disclosures` for the stored version.
 A reviewed item answers 409 `already_reviewed`. `GET /v1/booking/bookings` adds `source`,
 `intakeItemId` and `customer` (`contactId`, `name`, `status`) to each booking.
 `GET /v1/booking/pages` lists the tenant's pages with their public key, hosted URL and

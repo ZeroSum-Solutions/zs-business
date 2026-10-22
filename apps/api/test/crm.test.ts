@@ -43,6 +43,40 @@ describe("contacts", () => {
     expect(matchReplay.body).toEqual(matched.body);
   });
 
+  it("replays a contact result an earlier release stored with an instant before year 0001", async () => {
+    const key = randomUUID();
+    const body = { email: `legacy.${randomUUID().slice(0, 8)}@example.com`,
+      consent: { email: { status: "granted", source: "owner", recordedAt: "0001-01-01T00:00:00.000Z" }, sms: null } };
+    const first = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key, body });
+    expect(first.status).toBe(201);
+    // The old code bound a Date, which moved year-0001 instants back 58 s under a local mean time zone.
+    const legacy = "0000-12-31T23:59:02.000Z";
+    await h.database.pool.query(
+      `UPDATE actions SET result = jsonb_set(jsonb_set(result, '{contact,consent,email,recordedAt}', to_jsonb($3::text)),
+         '{contact,createdAt}', to_jsonb($3::text)) WHERE tenant_id=$1 AND idempotency_key=$2`, [h.a.tenantId, key, legacy]);
+    const stored = (await h.database.pool.query("SELECT id, result FROM actions WHERE tenant_id=$1 AND idempotency_key=$2",
+      [h.a.tenantId, key])).rows[0];
+    const replayed = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key, body });
+    expect(replayed.status).toBe(201);
+    expect(replayed.body).toEqual({ actionId: stored.id, result: stored.result });
+  });
+
+  it("refuses consent evidence dated outside years 0001-9999 with a 400 and writes nothing", async () => {
+    const count = () => h.fixture.service(async (tx) => (await tx.query(
+      "SELECT (SELECT count(*) FROM actions WHERE tenant_id=$1) + (SELECT count(*) FROM crm_contacts WHERE tenant_id=$1) AS n",
+      [h.a.tenantId])).rows[0].n);
+    const before = await count();
+    for (const recordedAt of ["0000-01-01T00:00:00.000Z", "0000-02-29T12:34:56.789Z"]) {
+      const response = await call(h.app, "POST", "/v1/crm/contacts", {
+        token: h.a.token, key: randomUUID(),
+        body: { email: "year-zero@example.com", consent: { email: { status: "granted", source: "owner", recordedAt }, sms: null } },
+      });
+      expect(response.status).toBe(400);
+      expect(apiErrorBodySchema.parse(response.body).error.code).toBe("ValidationFailed");
+    }
+    expect(await count()).toBe(before);
+  });
+
   it("rejects a contact without any identity", async () => {
     const response = await call(h.app, "POST", "/v1/crm/contacts", { token: h.a.token, key: randomUUID(), body: { displayName: "X" } });
     expect(response.status).toBe(400);
