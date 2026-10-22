@@ -12,6 +12,9 @@ export interface SessionIdentity {
   tenantId: string;
   userId: string;
   role: "owner" | "staff";
+  /** The tenant's name and the member's own email (members have no display name yet). */
+  businessName: string;
+  email: string;
 }
 
 /**
@@ -49,6 +52,7 @@ export async function sessionForRequest(request: Request, setup: LiveSetup | nul
   if (response.status === 403) return auth.finish(jsonAnswer(403, { error: "no_access" }));
   const me = response.ok ? meResponseSchema.safeParse(await response.json().catch(() => null)) : null;
   if (!me?.success) return auth.finish(jsonAnswer(502, { error: "unavailable" }));
-  const identity: SessionIdentity = { tenantId: me.data.tenantId, userId: me.data.userId, role: me.data.role };
+  const { tenantId, userId, role, businessName, email } = me.data;
+  const identity: SessionIdentity = { tenantId, userId, role, businessName, email };
   return auth.finish(jsonAnswer(200, identity));
 }

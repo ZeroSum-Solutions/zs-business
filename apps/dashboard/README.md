@@ -199,9 +199,9 @@ to an `ApiError` kind and shows plain copy, not the server message. A 409 with
 `concurrent_update` is a changed deal (`isDealChanged`): the board reloads it. A 429 is
 `rate_limited` and is never retried. A 401 is `unauthorized`: the session ends.
 
-Session: `GET /api/session` returns `{ tenantId, userId, role }` from the API's `/v1/me`
-for the signed-in person (401 `signed_out` with no session, `expired` when it ended or the
-browser sent the old pilot cookie; 403 `no_access` when the person is not a member). Every query key starts with that `tenantId`, and queries wait for it
+Session: `GET /api/session` returns `{ tenantId, userId, role, businessName, email }` from the
+API's `/v1/me` for the signed-in person (401 `signed_out` with no session, `expired` when it ended or the
+browser sent the old pilot cookie; 403 `no_access` when the person is not a member). The shell, the account menu (with the real role), Home and Settings name the business and person from it; members have no display name yet, so Home greets without one. `/sign-in` comes before any session and names no business. Every query key starts with that `tenantId`, and queries wait for it
 (`useKeys()` in `src/lib/queries.ts`, `src/lib/session.tsx`). Any 401 or "Sign out"
 clears the query cache and shows the signed-out screen (in live mode, "Sign out" only once
 `/api/sign-out` answers 2xx; until then a "Signing out" screen says so and offers Try again). API reads use `cache: "no-store"`.

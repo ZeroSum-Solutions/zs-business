@@ -11,6 +11,34 @@ async function openAccountMenu(page: Page) {
   await page.getByRole("button", { name: "Account menu" }).filter({ visible: true }).click();
 }
 
+test.describe("signed-in identity", () => {
+  test("names the business and the person from the session, with the real role", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
+    // Members have no display name yet, so the greeting names nobody.
+    await expect(page.getByText(/^(Good (morning|afternoon|evening)|Hello)\./)).toBeVisible();
+    await openAccountMenu(page);
+    await expect(page.getByRole("menu")).toContainText("mara@haldenrowe.example, Owner · Halden & Rowe Fine Jewelry");
+    await page.keyboard.press("Escape");
+
+    await page.evaluate(() => window.__zsDemo!.actAs("staff"));
+    await openAccountMenu(page);
+    await expect(page.getByRole("menu")).toContainText("jonah@haldenrowe.example, Staff · Halden & Rowe Fine Jewelry");
+    await expect(page.getByRole("menu")).not.toContainText("Owner");
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__zsDemo!.actAs("owner"));
+  });
+
+  test("names no business on the sign-in page or in the tab title", async ({ page }) => {
+    await page.goto("/sign-in");
+    await expect(page.getByRole("heading", { level: 1, name: "Sign in", exact: true })).toBeVisible();
+    await expect(page.getByRole("main")).not.toContainText("Halden");
+    await expect(page).toHaveTitle("Sign in | Zero Sum Business");
+    await page.goto("/nope-xyz");
+    await expect(page).toHaveTitle("Page not found | Zero Sum Business");
+  });
+});
+
 test.describe("session and cache", () => {
   test("scopes every cached query to the signed-in tenant", async ({ page }) => {
     await page.goto("/customers");

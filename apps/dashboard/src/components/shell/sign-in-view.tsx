@@ -6,7 +6,9 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { useApiRuntime } from "@/lib/api/react";
 import { cn } from "@/lib/utils";
-import { OWNER } from "./account-menu";
+
+/** Sign-in comes before any session, so it names no business. */
+export const SIGN_IN_TITLE = "Sign in";
 
 type Problem = { kind: "invalid" | "limited" | "unset" | "offline" | "failed" | "link"; waitMinutes?: number };
 
@@ -67,7 +69,7 @@ export function SignInView() {
       </span>
       {mode === "demo" ? (
         <>
-          <h1 id="sign-in-title" className="text-2xl leading-tight font-extrabold tracking-display">Sign in to {OWNER.business}</h1>
+          <h1 id="sign-in-title" className="text-2xl leading-tight font-extrabold tracking-display">{SIGN_IN_TITLE}</h1>
           <p className="mt-2 text-sm text-muted">This is the demo with sample data. It needs no sign-in.</p>
           <a href="/" className={cn(buttonVariants(), "mt-6")}>Open the demo</a>
         </>
@@ -81,7 +83,7 @@ export function SignInView() {
         </>
       ) : (
         <>
-          <h1 id="sign-in-title" className="text-2xl leading-tight font-extrabold tracking-display">Sign in to {OWNER.business}</h1>
+          <h1 id="sign-in-title" className="text-2xl leading-tight font-extrabold tracking-display">{SIGN_IN_TITLE}</h1>
           <form onSubmit={submit} noValidate className="mt-6 space-y-4">
             <p className="text-sm text-muted">Enter the email address your invitation went to. We will email you a link that signs you in.</p>
             <div>

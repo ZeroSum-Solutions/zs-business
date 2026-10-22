@@ -1,24 +1,29 @@
 "use client";
 
-import { CaretDown, CreditCard, GearSix, PlugsConnected, SignOut } from "@phosphor-icons/react";
+import { CaretDown, CreditCard, GearSix, LinkSimple, SignOut } from "@phosphor-icons/react";
 import Link from "next/link";
 import { DropdownMenu } from "radix-ui";
-import { useSession } from "@/lib/session";
+import { type Identity, useIdentity, useSession } from "@/lib/session";
 import { Avatar } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
-// TODO(api): owner and business profile come from the session once auth is wired.
-export const OWNER = { name: "Mara Halden", business: "Halden & Rowe", legalName: "Halden & Rowe Fine Jewelry", initials: "MH" };
+export const ROLE_LABEL: Record<Identity["role"], string> = { owner: "Owner", staff: "Staff" };
+
+/** "email, Role · Business": members have no display name yet, so the email names them. */
+export function accountLabel(identity: Identity): string {
+  return `${identity.email}, ${ROLE_LABEL[identity.role]} · ${identity.businessName}`;
+}
 
 const ITEMS = [
   { href: "/account/settings", label: "Settings", icon: GearSix },
-  { href: "/account/connections", label: "Connections", icon: PlugsConnected },
+  { href: "/account/connections", label: "Connections", icon: LinkSimple },
   { href: "/account/plan", label: "Plan", icon: CreditCard },
 ];
 
 /** `header`: the desktop header (name and role from xl up). `topbar`: the phone bar, avatar only. */
 export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
   const { signOut } = useSession();
+  const identity = useIdentity();
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
@@ -28,12 +33,12 @@ export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
         )}
       >
         <span className="sr-only">Account menu</span>
-        <Avatar name={OWNER.name} size="sm" />
-        {variant === "header" ? (
+        <Avatar name={identity?.email} size="sm" />
+        {variant === "header" && identity ? (
           <>
             <span className="hidden min-w-0 leading-tight xl:block">
-              <span className="block truncate text-sm font-bold text-fg">{OWNER.name}</span>
-              <span className="block truncate text-xs text-meta">Owner</span>
+              <span className="block max-w-48 truncate text-sm font-bold text-fg">{identity.email}</span>
+              <span className="block truncate text-xs text-meta">{ROLE_LABEL[identity.role]}</span>
             </span>
             <CaretDown size={16} aria-hidden className="hidden text-meta xl:block" />
           </>
@@ -46,7 +51,9 @@ export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
           sideOffset={8}
           className="z-50 min-w-56 rounded-[18px] bg-surface p-1.5 shadow-raised ring-1 ring-border data-[state=open]:animate-enter"
         >
-          <DropdownMenu.Label className="px-3 pt-2.5 pb-2 text-xs text-meta">{OWNER.name}, Owner · {OWNER.business}</DropdownMenu.Label>
+          {identity ? (
+            <DropdownMenu.Label className="max-w-72 px-3 pt-2.5 pb-2 text-xs [overflow-wrap:anywhere] text-meta">{accountLabel(identity)}</DropdownMenu.Label>
+          ) : null}
           {ITEMS.map((item) => (
             <DropdownMenu.Item key={item.href} asChild>
               <Link

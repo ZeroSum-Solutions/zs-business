@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Manrope } from "next/font/google";
 import type { ReactNode } from "react";
 import { AppShell } from "@/components/shell/app-shell";
+import { PRODUCT_NAME } from "@/lib/product";
 import { THEME_SCRIPT } from "@/lib/theme-script";
 import { Providers } from "./providers";
 import "./globals.css";
@@ -17,11 +18,12 @@ const manrope = Manrope({
   fallback: ["ui-sans-serif", "system-ui", "sans-serif"],
 });
 
+// Static metadata is the same for every business, so it names the product, not a tenant.
 export const metadata: Metadata = {
-  title: { default: "Halden & Rowe", template: "%s | Halden & Rowe" },
-  description: "Run Halden & Rowe Fine Jewelry from your phone: results, inbox, calendar, customers, site and agents.",
-  applicationName: "Zero Sum Business",
-  appleWebApp: { capable: true, title: "Halden & Rowe", statusBarStyle: "default" },
+  title: { default: PRODUCT_NAME, template: `%s | ${PRODUCT_NAME}` },
+  description: "Run your business from your phone: results, inbox, calendar, customers, site and agents.",
+  applicationName: PRODUCT_NAME,
+  appleWebApp: { capable: true, title: PRODUCT_NAME, statusBarStyle: "default" },
   icons: {
     icon: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
     apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180" }],

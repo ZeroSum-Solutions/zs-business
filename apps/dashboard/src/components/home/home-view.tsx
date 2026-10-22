@@ -10,13 +10,13 @@ import { Card, CardTitle, Tray, TrayBody, TrayHeader, TrayTitle } from "@/compon
 import { KpiTile } from "@/components/ui/kpi-tile";
 import { SampleBadge, useSampleOnly } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, Skeleton } from "@/components/ui/states";
-import { OWNER } from "@/components/shell/account-menu";
 import { bookingCustomerName, type HomeResults } from "@/lib/api";
 import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
 import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
+import { greetingLine } from "@/lib/greeting";
 import { READ_RESULTS, useCan } from "@/lib/session";
-import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey, zonedParts } from "@/lib/time";
+import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey } from "@/lib/time";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
 import { appointmentsPhrase, currentMinute, groupByDay, needsLine, needsModel, nextCutoff, subscribeMinute, weekStripDays, weekStripQuery } from "./home-model";
 
@@ -581,14 +581,8 @@ function WeekDays({ now, zone, className }: { now: number; zone: string; classNa
   );
 }
 
-function greeting(now: number, zone: string): string {
-  const hour = Math.floor(zonedParts(now, zone).minute / 60);
-  return hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-}
-
 function HomeHeader({ needs, reports }: { needs: Needs; reports: boolean }) {
   const { clock: now, zone, count, state, retry } = needs;
-  const first = OWNER.name.split(" ")[0];
   const things = needsLine(state, count);
   return (
     <header className="mb-5 grid items-end gap-6 lg:mb-8 lg:grid-cols-[1fr_minmax(0,520px)] lg:gap-8 lg:pt-2">
@@ -596,7 +590,7 @@ function HomeHeader({ needs, reports }: { needs: Needs; reports: boolean }) {
         <p className="min-h-5 text-caption font-semibold text-muted">{now === null ? null : formatDay(new Date(now), zone, "long")}</p>
         <h1 className="mt-1 text-2xl leading-tight font-extrabold tracking-display lg:text-3xl">This week</h1>
         <p className="mt-2 text-body text-muted">
-          {now === null ? `Hello, ${first}.` : `${greeting(now, zone)}, ${first}.`}{" "}
+          {greetingLine(now, zone)}{" "}
           {things}{" "}
           {/* A failed read leaves the count unknown: say so, never "nothing needs you". */}
           {state === "unknown" ? (

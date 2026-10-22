@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, CheckCircle } from "@phosphor-icons/react";
+import { Check, Info } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -9,9 +9,32 @@ import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { DisabledReason, NOT_AVAILABLE, useSampleOnly } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { useApi } from "@/lib/api/react";
-import { useKeys, usePlan } from "@/lib/queries";
+import type { Plan } from "@/lib/api/workspace-types";
+import { browserZone, useKeys, usePlan } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatMoney } from "@/lib/utils";
+
+// The plan carries no zone of its own and there is no business zone yet, so its dates are
+// shown in the viewer's zone.
+const day = (instant: string, zone: string) => formatDay(instant, zone, "long");
+
+export const PLAN_BADGE = {
+  active: { label: "Active", tone: "success" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
+} as const satisfies Record<Plan["status"], { label: string; tone: "success" | "neutral" }>;
+
+export function planDateLine(plan: Plan, zone: string): string {
+  return plan.status === "active" ? `Renews ${day(plan.renewsOn, zone)}` : `Ends ${day(plan.endsOn ?? plan.renewsOn, zone)}`;
+}
+
+/** What confirming the cancel does. No contract refunds the wallet on cancel (stripe.md, delivery.md D-4). */
+export function cancelTerms(renewsOn: string, zone: string): string {
+  return `Your plan stays on until ${day(renewsOn, zone)}. After that, nothing more is charged.`;
+}
+
+export function cancelledNote(endsOn: string, zone: string): string {
+  return `Your plan is cancelled. It stays on until ${day(endsOn, zone)}, and nothing more will be charged.`;
+}
 
 export function PlanView() {
   const api = useApi();
@@ -24,6 +47,10 @@ export function PlanView() {
   // scrolls it clear of the phone tab bar (see scroll-padding in globals.css).
   const confirmRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  // Confirming removes the button that had focus, so focus moves to the outcome.
+  const cancelledRef = useRef<HTMLDivElement>(null);
+  const cancelled = useRef(false);
+  const zone = browserZone();
   const stepChanged = useRef(false);
   useEffect(() => {
     if (!stepChanged.current) return;
@@ -37,10 +64,17 @@ export function PlanView() {
   const cancel = useMutation({
     mutationFn: () => api.cancelPlan(),
     onSuccess: (updated) => {
+      cancelled.current = true;
       setConfirming(false);
       queryClient.setQueryData(keys.plan, updated);
     },
   });
+  const status = plan.data?.status;
+  useEffect(() => {
+    if (status !== "cancelled" || !cancelled.current) return;
+    cancelled.current = false;
+    cancelledRef.current?.focus();
+  }, [status]);
 
   return (
     <>
@@ -52,17 +86,13 @@ export function PlanView() {
               <div>
                 <div className="flex items-center gap-2">
                   <CardTitle id="plan-title">{plan.data.name} plan</CardTitle>
-                  {plan.data.status === "active" ? <Badge tone="success">Active</Badge> : <Badge tone="warn">Ends soon</Badge>}
+                  <Badge tone={PLAN_BADGE[plan.data.status].tone}>{PLAN_BADGE[plan.data.status].label}</Badge>
                 </div>
                 <p className="mt-2">
                   <span className="tabular text-3xl font-extrabold tracking-display text-fg">{formatMoney(plan.data.pricePerMonth, plan.data.currency)}</span>
                   <span className="text-sm text-muted"> a month</span>
                 </p>
-                <p className="text-sm text-muted">
-                  {plan.data.status === "active"
-                    ? `Renews ${formatDay(plan.data.renewsOn, "America/New_York", "long")}`
-                    : `Ends ${formatDay(plan.data.endsOn ?? plan.data.renewsOn, "America/New_York", "long")}`}
-                </p>
+                <p className="text-sm text-muted">{planDateLine(plan.data, zone)}</p>
               </div>
             </CardHeader>
             <ul className="space-y-2">
@@ -84,18 +114,13 @@ export function PlanView() {
           <Card aria-labelledby="cancel-title" className="self-start">
             <CardHeader><CardTitle id="cancel-title">Cancel plan</CardTitle></CardHeader>
             {plan.data.status === "cancelled" ? (
-              <div role="status" className="flex items-start gap-3 text-sm text-fg-2">
-                <CheckCircle size={20} aria-hidden className="mt-px shrink-0 text-success" />
-                <p>
-                  Your plan is cancelled. It stays on until {formatDay(plan.data.endsOn ?? plan.data.renewsOn, "America/New_York", "long")}, and nothing more will be charged.
-                  Your customers and bookings stay available to export.
-                </p>
+              <div ref={cancelledRef} role="status" tabIndex={-1} className="flex items-start gap-3 rounded-md text-sm text-fg-2">
+                <Info size={20} aria-hidden className="mt-px shrink-0 text-muted" />
+                <p>{cancelledNote(plan.data.endsOn ?? plan.data.renewsOn, zone)}</p>
               </div>
             ) : confirming ? (
               <div className="space-y-3">
-                <p className="text-sm text-fg-2">
-                  Your plan stays on until {formatDay(plan.data.renewsOn, "America/New_York", "long")}. After that, nothing more is charged. Your wallet balance is refunded.
-                </p>
+                <p className="text-sm text-fg-2">{cancelTerms(plan.data.renewsOn, zone)}</p>
                 {cancel.isError ? <ErrorNote error={cancel.error} /> : null}
                 <div className="flex flex-col gap-2 sm:flex-row">
                   <Button ref={confirmRef} variant="danger" onClick={() => cancel.mutate()} disabled={cancel.isPending} aria-busy={cancel.isPending}>Confirm cancel</Button>

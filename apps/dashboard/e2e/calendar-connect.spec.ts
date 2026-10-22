@@ -46,7 +46,7 @@ test("lists each booking calendar as live data, with the sample accounts below",
     await expect(row(page, name).getByRole("button", { name: `Connect ${name}` })).toBeEnabled();
   }
   await expect(page.getByRole("heading", { level: 2, name: "Other accounts" })).toBeVisible();
-  await expect(page.getByRole("main").getByText("Gmail", { exact: true })).toBeVisible();
+  await expect(page.getByRole("main").getByText("Instagram", { exact: true })).toBeVisible();
   // The sample Google Calendar row is gone: the live card replaces it.
   await expect(page.getByRole("main").getByRole("heading", { name: "Google Calendar" })).toHaveCount(1);
 });

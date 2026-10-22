@@ -149,7 +149,10 @@ test("cancels the plan in two clicks", async ({ page }, info) => {
   await page.getByRole("button", { name: "Cancel plan" }).click();
   await page.getByRole("button", { name: "Confirm cancel" }).click();
   await expect(page.getByText(/Your plan is cancelled/)).toBeVisible();
-  await expect(page.getByText("Ends soon")).toBeVisible();
+  await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
+  // The pressed button is gone, so focus moves to the outcome instead of falling to the page.
+  await expect(page.getByRole("status").filter({ hasText: "Your plan is cancelled" })).toBeFocused();
+  await expect(page.getByRole("main")).not.toContainText(/refund|export/i);
   await shot(page, "16-plan-cancelled", info.project.name);
 });
 
