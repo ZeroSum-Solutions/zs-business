@@ -55,7 +55,7 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     includes: ["Six areas, all features", "Two team seats", "Website and booking pages", "Agents with approval"],
     caps: [
       { label: "Agent replies", value: "2,000 a month, then from your wallet" },
-      { label: "Wallet", value: "Prepaid by top-up. Nothing sends without funds, so no surprise bills." },
+      { label: "Wallet", value: "Prepaid, so no surprise bills. A message the balance can't cover waits for a top-up, and fails if none comes in time." },
     ],
   };
 

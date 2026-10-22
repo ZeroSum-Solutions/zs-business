@@ -16,7 +16,7 @@ export interface UsageLine {
 
 export interface Usage {
   currency: string;
-  /** Prepaid balance. It never goes below zero: sending pauses at zero. */
+  /** Prepaid balance. It never goes below zero: a send it cannot cover waits, then fails. */
   walletBalance: number;
   walletTopUp: number;
   periodLabel: string;

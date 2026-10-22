@@ -30,6 +30,7 @@ import {
   readStatus,
   resourceTone,
   subscribeMinute,
+  walletCaption,
   weekStripDays,
   weekStripQuery,
 } from "./home-model";
@@ -285,7 +286,7 @@ function UsageCard({ className }: { className?: string }) {
             >
               <Meter percent={(usage.data.walletBalance / usage.data.walletTopUp) * 100} />
             </div>
-            <p className="mt-3 text-caption text-muted">Of your {formatMoney(usage.data.walletTopUp, usage.data.currency)} top-up. Prepaid: sending pauses at $0, so there are no surprise bills.</p>
+            <p className="mt-3 text-caption text-muted">{walletCaption(usage.data.walletTopUp, usage.data.currency)}</p>
           </Card>
           {usage.data.lines.map((line) => (
             <Card key={line.id}>

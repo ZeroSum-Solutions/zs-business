@@ -1,6 +1,6 @@
 import type { BookingListQuery, BookingView, ListResult } from "@/lib/api";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay, zonedDateKey } from "@/lib/time";
-import { formatNumber } from "@/lib/utils";
+import { formatMoney, formatNumber } from "@/lib/utils";
 
 /** Home's pure parts: what the screen decides, apart from how it draws it. */
 
@@ -178,4 +178,12 @@ export function appointmentsPhrase(day: StripDay): string {
   if (day.known === "unknown") return ", appointments not checked";
   if (day.count === 0) return "";
   return `, ${day.count}${day.known === "atLeast" ? "+" : ""} appointment${day.count === 1 && day.known === "exact" ? "" : "s"}`;
+}
+
+/**
+ * The wallet's caption (delivery.md D-5): a send waits whenever the balance cannot cover its
+ * price, not only at zero, and after the attempt cap it fails instead of overdrawing.
+ */
+export function walletCaption(topUp: number, currency: string): string {
+  return `Of your ${formatMoney(topUp, currency)} top-up. Prepaid, so no surprise bills: a message the balance can't cover waits for a top-up, and fails if none comes in time.`;
 }
