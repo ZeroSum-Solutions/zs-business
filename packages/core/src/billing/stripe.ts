@@ -25,7 +25,7 @@ export const stripeConfigSchema = z.strictObject({
   /** Minor units. */
   minTopUp: z.number().int().positive().default(500),
   maxTopUp: z.number().int().positive().max(100_000_000).default(50_000),
-  /** Shown on the Checkout page as the line item. */
+  /** Shown on the Checkout page as the line item. Stored with each top-up, with the URLs (S-2). */
   productName: z.string().min(1).max(100).default("Message credit"),
 }).refine((config) => config.minTopUp <= config.maxTopUp, "minTopUp must not exceed maxTopUp");
 export type StripeConfig = z.input<typeof stripeConfigSchema>;
@@ -46,6 +46,10 @@ export interface CheckoutSessionRequest {
   readonly topupId: string;
   readonly amount: number;
   readonly currency: string;
+  /** S-2: stored with the top-up when it was created, so a retry sends what the first try sent. */
+  readonly successUrl: string;
+  readonly cancelUrl: string;
+  readonly productName: string;
   /** Unix seconds; Stripe accepts 30 minutes to 24 hours ahead. */
   readonly expiresAt: number;
 }
@@ -55,15 +59,15 @@ function form(entries: ReadonlyArray<readonly [string, string | number]>): strin
   return entries.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`).join("&");
 }
 
-export function checkoutSessionForm(config: ParsedStripeConfig, request: CheckoutSessionRequest): string {
+export function checkoutSessionForm(request: CheckoutSessionRequest): string {
   return form([
     ["mode", "payment"],
     ["line_items[0][quantity]", 1],
     ["line_items[0][price_data][currency]", request.currency],
     ["line_items[0][price_data][unit_amount]", request.amount],
-    ["line_items[0][price_data][product_data][name]", config.productName],
-    ["success_url", config.successUrl],
-    ["cancel_url", config.cancelUrl],
+    ["line_items[0][price_data][product_data][name]", request.productName],
+    ["success_url", request.successUrl],
+    ["cancel_url", request.cancelUrl],
     ["client_reference_id", request.topupId],
     ["metadata[zs_tenant]", request.tenantId],
     ["metadata[zs_topup]", request.topupId],
@@ -123,7 +127,7 @@ export function createStripeClient(deps: { readonly config: StripeConfig; readon
             "Idempotency-Key": `zst-${request.topupId}`,
             ...(config.apiVersion ? { "Stripe-Version": config.apiVersion } : {}),
           },
-          body: checkoutSessionForm(config, request),
+          body: checkoutSessionForm(request),
           redirect: "manual",
           ...(options.signal ? { signal: options.signal } : {}),
         });

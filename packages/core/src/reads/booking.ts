@@ -1,6 +1,7 @@
 // M1 tenant-scoped booking reads. Every function runs inside ScopedDatabase.tenant, so RLS
 // limits rows to the caller's tenant; the explicit tenant_id filter is defence in depth.
 import {
+  ValidationFailed,
   type BookingPage,
   type BookingRecord,
   type BookingSummary,
@@ -11,7 +12,7 @@ import {
   type SlotsResponse,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
-import { loadBusy, loadResource } from "../booking/create.js";
+import { isSupportedInstant, loadBusy, loadResource } from "../booking/create.js";
 import { compileRules, evaluateSlots } from "../booking/slots.js";
 import { MINUTE_MS, offsetAt } from "../booking/time-zone.js";
 import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "./cursor.js";
@@ -154,8 +155,12 @@ export async function findSlots(tx: Transaction, tenantId: string, query: SlotsQ
   const from = Date.parse(query.from);
   const to = Date.parse(query.to);
   // A slot in [from,to) conflicts with anything overlapping it widened by the resource buffers.
-  const busy = await loadBusy(tx, tenantId, query.resourceId,
-    from - rules.bufferBeforeMinutes * MINUTE_MS, to + rules.bufferAfterMinutes * MINUTE_MS);
+  // The widened bounds must be valid instants too, or Postgres rejects them with a raw SQLSTATE.
+  const busyFrom = from - rules.bufferBeforeMinutes * MINUTE_MS;
+  const busyTo = to + rules.bufferAfterMinutes * MINUTE_MS;
+  if (!isSupportedInstant(busyFrom) || !isSupportedInstant(busyTo))
+    throw new ValidationFailed("Slot range widened by the resource buffers leaves the supported instant range");
+  const busy = await loadBusy(tx, tenantId, query.resourceId, busyFrom, busyTo);
   const length = rules.slotLengthMinutes * MINUTE_MS;
   const zone = query.zone ?? rules.timeZone;
   return {

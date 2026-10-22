@@ -120,6 +120,18 @@ describe("public reads", () => {
   });
 });
 
+describe("instants outside UTC years 0001..9999 (booking.md B-3)", () => {
+  it("refuses year 0000 in a public slot read and a public request with 400, writing nothing", async () => {
+    const page = await freshPage(h.a);
+    const before = await tenantCounts(h.a.tenantId);
+    const slots = await call(h.app, "GET", `/public/v1/pages/${page.key}/slots?resourceId=${page.resourceId}&from=0000-12-31T23:00:00.000Z&to=0001-01-01T01:00:00.000Z`);
+    expect(slots.status).toBe(400);
+    const request = await book(page.key, visitor(page.resourceId, { startsAt: "0000-12-31T23:00:00.000Z" }));
+    expect(request.status).toBe(400);
+    expect(await tenantCounts(h.a.tenantId)).toEqual(before);
+  });
+});
+
 describe("forged tenant, page and resource references (P-2, P-4)", () => {
   let page: PageSetup & { resourceId: string };
   beforeAll(async () => { page = await freshPage(h.a); });
@@ -485,6 +497,80 @@ describe("owner review (P-12)", () => {
     expect(response.status).toBe(201);
     return { itemId: response.body.requestId as string, contactId: contact.id };
   }
+
+  it("shows the disclosure text each visitor agreed to after the page's words change (P-8)", async () => {
+    const page = await freshPage(h.a);
+    const shown = (await call(h.app, "GET", `/public/v1/pages/${page.key}`, { headers: { "X-Real-IP": nextAddress() } }))
+      .body.disclosure as { version: string; text: string };
+    const tag = randomUUID().slice(0, 8);
+    const contact = await ownerContact(h.a, { email: `words.${tag}@haldenrowe.example` });
+    const response = await book(page.key, visitor(page.resourceId, {
+      email: `words.${tag}@haldenrowe.example`, consent: { email: true, sms: false },
+    }));
+    expect(response.status).toBe(201);
+    await h.fixture.service((tx) => tx.query(
+      "UPDATE booking_pages SET disclosure_text='Replacement words', disclosure_version='v2' WHERE tenant_id=$1 AND id=$2",
+      [h.a.tenantId, page.pageId]));
+    const agreed = { disclosureVersion: shown.version, disclosureText: shown.text };
+    const items = intakeItemPageSchema.parse((await call(h.app, "GET", "/v1/intake/items?status=possible_match", { token: h.a.token })).body);
+    expect(items.items.find((item) => item.id === response.body.requestId)!.consent.email).toMatchObject(agreed);
+    const linked = await call(h.app, "POST", `/v1/intake/items/${response.body.requestId}/link`, {
+      token: h.a.token, key: randomUUID(), body: { contactId: contact.id },
+    });
+    expect(intakeItemOutputSchema.parse(linked.body).result.consent.email).toMatchObject(agreed);
+  });
+
+  it("replays a link or reject stored before results carried the disclosure text", async () => {
+    const page = await freshPage(h.a);
+    for (const verb of ["link", "reject"] as const) {
+      const tag = randomUUID().slice(0, 8);
+      const contact = await ownerContact(h.a, { email: `old.${tag}@haldenrowe.example` });
+      const response = await book(page.key, visitor(page.resourceId, {
+        email: `old.${tag}@haldenrowe.example`, startsAt: at(verb === "link" ? 11 : 12), consent: { email: true, sms: true },
+      }));
+      expect(response.status).toBe(201);
+      const key = randomUUID();
+      const request = { token: h.a.token, key, body: verb === "link" ? { contactId: contact.id } : {} };
+      const path = `/v1/intake/items/${response.body.requestId}/${verb}`;
+      const first = await call(h.app, "POST", path, request);
+      expect(first.status).toBe(200);
+      // An earlier release stored the consent rows without disclosureText.
+      await h.database.pool.query(
+        `UPDATE actions SET result = result #- '{consent,email,disclosureText}' #- '{consent,sms,disclosureText}'
+          WHERE tenant_id=$1 AND idempotency_key=$2`, [h.a.tenantId, key]);
+      const replayed = await call(h.app, "POST", path, request);
+      expect(replayed).toMatchObject({ status: 200, body: first.body });
+    }
+  });
+
+  it("replays a legacy link or reject from the page's disclosure history once the consent rows are gone", async () => {
+    for (const verb of ["link", "reject"] as const) {
+      const page = await freshPage(h.a);
+      const tag = randomUUID().slice(0, 8);
+      const contact = await ownerContact(h.a, { email: `erased.${tag}@haldenrowe.example` });
+      const response = await book(page.key, visitor(page.resourceId, {
+        email: `erased.${tag}@haldenrowe.example`, consent: { email: true, sms: true },
+      }));
+      expect(response.status).toBe(201);
+      const key = randomUUID();
+      const request = { token: h.a.token, key, body: verb === "link" ? { contactId: contact.id } : {} };
+      const path = `/v1/intake/items/${response.body.requestId}/${verb}`;
+      const first = await call(h.app, "POST", path, request);
+      expect(first.status).toBe(200);
+      // A legacy result without disclosureText, whose evidence rows were later erased, on a
+      // page that has since moved to other words: the history keeps the version's words.
+      await h.database.pool.query(
+        `UPDATE actions SET result = result #- '{consent,email,disclosureText}' #- '{consent,sms,disclosureText}'
+          WHERE tenant_id=$1 AND idempotency_key=$2`, [h.a.tenantId, key]);
+      await h.database.pool.query("DELETE FROM intake_item_consent WHERE tenant_id=$1 AND intake_item_id=$2",
+        [h.a.tenantId, response.body.requestId]);
+      await h.fixture.service((tx) => tx.query(
+        "UPDATE booking_pages SET disclosure_text=$3, disclosure_version=$4 WHERE tenant_id=$1 AND id=$2",
+        [h.a.tenantId, page.pageId, `Later words ${tag}`, `v-${tag}`]));
+      const replayed = await call(h.app, "POST", path, request);
+      expect(replayed).toMatchObject({ status: 200, body: first.body });
+    }
+  });
 
   it("rejects an item once and refuses a second review", async () => {
     const page = await freshPage(h.a);
