@@ -47,17 +47,19 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    # Each step has its own limit: the browser install has taken over 9 minutes on a slow apt
-    # mirror, and must not eat the time the suite needs (about 7 minutes).
-    timeout-minutes: 35
+    # Playwright's own image carries the browsers and their system libraries. Installing them on
+    # the runner took up to 12 minutes on a slow apt mirror (2026-10-22). The tag must match
+    # @playwright/test in apps/dashboard/package.json; a mismatch fails with "browser not found".
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf
+      options: --ipc=host
+    timeout-minutes: 25
     env:
       CI: "true"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2.4.4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @zs/dashboard exec playwright install --with-deps chromium
-        timeout-minutes: 15
       - run: pnpm --filter @zs/dashboard e2e
         timeout-minutes: 15
       - if: failure()
