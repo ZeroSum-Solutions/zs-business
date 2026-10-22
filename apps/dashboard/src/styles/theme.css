@@ -53,6 +53,9 @@
   --warn-tint: #fff2d4;
   --danger: #a83020;
   --danger-tint: #fdebe8;
+  /* Destructive button: a solid red with a light label in both themes */
+  --danger-solid: #a83020;
+  --danger-on: #ffffff;
   /* Floating navigation: an ink pill with a lit (accent) current item */
   --nav: #17171c;
   --nav-fg: #c9c9d2;
@@ -117,8 +120,15 @@
   --control-thumb: #ffffff;
   --control-on: #ffffff;
   --control-off: #d4d5dc;
-  /* Fill for inputs; segment tracks use the deep tray. */
+  /* Fill for inputs. */
   --well: #f7f7f9;
+  /* Segmented control: the track and its edge; the selected segment is --control-on, outlined
+     3:1 against the track. */
+  --segment-track: #e6e6ea;
+  --segment-edge: #e6e6ea;
+  --segment-ring: #74747e;
+  /* Loading placeholders: visible on the page, a tray and a card. */
+  --skeleton: #e6e6ea;
   /* Focus: inner gap in the page colour, outer ring in the accent */
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
   /* Motion (strong ease-out, under 300ms) */
@@ -178,6 +188,8 @@
   --warn-tint: #3a2c10;
   --danger: #ff9a8c;
   --danger-tint: #3f1b16;
+  --danger-solid: #c8372a;
+  --danger-on: #ffffff;
   --nav: #2a2a33;
   --nav-fg: #d0d0d9;
   --nav-fg-strong: #ffffff;
@@ -190,9 +202,13 @@
   --avatar-drop: rgb(0 0 0 / 0.4);
   --overlay: rgb(6 6 7 / 0.75);
   --control-thumb: #f4f4f6;
-  --control-on: #2d2d35;
+  --control-on: #3e3e48;
   --control-off: #2d2d35;
   --well: #141418;
+  --segment-track: #26262d;
+  --segment-edge: #4a4a55;
+  --segment-ring: #787883;
+  --skeleton: #34343e;
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
@@ -232,6 +248,8 @@
     --warn-tint: #3a2c10;
     --danger: #ff9a8c;
     --danger-tint: #3f1b16;
+    --danger-solid: #c8372a;
+    --danger-on: #ffffff;
     --nav: #2a2a33;
     --nav-fg: #d0d0d9;
     --nav-fg-strong: #ffffff;
@@ -244,9 +262,13 @@
     --avatar-drop: rgb(0 0 0 / 0.4);
     --overlay: rgb(6 6 7 / 0.75);
     --control-thumb: #f4f4f6;
-    --control-on: #2d2d35;
+    --control-on: #3e3e48;
     --control-off: #2d2d35;
     --well: #141418;
+    --segment-track: #26262d;
+    --segment-edge: #4a4a55;
+    --segment-ring: #787883;
+    --skeleton: #34343e;
   }
 }
 
@@ -271,7 +293,8 @@
   --color-surface-warm: var(--surface-warm);
   --color-tray: var(--tray);
   --color-tray-deep: var(--tray-deep);
-  --color-inset: var(--inset);
+  /* Background only: as a colour, `inset` also turned `ring-inset` into "ring colour: inset". */
+  --background-color-inset: var(--inset);
   --color-control-thumb: var(--control-thumb);
   --color-control-on: var(--control-on);
   --color-overlay: var(--overlay);
@@ -306,6 +329,11 @@
   --color-warn-tint: var(--warn-tint);
   --color-danger: var(--danger);
   --color-danger-tint: var(--danger-tint);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-on: var(--danger-on);
+  --color-segment-track: var(--segment-track);
+  --color-segment-edge: var(--segment-edge);
+  --color-segment-ring: var(--segment-ring);
   --color-nav: var(--nav);
   --color-nav-fg: var(--nav-fg);
   --color-nav-fg-strong: var(--nav-fg-strong);
