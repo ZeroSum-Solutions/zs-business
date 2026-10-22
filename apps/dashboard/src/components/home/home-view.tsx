@@ -175,7 +175,8 @@ function ResultsSection() {
   // Wait for the calendars, so the weeks are asked once, in the zone they are shown in.
   const query = useMemo(() => (resources.isPending ? null : { zone, weekStart: "monday" as const }), [resources.isPending, zone]);
   const results = useResults(query);
-  if (results.isPending) return <div className="grid grid-cols-2 gap-3 lg:col-span-12 lg:grid-cols-3"><Skeleton className="h-40" /><Skeleton className="h-40" /><Skeleton className="col-span-2 h-40 lg:col-span-1" /></div>;
+  // Busy, so the layout below waits for the real tiles, which are taller than these.
+  if (results.isPending) return <div aria-busy="true" aria-label="Loading results" className="grid grid-cols-2 gap-3 lg:col-span-12 lg:grid-cols-3"><Skeleton className="h-40" /><Skeleton className="h-40" /><Skeleton className="col-span-2 h-40 lg:col-span-1" /></div>;
   if (results.isError) return <div className="lg:col-span-12"><ErrorNote error={results.error} retry={() => results.refetch()} /></div>;
   const data = results.data;
   const ranges = `This week: ${formatRange(data.thisWeek.from, data.thisWeek.to, data.zone)}. Compared with the same span of last week: ${formatRange(data.lastWeek.from, data.lastWeek.to, data.zone)}. Times in ${data.zone.replaceAll("_", " ")}.`;
