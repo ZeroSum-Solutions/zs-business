@@ -5,7 +5,7 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { DraftFields } from "../src/components/site/site-view";
 import { LIMITS, type Draft } from "../src/components/site/draft";
-import { releaseMeta, singleFlight, siteStatus } from "../src/components/site/site-status";
+import { releaseMeta, singleFlight, siteStatus, withSite } from "../src/components/site/site-status";
 
 const NOW = Date.parse("2026-10-22T15:00:00.000Z");
 const live = { number: 4, createdAt: "2026-09-22T15:00:00.000Z" };
@@ -94,5 +94,22 @@ describe("single flight", () => {
     calls[0]!();
     expect(flight.run((done) => calls.push(done))).toBe(true);
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe("the site list after a publish", () => {
+  const site = (id: string, currentReleaseId: string | null, pointerVersion: number) =>
+    ({ id, name: "Site", currentReleaseId, pointerVersion, hosts: [] as string[], createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z" });
+  const other = site("22222222-2222-4222-8222-222222222222", null, 0);
+  const before = site("11111111-1111-4111-8111-111111111111", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 1);
+  const after = { ...before, currentReleaseId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", pointerVersion: 2 };
+
+  it("takes the published site at once, so editing again starts from the new version", () => {
+    expect(withSite([before, other], after)).toEqual([after, other]);
+  });
+
+  it("never goes back to an older version, and leaves an empty cache alone", () => {
+    expect(withSite([after, other], before)).toEqual([after, other]);
+    expect(withSite(undefined, after)).toBeUndefined();
   });
 });

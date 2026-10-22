@@ -26,7 +26,7 @@ import { createIntentKeys, fingerprint, isDefinitive, useIntentKey, type IntentK
 import { useKeys, useSiteEdge, useSiteRelease, useSiteReleases, useSites } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { draftFrom, draftProblem, LIMITS, MAX_SECTIONS, newSectionKey, specFrom, type Draft } from "./draft";
-import { releaseMeta, singleFlight, siteStatus } from "./site-status";
+import { releaseMeta, singleFlight, siteStatus, withSite } from "./site-status";
 
 /** Site toasts share a topic: each new answer replaces the last, so two never disagree. */
 const SITE = { topic: "site" };
@@ -396,6 +396,7 @@ function SitePanel({ site }: { site: SiteRecord }) {
     // A check made for the version before says nothing about this one.
     sync.reset();
     queryClient.setQueryData(keys.siteEdge(site.id, response.result.site.pointerVersion), response.edge);
+    queryClient.setQueryData<SiteRecord[]>(keys.sites, (list) => withSite(list, response.result.site));
     void queryClient.invalidateQueries({ queryKey: keys.sitesAll });
   };
   const host = site.hosts[0] ?? null;

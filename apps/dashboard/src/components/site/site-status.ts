@@ -1,3 +1,4 @@
+import type { SiteRecord } from "@/lib/api";
 import { relativeTime } from "@/lib/utils";
 
 export interface SiteStatusInput {
@@ -85,4 +86,13 @@ export function singleFlight() {
       return true;
     },
   };
+}
+
+/**
+ * The cached site list with `site` as a publish or rollback just left it, so an editor opened
+ * straight away starts from the new live version instead of the one before (the server would
+ * refuse that publish as stale). A list already holding a newer pointer keeps it.
+ */
+export function withSite(list: SiteRecord[] | undefined, site: SiteRecord): SiteRecord[] | undefined {
+  return list?.map((item) => (item.id === site.id && item.pointerVersion < site.pointerVersion ? site : item));
 }
