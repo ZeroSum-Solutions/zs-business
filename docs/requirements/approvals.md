@@ -1,6 +1,10 @@
 # M3b: approval and source records
 
-Status: contract for M3b (2026-10-20), revision 2 (review round 1: A-2, A-6, A-7, A-14, F-5).
+Status: contract for M3b (2026-10-20), revision 4 (2026-10-22). Revision 2 (review round 1):
+A-2, A-6, A-7, A-14, F-5. Revision 3 (audit B1): F-4 limits `observedAt` to UTC years 0001
+through 9999, the range CRM consent (crm.md C-9) and booking instants also apply. Records and
+replays accept any stored UTC ISO instant, and a derived `fresh_until` or a clock outside the
+range fails with `ValidationFailed`. Revision 4 (audit B3-01): A-6.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: two tenant records the rest of M3 builds on.
@@ -72,7 +76,11 @@ schema here; the action's own handler validates them when the approval runs (A-7
 **A-6. Decide: `approval.approve` and `approval.reject`.** Payload `{approvalId, note?}`
 (note 1 to 500 characters); target the approval. Only a member holding `approve` (owners)
 may decide. The row is locked `FOR UPDATE`; it must be `pending` and unexpired, else
-`Conflict` with reason `approval_not_pending` or `approval_expired`. The decider is
+`Conflict` with reason `approval_not_pending` or `approval_expired`. Expiry and
+`decided_at` use `now` read from the injected clock after the lock is granted; within one
+dispatch a clock read is never earlier than a previous one (a clock that steps back is held
+at the latest instant seen). The decision's action and outbox event are recorded at that
+same instant. The decider is
 recorded in `decided_by` and becomes the **executor**: the approved binding's actor is
 `decided_by`. An owner may approve their own request.
 Retry: when the caller is the recorded decider of an `approved` approval whose action has
@@ -158,9 +166,13 @@ contacts and deals, `calendar` for bookings and resources, `intake` for intake i
 sourceRef?, observedAt?, freshForMinutes?}`; target `{type: "source_record", id:
 sourceRecordId}`. The edge derives `sourceRecordId` from tenant, subject and source, so the
 same subject and source always name the same record. `observedAt` defaults to the
-dispatcher's clock and may not be later than it (`ValidationFailed`). `freshForMinutes` is 1
-to 525600 (one year); absent means the fact does not go stale (`fresh_until` NULL).
-`fresh_until = observedAt + freshForMinutes`.
+dispatcher's clock and may not be later than it (`ValidationFailed`). It must lie in UTC
+years 0001 through 9999 (`supportedInstantSchema`); a time outside is refused with
+`ValidationFailed` and nothing is written. `freshForMinutes` is 1 to 525600 (one year);
+absent means the fact does not go stale (`fresh_until` NULL).
+`fresh_until = observedAt + freshForMinutes`; it and the dispatcher's clock must lie in the
+same range, or the request fails with `ValidationFailed` and nothing is written. Records and
+replayed results accept any stored UTC ISO instant.
 
 **F-5. Monotonic.** The first observation inserts the row with `revision = 1`. A later one
 with `observedAt` after the stored `observed_at` replaces `source_ref`, `observed_at` and

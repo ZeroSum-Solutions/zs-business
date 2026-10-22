@@ -9,6 +9,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import {
+  clockInstant,
   contactColumns,
   contactRecord,
   idInUse,
@@ -77,7 +78,7 @@ async function attempt(
   tx: Transaction,
   tenantId: string,
   input: CreateOrFindContactInput,
-  now: Date,
+  now: string,
 ): Promise<CreateOrFindContactResult> {
   const locked = await lockMatches(tx, tenantId, input);
   const byEmail = input.email === null ? undefined : locked.find((row) => row.normalized_email === input.email);
@@ -150,6 +151,7 @@ export const createOrFindContactHandler: ActionHandler = {
     return { tenantId: target.tenantId, type: "contact", id: target.id };
   },
   async handle({ tx, command, binding, now }) {
+    const at = clockInstant(now);
     const { payload: input } = parseOrFail(createOrFindContactCommandSchema, command);
     for (const channel of CHANNELS) {
       const evidence = input.consent[channel];
@@ -161,7 +163,7 @@ export const createOrFindContactHandler: ActionHandler = {
     for (let tries = 1; ; tries++) {
       await tx.query("SAVEPOINT crm_contact_claim");
       try {
-        const result = await attempt(tx, tenantId, input, now);
+        const result = await attempt(tx, tenantId, input, at);
         await tx.query("RELEASE SAVEPOINT crm_contact_claim");
         return { result };
       } catch (error) {

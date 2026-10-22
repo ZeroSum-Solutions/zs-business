@@ -14,7 +14,7 @@ import {
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
-import { dealColumns, dealRecord, parseOrFail, type DealRow } from "../crm/rows.js";
+import { clockInstant, dealColumns, dealRecord, parseOrFail, type DealRow } from "../crm/rows.js";
 
 export const SET_DEAL_DETAILS_ACTION = "crm.deal.set-details";
 
@@ -50,6 +50,7 @@ export const setDealDetailsHandler: ActionHandler = {
     return owned.rowCount === 1 ? { tenantId: target.tenantId, type: "deal", id: target.id } : null;
   },
   async handle({ tx, command, binding, now }) {
+    const at = clockInstant(now);
     const { payload: input } = parseOrFail(setDealDetailsCommandSchema, command);
     const tenantId = binding.tenantId;
     const row = (await tx.query<DealSummaryRow>(
@@ -57,7 +58,7 @@ export const setDealDetailsHandler: ActionHandler = {
         WHERE tenant_id=$1 AND id=$2 AND revision=$3 AND revision < 9007199254740991
         RETURNING ${dealSummaryColumns}`,
       [tenantId, input.dealId, input.expectedRevision, input.value?.amountMinor ?? null, input.value?.currency ?? null,
-        input.leadSource, now],
+        input.leadSource, at],
     )).rows[0];
     if (!row)
       throw new Conflict("The deal revision changed", {

@@ -48,6 +48,9 @@ const topUp = (over: Partial<CheckoutSessionRequest> = {}): CheckoutSessionReque
   topupId: randomUUID(),
   amount: 2500,
   currency: "usd",
+  successUrl: SUCCESS,
+  cancelUrl: CANCEL,
+  productName: "Message credit",
   expiresAt: Math.floor(START / 1000) + 3600,
   ...over,
 });
@@ -101,7 +104,7 @@ describe("the Checkout Session request (S-2)", () => {
       ["payment_intent_data[metadata][zs_topup]", request.topupId],
       ["expires_at", String(request.expiresAt)],
     ]);
-    expect(got.raw).toBe(checkoutSessionForm(stripeClient.config, request));
+    expect(got.raw).toBe(checkoutSessionForm(request));
     expect(inits).toHaveLength(1);
     expect(inits[0]).toMatchObject({ method: "POST", redirect: "manual" });
     expect(inits[0]!.signal).toBeInstanceOf(AbortSignal);
@@ -118,9 +121,11 @@ describe("the Checkout Session request (S-2)", () => {
   });
 
   it("form-encodes every reserved character, so the URLs and names arrive unchanged", () => {
-    const config = client({ productName: "Credit & more = 100%", successUrl: "https://a.example/x?y=1&z=[2]" }).config;
-    const request = topUp({ topupId: "t-1", tenantId: "n-1", amount: 700, currency: "eur", expiresAt: 1_800_000_000 });
-    expect(checkoutSessionForm(config, request)).toBe([
+    const request = topUp({
+      topupId: "t-1", tenantId: "n-1", amount: 700, currency: "eur", expiresAt: 1_800_000_000,
+      productName: "Credit & more = 100%", successUrl: "https://a.example/x?y=1&z=[2]",
+    });
+    expect(checkoutSessionForm(request)).toBe([
       "mode=payment",
       "line_items%5B0%5D%5Bquantity%5D=1",
       "line_items%5B0%5D%5Bprice_data%5D%5Bcurrency%5D=eur",
@@ -137,9 +142,9 @@ describe("the Checkout Session request (S-2)", () => {
     ].join("&"));
   });
 
-  it("sends Stripe-Version only when apiVersion is set, and the configured product name", async () => {
-    const stripeClient = client({ apiVersion: "2026-09-30.clover", productName: "Halden credit", baseUrl: `${stripe.url}//` });
-    const request = topUp({ currency: "usd", amount: 999 });
+  it("sends Stripe-Version only when apiVersion is set, and the request's product name", async () => {
+    const stripeClient = client({ apiVersion: "2026-09-30.clover", baseUrl: `${stripe.url}//` });
+    const request = topUp({ currency: "usd", amount: 999, productName: "Halden credit" });
     const { received } = await observe(() => stripeClient.createCheckoutSession(request, open()));
     expect(received[0]!.path).toBe("/v1/checkout/sessions");
     expect(received[0]!.headers["stripe-version"]).toBe("2026-09-30.clover");

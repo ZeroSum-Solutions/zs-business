@@ -36,6 +36,7 @@ interface IntakeConsentRow {
   status: "granted" | "denied";
   purpose: string;
   disclosure_version: string;
+  disclosure_text: string;
   source: string;
   recorded_at: Date;
 }
@@ -51,7 +52,8 @@ const ITEM_SELECT = `
 
 async function consentFor(tx: Transaction, tenantId: string, ids: readonly string[]) {
   const rows = (await tx.query<IntakeConsentRow>(
-    `SELECT intake_item_id, channel::text AS channel, status::text AS status, purpose, disclosure_version, source, recorded_at
+    `SELECT intake_item_id, channel::text AS channel, status::text AS status, purpose, disclosure_version, disclosure_text,
+            source, recorded_at
        FROM intake_item_consent WHERE tenant_id=$1 AND intake_item_id = ANY($2::uuid[])`,
     [tenantId, ids],
   )).rows;
@@ -62,6 +64,7 @@ async function consentFor(tx: Transaction, tenantId: string, ids: readonly strin
       status: row.status,
       purpose: row.purpose,
       disclosureVersion: row.disclosure_version,
+      disclosureText: row.disclosure_text,
       source: row.source,
       recordedAt: row.recorded_at.toISOString(),
     });
