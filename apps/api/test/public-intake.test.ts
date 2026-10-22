@@ -486,6 +486,28 @@ describe("owner review (P-12)", () => {
     return { itemId: response.body.requestId as string, contactId: contact.id };
   }
 
+  it("shows the disclosure text each visitor agreed to after the page's words change (P-8)", async () => {
+    const page = await freshPage(h.a);
+    const shown = (await call(h.app, "GET", `/public/v1/pages/${page.key}`, { headers: { "X-Real-IP": nextAddress() } }))
+      .body.disclosure as { version: string; text: string };
+    const tag = randomUUID().slice(0, 8);
+    const contact = await ownerContact(h.a, { email: `words.${tag}@haldenrowe.example` });
+    const response = await book(page.key, visitor(page.resourceId, {
+      email: `words.${tag}@haldenrowe.example`, consent: { email: true, sms: false },
+    }));
+    expect(response.status).toBe(201);
+    await h.fixture.service((tx) => tx.query(
+      "UPDATE booking_pages SET disclosure_text='Replacement words', disclosure_version='v2' WHERE tenant_id=$1 AND id=$2",
+      [h.a.tenantId, page.pageId]));
+    const agreed = { disclosureVersion: shown.version, disclosureText: shown.text };
+    const items = intakeItemPageSchema.parse((await call(h.app, "GET", "/v1/intake/items?status=possible_match", { token: h.a.token })).body);
+    expect(items.items.find((item) => item.id === response.body.requestId)!.consent.email).toMatchObject(agreed);
+    const linked = await call(h.app, "POST", `/v1/intake/items/${response.body.requestId}/link`, {
+      token: h.a.token, key: randomUUID(), body: { contactId: contact.id },
+    });
+    expect(intakeItemOutputSchema.parse(linked.body).result.consent.email).toMatchObject(agreed);
+  });
+
   it("rejects an item once and refuses a second review", async () => {
     const page = await freshPage(h.a);
     const { itemId, contactId } = await possibleMatch(page, at(9));
