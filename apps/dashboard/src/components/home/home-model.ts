@@ -31,15 +31,16 @@ export interface NeedsInput<A, B> {
   threads: { name: string; needsReply: boolean; needsReview: boolean }[] | undefined;
   /** The next appointments, in start order. */
   bookings: B[] | undefined;
-  resources: { id: string; timeZone: string }[] | undefined;
   /** When the bookings were read from. */
   from: string;
+  /** The display zone: Next appointments reads days and times in it too, so they agree. */
+  zone: string;
 }
 
 /** Who and what needs the owner now: Home's lede counts the same items as the tray shows. */
-export function needsModel<A extends { status: string }, B extends { startsAt: string; resourceId: string }>(input: NeedsInput<A, B>) {
+export function needsModel<A extends { status: string }, B extends { startsAt: string }>(input: NeedsInput<A, B>) {
+  const { zone } = input;
   const next = input.bookings?.[0];
-  const zone = input.resources?.find((item) => item.id === next?.resourceId)?.timeZone ?? "America/New_York";
   const actions = input.checklist?.filter((item) => item.status === "action") ?? [];
   const people = input.threads?.filter((thread) => thread.needsReply || thread.needsReview).map((thread) => thread.name) ?? [];
   const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(input.from, zone) : false;

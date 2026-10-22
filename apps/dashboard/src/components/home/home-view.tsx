@@ -376,6 +376,7 @@ function useNeeds() {
   const from = useMemo(() => new Date().toISOString(), []);
   const bookings = useBookings({ from, limit: 4 });
   const resources = useResources();
+  const zone = useDisplayZone();
   // Every read the count rests on: the inbox count is the threads' first page.
   const reads = [threads, checklist, bookings, resources];
   const model = needsModel({
@@ -384,8 +385,8 @@ function useNeeds() {
     checklist: checklist.data,
     threads: threads.data?.pages[0]?.items,
     bookings: bookings.data?.items,
-    resources: resources.data,
     from,
+    zone,
   });
   const retry = () => {
     for (const read of reads) if (read.isError) void read.refetch();
