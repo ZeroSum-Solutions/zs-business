@@ -309,18 +309,14 @@ function ChecklistCard({ className }: { className?: string }) {
   );
 }
 
-function NextAppointments({ className }: { className?: string }) {
-  const now = useNowMinute();
-  // Days, headings and times share one zone, so a calendar elsewhere never splits a day.
-  const zone = useDisplayZone();
-  const from = useBookingCutoff(now, zone);
-  // The API returns the next four in start order, however many bookings there are.
-  const bookings = useBookings({ from, limit: 4 });
-  const resources = useResources();
+function NextAppointments({ needs, className }: { needs: Needs; className?: string }) {
+  // The same read as the needs-you count, so a retry in either place updates both. Days,
+  // headings and times share its one zone, so a calendar elsewhere never splits a day.
+  const { now, zone, bookings, resources } = needs;
   const nameOf = (id: string) => resources.data?.find((item) => item.id === id);
   const upcoming = bookings.data?.items ?? [];
   // Headings follow the minute clock, so "Tomorrow" becomes "Later today" at midnight.
-  const days = groupByDay(upcoming, now ?? from, zone);
+  const days = groupByDay(upcoming, now, zone);
   return (
     <Tray className={className} aria-labelledby="next-title">
       <TrayHeader>
@@ -378,7 +374,10 @@ function useBookingCutoff(now: number | null, zone: string): string {
   return next;
 }
 
-/** Who and what needs the owner now; Home's lede counts the same items as the tray shows. */
+/**
+ * Who and what needs the owner now. Home reads it once and hands it to the lede, the tray and
+ * Next appointments, so they count the same items and one retry brings all of them back.
+ */
 function useNeeds() {
   const waiting = useInboxCount();
   const threads = useThreads();
@@ -390,20 +389,24 @@ function useNeeds() {
   const resources = useResources();
   // Every read the count rests on: the inbox count is the threads' first page.
   const reads = [threads, checklist, bookings, resources];
+  // Until the clock is read on the client, "now" is when the bookings were read from.
+  const today = now ?? Date.parse(from);
   const model = needsModel({
     waiting,
     statuses: reads.map((read) => read.status),
     checklist: checklist.data,
     threads: threads.data?.pages[0]?.items,
     bookings: bookings.data?.items,
-    now: now ?? from,
+    now: today,
     zone,
   });
   const retry = () => {
     for (const read of reads) if (read.isError) void read.refetch();
   };
-  return { ...model, waiting, threads, checklist, bookings, resources, retry };
+  return { ...model, clock: now, now: today, waiting, threads, checklist, bookings, resources, retry };
 }
+
+type Needs = ReturnType<typeof useNeeds>;
 
 /** "Teo, Linnea, Noor and 2 more": first names, as the owner would say them. */
 function peopleLine(names: string[]): string {
@@ -417,8 +420,8 @@ function peopleLine(names: string[]): string {
 }
 
 /** What needs the owner now, first on every screen size (BRIEF: "what needs me now"). */
-function NeedsYou({ className }: { className?: string }) {
-  const { waiting, threads, checklist, bookings, resources, next, zone, actions, people, count, state } = useNeeds();
+function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
+  const { waiting, threads, checklist, bookings, resources, next, zone, actions, people, count, state } = needs;
   const sampleOnly = useSampleOnly();
   const open = actions.length;
   // Never claim "clear" or "nothing" before the answer is in: say so while loading or after a failure.
@@ -528,8 +531,7 @@ function NeedsYou({ className }: { className?: string }) {
 }
 
 /** Monday to Sunday of the current week, with a dot on days that have appointments. */
-function WeekStrip({ className }: { className?: string }) {
-  const now = useNowMinute();
+function WeekStrip({ now, className }: { now: number | null; className?: string }) {
   const zone = useDisplayZone();
   const resources = useResources();
   if (now === null || resources.isPending) return <div aria-hidden className={cn("h-[78px]", className)} />;
@@ -584,10 +586,8 @@ function greeting(now: number, zone: string): string {
   return hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 }
 
-function HomeHeader({ reports }: { reports: boolean }) {
-  const now = useNowMinute();
-  const zone = useDisplayZone();
-  const { count, state, retry } = useNeeds();
+function HomeHeader({ needs, reports }: { needs: Needs; reports: boolean }) {
+  const { clock: now, zone, count, state, retry } = needs;
   const first = OWNER.name.split(" ")[0];
   const things = needsLine(state, count);
   return (
@@ -605,7 +605,7 @@ function HomeHeader({ reports }: { reports: boolean }) {
           {reports ? "Results compare with the same time last week." : null}
         </p>
       </div>
-      <WeekStrip className="hidden lg:grid" />
+      <WeekStrip now={now} className="hidden lg:grid" />
     </header>
   );
 }
@@ -613,13 +613,14 @@ function HomeHeader({ reports }: { reports: boolean }) {
 export function HomeView() {
   // Staff have no `reports`: they neither see nor ask for results (H-5).
   const reports = useCan(READ_RESULTS);
+  const needs = useNeeds();
   return (
     <>
-      <HomeHeader reports={reports} />
+      <HomeHeader needs={needs} reports={reports} />
       <div className="grid grid-cols-1 items-start gap-3 lg:grid-flow-dense lg:grid-cols-12 lg:gap-4">
-        <NeedsYou className="lg:col-span-7" />
-        <WeekStrip className="lg:hidden" />
-        <NextAppointments className="lg:col-span-5 lg:self-stretch" />
+        <NeedsYou needs={needs} className="lg:col-span-7" />
+        <WeekStrip now={needs.clock} className="lg:hidden" />
+        <NextAppointments needs={needs} className="lg:col-span-5 lg:self-stretch" />
         {reports ? <ResultsSection /> : null}
         <ChecklistCard className="lg:col-span-5 lg:col-start-8" />
         <UsageCard className="lg:col-span-7" />
