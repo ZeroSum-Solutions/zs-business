@@ -2,8 +2,11 @@
 // shared dispatcher with a server-built principal; no member session can reach them
 // (edge/session.ts ACTION_PERMISSIONS leaves them out).
 import {
+  inboundSmsReplySchema,
   liftSuppressionCommandSchema,
   recordSuppressionCommandSchema,
+  SMS_REPLY_RECORD_ACTION,
+  smsReplyCommandSchema,
   suppressionResultSchema,
   SUPPRESSION_LIFT_ACTION,
   SUPPRESSION_RECORD_ACTION,
@@ -11,6 +14,7 @@ import {
   type ActionCommand,
   type ActionResult,
   type DeliveryChannel,
+  type InboundSmsReply,
   type SuppressionResult,
   type Target,
 } from "@zs/contracts";
@@ -75,9 +79,21 @@ export const liftSuppressionHandler: ActionHandler = {
   },
 };
 
+/** twilio.md T-8: the action row is the record; its stored result is what a repeat gets back. */
+export const recordSmsReplyHandler: ActionHandler = {
+  resolveTarget: resolveSuppression,
+  async handle({ command, binding }) {
+    const { payload } = parseOrFail(smsReplyCommandSchema, command);
+    requireTarget(command, binding.tenantId, "sms", payload.address);
+    const result: InboundSmsReply = { keyword: payload.keyword, reply: payload.reply };
+    return { result: { ...result } };
+  },
+};
+
 export const suppressionHandlers: Readonly<Record<string, ActionHandler>> = Object.freeze({
   [SUPPRESSION_RECORD_ACTION]: recordSuppressionHandler,
   [SUPPRESSION_LIFT_ACTION]: liftSuppressionHandler,
+  [SMS_REPLY_RECORD_ACTION]: recordSmsReplyHandler,
 });
 
 interface WriteContext {
@@ -87,6 +103,11 @@ export async function recordSuppression(command: ActionCommand, ctx: WriteContex
   const parsed = parseOrFail(recordSuppressionCommandSchema, command);
   const output = await ctx.dispatch(parsed);
   return parseOrFail(suppressionResultSchema, output.result);
+}
+export async function recordSmsReply(command: ActionCommand, ctx: WriteContext): Promise<InboundSmsReply> {
+  const parsed = parseOrFail(smsReplyCommandSchema, command);
+  const output = await ctx.dispatch(parsed);
+  return parseOrFail(inboundSmsReplySchema, output.result);
 }
 export async function liftSuppression(command: ActionCommand, ctx: WriteContext): Promise<SuppressionResult> {
   const parsed = parseOrFail(liftSuppressionCommandSchema, command);

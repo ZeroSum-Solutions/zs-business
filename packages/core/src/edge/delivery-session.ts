@@ -3,17 +3,23 @@
 // from the request body, and the server builds a principal that may run only the suppression
 // action it needs.
 import {
+  IdempotencyConflict,
+  inboundSmsReplySchema,
   inboundSmsSchema,
   NotFound,
+  SMS_REPLY_RECORD_ACTION,
   SUPPRESSION_LIFT_ACTION,
   SUPPRESSION_RECORD_ACTION,
   TenantDenied,
   uuidSchema,
   type DeliveryChannel,
+  type InboundSms,
   type InboundSmsReply,
   type SuppressionResult,
+  type Target,
 } from "@zs/contracts";
-import { liftSuppression, recordSuppression, smsKeyword, suppressionTargetId } from "../delivery/suppression.js";
+import { parseOrFail } from "../crm/rows.js";
+import { liftSuppression, recordSmsReply, recordSuppression, smsKeyword, suppressionTargetId } from "../delivery/suppression.js";
 import { verifyUnsubscribeToken, type UnsubscribeSecrets } from "../delivery/unsubscribe.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, parseInput, type Authorize, type EdgeDependencies } from "./session.js";
@@ -74,20 +80,44 @@ export const DEFAULT_SMS_REPLIES: InboundSmsReplies = Object.freeze({
 /**
  * D-9: an inbound SMS for one tenant. The tenant comes from the server's mapping of the
  * receiving number (M5 webhooks); the provider message ID keys the action, so a redelivered
- * webhook replays instead of acting twice.
+ * webhook replays instead of acting twice. `replies: null` answers nothing (the provider replies).
  */
-export function createInboundSmsSession(deps: EdgeDependencies, tenant: string, replies: InboundSmsReplies = DEFAULT_SMS_REPLIES) {
+export function createInboundSmsSession(deps: EdgeDependencies, tenant: string, replies: InboundSmsReplies | null = DEFAULT_SMS_REPLIES) {
   const tenantId = uuidSchema.parse(tenant);
-  const run = directDispatch(deps, tenantId, inboundSmsActorId(tenantId), only(SUPPRESSION_RECORD_ACTION, SUPPRESSION_LIFT_ACTION));
+  const run = directDispatch(deps, tenantId, inboundSmsActorId(tenantId),
+    only(SUPPRESSION_RECORD_ACTION, SUPPRESSION_LIFT_ACTION, SMS_REPLY_RECORD_ACTION));
+
+  /** twilio.md T-8: the first reply to a message is stored, and a repeat gets it back unchanged. */
+  async function replyOnce(message: InboundSms, target: Target, keyword: "stop" | "start" | "help", text: string | null) {
+    if (text === null) return null;
+    const idempotencyKey = `sms-inbound:${message.providerMessageId}:reply`;
+    try {
+      return (await recordSmsReply({
+        actionType: SMS_REPLY_RECORD_ACTION,
+        target,
+        approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
+        idempotencyKey,
+        payload: { address: message.from, keyword, reply: text },
+      }, { dispatch: run })).reply;
+    } catch (error) {
+      if (!(error instanceof IdempotencyConflict)) throw error;
+      // The reply was built again from settings changed since: the stored one stands.
+      const stored = await deps.db.tenant(tenantId, async (tx) => (await tx.query<{ result: unknown }>(
+        "SELECT result FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, idempotencyKey])).rows[0]?.result);
+      return parseOrFail(inboundSmsReplySchema, stored).reply;
+    }
+  }
+
   return {
     async receive(body: unknown): Promise<InboundSmsReply> {
       const message = parseInput(inboundSmsSchema, body, "inbound message");
       const keyword = smsKeyword(message.body);
       if (keyword === null) return { keyword: null, reply: null };
-      if (keyword === "help") return { keyword, reply: replies.help };
+      const target = { tenantId, type: "suppression", id: suppressionTargetId(tenantId, "sms", message.from) };
+      if (keyword === "help") return { keyword, reply: await replyOnce(message, target, keyword, replies?.help ?? null) };
       const idempotencyKey = `sms-inbound:${message.providerMessageId}`;
       const envelope = {
-        target: { tenantId, type: "suppression", id: suppressionTargetId(tenantId, "sms", message.from) },
+        target,
         approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
         idempotencyKey,
       };
@@ -95,12 +125,12 @@ export function createInboundSmsSession(deps: EdgeDependencies, tenant: string, 
       if (keyword === "stop") {
         await recordSuppression({ actionType: SUPPRESSION_RECORD_ACTION, ...envelope,
           payload: { channel: "sms", address: message.from, reason: "stop", source } }, { dispatch: run });
-        return { keyword, reply: replies.stop };
+        return { keyword, reply: await replyOnce(message, target, keyword, replies?.stop ?? null) };
       }
       const lifted = await liftSuppression({ actionType: SUPPRESSION_LIFT_ACTION, ...envelope,
         payload: { channel: "sms", address: message.from, reason: "stop", source } }, { dispatch: run });
       // A number listed for another reason (a carrier block, an owner's manual entry) stays listed.
-      return { keyword, reply: lifted.suppressed ? null : replies.start };
+      return { keyword, reply: lifted.suppressed ? null : await replyOnce(message, target, keyword, replies?.start ?? null) };
     },
   };
 }

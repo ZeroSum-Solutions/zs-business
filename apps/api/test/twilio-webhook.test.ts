@@ -589,13 +589,44 @@ describe("inbound keywords answered by the app (T-8 app)", () => {
     }
   });
 
-  it("answers HELP with the number's own reply, else the default, and changes nothing", async () => {
+  it("answers HELP with the number's own reply, else the default, and stores only that reply", async () => {
     const before = await snapshot(app);
-    expect((await inbound(app.a.tenantId, inboundForm(NUMBER_A, phone(), "help"))).body)
+    const [sidA, sidB] = [newSid(), newSid()];
+    expect((await inbound(app.a.tenantId, inboundForm(NUMBER_A, phone(), "help", sidA))).body)
       .toBe(message("Halden &amp; Rowe &lt;fittings&gt;: call +15555550199 or reply STOP to opt out."));
-    expect((await inbound(app.b.tenantId, inboundForm(NUMBER_B, phone(), " INFO? "))).body)
+    expect((await inbound(app.b.tenantId, inboundForm(NUMBER_B, phone(), " INFO? ", sidB))).body)
       .toBe(message("Tenant B: Reply STOP to opt out, START to resubscribe. Msg &amp; data rates may apply."));
-    expect(await snapshot(app)).toEqual(before);
+    // T-8: the reply is kept under the message's key, so a repeat gets the same text.
+    expect(await actionsWithKey(app.a.tenantId, `sms-inbound:${sidA}:reply`, app)).toBe(1);
+    expect(await actionsWithKey(app.b.tenantId, `sms-inbound:${sidB}:reply`, app)).toBe(1);
+    const after = await snapshot(app);
+    expect(after).toEqual({
+      a: { ...before.a, actions: before.a.actions + 1 },
+      b: { ...before.b, actions: before.b.actions + 1 },
+    });
+  });
+
+  it("replays the first reply to a repeated STOP, START or HELP after the business name or HELP reply changes", async () => {
+    const from = phone();
+    const [stop, start, help] = [newSid(), newSid(), newSid()];
+    const send = (body: string, sid: string) => inbound(app.a.tenantId, inboundForm(NUMBER_A, from, body, sid));
+    const first = [await send("STOP", stop), await send("START", start), await send("HELP", help)].map((reply) => reply.body);
+    expect(first).toEqual([
+      message("Halden &amp; Rowe: You are unsubscribed and will get no more messages. Reply START to resubscribe."),
+      message("Halden &amp; Rowe: You are resubscribed. Reply STOP to opt out."),
+      message("Halden &amp; Rowe &lt;fittings&gt;: call +15555550199 or reply STOP to opt out."),
+    ]);
+    const settings = (name: string, help: string) => app.fixture.service(async (tx) => {
+      await tx.query("UPDATE tenants SET name=$2 WHERE tenant_id=$1", [app.a.tenantId, name]);
+      await tx.query("UPDATE sms_numbers SET help_reply=$2 WHERE tenant_id=$1", [app.a.tenantId, help]);
+    });
+    await settings("Renamed Business", "Renamed Business: call +15555550198.");
+    try {
+      expect([await send("STOP", stop), await send("START", start), await send("HELP", help)].map((reply) => reply.body)).toEqual(first);
+    } finally {
+      await settings("Halden & Rowe", HELP_A);
+    }
+    expect(await suppressionOf(app.a.tenantId, from, app)).toEqual([]);
   });
 
   it("gives no reply to a text it does not act on", async () => {
