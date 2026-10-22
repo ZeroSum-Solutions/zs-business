@@ -42,11 +42,13 @@ test("drafts a reply, approves it into the delivery queue, and discards another"
   await expect(pane.getByLabel("Reply to Linnea Castellanos")).toHaveValue("");
   await shot(page, "21-inbox-draft", info.project.name);
 
-  await draft.getByRole("button", { name: "Approve and send" }).click();
+  await draft.getByRole("button", { name: "Approve and queue" }).click();
   await expect(page.getByRole("status").getByText("Approved. The reply is queued for delivery.")).toBeVisible();
   await expect(draft.getByTestId("reply-status")).toHaveText("Approved and queued");
   await expect(draft).toContainText("Approved by mara@haldenrowe.example");
   await expect(draft.getByRole("button")).toHaveCount(0);
+  // The buttons went away with the draft: focus lands on the approved reply, not on the page.
+  await expect(draft).toBeFocused();
   // Answered: the thread no longer needs a reply.
   await expect(pane.locator("header").getByText("Needs reply")).toHaveCount(0);
 
@@ -57,6 +59,8 @@ test("drafts a reply, approves it into the delivery queue, and discards another"
   await second.getByRole("button", { name: "Discard" }).click();
   await expect(page.getByRole("status").getByText("Draft discarded.")).toBeVisible();
   await expect(second).toHaveCount(0);
+  // No other draft waits, so focus lands on the messages.
+  await expect(pane.getByRole("list", { name: "Messages" })).toBeFocused();
   await expect(draft.getByTestId("reply-status")).toHaveText("Approved and queued");
 });
 
@@ -65,7 +69,13 @@ test("refuses an empty reply without sending anything", async ({ page }) => {
   const before = await page.evaluate(() => window.__zsDemo!.writeLog().length);
   await page.getByRole("button", { name: "Save draft" }).click();
   await expect(page.getByRole("article").getByRole("alert")).toHaveText("Write a reply first.");
-  await expect(page.getByLabel("Reply to Linnea Castellanos")).toHaveAttribute("aria-invalid", "true");
+  const reply = page.getByLabel("Reply to Linnea Castellanos");
+  await expect(reply).toHaveAttribute("aria-invalid", "true");
+  // The error is tied to the box and focus goes there, so the next keystroke fixes it.
+  await expect(reply).toHaveAccessibleDescription(/^Write a reply first\./);
+  await expect(reply).toBeFocused();
+  await reply.fill("Hi Linnea.");
+  await expect(page.getByRole("article").getByRole("alert")).toHaveCount(0);
   expect(await page.evaluate(() => window.__zsDemo!.writeLog().length)).toBe(before);
 });
 
@@ -96,15 +106,64 @@ test("says so when another owner approved the draft first, or the customer has n
   const draft = page.locator("[data-entry=reply][data-status=draft]");
   const replyId = await draft.getAttribute("data-reply-id");
   await page.evaluate((id) => window.__zsDemo!.approveReplyElsewhere(id!), replyId);
-  await draft.getByRole("button", { name: "Approve and send" }).click();
-  await expect(page.getByTestId("reply-step-error").getByRole("alert")).toContainText("This reply is no longer a draft. Someone approved or discarded it first. The thread was reloaded.");
+  await draft.getByRole("button", { name: "Approve and queue" }).click();
+  // Once the thread reloads it names who approved it, as information rather than an error.
+  await expect(page.getByTestId("reply-step-error").getByRole("status")).toHaveText(/^Already approved by .+\. It is queued for delivery\.$/);
+  await expect(page.getByTestId("reply-step-error").getByRole("alert")).toHaveCount(0);
   await expect(page.locator(`[data-reply-id="${replyId}"]`).getByTestId("reply-status")).toHaveText("Approved and queued");
 
   await openThread(page, "Dashiell Moreau");
   await expect(page.getByRole("article").getByText(/has no email address yet/).first()).toBeVisible();
-  await page.locator("[data-entry=reply][data-status=draft]").getByRole("button", { name: "Approve and send" }).click();
-  await expect(page.getByTestId("reply-step-error").getByRole("alert")).toContainText("This customer has no email address yet.");
-  await expect(page.locator("[data-entry=reply]").getByTestId("reply-status")).toHaveText("Draft");
+  // No email, no approval: the button is off and says where to add one (I-6 no_email).
+  const blocked = page.locator("[data-entry=reply][data-status=draft]");
+  await expect(blocked.getByRole("button", { name: "Approve and queue" })).toBeDisabled();
+  await expect(blocked).toContainText("Add an email address to the customer record to approve it.");
+  await expect(blocked.getByRole("link", { name: "Open customer record" })).toHaveAttribute("href", /^\/customers\/[0-9a-f-]{36}$/);
+  await expect(blocked.getByTestId("reply-status")).toHaveText("Draft");
+});
+
+test("a long unbroken preview wraps inside the list and leaves the open conversation usable", async ({ page }, info) => {
+  await openThread(page, "Celeste Vandermeer");
+  const pane = page.getByRole("article");
+  await pane.getByLabel("Reply to Celeste Vandermeer").fill("Engraving".repeat(40));
+  await pane.getByRole("button", { name: "Save draft" }).click();
+  await expect(page.getByRole("status").getByText(/^Draft saved\./)).toBeVisible();
+  // In-app navigation: a reload would start a fresh demo store without the saved draft.
+  await mainNav(page).getByRole("link", { name: "Inbox" }).click();
+  await expect(page).toHaveURL(/\/inbox$/);
+  const list = page.getByRole("list", { name: "Conversations" });
+  await expect(list.getByRole("link", { name: /Celeste Vandermeer/ }).getByText(/^(Engraving)+/)).toBeVisible();
+  await expect(page.getByRole("link", { name: /Noor Haddad/ }).getByText("1 draft")).toBeVisible();
+  // No row grows past the list, and the page does not scroll sideways.
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  const [listBox, rowBox] = await Promise.all([list.boundingBox(), list.getByRole("listitem").first().boundingBox()]);
+  expect(rowBox!.width).toBeLessThanOrEqual(listBox!.width + 1);
+  if (info.project.name === "desktop") {
+    // The open conversation beside the list still takes clicks.
+    await page.getByRole("link", { name: /Noor Haddad/ }).click();
+    await page.locator("[data-entry=reply][data-status=draft]").getByRole("button", { name: "Discard" }).click();
+    await expect(page.getByRole("status").getByText("Draft discarded.")).toBeVisible();
+  }
+});
+
+test("Home says it is offline instead of loading for ever", async ({ page, context }) => {
+  // The Inbox reads the conversations and calendars; Home's other reads have nothing cached.
+  await page.goto("/inbox");
+  await expect(page.getByRole("list", { name: "Conversations" })).toBeVisible();
+  await context.setOffline(true);
+  try {
+    await mainNav(page).getByRole("link", { name: "Home" }).click();
+    const next = page.getByRole("region", { name: "Next appointments" });
+    await expect(next.getByRole("alert")).toContainText("You look offline.");
+    await expect(page.getByRole("region", { name: "Needs you now" }).locator('a[href="/calendar"]')).toContainText("Couldn't check");
+    await expect(page.getByRole("main").getByText("Couldn't check everything.")).toBeVisible();
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+  } finally {
+    await context.setOffline(false);
+  }
+  // Back online, the paused reads run by themselves.
+  await expect(page.getByRole("region", { name: "Next appointments" }).getByRole("alert")).toHaveCount(0);
 });
 
 test("Home compares this week with last week, and counts a new booking and a won deal", async ({ page }, info) => {

@@ -4,7 +4,11 @@ import { randomUUID } from "node:crypto";
 import type { Transaction } from "@zs/db";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { WALLET_TOPUP_CREATE_ACTION } from "@zs/contracts";
-import { CHECKOUT_LIFETIME_MS, CHECKOUT_RETRY_LIMIT_MS, createSession, directDispatch, memberAuthorize, StripeRequestFailed } from "../../src/index.js";
+import {
+  CHECKOUT_LIFETIME_MS, CHECKOUT_RETRY_LIMIT_MS, createSession, createStripeClient, directDispatch, memberAuthorize, StripeRequestFailed,
+  type StripeConfig,
+} from "../../src/index.js";
+import { startFakeStripe } from "./fake-stripe.js";
 import { createBillingHarness, stripeId, type BillingHarness } from "./helpers.js";
 
 let b: BillingHarness;
@@ -28,25 +32,26 @@ describe("starting a top-up (S-1, S-2)", () => {
       topup: { id: expect.any(String), amount: 2_500, currency: "usd", status: "pending", refunded: 0, createdAt: createdAt.toISOString(), paidAt: null },
       checkoutUrl: expect.stringMatching(/^https:\/\/checkout\.stripe\.test\//),
     });
+    const { successUrl, cancelUrl, productName } = b.stripe.client.config;
     expect(b.stripe.calls).toEqual([{
-      tenantId, topupId: result.topup.id, amount: 2_500, currency: "usd",
+      tenantId, topupId: result.topup.id, amount: 2_500, currency: "usd", successUrl, cancelUrl, productName,
       expiresAt: Math.floor((createdAt.getTime() + CHECKOUT_LIFETIME_MS) / 1000),
     }]);
     const row = await b.topupRow(tenantId, result.topup.id);
-    expect(row).toMatchObject({ status: "pending", amount: "2500", refunded: "0", paid_at: null, stripe_checkout_session_id: null });
+    expect(row).toMatchObject({ status: "pending", amount: "2500", refunded: "0", paid_at: null, stripe_checkout_session_id: null,
+      checkout_success_url: successUrl, checkout_cancel_url: cancelUrl, checkout_product_name: productName, checkout_url: result.checkoutUrl });
     expect(await session.listTopUps()).toEqual({ items: [result.topup] });
     expect(await b.wallet(tenantId)).toEqual({ balance: 0, reserved: 0, owed: 0 });
   });
 
-  it("replays under the same key: same top-up, same Stripe request, one row", async () => {
+  it("replays under the same key: same top-up, the stored Checkout URL, one row", async () => {
     const tenantId = await b.tenant();
     const session = await b.session(tenantId);
     const first = await session.createTopUp({ amount: 1_000 }, "owner-topup-replay");
     b.h.clock.advance(60_000);
     const again = await session.createTopUp({ amount: 1_000 }, "owner-topup-replay");
     expect(again).toEqual(first);
-    expect(b.stripe.calls).toHaveLength(2);
-    expect(b.stripe.calls[1]).toEqual(b.stripe.calls[0]);
+    expect(b.stripe.calls).toHaveLength(1);
     expect(await topupCount(tenantId)).toBe(1);
     // A new key is a new top-up.
     const other = await session.createTopUp({ amount: 1_000 }, "owner-topup-other");
@@ -73,15 +78,21 @@ describe("starting a top-up (S-1, S-2)", () => {
 
   it("a retry up to the retry limit still asks Stripe; one later is topup_closed and Stripe is not called", async () => {
     const tenantId = await b.tenant();
+    // Stripe is busy on the first try, so no session URL is stored and the retry asks again.
+    const busy = createSession({ ...b.deps(), billing: { stripe: { ...b.stripe.client,
+      createCheckoutSession: () => Promise.reject(new StripeRequestFailed("stripe_503", true)) } } },
+    { tenantId, actorId: await b.owner(tenantId) });
+    await expect(busy.createTopUp({ amount: 1_500 }, "late-retry")).rejects.toMatchObject({ code: "stripe_503" });
     const session = await b.session(tenantId);
-    const first = await session.createTopUp({ amount: 1_500 }, "late-retry");
     b.h.clock.advance(CHECKOUT_RETRY_LIMIT_MS);
-    expect(await session.createTopUp({ amount: 1_500 }, "late-retry")).toEqual(first);
-    expect(b.stripe.calls).toHaveLength(2);
+    const paid = await session.createTopUp({ amount: 1_500 }, "late-retry");
+    expect(b.stripe.calls).toHaveLength(1);
+    // Past the limit even a stored session URL is not handed out.
     b.h.clock.advance(1);
     await expect(session.createTopUp({ amount: 1_500 }, "late-retry"))
       .rejects.toMatchObject({ code: "Conflict", details: { reason: "topup_closed" } });
-    expect(b.stripe.calls).toHaveLength(2);
+    expect(b.stripe.calls).toHaveLength(1);
+    expect((await b.topupRow(tenantId, paid.topup.id)).checkout_url).toBe(paid.checkoutUrl);
     expect(await topupCount(tenantId)).toBe(1);
   });
 
@@ -181,6 +192,52 @@ describe("the server's top-up terms (S-1)", () => {
     // A new request is judged by the new limits.
     await expect((await sessionWith(tenantId, { minTopUp: 2_000 })).createTopUp({ amount: 1_000 }, `topup-${randomUUID()}`))
       .rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
+  it("a retry after the Checkout URLs or product name change replays the stored request (S-2)", async () => {
+    const secretKey = ["sk", "test", randomUUID().replaceAll("-", "")].join("_");
+    const fake = await startFakeStripe({ secretKey, clock: b.h.clock });
+    try {
+      const tenantId = await b.tenant();
+      const actorId = await b.owner(tenantId);
+      const sessionWith = (change: Partial<StripeConfig>) => createSession({ ...b.deps(), billing: { stripe: createStripeClient({
+        config: { secretKey, baseUrl: fake.url, successUrl: "https://app.haldenrowe.example/wallet/paid", cancelUrl: "https://app.haldenrowe.example/wallet", ...change },
+      }) } }, { tenantId, actorId });
+      const key = `topup-${randomUUID()}`;
+      // Stripe creates the session, but the answer is lost; then a deploy changes the URLs and name.
+      fake.queue("lose-reply");
+      await expect(sessionWith({}).createTopUp({ amount: 1_000 }, key)).rejects.toMatchObject({ code: "stripe_network", retry: true });
+      const changed = sessionWith({ successUrl: "https://app.haldenrowe.example/new/paid", cancelUrl: "https://app.haldenrowe.example/new", productName: "Credit" });
+      const retried = await changed.createTopUp({ amount: 1_000 }, key);
+      expect(fake.sessions).toHaveLength(1);
+      expect(retried.checkoutUrl).toBe(fake.sessions[0]!.url);
+      expect(fake.received.map((request) => request.raw)).toEqual([fake.received[0]!.raw, fake.received[0]!.raw]);
+      expect(fake.received[0]!.form).toMatchObject({
+        success_url: "https://app.haldenrowe.example/wallet/paid", cancel_url: "https://app.haldenrowe.example/wallet",
+        "line_items[0][price_data][product_data][name]": "Message credit",
+      });
+      // Once a session URL is stored, a retry answers it without asking Stripe again.
+      expect(await changed.createTopUp({ amount: 1_000 }, key)).toEqual(retried);
+      expect(fake.received).toHaveLength(2);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("a top-up stored before the Checkout parameters were has its retry built from the config", async () => {
+    const tenantId = await b.tenant();
+    const key = `topup-${randomUUID()}`;
+    const { topup } = await (await b.session(tenantId)).createTopUp({ amount: 1_000 }, key);
+    // As the row looked before the snapshot columns existed (the superuser pool may write them).
+    await b.h.database.pool.query(
+      `UPDATE wallet_topups SET checkout_success_url=NULL, checkout_cancel_url=NULL, checkout_product_name=NULL, checkout_url=NULL
+        WHERE tenant_id=$1 AND id=$2`, [tenantId, topup.id]);
+    b.stripe.calls.length = 0;
+    const successUrl = "https://app.haldenrowe.example/now/paid";
+    const again = await createSession({ ...b.deps(), billing: { stripe: { ...b.stripe.client, config: { ...b.stripe.client.config, successUrl } } } },
+      { tenantId, actorId: await b.owner(tenantId) }).createTopUp({ amount: 1_000 }, key);
+    expect(b.stripe.calls).toEqual([expect.objectContaining({ topupId: topup.id, successUrl, cancelUrl: b.stripe.client.config.cancelUrl })]);
+    expect((await b.topupRow(tenantId, topup.id)).checkout_url).toBe(again.checkoutUrl);
   });
 
   it("refuses with 409 wallet_currency, before Stripe, when the wallet holds another currency", async () => {

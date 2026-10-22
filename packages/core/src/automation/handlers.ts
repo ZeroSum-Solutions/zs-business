@@ -270,11 +270,13 @@ export const createProposalHandler: ActionHandler = {
     if (await loadApproval(tx, target.tenantId, target.id)) throw new Conflict("The ID is already in use", { reason: "id_in_use" });
     return { tenantId: target.tenantId, type: "approval", id: target.id };
   },
-  async handle({ tx, command, binding, now }) {
+  async handle({ tx, command, binding, clock }) {
     const { payload } = parseOrFail(createProposalCommandSchema, command);
     const tenantId = binding.tenantId;
     if (binding.actorId !== automationActorId(tenantId, payload.tokenId)) throw new TenantDenied();
     const token: TokenRow | null = await loadToken(tx, tenantId, payload.tokenId, "update");
+    // Read the clock once the token lock is held, so a wait on the lock counts toward expiry.
+    const now = clock();
     if (!token || !tokenActive(token, now)) throw new TenantDenied();
     const { scope } = proposalFor(payload.action.actionType);
     if (!token.scopes.includes(scope)) throw new TenantDenied();
