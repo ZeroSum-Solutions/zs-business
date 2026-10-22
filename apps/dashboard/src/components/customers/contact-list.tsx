@@ -2,7 +2,7 @@
 
 import { CaretRight, MagnifyingGlass } from "@phosphor-icons/react";
 import Link from "next/link";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState, ErrorNote, LoadingRows } from "@/components/ui/states";
@@ -10,7 +10,11 @@ import { useContacts, useDebouncedValue } from "@/lib/queries";
 import { formatPhone } from "@/lib/utils";
 import { Avatar } from "@/components/ui/avatar";
 
-export function ContactList() {
+/**
+ * Search first, so results land right under it on a phone. `queue` (website bookings to review)
+ * sits between search and the list, and steps aside while a search is typed.
+ */
+export function ContactList({ queue }: { queue?: ReactNode }) {
   const [search, setSearch] = useState("");
   // The API searches every customer; wait for a pause in typing before asking it.
   const settled = useDebouncedValue(search.trim(), 250);
@@ -32,6 +36,7 @@ export function ContactList() {
           onChange={(event) => setSearch(event.target.value)}
         />
       </div>
+      {search.trim() === "" ? queue : null}
       {contacts.isPending ? <LoadingRows rows={6} label="Loading customers" /> : contacts.isError && !contacts.isFetchNextPageError ? (
         <ErrorNote error={contacts.error} retry={() => contacts.refetch()} />
       ) : items.length === 0 ? (

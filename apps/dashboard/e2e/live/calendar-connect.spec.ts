@@ -33,7 +33,7 @@ test("an owner connects a booking calendar through Google, confirms the account,
   // Nothing is connected until the owner confirms the account Google answered for.
   const confirm = page.getByRole("region", { name: "Confirm Google account" });
   await expect(confirm.getByTestId("gcal-confirm-question")).toHaveText(/^Connect owner-\d+@calendar\.test to Showroom appointments\?$/);
-  await expect(showroom.getByTestId("gcal-status")).toHaveText("Not connected");
+  await expect(showroom.getByTestId("gcal-status")).toHaveText("Waiting for confirmation");
   await confirm.getByRole("button", { name: "Connect calendar" }).click();
   await expect(page.getByTestId("gcal-return")).toHaveText("Google Calendar connected. Busy times start blocking slots after the first sync.");
   await expect(confirm).toBeHidden();
@@ -87,7 +87,7 @@ test("a consent URL finished elsewhere connects nothing: another browser is refu
   await expect(page).toHaveURL((url) => url.pathname === CONNECTIONS);
   const confirm = page.getByRole("region", { name: "Confirm Google account" });
   await expect(confirm.getByTestId("gcal-confirm-question")).toHaveText(/^Connect owner-\d+@calendar\.test to Showroom appointments\?$/);
-  await expect(row(page).getByTestId("gcal-status")).toHaveText("Not connected");
+  await expect(row(page).getByTestId("gcal-status")).toHaveText("Waiting for confirmation");
   // Not the owner's account: they cancel, and nothing was connected.
   await confirm.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByTestId("gcal-return")).toHaveText("Nothing was connected.");
@@ -123,9 +123,9 @@ test("a confirm connects only the account the owner was shown: a grant replaced 
   const question = page.getByRole("region", { name: "Confirm Google account" }).getByTestId("gcal-confirm-question");
   await expect(question).toHaveText(/^Connect owner-\d+@calendar\.test to Repair intake\?$/);
   await expect(question).not.toHaveText(shownA!);
-  for (const name of [NAME, "Repair intake"])
+  for (const [name, status] of [[NAME, "Not connected"], ["Repair intake", "Waiting for confirmation"]] as const)
     await expect(page.getByTestId("gcal-row").filter({ has: page.getByRole("heading", { name, exact: true }) }).getByTestId("gcal-status"))
-      .toHaveText("Not connected");
+      .toHaveText(status);
   expect(await grantCookie(page.context())).toBeDefined();
 });
 

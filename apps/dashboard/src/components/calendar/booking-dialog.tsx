@@ -2,7 +2,7 @@
 
 import { WarningCircle } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
@@ -11,7 +11,7 @@ import type { CreateBookingRequest } from "@zs/contracts";
 import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { dropBookedTime, useKeys, useSlots } from "@/lib/queries";
-import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay } from "@/lib/time";
+import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay, zonedDateKey } from "@/lib/time";
 import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
 import { cn, revealOnFocus } from "@/lib/utils";
@@ -21,25 +21,35 @@ const CONFLICT_MESSAGE = "That time was just taken. Pick another slot.";
 
 type Attempt = { request: CreateBookingRequest; generation: number };
 
+/** The sheet's first day: the day in view, or today when the page shows a past day. */
+export function firstBookableDay(dateKey: string, today: string): string {
+  return dateKey < today ? today : dateKey;
+}
+
 export function BookingDialog({
   open,
   onOpenChange,
   resource,
   initialDate,
   initialSlot,
+  onOpenerGone,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   resource: ResourceSummary;
   initialDate: string;
   initialSlot?: string | null;
+  /** Moves focus on when the control that opened the sheet is gone, as an open time just booked is. */
+  onOpenerGone?: () => void;
 }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
   const toast = useToast();
   const zone = resource.timeZone;
-  const [dateKey, setDateKey] = useState(initialDate);
+  const firstDay = firstBookableDay(initialDate, zonedDateKey(new Date(), zone));
+  const [dateKey, setDateKey] = useState(firstDay);
+  const opener = useRef<HTMLElement | null>(null);
   const [selected, setSelected] = useState<string | null>(initialSlot ?? null);
   const [conflict, setConflict] = useState(false);
   // One key per request body (the server derives the booking ID from it), so a retry after a
@@ -77,14 +87,14 @@ export function BookingDialog({
 
   useEffect(() => {
     if (open) {
-      setDateKey(initialDate);
+      setDateKey(firstDay);
       setSelected(initialSlot ?? null);
       setConflict(false);
       reset();
     }
-  }, [open, initialDate, initialSlot, reset]);
+  }, [open, firstDay, initialSlot, reset]);
 
-  const days = useMemo(() => Array.from({ length: 14 }, (_, index) => addDays(initialDate, index)), [initialDate]);
+  const days = useMemo(() => Array.from({ length: 14 }, (_, index) => addDays(firstDay, index)), [firstDay]);
   const query = useMemo(() => ({
     resourceId: resource.id,
     from: startOfZonedDay(dateKey, zone).toISOString(),
@@ -97,7 +107,22 @@ export function BookingDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Book an appointment" description={resource.name ?? "Calendar"} data-resource-id={resource.id}>
+      <DialogContent
+        title="Book an appointment"
+        description={resource.name ?? "Calendar"}
+        data-resource-id={resource.id}
+        onOpenAutoFocus={() => {
+          const active = document.activeElement;
+          opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+        }}
+        onCloseAutoFocus={(event) => {
+          const gone = opener.current !== null && !opener.current.isConnected;
+          opener.current = null;
+          if (!gone || !onOpenerGone) return;
+          event.preventDefault();
+          onOpenerGone();
+        }}
+      >
         <fieldset>
           <legend className="mb-2 text-sm font-medium text-fg-2">Day</legend>
           <div className="-m-1 flex scroll-px-2 gap-2 overflow-x-auto p-1 sm:flex-wrap">

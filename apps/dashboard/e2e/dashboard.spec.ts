@@ -132,7 +132,7 @@ test("moves a deal, and reloads when someone else changed it", async ({ page }, 
   const dealId = await pendant.getAttribute("data-deal-id");
   await page.evaluate((id) => window.__zsDemo!.editDealElsewhere(id!), dealId);
   await pendant.getByRole("combobox").selectOption({ label: "Delivered" });
-  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed Sapphire pendant redesign. Reloaded.");
   await expect(pendant.getByRole("combobox")).toHaveValue(/.+/);
   await expect(pendant.locator("option:checked")).toHaveText("Deposit");
   await viewportShot(page, "15-deal-conflict", info.project.name);

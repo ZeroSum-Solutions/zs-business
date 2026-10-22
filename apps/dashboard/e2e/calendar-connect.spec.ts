@@ -56,8 +56,10 @@ test("an owner confirms the Google account, then sees it and its first sync", as
   const panel = await startConnect(page, SHOWROOM);
   await expect(panel).toHaveAttribute("data-testid", "gcal-confirm");
   await expect(panel).toHaveAccessibleDescription("Check that this is your Google account. If you did not just connect a calendar, choose Cancel.");
-  // Nothing is connected while the owner decides, and the return says nothing by itself.
-  await expect(row(page, SHOWROOM).getByTestId("gcal-status")).toHaveText("Not connected");
+  // Nothing is connected while the owner decides, and the return says nothing by itself. The row
+  // waits for the panel's answer instead of offering a second Connect (UI audit V-10).
+  await expect(row(page, SHOWROOM).getByTestId("gcal-status")).toHaveText("Waiting for confirmation");
+  await expect(row(page, SHOWROOM).getByRole("button", { name: `Connect ${SHOWROOM}` })).toHaveCount(0);
   await expect(card(page).getByTestId("gcal-return")).toHaveCount(0);
   const axe = await new AxeBuilder({ page }).include('[data-testid="gcal-confirm"]').analyze();
   expect(axe.violations.map((violation) => violation.id)).toEqual([]);
@@ -145,6 +147,10 @@ test("disconnecting asks first, then shows Disconnecting until the worker finish
   await dialog.getByRole("button", { name: "Disconnect", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(repair.getByTestId("gcal-status")).toHaveText("Disconnecting");
+  // The Disconnect button is gone: focus lands on the row's name, not the page (UI audit U2-5).
+  await expect(repair.getByRole("heading", { name: REPAIR })).toBeFocused();
+  // The connect notice is old news once the owner acts again (V-3).
+  await expect(card(page).getByTestId("gcal-return")).toHaveCount(0);
   await expect(page.getByTestId("toast").filter({ hasText: `Disconnecting ${REPAIR}.` })).toBeVisible();
   await expect(repair.getByRole("button")).toHaveCount(0);
   await expect(repair.getByTestId("gcal-status")).toHaveText("Not connected", { timeout: 15_000 });
@@ -190,6 +196,15 @@ test("says so when the server has no Google settings", async ({ page }) => {
   await expect(button).toHaveAccessibleDescription("Google Calendar is not set up on this server yet.");
   await expect(page).toHaveURL(/\/account\/connections$/);
   await expect(row(page, SHOWROOM).getByTestId("gcal-status")).toHaveText("Not connected");
+});
+
+test("a notice from Google's return can be dismissed", async ({ page }) => {
+  await openConnections(page, "?calendar=error&reason=invalid_state");
+  const notice = card(page).getByTestId("gcal-return");
+  await expect(notice).toBeVisible();
+  await notice.getByRole("button", { name: "Dismiss" }).click();
+  await expect(notice).toHaveCount(0);
+  await expect(card(page).getByRole("heading", { name: "Google Calendar" })).toBeFocused();
 });
 
 test("explains an error from Google's return and takes the query off the address", async ({ page }, info) => {
