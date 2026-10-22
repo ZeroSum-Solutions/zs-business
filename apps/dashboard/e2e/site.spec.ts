@@ -234,7 +234,12 @@ test("checks the site again when another owner makes a version live", async ({ p
   await expect(page.getByRole("heading", { level: 1, name: "Customers" })).toBeVisible();
   await page.clock.fastForward(60_000);
   await mainNav(page).getByRole("link", { name: "Site" }).click();
-  await expect(liveSummary(page)).toHaveText(/^Version 1 is live\./);
+  // The host is down, so version 1 is current but not yet what visitors see.
+  await expect(page.getByTestId("site-badge")).toHaveText("Updating");
+  await expect(liveSummary(page)).toHaveText("Your site still shows the previous version. Version 1 is on its way.");
+  await expect(releases(page).last()).toContainText("Version 1");
+  await expect(releases(page).last()).toContainText("Current");
+  await expect(releases(page).last()).not.toContainText("Live");
   // What this page learned about version 2 does not stand for version 1.
   await expect(behind).toBeVisible();
 });
