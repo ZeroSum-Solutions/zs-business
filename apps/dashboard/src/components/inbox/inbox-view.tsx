@@ -209,21 +209,28 @@ export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: 
 
 type Step = { kind: "approve" | "discard"; replyId: string };
 
+const STEP_OUTCOME: Partial<Record<ReplyStatus, string>> = { approved: "It is queued for delivery.", sent: "It was sent.", failed: "Its delivery failed." };
+
 /**
  * What to say after an approve or discard failed. A `not_draft` conflict names what happened
  * once the reloaded thread shows it, as information; only conflicts that change the thread say
- * it was reloaded (`no_email` changes nothing: the owner adds an email first).
+ * it was reloaded (`no_email` changes nothing: the owner adds an email first). A reply missing
+ * from the reload may be discarded or older than the latest 200 entries (I-3), so the
+ * conflict's own `status` (I-6, I-7) says which.
  */
 export function stepNotice(error: unknown, thread: Pick<ThreadDetail, "entries"> | undefined, replyId: string, agentId: string | null): { tone: "info" | "danger"; message: string } {
   const message = isApiError(error) ? error.message : "Something went wrong. Try again.";
   if (!isApiError(error, "conflict")) return { tone: "danger", message };
   if (error.reason === "not_draft" && thread) {
+    const status = error.details.status;
     const reply = thread.entries.find((entry) => entry.type === "reply" && entry.reply.id === replyId);
-    if (!reply) return { tone: "info", message: "Someone discarded this draft first." };
-    if (reply.type === "reply" && reply.reply.status !== "draft") {
+    if (!reply) {
+      if (status === "discarded") return { tone: "info", message: "Someone discarded this draft first." };
+      const outcome = typeof status === "string" ? STEP_OUTCOME[status as ReplyStatus] : undefined;
+      if (outcome) return { tone: "info", message: `Someone already approved this draft. ${outcome}` };
+    } else if (reply.type === "reply" && reply.reply.status !== "draft") {
       const by = `Already approved by ${actorName(reply.reply.approvedBy, agentId)}`;
-      const outcome = reply.reply.status === "sent" ? "It was sent." : reply.reply.status === "failed" ? "Its delivery failed." : "It is queued for delivery.";
-      return { tone: "info", message: `${by}. ${outcome}` };
+      return { tone: "info", message: `${by}. ${STEP_OUTCOME[reply.reply.status] ?? STEP_OUTCOME.approved}` };
     }
   }
   if (error.reason === "not_draft" || error.reason === "approved_by_other") return { tone: "danger", message: `${message} The thread was reloaded.` };

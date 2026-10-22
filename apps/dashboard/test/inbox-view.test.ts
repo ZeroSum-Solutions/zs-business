@@ -30,8 +30,8 @@ function tagBefore(html: string, text: string): string {
   return html.slice(html.lastIndexOf("<", at), at + 1);
 }
 
-const conflict = (reason: string) => new ApiError("conflict", "", 409, "Conflict", { reason });
-const withMessage = (reason: string, message: string) => Object.assign(conflict(reason), { message });
+const conflict = (reason: string, details: Record<string, unknown> = {}) => new ApiError("conflict", "", 409, "Conflict", { reason, ...details });
+const withMessage = (reason: string, message: string, details: Record<string, unknown> = {}) => Object.assign(conflict(reason, details), { message });
 
 describe("a draft for a customer with no email address", () => {
   it("cannot be approved, says why next to the button and links to the customer record", async () => {
@@ -89,8 +89,23 @@ describe("the step error after approve or discard", () => {
 
   it("says a discarded draft was discarded", async () => {
     const { thread } = await open("Noor Haddad");
-    const notice = stepNotice(withMessage("not_draft", "x"), thread, "00000000-0000-4000-8000-00000000dead", null);
+    const notice = stepNotice(withMessage("not_draft", "x", { status: "discarded" }), thread, "00000000-0000-4000-8000-00000000dead", null);
     expect(notice).toEqual({ tone: "info", message: "Someone discarded this draft first." });
+  });
+
+  it("does not call an approved draft discarded when it fell out of the latest 200 entries", async () => {
+    const app = await demoApp();
+    const { thread: before } = await open("Noor Haddad", app);
+    const id = draft(before).id;
+    app.api.approveReplyElsewhere(id);
+    const reloaded = await app.api.getThread(before.id);
+    // I-3 returns the latest 200 entries: newer replies have pushed the approved one out.
+    const truncated: ThreadDetail = { ...reloaded, olderEntries: true, entries: reloaded.entries.filter((entry) => entry.type !== "reply" || entry.reply.id !== id) };
+    const error = withMessage("not_draft", "This reply is no longer a draft. Someone approved or discarded it first.", { status: "approved" });
+    expect(stepNotice(error, truncated, id, null)).toEqual({ tone: "info", message: "Someone already approved this draft. It is queued for delivery." });
+    // Without a status the conflict proves nothing either way.
+    expect(stepNotice(withMessage("not_draft", "This reply is no longer a draft. Someone approved or discarded it first."), truncated, id, null))
+      .toEqual({ tone: "danger", message: "This reply is no longer a draft. Someone approved or discarded it first. The thread was reloaded." });
   });
 
   it("uses the error's own message for anything else", () => {

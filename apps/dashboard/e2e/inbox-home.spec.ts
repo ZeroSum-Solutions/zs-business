@@ -128,9 +128,12 @@ test("a long unbroken preview wraps inside the list and leaves the open conversa
   await pane.getByLabel("Reply to Celeste Vandermeer").fill("Engraving".repeat(40));
   await pane.getByRole("button", { name: "Save draft" }).click();
   await expect(page.getByRole("status").getByText(/^Draft saved\./)).toBeVisible();
-  await page.goto("/inbox");
+  // In-app navigation: a reload would start a fresh demo store without the saved draft.
+  await mainNav(page).getByRole("link", { name: "Inbox" }).click();
+  await expect(page).toHaveURL(/\/inbox$/);
   const list = page.getByRole("list", { name: "Conversations" });
-  await expect(list.getByText(/^(Engraving)+/)).toBeVisible();
+  await expect(list.getByRole("link", { name: /Celeste Vandermeer/ }).getByText(/^(Engraving)+/)).toBeVisible();
+  await expect(page.getByRole("link", { name: /Noor Haddad/ }).getByText("1 draft")).toBeVisible();
   // No row grows past the list, and the page does not scroll sideways.
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
