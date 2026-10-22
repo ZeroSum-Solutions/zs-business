@@ -96,11 +96,11 @@ describe("agents screen", () => {
     expect(agentState(status({ settings: { ...status().settings, enabled: false }, canDraft: false, blockedBy: "disabled" }), { runnable: false }).label).toBe("Off");
   });
 
-  it("A-13: offers Stop and Run now only when they can do something, and says why not", () => {
+  it("A-13: offers Run now only when it can draft, says why not, and keeps Stop in every state (G-3, G-11)", () => {
+    // Off: a stop still latches, so turning it back on later needs a Resume first.
     const off = renderAgents(status({ settings: { ...status().settings, enabled: false }, canDraft: false, blockedBy: "disabled" }));
-    expect(button(off, "Stop the agent")).toMatch(/disabled=""/);
-    expect(button(off, "Stop the agent")).toMatch(/aria-describedby="stop-reason"/);
-    expect(textOf(off)).toContain("It is turned off, so there is nothing to stop.");
+    expect(button(off, "Stop the agent")).not.toMatch(/disabled=""/);
+    expect(button(off, "Stop the agent")).toMatch(/aria-describedby="stop-help"/);
     expect(button(off, "Run now")).toMatch(/disabled=""/);
     expect(button(off, "Run now")).toMatch(/aria-describedby="run-reason"/);
     expect(textOf(off)).toContain("Run now works when the agent can draft. See why above.");

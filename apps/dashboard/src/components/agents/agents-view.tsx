@@ -176,8 +176,7 @@ function FollowUpControls({ status, runnable, onUnrunnable }: { status: FollowUp
   const blocked = blockedSentence(status, { runnable });
   const busy = stop.isPending || resume.isPending;
   const failure = [stop, resume].find((step) => step.isError)?.error ?? (run.isError && runnable ? run.error : null);
-  // Turned off, it drafts nothing already; stopping it would only surprise whoever turns it on.
-  const stopUseless = !status.settings.enabled;
+  // Stop stays open while it is off: a stop latches, so turning it on later still needs a Resume (G-3).
   // A run while it cannot draft only reports why it stopped (the reason is shown above).
   const runBlocked = !runnable || !status.canDraft;
   const killedNote = status.killed?.note ?? null;
@@ -233,17 +232,13 @@ function FollowUpControls({ status, runnable, onUnrunnable }: { status: FollowUp
           <Button
             type="submit"
             variant="danger-outline"
-            disabled={busy || stopUseless}
+            disabled={busy}
             aria-busy={stop.isPending}
-            aria-describedby={stopUseless ? "stop-reason" : "stop-help"}
+            aria-describedby="stop-help"
           >
             <Prohibit aria-hidden />Stop the agent
           </Button>
-          {stopUseless ? (
-            <DisabledReason id="stop-reason">It is turned off, so there is nothing to stop.</DisabledReason>
-          ) : (
-            <p id="stop-help" className="text-xs text-meta">Stops new drafts at once. Drafts already in the Inbox stay there until someone approves or discards them.</p>
-          )}
+          <p id="stop-help" className="text-xs text-meta">Stops new drafts at once. Drafts already in the Inbox stay there until someone approves or discards them.</p>
         </form>
       )}
 

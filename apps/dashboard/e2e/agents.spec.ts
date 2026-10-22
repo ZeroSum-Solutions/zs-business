@@ -201,16 +201,20 @@ test("a double tap on Stop the agent stops it once, with one toast", async ({ pa
   expect((await writes(page, "agent.resume")).map((write) => write.outcome)).toEqual(["applied"]);
 });
 
-test("turned off, it offers neither Stop nor Run now, and says why", async ({ page }) => {
+test("turned off, Run now waits but Stop still latches, so turning it on needs a Resume", async ({ page }) => {
   await openAgents(page);
   const form = settings(page);
-  await form.getByRole("switch", { name: "Draft follow-ups" }).click();
+  const enabled = form.getByRole("switch", { name: "Draft follow-ups" });
+  await enabled.click();
   await form.getByRole("button", { name: "Save settings" }).click();
   await expect(card(page).getByTestId("followup-state")).toHaveText("Off");
-  const stop = card(page).getByRole("button", { name: "Stop the agent" });
-  await expect(stop).toBeDisabled();
-  await expect(stop).toHaveAccessibleDescription("It is turned off, so there is nothing to stop.");
   await expect(card(page).getByRole("button", { name: "Run now" })).toBeDisabled();
+  await card(page).getByRole("button", { name: "Stop the agent" }).click();
+  await expect(card(page).getByRole("button", { name: "Resume" })).toBeVisible();
+  await enabled.click();
+  await form.getByRole("button", { name: "Save settings" }).click();
+  await expect(card(page).getByTestId("followup-state")).toHaveText("Stopped");
+  await expect(card(page).getByRole("button", { name: "Resume" })).toBeVisible();
 });
 
 test("Run now drafts a follow-up that waits in the Inbox under the agent's name", async ({ page }) => {
