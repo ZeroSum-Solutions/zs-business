@@ -80,8 +80,13 @@ test("says when the site has not caught up yet, and updates it on request", asyn
   await editor.getByLabel("Tagline").fill("Closed for inventory this Monday");
   await editor.getByRole("button", { name: "Publish" }).click();
   await expect(page.getByRole("status").getByText("Published. Your site will show it in a moment.")).toBeVisible();
-  const behind = page.getByText("Saved and live here, but your site still shows the previous version.");
+  const behind = page.getByText("Saved, but your site still shows the previous version.");
   await expect(behind).toBeVisible();
+  // One status: the badge, summary and History say it is updating, not that the site is live (U3 A-2).
+  await expect(page.getByTestId("site-badge")).toHaveText("Updating");
+  await expect(liveSummary(page)).toHaveText("Your site still shows the previous version. Version 3 is on its way.");
+  await expect(releases(page).first()).toContainText("Current");
+  await expect(releases(page).first()).not.toContainText("Live");
 
   // Leaving the page and coming back keeps the warning and its button.
   await mainNav(page).getByRole("link", { name: "Customers" }).click();
@@ -89,15 +94,20 @@ test("says when the site has not caught up yet, and updates it on request", asyn
   await mainNav(page).getByRole("link", { name: "Site" }).click();
   await expect(behind).toBeVisible();
 
-  // Still down: the owner is told so instead of nothing happening.
+  // Still down: the card says so instead of nothing happening, and no toast repeats it (U3 A-1).
   await page.getByRole("button", { name: "Update the site now" }).click();
-  await expect(page.getByRole("status").getByText("Your site still shows the previous version. Try again in a moment.")).toBeVisible();
+  await expect(page.getByTestId("site-edge-checked")).toHaveText("Checked again just now. Try again in a moment.");
   await expect(behind).toBeVisible();
+  await expect(page.getByTestId("toast")).toHaveCount(0);
 
   await page.evaluate(() => window.__zsDemo!.setSiteEdgeDown(false));
   await page.getByRole("button", { name: "Update the site now" }).click();
   await expect(page.getByRole("status").getByText("Your site shows the live version now.")).toBeVisible();
-  await expect(page.getByText("Saved and live here, but your site still shows the previous version.")).toBeHidden();
+  await expect(page.getByText("Saved, but your site still shows the previous version.")).toBeHidden();
+  await expect(page.getByTestId("site-badge")).toHaveText("Live");
+  await expect(liveSummary(page)).toHaveText(/^Version 3 is live\./);
+  await expect(releases(page).first()).toContainText("Live");
+  await expect(page.getByTestId("toast")).toHaveCount(1);
 });
 
 test("refuses a publish when another version went live while the editor was open", async ({ page }) => {
@@ -108,7 +118,10 @@ test("refuses a publish when another version went live while the editor was open
   // Another owner makes version 1 live; this editor started from version 2.
   await page.evaluate(() => window.__zsDemo!.rollBackElsewhere());
   await editor.getByRole("button", { name: "Publish" }).click();
-  await expect(editor.getByText(/^Another version went live while you were editing/)).toBeVisible();
+  // A warning at the top of the editor, where the owner looks first (U3 A-6).
+  const warning = editor.getByRole("alert").filter({ hasText: /^Another version went live while you were editing/ });
+  await expect(warning).toBeVisible();
+  await expect(warning).toBeInViewport();
   await expect(editor.getByRole("button", { name: "Publish" })).toBeDisabled();
   // The owner's words stay in the editor, and nothing was added to History.
   await expect(editor.getByLabel("Tagline")).toHaveValue("Engagement rings by appointment");
@@ -157,6 +170,9 @@ test("a publish retried after a lost answer replays instead of adding a second v
   await expect(page.getByRole("heading", { level: 1, name: "Customers" })).toBeVisible();
   await mainNav(page).getByRole("link", { name: "Site" }).click();
   await expect(liveSummary(page)).toHaveText(/^Version 3 is live\./);
+  // The page does not call it settled while the publish has no answer (U3 A-1).
+  await expect(page.getByTestId("site-badge")).toHaveText("Not confirmed");
+  await expect(liveSummary(page)).toContainText("Your last publish got no answer. Open Edit site to finish it.");
 
   // The editor reopens the unanswered publish as it was sent, so publishing it replays.
   await page.getByRole("button", { name: "Edit site" }).click();
@@ -206,7 +222,7 @@ test("checks the site again when another owner makes a version live", async ({ p
   // Lists count as fresh for 30 s; the clock moves past that before the page is shown again.
   await page.clock.install();
   await openSite(page);
-  const behind = page.getByText("Saved and live here, but your site still shows the previous version.");
+  const behind = page.getByText("Saved, but your site still shows the previous version.");
   await expect(page.getByRole("button", { name: "Edit site" })).toBeEnabled();
   await expect(behind).toHaveCount(0);
   // Another owner makes version 1 live while the site host is down.
@@ -218,7 +234,12 @@ test("checks the site again when another owner makes a version live", async ({ p
   await expect(page.getByRole("heading", { level: 1, name: "Customers" })).toBeVisible();
   await page.clock.fastForward(60_000);
   await mainNav(page).getByRole("link", { name: "Site" }).click();
-  await expect(liveSummary(page)).toHaveText(/^Version 1 is live\./);
+  // The host is down, so version 1 is current but not yet what visitors see.
+  await expect(page.getByTestId("site-badge")).toHaveText("Updating");
+  await expect(liveSummary(page)).toHaveText("Your site still shows the previous version. Version 1 is on its way.");
+  await expect(releases(page).last()).toContainText("Version 1");
+  await expect(releases(page).last()).toContainText("Current");
+  await expect(releases(page).last()).not.toContainText("Live");
   // What this page learned about version 2 does not stand for version 1.
   await expect(behind).toBeVisible();
 });
@@ -239,4 +260,48 @@ test("explains when a page holds more text than one request can carry", async ({
   await expect(editor.getByText(/^This page holds more text than one publish can carry\./)).toBeVisible();
   await expect(editor.getByRole("button", { name: "Publish" })).toBeDisabled();
   await expect(editor.getByRole("button", { name: "Preview" })).toBeDisabled();
+});
+
+test("a double click on Make version 1 live sends once and toasts once (U3-4)", async ({ page }) => {
+  await openSite(page);
+  await page.getByRole("button", { name: "Make live version 1" }).click();
+  await page.getByRole("dialog", { name: "Make version 1 live?" }).getByRole("button", { name: "Make version 1 live" }).dblclick();
+  await expect(page.getByRole("status").getByText("Version 1 is live again.")).toBeVisible();
+  await expect(page.getByTestId("toast").filter({ hasText: "Version 1 is live again." })).toHaveCount(1);
+  await expect(releases(page)).toHaveCount(2);
+});
+
+test("a pasted title past the limit stays whole and says what to shorten (U3-10)", async ({ page }) => {
+  await openSite(page);
+  await page.getByRole("button", { name: "Edit site" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit site" });
+  const title = editor.getByLabel("Site title");
+  await title.fill("T".repeat(150));
+  await expect(title).toHaveValue("T".repeat(150));
+  await expect(title).toHaveAttribute("aria-invalid", "true");
+  await expect(editor.getByTestId("disabled-reason")).toHaveText("Shorten the site title to 120 characters.");
+  await expect(editor.getByRole("button", { name: "Publish" })).toBeDisabled();
+});
+
+test("the preview takes focus to the way back, and back to editing focuses the title (U3-11)", async ({ page }) => {
+  await openSite(page);
+  await page.getByRole("button", { name: "Edit site" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit site" });
+  await editor.getByRole("button", { name: "Preview" }).click();
+  await expect(editor.getByTestId("site-preview")).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Back to editing" })).toBeFocused();
+  await expect(editor.getByText("This is a preview. Nothing changes on your site until you publish.")).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(editor.getByLabel("Site title")).toBeFocused();
+});
+
+test("the editor's actions stay in view while a long form scrolls (U3 A-7)", async ({ page }) => {
+  await openSite(page);
+  await page.getByRole("button", { name: "Edit site" }).click();
+  const editor = page.getByRole("dialog", { name: "Edit site" });
+  for (let index = 0; index < 4; index += 1) await editor.getByRole("button", { name: "Add section" }).click();
+  await editor.getByLabel("Site title").focus();
+  await expect(editor.getByTestId("disabled-reason")).toBeInViewport();
+  await expect(editor.getByRole("button", { name: "Preview" })).toBeInViewport();
+  await expect(editor.getByRole("button", { name: "Publish" })).toBeInViewport();
 });

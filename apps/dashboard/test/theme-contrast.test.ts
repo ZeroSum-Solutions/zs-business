@@ -50,3 +50,43 @@ describe("primary button fills keep their label legible (WCAG 1.4.3)", () => {
     }
   });
 });
+
+/** The larger of two ratios: a control stands out by its fill or by its edge. */
+const standsOut = (values: Record<string, string>, fill: string, edge: string, against: string) =>
+  Math.max(contrast(values[fill]!, values[against]!), contrast(values[edge]!, values[against]!));
+
+describe("controls stay visible in every theme", () => {
+  for (const [theme, values] of Object.entries(THEMES)) {
+    it(`a segmented track shows against the page and a card in ${theme} (U2 V-8)`, () => {
+      for (const against of ["--bg", "--surface"]) {
+        expect(standsOut(values, "--segment-track", "--segment-edge", against), against).toBeGreaterThanOrEqual(1.2);
+      }
+    });
+
+    it(`the selected segment is marked 3:1 against its track in ${theme} (U3 A-9)`, () => {
+      expect(contrast(values["--segment-ring"]!, values["--segment-track"]!)).toBeGreaterThanOrEqual(3);
+      expect(contrast(values["--control-on"]!, values["--segment-track"]!)).toBeGreaterThanOrEqual(1.2);
+    });
+
+    it(`an off switch's edge is 3:1 against a card in ${theme} (U3 A-8, WCAG 1.4.11)`, () => {
+      expect(contrast(values["--border-strong"]!, values["--surface"]!)).toBeGreaterThanOrEqual(3);
+    });
+
+    it(`loading skeletons show on the page, a tray and a card in ${theme} (U2 V-5)`, () => {
+      for (const against of ["--bg", "--tray", "--surface"]) {
+        expect(contrast(values["--skeleton"]!, values[against]!), against).toBeGreaterThanOrEqual(theme === "light" && against === "--tray" ? 1.05 : 1.2);
+      }
+    });
+
+    it(`a destructive button is a solid red with a light label in ${theme} (U2 V-19)`, () => {
+      expect(contrast(values["--danger-solid"]!, values["--danger-on"]!)).toBeGreaterThanOrEqual(4.5);
+      expect(luminance(values["--danger-on"]!)).toBeGreaterThan(luminance(values["--danger-solid"]!));
+    });
+  }
+
+  it("system dark repeats dark for the control tokens", () => {
+    for (const token of ["--segment-track", "--segment-edge", "--segment-ring", "--control-on", "--skeleton", "--danger-solid", "--danger-on"]) {
+      expect(THEMES["system dark"][token], token).toBe(THEMES.dark[token]);
+    }
+  });
+});

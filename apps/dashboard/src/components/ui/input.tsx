@@ -19,6 +19,7 @@ export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
     <textarea
       className={cn(
         "min-h-24 w-full rounded-md bg-well px-3 py-2.5 text-base text-fg shadow-field transition-quick focus:shadow-[inset_0_0_0_1px_var(--accent)] placeholder:text-meta lg:text-sm",
+        "aria-invalid:shadow-[inset_0_0_0_1px_var(--danger)]",
         className,
       )}
       {...props}

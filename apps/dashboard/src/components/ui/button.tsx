@@ -12,7 +12,7 @@ export const buttonVariants = cva(
         ink: "bg-ink text-ink-on hover:bg-ink-hover",
         secondary: "bg-surface text-fg shadow-[inset_0_0_0_1px_var(--border-strong)] hover:bg-inset",
         ghost: "text-fg-2 hover:bg-inset hover:text-fg",
-        danger: "bg-danger text-surface hover:opacity-90",
+        danger: "bg-danger-solid text-danger-on hover:opacity-90",
         "danger-outline": "bg-surface text-danger shadow-[inset_0_0_0_1px_var(--danger)] hover:bg-danger-tint",
       },
       size: {
