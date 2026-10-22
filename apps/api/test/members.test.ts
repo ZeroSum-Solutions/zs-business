@@ -42,14 +42,20 @@ describe("role permissions", () => {
     for (const permission of permissionSchema.options) expect(roleCan("owner", permission)).toBe(true);
   });
 
-  it("reports the caller's own membership on /v1/me", async () => {
+  it("reports the caller's own membership, email and business name on /v1/me", async () => {
     const staff = await staffOf(h.a.tenantId);
     expect(meResponseSchema.parse((await call(h.app, "GET", "/v1/me", { token: h.a.token })).body)).toEqual({
       tenantId: h.a.tenantId, userId: h.a.actorId, memberId: h.a.memberId, role: "owner",
       permissions: ["calendar", "customers", "inbox.drafts", "members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations", "agents"],
+      businessName: "Tenant A", email: h.a.email,
     });
     expect(meResponseSchema.parse((await call(h.app, "GET", "/v1/me", { token: staff.token })).body)).toMatchObject({
       memberId: staff.memberId, role: "staff", permissions: ["calendar", "customers", "inbox.drafts"],
+      businessName: "Tenant A", email: staff.email,
+    });
+    // Each tenant's members see their own business, never another's.
+    expect(meResponseSchema.parse((await call(h.app, "GET", "/v1/me", { token: h.b.token })).body)).toMatchObject({
+      tenantId: h.b.tenantId, businessName: "Tenant B", email: h.b.email,
     });
   });
 

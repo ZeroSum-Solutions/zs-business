@@ -215,7 +215,7 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `POST /v1/inbox/replies/:id/approve` `{}` | 200 approved reply: approves the reply's open approval (proposing a new one if it expired or was withdrawn) and runs the send as this owner, writing one outbox event `message.send_requested` with the exact subject and text; a same-key retry replays. 409 `not_draft` (with `status`), `no_email`, or `approved_by_other` (with `approvedBy`) when another owner approved it and must finish the send. Owners only. Nothing is sent here (M3d) |
 | `POST /v1/inbox/replies/:id/discard` `{}` | 200 discarded reply, and its pending approval withdrawn where the caller may; 409 `not_draft` (with `status`). Owners and staff |
 | `GET /v1/home/results?[zone&][weekStart]` | `HomeResults`: leads, bookings, won deals and revenue by source, this week so far against the same span of last week; `zone` an IANA zone (default `UTC`), `weekStart` `monday` (default) or `sunday`; both ranges as UTC instants from the injected clock. Owners only |
-| `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions }`, any member |
+| `GET /v1/me` | `{ tenantId, userId, memberId, role, permissions, businessName, email }`, any member. `businessName` is the tenant's name and `email` the membership's own address (added 2026-10-22, audit U1-2/U3-1, so the dashboard names the right business and person) |
 | `GET /v1/members` | `{ items: Member[] }`, owners only |
 | `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
 | `POST /v1/members/:id/role` `{ role }` | 200 member; 409 `last_owner` when it would leave no owner; owners only |

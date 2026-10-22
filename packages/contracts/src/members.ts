@@ -88,12 +88,18 @@ export type ChangeMemberRoleRequest = z.infer<typeof changeMemberRoleRequestSche
 export const memberListSchema = z.strictObject({ items: z.array(memberRecordSchema) });
 export type MemberList = z.infer<typeof memberListSchema>;
 
-/** GET /v1/me: who the token belongs to in its tenant, and what they may do. */
+/**
+ * GET /v1/me: who the token belongs to in its tenant, and what they may do. `businessName` is
+ * the tenant's name and `email` the membership's own address, so screens name the right
+ * business and person; members have no display name yet.
+ */
 export const meResponseSchema = z.strictObject({
   tenantId: idSchema,
   userId: idSchema,
   memberId: idSchema,
   role: memberRoleSchema,
   permissions: z.array(permissionSchema),
+  businessName: z.string(),
+  email: z.string(),
 });
 export type MeResponse = z.infer<typeof meResponseSchema>;

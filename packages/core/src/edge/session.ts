@@ -119,7 +119,7 @@ import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm
 import { homeResults } from "../reads/home.js";
 import { getThread, listThreads, loadReply } from "../reads/inbox.js";
 import { findSlots, listBookings, listResources } from "../reads/booking.js";
-import { requireMember } from "../members/access.js";
+import { memberProfile, requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
 import {
   activateSiteRelease, createSite, getRelease, getSite, listReleases, listSites, publishSiteRelease, siteHandlers,
@@ -734,7 +734,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     /** The caller's own membership; any member may ask. */
     me: (): Promise<MeResponse> => deps.db.tenant(tenantId, async (tx) => {
       const access = await requireMember(tx, tenantId, actorId, null);
-      return { tenantId, userId: actorId, memberId: access.memberId, role: access.role, permissions: [...ROLE_PERMISSIONS[access.role]] };
+      const profile = await memberProfile(tx, tenantId, access.memberId);
+      return {
+        tenantId, userId: actorId, memberId: access.memberId, role: access.role, permissions: [...ROLE_PERMISSIONS[access.role]],
+        ...profile,
+      };
     }),
     listMembers: async (): Promise<MemberList> => ({ items: await read("members", (tx) => listMembers(tx, tenantId)) }),
     /** The prepaid wallet (delivery.md D-4); billing is an owner permission. */
