@@ -380,9 +380,14 @@ function useNeeds() {
   const actions = checklist.data?.filter((item) => item.status === "action") ?? [];
   const people = threads.data?.pages[0]?.items.filter((thread) => thread.needsReply || thread.needsReview).map((thread) => thread.name) ?? [];
   const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(from, zone) : false;
-  const settled = needsState([threads.status, checklist.status, bookings.status]) === "settled";
+  // Every read the count rests on: the inbox count is the threads' first page.
+  const reads = [threads, checklist, bookings, resources];
+  const state = needsState(reads.map((read) => read.status));
+  const retry = () => {
+    for (const read of reads) if (read.isError) void read.refetch();
+  };
   const count = (waiting > 0 ? 1 : 0) + (actions.length > 0 ? 1 : 0) + (nextToday ? 1 : 0);
-  return { waiting, threads, checklist, bookings, resources, next, zone, actions, people, settled, count };
+  return { waiting, threads, checklist, bookings, resources, next, zone, actions, people, state, retry, count };
 }
 
 /** "Teo, Linnea, Noor and 2 more": first names, as the owner would say them. */
@@ -398,7 +403,7 @@ function peopleLine(names: string[]): string {
 
 /** What needs the owner now, first on every screen size (BRIEF: "what needs me now"). */
 function NeedsYou({ className }: { className?: string }) {
-  const { waiting, threads, checklist, bookings, resources, next, zone, actions, people, count, settled } = useNeeds();
+  const { waiting, threads, checklist, bookings, resources, next, zone, actions, people, count, state } = useNeeds();
   const sampleOnly = useSampleOnly();
   const open = actions.length;
   // Never claim "clear" or "nothing" before the answer is in: say so while loading or after a failure.
@@ -438,7 +443,7 @@ function NeedsYou({ className }: { className?: string }) {
       <TrayHeader>
         <TrayTitle className="flex items-center gap-2">
           Needs you
-          {settled ? <span className="tabular inline-flex size-[22px] items-center justify-center rounded-pill bg-ink text-xs font-extrabold text-ink-on" aria-label={`${count} ${count === 1 ? "item" : "items"}`}>{count}</span> : null}
+          {state === "settled" ? <span className="tabular inline-flex size-[22px] items-center justify-center rounded-pill bg-ink text-xs font-extrabold text-ink-on" aria-label={`${count} ${count === 1 ? "item" : "items"}`}>{count}</span> : null}
         </TrayTitle>
       </TrayHeader>
       <TrayBody>
@@ -558,9 +563,9 @@ function greeting(now: number, zone: string): string {
 function HomeHeader({ reports }: { reports: boolean }) {
   const now = useNowMinute();
   const zone = useDisplayZone();
-  const { count, settled } = useNeeds();
+  const { count, state, retry } = useNeeds();
   const first = OWNER.name.split(" ")[0];
-  const things = needsLine(settled ? "settled" : "checking", count);
+  const things = needsLine(state, count);
   return (
     <header className="mb-5 grid items-end gap-6 lg:mb-8 lg:grid-cols-[1fr_minmax(0,520px)] lg:gap-8 lg:pt-2">
       <div className="min-w-0">
@@ -569,6 +574,10 @@ function HomeHeader({ reports }: { reports: boolean }) {
         <p className="mt-2 text-body text-muted">
           {now === null ? `Hello, ${first}.` : `${greeting(now, zone)}, ${first}.`}{" "}
           {things}{" "}
+          {/* A failed read leaves the count unknown: say so, never "nothing needs you". */}
+          {state === "unknown" ? (
+            <><button type="button" onClick={retry} className="-my-3 inline-flex min-h-11 items-center font-bold text-accent-ink underline-offset-4 hover:underline">Try again</button>{" "}</>
+          ) : null}
           {reports ? "Results compare with the same time last week." : null}
         </p>
       </div>

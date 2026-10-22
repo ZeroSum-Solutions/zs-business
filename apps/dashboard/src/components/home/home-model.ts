@@ -6,14 +6,19 @@ import { addDays, formatDateKey, startOfZonedDay, zonedDateKey } from "@/lib/tim
 export type QueryStatus = "pending" | "error" | "success";
 export type NeedsState = "checking" | "unknown" | "settled";
 
-/** Whether the "needs you" count can be told: only once every read it counts has answered. */
+/**
+ * Whether the "needs you" count can be told: only once every read it counts has succeeded.
+ * A failed read leaves it unknown, even while others still load: waiting will not fix it.
+ */
 export function needsState(statuses: QueryStatus[]): NeedsState {
-  return statuses.some((status) => status === "pending") ? "checking" : "settled";
+  if (statuses.includes("error")) return "unknown";
+  return statuses.includes("pending") ? "checking" : "settled";
 }
 
 /** Home's lede after the greeting, or nothing while the count is still coming in. */
 export function needsLine(state: NeedsState, count: number): string | null {
-  if (state !== "settled") return null;
+  if (state === "checking") return null;
+  if (state === "unknown") return "Couldn't check everything.";
   return count === 0 ? "Nothing needs you right now." : `${count === 1 ? "One thing needs" : `${count === 2 ? "Two" : "Three"} things need`} you today.`;
 }
 
