@@ -69,7 +69,7 @@ describe("plan", () => {
 describe("settings", () => {
   it("shows the session's business and says plainly that the demo does not save", () => {
     const html = render(h(SettingsView), "demo");
-    expect(html).toContain(`value="${DEMO_BUSINESS.replace("&", "&amp;")}"`);
+    expect(html).toContain(`value="${DEMO_BUSINESS.replaceAll("&", "&amp;")}"`);
     expect(html).toContain(DEMO_SAVE_NOTE);
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
     expect(html).not.toContain("+1 212");
