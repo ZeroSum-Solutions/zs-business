@@ -1,5 +1,6 @@
 import type { BookingListQuery, BookingView, ListResult } from "@/lib/api";
-import { addDays, formatDateKey, startOfZonedDay, zonedDateKey } from "@/lib/time";
+import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay, zonedDateKey } from "@/lib/time";
+import { formatNumber } from "@/lib/utils";
 
 /** Home's pure parts: what the screen decides, apart from how it draws it. */
 
@@ -13,6 +14,14 @@ export type NeedsState = "checking" | "unknown" | "settled";
 export function needsState(statuses: QueryStatus[]): NeedsState {
   if (statuses.includes("error")) return "unknown";
   return statuses.includes("pending") ? "checking" : "settled";
+}
+
+/**
+ * A read's status as Home counts it. Offline, React Query pauses a read that has nothing cached:
+ * it stays "pending" with no answer coming, so it counts as failed and Home says it could not check.
+ */
+export function readStatus(query: { status: QueryStatus; fetchStatus: "fetching" | "paused" | "idle" }): QueryStatus {
+  return query.status === "pending" && query.fetchStatus === "paused" ? "error" : query.status;
 }
 
 /** Home's lede after the greeting, or nothing while the count is still coming in. */
@@ -46,6 +55,24 @@ export function needsModel<A extends { status: string }, B extends { startsAt: s
   const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(input.now, zone) : false;
   const count = (input.waiting > 0 ? 1 : 0) + (actions.length > 0 ? 1 : 0) + (nextToday ? 1 : 0);
   return { next, zone, actions, people, state: needsState(input.statuses), count };
+}
+
+/** "Next: today at 11:00 AM": the same day words as Next appointments, in the display zone. */
+export function nextTitle(startsAt: string, now: string | number, zone: string): string {
+  const today = zonedDateKey(now, zone);
+  const day = zonedDateKey(startsAt, zone);
+  const when = day === today ? "today" : day === addDays(today, 1) ? "tomorrow" : formatDay(startsAt, zone);
+  return `Next: ${when} at ${formatTime(startsAt, zone)}`;
+}
+
+/** A week-on-week change as the tile shows it, beside an arrow that gives the direction. */
+export function formatWeekChange(percent: number): string {
+  return `${formatNumber(Math.abs(percent))}%`;
+}
+
+/** One chip colour per calendar on Home: the first calendar is the accent, the rest neutral. */
+export function resourceTone(resourceId: string, resources: { id: string }[] | undefined): "accent" | "neutral" {
+  return resources?.[0]?.id === resourceId ? "accent" : "neutral";
 }
 
 /** "Later today", "Tomorrow" or the weekday, for a day group of appointments. */
