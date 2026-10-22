@@ -16,9 +16,9 @@ import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
 import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
-import { addDays, formatDateKey, formatDay, formatRange, formatTime, startOfZonedDay, weekdayOf, zonedDateKey, zonedParts } from "@/lib/time";
+import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey, zonedParts } from "@/lib/time";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
-import type { BookingView } from "@/lib/api";
+import { appointmentsPhrase, currentMinute, groupByDay, needsLine, needsState, subscribeMinute, weekStripDays, weekStripQuery } from "./home-model";
 
 interface WeekCompare {
   thisWeek: number;
@@ -308,13 +308,6 @@ function ChecklistCard({ className }: { className?: string }) {
   );
 }
 
-/** "Later today", "Tomorrow" or the weekday, for a day group of appointments. */
-function dayHeading(dayKey: string, todayKey: string): string {
-  if (dayKey === todayKey) return "Later today";
-  if (dayKey === addDays(todayKey, 1)) return "Tomorrow";
-  return formatDateKey(dayKey, "long").split(",")[0] ?? dayKey;
-}
-
 function NextAppointments({ className }: { className?: string }) {
   const from = useMemo(() => new Date().toISOString(), []);
   // The API returns the next four in start order, however many bookings there are.
@@ -323,14 +316,7 @@ function NextAppointments({ className }: { className?: string }) {
   const nameOf = (id: string) => resources.data?.find((item) => item.id === id);
   const upcoming = bookings.data?.items ?? [];
   const zone = resources.data?.[0]?.timeZone ?? "America/New_York";
-  const todayKey = zonedDateKey(from, zone);
-  const days: { key: string; items: BookingView[] }[] = [];
-  for (const booking of upcoming) {
-    const key = zonedDateKey(booking.startsAt, nameOf(booking.resourceId)?.timeZone ?? zone);
-    const last = days.at(-1);
-    if (last?.key === key) last.items.push(booking);
-    else days.push({ key, items: [booking] });
-  }
+  const days = groupByDay(upcoming, from, zone, (booking) => nameOf(booking.resourceId)?.timeZone ?? zone);
   return (
     <Tray className={className} aria-labelledby="next-title">
       <TrayHeader>
@@ -345,7 +331,7 @@ function NextAppointments({ className }: { className?: string }) {
           {days.map((day) => (
             <Card key={day.key}>
               <p className="mb-2 flex justify-between gap-3 text-xs font-bold tracking-[0.06em] text-muted uppercase">
-                <span>{dayHeading(day.key, todayKey)}</span>
+                <span>{day.heading}</span>
                 <span>{formatDateKey(day.key)}</span>
               </p>
               <ul className="divide-y divide-border">
@@ -376,10 +362,9 @@ function NextAppointments({ className }: { className?: string }) {
   );
 }
 
-const subscribeNever = () => () => {};
 /** The current minute, client only: the server renders no clock, so nothing mismatches on hydration. */
 function useNowMinute(): number | null {
-  return useSyncExternalStore(subscribeNever, () => Math.floor(Date.now() / 60_000) * 60_000, () => null);
+  return useSyncExternalStore(subscribeMinute, currentMinute, () => null);
 }
 
 /** Who and what needs the owner now; Home's lede counts the same items as the tray shows. */
@@ -395,7 +380,7 @@ function useNeeds() {
   const actions = checklist.data?.filter((item) => item.status === "action") ?? [];
   const people = threads.data?.pages[0]?.items.filter((thread) => thread.needsReply || thread.needsReview).map((thread) => thread.name) ?? [];
   const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(from, zone) : false;
-  const settled = !threads.isPending && !checklist.isPending && !bookings.isPending;
+  const settled = needsState([threads.status, checklist.status, bookings.status]) === "settled";
   const count = (waiting > 0 ? 1 : 0) + (actions.length > 0 ? 1 : 0) + (nextToday ? 1 : 0);
   return { waiting, threads, checklist, bookings, resources, next, zone, actions, people, settled, count };
 }
@@ -534,26 +519,17 @@ function WeekStrip({ className }: { className?: string }) {
 function WeekDays({ now, zone, className }: { now: number; zone: string; className?: string | undefined }) {
   const today = zonedDateKey(now, zone);
   const monday = addDays(today, 1 - weekdayOf(today));
-  const query = useMemo(() => ({
-    from: startOfZonedDay(monday, zone).toISOString(),
-    to: startOfZonedDay(addDays(monday, 7), zone).toISOString(),
-    limit: 100,
-  }), [monday, zone]);
+  const query = useMemo(() => weekStripQuery(monday, zone), [monday, zone]);
   const bookings = useBookings(query);
-  const counts = new Map<string, number>();
-  for (const booking of bookings.data?.items ?? []) {
-    const key = zonedDateKey(booking.startsAt, zone);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  const days = Array.from({ length: 7 }, (_, index) => addDays(monday, index));
+  const days = weekStripDays(bookings.data ?? { items: [], incomplete: false, loaded: 0 }, Array.from({ length: 7 }, (_, index) => addDays(monday, index)), zone);
   return (
     <ol aria-label="Days this week" className={cn("tray grid grid-cols-7 gap-0.5 p-1.5!", className)}>
-      {days.map((key) => {
-        const count = counts.get(key) ?? 0;
+      {days.map((day) => {
+        const { key, count } = day;
         const isToday = key === today;
         const past = key < today;
         const [weekday = "", rest = ""] = formatDateKey(key, "long").split(", ");
-        const label = `${weekday}, ${rest}${isToday ? ", today" : ""}${count > 0 ? `, ${count} appointment${count === 1 ? "" : "s"}` : ""}`;
+        const label = `${weekday}, ${rest}${isToday ? ", today" : ""}${appointmentsPhrase(day)}`;
         return (
           <li
             key={key}
@@ -584,7 +560,7 @@ function HomeHeader({ reports }: { reports: boolean }) {
   const zone = useDisplayZone();
   const { count, settled } = useNeeds();
   const first = OWNER.name.split(" ")[0];
-  const things = count === 0 ? "Nothing needs you right now." : `${count === 1 ? "One thing needs" : `${count === 2 ? "Two" : "Three"} things need`} you today.`;
+  const things = needsLine(settled ? "settled" : "checking", count);
   return (
     <header className="mb-5 grid items-end gap-6 lg:mb-8 lg:grid-cols-[1fr_minmax(0,520px)] lg:gap-8 lg:pt-2">
       <div className="min-w-0">
@@ -592,7 +568,7 @@ function HomeHeader({ reports }: { reports: boolean }) {
         <h1 className="mt-1 text-2xl leading-tight font-extrabold tracking-display lg:text-3xl">This week</h1>
         <p className="mt-2 text-body text-muted">
           {now === null ? `Hello, ${first}.` : `${greeting(now, zone)}, ${first}.`}{" "}
-          {settled ? things : null}{" "}
+          {things}{" "}
           {reports ? "Results compare with the same time last week." : null}
         </p>
       </div>
