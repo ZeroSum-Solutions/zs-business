@@ -30,8 +30,9 @@ test("keeps Confirm cancel clear of the bottom tabs", async ({ page }) => {
   await expect(confirm).toBeFocused();
 });
 
-test("keeps the last control on every page clear of the bottom tabs when scrolled to", async ({ page }) => {
-  for (const path of ["/", "/inbox", "/calendar", "/customers", "/site", "/agents", "/account/settings", "/account/connections", "/account/plan"]) {
+// One test per page, so a slow page cannot spend the others' time budget.
+for (const path of ["/", "/inbox", "/calendar", "/customers", "/site", "/agents", "/account/settings", "/account/connections", "/account/plan"]) {
+  test(`keeps the last control clear of the bottom tabs when scrolled to: ${path}`, async ({ page }) => {
     await page.goto(path);
     await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
     const last = page.locator("main").locator("a[href], button, input, select, textarea").filter({ visible: true }).last();
@@ -39,5 +40,5 @@ test("keeps the last control on every page clear of the bottom tabs when scrolle
     // scroll padding must keep it above the tab bar.
     await last.evaluate((element) => element.scrollIntoView({ block: "end" }));
     await expectUnobscured(last, path);
-  }
-});
+  });
+}
