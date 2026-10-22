@@ -122,6 +122,8 @@ export const intakeConsentRecordSchema = z.strictObject({
   status: z.enum(["granted", "denied"]),
   purpose: z.string(),
   disclosureVersion: z.string(),
+  /** P-8: the words the visitor saw, kept on the row; the page may show other words now. */
+  disclosureText: z.string(),
   source: z.string(),
   recordedAt: crmInstantSchema,
 });

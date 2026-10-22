@@ -1,5 +1,6 @@
 import {
   Conflict,
+  supportedInstantSchema,
   ValidationFailed,
   type ConsentEvidence,
   type ContactRecord,
@@ -16,6 +17,18 @@ export function parseOrFail<T>(schema: SafeParser<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new ValidationFailed(parsed.error.message);
   return parsed.data;
+}
+
+/**
+ * The dispatcher's clock as the ISO string a handler binds for server timestamps. Check it
+ * before any write: outside UTC years 0001 through 9999 Postgres cannot store it exactly, and a
+ * bound Date is written at whole-minute offset precision in the process zone.
+ */
+export function clockInstant(now: Date): string {
+  const instant = Number.isFinite(now.getTime()) ? now.toISOString() : "";
+  if (!supportedInstantSchema.safeParse(instant).success)
+    throw new ValidationFailed("Clock returned an instant outside UTC years 0001 through 9999");
+  return instant;
 }
 
 export function idInUse(type: "contact" | "deal" | "member" | "approval" | "source record" | "reply" | "calendar connection"): Conflict {

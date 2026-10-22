@@ -62,6 +62,11 @@ export interface ActionHandler<Config = DispatchConfig> {
   }): Promise<HandlerResult>;
   /** Return a typed domain error, or undefined to use the shared mapping. */
   mapError?(error: unknown): ActionError | undefined;
+  /**
+   * Optional: bring a result an earlier release stored up to the current output shape before
+   * a replay returns it. Runs in the replay's transaction; the stored row never changes.
+   */
+  upgradeStoredResult?(tx: Transaction, result: JsonValue, binding: ActionBinding): Promise<JsonValue>;
 }
 
 function databaseError(error: unknown): unknown {
@@ -163,7 +168,9 @@ export function createDispatcher<Config = DispatchConfig>(
             throw new IdempotencyConflict();
           if (canonical(stored.binding) !== canonical(binding))
             throw new BindingMismatch();
-          return { actionId: stored.id, result: stored.result };
+          const upgrade = handler.upgradeStoredResult;
+          const result = upgrade ? await runHandler(() => upgrade(tx, stored.result, binding)) : stored.result;
+          return { actionId: stored.id, result };
         }
         const target = targetSchema.safeParse(
           await runHandler(() => handler.resolveTarget(tx, command.target)),

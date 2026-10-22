@@ -47,8 +47,9 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    # The suite takes about 6 minutes; the browser install alone has taken 6 on a slow apt mirror.
-    timeout-minutes: 15
+    # Each step has its own limit: the browser install has taken over 9 minutes on a slow apt
+    # mirror, and must not eat the time the suite needs (about 7 minutes).
+    timeout-minutes: 35
     env:
       CI: "true"
     steps:
@@ -56,7 +57,9 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2.4.4
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @zs/dashboard exec playwright install --with-deps chromium
+        timeout-minutes: 15
       - run: pnpm --filter @zs/dashboard e2e
+        timeout-minutes: 15
       - if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
