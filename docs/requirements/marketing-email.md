@@ -10,7 +10,7 @@ contract: no slice starts until all of these hold:
 
 Scope: an owner sends one approved newsletter (a campaign) to a frozen list of consenting
 customers. The approved send commits one campaign event; the delivery worker turns it into one
-ordinary message delivery per recipient with purpose `marketing` (`delivery.md` D-1, M-6), so
+ordinary message delivery per recipient with purpose `marketing` (M-6, `delivery.md` D-1), so
 consent, suppression, approval re-check, wallet reservation
 and exactly-once settlement all come from the delivery outbox. This contract adds what bulk
 mail needs on top: a verified sender per tenant, an audience snapshot, a legal footer, pacing
