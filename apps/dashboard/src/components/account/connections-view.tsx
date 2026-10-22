@@ -20,11 +20,14 @@ const STATUS: Record<ConnectionStatus, { label: string; tone: "success" | "warn"
   verifying: { label: "Checking", tone: "neutral", icon: Clock, action: null },
 };
 
+/** Only Google Calendar connects from here today; the other rows are read-only (U3-7). */
+const CONNECTIONS_DESCRIPTION = "Accounts this business uses. Connect Google Calendar here. The other accounts can't be changed here yet.";
+
 export function ConnectionsView() {
   const [notice, setNotice] = useState<ReturnNotice | null>(null);
   return (
     <>
-      <PageHeader title="Connections" description="Accounts this business uses. Fix anything marked here and it shows as done on Home." />
+      <PageHeader title="Connections" description={CONNECTIONS_DESCRIPTION} />
       <Suspense fallback={null}>
         <GoogleReturn onNotice={setNotice} />
       </Suspense>
@@ -96,7 +99,7 @@ function OtherAccounts() {
                 {status.action ? (
                   <div className="flex w-full flex-col items-start gap-1 sm:w-auto sm:items-end">
                     <Button variant="secondary" disabled aria-describedby={`why-${connection.id}`}>{status.action}</Button>
-                    <DisabledReason id={`why-${connection.id}`}>Available when connections go live.</DisabledReason>
+                    <DisabledReason id={`why-${connection.id}`}>You can&apos;t change this here yet.</DisabledReason>
                   </div>
                 ) : null}
               </li>
