@@ -12,7 +12,7 @@ const instantSchema = z.iso.datetime({ precision: 3 });
 
 /** G-8: why the agent did not draft for one inquiry. */
 export const followUpSkipReasonSchema = z.enum([
-  "no_email", "suppressed", "consent_denied", "contact_cap", "answered", "model_error", "model_invalid",
+  "no_email", "suppressed", "consent_denied", "contact_cap", "answered", "superseded", "model_error", "model_invalid",
   "global_killed", "disabled", "tenant_killed", "quiet_hours", "daily_cap",
 ]);
 export type FollowUpSkipReason = z.infer<typeof followUpSkipReasonSchema>;

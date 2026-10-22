@@ -293,6 +293,35 @@ describe("skips (G-7, G-8)", () => {
     for (const skipped of [old, answered, repeat, young]) expect(run.decisions.some((d) => d.intakeItemId === skipped.itemId)).toBe(false);
   });
 
+  it("skips a customer whose address is under the reserved .invalid name", async () => {
+    const reserved = await inquiry({ name: "Reserved Rory", email: `rory-${randomUUID().slice(0, 8)}@example.invalid` });
+    now += 25 * HOUR;
+    const model = createFakeFollowUpModel();
+    const run = await agent(model).runScheduled(tenantId, randomUUID());
+    expect(run.decisions).toEqual([expect.objectContaining({ intakeItemId: reserved.itemId, outcome: "skipped", reason: "no_email" })]);
+    expect(model.prompts).toHaveLength(0);
+  });
+
+  it("skips an inquiry the customer followed with a newer one while the model wrote, and drafts for the newer one later", async () => {
+    const first = await inquiry({ name: "Lio Marsh" });
+    now += 25 * HOUR;
+    let newer: Awaited<ReturnType<typeof inquiry>> | undefined;
+    // The customer asks again, and the owner links it, while the model writes about the first request.
+    const model = createFakeFollowUpModel(async () => {
+      now += 60_000;
+      newer = await inquiry({ name: "Lio Marsh", email: first.email });
+      return { subject: "Hello", body: "Checking in." };
+    });
+    const run = await agent(model).runScheduled(tenantId, randomUUID());
+    expect(newer!.contactId).toBe(first.contactId);
+    expect(run.decisions).toEqual([expect.objectContaining({ intakeItemId: first.itemId, outcome: "skipped", reason: "superseded" })]);
+    expect(await rows("SELECT 1 FROM inbox_replies WHERE tenant_id=$1 AND contact_id=$2", [tenantId, first.contactId])).toHaveLength(0);
+    // The newer request is the one followed up once it is due.
+    now += 25 * HOUR;
+    const later = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(later.decisions).toEqual([expect.objectContaining({ intakeItemId: newer!.itemId, outcome: "drafted" })]);
+  });
+
   it("records model errors and invalid answers and goes on", async () => {
     const [broken, empty, fine] = await dueInquiries(3);
     const model = createFakeFollowUpModel((prompt) => {
@@ -609,6 +638,36 @@ describe("settings (G-2)", () => {
     // Server keys are reserved: a member cannot take an agent step's key.
     expect(await rejection(session.killFollowUp({}, `agent:start:${randomUUID()}`))).toMatchObject({ code: "ValidationFailed" });
   });
+
+  it("two first saves at once: one wins, the other is a stale_revision with the new revision", async () => {
+    await service((tx) => tx.query("DELETE FROM agent_settings WHERE tenant_id=$1", [tenantId]));
+    // Both saves read revision 0 before either inserts the row.
+    let arrived = 0;
+    let bothRead!: () => void;
+    const barrier = new Promise<void>((resolve) => { bothRead = resolve; });
+    const db: typeof database.db = {
+      ...database.db,
+      tenant: (tenant, work) => database.db.tenant(tenant, (tx) => work(new Proxy(tx, {
+        get(target, prop, receiver) {
+          if (prop !== "query") return Reflect.get(target, prop, receiver);
+          return async (sql: string, params?: unknown[]) => {
+            if (typeof sql === "string" && sql.includes("INSERT INTO agent_settings (enabled")) {
+              if (++arrived === 2) bothRead();
+              await barrier;
+            }
+            return target.query(sql, params);
+          };
+        },
+      }))),
+    };
+    const session = createSession({ ...deps(), db }, { tenantId, actorId: owner });
+    const saves = await Promise.allSettled([5, 6].map((maxDraftsPerDay) =>
+      session.updateFollowUpSettings({ ...BASE, maxDraftsPerDay, expectedRevision: 0 }, randomUUID())));
+    expect(saves.map((save) => save.status).sort()).toEqual(["fulfilled", "rejected"]);
+    const lost = saves.find((save) => save.status === "rejected") as PromiseRejectedResult;
+    expect(lost.reason).toMatchObject({ code: "Conflict", details: { reason: "stale_revision", currentRevision: 1 } });
+    expect(await sessionFor(owner).getFollowUpStatus()).toMatchObject({ revision: 1 });
+  });
 });
 
 describe("runs are recorded and replay (G-6, G-10)", () => {
@@ -625,6 +684,20 @@ describe("runs are recorded and replay (G-6, G-10)", () => {
     const next = await sessionFor(staff).listFollowUpRuns({ limit: 1, cursor: page.nextCursor! });
     expect(next.items[0]?.id).not.toBe(first.id);
     expect(await sessionFor(staff).getFollowUpRun(first.id)).toEqual(first);
+  });
+
+  it("the runtime role can close a running run once, and cannot reopen or rewrite a closed one", async () => {
+    await dueInquiries(1);
+    const run = await agent(createFakeFollowUpModel()).runScheduled(tenantId, randomUUID());
+    expect(run).toMatchObject({ status: "completed", drafted: 1 });
+    const rewrites = [
+      "UPDATE agent_runs SET status='running', finished_at=NULL, considered=999, drafted=999, skipped=999 WHERE tenant_id=$1 AND id=$2",
+      "UPDATE agent_runs SET drafted=0 WHERE tenant_id=$1 AND id=$2",
+      "UPDATE agent_runs SET status='stopped', stop_reason='daily_cap' WHERE tenant_id=$1 AND id=$2",
+    ];
+    for (const sql of rewrites)
+      await expect(fixture.a.run((tx) => tx.query(sql, [tenantId, run.id])), sql).rejects.toMatchObject({ code: "23514", constraint: "agent_runs_guard" });
+    expect(await sessionFor(owner).getFollowUpRun(run.id)).toEqual(run);
   });
 });
 

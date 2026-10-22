@@ -21,6 +21,7 @@ export const SKIP_REASONS: Record<FollowUpSkipReason, string> = {
   consent_denied: "they said no to email",
   contact_cap: "they already got the most follow-ups allowed for now",
   answered: "someone on the team replied first",
+  superseded: "they sent a newer request, which gets its own follow-up",
   model_error: "the writing service did not answer",
   model_invalid: "the writing service's draft could not be used",
   ...STOP_REASONS,
