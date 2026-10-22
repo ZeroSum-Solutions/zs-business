@@ -1,4 +1,4 @@
-import { createRuntimePool } from "@zs/db";
+import { createRuntimePool, createScopedDatabase, type ScopedDatabase } from "@zs/db";
 import type { TestDatabase } from "@zs/db/testing";
 
 /**
@@ -16,4 +16,18 @@ export function zonedRuntimePool(database: TestDatabase) {
     max: 1,
     onError: (summary) => { throw new Error(`zoned test pool: ${summary.code ?? ""} ${summary.message}`); },
   });
+}
+
+/** Run `work` with Node and a runtime-role database both in America/Los_Angeles. */
+export async function inLosAngeles<T>(database: TestDatabase, work: (db: ScopedDatabase) => Promise<T>): Promise<T> {
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  const zoned = zonedRuntimePool(database);
+  try {
+    return await work(createScopedDatabase(zoned));
+  } finally {
+    await zoned.end();
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
 }

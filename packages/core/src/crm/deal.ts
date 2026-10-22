@@ -8,6 +8,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import {
+  clockInstant,
   dealColumns,
   dealRecord,
   idInUse,
@@ -39,6 +40,7 @@ export const createDealHandler: ActionHandler = {
     return { tenantId: target.tenantId, type: "deal", id: target.id };
   },
   async handle({ tx, command, binding, now }) {
+    const at = clockInstant(now);
     const { payload: input } = parseOrFail(createDealCommandSchema, command);
     const tenantId = binding.tenantId;
     // C-13: every parent's ownership first (TenantDenied), then stage membership (ValidationFailed).
@@ -52,7 +54,7 @@ export const createDealHandler: ActionHandler = {
     const row = (await tx.query<DealRow>(
       `INSERT INTO crm_deals (tenant_id,id,contact_id,pipeline_id,stage_id,title,revision,created_at,updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,1,$7,$7) RETURNING ${dealColumns}`,
-      [tenantId, input.dealId, input.contactId, input.pipelineId, input.stageId, input.title, now],
+      [tenantId, input.dealId, input.contactId, input.pipelineId, input.stageId, input.title, at],
     )).rows[0]!;
     return { result: dealRecord(row) };
   },
@@ -81,6 +83,7 @@ export const moveDealStageHandler: ActionHandler = {
     return owned ? { tenantId: target.tenantId, type: "deal", id: target.id } : null;
   },
   async handle({ tx, command, binding, now }) {
+    const at = clockInstant(now);
     const { payload: input } = parseOrFail(moveDealStageCommandSchema, command);
     const tenantId = binding.tenantId;
     // C-14 order: ownership, then pipeline/stage membership, then the revision compare-and-set.
@@ -98,7 +101,7 @@ export const moveDealStageHandler: ActionHandler = {
       `UPDATE crm_deals SET stage_id=$4, revision=revision+1, updated_at=$6
        WHERE tenant_id=$1 AND id=$2 AND pipeline_id=$3 AND revision=$5 AND revision < 9007199254740991
        RETURNING ${dealColumns}`,
-      [tenantId, input.dealId, input.pipelineId, input.stageId, input.expectedRevision, now],
+      [tenantId, input.dealId, input.pipelineId, input.stageId, input.expectedRevision, at],
     )).rows[0];
     if (!row)
       throw new Conflict("The deal revision changed", {

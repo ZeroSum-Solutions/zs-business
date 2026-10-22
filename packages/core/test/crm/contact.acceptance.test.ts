@@ -4,7 +4,7 @@ import { Conflict, ValidationFailed, type ContactConsent } from "@zs/contracts";
 import { createScopedDatabase, type ScopedDatabase, type Transaction } from "@zs/db";
 import { createDispatcher, createOrFindContact, crmHandlers, type DispatchContext } from "../../src/index.js";
 import { shouldWriteConsent } from "../../src/crm/contact.js";
-import { zonedRuntimePool } from "../zoned.js";
+import { inLosAngeles, zonedRuntimePool } from "../zoned.js";
 import { contactCommand, createHarness, NOW, rejection, type Harness } from "./helpers.js";
 
 let h: Harness;
@@ -165,6 +165,36 @@ describe("contact create/find on the runtime database", () => {
       if (zone === undefined) delete process.env.TZ;
       else process.env.TZ = zone;
     }
+  });
+
+  it("server timestamps from a year-0001 clock read back exactly under a non-UTC time zone", async () => {
+    const a = h.fixture.a.tenantId;
+    const clock = "0001-01-01T00:00:00.000Z";
+    const email = "clock-0001@example.test";
+    const stored = (id: string) => h.fixture.service(async (tx) => (await tx.query<{ created: string; updated: string }>(
+      `SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z" BC') AS created,
+              to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z" BC') AS updated
+         FROM crm_contacts WHERE tenant_id=$1 AND id=$2`, [a, id])).rows[0]);
+    await inLosAngeles(h.database, async (db) => {
+      const created = await createOrFindContact(contactCommand(a, { email }), h.ctx(a, clock, db));
+      expect(created.result.contact).toMatchObject({ createdAt: clock, updatedAt: clock });
+      expect(await stored(created.result.contact.id)).toEqual({ created: `${clock} AD`, updated: `${clock} AD` });
+      // A fill on the matched contact writes updated_at from the same clock.
+      const filled = await createOrFindContact(contactCommand(a, { email, phone: "+12025550188" }), h.ctx(a, clock, db));
+      expect(filled.result.contact).toMatchObject({ id: created.result.contact.id, updatedAt: clock });
+      expect(await stored(created.result.contact.id)).toEqual({ created: `${clock} AD`, updated: `${clock} AD` });
+    });
+  });
+
+  it("a clock outside UTC years 0001-9999 is ValidationFailed and writes nothing", async () => {
+    const a = h.fixture.a.tenantId;
+    const counts = async () => Promise.all((["actions", "crm_contacts", "crm_contact_consent"] as const).map((table) => h.count(table, a)));
+    const before = await counts();
+    for (const clock of ["0000-06-01T00:00:00.000Z", "+010000-01-01T00:00:00.000Z"]) {
+      const command = contactCommand(a, { email: `clock-${clock.slice(0, 2)}@example.test` });
+      expect(await rejection(createOrFindContact(command, h.ctx(a, clock)))).toBeInstanceOf(ValidationFailed);
+    }
+    expect(await counts()).toEqual(before);
   });
 
   it("C-11: interactive consent takes later evidence, ignores older, denial wins ties", async () => {

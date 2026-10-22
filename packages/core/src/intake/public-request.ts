@@ -15,7 +15,7 @@ import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { assertBookingIdUnused, checkBookingSlot, currentTenant, insertBooking } from "../booking/create.js";
 import { lockIdentities } from "../crm/contact.js";
-import { idInUse, pgCode } from "../crm/rows.js";
+import { clockInstant, idInUse, pgCode } from "../crm/rows.js";
 import { loadPublishedPage, pageHasResource } from "../reads/intake.js";
 
 export const PUBLIC_REQUEST_ACTION = "booking.public_request";
@@ -34,7 +34,7 @@ interface Claim {
  * P-7: find contacts holding the email or phone. None: create the contact. Any: change nothing
  * and report the matches, so the owner decides. Split or mismatched identities are just matches.
  */
-async function claimContact(tx: Transaction, tenantId: string, input: PublicBookingRequestInput, now: Date): Promise<Claim> {
+async function claimContact(tx: Transaction, tenantId: string, input: PublicBookingRequestInput, now: string): Promise<Claim> {
   const rows = (await tx.query<{ id: string; normalized_email: string | null; e164_phone: string | null }>(
     `SELECT id, normalized_email, e164_phone FROM crm_contacts
       WHERE tenant_id=$1 AND (id=$2 OR normalized_email=$3 OR e164_phone=$4) ORDER BY id`,
@@ -54,7 +54,7 @@ async function claimContact(tx: Transaction, tenantId: string, input: PublicBook
   return { outcome: "new_contact", contactId: input.contactId, matched: [] };
 }
 
-async function claimWithRetry(tx: Transaction, tenantId: string, input: PublicBookingRequestInput, now: Date): Promise<Claim> {
+async function claimWithRetry(tx: Transaction, tenantId: string, input: PublicBookingRequestInput, now: string): Promise<Claim> {
   for (let tries = 1; ; tries++) {
     await tx.query("SAVEPOINT intake_contact_claim");
     try {
@@ -79,6 +79,7 @@ export const publicRequestHandler: ActionHandler = {
   },
 
   async handle({ tx, command, binding, now }) {
+    const at = clockInstant(now);
     const parsed = publicBookingRequestCommandSchema.safeParse(command);
     if (!parsed.success) throw new ValidationFailed(parsed.error.message);
     const input = parsed.data.payload;
@@ -97,18 +98,16 @@ export const publicRequestHandler: ActionHandler = {
     const slot = await checkBookingSlot(tx, tenantId,
       { bookingId: input.bookingId, resourceId: input.resourceId, startsAt: input.startsAt }, now);
     await lockIdentities(tx, tenantId, input);
-    const claim = await claimWithRetry(tx, tenantId, input, now);
+    const claim = await claimWithRetry(tx, tenantId, input, at);
 
     await tx.query(
       `INSERT INTO intake_items (tenant_id,id,kind,status,channel,page_id,submitted_name,submitted_email,
          submitted_phone,notes,matched_contact_ids,contact_id,created_at)
        VALUES ($1,$2,'booking_request',$3,$4,$5,$6,$7,$8,$9,$10::uuid[],$11,$12)`,
       [tenantId, input.intakeItemId, claim.outcome, input.channel, input.pageId, input.name, input.email,
-        input.phone, input.notes, claim.matched, claim.contactId, now],
+        input.phone, input.notes, claim.matched, claim.contactId, at],
     );
     const source = `${input.channel}:${input.pageId}`;
-    // Consent instants are bound as exact ISO strings, as the CRM consent writes are.
-    const recordedAt = now.toISOString();
     for (const channel of CHANNELS) {
       if (!input.consent[channel]) continue;
       await tx.query(
@@ -116,14 +115,14 @@ export const publicRequestHandler: ActionHandler = {
            disclosure_text,source,recorded_at)
          VALUES ($1,$2,$3::crm_consent_channel,'granted',$4,$5,$6,$7,$8)`,
         [tenantId, input.intakeItemId, channel, intakeConsentPurpose, page.disclosure_version, page.disclosure_text,
-          source, recordedAt],
+          source, at],
       );
       // A contact created in this transaction has no recorded evidence to override.
       if (claim.outcome === "new_contact")
         await tx.query(
           `INSERT INTO crm_contact_consent (tenant_id,contact_id,channel,status,source,recorded_at)
            VALUES ($1,$2,$3::crm_consent_channel,'granted',$4,$5)`,
-          [tenantId, claim.contactId, channel, `intake:${input.intakeItemId}`, recordedAt],
+          [tenantId, claim.contactId, channel, `intake:${input.intakeItemId}`, at],
         );
     }
 

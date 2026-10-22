@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Conflict, TenantDenied, ValidationFailed } from "@zs/contracts";
 import { createDeal, createOrFindContact, moveDealStage } from "../../src/index.js";
+import { inLosAngeles } from "../zoned.js";
 import { contactCommand, createHarness, dealCommand, moveCommand, NOW, rejection, type Harness } from "./helpers.js";
 
 let h: Harness;
@@ -71,6 +72,38 @@ describe("deal creation", () => {
       dealId: deal.id, contactId: foreign.contactId, pipelineId: foreign.pipelineId, stageId: foreign.stages[0], title: "B",
     }), h.ctx(b));
     expect(inB.result).toMatchObject({ id: deal.id, tenantId: b, revision: 1 });
+  });
+});
+
+describe("deal clock range", () => {
+  it("a year-0001 clock creates and moves a deal with exact timestamps under a non-UTC time zone", async () => {
+    const clock = "0001-01-01T00:00:00.000Z";
+    await inLosAngeles(h.database, async (db) => {
+      const deal = (await createDeal(dealCommand(a, {
+        contactId, pipelineId: pipe.pipelineId, stageId: pipe.stages[0], title: "Ancient",
+      }), h.ctx(a, clock, db))).result;
+      expect(deal).toMatchObject({ createdAt: clock, updatedAt: clock });
+      const moved = (await moveDealStage(moveCommand(a, {
+        dealId: deal.id, pipelineId: pipe.pipelineId, stageId: pipe.stages[1], expectedRevision: 1,
+      }), h.ctx(a, clock, db))).result;
+      expect(moved).toMatchObject({ revision: 2, createdAt: clock, updatedAt: clock });
+    });
+  });
+
+  it("a clock outside UTC years 0001-9999 is ValidationFailed and writes nothing", async () => {
+    const deal = await newDeal();
+    const counts = async () => Promise.all((["actions", "crm_deals"] as const).map((table) => h.count(table, a)));
+    const before = await counts();
+    for (const clock of ["0000-06-01T00:00:00.000Z", "+010000-01-01T00:00:00.000Z"]) {
+      expect(await rejection(createDeal(dealCommand(a, {
+        contactId, pipelineId: pipe.pipelineId, stageId: pipe.stages[0], title: "Out of range",
+      }), h.ctx(a, clock)))).toBeInstanceOf(ValidationFailed);
+      expect(await rejection(moveDealStage(moveCommand(a, {
+        dealId: deal.id, pipelineId: pipe.pipelineId, stageId: pipe.stages[1], expectedRevision: 1,
+      }), h.ctx(a, clock)))).toBeInstanceOf(ValidationFailed);
+    }
+    expect(await counts()).toEqual(before);
+    expect(await readDeal(deal.id)).toMatchObject({ revision: 1 });
   });
 });
 
