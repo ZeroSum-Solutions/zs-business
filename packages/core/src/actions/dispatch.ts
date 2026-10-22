@@ -51,7 +51,10 @@ export interface ActionHandler<Config = DispatchConfig> {
     command: ActionCommand;
     binding: ActionBinding;
     now: Date;
-    /** Reads the injected clock again, for a handler that waits on a row lock first. */
+    /**
+     * Reads the injected clock again, for a handler that waits on a row lock first. Never
+     * earlier than `now` or any previous read in the same dispatch.
+     */
     clock: () => Date;
     config: Config;
     generateId: () => string;
@@ -179,11 +182,15 @@ export function createDispatcher<Config = DispatchConfig>(
           throw new TenantDenied();
         if (canonical(approvedBinding.data) !== canonical(binding))
           throw new BindingMismatch();
+        // Reads never go backward within one dispatch: a clock that steps back is held at the
+        // latest instant seen, so an expiry an earlier read reached stays reached.
+        let latest = -Infinity;
         const readClock = () => {
-          const instant = new Date(ctx.clock.now().getTime());
-          if (!Number.isFinite(instant.getTime()))
+          const instant = ctx.clock.now().getTime();
+          if (!Number.isFinite(instant))
             throw new ValidationFailed("Clock returned an invalid instant");
-          return instant;
+          latest = Math.max(latest, instant);
+          return new Date(latest);
         };
         const now = readClock();
         const handled = await runHandler(() =>

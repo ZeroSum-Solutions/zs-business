@@ -329,6 +329,23 @@ describe("expiry (A-3)", () => {
     expect(outcome).toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
     expect(await decider.getApproval(result.id)).toMatchObject({ status: "pending", standing: "expired", decidedAt: null });
   });
+
+  it.each(["approve", "reject"] as const)("never reads the clock backward within a dispatch: %s at expiry, then a minute earlier, is refused", async (decision) => {
+    const { result } = await sessionFor(staff.userId).requestApproval({ action: bookingAction(), summary: "Book", expiresInMinutes: 5 }, randomUUID());
+    // The dispatch's first read lands on the expiry; every later read steps back a minute.
+    let reads = 0;
+    const stepBack = { now: () => new Date(START + (reads++ === 0 ? 5 : 4) * 60_000) };
+    const run = directDispatch({ ...deps(), clock: stepBack }, tenantId, owner.userId, memberAuthorize(tenantId, owner.userId));
+    await expect(run({
+      actionType: `approval.${decision}`,
+      target: { tenantId, type: "approval", id: result.id },
+      approvalReference: { tenantId, id: randomUUID() },
+      idempotencyKey: randomUUID(),
+      payload: { approvalId: result.id },
+    })).rejects.toMatchObject({ code: "Conflict", details: { reason: "approval_expired" } });
+    expect(reads).toBeGreaterThan(1);
+    expect(await sessionFor(owner.userId).getApproval(result.id)).toMatchObject({ status: "pending", decidedAt: null });
+  });
 });
 
 /**
