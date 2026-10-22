@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowsClockwise, ArrowSquareOut, CalendarCheck, CheckCircle, Clock, Info, LinkBreak, MinusCircle, PlugsConnected, WarningCircle } from "@phosphor-icons/react";
+import { ArrowsClockwise, ArrowSquareOut, CalendarCheck, CheckCircle, Clock, Info, MinusCircle, Plug, Plugs, WarningCircle, X } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -30,6 +30,7 @@ import {
 import { newId } from "@/lib/id";
 import { useIntentKey } from "@/lib/intent-key";
 import { useCalendarConnections, useKeys, usePendingGoogleConnect, useResources } from "@/lib/queries";
+import { calendarName } from "@/lib/resources";
 import { useCan } from "@/lib/session";
 import { cn, relativeTime } from "@/lib/utils";
 
@@ -41,6 +42,10 @@ const STATE: Record<Exclude<RowState, "disconnected">, { label: string; tone: "s
   reauthorize: { label: "Reconnect needed", tone: "warn", icon: WarningCircle },
   disconnecting: { label: "Disconnecting", tone: "neutral", icon: Clock },
 };
+// A grant Google gave for this calendar, waiting for the owner to confirm it in the panel above.
+const WAITING = { label: "Waiting for confirmation", tone: "warn", icon: Clock } as const;
+// Staff cannot connect, so "try again" is no use to them.
+const STAFF_ERROR = "Google Calendar was not connected. Ask an owner to connect it.";
 
 const OWNER_ONLY_ID = "calendar-owner-only";
 
@@ -66,9 +71,11 @@ export function GoogleCalendarCard({ notice, onNotice }: { notice: ReturnNotice 
     setFocusNotice((count) => count + 1);
   }, [onNotice]);
   // Asked once the calendars are known, so the question names the right one.
-  const pendingName = pending.data && resources.data
-    ? resources.data.find((resource) => resource.id === pending.data!.resourceId)?.name ?? "this booking calendar"
-    : null;
+  const pendingResource = pending.data ? resources.data?.find((resource) => resource.id === pending.data!.resourceId) : undefined;
+  const pendingName = pending.data && resources.data ? (pendingResource ? calendarName(pendingResource) : "this booking calendar") : null;
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  // Any later action makes what Google's return said old news.
+  const clearNotice = useCallback(() => onNotice(null), [onNotice]);
 
   return (
     <Card aria-labelledby="gcal-title" data-testid="gcal-card" className="mb-6">
@@ -76,7 +83,7 @@ export function GoogleCalendarCard({ notice, onNotice }: { notice: ReturnNotice 
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <CalendarCheck size={20} aria-hidden className="text-muted" />
-            <CardTitle id="gcal-title">Google Calendar</CardTitle>
+            <CardTitle id="gcal-title" ref={titleRef} tabIndex={-1} className="outline-none">Google Calendar</CardTitle>
           </div>
           <CardDescription className="mt-1">
             Busy times in a connected Google Calendar block that calendar&apos;s open slots, and new bookings are added to it.
@@ -99,7 +106,15 @@ export function GoogleCalendarCard({ notice, onNotice }: { notice: ReturnNotice 
           {notice.tone === "success" ? <CheckCircle size={20} aria-hidden className="mt-px shrink-0 text-success" />
             : notice.tone === "info" ? <Info size={20} aria-hidden className="mt-px shrink-0 text-muted" />
             : <WarningCircle size={20} aria-hidden className="mt-px shrink-0 text-danger" />}
-          <p>{notice.message}</p>
+          <p className="flex-1">{canManage || notice.tone !== "error" ? notice.message : STAFF_ERROR}</p>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => { onNotice(null); titleRef.current?.focus(); }}
+            className="-m-2.5 inline-flex size-11 shrink-0 items-center justify-center rounded-pill text-muted transition-quick hover:bg-inset hover:text-fg"
+          >
+            <X size={16} aria-hidden />
+          </button>
         </div>
       ) : null}
       {canManage ? null : <div className="mb-3"><DisabledReason id={OWNER_ONLY_ID}>Only an owner can connect or disconnect calendars.</DisabledReason></div>}
@@ -111,7 +126,14 @@ export function GoogleCalendarCard({ notice, onNotice }: { notice: ReturnNotice 
       ) : (
         <ul className="-mx-4 divide-y divide-border-soft border-t border-border-soft lg:-mx-6" aria-label="Booking calendars">
           {resources.data.map((resource) => (
-            <CalendarRow key={resource.id} resource={resource} connection={currentConnection(connections.data, resource.id)} canManage={canManage} />
+            <CalendarRow
+              key={resource.id}
+              resource={resource}
+              connection={currentConnection(connections.data, resource.id)}
+              canManage={canManage}
+              waiting={pending.data?.resourceId === resource.id}
+              onAction={clearNotice}
+            />
           ))}
         </ul>
       )}
@@ -195,14 +217,21 @@ function ConfirmGrant({ pending, resourceName, onDone }: { pending: PendingGoogl
           {discard.isPending ? "Cancelling…" : "Cancel"}
         </Button>
         <Button onClick={() => confirm.mutate()} disabled={busy} aria-busy={confirm.isPending}>
-          <PlugsConnected aria-hidden />{confirm.isPending ? "Connecting…" : "Connect calendar"}
+          <Plug aria-hidden />{confirm.isPending ? "Connecting…" : "Connect calendar"}
         </Button>
       </div>
     </div>
   );
 }
 
-function CalendarRow({ resource, connection, canManage }: { resource: ResourceSummary; connection: CalendarConnection | null; canManage: boolean }) {
+function CalendarRow({ resource, connection, canManage, waiting, onAction }: {
+  resource: ResourceSummary;
+  connection: CalendarConnection | null;
+  canManage: boolean;
+  /** A grant for this calendar waits in the confirm panel: no second Connect here. */
+  waiting: boolean;
+  onAction: () => void;
+}) {
   const api = useApi();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -214,6 +243,10 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   // Set once the browser is on its way to Google, so the button stays busy until the page goes.
   const [leaving, setLeaving] = useState(false);
+  const name = calendarName(resource);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  // The Disconnect button leaves with the live connection: focus goes to the row's name instead.
+  const disconnected = useRef(false);
 
   // Back from Google through the browser's back button, the page may come from its cache as it was.
   useEffect(() => {
@@ -227,7 +260,8 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
   const state: RowState = connection?.status ?? "none";
   const liveId = connection && (connection.status === "active" || connection.status === "reauthorize") ? connection.id : null;
   const confirming = confirmingId !== null && confirmingId === liveId;
-  const shown = STATE[state === "disconnected" ? "none" : state];
+  const waitingHere = waiting && (state === "none" || state === "disconnected" || state === "reauthorize");
+  const shown = waitingHere ? WAITING : STATE[state === "disconnected" ? "none" : state];
   const leavingStatus = connection?.status === "disconnecting" ? disconnectingStatus(connection.lastError) : null;
   const rowId = `gcal-${resource.id}`;
   const errorId = `${rowId}-error`;
@@ -258,8 +292,9 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
     },
     onSuccess: (result) => {
       queryClient.setQueryData<CalendarConnection[]>(keys.calendarConnections, (items) => items?.map((item) => (item.id === result.id ? result : item)));
+      disconnected.current = true;
       setConfirmingId(null);
-      toast(`Disconnecting ${resource.name}. Busy times from Google stop blocking its slots in a moment.`, "info");
+      toast(`Disconnecting ${name}. Busy times from Google stop blocking its slots in a moment.`, "info");
     },
   });
 
@@ -272,7 +307,7 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
     <li aria-labelledby={`${rowId}-name`} data-testid="gcal-row" className="flex flex-wrap items-start gap-3 px-4 py-4 sm:flex-nowrap lg:px-6">
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <h3 id={`${rowId}-name`} className="text-sm font-bold">{resource.name}</h3>
+          <h3 id={`${rowId}-name`} ref={headingRef} tabIndex={-1} className="text-sm font-bold outline-none">{name}</h3>
           <Badge tone={shown.tone} data-testid="gcal-status"><shown.icon aria-hidden />{shown.label}</Badge>
         </div>
         {connection?.status === "active" ? (
@@ -283,6 +318,8 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
             </p>
             {connection.lastError ? <Warning>{syncErrorMessage(connection.lastError)}</Warning> : null}
           </>
+        ) : waitingHere ? (
+          <p className="text-xs text-meta">Confirm the Google account above to finish connecting.</p>
         ) : connection?.status === "reauthorize" ? (
           <Warning>Google access ended. Busy times already read still block slots until you reconnect or disconnect.</Warning>
         ) : leavingStatus?.stuck ? (
@@ -309,17 +346,17 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
         ) : null
       ) : (
         <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
-          {state === "active" ? null : (
+          {state === "active" || waitingHere ? null : (
             <Button
               variant={state === "reauthorize" ? "primary" : "secondary"}
-              onClick={() => connect.mutate()}
+              onClick={() => { onAction(); connect.mutate(); }}
               disabled={!canManage || connecting}
               aria-busy={connecting}
               aria-describedby={describedBy(ownerOnly, connectError ? errorId : undefined)}
             >
-              {state === "reauthorize" ? <ArrowsClockwise aria-hidden /> : <PlugsConnected aria-hidden />}
+              {state === "reauthorize" ? <ArrowsClockwise aria-hidden /> : <Plug aria-hidden />}
               {connecting ? "Opening Google…" : state === "reauthorize" ? "Reconnect" : "Connect"}
-              <span className="sr-only"> {resource.name}</span>
+              <span className="sr-only"> {name}</span>
             </Button>
           )}
           {connection && (state === "active" || state === "reauthorize") ? (
@@ -332,7 +369,7 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
               disabled={!canManage}
               aria-describedby={ownerOnly}
             >
-              <LinkBreak aria-hidden />Disconnect<span className="sr-only"> {resource.name}</span>
+              <Plugs aria-hidden />Disconnect<span className="sr-only"> {name}</span>
             </Button>
           ) : null}
         </div>
@@ -340,7 +377,16 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
       {connection ? (
         <Dialog open={confirming} onOpenChange={(open) => { if (!disconnect.isPending) setConfirmingId(open ? liveId : null); }}>
           {confirming ? (
-            <DialogContent title="Disconnect Google Calendar?" description={`${resource.name} stops syncing with ${connection.accountEmail ?? "Google"}.`}>
+            <DialogContent
+              title="Disconnect Google Calendar?"
+              description={`${name} stops syncing with ${connection.accountEmail ?? "Google"}.`}
+              onCloseAutoFocus={(event) => {
+                if (!disconnected.current) return;
+                disconnected.current = false;
+                event.preventDefault();
+                headingRef.current?.focus();
+              }}
+            >
               <ul className="mb-4 list-disc space-y-1 pl-5 text-sm text-fg-2">
                 <li>Busy times from Google stop blocking this calendar&apos;s open slots.</li>
                 <li>Events already added to Google stay in Google.</li>
@@ -349,7 +395,7 @@ function CalendarRow({ resource, connection, canManage }: { resource: ResourceSu
               {disconnect.isError ? <div className="mb-4"><ErrorNote error={disconnect.error} /></div> : null}
               <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                 <DialogClose asChild><Button variant="ghost" disabled={disconnect.isPending}>Keep connected</Button></DialogClose>
-                <Button variant="danger" onClick={() => disconnect.mutate(connection.id)} disabled={disconnect.isPending} aria-busy={disconnect.isPending}>
+                <Button variant="danger" onClick={() => { onAction(); disconnect.mutate(connection.id); }} disabled={disconnect.isPending} aria-busy={disconnect.isPending}>
                   {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
                 </Button>
               </div>

@@ -35,6 +35,12 @@ export function formatAmountInput(amountMinor: number, currency: string): string
   return amountMinor % scale === 0 ? String(amountMinor / scale) : (amountMinor / scale).toFixed(digits);
 }
 
+/** The amount hint for `currency`: an example with no decimals for a currency that has none. */
+export function amountHint(currency: string): string {
+  const digits = currencyDigits(currency);
+  return digits === 0 ? "Enter a whole amount like 1250." : `Enter an amount like 1250 or 1250.${"50".padEnd(digits, "0")}.`;
+}
+
 const isCurrency = (code: string) => {
   if (!/^[A-Z]{3}$/.test(code)) return false;
   try {
@@ -177,7 +183,7 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
                 placeholder="1250"
                 value={form.amount}
                 aria-invalid={problem === "amount" || undefined}
-                aria-describedby={`${prefix}-help`}
+                aria-describedby={problem ? `${prefix}-problem ${prefix}-help` : `${prefix}-help`}
                 onChange={(event) => setForm({ ...form, amount: event.target.value })}
               />
             </div>
@@ -189,13 +195,18 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
                 autoCapitalize="characters"
                 value={form.currency}
                 aria-invalid={problem === "currency" || undefined}
+                aria-describedby={problem === "currency" ? `${prefix}-problem` : undefined}
                 onChange={(event) => setForm({ ...form, currency: event.target.value.toUpperCase() })}
               />
             </div>
           </div>
-          <p id={`${prefix}-help`} className="-mt-2 text-xs text-meta">Leave the value empty if it is not known yet.</p>
-          {problem === "amount" ? <p role="alert" className="text-sm text-danger">Enter an amount like 1250 or 1250.50.</p> : null}
-          {problem === "currency" ? <p role="alert" className="text-sm text-danger">Enter a three-letter currency code such as USD.</p> : null}
+          {/* Right under the fields it is about, before the general hint. */}
+          {problem ? (
+            <p id={`${prefix}-problem`} role="alert" className="-mt-2 text-sm text-danger">
+              {problem === "amount" ? amountHint(form.currency.trim().toUpperCase()) : "Enter a three-letter currency code such as USD."}
+            </p>
+          ) : null}
+          <p id={`${prefix}-help`} className={problem ? "text-xs text-meta" : "-mt-2 text-xs text-meta"}>Leave the value empty if it is not known yet.</p>
           <div>
             <Label htmlFor={`${prefix}-source`}>Lead source</Label>
             <Select id={`${prefix}-source`} className="w-full" value={form.leadSource} onChange={(event) => setForm({ ...form, leadSource: event.target.value })}>

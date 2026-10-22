@@ -314,7 +314,7 @@ test("moves a deal, and reloads when someone else changed it", async ({ page, re
   await expect(target).toBeVisible();
   await someoneElse(request).touchDeal(stale.title);
   await target.getByRole("combobox").selectOption({ label: "Delivered" });
-  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(`Someone changed ${stale.title}. Reloaded.`);
   await expect(target.locator("option:checked")).toHaveText(stale.from);
   await viewportShot(page, "15-deal-conflict", info.project.name, PREFIX);
 
@@ -481,7 +481,7 @@ test("reloads and allows a retry when the API reports a concurrent update", asyn
   const reloaded = waitForDealsRead(page);
   await card.getByRole("combobox").selectOption({ label: "Deposit" });
   await reloaded;
-  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(`Someone changed ${title}. Reloaded.`);
   await expect(card.locator("option:checked")).toHaveText("Design");
   await expect(card.getByRole("combobox")).toBeEnabled();
 
@@ -507,14 +507,14 @@ test("keeps a deal unmovable, and says so, when the reload after a conflict fail
   await card.getByRole("combobox").selectOption({ label: "Deposit" });
   const note = page.locator("#deal-reload-needed");
   await expect(note).toContainText("Someone changed this deal, but the board could not reload.", { timeout: 10_000 });
-  await expect(page.getByText("Someone changed this deal. Reloaded.")).toHaveCount(0);
+  await expect(page.getByText(/^Someone changed .+\. Reloaded\.$/)).toHaveCount(0);
   await expect(card.getByRole("combobox")).toBeDisabled();
   await expect(card.locator("option:checked")).toHaveText("Design");
 
   abort = false;
   await page.unroute(stage);
   await note.getByRole("button", { name: "Try again" }).click();
-  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText("Someone changed this deal. Reloaded.");
+  await expect(page.getByRole("region", { name: "Pipeline" }).getByRole("alert")).toHaveText(`Someone changed ${title}. Reloaded.`);
   await expect(card.getByRole("combobox")).toBeEnabled();
   await expect(page.locator("[data-fetching]")).toHaveCount(0);
   await card.getByRole("combobox").selectOption({ label: "Deposit" });
@@ -575,7 +575,8 @@ test("pages a long customer list, searches all of it, and opens a customer it ha
 
   // The single-contact route answers for itself; an unknown customer is "not found".
   await page.goto(`/customers/${randomUUID()}`);
-  await expect(page.getByRole("main").getByRole("alert")).toContainText("We could not find that customer.");
+  await expect(page.getByRole("heading", { level: 1, name: "Customer not found" })).toBeVisible();
+  await expect(page.getByRole("main").getByRole("button", { name: "Try again" })).toHaveCount(0);
 });
 
 test("says sign-out did not finish and offers Try again until the server confirms it, and a 401 posts nothing", async ({ page }) => {

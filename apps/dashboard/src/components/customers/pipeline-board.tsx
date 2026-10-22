@@ -3,7 +3,7 @@
 import { ArrowsClockwise } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/input";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
@@ -12,14 +12,14 @@ import { isDealChanged, type DealSummary, type ListResult, type PipelineSummary 
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { LEAD_SOURCE_LABELS } from "@/lib/lead-sources";
-import { useContactNames, useDeals, useDisplayZone, useKeys, usePipelines } from "@/lib/queries";
+import { browserZone, useContactNames, useDeals, useKeys, usePipelines } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
-import { cn, formatMinor, relativeTime, revealOnFocus } from "@/lib/utils";
+import { cn, formatMinor, relativeTime } from "@/lib/utils";
 import { DealDetailsDialog } from "./deal-details-dialog";
 
 type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
 
-export const STALE_DEAL_MESSAGE = "Someone changed this deal. Reloaded.";
+export const staleDealMessage = (title: string) => `Someone changed ${title}. Reloaded.`;
 export const RELOAD_FAILED_MESSAGE = "Someone changed this deal, but the board could not reload. You can move it again once it has.";
 
 function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blockedBy, zone }: {
@@ -40,19 +40,19 @@ function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blocked
       <p className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-2">
         <span className="tabular font-medium" data-testid="deal-value">{deal.value ? formatMinor(deal.value.amountMinor, deal.value.currency) : "No value yet"}</span>
         <span data-testid="deal-source">{deal.leadSource ? `From ${LEAD_SOURCE_LABELS[deal.leadSource]}` : "Source not set"}</span>
-        {deal.wonAt ? <span className="text-success" data-testid="deal-won">Won {formatDay(deal.wonAt, zone)}</span> : null}
+        {deal.wonAt ? <span className="font-medium text-fg" data-testid="deal-won">Won {formatDay(deal.wonAt, zone)}</span> : null}
       </p>
       <Link href={`/customers/${deal.contactId}`} className="mt-0.5 inline-flex min-h-11 max-w-full items-center text-sm break-words text-accent underline-offset-4 hover:underline">
         {contactName}
       </Link>
       <div className="mt-2 flex items-center justify-between gap-2">
-        <label htmlFor={selectId} className="sr-only">Move {deal.title} to stage</label>
-        <Select id={selectId} value={deal.stageId} disabled={moving || blockedBy !== null} aria-describedby={blockedBy ?? undefined} onChange={(event) => onMove(deal, event.target.value)} className="flex-1">
+        <label htmlFor={selectId} className="text-xs font-medium text-fg-2">Stage<span className="sr-only"> of {deal.title}</span></label>
+        <Select id={selectId} value={deal.stageId} disabled={moving || blockedBy !== null} aria-describedby={blockedBy ?? undefined} onChange={(event) => onMove(deal, event.target.value)} className="min-w-0 flex-1 pr-8">
           {pipeline.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
         </Select>
       </div>
       <div className="mt-1 flex items-center justify-between gap-2">
-        <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt)}</p>
+        <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt).toLowerCase()}</p>
         <Button variant="ghost" className="-mr-2" disabled={moving} aria-label={`Edit details of ${deal.title}`} onClick={() => onEdit(deal)}>Details</Button>
       </div>
     </li>
@@ -104,12 +104,16 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   const deals = useDeals(dealQuery);
   const contacts = useContactNames(useMemo(() => deals.data?.items.map((deal) => deal.contactId) ?? [], [deals.data]));
   const [stageFilter, setStageFilter] = useState<string | null>(null);
-  const [stale, setStale] = useState(false);
+  // The title of the deal someone else changed, while the note about it shows.
+  const [stale, setStale] = useState<string | null>(null);
   // A deal whose move hit a newer revision while the reload after it failed: its revision
   // on screen is known to be old, so it stays unmovable until a later read succeeds.
-  const [reloadNeeded, setReloadNeeded] = useState<{ dealId: string; since: number } | null>(null);
+  const [reloadNeeded, setReloadNeeded] = useState<{ dealId: string; title: string; since: number } | null>(null);
+  // The deal whose stage select had focus when it moved: the card re-mounts, so focus goes back to it.
+  const [refocus, setRefocus] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ dealId: string; open: boolean } | null>(null);
-  const zone = useDisplayZone();
+  // CRM dates show in the viewer's zone; only bookings carry a calendar's own.
+  const zone = browserZone();
 
   const names = useMemo(() => new Map(contacts.data?.map((contact) => [contact.id, contact.displayName ?? contact.email ?? "Customer"]) ?? []), [contacts.data]);
 
@@ -119,9 +123,12 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
 
   const move = useMutation({
     mutationFn: (request: DealMove) => api.moveDealStage(request, { idempotencyKey: intents.keyFor(request) }),
-    onSettled: (_updated, error, request) => intents.settle(request, error),
+    onSettled: (_updated, error, request) => {
+      intents.settle(request, error);
+      setRefocus(request.dealId);
+    },
     onSuccess: async (updated) => {
-      setStale(false);
+      setStale(null);
       // A move answers with the frozen record: keep the value and lead source on screen.
       queryClient.setQueryData<ListResult<DealSummary>>(keys.deals(dealQuery), (current) => current && {
         ...current, items: current.items.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
@@ -133,6 +140,8 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
       // A move into or out of a won stage changes Home's revenue (H-2).
       void queryClient.invalidateQueries({ queryKey: keys.resultsAll });
       const stage = pipeline.stages.find((item) => item.id === updated.stageId)?.name ?? "the new stage";
+      // On phones the board shows one stage: follow the deal to its new one.
+      setStageFilter(updated.stageId);
       toast(`Moved to ${stage}.`);
     },
     onError: async (error, request) => {
@@ -145,15 +154,16 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
       }
       // A concurrent_update is the same story as a stale revision: reload, then retry.
       if (!isDealChanged(error)) return;
+      const title = deals.data?.items.find((item) => item.id === request.dealId)?.title ?? "this deal";
       // Say "Reloaded" only once a read that started after the conflict has landed, so the
       // fresh revision is on screen and a retry uses it.
       const state = queryClient.getQueryState(keys.deals(dealQuery));
       if (reloaded && state?.status === "success" && state.dataUpdatedAt >= since) {
-        setStale(true);
-        toast(STALE_DEAL_MESSAGE, "info");
+        setStale(title);
+        toast(staleDealMessage(title), "info");
       } else {
-        setStale(false);
-        setReloadNeeded({ dealId: request.dealId, since });
+        setStale(null);
+        setReloadNeeded({ dealId: request.dealId, title, since });
       }
     },
   });
@@ -162,9 +172,17 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   useEffect(() => {
     if (!reloadNeeded || deals.isFetching || deals.status !== "success" || deals.dataUpdatedAt < reloadNeeded.since) return;
     setReloadNeeded(null);
-    setStale(true);
-    toast(STALE_DEAL_MESSAGE, "info");
+    setStale(reloadNeeded.title);
+    toast(staleDealMessage(reloadNeeded.title), "info");
   }, [reloadNeeded, deals.isFetching, deals.status, deals.dataUpdatedAt, toast]);
+
+  // Once the move has settled and the select is enabled again. Focus someone moved on their own stays put.
+  useEffect(() => {
+    if (!refocus || move.isPending) return;
+    const active = document.activeElement;
+    if (!active || active === document.body) document.getElementById(`stage-${refocus}`)?.focus();
+    setRefocus(null);
+  }, [refocus, move.isPending]);
 
   if (deals.isPending) return <LoadingRows rows={5} label="Loading pipeline" />;
   if (deals.isError && !deals.data) return <ErrorNote error={deals.error} retry={() => deals.refetch()} />;
@@ -181,10 +199,10 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   return (
     // data-fetching lets tests wait out a background refetch before acting as someone else.
     <div data-fetching={deals.isFetching || undefined}>
-      {stale ? (
+      {stale !== null ? (
         <div role="alert" className="mb-4 flex items-center gap-3 rounded-md bg-accent-tint p-3 text-sm text-fg">
           <ArrowsClockwise size={20} aria-hidden className="shrink-0 text-accent" />
-          <p>{STALE_DEAL_MESSAGE}</p>
+          <p>{staleDealMessage(stale)}</p>
         </div>
       ) : null}
       {reloadNeeded ? (
@@ -197,7 +215,7 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
       {refreshError ? <div className="mb-4"><ErrorNote error={refreshError} retry={() => deals.refetch()} /></div> : null}
       <IncompleteNote list={deals.data} />
 
-      <div role="group" aria-label="Stage" className="-mx-4 mb-3 flex scroll-px-4 gap-2 overflow-x-auto px-4 py-1 lg:hidden">
+      <div role="group" aria-label="Stage" className="mb-3 flex flex-wrap gap-2 py-1 lg:hidden">
         {stages.map((stage) => {
           const count = deals.data.items.filter((deal) => deal.stageId === stage.id).length;
           const active = stage.id === activeStage;
@@ -207,7 +225,6 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
               type="button"
               aria-pressed={active}
               onClick={() => setStageFilter(stage.id)}
-              onFocus={revealOnFocus}
               className={cn(
                 "flex min-h-11 shrink-0 items-center gap-2 rounded-pill px-4 text-sm font-medium transition-quick",
                 active ? "bg-accent-tint text-accent-ink ring-2 ring-inset ring-accent" : "bg-surface text-fg-2 shadow-ring hover:bg-inset",
@@ -220,7 +237,11 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
         })}
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+      {/* One column per stage, however many the pipeline has; a long pipeline scrolls sideways. */}
+      <div
+        className="grid grid-cols-1 gap-4 lg:-m-1 lg:grid-cols-[repeat(var(--stages),minmax(11rem,1fr))] lg:overflow-x-auto lg:p-1"
+        style={{ "--stages": stages.length } as CSSProperties}
+      >
         {stages.map((stage) => {
           const items = deals.data.items.filter((deal) => deal.stageId === stage.id);
           return (

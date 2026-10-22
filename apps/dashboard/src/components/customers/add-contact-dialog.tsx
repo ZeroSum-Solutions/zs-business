@@ -58,7 +58,9 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
     if (open) reset();
   }, [open, reset]);
 
-  const field = isApiError(save.error, "validation") ? save.error.field ?? "" : "";
+  // A validation error without a field is the "email or phone" rule: it is about both.
+  const field = isApiError(save.error, "validation") ? save.error.field ?? "identity" : "";
+  const invalid = (name: "email" | "phone") => field === name || field === "identity";
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const input = { displayName: form.name.trim() || null, email: form.email.trim() || null, phone: form.phone.trim() || null };
@@ -81,8 +83,8 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
               inputMode="email"
               autoComplete="email"
               value={form.email}
-              aria-invalid={field === "email" || undefined}
-              aria-describedby={field === "email" ? "contact-error" : undefined}
+              aria-invalid={invalid("email") || undefined}
+              aria-describedby={invalid("email") ? "contact-error" : undefined}
               onChange={(event) => setForm({ ...form, email: event.target.value })}
             />
           </div>
@@ -93,12 +95,13 @@ export function AddContactDialog({ open, onOpenChange }: { open: boolean; onOpen
               type="tel"
               inputMode="tel"
               autoComplete="tel"
-              placeholder="+1 212 555 0142"
               value={form.phone}
-              aria-invalid={field === "phone" || undefined}
-              aria-describedby={field === "phone" ? "contact-error" : undefined}
+              aria-invalid={invalid("phone") || undefined}
+              aria-describedby={invalid("phone") ? "contact-phone-hint contact-error" : "contact-phone-hint"}
               onChange={(event) => setForm({ ...form, phone: event.target.value })}
             />
+            {/* A hint, not a placeholder: an example in the box reads as a filled-in number. */}
+            <p id="contact-phone-hint" className="mt-1 text-xs text-meta">With country code, like +1 212 555 0142.</p>
           </div>
           {save.isError ? <div id="contact-error"><ErrorNote error={save.error} /></div> : null}
           <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
