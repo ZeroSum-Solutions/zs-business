@@ -315,8 +315,9 @@ function NextAppointments({ className }: { className?: string }) {
   const resources = useResources();
   const nameOf = (id: string) => resources.data?.find((item) => item.id === id);
   const upcoming = bookings.data?.items ?? [];
-  const zone = resources.data?.[0]?.timeZone ?? "America/New_York";
-  const days = groupByDay(upcoming, from, zone, (booking) => nameOf(booking.resourceId)?.timeZone ?? zone);
+  // Days, headings and times share one zone, so a calendar elsewhere never splits a day.
+  const zone = useDisplayZone();
+  const days = groupByDay(upcoming, from, zone);
   return (
     <Tray className={className} aria-labelledby="next-title">
       <TrayHeader>
@@ -337,11 +338,10 @@ function NextAppointments({ className }: { className?: string }) {
               <ul className="divide-y divide-border">
                 {day.items.map((booking) => {
                   const resource = nameOf(booking.resourceId);
-                  const bookingZone = resource?.timeZone ?? zone;
                   const customer = bookingCustomerName(booking);
                   return (
                     <li key={booking.id} className="flex gap-3 py-3 last:pb-0 sm:gap-4">
-                      <p className="tabular w-20 shrink-0 pt-px text-sm font-bold text-fg">{formatTime(booking.startsAt, bookingZone)}</p>
+                      <p className="tabular w-20 shrink-0 pt-px text-sm font-bold text-fg">{formatTime(booking.startsAt, zone)}</p>
                       <div className="min-w-0 flex-1">
                         <h3 className="truncate text-body font-semibold text-fg">{booking.title ?? (booking.source === "website" ? "Website booking" : "Appointment")}</h3>
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">

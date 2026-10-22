@@ -35,17 +35,21 @@ export interface DayGroup<T> {
   items: T[];
 }
 
-/** Appointments in start order, grouped by local day under a "Later today" / "Tomorrow" heading. */
-export function groupByDay<T extends { startsAt: string }>(items: T[], now: string | number, zone: string, zoneOf: (item: T) => string): DayGroup<T>[] {
+/**
+ * Appointments grouped by local day under a "Later today" / "Tomorrow" heading. Days, headings
+ * and today are all read in the one display zone, so calendars in other zones never split a
+ * day in two or call tomorrow today. One group per day, in the order the days first appear.
+ */
+export function groupByDay<T extends { startsAt: string }>(items: T[], now: string | number, zone: string): DayGroup<T>[] {
   const todayKey = zonedDateKey(now, zone);
-  const days: DayGroup<T>[] = [];
+  const days = new Map<string, DayGroup<T>>();
   for (const item of items) {
-    const key = zonedDateKey(item.startsAt, zoneOf(item));
-    const last = days.at(-1);
-    if (last?.key === key) last.items.push(item);
-    else days.push({ key, heading: dayHeading(key, todayKey), items: [item] });
+    const key = zonedDateKey(item.startsAt, zone);
+    const day = days.get(key);
+    if (day) day.items.push(item);
+    else days.set(key, { key, heading: dayHeading(key, todayKey), items: [item] });
   }
-  return days;
+  return [...days.values()];
 }
 
 /** Subscribes `onChange` to the wall clock's minute; returns the unsubscribe. */
