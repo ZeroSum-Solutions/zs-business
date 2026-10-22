@@ -12,6 +12,8 @@ import {
   GRANT_CHANGED_MESSAGE,
   CONNECTED_MESSAGE,
   currentConnection,
+  disconnectingStatus,
+  GOOGLE_ACCESS_URL,
   RETURN_REASONS,
   returnNotice,
 } from "../src/lib/calendar-sync";
@@ -107,5 +109,24 @@ describe("connectErrorMessage", () => {
     expect(connectErrorMessage(new ApiError("not_found", "x", 404))).toBe("Google Calendar is not set up on this server yet.");
     expect(connectErrorMessage(new ApiError("forbidden", "x", 403))).toBe("Only an owner can connect calendars.");
     expect(connectErrorMessage(new ApiError("network", "You look offline."))).toBe("You look offline.");
+  });
+});
+
+describe("disconnectingStatus (G-9)", () => {
+  it("says the busy times are going while nothing failed", () => {
+    expect(disconnectingStatus(null)).toEqual({ message: "Removing its busy times. Events already added stay in Google.", stuck: false });
+  });
+
+  it("after a failed try, says the busy times stay until Google ends the grant, and offers Google's access page", () => {
+    for (const code of ["google_403", "google_network", "run_deadline", "token_unreadable"]) {
+      const status = disconnectingStatus(code);
+      expect(status.stuck, code).toBe(true);
+      expect(status.message, code).toMatch(/still block slots/);
+      expect(status.message, code).not.toMatch(/Removing/);
+      expect(status.message, code).toMatch(/^[A-Z].*\.$/);
+    }
+    expect(disconnectingStatus("token_unreadable").message).toMatch(/could not read the saved Google access/);
+    expect(disconnectingStatus("google_403").message).toMatch(/Google has not confirmed the disconnect/);
+    expect(new URL(GOOGLE_ACCESS_URL).origin).toBe("https://myaccount.google.com");
   });
 });
