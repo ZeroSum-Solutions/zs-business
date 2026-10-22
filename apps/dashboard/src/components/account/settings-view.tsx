@@ -13,8 +13,8 @@ import { OWNER } from "@/components/shell/account-menu";
 import { setTheme, type Theme, useTheme } from "@/lib/theme";
 
 const THEME_OPTIONS = [
-  { value: "dark", label: "Dark" },
   { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
   { value: "system", label: "Match device" },
 ] as const satisfies readonly { value: Theme; label: string }[];
 

@@ -1,8 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { THEME_KEY as KEY } from "./theme-script";
 
-/** Black is the default (the owner's pick); light and system are per-device choices. */
-export const THEMES = ["dark", "light", "system"] as const;
+/** Light is the default (Direction A); dark and system are per-device choices. */
+export const THEMES = ["light", "dark", "system"] as const;
 export type Theme = (typeof THEMES)[number];
 
 const isTheme = (value: unknown): value is Theme => THEMES.includes(value as Theme);
@@ -12,7 +12,7 @@ const listeners = new Set<() => void>();
 let current: Theme | null = null;
 
 function snapshot(): Theme {
-  current ??= isTheme(document.documentElement.dataset.theme) ? document.documentElement.dataset.theme : "dark";
+  current ??= isTheme(document.documentElement.dataset.theme) ? document.documentElement.dataset.theme : "light";
   return current;
 }
 
@@ -46,9 +46,9 @@ export function setTheme(theme: Theme) {
 export function watchTheme(): () => void {
   const onStorage = (event: StorageEvent) => {
     if (event.key !== KEY && event.key !== null) return;
-    apply(isTheme(event.newValue) ? event.newValue : "dark");
+    apply(isTheme(event.newValue) ? event.newValue : "light");
   };
-  const scheme = window.matchMedia("(prefers-color-scheme: light)");
+  const scheme = window.matchMedia("(prefers-color-scheme: dark)");
   window.addEventListener("storage", onStorage);
   scheme.addEventListener("change", syncThemeColor);
   syncThemeColor();
@@ -64,5 +64,5 @@ function subscribe(onChange: () => void) {
 }
 
 export function useTheme(): Theme {
-  return useSyncExternalStore(subscribe, snapshot, () => "dark");
+  return useSyncExternalStore(subscribe, snapshot, () => "light");
 }

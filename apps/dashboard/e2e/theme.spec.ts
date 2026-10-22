@@ -12,51 +12,51 @@ function collectErrors(page: Page) {
 }
 
 test.describe("theme", () => {
-  test("black is the default, and Light in Settings sticks across a reload", async ({ page }) => {
+  test("light is the default, and Dark in Settings sticks across a reload", async ({ page }) => {
     const errors = collectErrors(page);
     await page.goto("/account/settings");
     const html = page.locator("html");
-    await expect(html).toHaveAttribute("data-theme", "dark");
-    expect(await pageColor(page)).toBe("rgb(6, 6, 7)");
+    await expect(html).toHaveAttribute("data-theme", "light");
+    expect(await pageColor(page)).toBe("rgb(255, 255, 255)");
 
     const theme = page.getByRole("group", { name: "Theme" });
-    await theme.getByRole("button", { name: "Light" }).click();
-    await expect(html).toHaveAttribute("data-theme", "light");
-    expect(await pageColor(page)).toBe("rgb(243, 243, 245)");
-    await expect(barColor(page)).toHaveAttribute("content", "#f3f3f5");
+    await theme.getByRole("button", { name: "Dark" }).click();
+    await expect(html).toHaveAttribute("data-theme", "dark");
+    expect(await pageColor(page)).toBe("rgb(14, 14, 17)");
+    await expect(barColor(page)).toHaveAttribute("content", "#0e0e11");
 
     await page.reload();
-    await expect(theme.getByRole("button", { name: "Light" })).toHaveAttribute("aria-pressed", "true");
-    await expect(barColor(page)).toHaveAttribute("content", "#f3f3f5");
+    await expect(theme.getByRole("button", { name: "Dark" })).toHaveAttribute("aria-pressed", "true");
+    await expect(barColor(page)).toHaveAttribute("content", "#0e0e11");
     expect(errors).toEqual([]);
   });
 
   test("the saved theme is on the page before any script of ours runs", async ({ page }) => {
-    await page.addInitScript(() => localStorage.setItem("zs-theme", "light"));
+    await page.addInitScript(() => localStorage.setItem("zs-theme", "dark"));
     // Block the app bundles: only the inline head script can set the theme now.
     await page.route(/\/_next\/static\/.*\.js$/, (route) => route.abort());
     await page.goto("/");
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-    expect(await pageColor(page)).toBe("rgb(243, 243, 245)");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    expect(await pageColor(page)).toBe("rgb(14, 14, 17)");
   });
 
   test("a choice made in another tab applies here too", async ({ page, context }) => {
     await page.goto("/");
     const other = await context.newPage();
     await other.goto("/account/settings");
-    await other.getByRole("group", { name: "Theme" }).getByRole("button", { name: "Light" }).click();
-    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-    await expect(barColor(page)).toHaveAttribute("content", "#f3f3f5");
+    await other.getByRole("group", { name: "Theme" }).getByRole("button", { name: "Dark" }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(barColor(page)).toHaveAttribute("content", "#0e0e11");
   });
 
   test("Match device follows the system colour scheme, browser bars included", async ({ page }) => {
-    await page.emulateMedia({ colorScheme: "light" });
+    await page.emulateMedia({ colorScheme: "dark" });
     await page.addInitScript(() => localStorage.setItem("zs-theme", "system"));
     await page.goto("/");
-    expect(await pageColor(page)).toBe("rgb(243, 243, 245)");
-    await expect(barColor(page)).toHaveAttribute("content", "#f3f3f5");
-    await page.emulateMedia({ colorScheme: "dark" });
-    expect(await pageColor(page)).toBe("rgb(6, 6, 7)");
-    await expect(barColor(page)).toHaveAttribute("content", "#060607");
+    expect(await pageColor(page)).toBe("rgb(14, 14, 17)");
+    await expect(barColor(page)).toHaveAttribute("content", "#0e0e11");
+    await page.emulateMedia({ colorScheme: "light" });
+    expect(await pageColor(page)).toBe("rgb(255, 255, 255)");
+    await expect(barColor(page)).toHaveAttribute("content", "#ffffff");
   });
 });

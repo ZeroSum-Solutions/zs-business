@@ -1,58 +1,83 @@
 /*
  * Theme: the one place design tokens live.
- * Structure from Mish "Neutral Product" (Apache-2.0, ours); values from the 2026-10 redesign
- * (design/DESIGN.md): black, white for primary actions, violet for the current place and links,
- * blue for good news. Black is the default; light is the owner's choice in Settings
- * (`data-theme` on <html>: dark, light, or system, set before first paint by lib/theme.ts). Components use the Tailwind names in @theme below, never raw hex.
+ * Values from Direction A, "light tray" (design/directions/a-light-tray, chosen at G3 on
+ * 2026-10-22): a white page, grey trays that hold white cards, Manrope, cobalt for where you
+ * are, links, focus and the primary action, and an ink pill for the navigation.
+ * Light is the default. Dark is the owner's choice in Settings (`data-theme` on <html>: light,
+ * dark, or system, set before first paint by lib/theme-script.ts); it is A's roles moved onto
+ * ink, with the trays darker than the cards as in light.
+ * Components use the Tailwind names in @theme below, never raw hex.
  */
 :root {
-  color-scheme: dark;
-  /* Surface */
-  --bg: #060607;
-  --surface: #121316;
-  --surface-warm: #1b1c21;
+  color-scheme: light;
+  /* Surface: white page, grey trays, white cards inside them */
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-warm: #eeeef1;
+  --tray: #eeeef1;
+  --tray-deep: #e6e6ea;
+  /* A recessed panel inside a card (sub-tasks, a matched customer, a draft) */
+  --inset: #f6f6f8;
   /* Foreground */
-  --fg: #f5f5f4;
-  --fg-2: #d6d6d3;
-  --muted: #a6a6a2;
-  --meta: #8e8e8a;
+  --fg: #141418;
+  --fg-2: #33333b;
+  --muted: #55555f; /* 7.3:1 on white, 6.4:1 on a tray */
+  --meta: #62626c; /* 6.1:1 on white, 5.3:1 on a tray */
+  --faint: #8a8a93; /* large text only (dimmed cents) */
   /* Border */
-  --border: #2a2b31;
-  --border-soft: #202126;
-  --border-strong: #6e6e6b;
-  /* Primary: solid white action fills */
-  --primary: #f5f5f4;
-  --primary-on: #060607;
-  --primary-hover: #e2e2df;
-  --primary-active: #cfcfcb;
-  /* Accent: violet for the current place, links, focus, progress and selection */
-  --accent: #a58bff;
-  --accent-on: #060607;
-  --accent-hover: #b9a4ff;
-  --accent-active: #9179f0;
-  /* Semantic. Success is blue: good news (up trends, connected, sent). */
-  --success: #6f93ff;
-  --info: #5cc8ff;
-  --warn: #f2b84b;
-  --danger: #ff6b5f;
+  --border: #e3e3e8;
+  --border-soft: #ececf0;
+  --border-strong: #8e8e97; /* component edges, 3.3:1 on white */
+  /* Primary: the cobalt action fill (Send, Link, New) */
+  --primary: #3047f0;
+  --primary-on: #ffffff;
+  --primary-hover: #2639d8;
+  --primary-active: #1f2fbc;
+  /* Ink: the quiet solid action (Reconnect) and counts */
+  --ink: #141418;
+  --ink-on: #ffffff;
+  --ink-hover: #2a2a31;
+  /* Accent: cobalt for the current place, links, focus, progress and selection */
+  --accent: #3047f0;
+  --accent-on: #ffffff;
+  --accent-hover: #2639d8;
+  --accent-active: #1f2fbc;
+  --accent-tint: #ebeeff;
+  --accent-ink: #2236c9;
+  /* Semantic: text colour and its tint (chips, icon tiles). Good news is cobalt. */
+  --success: #2236c9;
+  --success-tint: #e8ecff;
+  --info: #0a5875;
+  --info-tint: #e3f2f9;
+  --warn: #6f4800;
+  --warn-tint: #fff2d4;
+  --danger: #a83020;
+  --danger-tint: #fdebe8;
+  /* Floating navigation: an ink pill with a lit (accent) current item */
+  --nav: #17171c;
+  --nav-fg: #c9c9d2;
+  --nav-fg-strong: #ffffff;
+  --nav-focus: #9fb0ff;
   /* Typography: fonts */
-  --font-display: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
-  --font-body: var(--font-google-sans), system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-display: var(--font-manrope), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-body: var(--font-manrope), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  /* Typography: scale */
+  /* Typography: scale. Body copy is 15px; form fields stay 16px so phones do not zoom. */
   --text-xs: 12px;
+  --text-meta: 13px;
   --text-sm: 14px;
+  --text-body: 15px;
   --text-base: 16px;
   --text-lg: 18px;
-  --text-xl: 22px;
-  --text-2xl: 28px;
-  --text-3xl: 36px;
-  --text-4xl: 48px;
+  --text-xl: 20px;
+  --text-2xl: 32px;
+  --text-3xl: 40px;
+  --text-4xl: 56px;
   /* Typography: leading and tracking */
-  --leading-body: 1.55;
-  --leading-tight: 1.2;
-  --tracking-display: -0.022em;
-  /* Spacing */
+  --leading-body: 1.5;
+  --leading-tight: 1.15;
+  --tracking-display: -0.03em;
+  /* Spacing (4px base) */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -60,43 +85,42 @@
   --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
+  --space-10: 40px;
   --space-12: 48px;
-  /* Section rhythm */
-  --section-y-desktop: 96px;
-  --section-y-tablet: 72px;
-  --section-y-phone: 48px;
-  /* Radius */
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
+  /* Radius: tray 28, card 20, inner panel 14, pill */
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-tray: 28px;
   --radius-pill: 9999px;
   /* Elevation */
   --elev-flat: none;
   --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.6), 0 12px 32px rgba(0, 0, 0, 0.6);
-  /* Card edge: Cult UI Minimal Card's layered hairline with its dark-mode top highlight (MIT, see NOTICE) */
-  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 0 0 1px rgba(255, 255, 255, 0.12), 0 16px 40px -8px rgba(0, 0, 0, 0.85);
-  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.08), 0 10px 28px -6px rgba(0, 0, 0, 0.72);
-  /* Top-lit card fill: a faint white wash fading down over the surface */
-  --surface-lit: linear-gradient(180deg, rgb(255 255 255 / 0.035), rgb(255 255 255 / 0) 160px), var(--surface);
+  --elev-card: 0 0 0 1px rgba(20, 20, 24, 0.05), 0 1px 2px rgba(20, 20, 24, 0.05), 0 6px 16px -8px rgba(20, 20, 24, 0.1);
+  --elev-card-hover: 0 0 0 1px rgba(20, 20, 24, 0.07), 0 2px 4px rgba(20, 20, 24, 0.06), 0 14px 28px -12px rgba(20, 20, 24, 0.18);
+  /* Menus, sheets, the floating nav and toasts */
+  --elev-raised: 0 14px 34px -10px rgba(20, 20, 24, 0.45), 0 3px 8px rgba(20, 20, 24, 0.18);
+  /* Card fill: flat white in A (the name is kept so older call sites still resolve). */
+  --surface-lit: var(--surface);
   /* Recessed wells for inputs */
-  --elev-well: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px var(--border);
-  /* Text fields: a well whose edge meets 3:1 against the card (WCAG 1.4.11). */
-  --elev-field: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px var(--border-strong);
+  --elev-well: inset 0 0 0 1px var(--border);
+  /* Text fields: an edge that meets 3:1 against the card (WCAG 1.4.11). */
+  --elev-field: inset 0 0 0 1px var(--border-strong);
   /* Avatar initials: how much ink is mixed into the pop so it reads on the fill */
-  --avatar-ink: 0%;
-  --avatar-drop: rgb(0 0 0 / 0.4);
+  --avatar-ink: 60%;
+  --avatar-drop: rgb(20 20 24 / 0.08);
   /* Dims the page behind a dialog. */
-  --overlay: rgb(6 6 7 / 0.8);
-  /* Switch thumb and the selected segment: lifted controls that sit on a well. */
-  --control-thumb: var(--fg);
-  --control-on: var(--surface-warm);
-  --control-off: var(--surface-warm);
-  /* Recessed fill for inputs and segment tracks: below the card, and below the page too. */
-  --well: var(--bg);
-  /* Focus: inner gap in the surface color, outer ring in the accent */
-  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
-  /* Motion */
+  --overlay: rgb(20 20 24 / 0.35);
+  /* Switch thumb and the selected segment: lifted controls that sit on a track. */
+  --control-thumb: #ffffff;
+  --control-on: #ffffff;
+  --control-off: #d4d5dc;
+  /* Fill for inputs; segment tracks use the deep tray. */
+  --well: #f7f7f9;
+  /* Focus: inner gap in the page colour, outer ring in the accent */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  /* Motion (strong ease-out, under 300ms) */
+  --motion-press: 110ms;
   --motion-fast: 140ms;
   --motion-base: 200ms;
   --motion-spring: 520ms;
@@ -104,118 +128,146 @@
   /* A real spring (stiffness ~180, damping ~12) sampled for CSS: overshoots about 6% and settles. */
   --ease-spring: linear(0, 0.06 2.4%, 0.23 5%, 0.66 10.6%, 0.88 14.6%, 1.01 19.2%, 1.06 23.4%, 1.065 26%, 1.05 30.6%, 1.01 39%, 0.995 47%, 0.998 60%, 1);
   /* Layout */
-  --container-max: 1200px;
-  --container-gutter-desktop: 32px;
-  --container-gutter-tablet: 24px;
+  --container-max: 1360px;
+  --container-gutter-desktop: 40px;
   --container-gutter-phone: 16px;
 }
 
 /*
- * Light: the same roles on cool white (no warm paper, per the owner). Black takes over the
- * primary fill; the pops are darkened until text on white and on their own tints meets AA.
- * The block is repeated for `system` under a light preference: CSS cannot share one block
- * between a selector and a media query.
+ * Dark: A's roles on ink. Trays sit below the cards as in light; text, pops and tints are
+ * lifted until each meets AA on the card, the tray and its own tint. The block is repeated for
+ * `system` under a dark preference: CSS cannot share one block between a selector and a query.
  */
-:root[data-theme="light"] {
-  color-scheme: light;
-  --bg: #f3f3f5;
-  --surface: #ffffff;
-  --surface-warm: #ececf0;
-  --fg: #0b0b0d;
-  --fg-2: #2a2b30;
-  --muted: #55575e;
-  --meta: #606269;
-  --border: #e0e0e6;
-  --border-soft: #ebebef;
-  --border-strong: #7a7c84;
-  --primary: #0b0b0d;
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e0e11;
+  --surface: #1d1d23;
+  --surface-warm: #16161b;
+  --tray: #16161b;
+  --tray-deep: #101013;
+  --inset: #26262d;
+  --fg: #f4f4f6;
+  --fg-2: #d6d6de;
+  --muted: #b0b0ba;
+  --meta: #a2a2ad;
+  --faint: #7a7a85;
+  --border: #2d2d35;
+  --border-soft: #25252c;
+  --border-strong: #787883;
+  --primary: #4d62ff;
   --primary-on: #ffffff;
-  --primary-hover: #26272c;
-  --primary-active: #3a3b41;
-  --accent: #583bc9;
-  --accent-on: #ffffff;
-  --accent-hover: #4b30b5;
-  --accent-active: #3f269e;
-  --success: #2451cc;
-  --info: #066587;
-  --warn: #854b00;
-  --danger: #b82519;
-  --elev-ring: 0 0 0 1px var(--border);
-  --elev-raised: 0 0 0 1px rgba(16, 16, 24, 0.06), 0 4px 8px rgba(16, 16, 24, 0.06), 0 16px 40px -8px rgba(16, 16, 24, 0.2);
-  --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.07), 0 1px 2px rgba(16, 16, 24, 0.06), 0 8px 24px -10px rgba(16, 16, 24, 0.14);
-  --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.1), 0 2px 4px rgba(16, 16, 24, 0.06), 0 18px 40px -12px rgba(16, 16, 24, 0.22);
-  --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
-  --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
-  --elev-field: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px var(--border-strong);
-  --avatar-ink: 60%;
-  --avatar-drop: rgb(16 16 24 / 0.08);
-  --overlay: rgb(11 11 13 / 0.35);
-  --control-thumb: #ffffff;
-  --control-on: #ffffff;
-  --control-off: #d4d5dc;
-  --well: #ebebef;
+  --primary-hover: #6175ff;
+  --primary-active: #3f53e6;
+  --ink: #f4f4f6;
+  --ink-on: #141418;
+  --ink-hover: #dcdce2;
+  --accent: #95a2ff;
+  --accent-on: #0e0e11;
+  --accent-hover: #a9b4ff;
+  --accent-active: #8190f5;
+  --accent-tint: #242a52;
+  --accent-ink: #b9c1ff;
+  --success: #a3aeff;
+  --success-tint: #242a52;
+  --info: #7fd0f2;
+  --info-tint: #13303d;
+  --warn: #f5c873;
+  --warn-tint: #3a2c10;
+  --danger: #ff9a8c;
+  --danger-tint: #3f1b16;
+  --nav: #2a2a33;
+  --nav-fg: #d0d0d9;
+  --nav-fg-strong: #ffffff;
+  --nav-focus: #b9c1ff;
+  --elev-card: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 20px -10px rgba(0, 0, 0, 0.7);
+  --elev-card-hover: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 4px rgba(0, 0, 0, 0.5), 0 16px 32px -12px rgba(0, 0, 0, 0.8);
+  --elev-raised: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 14px 34px -10px rgba(0, 0, 0, 0.8), 0 3px 8px rgba(0, 0, 0, 0.5);
+  --avatar-ink: 0%;
+  --avatar-drop: rgb(0 0 0 / 0.4);
+  --overlay: rgb(6 6 7 / 0.75);
+  --control-thumb: #f4f4f6;
+  --control-on: #2d2d35;
+  --control-off: #2d2d35;
+  --well: #141418;
 }
-@media (prefers-color-scheme: light) {
+@media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
-    color-scheme: light;
-    --bg: #f3f3f5;
-    --surface: #ffffff;
-    --surface-warm: #ececf0;
-    --fg: #0b0b0d;
-    --fg-2: #2a2b30;
-    --muted: #55575e;
-    --meta: #606269;
-    --border: #e0e0e6;
-    --border-soft: #ebebef;
-    --border-strong: #7a7c84;
-    --primary: #0b0b0d;
+    color-scheme: dark;
+    --bg: #0e0e11;
+    --surface: #1d1d23;
+    --surface-warm: #16161b;
+    --tray: #16161b;
+    --tray-deep: #101013;
+    --inset: #26262d;
+    --fg: #f4f4f6;
+    --fg-2: #d6d6de;
+    --muted: #b0b0ba;
+    --meta: #a2a2ad;
+    --faint: #7a7a85;
+    --border: #2d2d35;
+    --border-soft: #25252c;
+    --border-strong: #787883;
+    --primary: #4d62ff;
     --primary-on: #ffffff;
-    --primary-hover: #26272c;
-    --primary-active: #3a3b41;
-    --accent: #583bc9;
-    --accent-on: #ffffff;
-    --accent-hover: #4b30b5;
-    --accent-active: #3f269e;
-    --success: #2451cc;
-    --info: #066587;
-    --warn: #854b00;
-    --danger: #b82519;
-    --elev-ring: 0 0 0 1px var(--border);
-    --elev-raised: 0 0 0 1px rgba(16, 16, 24, 0.06), 0 4px 8px rgba(16, 16, 24, 0.06), 0 16px 40px -8px rgba(16, 16, 24, 0.2);
-    --elev-card: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.07), 0 1px 2px rgba(16, 16, 24, 0.06), 0 8px 24px -10px rgba(16, 16, 24, 0.14);
-    --elev-card-hover: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 0 0 1px rgba(16, 16, 24, 0.1), 0 2px 4px rgba(16, 16, 24, 0.06), 0 18px 40px -12px rgba(16, 16, 24, 0.22);
-    --surface-lit: linear-gradient(180deg, #ffffff, #fbfbfc 160px), var(--surface);
-    --elev-well: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px #d4d5dc;
-    --elev-field: inset 0 1px 2px rgba(16, 16, 24, 0.08), inset 0 0 0 1px var(--border-strong);
-    --avatar-ink: 60%;
-    --avatar-drop: rgb(16 16 24 / 0.08);
-    --overlay: rgb(11 11 13 / 0.35);
-    --control-thumb: #ffffff;
-    --control-on: #ffffff;
-    --control-off: #d4d5dc;
-    --well: #ebebef;
-}
+    --primary-hover: #6175ff;
+    --primary-active: #3f53e6;
+    --ink: #f4f4f6;
+    --ink-on: #141418;
+    --ink-hover: #dcdce2;
+    --accent: #95a2ff;
+    --accent-on: #0e0e11;
+    --accent-hover: #a9b4ff;
+    --accent-active: #8190f5;
+    --accent-tint: #242a52;
+    --accent-ink: #b9c1ff;
+    --success: #a3aeff;
+    --success-tint: #242a52;
+    --info: #7fd0f2;
+    --info-tint: #13303d;
+    --warn: #f5c873;
+    --warn-tint: #3a2c10;
+    --danger: #ff9a8c;
+    --danger-tint: #3f1b16;
+    --nav: #2a2a33;
+    --nav-fg: #d0d0d9;
+    --nav-fg-strong: #ffffff;
+    --nav-focus: #b9c1ff;
+    --elev-card: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 20px -10px rgba(0, 0, 0, 0.7);
+    --elev-card-hover: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 4px rgba(0, 0, 0, 0.5), 0 16px 32px -12px rgba(0, 0, 0, 0.8);
+    --elev-raised: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 14px 34px -10px rgba(0, 0, 0, 0.8), 0 3px 8px rgba(0, 0, 0, 0.5);
+    --avatar-ink: 0%;
+    --avatar-drop: rgb(0 0 0 / 0.4);
+    --overlay: rgb(6 6 7 / 0.75);
+    --control-thumb: #f4f4f6;
+    --control-on: #2d2d35;
+    --control-off: #2d2d35;
+    --well: #141418;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="full"]) {
+    --motion-press: 0ms;
     --motion-fast: 0ms;
     --motion-base: 0ms;
     --motion-spring: 0ms;
   }
 }
 
-/* Dashboard additions on top of the Mish tokens. */
+/* Dashboard layout. The phone dock is 64px tall and floats 16px off the bottom edge. */
 :root {
-  --tabbar-height: 64px;
-  --topbar-height: 56px;
+  --tabbar-height: 80px;
   --sidebar-width: 256px;
+  --topbar-height: 68px;
 }
 
 @theme inline {
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-warm: var(--surface-warm);
+  --color-tray: var(--tray);
+  --color-tray-deep: var(--tray-deep);
+  --color-inset: var(--inset);
   --color-control-thumb: var(--control-thumb);
   --color-control-on: var(--control-on);
   --color-overlay: var(--overlay);
@@ -225,6 +277,7 @@
   --color-fg-2: var(--fg-2);
   --color-muted: var(--muted);
   --color-meta: var(--meta);
+  --color-faint: var(--faint);
   --color-border: var(--border);
   --color-border-soft: var(--border-soft);
   --color-border-strong: var(--border-strong);
@@ -232,34 +285,51 @@
   --color-primary-on: var(--primary-on);
   --color-primary-hover: var(--primary-hover);
   --color-primary-active: var(--primary-active);
+  --color-ink: var(--ink);
+  --color-ink-on: var(--ink-on);
+  --color-ink-hover: var(--ink-hover);
   --color-accent: var(--accent);
   --color-accent-on: var(--accent-on);
   --color-accent-hover: var(--accent-hover);
   --color-accent-active: var(--accent-active);
+  --color-accent-tint: var(--accent-tint);
+  --color-accent-ink: var(--accent-ink);
   --color-success: var(--success);
+  --color-success-tint: var(--success-tint);
   --color-info: var(--info);
+  --color-info-tint: var(--info-tint);
   --color-warn: var(--warn);
+  --color-warn-tint: var(--warn-tint);
   --color-danger: var(--danger);
+  --color-danger-tint: var(--danger-tint);
+  --color-nav: var(--nav);
+  --color-nav-fg: var(--nav-fg);
+  --color-nav-fg-strong: var(--nav-fg-strong);
   --font-sans: var(--font-body);
   --font-display: var(--font-display);
   --font-mono: var(--font-mono);
   --text-xs: var(--text-xs);
+  --text-meta: var(--text-meta);
   --text-sm: var(--text-sm);
+  --text-body: var(--text-body);
   --text-base: var(--text-base);
   --text-lg: var(--text-lg);
   --text-xl: var(--text-xl);
   --text-2xl: var(--text-2xl);
   --text-3xl: var(--text-3xl);
+  --text-4xl: var(--text-4xl);
   --leading-body: var(--leading-body);
   --leading-tight: var(--leading-tight);
   --tracking-display: var(--tracking-display);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
+  --radius-tray: var(--radius-tray);
   --radius-pill: var(--radius-pill);
   --shadow-ring: var(--elev-ring);
   --shadow-raised: var(--elev-raised);
   --shadow-card: var(--elev-card);
+  --shadow-card-hover: var(--elev-card-hover);
   --shadow-well: var(--elev-well);
   --shadow-field: var(--elev-field);
   --shadow-focus: var(--focus-ring);
