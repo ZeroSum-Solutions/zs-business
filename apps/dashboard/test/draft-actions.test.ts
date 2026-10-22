@@ -18,9 +18,9 @@ const render = (role: "owner" | "staff") => renderToString(h(DraftActions, {
 })).replaceAll("<!-- -->", "");
 
 describe("draft actions", () => {
-  it("offers an owner Approve and send and Discard, and says approval queues it", () => {
+  it("offers an owner Approve and queue and Discard, and says approval queues it", () => {
     const html = render("owner");
-    expect(html).toContain("Approve and send");
+    expect(html).toContain("Approve and queue");
     expect(html).toContain(">Discard<");
     expect(html).toContain("Approving queues it for delivery by email.");
     expect(html).toMatch(/aria-describedby="draft-note-e7f9a1b3-5c7d-4e9f-8a1b-000000000001"/);
@@ -30,7 +30,7 @@ describe("draft actions", () => {
     expect(ROLE_PERMISSIONS.staff).not.toContain(APPROVE_REPLIES);
     expect(ROLE_PERMISSIONS.owner).toContain(APPROVE_REPLIES);
     const html = render("staff");
-    expect(html).not.toContain("Approve and send");
+    expect(html).not.toContain("Approve and queue");
     expect(html).toContain(">Discard<");
     expect(html).toContain("Waiting for an owner to approve it before it is queued to send.");
   });

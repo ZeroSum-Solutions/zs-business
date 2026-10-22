@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { zonedDateKey } from "./time";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -19,14 +20,19 @@ export function weekChange(thisWeek: number, lastWeek: number): number | null {
   return Math.round(((thisWeek - lastWeek) / lastWeek) * 100);
 }
 
-export function relativeTime(iso: string, now = Date.now()): string {
+/**
+ * How long ago, as people say it: minutes, hours within the same day, then calendar days in
+ * `zone` (the viewer's by default), so yesterday evening is "Yesterday" however many hours back.
+ */
+export function relativeTime(iso: string, now = Date.now(), zone = Intl.DateTimeFormat().resolvedOptions().timeZone): string {
   const minutes = Math.round((now - Date.parse(iso)) / 60000);
   if (minutes < 1) return "Just now";
   if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.round(hours / 24);
-  return days === 1 ? "Yesterday" : `${days} days ago`;
+  const today = zonedDateKey(now, zone);
+  const day = zonedDateKey(iso, zone);
+  if (day === today) return `${Math.round(minutes / 60)} h ago`;
+  const days = Math.round((Date.parse(today) - Date.parse(day)) / 86_400_000);
+  return days <= 1 ? "Yesterday" : `${days} days ago`;
 }
 
 export function initials(name: string | null | undefined): string {

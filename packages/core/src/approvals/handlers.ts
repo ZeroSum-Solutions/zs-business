@@ -71,13 +71,15 @@ export const requestApprovalHandler: ActionHandler = {
 function decide(decision: "approved" | "rejected"): ActionHandler {
   return {
     resolveTarget: resolveExisting,
-    async handle({ tx, command, binding, now }) {
+    async handle({ tx, command, binding, clock }) {
       // A-6: owners decide, checked here too so a dispatcher without the edge hook cannot.
       await requireMember(tx, binding.tenantId, binding.actorId, "approve");
       const { payload } = decision === "approved"
         ? parseOrFail(approveApprovalCommandSchema, command)
         : parseOrFail(rejectApprovalCommandSchema, command);
       const row = (await loadApproval(tx, binding.tenantId, payload.approvalId, "update"))!;
+      // A-3: read the clock once the lock is held, so a wait on the row counts toward expiry.
+      const now = clock();
       if (row.status !== "pending") throw notPending();
       if (standing(row, now) === "expired") throw expired();
       await tx.query(

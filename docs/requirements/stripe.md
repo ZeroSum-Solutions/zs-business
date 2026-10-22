@@ -1,6 +1,6 @@
 # M5: Stripe wallet top-ups
 
-Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 3. Code follows this file;
+Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 4 (audit B3-02: S-2, S-7). Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: owners add money to the M3d prepaid wallet (`delivery.md` D-4) through Stripe Checkout,
@@ -46,11 +46,15 @@ wallet as it is now, since the wallet may have come into being in another curren
 **S-2. The Checkout Session.** After the action commits, the route asks Stripe for a session
 with `Idempotency-Key: zst-<topup id>`: one line item of the amount, `client_reference_id` and
 `metadata` and `payment_intent_data[metadata]` naming `zs_tenant` and `zs_topup`, the
-configured success and cancel URLs, and `expires_at` one hour after the top-up was created.
-Every parameter derives from the stored row and config, so a retry is the same request and
-Stripe replays the same session. Stripe refuses an `expires_at` less than 30 minutes ahead, so
-a retry later than 25 minutes after creation, or for a top-up that is no longer `pending`, is
-refused (409 `topup_closed`) instead of risking a refused or second session.
+configured success and cancel URLs and product name, and `expires_at` one hour after the top-up
+was created. Every parameter derives from the stored row: the action stores the URLs and the
+product name with the top-up (from dispatch config, like the currency), so a retry after a
+deploy changes them is still the same request and Stripe replays the same session. The route
+stores the session URL Stripe answers, once; a later retry returns it without asking Stripe. A
+top-up stored before revision 4 has no stored URLs or name, and its retries use the config.
+Stripe refuses an `expires_at` less than 30 minutes ahead, so a retry later than 25 minutes
+after creation, or for a top-up that is no longer `pending`, is refused (409 `topup_closed`)
+instead of risking a refused or second session.
 Answers: 201 `{ topup, checkoutUrl }`; Stripe unreachable, 429 or 5xx: 503 (retry with the same
 key); any other Stripe refusal: 500.
 
@@ -100,8 +104,9 @@ total, dispute ID and direction), so repeats and reordering are safe.
 
 **S-7. Tenancy.** `wallet_topups` and `wallet_billing_events` have `tenant_id`, forced RLS, the
 tenant policy, and are in the catalog isolation test. The runtime role reads its own tenant's
-rows and may insert a pending top-up through the action; it never updates money columns. The
-worker names `tenant_id` in every statement.
+rows and may insert a pending top-up through the action; the only column it may update is the
+Checkout session URL (S-2), and it never updates money columns. The worker names `tenant_id`
+in every statement.
 
 **S-8. Running it.** `GET /cron/billing` is its own Vercel function, with the same Bearer
 `CRON_SECRET` check as `/cron/delivery`; `pnpm billing:worker` is the Node loop. The kill switch
