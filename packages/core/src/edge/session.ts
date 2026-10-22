@@ -524,13 +524,13 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         const reply = await loadReply(tx, tenantId, id);
         if (reply?.status === "draft") await requireEmail(tx, tenantId, reply.contactId);
         const open = await openSendApproval(tx, tenantId, id, now);
-        // The approved proposal to send this reply that this key already approved or resumed: a
-        // retry of that call. Found whether or not it is still open, so a send that committed
-        // replays after its proposal expired; one that never ran still meets the expiry check.
+        // The proposal to send this reply that this key already approved or resumed: a retry of
+        // that call. Found whatever its status is now, so a send that committed replays after its
+        // proposal expired or was revoked; the dispatcher refuses one that never ran (A-7).
         const bound = (await tx.query<{ id: string }>(
           `SELECT a.id FROM actions x JOIN approvals a ON a.tenant_id=x.tenant_id AND a.id::text = lower(x.payload->>'approvalId')
             WHERE x.tenant_id=$1 AND x.idempotency_key=$2 AND x.action_type IN ('approval.approve', $3)
-              AND a.action_type=$4 AND a.target_type='inbox_reply' AND a.target_id=$5 AND a.status='approved'`,
+              AND a.action_type=$4 AND a.target_type='inbox_reply' AND a.target_id=$5`,
           [tenantId, idempotencyKey, RESUME_REPLY_ACTION, SEND_REPLY_ACTION, id],
         )).rows[0]?.id ?? null;
         return { reply, open, bound };

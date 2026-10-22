@@ -687,6 +687,46 @@ describe("sending through M3b approval records (I-6, approvals.md A-5..A-10)", (
     expect(await approvedEvents(drafted.result.id)).toHaveLength(1);
   });
 
+  it("a retry of an approval replays after its proposal is revoked, and a send that never ran stays refused", async () => {
+    const customer = await contact(a, { displayName: "Rhea Voss", email: "rhea@example.com" });
+    const drafted = await draft(a, customer, "Booked for Monday.");
+    tick();
+    const key = randomUUID();
+    const sent = await a.approveReply(drafted.result.id, {}, key);
+    const [proposal] = await proposals(drafted.result.id);
+    tick();
+    await a.revokeApproval(proposal!.id, {}, randomUUID());
+    expect(await proposals(drafted.result.id)).toEqual([expect.objectContaining({ status: "revoked" })]);
+    // The committed send replays its original result (I-6); the key still names only that reply.
+    expect(await a.approveReply(drafted.result.id, {}, key)).toEqual(sent);
+    const other = await draft(a, customer, "And Tuesday.");
+    expect((await rejection(a.approveReply(other.result.id, {}, key))).code).toBe("IdempotencyConflict");
+    expect(await approvedEvents(drafted.result.id)).toHaveLength(1);
+    expect(await approvedEvents(other.result.id)).toHaveLength(0);
+    // Keys are per tenant: tenant B approves its own reply with the same key.
+    tick();
+    const theirs = (await b.upsertContact({ displayName: "Rhea Voss", email: "rhea@example.com" }, randomUUID())).result.contact.id;
+    tick();
+    const theirDraft = await b.draftReply({ contactId: theirs, body: "Booked for Monday." }, randomUUID());
+    tick();
+    expect((await b.approveReply(theirDraft.result.id, {}, key)).result).toMatchObject({ status: "approved" });
+
+    // Approved under key K, the send failed, then the proposal was revoked: K is refused, nothing sends.
+    const unsent = await contact(a, { displayName: "Ivo Lind", phone: "+15555550177" });
+    const drafted2 = await draft(a, unsent, "Ready when you are.");
+    const [proposal2] = await proposals(drafted2.result.id);
+    tick();
+    const failedKey = randomUUID();
+    expect((await rejection(a.approveApproval(proposal2!.id, {}, failedKey))).details).toMatchObject({ reason: "no_email" });
+    tick();
+    await a.revokeApproval(proposal2!.id, {}, randomUUID());
+    await giveEmail(unsent, "ivo@example.com");
+    tick();
+    expect((await rejection(a.approveReply(drafted2.result.id, {}, failedKey))).details).toMatchObject({ reason: "approval_not_approved" });
+    expect(await approvedEvents(drafted2.result.id)).toHaveLength(0);
+    expect((await replyRow(drafted2.result.id))?.status).toBe("draft");
+  });
+
   /** An owner approves through the approvals route while the customer has no address, so the run fails after the decision. */
   async function approvedButUnsent(session: Session, contactId: string, body: string) {
     const drafted = await draft(a, contactId, body);
