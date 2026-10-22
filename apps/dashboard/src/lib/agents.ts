@@ -7,9 +7,9 @@ import { followUpSettingsSchema, type FollowUpRun, type FollowUpSettings, type F
 
 /** Why a run stopped, finishing "Stopped because …". */
 export const STOP_REASONS: Record<FollowUpStopReason, string> = {
-  global_killed: "agents were stopped for every business on this service",
+  global_killed: "support paused the agent",
   disabled: "the agent was turned off",
-  tenant_killed: "someone stopped the agent",
+  tenant_killed: "the team stopped the agent",
   quiet_hours: "it was quiet hours",
   daily_cap: "it reached the daily draft limit",
 };
@@ -55,29 +55,61 @@ export function timeToMinute(value: string): number {
 
 export function quietHoursLabel(settings: Pick<FollowUpSettings, "quietStartMinute" | "quietEndMinute" | "timeZone">): string {
   if (settings.quietStartMinute === settings.quietEndMinute) return "No quiet hours";
-  return `${minuteLabel(settings.quietStartMinute)} to ${minuteLabel(settings.quietEndMinute)}, ${settings.timeZone.replaceAll("_", " ")} time`;
+  return `${minuteLabel(settings.quietStartMinute)} to ${minuteLabel(settings.quietEndMinute)}, ${zoneName(settings.timeZone)}`;
 }
 
-/** The headline state: on, off, stopped here, or stopped for every business. */
-export function agentState(status: FollowUpStatus): { label: string; tone: "success" | "neutral" | "warn" | "danger" } {
-  if (status.globalKilled) return { label: "Stopped for all businesses", tone: "danger" };
-  if (status.killed) return { label: "Stopped", tone: "danger" };
+const zoneNames = new Map<string, string>();
+
+/** "Eastern Time (New York)" for "America/New_York": the zone's name in words, with its city. */
+export function zoneName(zone: string): string {
+  if (zone === "UTC") return "UTC";
+  const known = zoneNames.get(zone);
+  if (known) return known;
+  const city = zone.slice(zone.lastIndexOf("/") + 1).replaceAll("_", " ");
+  let generic: string | undefined;
+  try {
+    generic = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longGeneric" })
+      .formatToParts(0).find((part) => part.type === "timeZoneName")?.value;
+  } catch {
+    generic = undefined;
+  }
+  const name = generic && generic !== city ? `${generic} (${city})` : city;
+  zoneNames.set(zone, name);
+  return name;
+}
+
+/**
+ * Whether the server can run the agent: false once `POST /runs` answered 404, which means no
+ * model is configured (G-11). The status read does not say, so the screen learns it from Run now.
+ */
+export interface AgentReach {
+  runnable: boolean;
+}
+
+/** The headline state: on, off, stopped here, or paused by support (the global switch, G-3). */
+export function agentState(status: FollowUpStatus, reach: AgentReach = { runnable: true }): { label: string; tone: "success" | "neutral" | "warn" } {
+  if (status.globalKilled) return { label: "Paused by support", tone: "warn" };
+  if (status.killed) return { label: "Stopped", tone: "warn" };
   if (!status.settings.enabled) return { label: "Off", tone: "neutral" };
+  if (!reach.runnable) return { label: "Can't draft yet", tone: "warn" };
   if (status.canDraft) return { label: "On", tone: "success" };
-  return { label: "On, waiting", tone: "warn" };
+  return { label: "On, waiting", tone: "neutral" };
 }
 
 /** Why it cannot draft right now, as a sentence; null when it can. */
-export function blockedSentence(status: FollowUpStatus): string | null {
+export function blockedSentence(status: FollowUpStatus, reach: AgentReach = { runnable: true }): string | null {
+  // Quiet hours and the daily limit end by themselves; a missing model does not.
+  if (!reach.runnable && !status.globalKilled && !status.killed && status.settings.enabled) return "No writing service is connected yet, so it drafts nothing.";
   switch (status.blockedBy) {
     case null:
       return null;
     case "global_killed":
-      return "Agents are stopped for every business on this service. Nothing is drafted until the service turns them back on.";
+      // Owners are not told how the service is shared: support paused it, and support resumes it.
+      return "Support paused it. Nothing is drafted until support turns it back on.";
     case "disabled":
       return "It is turned off. An owner can turn it on in the agent's settings.";
     case "tenant_killed":
-      return "Someone stopped it. Nothing is drafted until an owner resumes it.";
+      return "It is stopped. Nothing is drafted until an owner resumes it.";
     case "quiet_hours":
       return `It is quiet hours (${quietHoursLabel(status.settings)}). It drafts again when they end.`;
     case "daily_cap":

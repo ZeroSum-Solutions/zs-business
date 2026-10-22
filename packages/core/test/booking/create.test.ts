@@ -8,7 +8,7 @@ import {
   type CreateBookingCommand,
 } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { bookingHandlers, createBooking, createDispatcher, crmHandlers, getAvailableSlots, type DispatchContext } from "../../src/index.js";
+import { bookingHandlers, createBooking, createDispatcher, crmHandlers, findSlots, getAvailableSlots, type DispatchContext } from "../../src/index.js";
 
 let database: TestDatabase;
 beforeAll(async () => { database = await createTestDatabase(undefined, { nonSuperuserMigrator: true }); });
@@ -322,6 +322,22 @@ describe("booking.create through the shared dispatcher (B-17..B-23)", () => {
     expect(error).toBeInstanceOf(ValidationFailed);
     expect(error).toMatchObject({ code: "ValidationFailed" });
     expect(await counts(fixture, a.tenantId)).toEqual({ bookings: 0, actions: 0, outbox: 0 });
+  });
+
+  it.each([
+    ["before", { bufferBeforeMinutes: 1440, bufferAfterMinutes: 0 }, "0001-01-01T00:00:00.000Z", "0001-01-02T00:00:00.000Z"],
+    ["after", { bufferBeforeMinutes: 0, bufferAfterMinutes: 1440 }, "9999-12-31T00:00:00.000Z", "9999-12-31T23:59:59.999Z"],
+  ])("a slot read whose range widened by the %s buffer leaves the supported instant range is ValidationFailed", async (_name, buffers, from, to) => {
+    const { a } = await world({ ...buffers, minimumNoticeMinutes: 0 });
+    const read = (resourceId: string) => database.db.tenant(a.tenantId, (tx) =>
+      findSlots(tx, a.tenantId, { resourceId, from, to }, new Date(from)));
+    const error = await rejection(read(a.id));
+    expect(error).toBeInstanceOf(ValidationFailed);
+    expect(error).toMatchObject({ code: "ValidationFailed" });
+    // The same range without buffers is an ordinary read.
+    const { a: unbuffered } = await world({ bufferBeforeMinutes: 0, bufferAfterMinutes: 0, minimumNoticeMinutes: 0 });
+    await expect(database.db.tenant(unbuffered.tenantId, (tx) =>
+      findSlots(tx, unbuffered.tenantId, { resourceId: unbuffered.id, from, to }, new Date(from)))).resolves.toMatchObject({ resourceId: unbuffered.id });
   });
 
   describe("sub-millisecond busy rows (B-13/B-15, half-open [start,end))", () => {

@@ -127,7 +127,7 @@ import {
 } from "../sites/index.js";
 import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
-import { getTopUpForCheckout, listTopUps, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
+import { getTopUpForCheckout, listTopUps, rememberCheckoutUrl, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
 import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
 import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
@@ -753,11 +753,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const { id, ...rest } = envelope(key, "wallet_topup");
       const config = billing.stripe.config;
       // S-1: the terms travel as dispatch config, never in the stored payload.
-      const terms: TopUpDispatchConfig = { topUp: { currency: config.currency, minAmount: config.minTopUp, maxAmount: config.maxTopUp } };
+      const terms: TopUpDispatchConfig = { topUp: {
+        currency: config.currency, minAmount: config.minTopUp, maxAmount: config.maxTopUp,
+        checkout: { successUrl: config.successUrl, cancelUrl: config.cancelUrl, productName: config.productName },
+      } };
       return startTopUp({
         command: { actionType: WALLET_TOPUP_CREATE_ACTION, ...rest, payload: { topupId: id, amount: request.amount } },
         dispatch: directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), terms),
         read: (topupId) => read("billing", (tx) => getTopUpForCheckout(tx, tenantId, topupId)),
+        remember: (topupId, url) => read("billing", (tx) => rememberCheckoutUrl(tx, tenantId, topupId, url)),
         stripe: billing.stripe,
         tenantId,
         now: new Date(readClock(deps.clock)),

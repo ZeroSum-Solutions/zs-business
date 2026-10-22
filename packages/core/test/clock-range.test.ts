@@ -13,7 +13,7 @@ describe("clock range in CRM, intake and source writers", () => {
       const queries: string[] = [];
       const tx = { query: async (sql: string) => { queries.push(sql); return { rows: [], rowCount: 0 }; } } as unknown as Transaction;
       const error = await writers[actionType]!.handle({
-        tx, command: {} as ActionCommand, binding: {} as ActionBinding, now: new Date(clock), config: {}, generateId: () => "",
+        tx, command: {} as ActionCommand, binding: {} as ActionBinding, now: new Date(clock), clock: () => new Date(clock), config: {}, generateId: () => "",
       }).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(ValidationFailed);
       expect((error as Error).message).toMatch(/outside UTC years 0001 through 9999/);

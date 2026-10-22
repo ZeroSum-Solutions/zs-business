@@ -10,7 +10,7 @@ import { Card, CardTitle, Tray, TrayBody, TrayHeader, TrayTitle } from "@/compon
 import { KpiTile } from "@/components/ui/kpi-tile";
 import { SampleBadge, useSampleOnly } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, Skeleton } from "@/components/ui/states";
-import { bookingCustomerName, type HomeResults } from "@/lib/api";
+import { ApiError, bookingCustomerName, defaultMessage, type HomeResults } from "@/lib/api";
 import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
 import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useUsage } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
@@ -18,7 +18,30 @@ import { greetingLine } from "@/lib/greeting";
 import { READ_RESULTS, useCan } from "@/lib/session";
 import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey } from "@/lib/time";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
-import { appointmentsPhrase, currentMinute, groupByDay, needsLine, needsModel, nextCutoff, subscribeMinute, weekStripDays, weekStripQuery } from "./home-model";
+import {
+  appointmentsPhrase,
+  currentMinute,
+  formatWeekChange,
+  groupByDay,
+  needsLine,
+  needsModel,
+  nextCutoff,
+  nextTitle,
+  readStatus,
+  resourceTone,
+  subscribeMinute,
+  weekStripDays,
+  weekStripQuery,
+} from "./home-model";
+
+/** What a read shows when it has nothing cached and the connection is down. */
+const OFFLINE = new ApiError("network", defaultMessage("network"));
+
+/**
+ * A read with nothing cached that React Query paused offline: it waits for the connection, so
+ * show the offline note rather than skeletons. It reads again by itself once back online.
+ */
+const paused = (query: { isPending: boolean; fetchStatus: string }) => query.isPending && query.fetchStatus === "paused";
 
 interface WeekCompare {
   thisWeek: number;
@@ -47,7 +70,7 @@ function WeekTile({ id, label, compare, format, valueTestId, step = 1, className
       value={compare.thisWeek}
       format={(value) => format(Math.round(value / step) * step)}
       {...(change === null ? {} : { delta: change })}
-      formatDelta={(value) => `${Math.abs(value)}%`}
+      formatDelta={formatWeekChange}
       deltaLabel={change === null ? "None in the same span last week" : "vs last week"}
       sparkline={false}
       {...(className ? { className } : {})}
@@ -178,7 +201,9 @@ function ResultsSection() {
         <TrayTitle id="results-title">Results</TrayTitle>
         {results.isSuccess ? <RangesNote data={results.data} /> : null}
       </TrayHeader>
-      {results.isPending ? (
+      {paused(resources) || paused(results) ? (
+        <ErrorNote error={OFFLINE} retry={() => (resources.isPending ? resources.refetch() : results.refetch())} />
+      ) : results.isPending ? (
         // Busy, so the layout below waits for the real tiles, which are taller than these.
         <div aria-busy="true" aria-label="Loading results" className="grid grid-cols-2 gap-1.5 lg:grid-cols-[2fr_1fr_1fr] lg:gap-2"><Skeleton className="col-span-2 h-40 lg:col-span-1" /><Skeleton className="h-40" /><Skeleton className="h-40" /></div>
       ) : results.isError ? (
@@ -244,7 +269,7 @@ function UsageCard({ className }: { className?: string }) {
       <TrayHeader>
         <div className="flex flex-wrap items-center gap-2"><TrayTitle id="usage-title">Wallet and usage</TrayTitle><SampleBadge /></div>
       </TrayHeader>
-      {usage.isPending ? <Card><LoadingRows rows={3} /></Card> : usage.isError ? <Card><ErrorNote error={usage.error} retry={() => usage.refetch()} /></Card> : (
+      {paused(usage) ? <Card><ErrorNote error={OFFLINE} retry={() => usage.refetch()} /></Card> : usage.isPending ? <Card><LoadingRows rows={3} /></Card> : usage.isError ? <Card><ErrorNote error={usage.error} retry={() => usage.refetch()} /></Card> : (
         <TrayBody className="sm:grid-cols-3">
           <Card className="sm:col-span-3">
             <p className="text-sm font-bold text-muted">Balance</p>
@@ -288,7 +313,7 @@ function ChecklistCard({ className }: { className?: string }) {
       </TrayHeader>
       <Card>
         <p className="sr-only">{open > 0 ? `${open} need${open === 1 ? "s" : ""} you` : "Everything is connected"}</p>
-        {checklist.isPending ? <LoadingRows rows={3} /> : checklist.isError ? <ErrorNote error={checklist.error} retry={() => checklist.refetch()} /> : (
+        {paused(checklist) ? <ErrorNote error={OFFLINE} retry={() => checklist.refetch()} /> : checklist.isPending ? <LoadingRows rows={3} /> : checklist.isError ? <ErrorNote error={checklist.error} retry={() => checklist.refetch()} /> : (
           <ul className="divide-y divide-border">
             {checklist.data.map((item) => (
               <li key={item.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
@@ -324,7 +349,7 @@ function NextAppointments({ needs, className }: { needs: Needs; className?: stri
         <TrayLink href="/calendar">Calendar</TrayLink>
       </TrayHeader>
       {/* Times need the calendar's zone, so wait for the resources too. */}
-      {bookings.isPending || resources.isPending ? <Card><LoadingRows rows={3} /></Card> : bookings.isError ? <Card><ErrorNote error={bookings.error} retry={() => bookings.refetch()} /></Card> : resources.isError ? <Card><ErrorNote error={resources.error} retry={() => resources.refetch()} /></Card> : upcoming.length === 0 ? (
+      {paused(bookings) || paused(resources) ? <Card><ErrorNote error={OFFLINE} retry={needs.retry} /></Card> : bookings.isPending || resources.isPending ? <Card><LoadingRows rows={3} /></Card> : bookings.isError ? <Card><ErrorNote error={bookings.error} retry={() => bookings.refetch()} /></Card> : resources.isError ? <Card><ErrorNote error={resources.error} retry={() => resources.refetch()} /></Card> : upcoming.length === 0 ? (
         <EmptyState title="No appointments coming up">Open slots show on the calendar.</EmptyState>
       ) : (
         <TrayBody className="flex-1 content-start">
@@ -346,7 +371,7 @@ function NextAppointments({ needs, className }: { needs: Needs; className?: stri
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
                           <Avatar name={customer} size="sm" />
                           <span className="min-w-0 truncate text-caption text-fg-2">{customer ?? "No customer linked"}</span>
-                          {resource ? <Badge className="ml-auto" tone={resource.id === resources.data?.[0]?.id ? "accent" : "neutral"}>{resourceLabel(resource)}</Badge> : null}
+                          {resource ? <Badge className="ml-auto" tone={resourceTone(resource.id, resources.data)}>{resourceLabel(resource)}</Badge> : null}
                         </div>
                       </div>
                     </li>
@@ -393,7 +418,7 @@ function useNeeds() {
   const today = now ?? Date.parse(from);
   const model = needsModel({
     waiting,
-    statuses: reads.map((read) => read.status),
+    statuses: reads.map(readStatus),
     checklist: checklist.data,
     threads: threads.data?.pages[0]?.items,
     bookings: bookings.data?.items,
@@ -401,7 +426,7 @@ function useNeeds() {
     zone,
   });
   const retry = () => {
-    for (const read of reads) if (read.isError) void read.refetch();
+    for (const read of reads) if (read.isError || paused(read)) void read.refetch();
   };
   return { ...model, clock: now, now: today, waiting, threads, checklist, bookings, resources, retry };
 }
@@ -421,12 +446,13 @@ function peopleLine(names: string[]): string {
 
 /** What needs the owner now, first on every screen size (BRIEF: "what needs me now"). */
 function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
-  const { waiting, threads, checklist, bookings, resources, next, zone, actions, people, count, state } = needs;
+  const { waiting, threads, checklist, bookings, resources, next, now, zone, actions, people, count, state } = needs;
   const sampleOnly = useSampleOnly();
   const open = actions.length;
   // Never claim "clear" or "nothing" before the answer is in: say so while loading or after a failure.
-  const unknown = (query: { isPending: boolean; isError: boolean }) =>
-    query.isPending ? { title: "Checking…", detail: "Loading" } : query.isError ? { title: "Couldn't check", detail: "Open to try again" } : null;
+  const unknown = (query: { isPending: boolean; isError: boolean; fetchStatus: string }) =>
+    paused(query) ? { title: "Couldn't check", detail: "You look offline" }
+      : query.isPending ? { title: "Checking…", detail: "Loading" } : query.isError ? { title: "Couldn't check", detail: "Open to try again" } : null;
   const inbox = unknown(threads);
   // The time needs the calendar's zone, so it waits for the resources too.
   const calendar = unknown(bookings) ?? (next ? unknown(resources) : null);
@@ -437,7 +463,7 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
   const inboxTitle = inbox?.title ?? (waiting > 0 ? `${formatNumber(waiting)} waiting for you` : threads.hasNextPage ? "No recent replies waiting" : "Inbox clear");
   // The count reads the newest page of threads; with more pages, the claim says "recent".
   const inboxDetail = inbox?.detail ?? (waiting > 0 ? "Replies and reviews in Inbox" : threads.hasNextPage ? "Older conversations not checked" : "No replies or reviews waiting");
-  const calendarTitle = calendar?.title ?? (next ? `Next: ${formatTime(next.startsAt, zone)}, ${formatDay(next.startsAt, zone)}` : "No appointments coming up");
+  const calendarTitle = calendar?.title ?? (next ? nextTitle(next.startsAt, now, zone) : "No appointments coming up");
   const calendarDetail = calendar?.detail ?? (next ? (next.title ?? customer ?? "Next appointment") : "Open slots are on the calendar");
   const connectionsTitle = connections?.title ?? (open > 0 ? `${formatNumber(open)} connection${open === 1 ? "" : "s"} need${open === 1 ? "s" : ""} you` : "Everything is connected");
   // Live mode still reads the sample checklist (see SampleBadge); the tile says so too.
@@ -474,7 +500,10 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
             !inbox && people.length > 0 ? (
               <span className="mt-2.5 flex items-center gap-2.5">
                 <span aria-hidden className="flex shrink-0 -space-x-2">
-                  {people.slice(0, 4).map((name, index) => <Avatar key={`${name}-${index}`} name={name} size="sm" className="ring-2 ring-surface" />)}
+                  {/* A solid disc under each avatar, so an overlapping outline never crosses the initials. */}
+                  {people.slice(0, 4).map((name, index) => (
+                    <span key={`${name}-${index}`} className="rounded-pill bg-surface ring-2 ring-surface"><Avatar name={name} size="sm" /></span>
+                  ))}
                 </span>
                 <span className="min-w-0 truncate text-caption text-fg-2">{peopleLine(people)}</span>
               </span>
@@ -491,7 +520,7 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
               <span className="mt-2.5 flex flex-wrap items-center gap-2">
                 <Avatar name={customer} size="sm" />
                 <span className="min-w-0 truncate text-caption text-fg-2">{customer ?? "No customer linked"}</span>
-                {resource ? <Badge>{resourceLabel(resource)}</Badge> : null}
+                {resource ? <Badge tone={resourceTone(resource.id, resources.data)}>{resourceLabel(resource)}</Badge> : null}
               </span>
             ) : undefined,
           )}
@@ -507,7 +536,7 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
                     <p className="text-caption text-muted">{item.detail}</p>
                   </div>
                   {item.actionLabel ? (
-                    <Button asChild variant={index === 0 ? "ink" : "secondary"} className="shrink-0">
+                    <Button asChild variant={index === 0 ? "primary" : "secondary"} className="shrink-0">
                       <Link href="/account/connections">{item.actionLabel}</Link>
                     </Button>
                   ) : null}
@@ -534,7 +563,10 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
 function WeekStrip({ now, className }: { now: number | null; className?: string }) {
   const zone = useDisplayZone();
   const resources = useResources();
-  if (now === null || resources.isPending) return <div aria-hidden className={cn("h-[78px]", className)} />;
+  if (paused(resources)) {
+    return <div className={cn("tray p-1.5!", className)}><ErrorNote error={OFFLINE} retry={() => resources.refetch()} /></div>;
+  }
+  if (now === null || resources.isPending) return <div aria-hidden className={cn("h-[102px]", className)} />;
   return <WeekDays now={now} zone={zone} className={className} />;
 }
 
@@ -543,10 +575,10 @@ function WeekDays({ now, zone, className }: { now: number; zone: string; classNa
   const monday = addDays(today, 1 - weekdayOf(today));
   const query = useMemo(() => weekStripQuery(monday, zone), [monday, zone]);
   const bookings = useBookings(query);
-  if (bookings.isError) {
+  if (bookings.isError || paused(bookings)) {
     return (
       <div className={cn("tray p-1.5!", className)}>
-        <ErrorNote error={bookings.error} message="Couldn't load this week's appointments." retry={() => bookings.refetch()} />
+        <ErrorNote error={bookings.error ?? OFFLINE} message={bookings.isError ? "Couldn't load this week's appointments." : undefined} retry={() => bookings.refetch()} />
       </div>
     );
   }
@@ -554,30 +586,36 @@ function WeekDays({ now, zone, className }: { now: number; zone: string; classNa
   // Until the week is read, no day claims to be free: the dots wait and the list says it is busy.
   const loading = bookings.isPending;
   return (
-    <ol aria-label="Days this week" aria-busy={loading || undefined} className={cn("tray grid grid-cols-7 gap-0.5 p-1.5!", className)}>
-      {days.map((day) => {
-        const { key, count } = day;
-        const isToday = key === today;
-        const past = key < today;
-        const [weekday = "", rest = ""] = formatDateKey(key, "long").split(", ");
-        const label = `${weekday}, ${rest}${isToday ? ", today" : ""}${loading ? "" : appointmentsPhrase(day)}`;
-        return (
-          <li
-            key={key}
-            aria-label={label}
-            aria-current={isToday ? "date" : undefined}
-            className={cn(
-              "flex flex-col items-center gap-0.5 rounded-[20px] py-2 text-[11px] font-bold tracking-[0.04em] uppercase",
-              isToday ? "bg-surface text-accent-ink shadow-card" : past ? "text-muted" : "text-fg-2",
-            )}
-          >
-            <span aria-hidden>{weekday.slice(0, 3)}</span>
-            <b aria-hidden className={cn("tabular text-lg leading-6 font-extrabold tracking-normal", isToday ? "text-accent-ink" : past ? "text-muted" : "text-fg")}>{Number(key.slice(8))}</b>
-            <i aria-hidden className={cn("size-1.5 rounded-pill", loading ? "skeleton" : day.known === "unknown" ? "ring-1 ring-border-strong ring-inset" : count > 0 ? "bg-primary" : "bg-transparent")} />
-          </li>
-        );
-      })}
-    </ol>
+    <div className={className}>
+      <ol aria-label="Days this week" aria-busy={loading || undefined} className="tray grid grid-cols-7 gap-0.5 p-1.5!">
+        {days.map((day) => {
+          const { key, count } = day;
+          const isToday = key === today;
+          const past = key < today;
+          const [weekday = "", rest = ""] = formatDateKey(key, "long").split(", ");
+          const label = `${weekday}, ${rest}${isToday ? ", today" : ""}${loading ? "" : appointmentsPhrase(day)}`;
+          return (
+            <li
+              key={key}
+              aria-label={label}
+              aria-current={isToday ? "date" : undefined}
+              className={cn(
+                "flex flex-col items-center gap-0.5 rounded-[20px] py-2 text-[11px] font-bold tracking-[0.04em] uppercase",
+                isToday ? "bg-surface text-accent-ink shadow-card" : past ? "text-muted" : "text-fg-2",
+              )}
+            >
+              <span aria-hidden>{weekday.slice(0, 3)}</span>
+              <b aria-hidden className={cn("tabular text-lg leading-6 font-extrabold tracking-normal", isToday ? "text-accent-ink" : past ? "text-muted" : "text-fg")}>{Number(key.slice(8))}</b>
+              <i aria-hidden className={cn("size-1.5 rounded-pill", loading ? "skeleton" : day.known === "unknown" ? "ring-1 ring-border-strong ring-inset" : count > 0 ? "bg-primary" : "bg-transparent")} />
+            </li>
+          );
+        })}
+      </ol>
+      {/* The dots' key; each day's name already says how many appointments it has. */}
+      <p aria-hidden className="mt-1.5 flex items-center justify-end gap-1.5 px-2 text-xs text-meta">
+        <i className="size-1.5 rounded-pill bg-primary" />Days with appointments
+      </p>
+    </div>
   );
 }
 

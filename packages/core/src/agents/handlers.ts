@@ -247,7 +247,7 @@ export const skipHandler: ActionHandler = {
  */
 export const draftHandler: ActionHandler = {
   resolveTarget: resolveNewDecision,
-  async handle({ tx, command, binding, now }) {
+  async handle({ tx, command, binding, clock }) {
     const { payload } = parseOrFail(draftFollowUpCommandSchema, command);
     const tenantId = binding.tenantId;
     // Lock order: global (shared advisory), then the tenant's settings row. Kills take the same.
@@ -257,6 +257,8 @@ export const draftHandler: ActionHandler = {
     // G-7: hold the customer while checking that this is still their latest request. Linking a
     // request to them locks the same row, so none can land between the check and the draft.
     await tx.query("SELECT 1 FROM crm_contacts WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [tenantId, payload.contactId]);
+    // Read the clock once the locks are held, so a wait on them counts toward quiet hours.
+    const now = clock();
     let reason: FollowUpSkipReason | null = gate(controls, globalKilled, now);
     if (!reason && (await draftsToday(tx, tenantId, now)) >= controls.settings.maxDraftsPerDay) reason = "daily_cap";
     reason ??= await checkCandidate(tx, tenantId, inquiry, controls.settings, now);
