@@ -2,7 +2,7 @@
 
 import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, WarningCircle } from "@phosphor-icons/react";
 import Link from "next/link";
-import { type ReactNode, useMemo, useSyncExternalStore } from "react";
+import { type ReactNode, useMemo, useState, useSyncExternalStore } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,7 @@ import { resourceLabel } from "@/lib/resources";
 import { READ_RESULTS, useCan } from "@/lib/session";
 import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey, zonedParts } from "@/lib/time";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
-import { appointmentsPhrase, currentMinute, groupByDay, needsLine, needsModel, subscribeMinute, weekStripDays, weekStripQuery } from "./home-model";
+import { appointmentsPhrase, currentMinute, groupByDay, needsLine, needsModel, nextCutoff, subscribeMinute, weekStripDays, weekStripQuery } from "./home-model";
 
 interface WeekCompare {
   thisWeek: number;
@@ -310,15 +310,17 @@ function ChecklistCard({ className }: { className?: string }) {
 }
 
 function NextAppointments({ className }: { className?: string }) {
-  const from = useMemo(() => new Date().toISOString(), []);
+  const now = useNowMinute();
+  // Days, headings and times share one zone, so a calendar elsewhere never splits a day.
+  const zone = useDisplayZone();
+  const from = useBookingCutoff(now, zone);
   // The API returns the next four in start order, however many bookings there are.
   const bookings = useBookings({ from, limit: 4 });
   const resources = useResources();
   const nameOf = (id: string) => resources.data?.find((item) => item.id === id);
   const upcoming = bookings.data?.items ?? [];
-  // Days, headings and times share one zone, so a calendar elsewhere never splits a day.
-  const zone = useDisplayZone();
-  const days = groupByDay(upcoming, from, zone);
+  // Headings follow the minute clock, so "Tomorrow" becomes "Later today" at midnight.
+  const days = groupByDay(upcoming, now ?? from, zone);
   return (
     <Tray className={className} aria-labelledby="next-title">
       <TrayHeader>
@@ -368,15 +370,24 @@ function useNowMinute(): number | null {
   return useSyncExternalStore(subscribeMinute, currentMinute, () => null);
 }
 
+/** When the next appointments are read from: set on mount, moved on once the day changes. */
+function useBookingCutoff(now: number | null, zone: string): string {
+  const [cutoff, setCutoff] = useState(() => new Date().toISOString());
+  const next = nextCutoff(cutoff, now, zone);
+  if (next !== cutoff) setCutoff(next);
+  return next;
+}
+
 /** Who and what needs the owner now; Home's lede counts the same items as the tray shows. */
 function useNeeds() {
   const waiting = useInboxCount();
   const threads = useThreads();
   const checklist = useChecklist();
-  const from = useMemo(() => new Date().toISOString(), []);
+  const now = useNowMinute();
+  const zone = useDisplayZone();
+  const from = useBookingCutoff(now, zone);
   const bookings = useBookings({ from, limit: 4 });
   const resources = useResources();
-  const zone = useDisplayZone();
   // Every read the count rests on: the inbox count is the threads' first page.
   const reads = [threads, checklist, bookings, resources];
   const model = needsModel({
@@ -385,7 +396,7 @@ function useNeeds() {
     checklist: checklist.data,
     threads: threads.data?.pages[0]?.items,
     bookings: bookings.data?.items,
-    from,
+    now: now ?? from,
     zone,
   });
   const retry = () => {

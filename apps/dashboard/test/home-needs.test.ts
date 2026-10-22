@@ -34,7 +34,7 @@ describe("Home's next appointment in the needs-you count", () => {
     const now = "2026-10-22T02:00:00.000Z";
     // A Tokyo calendar's booking at 2:00 AM Thursday in New York, 3:00 PM Thursday in Tokyo.
     const next = { startsAt: "2026-10-22T06:00:00.000Z" };
-    const model = needsModel({ ...quiet, bookings: [next], from: now, zone: NEW_YORK });
+    const model = needsModel({ ...quiet, bookings: [next], now, zone: NEW_YORK });
     expect(model.zone).toBe(NEW_YORK);
     // Tomorrow in New York, where Next appointments shows it: not one of today's needs.
     expect(model.count).toBe(0);

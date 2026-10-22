@@ -31,8 +31,8 @@ export interface NeedsInput<A, B> {
   threads: { name: string; needsReply: boolean; needsReview: boolean }[] | undefined;
   /** The next appointments, in start order. */
   bookings: B[] | undefined;
-  /** When the bookings were read from. */
-  from: string;
+  /** The live clock: what "today" is, apart from when the bookings were read. */
+  now: string | number;
   /** The display zone: Next appointments reads days and times in it too, so they agree. */
   zone: string;
 }
@@ -43,7 +43,7 @@ export function needsModel<A extends { status: string }, B extends { startsAt: s
   const next = input.bookings?.[0];
   const actions = input.checklist?.filter((item) => item.status === "action") ?? [];
   const people = input.threads?.filter((thread) => thread.needsReply || thread.needsReview).map((thread) => thread.name) ?? [];
-  const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(input.from, zone) : false;
+  const nextToday = next ? zonedDateKey(next.startsAt, zone) === zonedDateKey(input.now, zone) : false;
   const count = (input.waiting > 0 ? 1 : 0) + (actions.length > 0 ? 1 : 0) + (nextToday ? 1 : 0);
   return { next, zone, actions, people, state: needsState(input.statuses), count };
 }
@@ -93,6 +93,15 @@ export function subscribeMinute(onChange: () => void): () => void {
   };
   arm();
   return () => clearTimeout(timer);
+}
+
+/**
+ * When Home reads its next appointments from. It stays put while the minute clock ticks, so the
+ * read is not repeated every minute, and moves to `now` once the display zone's day changes.
+ */
+export function nextCutoff(cutoff: string, now: number | null, zone: string): string {
+  if (now === null || zonedDateKey(now, zone) === zonedDateKey(cutoff, zone)) return cutoff;
+  return new Date(now).toISOString();
 }
 
 /** The current minute, as epoch ms. */
