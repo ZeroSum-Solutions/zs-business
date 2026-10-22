@@ -115,11 +115,12 @@ export function createTwilioInboundSession(deps: EdgeDependencies, options: { re
           WHERE n.tenant_id=$1`, [tenantId.data])).rows[0]);
       if (!number || number.phone_number !== message.To) return { handled: false, reason: "unknown_number" };
       if (!contactPhoneSchema.safeParse(message.From).success) return { handled: false, reason: "sender_not_e164" };
-      const session = createInboundSmsSession(deps, tenantId.data, tenantSmsReplies(number.name, number.help_reply));
+      // With Twilio's own opt-out handling on, it has answered already; a second reply would be noise.
+      const replies = keywordReplies === "app" ? tenantSmsReplies(number.name, number.help_reply) : null;
+      const session = createInboundSmsSession(deps, tenantId.data, replies);
       const result = await session.receive({ from: message.From, body: message.Body, providerMessageId: message.MessageSid });
       if (result.keyword === null) return { handled: false, reason: "not_a_keyword" };
-      // With Twilio's own opt-out handling on, it has answered already; a second reply would be noise.
-      return { handled: true, keyword: result.keyword, reply: keywordReplies === "app" ? result.reply : null };
+      return { handled: true, keyword: result.keyword, reply: result.reply };
     },
   };
 }

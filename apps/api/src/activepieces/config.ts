@@ -5,7 +5,7 @@
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { activepiecesKeySecretSchema, activepiecesLoopbackSchema, assertLoopbackOnly } from "../config.js";
-import { PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
+import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
@@ -21,7 +21,7 @@ const onSchema = z.object({
   ACTIVEPIECES_KEY_PREVIOUS_SECRET: activepiecesKeySecretSchema.optional(),
   ACTIVEPIECES_ALLOW_LOOPBACK: activepiecesLoopbackSchema,
   ACTIVEPIECES_WORKER_ID: z.string().min(1).max(200).default("activepieces"),
-  // One cron run stops starting work this long after it began; it must fit the function's limit.
+  // One run stops starting work this long after it began; the cron entry allows at most 20 s.
   ACTIVEPIECES_RUN_BUDGET_MS: int(1_000, 600_000).default(20_000),
   ACTIVEPIECES_CLAIM_LIMIT: int(1, 50).default(2),
   ACTIVEPIECES_REQUEST_TIMEOUT_MS: int(1_000, 30_000).default(5_000),
@@ -48,6 +48,15 @@ export interface ActivepiecesWorkerEnv {
   readonly runner: ActivepiecesRunnerEnv | null;
   /** Null when CRON_SECRET is unset: the cron route answers 404. */
   readonly cronSecret: string | null;
+}
+
+/**
+ * The cron entry refuses a budget its Vercel function (stopped at 30 s) could not finish; the Node
+ * worker keeps the longer limit. A run cut short is safe (leases, W-8).
+ */
+export function assertActivepiecesCronFits(runner: ActivepiecesRunnerEnv | null): void {
+  if (runner !== null && runner.budgetMs > DELIVERY_CRON_BUDGET_LIMIT_MS)
+    throw new Error(`Invalid environment: ACTIVEPIECES_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
 
 const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
