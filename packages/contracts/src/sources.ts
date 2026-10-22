@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
-import { supportedInstantSchema } from "./instant.js";
+import { storedInstantSchema, supportedInstantSchema } from "./instant.js";
 import { isPostgresText } from "./json.js";
 
 // M3b source record (docs/requirements/approvals.md F-1..F-8): where a fact came from and
 // until when it counts as fresh. Root re-exports this module; shared schemas are lazy.
 const idSchema = z.lazy(() => uuidSchema);
-const instantSchema = supportedInstantSchema;
+// Strict on input, tolerant on output: records and replays return what was stored.
+const instantSchema = storedInstantSchema;
 
 /** F-2: what a source record may describe. */
 export const sourceSubjectTypeSchema = z.enum(["contact", "deal", "booking", "booking_resource", "intake_item"]);
@@ -26,7 +27,7 @@ export const observeSourceInputSchema = z.strictObject({
   subject: sourceSubjectSchema,
   source: sourceNameSchema,
   sourceRef: sourceRefSchema.optional(),
-  observedAt: instantSchema.optional(),
+  observedAt: supportedInstantSchema.optional(),
   freshForMinutes: freshForMinutesSchema.optional(),
 });
 export const observeSourceCommandSchema = z.lazy(() => actionCommandSchema.extend({

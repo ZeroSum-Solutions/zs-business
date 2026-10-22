@@ -167,6 +167,24 @@ describe("source routes", () => {
     expect(sourceListSchema.parse(list.body).items.map((item) => [item.source, item.fresh])).toEqual([["owner", true], ["website", false]]);
   });
 
+  it("replays a result an earlier release stored with an instant before year 0001", async () => {
+    // The old code bound a Date, which moved 0001-01-01T00:00:00.000Z back 58 s under a
+    // local mean time zone; such stored results must still replay byte for byte.
+    const { contactId } = await contactAndDeal(h, h.a, `${randomUUID()}@example.com`);
+    const key = randomUUID();
+    const body = { subject: { type: "contact", id: contactId }, source: "website", freshForMinutes: 1 };
+    expect((await observe(h.a.token, body, key)).status).toBe(200);
+    const legacy = "0000-12-31T23:59:02.000Z";
+    await h.database.pool.query(
+      `UPDATE actions SET result = jsonb_set(jsonb_set(result, '{record,observedAt}', to_jsonb($3::text)),
+         '{record,freshUntil}', to_jsonb($3::text)) WHERE tenant_id=$1 AND idempotency_key=$2`, [h.a.tenantId, key, legacy]);
+    const stored = (await h.database.pool.query("SELECT id, result FROM actions WHERE tenant_id=$1 AND idempotency_key=$2",
+      [h.a.tenantId, key])).rows[0];
+    const replayed = await observe(h.a.token, body, key);
+    expect(replayed.status).toBe(200);
+    expect(replayed.body).toEqual({ actionId: stored.id, result: stored.result });
+  });
+
   it("checks the subject's permission, its existence and the clock", async () => {
     const forbidden = await observe(staff.token, { subject: { type: "intake_item", id: randomUUID() }, source: "website" });
     expect(forbidden.status).toBe(403);

@@ -9,7 +9,11 @@ Revision 2026-10-22 (audit B1-02): C-9 limits `recordedAt` to the supported inst
 UTC years 0001 through 9999. A time outside it is refused with `ValidationFailed` and
 nothing is written; before this, year 0000 passed the boundary and Postgres failed the
 request with a 500. Source observations (approvals.md F-4) and booking instants
-(booking.md) apply the same range.
+(booking.md) apply the same range. The range binds client input only: records, reads and
+replayed results accept any UTC ISO instant with milliseconds (`storedInstantSchema`), so a
+result an earlier release stored outside it still replays unchanged. Server timestamps
+(`createdAt`, `updatedAt`, consent `recordedAt` on intake) come from the injected clock, which
+must also lie in the range; outside it the write fails with `ValidationFailed`, nothing written.
 This slice covers contact identity, consent storage, deal creation and stage moves.
 It provides no messaging, contact merge, general contact edit or pipeline editor.
 
