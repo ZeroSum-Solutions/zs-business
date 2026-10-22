@@ -2,6 +2,7 @@
 // routes' filters and paging stands in, with more rows than the old 2,000-row page cap.
 import { describe, expect, it } from "vitest";
 import { createHttpClient } from "../src/lib/api/http-client";
+import { weekStripQuery } from "../src/components/home/home-model";
 
 const TENANT = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70";
 const RESOURCE = "0b7e5c1a-9d2f-4a3b-8c6d-1e2f3a4b5c61";
@@ -73,6 +74,16 @@ describe("reads past 2,000 rows", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.searchParams.get("from")).toBe("2026-10-20T04:00:00.000Z");
     expect(requests[0]?.searchParams.get("to")).toBe("2026-10-21T04:00:00.000Z");
+  });
+
+  it("counts a busy week on Home past one page of 100", async () => {
+    const monday = Date.parse("2026-10-19T13:00:00.000Z");
+    const week = Array.from({ length: 150 }, (_, n) => booking(n, new Date(monday + (n % 7) * 24 * HOUR + Math.floor(n / 7) * 1_000).toISOString()));
+    const { api, requests } = fakeApi({ bookings: week });
+    const list = await api.listBookings(weekStripQuery("2026-10-19", "America/New_York"));
+    expect(list.items).toHaveLength(150);
+    expect(list.incomplete).toBe(false);
+    expect(requests).toHaveLength(2);
   });
 
   it("finds a customer by search however many customers come before them", async () => {

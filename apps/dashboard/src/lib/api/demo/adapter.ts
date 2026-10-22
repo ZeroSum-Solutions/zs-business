@@ -111,6 +111,8 @@ export interface DemoControls extends DemoAgentControls, DemoCalendarControls {
   delayNextWrite(ms: number): void;
   /** While on, every read of the deal list fails with a network error; writes still work. */
   failDealReads(failing: boolean): void;
+  /** While on, every read of the booking list fails with a network error. */
+  failBookingReads(failing: boolean): void;
   /** Replaces the business's pipelines, such as none, one without stages, or several. */
   setPipelines(pipelines: PipelineSummary[]): void;
   /**
@@ -162,6 +164,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   let expired = false;
   let delayNext = 0;
   let dealReadsFail = false;
+  let bookingReadsFail = false;
   let pipelines = clone(options.pipelines ?? [DEMO_PIPELINE]);
   // A copy per adapter: setOpenHours changes this business's calendars only.
   const resources = clone(DEMO_RESOURCES);
@@ -409,6 +412,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
     async listBookings(query = {}) {
       await wait();
+      if (bookingReadsFail) throw networkError();
       const fromMs = query.from ? Date.parse(query.from) : -Infinity;
       const toMs = query.to ? Date.parse(query.to) : Infinity;
       const rows: BookingView[] = [...bookings.values()]
@@ -749,6 +753,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
     failDealReads(failing) {
       dealReadsFail = failing;
+    },
+
+    failBookingReads(failing) {
+      bookingReadsFail = failing;
     },
 
     setPipelines(next) {

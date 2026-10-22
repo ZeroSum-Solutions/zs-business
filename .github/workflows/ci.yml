@@ -47,7 +47,8 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # The suite takes about 6 minutes; the browser install alone has taken 6 on a slow apt mirror.
+    timeout-minutes: 15
     env:
       CI: "true"
     steps:

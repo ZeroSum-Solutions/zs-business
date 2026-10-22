@@ -202,6 +202,19 @@ describe("suppression and unsubscribe (D-9)", () => {
     expect(await h.delivery(tenant, allowed.messageId)).toMatchObject({ status: "sent" });
   });
 
+  it("a STOP padded past 64 characters still suppresses, and the next SMS is blocked (D-9)", async () => {
+    const phone = "+15555550143";
+    const contactId = await h.contact(tenant, { phone, consent: { sms: "granted" } });
+    const sms = createInboundSmsSession(edge, tenant);
+    expect(await sms.receive({ from: phone, body: " ".repeat(65) + "STOP", providerMessageId: "in-pad-1" }))
+      .toEqual({ keyword: "stop", reply: DEFAULT_SMS_REPLIES.stop });
+    expect(await h.rows("SELECT reason, source FROM suppressions WHERE tenant_id=$1 AND address=$2", [tenant, phone]))
+      .toEqual([{ reason: "stop", source: "sms:in-pad-1" }]);
+    const blocked = await h.enqueue(tenant, { contactId, channel: "sms" });
+    await h.worker().runOnce();
+    expect(await h.delivery(tenant, blocked.messageId)).toMatchObject({ status: "blocked", final_reason: "suppressed" });
+  });
+
   it("START does not lift a suppression recorded for another reason", async () => {
     const phone = "+15555550143";
     await h.service((tx) => tx.query(
