@@ -110,7 +110,11 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
     // A key rotation keeps the token working through `previous`; a token signed by another key does not.
     expect((await h.inbound({ current: OTHER_KEY, previous: KEY }).authenticate(`Bearer ${created.secret}`)).tokenId).toBe(created.token.id);
     expect(await h.inbound({ current: OTHER_KEY }).authenticate(`Bearer ${created.secret}`).catch(code)).toBe("Unauthenticated");
-    for (const header of [undefined, "", created.secret, `Basic ${created.secret}`, `Bearer ${created.secret.slice(0, -2)}AA`])
+    // Change the next-to-last character: it carries six signature bits, so the result always
+    // differs (a fixed "AA" suffix matched a real token ending in "AA", about 1 run in 256).
+    const forged = `${created.secret.slice(0, -2)}${created.secret.at(-2) === "A" ? "B" : "A"}${created.secret.at(-1)}`;
+    expect(forged).not.toBe(created.secret);
+    for (const header of [undefined, "", created.secret, `Basic ${created.secret}`, `Bearer ${forged}`])
       expect(await inbound.authenticate(header).catch(code), String(header)).toBe("Unauthenticated");
 
     h.clock.advance(31 * 86_400_000);
