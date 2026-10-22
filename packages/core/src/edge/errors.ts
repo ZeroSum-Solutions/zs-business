@@ -67,10 +67,12 @@ const CONFLICT_REASONS = new Set([
   "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other", "topup_closed", "wallet_currency",
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
-  "stale_release", "host_in_use", "grant_changed",
+  "stale_release", "host_in_use", "grant_changed", "invalid_currency",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
+/** H-1 revision 4: an invalid_currency conflict names the deal's stored code (three capitals). */
+const STORED_CURRENCY = /^[A-Z]{3}$/;
 /** I-6: an approved_by_other conflict names the owner who finishes the send. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -97,6 +99,8 @@ function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<s
     safe.status = details.status;
   if (safe.reason === "approved_by_other" && typeof details.approvedBy === "string" && UUID.test(details.approvedBy))
     safe.approvedBy = details.approvedBy;
+  if (safe.reason === "invalid_currency" && typeof details.currency === "string" && STORED_CURRENCY.test(details.currency))
+    safe.currency = details.currency;
   return safe;
 }
 

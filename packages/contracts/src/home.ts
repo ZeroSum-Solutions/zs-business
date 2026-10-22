@@ -31,15 +31,24 @@ export const CURRENCY_CODES: readonly string[] = Object.freeze([
 ]);
 const currencyCodes: ReadonlySet<string> = new Set(CURRENCY_CODES);
 export const currencyCodeSchema = z.string().refine((code) => currencyCodes.has(code), "Expected an ISO 4217 code such as USD");
+/**
+ * H-1 revision 4: a currency as reads show it. Deals stored under the earlier check may hold any
+ * three capitals until the owner fixes them, so reads accept that shape; writes take only
+ * currencyCodeSchema.
+ */
+export const storedCurrencyCodeSchema = z.string().regex(/^[A-Z]{3}$/, "Expected three capital letters");
+const amountMinorSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 export const dealValueSchema = z.strictObject({
   /** Minor units (cents for USD). */
-  amountMinor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  amountMinor: amountMinorSchema,
   currency: currencyCodeSchema,
 });
 export type DealValue = z.infer<typeof dealValueSchema>;
+/** A stored deal value, as lists and write results show it (H-1 revision 4). */
+export const storedDealValueSchema = z.strictObject({ amountMinor: amountMinorSchema, currency: storedCurrencyCodeSchema });
 
 export const dealDetailsSchema = z.strictObject({
-  value: dealValueSchema.nullable(),
+  value: storedDealValueSchema.nullable(),
   leadSource: leadSourceSchema.nullable(),
   wonAt: crmInstantSchema.nullable(),
 });
@@ -104,7 +113,7 @@ export const homeResultsSchema = z.strictObject({
   wonDeals: weekCompareSchema,
   /** One entry per currency with won value in either week, largest this week first. */
   revenue: z.array(z.strictObject({
-    currency: currencyCodeSchema,
+    currency: storedCurrencyCodeSchema,
     thisWeek: z.number().int().min(0),
     lastWeek: z.number().int().min(0),
     bySource: bySource(revenueSourceSchema),
