@@ -117,12 +117,20 @@ only from `.safetensors` files whose digest matches; `.ckpt`, `.pt` and other pi
 are refused.
 
 **IM-9. Product pixel lock.** For `background_remove` and `studio_background_swap` the
-adapter returns the matte, and our own code (not the vendor) builds the output: the source
-pixels where the matte is opaque, the generated background or transparency elsewhere, at the
-source's width and height. After every job the worker checks the output against the source:
-every pixel whose matte alpha is 255 must have the same RGB values. Any difference fails the
-variant with `product_pixels_changed`, and a size change fails it with `size_changed`. No
-preset relights, recolours or re-renders the product.
+adapter returns the matte and, for a swap, the generated background; our own code (not the
+vendor) builds the output. The worker first validates the matte: it must have the source's
+width and height, and its product region (alpha above 0) must cover between 2% and 98% of the
+pixels, or the variant fails `matte_invalid` (an empty or full matte never passes). The matte
+and the background are stored with their SHA-256 (`matte_sha256`). The output is a fixed
+composite: each pixel is `source × alpha + background × (1 − alpha)`, with transparency as the
+background for `background_remove`, at the source's width and height. After every job the
+worker recomputes that composite from the stored source, matte and background and requires
+byte equality with the output over every pixel whose alpha is above 0, partial alpha included.
+Any difference fails the variant with `product_pixels_changed`, and a size change fails it with
+`size_changed`. No preset relights, recolours or re-renders the product. Tests: an empty matte
+and a full matte fail `matte_invalid`; an output with one changed partial-alpha pixel fails
+`product_pixels_changed`. Whether the matte follows the product's real edge is for the owner's
+approval (IM-12); no automatic check proves it.
 
 **IM-10. Catalog facts are out of reach.** The image worker's principal holds only
 `media.variant.stage` and `media.variant.fail`. No image action writes catalog, knowledge or

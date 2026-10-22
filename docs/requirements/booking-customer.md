@@ -29,20 +29,23 @@ and changing `booking.create`.
 
 **BC-1. Table.** `booking_contacts(tenant_id, booking_id, contact_id, linked_by, linked_at,
 revision)`, primary key `(tenant_id, booking_id)`, foreign keys to the tenant's booking and
-contact, forced RLS by `tenant_id`. At most one contact per booking.
+contact, forced RLS by `tenant_id`. At most one contact per booking. `contact_id` is null while
+the booking has no customer; the row, and its `revision`, stay once created, so the revision
+only ever grows.
 
 **BC-2. Only owner-made bookings.** A booking whose `source` is `website` (it has an intake item)
 refuses a link with `Conflict` `details.reason = "intake_booking"`; its customer comes from the
 intake review only (`public-intake.md` P-12).
 
 **BC-3. Link.** `booking.contact.link` with `{ bookingId, contactId, expectedRevision }`, where
-`expectedRevision` is 0 when no link exists. It needs both `calendar` and `customers`. The
+`expectedRevision` is 0 only when the booking has never had a row. It needs both `calendar` and `customers`. The
 booking and the contact must belong to the caller's tenant; otherwise `NotFound`, never a hint
 that the other tenant's row exists. A cancelled booking can still be linked, for the record.
 
 **BC-4. Change and clear.** The same action with another `contactId` replaces the link;
-`booking.contact.unlink` with `{ bookingId, expectedRevision }` removes it. Each change bumps
-`revision`. A stale `expectedRevision` is `Conflict` `details.reason = "stale_revision"` with
+`booking.contact.unlink` with `{ bookingId, expectedRevision }` sets `contact_id` to null.
+Each change bumps `revision`; an unlink never deletes the row, so a revision read before an
+unlink stays stale after a relink. A stale `expectedRevision` is `Conflict` `details.reason = "stale_revision"` with
 `details.currentRevision`.
 
 **BC-5. Idempotent.** Both actions run through the dispatcher with an idempotency key. A replay
@@ -52,8 +55,9 @@ returns the first result, even after a later change.
 a link, `customer: { contactId, name, status: "linked" }`, where `name` is the contact's current
 name; with no link, `customer` stays null. Website bookings keep their P-12 customer.
 
-**BC-7. Contact deletion.** Deleting or erasing a contact deletes its `booking_contacts` rows in
-the same transaction; the bookings stay, with no customer.
+**BC-7. Contact deletion.** Deleting or erasing a contact sets `contact_id` to null on its
+`booking_contacts` rows and bumps their revisions in the same transaction; the bookings stay,
+with no customer.
 
 **BC-8. Book and link in one step.** The booking dialog has an optional "Who is it for?"
 contact search. On submit it runs `booking.create`, then, when a contact was picked,
@@ -71,14 +75,15 @@ test covers all three.
 
 ## First slice
 
-Migration (`booking_contacts`, RLS, delete cascade from contacts), both actions with their
+Migration (`booking_contacts`, RLS, contact deletion clearing `contact_id`), both actions with their
 contracts, the list and detail reads, the dialog's optional contact search and the detail's
 Change and Remove.
 
 Acceptance test: a staff member books 10:00 for "Ana Ruiz" in one step; the bookings list
 returns `customer: { contactId, name: "Ana Ruiz", status: "linked" }`. Linking a website booking
 is `Conflict` `intake_booking`. A second link with the old revision is `Conflict`
-`stale_revision`. Unlink returns the booking to "No customer linked". Deleting the contact
+`stale_revision`. Unlink returns the booking to "No customer linked", and a link sent with the
+revision read before the unlink, after a relink, is still `stale_revision`. Deleting the contact
 removes the link and keeps the booking. Tenant B gets `NotFound` for tenant A's booking. The
 e2e books with a customer on phone and desktop and sees the name on the calendar and on Home.
 

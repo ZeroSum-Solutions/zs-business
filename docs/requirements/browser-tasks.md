@@ -60,7 +60,8 @@ over HTTPS with its scoped token (BT-7) and opens no inbound port. It refuses to
 Browser Use Cloud. Each job runs a Chrome it launched itself.
 
 **BT-3. Targets and allowed origins.** `browser_targets` (`tenant_id, id, name, task_kind,
-allowed_origins, enabled, attested_by, attested_at, revision, updated_at`) holds what a task may
+allowed_origins, allowed_paths, sign_in_path, enabled, attested_by, attested_at, revision,
+updated_at`) holds what a task may
 visit. `allowed_origins` lists exact `https://host[:port]` origins, 1 to 5, with no wildcards. A
 navigation, redirect or new tab outside them ends the run `stopped` with reason
 `origin_denied`, before the page loads. An owner creates and enables a target with
@@ -73,10 +74,22 @@ file. This revision has one: `supplier_invoice_download` (read-only). It signs i
 invoice list, and downloads the PDF invoices dated in the requested month. There is no kind
 for claim status, payer portals or health records.
 
-**BT-5. Read-only means no change on the site.** A read-only plan may navigate, follow links,
-open menus, change filters and download files, and may submit only the target's sign-in form.
-The planner's action list has no free typing outside the sign-in fields and no submit of any
-other form. An attempt ends the run `stopped` with reason `write_refused`.
+**BT-5. Read-only means no change on the site.** The model picks steps; the runner, not the
+model, decides whether a step may run. For a read-only task kind:
+- Paths. Each target lists `allowed_paths` (1 to 10 path prefixes, set with the target, BT-3)
+  and its `sign_in_path`. A navigation or link whose path is outside them is not followed.
+- Requests. The runner intercepts every request the page makes. After sign-in, only `GET` and
+  `HEAD` requests to the allowed origins may leave; any other method (a JavaScript button that
+  posts, a fetch, a form) is aborted before it is sent. The one exception is the sign-in form's
+  own `POST` to `sign_in_path`, once per run.
+- Operations. The planner's actions are a fixed list per task kind: open an allowed URL, click a
+  link whose resolved target is an allowed `GET` URL, set a date filter that changes only the
+  query string, and download an `application/pdf` response. There is no free typing outside
+  the sign-in fields and no generic click.
+Any refused step ends the run `stopped` with reason `write_refused`. The acceptance test serves
+a fake supplier site with a `GET` delete link outside `allowed_paths`, a JavaScript button that
+`POST`s to an allowed path and a second form; each attempt ends `write_refused`, and the fake
+site's log shows no request other than `GET`, `HEAD` and the one sign-in `POST`.
 
 **BT-6. Profiles and files are per tenant.** Each (tenant, target) has its own profile at
 `<BROWSER_ROOT>/<tenantId>/<targetId>/profile`, built only from the server-derived tenant and a
@@ -107,8 +120,10 @@ store origin and path, never the query string or fragment. Per run: `maxSteps` (
 default 25), `deadlineMs` (default 600000) and `maxCostMicros`; per tenant per day: runs
 (default 5) and cost. Model usage is recorded per step as `agents.md` G-15 records it.
 Reaching a cap stops the run with `step_cap`, `deadline` or `cost_cap`. Before the job starts,
-the run reserves `maxSteps` times the step price from the wallet (`delivery.md` D-11, job kind
-`browser_run`); without funds it does not start (`insufficient_funds`). On close it captures
+the API's claim handler, in a service-role transaction like the delivery worker's
+(`delivery.md` D-10), reserves `maxSteps` times the step price for the existing `browser_runs`
+row (`delivery.md` D-11, job kind `browser_run`); without funds the claim returns nothing and
+the run ends `insufficient_funds`. On close it captures
 the steps it took and releases the rest.
 
 **BT-10. Text-only on the Cerebras lane.** The planner calls Cerebras with vision off, through

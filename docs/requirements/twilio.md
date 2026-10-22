@@ -221,7 +221,9 @@ transaction, keyed `twilio-voice:<CallSid>:optin`:
   `caller_e164`, `disclosure_version`, the exact `disclosure_text` of that version (the words
   the caller heard), and the transaction time; the table is append-only like the disclosures;
 - fills the contact's SMS consent only when it has no record (C-10 semantics): status
-  `granted`, source `twilio-voice:<CallSid>`. A recorded grant stays as it is. A recorded
+  `granted`, source `twilio-voice:<CallSid>`. That grant covers transactional texts only: it
+  never counts as marketing consent (`delivery.md` D-6, `agents.md` G-20). A recorded grant
+  stays as it is. A recorded
   denial is never replaced; then no
   event is written and the call goes to voicemail;
 - commits one `message.send_requested` event (`delivery.md` D-1): channel `sms`, purpose

@@ -23,8 +23,9 @@ only).
 
 ## Evidence and decisions
 
-- Listmonk is not run (AGPL, no tenant isolation). We build our own marketing email on the
-  delivery outbox; decided 2026-10-22 (coordinator, standing approval).
+- Listmonk is not run (AGPL, no tenant isolation); decided 2026-10-22 (supervisor brief). We
+  build our own marketing email on the delivery outbox; decided 2026-10-22 (coordinator,
+  standing approval).
 - Native newsletters are deferred until each tenant has its own verified sending domain;
   decided 2026-10-22 (coordinator, standing approval).
 - Marketing one-click unsubscribe stops marketing email only and keeps booking emails;
@@ -80,13 +81,20 @@ any reason, and an address whose local part is not a role name (`abuse`, `postma
 `noreply`, `no-reply`, `mailer-daemon`). The snapshot is frozen: later contacts are not added.
 A campaign holds at most 2,000 recipients; a larger audience fails `ValidationFailed`
 (`audience_too_large`). The D-6 checks still run for every recipient at delivery, so a consent
-withdrawn after the snapshot blocks that send.
+withdrawn after the snapshot blocks that send. Each `message.send_requested` carries the
+snapshot address, and a marketing delivery goes only to that address: when the contact's
+current address differs, the delivery blocks `address_changed` (`delivery.md` D-6) and is
+never sent to the new address. A test changes a recipient's address between approval and the
+first attempt and checks that nothing is sent to either address.
 
 **M-5. Content and footer.** A campaign has a one-line subject and a plain-text body. The
 server appends the footer when the approval is requested: the business display name, the
-postal address from BP-1 and a visible unsubscribe URL (the D-9 token page). The approved body
-includes the footer, so a later edit of the postal address does not change an approved
-campaign. `marketing.campaign.send` refuses a campaign whose stored body does not end with the
+postal address from BP-1 and the fixed placeholder `{{unsubscribe_url}}`. The approved body,
+and the digest the approval binds (M-6), include the footer with the placeholder, so a later
+edit of the postal address does not change an approved campaign. The delivery worker replaces
+the placeholder with that delivery's own D-9 token URL after the approval check (`delivery.md`
+D-6); the placeholder is the only text it may change. A test sends to three recipients and
+checks three distinct URLs, each of which unsubscribes only its own address. `marketing.campaign.send` refuses a campaign whose stored body does not end with the
 footer it built (`footer_missing`).
 
 **M-6. Planner and executor.** `marketing.campaign.draft` (permission `customers`) creates or

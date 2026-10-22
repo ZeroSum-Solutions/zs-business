@@ -86,7 +86,9 @@ worker re-checks, for every attempt:
 - suppression of the channel and address (D-9): blocked `suppressed`;
 - the contact's consent for the channel: `denied` blocks `consent_denied`; marketing, and
   every SMS, needs `granted`, or it blocks `consent_missing`; a transactional email needs no
-  recorded grant;
+  recorded grant. For a `marketing` delivery, a grant whose source starts with
+  `twilio-voice:` (`twilio.md` T-12, a caller asking for one booking-link text) does not count
+  and blocks `consent_missing` (revision 5);
 - the approval of the action that committed the event, through `DeliveryApprovals.check(tx,
   { tenantId, actionId, messageId, contentDigest })`, which must answer `approved`, or it
   blocks `approval_revoked` or `approval_missing`. `approvalsFromRecords` implements the port

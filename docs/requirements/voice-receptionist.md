@@ -65,19 +65,24 @@ a message instead), then `<Connect><Stream>`. The disclosure history is append-o
 role, like `public-intake.md` P-8. The session row records the version the caller heard.
 
 **V-4. Preflight.** In the dial callback, before any `<Connect>`, `voice.session.start` checks in
-one transaction: V-1's gates; the global and tenant kill switches and the `voice_receptionist`
-agent kind's settings (`agents.md` G-3 and G-14..G-21); V-9's limits; fewer live sessions
-than `VOICE_MAX_CONCURRENT` (default 2) across all tenants; and the wallet
-reservation (V-5). Any failure falls back to the press-1 offer or voicemail (`twilio.md` T-11,
-T-13) and records the reason on the session row. A pass inserts `voice_receptionist_sessions`
-(`call_sid` unique per tenant, `status` `connecting`) and mints a one-time stream token bound to
-tenant, session and `CallSid`, sent to the service as a `<Parameter>`.
+one transaction (the webhook's tenant scope, runtime role, as `twilio.md` T-10): V-1's gates;
+the global and tenant kill switches and the `voice_receptionist` agent kind's settings
+(`agents.md` G-3 and G-14..G-21); V-9's limits; and fewer live sessions than
+`VOICE_MAX_CONCURRENT` (default 2) across all tenants. A pass inserts
+`voice_receptionist_sessions` (`call_sid` unique per tenant, `status` `preflight`) and commits.
+A second transaction, as the service role like the delivery worker (`delivery.md` D-10),
+reserves for that existing row (V-5); only then does the session move to `connecting` and get a
+one-time stream token bound to tenant, session and `CallSid`, sent to the service as a
+`<Parameter>`. Any failure, including no funds, ends the session with the reason on its row and
+falls back to the press-1 offer or voicemail (`twilio.md` T-11, T-13). The runtime role gets no
+new wallet grant.
 
 **V-5. Caps and wallet.** `max_duration_seconds` is 30..600 (default 180). Preflight reserves the
 price of that many minutes through `delivery.md` D-11 (`reserveForJob`, `job_kind`
 `voice_minutes`, `job_id` the session id, job table `voice_receptionist_sessions`). The price is
 `voice_numbers.receptionist_minute_price_minor`, in the wallet's currency, set by the operator
-script. Without funds (`reserveForJob` returns null) there is no connect. At the end, settle captures
+script. Without funds (`reserveForJob` returns null) the session ends `insufficient_funds` and
+there is no connect. At the end, settle captures
 the price of the minutes used (rounded up to whole minutes), once, and releases the rest. The service ends the stream at the
 cap; Twilio then runs the voicemail TwiML that follows the `<Connect>`.
 

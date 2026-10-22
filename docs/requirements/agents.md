@@ -201,14 +201,16 @@ one runner:
   loopback databases. `pnpm followup:global-switch on|off` flips the global switch (G-3).
 
 **G-14. Agent kinds.** `agent_kind` is one of `inquiry_followup` (M6), `appointment_reminder`,
-`review_request` and `document_intake`; a new kind needs a revision of this file. It keys:
+`review_request`, `document_intake` and `voice_receptionist` (`voice-receptionist.md`; its
+runs are call sessions, V-4, on the `personal_data` lane); a new kind needs a revision of this
+file. It keys:
 - settings: `agent_settings` gains `agent_kind` (default `inquiry_followup`, so existing rows
   keep their meaning) and the key `(tenant_id, agent_kind)`. Its kind-specific settings sit in
   `config` (JSONB), validated by `agentKindConfigSchemas[kind]` in `packages/contracts`;
   unknown keys are `ValidationFailed`. Each kind is off by default, and a missing row reads as
   that kind's defaults with the kind off. Each kind has its own kill switch on its row (G-3),
   and the one global switch stops every kind;
-- runs: the `agent_runs_agent` check covers the four kinds; new kinds record their decisions
+- runs: the `agent_runs_agent` check covers the five kinds; new kinds record their decisions
   in `agent_decisions` (`tenant_id, id, run_id, agent_kind, subject_type, subject_id,
   contact_id, outcome, reason, message_id, approval_id, created_at`), append-only, forced RLS,
   in the catalog two-tenant test. `agent_followups` does not change;
@@ -264,7 +266,8 @@ report fixed token counts, so tests see usage without a network.
 
 **G-18. Real model adapters per lane.** Two lanes, each with its own adapter behind G-17:
 - `personal_data`: `createCerebrasModel` (Cerebras, prepaid). It serves every kind whose input
-  may hold a customer's personal data: `inquiry_followup` and `document_intake`;
+  may hold a customer's personal data: `inquiry_followup`, `document_intake` and
+  `voice_receptionist`;
 - `no_personal_data`: `createDeepSeekModel` (DeepSeek Flash). It serves only callers whose
   input holds no customer data, such as G-19's template wording suggestion.
 Each kind declares its lane in code (`AGENT_KIND_LANES`), and `modelForLane("personal_data")`
@@ -299,14 +302,22 @@ rendered from an approved template revision and never call a model at run time:
   (G-5, G-8).
 - An owner may ask for a suggested wording (`POST /v1/agents/:agentKind/template-suggestion`,
   permission `agents`). Its input is the business name, the kind and the variable list, never
-  customer data, on the `no_personal_data` lane (G-18). It returns text; it writes nothing.
+  customer data, on the `no_personal_data` lane (G-18). Each suggestion is one model call
+  under G-15: it writes an `agent_model_calls` row (the requested kind, no `run_id`, key
+  `agent:<kind>:suggestion:<idempotencyKey>`) and counts against that kind's
+  `maxCostMicrosPerDay`, so a templated kind's cap is not zero once suggestions are used. At the
+  cap it is refused with `Conflict` `cost_cap` before any provider call. It writes nothing else.
 
 **G-20. Review requests need marketing consent.** `review_request` sends with purpose
 `marketing` and only to a customer whose consent for the channel is `granted`. Contact consent
 has no purpose column (`crm.md` C-9), and every grant recorded today comes from a
 `marketing_updates` box (`public-intake.md` P-8), so a `granted` channel stands for
-`marketing_updates` consent; a missing grant is skipped `consent_missing` before anything is
-queued, and D-6 checks again at delivery. Candidates are `confirmed` bookings with a customer
+`marketing_updates` consent, with one exception: a grant whose source starts with
+`twilio-voice:` (`twilio.md` T-12) was given for one booking-link text and never counts. A
+missing or voice-sourced grant is skipped `consent_missing` before anything is queued, and
+`delivery.md` D-6 refuses the same grant again at delivery. A test proves that a contact whose
+only grant came from pressing 1 gets no review request at queue time and, if one is forced into
+the outbox, none at delivery. Candidates are `confirmed` bookings with a customer
 whose end is at least `timing_hours` (1..720, default 24) and at most `lookbackDays` (1..30,
 default 7) before now. Caps: one request per customer in `contactWindowDays` (1..730, default
 180), at most `maxSendsPerDay` (1..100, default 20). Every eligible customer gets the same

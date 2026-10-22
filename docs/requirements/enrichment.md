@@ -71,9 +71,10 @@ from the idempotency key; the contact must be in the caller's tenant (`TenantDen
 Treg input is a domain: the profile's `company_domain` (E-14) when set, else the domain of the
 stored email. No email, a placeholder or a consumer mailbox domain (`CONSUMER_MAIL_DOMAINS`:
 `gmail.com`, `outlook.com` and the like) is `Conflict` `enrichment_no_company_domain`. Name,
-email and phone never leave the server. Once E-5 to E-9 pass, one transaction reserves, inserts
-`enrichment_requests` (`pending`) and commits the action with outbox event
-`enrichment.requested`. A refusal writes, calls and spends nothing.
+email and phone never leave the server. Once E-5 to E-9 pass, one transaction (runtime role)
+inserts `enrichment_requests` (`pending`, with the price) and commits the action with outbox
+event `enrichment.requested`. It holds no money: the worker reserves (E-8, E-10). A refusal
+writes, calls and spends nothing.
 
 **E-5. Service gates.** A request, and every attempt (E-10), is refused with `Conflict`
 `enrichment_unavailable` unless `ENRICHMENT_PROVIDER` is `treg` or `fake`,
@@ -105,21 +106,27 @@ error an unlawful transfer. A change to the contact's email or phone clears the 
 (crm.md revision, E-14). Tests cover every listed prefix and ccTLD and each signal order case.
 
 **E-8. Price, reservation and cap.** `ENRICHMENT_PRICES` holds one fixed price per op in
-whole USD cents. The request reserves it as a job of kind `enrichment` with id `requestId`
-(`delivery.md` D-11: a reservation may cover any priced job, keyed by a job kind and id, not
-only a message delivery). Short funds or a non-USD wallet is `Conflict` `insufficient_funds`.
+whole USD cents. The request reads the wallet and refuses with `Conflict`
+`insufficient_funds` when the available balance is below the price or the wallet is not in
+USD; this read is a courtesy and holds nothing. The money is held by the worker: in
+`enrichment.attempt.start` (service role) it calls `reserveForJob` (`delivery.md` D-11) with
+kind `enrichment` and job id `requestId`, after the request row has committed and before any
+Treg call. When that returns null the request ends `insufficient_funds` with no call. Retries of
+the same request reuse the one hold; D-11's index refuses a second. The runtime role gets no
+new wallet grant.
 Every call sends `X-Treg-Route-Max-Cost` equal to that price, converted exactly to dollars, so
 Treg never bills more than was reserved. The token's own per-call cap is at least the top price.
 
-**E-9. Daily caps.** Before reserving, the request counts `enrichment_requests` created in the
+**E-9. Daily caps.** Before inserting, the request counts `enrichment_requests` created in the
 current UTC day (injected clock) for the tenant and for all tenants, under a transaction-scoped
 advisory lock. At `ENRICHMENT_TENANT_DAILY_CAP` or `ENRICHMENT_GLOBAL_DAILY_CAP` it is
 `Conflict` `enrichment_daily_cap`.
 
 **E-10. Worker and re-check.** The worker (service role) claims `pending` or due `uncertain`
 requests with a lease token under `FOR UPDATE SKIP LOCKED`, as in `delivery.md` D-3. In
-`enrichment.attempt.start` it re-checks E-5, E-6 and E-7 against current rows; a failed check
-ends the request `blocked` with that reason and releases the reservation, with no call. The
+`enrichment.attempt.start` it re-checks E-5, E-6 and E-7 against current rows, then reserves
+(E-8) if no hold exists yet; a failed check ends the request `blocked` with that reason and
+releases any hold, with no call. The
 attempt stores the exact domain and price it sends, and every retry repeats them.
 
 **E-11. Outcomes and settlement.** `enrichment.attempt.settle` stores the Treg call id, the
@@ -133,7 +140,8 @@ provider and `treg_cost_micro` (from `X-Treg-Cost-Micro`, on every status), then
   `retry_after_s` when given, up to `ENRICHMENT_MAX_ATTEMPTS`, then releases and ends `failed`.
   `route_max_cost` and `insufficient_balance` end `failed` at once; the second also reports
   `treg_balance_empty` to the operator.
-A reservation moves from held to captured or released once (D-8 partial unique index).
+A reservation moves from held to captured or released once (`delivery.md` D-11 partial unique
+indexes).
 
 **E-12. Unknown outcome.** A timeout or dropped connection keeps the hold and marks the
 request `uncertain`. Retries reuse `Idempotency-Key: enrichment:<requestId>` and send only
