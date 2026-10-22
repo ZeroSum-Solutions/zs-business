@@ -16,11 +16,10 @@ describe("GET /v1/me", () => {
     expect(meResponseSchema.parse(me)).toEqual(me);
   });
 
-  it("refuses an answer without the business name or the email", () => {
-    const { businessName: _name, ...noName } = me;
-    const { email: _email, ...noEmail } = me;
-    expect(meResponseSchema.safeParse(noName).success).toBe(false);
-    expect(meResponseSchema.safeParse(noEmail).success).toBe(false);
+  it("allows the original shape without the profile, and nothing beyond the known keys", () => {
+    const { businessName: _name, email: _email, ...original } = me;
+    expect(meResponseSchema.parse(original)).toEqual(original);
+    expect(meResponseSchema.safeParse({ ...me, extra: 1 }).success).toBe(false);
   });
 });
 

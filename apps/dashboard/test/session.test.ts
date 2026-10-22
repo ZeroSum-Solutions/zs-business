@@ -15,7 +15,7 @@ describe("GET /api/session", () => {
     expect(await response.json()).toEqual({
       tenantId: harness.tenantId, userId: harness.owner.id, role: "owner", businessName: LIVE_BUSINESS, email: harness.owner.email,
     });
-    expect(harness.apiCalls.map((call) => call.url)).toEqual(["http://api.internal:8787/v1/me"]);
+    expect(harness.apiCalls.map((call) => call.url)).toEqual(["http://api.internal:8787/v1/me?include=profile"]);
     expect(forwardedClaims(harness.apiCalls[0]!).sub).toBe(harness.owner.id);
   });
 

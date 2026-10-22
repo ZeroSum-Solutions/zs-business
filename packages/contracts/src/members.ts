@@ -89,9 +89,11 @@ export const memberListSchema = z.strictObject({ items: z.array(memberRecordSche
 export type MemberList = z.infer<typeof memberListSchema>;
 
 /**
- * GET /v1/me: who the token belongs to in its tenant, and what they may do. `businessName` is
- * the tenant's name and `email` the membership's own address, so screens name the right
- * business and person; members have no display name yet.
+ * GET /v1/me: who the token belongs to in its tenant, and what they may do. With
+ * `?include=profile` it adds `businessName` (the tenant's name) and `email` (the membership's
+ * own address), so screens name the right business and person; members have no display name
+ * yet. Without it the answer keeps its original five keys, which a dashboard built before the
+ * profile fields reads strictly, so the API can deploy first.
  */
 export const meResponseSchema = z.strictObject({
   tenantId: idSchema,
@@ -99,8 +101,8 @@ export const meResponseSchema = z.strictObject({
   memberId: idSchema,
   role: memberRoleSchema,
   permissions: z.array(permissionSchema),
-  businessName: z.string(),
-  email: z.string(),
+  businessName: z.string().optional(),
+  email: z.string().optional(),
 });
 export type MeResponse = z.infer<typeof meResponseSchema>;
 /**

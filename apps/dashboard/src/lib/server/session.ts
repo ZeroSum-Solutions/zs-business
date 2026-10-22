@@ -40,7 +40,7 @@ export async function sessionForRequest(request: Request, setup: LiveSetup | nul
 
   let response: Response;
   try {
-    response = await (config.fetch ?? fetch)(`${config.apiUrl}/v1/me`, {
+    response = await (config.fetch ?? fetch)(`${config.apiUrl}/v1/me?include=profile`, {
       headers: { Authorization: `Bearer ${lookup.session.access_token}`, Accept: "application/json" },
       redirect: "manual",
       signal: AbortSignal.timeout(config.timeoutMs ?? 15_000),

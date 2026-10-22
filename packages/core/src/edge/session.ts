@@ -731,10 +731,10 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return { site, edge: await syncSite(sites, id) };
     },
 
-    /** The caller's own membership; any member may ask. */
-    me: (): Promise<MeResponse> => deps.db.tenant(tenantId, async (tx) => {
+    /** The caller's own membership; any member may ask. `profile` adds the business name and email. */
+    me: (options: { profile?: boolean } = {}): Promise<MeResponse> => deps.db.tenant(tenantId, async (tx) => {
       const access = await requireMember(tx, tenantId, actorId, null);
-      const profile = await memberProfile(tx, tenantId, access.memberId);
+      const profile = options.profile ? await memberProfile(tx, tenantId, access.memberId) : {};
       return {
         tenantId, userId: actorId, memberId: access.memberId, role: access.role, permissions: [...ROLE_PERMISSIONS[access.role]],
         ...profile,
