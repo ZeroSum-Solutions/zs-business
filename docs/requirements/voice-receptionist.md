@@ -70,11 +70,12 @@ the global and tenant kill switches and the `voice_receptionist` agent kind's se
 (`agents.md` G-3 and G-14..G-21); and V-9's limits. A pass inserts
 `voice_receptionist_sessions` (`call_sid` unique per tenant, `status` `preflight`) and commits.
 A second transaction, as the service role like the delivery worker (`delivery.md` D-10),
-takes one advisory lock for all tenants, counts sessions in `preflight` (admitted), `connecting`
-or `live` across all tenants, refuses `capacity` at `VOICE_MAX_CONCURRENT` (default 2), and
-reserves for that existing row (V-5); only then does the session move to `connecting` and get a
-one-time stream token bound to tenant, session and `CallSid`, sent to the service as a
-`<Parameter>`. Any failure, including no funds, ends the session with the reason on its row and
+takes one advisory lock for all tenants and counts admitted sessions (`connecting` or `live`)
+across all tenants; `preflight` rows, the candidate's included, are not admitted and do not
+count. When that count is already `VOICE_MAX_CONCURRENT` (default 2) it refuses `capacity`;
+otherwise, in the same transaction, it reserves for the candidate's row (V-5) and moves it to
+`connecting`, so admission is atomic under the lock. Only an admitted session gets a one-time
+stream token bound to tenant, session and `CallSid`, sent to the service as a `<Parameter>`. Any failure, including no funds, ends the session with the reason on its row and
 falls back to the press-1 offer or voicemail (`twilio.md` T-11, T-13). The runtime role gets no
 new wallet grant.
 
@@ -155,7 +156,9 @@ disclosure `<Say>` before `<Connect><Stream>`, and a reservation is held. The fa
 token (a second claim is refused), settles after 70 seconds with one callback: the wallet
 captures 2 minutes and releases the rest, and the callback shows in the caller's thread. A
 tenant kill makes the next heartbeat answer `stop`. With no funds, the call falls back to the
-offer. A fourth session from one number in a day falls back. Tenant B cannot read A's
+offer. A fourth session from one number in a day falls back. With `VOICE_MAX_CONCURRENT` set
+to 1 and then 2, that many concurrent missed calls (different tenants) connect and the next one
+falls back with `capacity`. Tenant B cannot read A's
 sessions, facts or callbacks.
 
 ## Known limits

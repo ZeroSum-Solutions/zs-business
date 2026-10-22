@@ -122,10 +122,13 @@ Treg never bills more than was reserved. The token's own per-call cap is at leas
 transaction-scoped advisory lock keyed by tenant; at `ENRICHMENT_TENANT_DAILY_CAP` it is
 `Conflict` `enrichment_daily_cap`. The runtime role cannot see other tenants, so the global cap
 is checked by the worker: in `enrichment.attempt.start` (service role), under one advisory lock
-for all tenants, it counts attempts started that day across tenants, and at
-`ENRICHMENT_GLOBAL_DAILY_CAP` the request ends `enrichment_daily_cap` with no hold and no call.
-A test starts attempts for two tenants concurrently at the global cap minus one and finds
-exactly one call.
+for all tenants, it counts requests whose first attempt started that day across tenants. A
+request with no attempt yet that finds the count at `ENRICHMENT_GLOBAL_DAILY_CAP` ends
+`enrichment_daily_cap` with no hold and no call. A retry of an `uncertain` request is the same
+call (same idempotency key): the cap neither counts nor refuses it, and it keeps its hold and
+follows E-12. A test starts attempts for two tenants concurrently at the global cap minus one
+and finds exactly one call; a second test times out the last permitted call and finds its
+retry sent with the hold kept.
 
 **E-10. Worker and re-check.** The worker (service role) claims `pending` or due `uncertain`
 requests with a lease token under `FOR UPDATE SKIP LOCKED`, as in `delivery.md` D-3. In
