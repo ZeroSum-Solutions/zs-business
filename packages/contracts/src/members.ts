@@ -103,3 +103,18 @@ export const meResponseSchema = z.strictObject({
   email: z.string(),
 });
 export type MeResponse = z.infer<typeof meResponseSchema>;
+/**
+ * How a client reads /v1/me: the membership must be there, but an older API may leave out the
+ * profile fields, a newer one may add keys (dropped here) or permissions, so neither order of
+ * a rolling deploy locks anyone out. The API answers with `meResponseSchema`.
+ */
+export const meReadSchema = z.object({
+  tenantId: idSchema,
+  userId: idSchema,
+  memberId: idSchema,
+  role: memberRoleSchema,
+  permissions: z.array(z.string()),
+  businessName: z.string().optional(),
+  email: z.string().optional(),
+});
+export type MeRead = z.infer<typeof meReadSchema>;

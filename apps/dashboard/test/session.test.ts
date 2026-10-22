@@ -19,6 +19,32 @@ describe("GET /api/session", () => {
     expect(forwardedClaims(harness.apiCalls[0]!).sub).toBe(harness.owner.id);
   });
 
+  it("works with an older API that does not name the business or the email", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    const live = harness.api;
+    harness.api = async (call) => {
+      const answer = await live(call);
+      const { businessName: _name, email: _email, ...older } = await answer.json();
+      return Response.json(older, { status: answer.status });
+    };
+    const response = await sessionForRequest(request(jar.header()), harness.setup);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ tenantId: harness.tenantId, userId: harness.owner.id, role: "owner" });
+  });
+
+  it("ignores keys a newer API adds", async () => {
+    const harness = createLiveHarness();
+    const jar = await signInThroughLink(harness);
+    const live = harness.api;
+    harness.api = async (call) => Response.json({ ...(await (await live(call)).json()), timeZone: "UTC" });
+    const response = await sessionForRequest(request(jar.header()), harness.setup);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      tenantId: harness.tenantId, userId: harness.owner.id, role: "owner", businessName: LIVE_BUSINESS, email: harness.owner.email,
+    });
+  });
+
   it("is signed out with no cookie, and expired with the retired pilot cookie, which it expires", async () => {
     const harness = createLiveHarness();
     const none = await sessionForRequest(request(), harness.setup);

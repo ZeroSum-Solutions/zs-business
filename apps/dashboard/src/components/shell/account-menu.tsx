@@ -9,9 +9,13 @@ import { cn } from "@/lib/utils";
 
 export const ROLE_LABEL: Record<Identity["role"], string> = { owner: "Owner", staff: "Staff" };
 
-/** "email, Role · Business": members have no display name yet, so the email names them. */
+/**
+ * "email, Role · Business": members have no display name yet, so the email names them. An older
+ * API sends no email or business name; the label then leaves them out.
+ */
 export function accountLabel(identity: Identity): string {
-  return `${identity.email}, ${ROLE_LABEL[identity.role]} · ${identity.businessName}`;
+  const role = ROLE_LABEL[identity.role];
+  return `${identity.email ? `${identity.email}, ${role}` : role}${identity.businessName ? ` · ${identity.businessName}` : ""}`;
 }
 
 const ITEMS = [
@@ -37,7 +41,7 @@ export function AccountMenu({ variant }: { variant: "header" | "topbar" }) {
         {variant === "header" && identity ? (
           <>
             <span className="hidden min-w-0 leading-tight xl:block">
-              <span className="block max-w-48 truncate text-sm font-bold text-fg">{identity.email}</span>
+              {identity.email ? <span className="block max-w-48 truncate text-sm font-bold text-fg">{identity.email}</span> : null}
               <span className="block truncate text-xs text-meta">{ROLE_LABEL[identity.role]}</span>
             </span>
             <CaretDown size={16} aria-hidden className="hidden text-meta xl:block" />

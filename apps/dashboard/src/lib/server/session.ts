@@ -4,7 +4,7 @@
  * reads a token. The answer comes from the API's /v1/me with the person's own token, so it
  * also proves the session is live and the person is still a member.
  */
-import { meResponseSchema } from "@zs/contracts";
+import { meReadSchema } from "@zs/contracts";
 import { jsonAnswer, reportSetupProblem, type LiveSetup } from "./live-config";
 import { authFor, lookupSession } from "./supabase";
 
@@ -12,9 +12,12 @@ export interface SessionIdentity {
   tenantId: string;
   userId: string;
   role: "owner" | "staff";
-  /** The tenant's name and the member's own email (members have no display name yet). */
-  businessName: string;
-  email: string;
+  /**
+   * The tenant's name and the member's own email (members have no display name yet). An older
+   * API sends neither, so screens must cope without them.
+   */
+  businessName?: string;
+  email?: string;
 }
 
 /**
@@ -50,9 +53,13 @@ export async function sessionForRequest(request: Request, setup: LiveSetup | nul
     return auth.finish(jsonAnswer(401, { error: "expired" }));
   }
   if (response.status === 403) return auth.finish(jsonAnswer(403, { error: "no_access" }));
-  const me = response.ok ? meResponseSchema.safeParse(await response.json().catch(() => null)) : null;
+  const me = response.ok ? meReadSchema.safeParse(await response.json().catch(() => null)) : null;
   if (!me?.success) return auth.finish(jsonAnswer(502, { error: "unavailable" }));
   const { tenantId, userId, role, businessName, email } = me.data;
-  const identity: SessionIdentity = { tenantId, userId, role, businessName, email };
+  const identity: SessionIdentity = {
+    tenantId, userId, role,
+    ...(businessName === undefined ? {} : { businessName }),
+    ...(email === undefined ? {} : { email }),
+  };
   return auth.finish(jsonAnswer(200, identity));
 }

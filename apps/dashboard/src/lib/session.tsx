@@ -16,7 +16,8 @@ import { useApiRuntime } from "./api/react";
  */
 export type Session =
   | { status: "loading" }
-  | { status: "signed_in"; tenantId: string; userId: string; role: "owner" | "staff"; businessName: string; email: string }
+  /** `businessName` and `email` are missing when an older API does not send them. */
+  | { status: "signed_in"; tenantId: string; userId: string; role: "owner" | "staff"; businessName?: string; email?: string }
   /** `no_access`: signed in, but not (or no longer) a member of this business. */
   | { status: "signed_out"; reason: SignedOutReason }
   /**
@@ -48,9 +49,20 @@ const SessionBody = z.object({
   tenantId: z.string().min(1),
   userId: z.string().min(1),
   role: z.enum(["owner", "staff"]),
-  businessName: z.string(),
-  email: z.string(),
+  businessName: z.string().optional(),
+  email: z.string().optional(),
 });
+/** A 200 from /api/session as a session; unknown keys are dropped, a body without the membership is `unavailable`. */
+export function sessionFromBody(json: unknown): Session {
+  const body = SessionBody.safeParse(json);
+  if (!body.success) return { status: "unavailable" };
+  const { businessName, email, ...member } = body.data;
+  return {
+    status: "signed_in", ...member,
+    ...(businessName === undefined ? {} : { businessName }),
+    ...(email === undefined ? {} : { email }),
+  };
+}
 /** Demo mode: the seed's business, as whoever the adapter acts as (the owner unless `actAs` says otherwise). */
 export function demoSession(demo: Pick<DemoControls, "currentActor"> | null): Session {
   const actor = demo?.currentActor() ?? { role: "owner" as const, userId: DEMO_OWNER.userId };
@@ -99,8 +111,7 @@ async function fetchSession(): Promise<Session> {
       return { status: "unavailable", misconfigured: body?.error === "misconfigured" };
     }
     if (!response.ok) return { status: "unavailable" };
-    const body = SessionBody.safeParse(await response.json());
-    return body.success ? { status: "signed_in", ...body.data } : { status: "unavailable" };
+    return sessionFromBody(await response.json());
   } catch {
     return { status: "unavailable" };
   }
@@ -195,14 +206,15 @@ export function useSession(): SessionValue {
 
 /** Who is signed in, for the shell and greetings: null while loading or signed out. */
 export interface Identity {
-  businessName: string;
-  email: string;
+  businessName?: string;
+  email?: string;
   role: "owner" | "staff";
 }
 export function useIdentity(): Identity | null {
   const { session } = useSession();
   if (session.status !== "signed_in") return null;
-  return { businessName: session.businessName, email: session.email, role: session.role };
+  const { businessName, email, role } = session;
+  return { role, ...(businessName === undefined ? {} : { businessName }), ...(email === undefined ? {} : { email }) };
 }
 
 /** The signed-in tenant, or null while loading or signed out (queries stay disabled). */

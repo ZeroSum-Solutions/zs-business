@@ -10,7 +10,7 @@ import { SIGN_IN_TITLE } from "../src/components/shell/sign-in-view";
 import { DEMO_BUSINESS, DEMO_OWNER, DEMO_STAFF } from "../src/lib/api/demo/seed";
 import { greetingLine } from "../src/lib/greeting";
 import { PRODUCT_NAME } from "../src/lib/product";
-import { demoSession } from "../src/lib/session";
+import { demoSession, sessionFromBody } from "../src/lib/session";
 import manifest from "../src/app/manifest";
 
 const html = (node: ReturnType<typeof h>) => renderToString(node).replaceAll("<!-- -->", "");
@@ -39,6 +39,18 @@ describe("signed-in identity", () => {
     expect(signedOut).toContain(PRODUCT_NAME);
     expect(brandMark("Halden & Rowe Fine Jewelry")).toBe("HR");
     expect(brandMark("  ")).toBe("ZS");
+  });
+
+  it("signs in from an older API's answer and falls back to neutral words", () => {
+    const tenantId = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70";
+    const older = sessionFromBody({ tenantId, userId: "u-1", role: "owner" });
+    expect(older).toEqual({ status: "signed_in", tenantId, userId: "u-1", role: "owner" });
+    const identity = { role: "owner" } as const;
+    expect(accountLabel(identity)).toBe("Owner");
+    expect(html(h(Brand, { identity }))).toContain(PRODUCT_NAME);
+    expect(sessionFromBody({ tenantId, userId: "u-1", role: "staff", businessName: "Corner Bakery", email: "sam@example.com", extra: 1 }))
+      .toEqual({ status: "signed_in", tenantId, userId: "u-1", role: "staff", businessName: "Corner Bakery", email: "sam@example.com" });
+    expect(sessionFromBody({ tenantId, role: "owner" })).toEqual({ status: "unavailable" });
   });
 
   it("greets without a name, since members have none yet", () => {
