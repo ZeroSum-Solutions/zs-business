@@ -56,11 +56,18 @@ export async function loadInquiry(tx: Transaction, tenantId: string, intakeItemI
 
 /**
  * G-8: the reason not to draft for this inquiry, or null. Suppression and consent are checked
- * as delivery checks them (delivery.md D-6) for a transactional email.
+ * as delivery checks them (delivery.md D-6) for a transactional email. An inquiry the customer
+ * has since followed with a newer request (G-7) is `superseded`; the draft action holds the
+ * contact's row lock, which linking a request to the customer takes too, while it checks.
  */
 export async function checkCandidate(
   tx: Transaction, tenantId: string, candidate: Candidate, settings: FollowUpSettings, now: Date,
 ): Promise<FollowUpSkipReason | null> {
+  const newer = await tx.query(
+    `SELECT 1 FROM intake_items l WHERE l.tenant_id=$1 AND l.contact_id=$2 AND (l.created_at, l.id) > ($3, $4) LIMIT 1`,
+    [tenantId, candidate.contactId, candidate.createdAt, candidate.intakeItemId],
+  );
+  if (newer.rowCount) return "superseded";
   const contact = (await tx.query<{ email: string | null; suppressed: boolean; consent: "granted" | "denied" | null }>(
     `SELECT c.normalized_email AS email,
             EXISTS (SELECT 1 FROM suppressions s WHERE s.tenant_id=c.tenant_id AND s.channel='email' AND s.address=c.normalized_email) AS suppressed,
