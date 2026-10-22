@@ -55,7 +55,7 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     caps: [
       { label: "Text messages", value: "500 a month, then from your wallet" },
       { label: "Agent replies", value: "2,000 a month, then from your wallet" },
-      { label: "Wallet", value: "Prepaid. Sending pauses at $0. No surprise bills." },
+      { label: "Wallet", value: "Prepaid, so no surprise bills. A message the balance can't cover waits for a top-up." },
     ],
   };
 

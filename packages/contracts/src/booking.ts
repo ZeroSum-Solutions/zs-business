@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { supportedInstantSchema } from "./instant.js";
 import {
   actionCommandSchema,
   actionResultSchema,
@@ -14,8 +15,7 @@ const idSchema = z.lazy(() => uuidSchema);
 
 /** F1 frozen boundary. These schemas validate data; they do not calculate slots. */
 /** B-3: UTC years 0001 through 9999 only. Year 0000 fits the pattern, but Postgres has no year zero. */
-export const bookingInstantSchema = z.iso.datetime({ precision: 3 })
-  .refine((value) => !value.startsWith("0000-"), "Instant must fall in UTC years 0001 through 9999");
+export const bookingInstantSchema = supportedInstantSchema;
 export type BookingInstant = z.infer<typeof bookingInstantSchema>;
 export const bookingTimeZoneSchema = z.string().min(1).refine((zone) => {
   if (zone !== "UTC" && !zone.includes("/")) return false;
