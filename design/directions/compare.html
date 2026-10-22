@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare directions · Halden &amp; Rowe dashboard</title>
+<style>
+:root {
+  --page: #dedee2;
+  --bar: #ffffff;
+  --ink: #141418;
+  --muted: #55555f;
+  --line: #c9c9d0;
+  --sel: #141418;
+  --sel-on: #ffffff;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--page); color: var(--ink); font-family: var(--font); font-size: 14px; display: flex; flex-direction: column; overflow-x: hidden; }
+h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 10px 20px;
+  background: var(--bar); border-bottom: 1px solid var(--line);
+}
+.bar p { margin: 0; color: var(--muted); font-size: 13px; }
+.spacer { flex: 1; }
+.seg { display: inline-flex; background: #ececef; border-radius: 999px; padding: 3px; gap: 2px; }
+.seg button {
+  font: inherit; font-weight: 600; font-size: 13px; border: 0; background: none; color: var(--muted); cursor: pointer;
+  min-height: 38px; padding: 0 16px; border-radius: 999px; position: relative;
+}
+.seg button::after { content: ""; position: absolute; inset: -3px 0; }
+.seg button[aria-pressed="true"] { background: var(--sel); color: var(--sel-on); }
+.seg button:focus-visible { outline: 2px solid #3047f0; outline-offset: 2px; }
+.group { display: flex; align-items: center; gap: 8px; }
+.group span { font-size: 12px; font-weight: 600; color: var(--muted); }
+.stage { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 16px 20px 20px; min-height: 0; }
+.col { display: flex; flex-direction: column; align-items: center; gap: 10px; min-width: 0; }
+.col header { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 8px; }
+.col h2 { margin: 0; font-size: 14px; font-weight: 700; }
+.col h2 small { font-weight: 500; color: var(--muted); margin-left: 6px; }
+.col a { color: var(--ink); font-size: 13px; font-weight: 600; min-height: 44px; padding: 0 4px; display: inline-flex; align-items: center; }
+.col a:focus-visible { outline: 2px solid #3047f0; outline-offset: 2px; border-radius: 4px; }
+.frame { position: relative; overflow: hidden; border-radius: 14px; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.12), 0 16px 40px -18px rgba(0,0,0,.45); flex: none; }
+.frame.phone { border-radius: 28px; }
+.frame iframe { position: absolute; top: 0; left: 0; border: 0; transform-origin: 0 0; background: #fff; }
+.frame.dark, .frame.dark iframe { background: #0a0a0b; }
+@media (max-width: 760px) { .stage { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>Dashboard directions</h1>
+  <p>A, light tray. B, black control room. Same data, same screens.</p>
+  <span class="spacer"></span>
+  <div class="group"><span id="lbl-screen">Screen</span>
+    <div class="seg" role="group" aria-labelledby="lbl-screen">
+      <button type="button" data-screen="home" aria-pressed="true">Home</button>
+      <button type="button" data-screen="inbox" aria-pressed="false">Inbox, M. Okafor</button>
+    </div>
+  </div>
+  <div class="group"><span id="lbl-layout">Layout</span>
+    <div class="seg" role="group" aria-labelledby="lbl-layout">
+      <button type="button" data-layout="phone" aria-pressed="true">Phone 390</button>
+      <button type="button" data-layout="desktop" aria-pressed="false">Desktop 1440</button>
+    </div>
+  </div>
+</div>
+
+<main class="stage">
+  <section class="col" aria-labelledby="ha">
+    <header><h2 id="ha">A <small>Light tray</small></h2><a id="open-a" href="a-light-tray/index.html#home" target="_blank" rel="noopener">Open full page</a></header>
+    <div class="frame" id="fa"><iframe id="ia" title="Direction A, light tray" src="a-light-tray/index.html#home"></iframe></div>
+  </section>
+  <section class="col" aria-labelledby="hb">
+    <header><h2 id="hb">B <small>Black control room</small></h2><a id="open-b" href="b-control-room/index.html#home" target="_blank" rel="noopener">Open full page</a></header>
+    <div class="frame dark" id="fb"><iframe id="ib" title="Direction B, black control room" src="b-control-room/index.html#home"></iframe></div>
+  </section>
+</main>
+
+<script>
+(function () {
+  var SIZES = { phone: [390, 844], desktop: [1440, 900] };
+  var params = new URLSearchParams(location.search);
+  var state = {
+    screen: params.get('screen') === 'inbox' ? 'inbox' : 'home',
+    layout: params.get('layout') === 'desktop' ? 'desktop' : 'phone'
+  };
+  var frames = [
+    { wrap: document.getElementById('fa'), iframe: document.getElementById('ia'), open: document.getElementById('open-a'), path: 'a-light-tray/index.html' },
+    { wrap: document.getElementById('fb'), iframe: document.getElementById('ib'), open: document.getElementById('open-b'), path: 'b-control-room/index.html' }
+  ];
+
+  function fit() {
+    var size = SIZES[state.layout], w = size[0], h = size[1];
+    var stage = document.querySelector('.stage');
+    var col = document.querySelector('.col');
+    var colW = col.clientWidth;
+    var availH = window.innerHeight - stage.getBoundingClientRect().top - 20 - 42;
+    var s = Math.min(colW / w, Math.max(availH, 240) / h, 1);
+    frames.forEach(function (f) {
+      f.wrap.classList.toggle('phone', state.layout === 'phone');
+      f.wrap.style.width = Math.floor(w * s) + 'px';
+      f.wrap.style.height = Math.floor(h * s) + 'px';
+      f.iframe.style.width = w + 'px';
+      f.iframe.style.height = h + 'px';
+      f.iframe.style.transform = 'scale(' + s + ')';
+    });
+  }
+
+  function apply() {
+    frames.forEach(function (f) {
+      var url = f.path + '#' + state.screen;
+      // Changing only the hash navigates inside the frame; works from file:// and http.
+      if (f.iframe.getAttribute('src') !== url) f.iframe.setAttribute('src', url);
+      f.open.setAttribute('href', url);
+    });
+    document.querySelectorAll('[data-screen]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.screen === state.screen)); });
+    document.querySelectorAll('[data-layout]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.layout === state.layout)); });
+    var q = '?screen=' + state.screen + '&layout=' + state.layout;
+    try { history.replaceState(null, '', q); } catch (e) { /* file:// in some browsers */ }
+    fit();
+  }
+
+  document.querySelectorAll('[data-screen]').forEach(function (b) { b.addEventListener('click', function () { state.screen = b.dataset.screen; apply(); }); });
+  document.querySelectorAll('[data-layout]').forEach(function (b) { b.addEventListener('click', function () { state.layout = b.dataset.layout; apply(); }); });
+  window.addEventListener('resize', fit);
+  apply();
+})();
+</script>
+</body>
+</html>
