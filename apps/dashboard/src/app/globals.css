@@ -148,7 +148,7 @@
 }
 
 @utility skeleton {
-  background: var(--tray-deep);
+  background: var(--skeleton);
   border-radius: var(--radius-sm);
   animation: pulse-soft 1.4s ease-in-out infinite;
   @media (prefers-reduced-motion: reduce) {
