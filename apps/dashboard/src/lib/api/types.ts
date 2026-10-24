@@ -2,6 +2,7 @@ import type {
   BusinessProfile,
   ContactEnrichment,
   EnrichmentRequestRecord,
+  BookingContactResult,
   BookingPageSummary,
   BookingRecord,
   BookingSummary,
@@ -55,6 +56,7 @@ export type {
   BusinessProfile,
   ContactEnrichment,
   EnrichmentRequestRecord,
+  BookingContactResult,
   BookingPageSummary,
   BookingRecord,
   CalendarConnection,
@@ -147,6 +149,22 @@ export type BookingView = BookingRecord & {
   customer?: BookingSummary["customer"];
 };
 
+/** One booking as the detail read shows it: the revision to send with the next customer change (BC-3). */
+export type BookingDetailView = BookingView & { customerRevision: number };
+
+/** Link or change a booking's customer; `expectedRevision` is the `customerRevision` last read. */
+export interface BookingContactLink {
+  bookingId: string;
+  contactId: string;
+  expectedRevision: number;
+}
+
+/** Clear a booking's customer. */
+export interface BookingContactUnlink {
+  bookingId: string;
+  expectedRevision: number;
+}
+
 /** Who a booking is for: the linked customer, the website visitor's name, or the demo label. */
 export function bookingCustomerName(booking: BookingView): string | null {
   return booking.customer?.name ?? booking.contactName ?? null;
@@ -165,6 +183,8 @@ export interface BookingListQuery {
   resourceId?: string;
   from?: string;
   to?: string;
+  /** Only this customer's bookings: the ones linked to them and their website requests. */
+  contactId?: string;
   /** Only the first `limit` bookings, in one request (at most 100). */
   limit?: number;
 }
@@ -219,6 +239,16 @@ export interface BookingApi {
   listBookings(query?: BookingListQuery, options?: ReadOptions): Promise<ListResult<BookingView>>;
   /** Throws an ApiError where `isSlotTaken(error)` holds when the time was taken first. */
   createBooking(input: NewBooking, options: WriteOptions): Promise<BookingRecord>;
+  /** One booking with its customer revision. Throws `not_found` for another business's booking. */
+  getBooking(id: string, options?: ReadOptions): Promise<BookingDetailView>;
+  /**
+   * Link or change who a booking is for (booking-customer.md BC-3). Throws a conflict where
+   * `isStaleRevision(error)` holds when the customer changed since it was read, and one with
+   * reason `intake_booking` for a website booking.
+   */
+  linkBookingContact(input: BookingContactLink, options: WriteOptions): Promise<BookingContactResult>;
+  /** Clear who a booking is for (BC-4). Same conflicts as `linkBookingContact`. */
+  unlinkBookingContact(input: BookingContactUnlink, options: WriteOptions): Promise<BookingContactResult>;
 }
 
 export interface CrmApi {

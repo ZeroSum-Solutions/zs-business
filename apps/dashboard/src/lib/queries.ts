@@ -31,6 +31,9 @@ export const keys = {
   slotsAll: ["booking", "slots"] as const,
   bookings: (query: BookingListQuery = {}) => ["booking", "bookings", query] as const,
   bookingsAll: ["booking", "bookings"] as const,
+  /** One booking with its customer revision (booking-customer.md BC-9). */
+  booking: (id: string) => ["booking", "detail", id] as const,
+  bookingDetailsAll: ["booking", "detail"] as const,
   bookingPages: ["booking", "pages"] as const,
   intake: (status?: IntakeStatus) => ["intake", "items", status ?? "all"] as const,
   intakeAll: ["intake", "items"] as const,
@@ -154,6 +157,30 @@ export function useBookings(query: BookingListQuery = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.bookings(query), queryFn: ({ signal }) => api.listBookings(query, { signal }) });
+}
+
+/** One booking and the revision its next customer change must send. */
+export function useBooking(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && id !== null,
+    queryKey: id ? keys.booking(id) : [...keys.bookingDetailsAll, "idle"],
+    queryFn: ({ signal }) => api.getBooking(id!, { signal }),
+  });
+}
+
+/**
+ * After a booking's customer changes, every place that names it refetches: the calendar, Home's
+ * next appointment and week, a customer page's appointments (all bookings lists), the booking
+ * itself, and Home's counts. Awaiting it keeps a dialog on its spinner until the lists are right.
+ */
+export function refreshBookingCustomer(queryClient: QueryClient, scoped: ScopedKeys): Promise<unknown> {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: scoped.bookingsAll }),
+    queryClient.invalidateQueries({ queryKey: scoped.bookingDetailsAll }),
+    queryClient.invalidateQueries({ queryKey: scoped.resultsAll }),
+  ]);
 }
 
 /** Website booking requests, newest first (public-intake.md P-12). */

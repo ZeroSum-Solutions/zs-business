@@ -25,7 +25,10 @@ import {
   Conflict,
   approvalOutputSchema,
   changeMemberRoleRequestSchema,
+  bookingContactOutputSchema,
   createBookingRequestSchema,
+  linkBookingContactRequestSchema,
+  unlinkBookingContactRequestSchema,
   createDealRequestSchema,
   decideApprovalRequestSchema,
   draftReplyRequestSchema,
@@ -77,6 +80,8 @@ import {
   type FollowUpRunDetail,
   type FollowUpRunPage,
   type FollowUpStatus,
+  type BookingContactOutput,
+  type BookingDetail,
   type BusinessProfile,
   type BusinessProfileOutput,
   type FollowUpStatusOutput,
@@ -110,7 +115,7 @@ import { createDispatcher, type DispatchConfig, type DispatchContext } from "../
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { businessHandlers, getBusinessProfile } from "../business/index.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
-import { bookingHandlers, createBooking } from "../booking/index.js";
+import { bookingContactHandlers, bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
@@ -123,7 +128,7 @@ import { listBookingPages, listIntakeItems } from "../reads/intake.js";
 import { getContact, listContacts, listDeals, listPipelines } from "../reads/crm.js";
 import { homeResults } from "../reads/home.js";
 import { getThread, listThreads, loadReply } from "../reads/inbox.js";
-import { findSlots, listBookings, listResources } from "../reads/booking.js";
+import { findSlots, getBooking, listBookings, listResources } from "../reads/booking.js";
 import { memberProfile, requireMember } from "../members/access.js";
 import { listMembers, memberHandlers } from "../members/handlers.js";
 import {
@@ -196,7 +201,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 }
 
 const dispatch = createDispatcher({
-  ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
+  ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...businessHandlers, ...enrichmentHandlers,
 });
@@ -210,6 +215,9 @@ const dispatch = createDispatcher({
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
+  // booking-customer.md BC-3: also needs `customers` (ALSO_REQUIRED_PERMISSIONS below).
+  "booking.contact.link": "calendar",
+  "booking.contact.unlink": "calendar",
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
@@ -244,6 +252,16 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "contact.enrichment.unblock": "enrich",
   "contact.region.attest": "enrich",
   "contact.profile.apply": "enrich",
+});
+
+/**
+ * A second permission an action needs beside its ACTION_PERMISSIONS one. It is checked with the
+ * first, before the idempotency replay and the target lookup, so a caller without it learns nothing
+ * about a booking or a stored result; the handler checks it again.
+ */
+export const ALSO_REQUIRED_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
+  "booking.contact.link": "customers",
+  "booking.contact.unlink": "customers",
 });
 
 /** Registered actions whose permission depends on their payload (payloadPermission below). */
@@ -294,6 +312,12 @@ export function memberAuthorize(
     if (permission === undefined || (Object.hasOwn(policies, binding.actionType) && policies[binding.actionType]!.required))
       throw new TenantDenied();
     await requireMember(tx, tenantId, actorId, permission, binding.actionType.startsWith("member.") ? "exclusive" : "shared");
+    // An approval request names the action it proposes; that action's second permission counts too.
+    const proposed = binding.actionType === "approval.request"
+      ? (requestApprovalInputSchema.safeParse(binding.payload).data?.action.actionType ?? binding.actionType)
+      : binding.actionType;
+    const also = ALSO_REQUIRED_PERMISSIONS[proposed];
+    if (also) await requireMember(tx, tenantId, actorId, also, "shared");
   };
 }
 
@@ -328,6 +352,8 @@ export function approvedDispatch(deps: EdgeDependencies, tenantId: string, actor
         const permission = ACTION_PERMISSIONS[binding.actionType];
         if (!permission) throw new TenantDenied();
         await requireMember(tx, tenantId, actorId, permission, binding.actionType.startsWith("member.") ? "exclusive" : "shared");
+        const also = ALSO_REQUIRED_PERMISSIONS[binding.actionType];
+        if (also) await requireMember(tx, tenantId, actorId, also, "shared");
       },
     };
     return dispatch(ctx, {
@@ -501,6 +527,23 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return createBooking({ actionType: "booking.create", ...rest, payload: { bookingId: id, ...request } }, writeContext);
     },
 
+    /** booking-customer.md BC-3: link a booking to a contact, or change it; `expectedRevision` is the detail's. */
+    async linkBookingContact(bookingId: unknown, body: unknown, key: unknown): Promise<BookingContactOutput> {
+      const id = parseInput(uuidSchema, bookingId, "booking ID");
+      const request = parseInput(linkBookingContactRequestSchema, body);
+      const { id: _target, ...rest } = envelope(key, "booking", id);
+      return parseInput(bookingContactOutputSchema,
+        await run({ actionType: "booking.contact.link", ...rest, payload: toJson({ bookingId: id, ...request }) }), "result");
+    },
+    /** BC-4: clear the booking's customer. */
+    async unlinkBookingContact(bookingId: unknown, body: unknown, key: unknown): Promise<BookingContactOutput> {
+      const id = parseInput(uuidSchema, bookingId, "booking ID");
+      const request = parseInput(unlinkBookingContactRequestSchema, body);
+      const { id: _target, ...rest } = envelope(key, "booking", id);
+      return parseInput(bookingContactOutputSchema,
+        await run({ actionType: "booking.contact.unlink", ...rest, payload: toJson({ bookingId: id, ...request }) }), "result");
+    },
+
     async upsertContact(body: unknown, key: unknown) {
       const request = parseInput(upsertContactRequestSchema, body);
       const { id, ...rest } = envelope(key, "contact");
@@ -612,6 +655,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return read("reports", (tx) => homeResults(tx, tenantId, parsed, now));
     },
 
+    /** BC-6, BC-9: one booking with its customer and the revision for the next change. */
+    getBooking: (bookingId: unknown): Promise<BookingDetail> => {
+      const id = parseInput(uuidSchema, bookingId, "booking ID");
+      return read("calendar", (tx) => getBooking(tx, tenantId, id));
+    },
     listBookings: (query: unknown) => {
       const parsed = parseInput(listBookingsQuerySchema, query, "query");
       return read("calendar", (tx) => listBookings(tx, tenantId, parsed));

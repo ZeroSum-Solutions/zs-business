@@ -7,8 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { isApiError, type ConsentEvidence } from "@/lib/api";
-import { browserZone, useContact, useDeals, usePipelines } from "@/lib/queries";
-import { formatDay } from "@/lib/time";
+import { browserZone, useBookings, useContact, useDeals, useDisplayZone, usePipelines } from "@/lib/queries";
+import { formatDay, formatTime } from "@/lib/time";
 import { formatPhone, relativeTime } from "@/lib/utils";
 import { Avatar } from "@/components/ui/avatar";
 import { CompanyDetails } from "./company-details";
@@ -32,6 +32,9 @@ export function ContactDetail({ id }: { id: string }) {
   const contact = useContact(id);
   const deals = useDeals({ contactId: id });
   const pipelines = usePipelines();
+  // Appointments linked to this customer, and their website bookings (booking-customer.md BC-6).
+  const appointments = useBookings({ contactId: id });
+  const zone = useDisplayZone();
   const stageName = (pipelineId: string, stageId: string) =>
     pipelines.data?.find((pipeline) => pipeline.id === pipelineId)?.stages.find((stage) => stage.id === stageId)?.name ?? "Stage";
 
@@ -58,6 +61,7 @@ export function ContactDetail({ id }: { id: string }) {
             </div>
           </header>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="space-y-4">
             <Card aria-labelledby="deals-title">
               <CardHeader><CardTitle id="deals-title">Deals</CardTitle></CardHeader>
               {deals.isPending ? <LoadingRows rows={2} /> : deals.isError ? <ErrorNote error={deals.error} retry={() => deals.refetch()} /> : deals.data.items.length === 0 ? (
@@ -79,6 +83,25 @@ export function ContactDetail({ id }: { id: string }) {
                 </>
               )}
             </Card>
+            <Card aria-labelledby="appointments-title">
+              <CardHeader><CardTitle id="appointments-title">Appointments</CardTitle></CardHeader>
+              {appointments.isPending ? <LoadingRows rows={2} /> : appointments.isError ? <ErrorNote error={appointments.error} retry={() => appointments.refetch()} /> : appointments.data.items.length === 0 ? (
+                <EmptyState title="No appointments yet">Appointments booked for this customer show here.</EmptyState>
+              ) : (
+                <>
+                <IncompleteNote list={appointments.data} />
+                <ul className="divide-y divide-border-soft">
+                  {appointments.data.items.map((booking) => (
+                    <li key={booking.id} className="flex items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+                      <p className="text-sm font-medium text-fg">{formatDay(booking.startsAt, zone)}</p>
+                      <p className="tabular text-sm text-muted">{formatTime(booking.startsAt, zone)}</p>
+                    </li>
+                  ))}
+                </ul>
+                </>
+              )}
+            </Card>
+            </div>
             <div className="space-y-4">
               <CompanyDetails contactId={id} />
               <Card aria-labelledby="reach-title">
