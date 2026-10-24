@@ -79,6 +79,8 @@ export const listBookingsQuerySchema = pageQuerySchema.extend({
   resourceId: idSchema.optional(),
   from: bookingInstantSchema.optional(),
   to: bookingInstantSchema.optional(),
+  /** Only this contact's bookings: an owner link (booking-customer.md BC-6) or a website booking they sent. */
+  contactId: idSchema.optional(),
 }).refine((value) => !value.from || !value.to || value.from < value.to, "Range must have positive length");
 export type ListBookingsQuery = z.infer<typeof listBookingsQuerySchema>;
 export const listDealsQuerySchema = pageQuerySchema.extend({
