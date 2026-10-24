@@ -19,7 +19,11 @@ export interface ModelEntry {
 export const IMAGE_MODEL_ALLOWLIST: readonly ModelEntry[] = Object.freeze([
   { adapter: "fake", modelId: "fake-matte-v1", license: "none: test double with no weights", verified: true },
   { adapter: "fake", modelId: "fake-upscale-v1", license: "none: test double with no weights", verified: true },
-  // Vendor entries (IM-19) are added by each adapter below this line. TODO verify each licence before setting verified.
+  // Vendor entries (IM-19). TODO verify each vendor's hosted-use terms before setting verified.
+  // Kie.ai entries:
+  // End of Kie.ai entries.
+  // FAL entries:
+  // End of FAL entries.
 ]);
 
 /**

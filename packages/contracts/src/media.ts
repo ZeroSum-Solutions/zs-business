@@ -25,8 +25,8 @@ export const IMAGE_PRESETS = Object.freeze(["background_remove", "studio_backgro
 export const imagePresetSchema = z.enum(IMAGE_PRESETS);
 export type ImagePreset = z.infer<typeof imagePresetSchema>;
 
-/** IM-2 */
-export const IMAGE_STATUSES = Object.freeze(["queued", "running", "staged", "approved", "promoted", "failed", "expired"] as const);
+/** IM-2, IM-23 */
+export const IMAGE_STATUSES = Object.freeze(["queued", "running", "staged", "approved", "promoted", "failed", "expired", "rejected"] as const);
 export const imageStatusSchema = z.enum(IMAGE_STATUSES);
 export type ImageStatus = z.infer<typeof imageStatusSchema>;
 
@@ -133,6 +133,17 @@ export const approveVariantCommandSchema = z.lazy(() => actionCommandSchema.exte
   payload: approveVariantInputSchema,
 }).refine((command) => command.target.id === command.payload.variantId, "Target must equal the variant ID"));
 
+/** IM-23: an owner turns a staged variant down. Not approvable: rejecting publishes nothing. */
+export const rejectVariantInputSchema = z.strictObject({ variantId: idSchema, sha256: sha256HexSchema });
+export const rejectVariantCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("media.variant.reject"),
+  target: targetSchema.extend({ type: z.literal(MEDIA_VARIANT_TARGET) }),
+  payload: rejectVariantInputSchema,
+}).refine((command) => command.target.id === command.payload.variantId, "Target must equal the variant ID"));
+/** IM-22: the HTTP body of approve-request and reject; the variant ID is the path's. */
+export const variantDecisionRequestSchema = z.strictObject({ sha256: sha256HexSchema });
+export type VariantDecisionRequest = z.infer<typeof variantDecisionRequestSchema>;
+
 /** IM-10, IM-15: the worker principal's two actions. Provenance is written once, here. */
 const textField = (max: number) => z.string().min(1).max(max).refine(isPostgresText, "Text is not valid in Postgres");
 export const stageVariantInputSchema = z.strictObject({
@@ -210,6 +221,7 @@ export const imageVariantSchema = z.strictObject({
   expiresAt: instantSchema.nullable(),
   approvedAt: instantSchema.nullable(),
   promotedAt: instantSchema.nullable(),
+  rejectedAt: instantSchema.nullable(),
 });
 export type ImageVariant = z.infer<typeof imageVariantSchema>;
 export const imageVariantOutputSchema = z.lazy(() => actionResultSchema.extend({ result: imageVariantSchema }));
