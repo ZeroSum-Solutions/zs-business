@@ -390,7 +390,13 @@ export function useAgentActorId(): string | null {
 export function useTranscriptions() {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.transcriptions, queryFn: ({ signal }) => api.listTranscriptions({ signal }) });
+  return useQuery({
+    enabled,
+    queryKey: keys.transcriptions,
+    queryFn: ({ signal }) => api.listTranscriptions({ signal }),
+    // The worker finishes jobs on its own clock: look again while any recording is still in flight.
+    refetchInterval: (query) => (query.state.data?.some((job) => job.status === "queued" || job.status === "running" || job.status === "failed") ? 5000 : false),
+  });
 }
 
 export function useTranscription(id: string | null) {
@@ -400,6 +406,7 @@ export function useTranscription(id: string | null) {
     enabled: enabled && id !== null,
     queryKey: keys.transcription(id ?? "none"),
     queryFn: ({ signal }) => api.getTranscription(id!, { signal }),
+    refetchInterval: (query) => (query.state.data && ["queued", "running", "failed"].includes(query.state.data.status) ? 5000 : false),
   });
 }
 

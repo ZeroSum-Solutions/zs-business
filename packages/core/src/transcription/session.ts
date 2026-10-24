@@ -177,6 +177,8 @@ export function createTranscriptionSession(deps: EdgeDependencies, config: Trans
           if (loose.sourceKind === "recorded_call")
             throw new Conflict("Recording calls is not available", { reason: "consent_required" });
           if (loose.sourceKind === "voicemail") throw new TenantDenied();
+          // X-1: an unknown source is a 404, not a validation error.
+          if (loose.sourceKind !== "media_upload") throw new NotFound();
           if (loose.containsHealthData !== false) throw new Refused(422, "health_data_forbidden", "No health or medical audio");
           if (loose.rightsConfirmed !== true)
             throw validationError("Invalid request", [{ path: ["rightsConfirmed"], message: "Confirm you have the right to transcribe this audio" }]);
@@ -242,11 +244,19 @@ export function createTranscriptionSession(deps: EdgeDependencies, config: Trans
         if (!deps.db.platform) throw new Error("The transcription worker needs the platform transaction");
         const at = now();
         const stamp = iso(at);
+        const deadLettered: { tenant_id: string; id: string; source_kind: Lease["sourceKind"] }[] = [];
         const claimed = await deps.db.platform(async (tx) => {
-          await tx.query(
-            `UPDATE transcription_jobs SET status='dead_letter', last_error_code='lease_expired', updated_at=$1
-              WHERE status='running' AND lease_expires_at <= $1 AND attempts >= $2`,
-            [stamp, TRANSCRIPTION_MAX_ATTEMPTS]);
+          // Skip locked rows: one job held by a writer must not stall the queue for everyone else.
+          const lapsed = (await tx.query<{ tenant_id: string; id: string; source_kind: Lease["sourceKind"] }>(
+            `SELECT tenant_id, id, source_kind FROM transcription_jobs
+              WHERE status='running' AND lease_expires_at <= $1 AND attempts >= $2
+              ORDER BY lease_expires_at, id LIMIT 20 FOR UPDATE SKIP LOCKED`,
+            [stamp, TRANSCRIPTION_MAX_ATTEMPTS])).rows;
+          for (const job of lapsed)
+            await tx.query(
+              `UPDATE transcription_jobs SET status='dead_letter', last_error_code='lease_expired', updated_at=$3
+                WHERE tenant_id=$1 AND id=$2`, [job.tenant_id, job.id, stamp]);
+          deadLettered.push(...lapsed);
           const due = (await tx.query<{ tenant_id: string; id: string }>(
             `SELECT tenant_id, id FROM transcription_jobs
               WHERE (status IN ('queued','failed') AND next_attempt_at <= $1)
@@ -262,6 +272,9 @@ export function createTranscriptionSession(deps: EdgeDependencies, config: Trans
             [due.tenant_id, due.id, leaseToken, expires, stamp])).rows[0]!;
           return { row, leaseToken, expires };
         });
+        // X-8: a job that ends here drops its audio, as one ended by `fail` does.
+        for (const job of deadLettered)
+          await dropAudio({ tenantId: job.tenant_id, jobId: job.id, attempt: TRANSCRIPTION_MAX_ATTEMPTS, status: "dead_letter", sourceKind: job.source_kind, sourceId: null });
         if (!claimed) return null;
         const { row, leaseToken, expires } = claimed;
         return claimedJobSchema.parse({

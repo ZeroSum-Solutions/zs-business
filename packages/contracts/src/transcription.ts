@@ -83,7 +83,7 @@ export const enqueuePayloadSchema = z.discriminatedUnion("sourceKind", [enqueueU
 export type EnqueuePayload = z.infer<typeof enqueuePayloadSchema>;
 
 /** The enqueue request as a member sends it (X-1); the core door applies the refusals in the contract's order. */
-export const enqueueRequestSchema = z.looseObject({ sourceKind: z.enum(["media_upload", "voicemail", "recorded_call"]) });
+export const enqueueRequestSchema = z.looseObject({ sourceKind: z.string() });
 
 export const enqueueCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal(TRANSCRIPTION_ENQUEUE_ACTION),

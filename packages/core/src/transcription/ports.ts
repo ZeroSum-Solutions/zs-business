@@ -35,6 +35,11 @@ export interface TranscriptionAudioStore {
 export interface VoicemailSource {
   find(tx: Transaction, tenantId: string, voicemailId: string): Promise<boolean>;
   open(tenantId: string, voicemailId: string): Promise<AudioObject | null>;
+  /**
+   * X-2: the tenant turned `transcribe_voicemails` on and the owner attested the business takes no
+   * health information by phone. The setting and the attestation belong to the missed-call slice.
+   */
+  transcriptionAllowed(tx: Transaction, tenantId: string): Promise<boolean>;
 }
 
 export const audioPath = (tenantId: string, jobId: string): string => `audio/${tenantId}/${jobId}`;
@@ -68,6 +73,14 @@ export class InMemoryAudioStore implements TranscriptionAudioStore {
 /** In-memory voicemails, keyed by tenant, for tests. */
 export class InMemoryVoicemails implements VoicemailSource {
   private readonly items = new Map<string, Uint8Array>();
+  private readonly allowed = new Set<string>();
+  /** Turns the opt-in and the attestation on for a tenant. Off until a test turns it on. */
+  allow(tenantId: string, on = true): void {
+    if (on) this.allowed.add(tenantId); else this.allowed.delete(tenantId);
+  }
+  async transcriptionAllowed(_tx: Transaction, tenantId: string): Promise<boolean> {
+    return this.allowed.has(tenantId);
+  }
   add(tenantId: string, voicemailId: string, bytes: Uint8Array): void {
     this.items.set(`${tenantId}/${voicemailId}`, bytes);
   }

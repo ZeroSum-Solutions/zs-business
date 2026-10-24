@@ -91,6 +91,11 @@ describe("enqueue refusals (X-1, X-2, X-9)", () => {
     expect((await asOwner(h.a, "GET", "", undefined, null)).body).toEqual({ items: [] });
   });
 
+  it("answers 404 for an unknown source", async () => {
+    const response = await asOwner(h.a, "POST", "", { sourceKind: "bogus", jobId: randomUUID() });
+    expect(response.status).toBe(404);
+  });
+
   it("refuses an upload that does not say it holds no health data with 422 health_data_forbidden", async () => {
     const jobId = randomUUID();
     h.transcription!.audio.put(`audio/${h.a.tenantId}/${jobId}`, AUDIO);
@@ -248,6 +253,8 @@ describe("the worker's job interface (X-3, X-4, X-7)", () => {
     expect(await claim()).toBeNull();
     const detail = transcriptionDetailSchema.parse((await asOwner(h.a, "GET", `/${ticket.jobId}`, undefined, null)).body);
     expect(detail).toMatchObject({ status: "dead_letter", attempts: 3, lastErrorCode: "lease_expired" });
+    // X-8: the audio goes with it.
+    expect(h.transcription!.audio.objects.has(ticket.path)).toBe(false);
   });
 
   it("refuses a transcript that breaks the schema", async () => {
@@ -334,6 +341,9 @@ describe("voicemail jobs (X-1)", () => {
     h.transcription!.voicemails.add(h.b.tenantId, voicemailId, AUDIO);
     await expect(session.enqueueVoicemail(h.a.tenantId, voicemailId)).rejects.toMatchObject({ code: "NotFound" });
     h.transcription!.voicemails.add(h.a.tenantId, voicemailId, AUDIO);
+    // X-2: without the opt-in and the attestation nothing is queued.
+    await expect(session.enqueueVoicemail(h.a.tenantId, voicemailId)).rejects.toMatchObject({ code: "Conflict", details: { reason: "consent_required" } });
+    h.transcription!.voicemails.allow(h.a.tenantId);
     const first = await session.enqueueVoicemail(h.a.tenantId, voicemailId);
     const again = await session.enqueueVoicemail(h.a.tenantId, voicemailId);
     expect(again).toEqual(first);

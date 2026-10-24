@@ -60,6 +60,8 @@ export const enqueueTranscriptionHandler: ActionHandler = {
       if (binding.actorId !== transcriptionActorId(binding.tenantId)) throw new TenantDenied();
       const voicemails = (config as TranscriptionDispatchConfig).voicemails;
       if (!voicemails || !(await voicemails.find(tx, binding.tenantId, payload.voicemailId))) throw new NotFound();
+      if (!(await voicemails.transcriptionAllowed(tx, binding.tenantId)))
+        throw new Conflict("Voicemail transcription is not turned on", { reason: "consent_required" });
       jobId = voicemailJobId(binding.tenantId, payload.voicemailId);
       sourceId = payload.voicemailId;
     } else {
