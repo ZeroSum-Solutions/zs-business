@@ -77,6 +77,10 @@ export const keys = {
   /** Transcripts of uploaded audio and voicemails (transcription.md X-7). */
   transcriptions: ["transcriptions", "list"] as const,
   transcription: (id: string) => ["transcriptions", "detail", id] as const,
+  /** Price lists read into rows for the owner to review (document-intake.md DL-12). */
+  intakeJobs: ["docIntake", "jobs"] as const,
+  intakeJob: (id: string) => ["docIntake", "job", id] as const,
+  docIntakeAll: ["docIntake"] as const,
   /**
    * Whether the site shows the release live at one pointer version. Outside "sites", so
    * refreshing the lists does not re-sync; per version, so an answer about an older version
@@ -486,6 +490,28 @@ export function useTranscription(id: string | null) {
     queryKey: keys.transcription(id ?? "none"),
     queryFn: ({ signal }) => api.getTranscription(id!, { signal }),
     refetchInterval: (query) => (query.state.data && ["queued", "running", "failed"].includes(query.state.data.status) ? 5000 : false),
+  });
+}
+
+export function useIntakeJobs(enabledByRole = true) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && enabledByRole,
+    queryKey: keys.intakeJobs,
+    queryFn: ({ signal }) => api.listIntakeJobs({ signal }),
+    // The service reads a file on its own clock: look again while one is waiting or being read.
+    refetchInterval: (query) => (query.state.data?.some((job) => job.status === "queued" || job.status === "claimed") ? 5000 : false),
+  });
+}
+
+export function useIntakeJob(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && id !== null,
+    queryKey: keys.intakeJob(id ?? "none"),
+    queryFn: ({ signal }) => api.getIntakeJob(id!, { signal }),
   });
 }
 

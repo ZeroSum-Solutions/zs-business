@@ -32,6 +32,7 @@ import {
   type SettingsField,
   type SettingsForm,
 } from "@/lib/agents";
+import { IntakeCard } from "@/components/agents/intake-review";
 import { useIntentKey } from "@/lib/intent-key";
 import { useContactNames, useDisplayZone, useFollowUpRun, useFollowUpRuns, useFollowUpStatus, useKeys } from "@/lib/queries";
 import { MANAGE_AGENTS, useCan, useSession } from "@/lib/session";
@@ -62,6 +63,7 @@ export function AgentsView() {
           <FollowUpCard />
           <RunsCard />
           <BrowserTasksCard />
+          <IntakeCard />
         </div>
         <div className="tray min-w-0">
           <SettingsCard />

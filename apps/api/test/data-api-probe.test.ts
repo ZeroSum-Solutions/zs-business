@@ -58,10 +58,11 @@ describe("tables to probe", () => {
       "public.approvals", "public.automation_tokens", "public.booking_contacts", "public.booking_external_blocks", "public.booking_page_disclosures",
       "public.booking_page_resources",
       "public.booking_pages", "public.booking_resources", "public.bookings", "public.browser_credentials", "public.browser_run_artifacts", "public.browser_run_events", "public.browser_runs", "public.browser_targets", "public.browser_task_settings", "public.business_profiles",
-      "public.calendar_connections", "public.calendar_push_notifications", "public.calendar_pushes",
+      "public.calendar_connections", "public.calendar_push_notifications", "public.calendar_pushes", "public.catalog_items",
       "public.crm_contact_consent", "public.crm_contact_profile", "public.crm_contacts", "public.crm_deals", "public.crm_pipelines", "public.crm_stages",
+      "public.document_intake_jobs", "public.document_intake_rows",
       "public.enrichment_requests", "public.enrichment_results",
-      "public.image_variants", "public.inbox_replies", "public.intake_item_consent", "public.intake_items", "public.media_assets", "public.message_deliveries",
+      "public.image_variants", "public.inbox_replies", "public.intake_item_consent", "public.intake_items", "public.knowledge_entries", "public.media_assets", "public.message_deliveries",
       "public.message_delivery_attempts", "public.outbox", "public.rate_limit_buckets", "public.site_activations", "public.site_hosts",
       "public.site_pointers", "public.site_release_files", "public.site_releases", "public.sites", "public.sms_numbers", "public.sms_status_events", "public.source_records",
       "public.stripe_events", "public.suppressions", "public.tenant_members", "public.tenants", "public.transcription_jobs", "public.transcripts",
@@ -173,13 +174,13 @@ describe("runDataApiProbes against a fake PostgREST", () => {
   it("passes when only graphql_public is exposed: every table, both callers, all four operations refused", async () => {
     const { ok, detail, seen } = await run(() => ({ status: 406, body: { code: "PGRST106", message: "Invalid schema" } }));
     expect(ok).toBe(true);
-    expect(detail.probed).toBe(72);
+    expect(detail.probed).toBe(76);
     // Per caller: the control and the action RPC, then four operations on each table.
-    expect(seen).toHaveLength(2 * 2 + 72 * 2 * 4);
+    expect(seen).toHaveLength(2 * 2 + 76 * 2 * 4);
     const tableProbes = seen.filter((request) => !isRpc(request));
     for (const operation of ["GET", "POST", "PATCH", "DELETE"])
-      expect(tableProbes.filter((request) => request.method === operation)).toHaveLength(72 * 2);
-    expect(seen.filter(isUser)).toHaveLength(2 + 72 * 4);
+      expect(tableProbes.filter((request) => request.method === operation)).toHaveLength(76 * 2);
+    expect(seen.filter(isUser)).toHaveLength(2 + 76 * 4);
     expect(detail.control).toEqual({ anon: "406 PGRST106: token accepted", authenticated: "406 PGRST106: token accepted" });
     expect(seen.every((request) => request.headers.apikey === ANON_KEY && schemaOf(request) === "public")).toBe(true);
     expect(detail.tables["public.tenant_members"]!.authenticated.select).toBe("406 PGRST106: refused");
@@ -211,7 +212,7 @@ describe("runDataApiProbes against a fake PostgREST", () => {
 
     const outage = await run(() => ({ status: 502, html: true }));
     expect(outage.ok).toBe(false);
-    expect(outage.detail.failures).toHaveLength(2 * 2 + 72 * 2 * 4);
+    expect(outage.detail.failures).toHaveLength(2 * 2 + 76 * 2 * 4);
 
     const unreachable = fakePostgrest(() => ({ status: 200 }));
     const thrown = await runDataApiProbes({ ...context, userToken: USER_TOKEN, generateId: randomUUID, tables: [{ schema: "public", name: "tenants" }],

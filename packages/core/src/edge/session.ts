@@ -133,6 +133,7 @@ import { BROWSER_MEMBER_PERMISSIONS, browserHandlers } from "../browser/handlers
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, agentKindStatus, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { businessHandlers, getBusinessProfile } from "../business/index.js";
 import { transcriptionHandlers } from "../transcription/handlers.js";
+import { documentIntakeHandlers } from "../document-intake/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingContactHandlers, bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
@@ -230,7 +231,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers,
+  ...agentHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
 });
 
 /**
@@ -278,6 +279,10 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   ...BROWSER_MEMBER_PERMISSIONS,
   // business-profile.md BP-6: only owners change who the business is.
   "business.profile.update": "business",
+  // document-intake.md DL-3, DL-13: owners upload and discard; apply is `required` in APPROVAL_POLICIES.
+  "catalog.intake.upload": "publish",
+  "catalog.intake.apply": "publish",
+  "catalog.intake.discard": "publish",
   // enrichment.md E-4, E-6, E-7, E-14: owners enrich and decide; staff may stop enrichment of a contact.
   "enrichment.request": "enrich",
   "contact.enrichment.block": "customers",
