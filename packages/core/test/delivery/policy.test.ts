@@ -44,6 +44,13 @@ describe("consentBlock", () => {
   });
 });
 
+it("D-6 rev 5: a voice opt-in grants transactional SMS but never marketing", () => {
+  const base = { channel: "sms", consent: "granted", suppressed: false, source: "twilio-voice:CA0" } as const;
+  expect(consentBlock({ ...base, purpose: "transactional" })).toBeNull();
+  expect(consentBlock({ ...base, purpose: "marketing" })).toBe("consent_missing");
+  expect(consentBlock({ ...base, purpose: "marketing", source: "web-form" })).toBeNull();
+});
+
 it.each([
   ["STOP", "stop"], [" stop ", "stop"], ["Stop.", "stop"], ["STOPALL", "stop"], ["Unsubscribe", "stop"], ["cancel", "stop"],
   ["end", "stop"], ["QUIT", "stop"], ["revoke", "stop"], ["opt out", "stop"], ["opt-out", "stop"],
