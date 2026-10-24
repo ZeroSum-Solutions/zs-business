@@ -73,7 +73,7 @@ const CONFLICT_REASONS = new Set([
   "variant_expired", "variant_changed", "variant_not_staged", "variant_not_running", "image_not_approved", "upload_missing",
   // enrichment.md E-17: the only enrichment reasons a tenant sees.
   ...ENRICHMENT_ERROR_CODES,
-  "consent_required", "lease_lost",
+  "consent_required", "lease_lost", "intake_not_in_review", "intake_changed", "intake_target_changed",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
