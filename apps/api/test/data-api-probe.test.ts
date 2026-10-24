@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import type { Pool } from "pg";
 import { describe, expect, it } from "vitest";
+import { withTestDatabase } from "@zs/db/testing";
 import {
   dataApiRequest,
   evaluateDataApiReply,
@@ -11,6 +13,8 @@ import {
 } from "../src/data-api-probe.js";
 
 const migrations = new URL("../../../supabase/migrations/", import.meta.url);
+/** Created by the migration runner, not by a migration file. */
+const RUNNER_TABLES = ["zs_internal.schema_migrations"];
 const SUPABASE_URL = "https://abcdefghijklmnopqrst.supabase.co";
 const ANON_KEY = "anon-key-for-tests";
 const USER_TOKEN = "user.token.for-tests";
@@ -43,6 +47,49 @@ const isControl = (request: Seen) => request.url.pathname.startsWith("/rest/v1/r
 const schemaOf = (request: Seen) => request.headers["Accept-Profile"] ?? request.headers["Content-Profile"];
 const isUser = (request: Seen) => request.headers.Authorization === `Bearer ${USER_TOKEN}`;
 
+const CATALOG_TABLES = `SELECT n.nspname AS schema, c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname IN ('public','zs_internal') AND c.relkind IN ('r','p','v','m','f') ORDER BY 1,2`;
+
+/** Tables the migrations name that the catalog lacks, and catalog tables the migrations do not name. */
+async function coverageGaps(pool: Pool, fromMigrations: readonly DataApiTable[]): Promise<string[]> {
+  const fromCatalog = (await pool.query<DataApiTable>(CATALOG_TABLES)).rows;
+  const { tables, missingFromCatalog } = tablesToProbe(fromMigrations, fromCatalog);
+  const parsed = new Set(fromMigrations.map((table) => `${table.schema}.${table.name}`));
+  return [
+    ...missingFromCatalog.map((name) => `migration table not in catalog: ${name}`),
+    ...tables.map((table) => `${table.schema}.${table.name}`)
+      .filter((name) => !parsed.has(name) && !RUNNER_TABLES.includes(name))
+      .map((name) => `catalog table not in migrations: ${name}`),
+  ];
+}
+
+/**
+ * The catalog rule behind the probe: every public table has RLS enabled and forced, and no
+ * table in public or zs_internal is granted (table or column) to PUBLIC or anon; zs_internal
+ * is granted to no API role at all.
+ */
+async function exposureViolations(pool: Pool): Promise<string[]> {
+  const { rows } = await pool.query<{ violation: string }>(`
+    WITH t AS (
+      SELECT c.oid, n.nspname AS schema, format('%s.%s', n.nspname, c.relname) AS name, c.relrowsecurity, c.relforcerowsecurity
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname IN ('public','zs_internal') AND c.relkind IN ('r','p','v','m','f')
+    ), grantees AS (
+      SELECT DISTINCT t.name, CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee)::text END AS grantee
+      FROM t, LATERAL (
+        SELECT (aclexplode(c.relacl)).grantee FROM pg_class c WHERE c.oid=t.oid
+        UNION ALL SELECT (aclexplode(a.attacl)).grantee FROM pg_attribute a WHERE a.attrelid=t.oid AND NOT a.attisdropped
+      ) acl
+      WHERE acl.grantee=0 OR pg_get_userbyid(acl.grantee) = 'anon'
+        OR (t.schema='zs_internal' AND pg_get_userbyid(acl.grantee) IN ('authenticated','service_role'))
+    )
+    SELECT name || ': RLS not enabled' AS violation FROM t WHERE schema='public' AND NOT relrowsecurity
+    UNION ALL SELECT name || ': RLS not forced' FROM t WHERE schema='public' AND NOT relforcerowsecurity
+    UNION ALL SELECT name || ': granted to ' || grantee FROM grantees`);
+  // Sorted here, not in SQL: ORDER BY follows the cluster's collation, which differs between machines.
+  return rows.map((row) => row.violation).sort();
+}
+
 /** PostgREST with public exposed: no such function for the control, permission denied for the action RPC, `tables` for the rest. */
 const withRpcs = (tables: (request: Seen) => Answer) => (request: Seen): Answer => {
   if (isControl(request)) return { status: 404, body: { code: "PGRST202", message: "Could not find the function" } };
@@ -51,25 +98,28 @@ const withRpcs = (tables: (request: Seen) => Answer) => (request: Seen): Answer 
 };
 
 describe("tables to probe", () => {
-  it("reads every table the migrations create, tenant_members included", async () => {
+  it("reads every table the migrations create, tenant_members included: exactly the tables a migrated catalog holds", async () => {
     const tables = await readMigrationTables(migrations);
-    expect(tables.map((table) => `${table.schema}.${table.name}`)).toEqual([
-      "public.actions", "public.agent_decisions", "public.agent_followups", "public.agent_global_switch", "public.agent_model_calls", "public.agent_runs", "public.agent_settings",
-      "public.approvals", "public.automation_tokens", "public.booking_contacts", "public.booking_external_blocks", "public.booking_page_disclosures",
-      "public.booking_page_resources",
-      "public.booking_pages", "public.booking_resources", "public.bookings", "public.browser_credentials", "public.browser_run_artifacts", "public.browser_run_events", "public.browser_runs", "public.browser_targets", "public.browser_task_settings", "public.business_profiles",
-      "public.calendar_connections", "public.calendar_push_notifications", "public.calendar_pushes", "public.catalog_items",
-      "public.crm_contact_consent", "public.crm_contact_profile", "public.crm_contacts", "public.crm_deals", "public.crm_pipelines", "public.crm_stages",
-      "public.document_intake_jobs", "public.document_intake_rows",
-      "public.enrichment_requests", "public.enrichment_results",
-      "public.image_variants", "public.inbox_replies", "public.intake_item_consent", "public.intake_items", "public.knowledge_entries", "public.media_assets", "public.message_deliveries",
-      "public.message_delivery_attempts", "public.outbox", "public.rate_limit_buckets", "public.site_activations", "public.site_hosts",
-      "public.site_pointers", "public.site_release_files", "public.site_releases", "public.sites", "public.sms_numbers", "public.sms_status_events", "public.source_records",
-      "public.stripe_events", "public.suppressions", "public.tenant_members", "public.tenants", "public.transcription_jobs", "public.transcripts",
-      "public.voice_calls", "public.voice_numbers", "public.voice_textback_consents", "public.voice_textback_disclosures", "public.voicemails", "public.wallet_billing_events",
-      "public.wallet_ledger", "public.wallet_reservations", "public.wallet_topups", "public.wallets", "public.webhook_deliveries",
-      "public.webhook_delivery_attempts", "public.webhook_endpoints", "public.webhook_ingest_marks",
-    ]);
+    expect(tables).toContainEqual({ schema: "public", name: "tenant_members" });
+    await withTestDatabase(async (database) => {
+      expect(await coverageGaps(database.pool, tables)).toEqual([]);
+      // Negative case: a table the parser cannot see (SELECT INTO) is named as a gap.
+      await database.pool.query("SELECT 1 AS id INTO public.zs_probe_unparsed");
+      expect(await coverageGaps(database.pool, tables)).toEqual(["catalog table not in migrations: public.zs_probe_unparsed"]);
+    });
+  });
+
+  it("every table the probe expects to be refused is refused by the catalog too: forced RLS, no PUBLIC or anon grant", async () => {
+    await withTestDatabase(async (database) => {
+      expect(await exposureViolations(database.pool)).toEqual([]);
+      // Negative case: a table without RLS, granted to PUBLIC, fails the rule by name.
+      await database.pool.query(`CREATE TABLE public.zs_probe_exposed (tenant_id uuid);
+        GRANT SELECT ON public.zs_probe_exposed TO PUBLIC; GRANT SELECT ON zs_internal.schema_migrations TO authenticated`);
+      expect(await exposureViolations(database.pool)).toEqual([
+        "public.zs_probe_exposed: RLS not enabled", "public.zs_probe_exposed: RLS not forced", "public.zs_probe_exposed: granted to PUBLIC",
+        "zs_internal.schema_migrations: granted to authenticated",
+      ].sort());
+    });
   });
 
   it("parses qualified, quoted and IF NOT EXISTS names, and skips comments and format() templates", () => {
@@ -173,14 +223,16 @@ describe("runDataApiProbes against a fake PostgREST", () => {
 
   it("passes when only graphql_public is exposed: every table, both callers, all four operations refused", async () => {
     const { ok, detail, seen } = await run(() => ({ status: 406, body: { code: "PGRST106", message: "Invalid schema" } }));
+    const tables = (await tablesPromise).length;
     expect(ok).toBe(true);
-    expect(detail.probed).toBe(76);
+    expect(tables).toBeGreaterThan(0);
+    expect(detail.probed).toBe(tables);
     // Per caller: the control and the action RPC, then four operations on each table.
-    expect(seen).toHaveLength(2 * 2 + 76 * 2 * 4);
+    expect(seen).toHaveLength(2 * 2 + tables * 2 * 4);
     const tableProbes = seen.filter((request) => !isRpc(request));
     for (const operation of ["GET", "POST", "PATCH", "DELETE"])
-      expect(tableProbes.filter((request) => request.method === operation)).toHaveLength(76 * 2);
-    expect(seen.filter(isUser)).toHaveLength(2 + 76 * 4);
+      expect(tableProbes.filter((request) => request.method === operation)).toHaveLength(tables * 2);
+    expect(seen.filter(isUser)).toHaveLength(2 + tables * 4);
     expect(detail.control).toEqual({ anon: "406 PGRST106: token accepted", authenticated: "406 PGRST106: token accepted" });
     expect(seen.every((request) => request.headers.apikey === ANON_KEY && schemaOf(request) === "public")).toBe(true);
     expect(detail.tables["public.tenant_members"]!.authenticated.select).toBe("406 PGRST106: refused");
@@ -212,7 +264,7 @@ describe("runDataApiProbes against a fake PostgREST", () => {
 
     const outage = await run(() => ({ status: 502, html: true }));
     expect(outage.ok).toBe(false);
-    expect(outage.detail.failures).toHaveLength(2 * 2 + 76 * 2 * 4);
+    expect(outage.detail.failures).toHaveLength(2 * 2 + (await tablesPromise).length * 2 * 4);
 
     const unreachable = fakePostgrest(() => ({ status: 200 }));
     const thrown = await runDataApiProbes({ ...context, userToken: USER_TOKEN, generateId: randomUUID, tables: [{ schema: "public", name: "tenants" }],
