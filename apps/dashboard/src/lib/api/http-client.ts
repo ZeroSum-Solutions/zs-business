@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  bookingContactOutputSchema,
+  bookingDetailSchema,
   bookingPageSchema,
   bookingPageSummarySchema,
   businessProfileReadSchema,
@@ -207,7 +209,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     },
 
     async listBookings(query = {}, options = {}) {
-      const filters = { resourceId: query.resourceId, from: query.from, to: query.to };
+      const filters = { resourceId: query.resourceId, from: query.from, to: query.to, contactId: query.contactId };
       if (query.limit === undefined) return listAll("/v1/booking/bookings", bookingPageSchema, filters, options.signal);
       const page = await request({
         method: "GET", path: "/v1/booking/bookings", query: { ...filters, limit: query.limit },
@@ -219,6 +221,20 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     async createBooking(input, options) {
       const body: CreateBookingRequest = { resourceId: input.resourceId, startsAt: input.startsAt };
       return (await write("/v1/booking/bookings", body, createBookingOutputSchema, options)).result;
+    },
+
+    getBooking(id, options = {}) {
+      return request({ method: "GET", path: `/v1/booking/bookings/${encodeURIComponent(id)}`, schema: bookingDetailSchema, signal: options.signal });
+    },
+
+    async linkBookingContact(input, options) {
+      const body = { contactId: input.contactId, expectedRevision: input.expectedRevision };
+      return (await write(`/v1/booking/bookings/${encodeURIComponent(input.bookingId)}/contact/link`, body, bookingContactOutputSchema, options)).result;
+    },
+
+    async unlinkBookingContact(input, options) {
+      const body = { expectedRevision: input.expectedRevision };
+      return (await write(`/v1/booking/bookings/${encodeURIComponent(input.bookingId)}/contact/unlink`, body, bookingContactOutputSchema, options)).result;
     },
 
     async listPipelines(options = {}) {
