@@ -12,6 +12,7 @@ import { bookingCustomerName, defaultMessage, type BookingView, type ResourceSum
 import { resourceLabel } from "@/lib/resources";
 import { useBookings, useResources, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatTime, startOfZonedDay, weekdayOf, zonedDateKey } from "@/lib/time";
+import { useCan } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { BookingCustomerDialog } from "./booking-customer-dialog";
 import { BookingDialog } from "./booking-dialog";
@@ -39,8 +40,9 @@ function WebsiteBadge({ booking }: { booking: BookingView }) {
   );
 }
 
-function BookingRow({ booking, zone, onCustomer }: { booking: BookingView; zone: string; onCustomer: (id: string) => void }) {
+function BookingRow({ booking, zone, onCustomer }: { booking: BookingView; zone: string; onCustomer?: ((id: string) => void) | undefined }) {
   const customer = bookingCustomerName(booking);
+  const time = formatTime(booking.startsAt, zone);
   return (
     <li className="card flex items-center gap-4 p-4" data-source={booking.source ?? "owner"}>
       <div className="w-20 shrink-0">
@@ -56,9 +58,10 @@ function BookingRow({ booking, zone, onCustomer }: { booking: BookingView; zone:
         </div>
         <p className="truncate text-sm text-muted">{customer ?? "No customer linked"}</p>
         {/* A website booking takes its customer from the request; only owner-made ones can be linked (BC-2). */}
-        {fromWebsite(booking) ? null : (
+        {fromWebsite(booking) || !onCustomer ? null : (
           <button
             type="button"
+            aria-label={`${booking.customer ? "Change customer" : "Link a customer"} for ${time}`}
             onClick={() => onCustomer(booking.id)}
             className="focus-inset -ml-1 mt-0.5 inline-flex min-h-11 items-center rounded-sm px-1 text-sm font-bold text-accent-ink underline-offset-4 hover:underline"
           >
@@ -79,6 +82,8 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
   }), [dateKey, zone]);
   const bookings = useBookings({ resourceId: resource.id, ...range });
   const slots = useSlots({ resourceId: resource.id, ...range, zone });
+  // Linking needs `customers` as well as `calendar` (booking-customer.md BC-3).
+  const canLink = useCan("calendar") && useCan("customers");
   const [customerFor, setCustomerFor] = useState<{ id: string; open: boolean } | null>(null);
   // Looked up by ID on every render, so the sheet shows the booking as the list has it now.
   const customerBooking = bookings.data?.items.find((item) => item.id === customerFor?.id) ?? null;
@@ -99,7 +104,7 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
         {bookings.data.items.length === 0 ? (
           <EmptyState title={past ? "Nothing was booked" : "Nothing booked yet"}>{!past && open.length > 0 ? "Pick an open time to book one." : null}</EmptyState>
         ) : (
-          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} zone={zone} onCustomer={(id) => setCustomerFor({ id, open: true })} />)}</ul>
+          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} zone={zone} {...(canLink ? { onCustomer: (id: string) => setCustomerFor({ id, open: true }) } : {})} />)}</ul>
         )}
       </section>
       <section aria-labelledby="day-open" className="tray">
@@ -122,7 +127,7 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
           </div>
         )}
       </section>
-      {customerBooking ? (
+      {canLink && customerBooking ? (
         <BookingCustomerDialog booking={customerBooking} zone={zone} open={customerFor?.open ?? false} onOpenChange={(open) => setCustomerFor((state) => state && { ...state, open })} />
       ) : null}
     </div>

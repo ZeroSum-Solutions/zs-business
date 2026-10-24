@@ -142,6 +142,8 @@ export const unlinkBookingContactHandler: ActionHandler = {
     const at = clockInstant(now);
     const tenantId = binding.tenantId;
     const state = await lockedState(tx, tenantId, payload.bookingId);
+    // A website booking has no link to clear (BC-2), and its revision is always 0: say why, not "stale".
+    if (state.source !== "owner") throw new Conflict("A website booking takes its customer from the intake review", { reason: "intake_booking" });
     if (state.revision !== payload.expectedRevision) throw staleRevision(state.revision);
     // BC-4: the row stays, so the revision only grows. Clearing no customer changes nothing.
     if (state.contactId === null) return { result: resultOf(payload.bookingId, { contactId: null, name: null }, state.revision) };

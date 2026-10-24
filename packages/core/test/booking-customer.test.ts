@@ -156,6 +156,14 @@ describe("website bookings (BC-2)", () => {
     expect(detail.customer).not.toMatchObject({ status: "linked" });
     expect(detail.customerRevision).toBe(0);
   });
+
+  it("refuse an unlink with intake_booking too, whatever revision it carries", async () => {
+    const id = await websiteBooking();
+    for (const expectedRevision of [0, 1]) {
+      expect(await rejection(a.unlinkBookingContact(id, { expectedRevision }, randomUUID())))
+        .toMatchObject({ code: "Conflict", details: { reason: "intake_booking" } });
+    }
+  });
 });
 
 describe("change, clear and the revision (BC-4)", () => {

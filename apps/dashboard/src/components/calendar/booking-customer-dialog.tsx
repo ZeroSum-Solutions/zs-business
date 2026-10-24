@@ -74,8 +74,13 @@ export function BookingCustomerDialog({
     },
     onError: (error, attempt) => {
       if (!generation.isCurrent(attempt.generation)) return;
-      // The booking moved on under us: show the latest customer and revision before another try.
-      if (isStaleRevision(error)) void queryClient.invalidateQueries({ queryKey: keys.booking(booking.id) });
+      // The booking moved on under us: leave the picker, show the latest customer and revision
+      // (controls wait for that read), and refresh the lists that name them.
+      if (isStaleRevision(error)) {
+        setChanging(false);
+        void queryClient.invalidateQueries({ queryKey: keys.booking(booking.id) });
+        void refreshBookingCustomer(queryClient, keys);
+      }
     },
   });
   const { reset } = change;
@@ -91,6 +96,8 @@ export function BookingCustomerDialog({
   const revision = detail.data?.customerRevision ?? 0;
   const run = (next: Change) => change.mutate({ change: next, generation: generation.current() });
   const pickerLabel = customer ? "Choose another customer" : "Who is it for?";
+  // A write is in flight, or the latest customer and revision are still being read.
+  const busy = change.isPending || detail.isFetching;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -102,7 +109,7 @@ export function BookingCustomerDialog({
         {detail.isPending ? <LoadingRows rows={2} label="Loading customer" /> : detail.isError ? (
           <ErrorNote error={detail.error} retry={() => detail.refetch()} />
         ) : (
-          <div className="space-y-4" aria-busy={change.isPending}>
+          <div className="space-y-4" aria-busy={busy}>
             {customer && !changing ? (
               <>
                 <div className="flex min-h-14 items-center gap-3 rounded-md bg-accent-tint px-3 py-2" data-testid="booking-customer">
@@ -115,10 +122,10 @@ export function BookingCustomerDialog({
                   </div>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  <Button variant="secondary" disabled={change.isPending} onClick={() => { setChanging(true); change.reset(); }}>Change</Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => { setChanging(true); change.reset(); }}>Change</Button>
                   <Button
                     variant="danger-outline"
-                    disabled={change.isPending}
+                    disabled={busy}
                     aria-busy={change.isPending}
                     onClick={() => run({ kind: "unlink", name: customer.name, expectedRevision: revision })}
                   >
@@ -133,10 +140,10 @@ export function BookingCustomerDialog({
                   browse
                   label={pickerLabel}
                   selected={null}
-                  disabled={change.isPending}
+                  disabled={busy}
                   onSelect={(picked) => run({ kind: "link", customer: picked, expectedRevision: revision })}
                 />
-                {customer ? <Button variant="ghost" disabled={change.isPending} onClick={() => { setChanging(false); change.reset(); }}>Keep {customer.name ?? "the current customer"}</Button> : null}
+                {customer ? <Button variant="ghost" disabled={busy} onClick={() => { setChanging(false); change.reset(); }}>Keep {customer.name ?? "the current customer"}</Button> : null}
               </>
             )}
             {change.isError ? <ErrorNote error={change.error} message={customerChangeMessage(change.error)} /> : null}

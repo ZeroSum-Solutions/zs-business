@@ -13,6 +13,7 @@ import { useApi } from "@/lib/api/react";
 import { dropBookedTime, refreshBookingCustomer, useKeys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay, zonedDateKey } from "@/lib/time";
 import { useDialogGeneration } from "@/lib/dialog-generation";
+import { useCan } from "@/lib/session";
 import { useIntentKey } from "@/lib/intent-key";
 import { cn, revealOnFocus } from "@/lib/utils";
 import { customerChangeMessage } from "./booking-customer-dialog";
@@ -51,6 +52,8 @@ export function BookingDialog({
   const { keys } = useKeys();
   const toast = useToast();
   const zone = resource.timeZone;
+  // Linking needs `customers` as well as `calendar` (booking-customer.md BC-3); without it the picker is not offered.
+  const canLink = useCan("calendar") && useCan("customers");
   const firstDay = firstBookableDay(initialDate, zonedDateKey(new Date(), zone));
   const [dateKey, setDateKey] = useState(firstDay);
   const opener = useRef<HTMLElement | null>(null);
@@ -106,6 +109,11 @@ export function BookingDialog({
     },
   });
   const { reset: resetLink } = link;
+  // Any way out of the sheet (X, Escape, Close) while a booking waits for its customer says so.
+  const handleOpenChange = (next: boolean) => {
+    if (!next && booked && link.isError) toast(`Booked ${bookedAt(booked.record)}. ${booked.customer.name ?? "The customer"} may not be linked: open the booking to check.`);
+    onOpenChange(next);
+  };
   // An answer for a sheet that has moved on must not take over the panel of the one on screen
   // (the mutation observer follows the latest call), so it links on its own and only reports.
   const linkDetached = (target: Booked) => {
@@ -179,7 +187,7 @@ export function BookingDialog({
   const otherError = book.isError && !isSlotTaken(book.error) ? book.error : null;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         title="Book an appointment"
         description={resource.name ?? "Calendar"}
@@ -210,7 +218,7 @@ export function BookingDialog({
                 <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                   <Button
                     variant="ghost"
-                    onClick={() => { toast(`Booked ${bookedAt(booked.record)}. ${booked.customer.name ?? "The customer"} may not be linked: open the booking to check.`); onOpenChange(false); }}
+                    onClick={() => handleOpenChange(false)}
                   >
                     Close for now
                   </Button>
@@ -284,16 +292,18 @@ export function BookingDialog({
             )}
           </fieldset>
 
-          <div className="mt-5">
-            <CustomerPicker
-              label="Who is it for? (optional)"
-              selected={customer}
-              onSelect={setCustomer}
-              onClear={() => setCustomer(null)}
-              disabled={book.isPending}
-              hint="Add a customer to see their name on the calendar. You can also do this later."
-            />
-          </div>
+          {canLink ? (
+            <div className="mt-5">
+              <CustomerPicker
+                label="Who is it for? (optional)"
+                selected={customer}
+                onSelect={setCustomer}
+                onClear={() => setCustomer(null)}
+                disabled={book.isPending}
+                hint="Add a customer to see their name on the calendar. You can also do this later."
+              />
+            </div>
+          ) : null}
 
           {otherError ? (
             <div className="mt-4">
@@ -306,7 +316,7 @@ export function BookingDialog({
             <Button
               disabled={!selected || book.isPending}
               aria-busy={book.isPending}
-              onClick={() => selected && book.mutate({ request: { resourceId: resource.id, startsAt: selected }, customer, generation: generation.current() })}
+              onClick={() => selected && book.mutate({ request: { resourceId: resource.id, startsAt: selected }, customer: canLink ? customer : null, generation: generation.current() })}
             >
               {selected ? `Book ${formatTime(selected, zone)}${customer ? ` for ${customer.name ?? "customer"}` : ""}` : "Pick a time"}
             </Button>

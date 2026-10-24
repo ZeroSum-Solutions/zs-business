@@ -27,8 +27,8 @@ CREATE INDEX booking_contacts_tenant_contact ON public.booking_contacts (tenant_
 -- BC-1, BC-2, BC-4 at the database, whatever writes the row:
 --  * the first row is revision 1 and every update adds exactly one, so a revision read earlier can
 --    never match again (an unlink does not reset it);
---  * a website booking (it has an intake item) never gets a contact: its customer comes from the
---    intake review (public-intake.md P-12).
+--  * a website booking (it has an intake item) never gets a row, empty or not: its customer comes
+--    from the intake review (public-intake.md P-12), and an empty row would show a revision.
 CREATE FUNCTION public.booking_contacts_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
@@ -41,7 +41,7 @@ BEGIN
     RAISE EXCEPTION 'A booking contact revision grows by one: % to %', OLD.revision, NEW.revision
       USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'booking_contacts', CONSTRAINT = 'booking_contacts_revision_step';
   END IF;
-  IF NEW.contact_id IS NOT NULL AND EXISTS (
+  IF EXISTS (
     SELECT 1 FROM public.bookings b
     WHERE b.tenant_id = NEW.tenant_id AND b.id = NEW.booking_id AND b.source <> 'owner'
   ) THEN

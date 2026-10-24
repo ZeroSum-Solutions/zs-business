@@ -91,16 +91,15 @@ describe("the table (BC-1)", () => {
 });
 
 describe("only owner-made bookings (BC-2)", () => {
-  it("refuses a contact on a website booking, on insert and update, and allows its empty row", async () => {
+  it("refuses any row on a website booking, with a contact or without", async () => {
     const booking = await makeBooking(fixture.a.tenantId, true);
     const contact = await makeContact(fixture.a.tenantId, "Ana Four");
     await expect(asA((tx) => insertLink(tx, fixture.a.tenantId, booking, contact)))
       .rejects.toMatchObject({ code: "23514", constraint: "booking_contacts_owner_made" });
-    await asA((tx) => insertLink(tx, fixture.a.tenantId, booking, null));
-    await expect(asA((tx) => tx.query(
-      "UPDATE booking_contacts SET contact_id=$1, revision=revision+1 WHERE tenant_id=$2 AND booking_id=$3", [contact, fixture.a.tenantId, booking])))
+    // An empty row would show revision 1 on a booking that has no revision to speak of.
+    await expect(asA((tx) => insertLink(tx, fixture.a.tenantId, booking, null)))
       .rejects.toMatchObject({ code: "23514", constraint: "booking_contacts_owner_made" });
-    expect(await rowOf(fixture.a.tenantId, booking)).toMatchObject({ contact_id: null, revision: 1 });
+    expect(await rowOf(fixture.a.tenantId, booking)).toBeUndefined();
   });
 });
 

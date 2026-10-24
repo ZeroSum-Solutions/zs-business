@@ -56,6 +56,12 @@ describe("calendar day: who a booking is for", () => {
     expect(html).not.toContain("Change customer");
   });
 
+  it("tells the link buttons apart by time for a screen reader", () => {
+    const html = calendar([booking(0, {}), booking(1, { customer: { contactId: uuid(7), name: "Ana Ruiz", status: "linked" } })]);
+    expect(html).toMatch(/aria-label="Link a customer for \d{1,2}:\d{2} [AP]M"/);
+    expect(html).toMatch(/aria-label="Change customer for \d{1,2}:\d{2} [AP]M"/);
+  });
+
   it("shows a linked customer by name and offers to change them", () => {
     const html = calendar([booking(0, { customer: { contactId: uuid(7), name: "Ana Ruiz", status: "linked" } })]);
     expect(html).toContain("Ana Ruiz");

@@ -40,6 +40,7 @@ export function CustomerPicker({
   browse?: boolean;
 }) {
   const inputId = useId();
+  const hintId = `${inputId}-hint`;
   const [search, setSearch] = useState("");
   const settled = useDebouncedValue(search.trim(), 250);
   const contacts = useContacts(settled);
@@ -78,6 +79,7 @@ export function CustomerPicker({
           id={inputId}
           type="search"
           autoComplete="off"
+          aria-describedby={hint ? hintId : undefined}
           placeholder="Search by name, email or phone"
           className="pl-10"
           disabled={disabled}
@@ -85,7 +87,7 @@ export function CustomerPicker({
           onChange={(event) => setSearch(event.target.value)}
         />
       </div>
-      {hint ? <p className="mt-1.5 text-xs text-meta">{hint}</p> : null}
+      {hint ? <p id={hintId} className="mt-1.5 text-xs text-meta">{hint}</p> : null}
       {browse || settled !== "" ? <div className="mt-2" aria-busy={contacts.isFetching}>
         {contacts.isPending ? <LoadingRows rows={2} label="Loading customers" /> : contacts.isError ? (
           <ErrorNote error={contacts.error} retry={() => contacts.refetch()} />

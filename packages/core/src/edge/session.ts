@@ -214,7 +214,7 @@ const dispatch = createDispatcher({
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
-  // booking-customer.md BC-3: also needs `customers`, which the handler checks beside this one.
+  // booking-customer.md BC-3: also needs `customers` (ALSO_REQUIRED_PERMISSIONS below).
   "booking.contact.link": "calendar",
   "booking.contact.unlink": "calendar",
   "crm.contact.create-or-find": "customers",
@@ -245,6 +245,16 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   ...AGENT_MEMBER_PERMISSIONS,
   // business-profile.md BP-6: only owners change who the business is.
   "business.profile.update": "business",
+});
+
+/**
+ * A second permission an action needs beside its ACTION_PERMISSIONS one. It is checked with the
+ * first, before the idempotency replay and the target lookup, so a caller without it learns nothing
+ * about a booking or a stored result; the handler checks it again.
+ */
+export const ALSO_REQUIRED_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
+  "booking.contact.link": "customers",
+  "booking.contact.unlink": "customers",
 });
 
 /** Registered actions whose permission depends on their payload (payloadPermission below). */
@@ -295,6 +305,12 @@ export function memberAuthorize(
     if (permission === undefined || (Object.hasOwn(policies, binding.actionType) && policies[binding.actionType]!.required))
       throw new TenantDenied();
     await requireMember(tx, tenantId, actorId, permission, binding.actionType.startsWith("member.") ? "exclusive" : "shared");
+    // An approval request names the action it proposes; that action's second permission counts too.
+    const proposed = binding.actionType === "approval.request"
+      ? (requestApprovalInputSchema.safeParse(binding.payload).data?.action.actionType ?? binding.actionType)
+      : binding.actionType;
+    const also = ALSO_REQUIRED_PERMISSIONS[proposed];
+    if (also) await requireMember(tx, tenantId, actorId, also, "shared");
   };
 }
 
@@ -329,6 +345,8 @@ export function approvedDispatch(deps: EdgeDependencies, tenantId: string, actor
         const permission = ACTION_PERMISSIONS[binding.actionType];
         if (!permission) throw new TenantDenied();
         await requireMember(tx, tenantId, actorId, permission, binding.actionType.startsWith("member.") ? "exclusive" : "shared");
+        const also = ALSO_REQUIRED_PERMISSIONS[binding.actionType];
+        if (also) await requireMember(tx, tenantId, actorId, also, "shared");
       },
     };
     return dispatch(ctx, {
