@@ -21,8 +21,20 @@ export const IMAGE_MODEL_ALLOWLIST: readonly ModelEntry[] = Object.freeze([
   { adapter: "fake", modelId: "fake-upscale-v1", license: "none: test double with no weights", verified: true },
   // Vendor entries (IM-19). TODO verify each vendor's hosted-use terms before setting verified.
   // Kie.ai entries:
+  // TODO verify: each licence below is our reading of the model maker's hosted-API terms, not checked.
+  { adapter: "kie", modelId: "recraft/remove-background", license: "TODO verify: Recraft's proprietary hosted model; outputs usable commercially under its API terms", verified: false },
+  { adapter: "kie", modelId: "recraft/remove-background+bytedance/seedream-v4-text-to-image", license: "TODO verify: Recraft's proprietary hosted cut-out plus ByteDance Seedream 4.0, a proprietary hosted model; outputs usable commercially under their API terms", verified: false },
+  { adapter: "kie", modelId: "topaz/image-upscale", license: "TODO verify: Topaz Labs' proprietary hosted upscaler; outputs usable commercially under its API terms", verified: false },
   // End of Kie.ai entries.
   // FAL entries:
+  // TODO verify: FAL's hosted-use terms for each model, and that FAL serves these weights.
+  { adapter: "fal", modelId: "fal-ai/birefnet/v2", license: "BiRefNet weights, MIT: commercial use allowed. TODO verify hosted-use terms", verified: false },
+  {
+    adapter: "fal", modelId: "fal-ai/birefnet/v2+fal-ai/flux/schnell",
+    license: "BiRefNet weights, MIT; FLUX.1 schnell weights, Apache-2.0: commercial use allowed for both. TODO verify hosted-use terms",
+    verified: false,
+  },
+  { adapter: "fal", modelId: "fal-ai/esrgan", license: "Real-ESRGAN weights, BSD-3-Clause: commercial use allowed. TODO verify hosted-use terms", verified: false },
   // End of FAL entries.
 ]);
 
