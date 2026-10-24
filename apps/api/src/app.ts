@@ -2,16 +2,18 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
-import type { ApiErrorCode } from "@zs/contracts";
+import { DOCUMENT_INTAKE_UPLOAD_PATH, DOCUMENT_INTAKE_WORKER_PREFIX, type ApiErrorCode } from "@zs/contracts";
 import {
   apiErrorBody,
   AuthUnavailable,
   authenticate,
+  createDocumentIntakeSession,
   createFollowUpAgent,
   createTranscriptionSession,
   DatabaseUnavailable,
   mapError,
   type AutomationEdgeConfig,
+  type DocumentIntakeConfig,
   type FollowUpAgentConfig,
   type Session,
   type SessionCheck,
@@ -44,6 +46,7 @@ import { googleCalendarRoutes, type GoogleCalendarConfig } from "./public/google
 import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 import { transcriptionRoutes, workerAuth, workerRoutes, type TranscriptionApiConfig } from "./routes/transcription.js";
+import { intakeMemberRoutes, intakeWorkerAuth, intakeWorkerRoutes, type DocumentIntakeApiConfig } from "./routes/document-intake.js";
 
 export interface AppConfig {
   /** Exact origins allowed to call the API from a browser; empty means no CORS. */
@@ -99,6 +102,11 @@ export interface AppDependencies {
    * the pilot Mac worker's bearer token. Absent means /v1/transcriptions and /worker/v1 are off.
    */
   readonly transcription?: TranscriptionConfig & TranscriptionApiConfig;
+  /**
+   * Document intake (document-intake.md DL-3, DL-5): the PDF store and the Docling service's bearer
+   * token. Absent means /v1/document-intake and /v1/workers/document-intake are off.
+   */
+  readonly documentIntake?: DocumentIntakeConfig & DocumentIntakeApiConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -225,10 +233,19 @@ export function createApp(deps: AppDependencies) {
     app.route("/worker/v1/transcription", workerRoutes(transcriptionFor));
   }
 
-  app.use("/v1/*", bodyLimit({
+  const intake = deps.documentIntake;
+  const intakeFor = (c: Context<AppEnv>) => createDocumentIntakeSession(requestEdge(c), intake!);
+  if (intake) {
+    app.use(`${DOCUMENT_INTAKE_WORKER_PREFIX}/*`, intakeWorkerAuth(intake));
+    app.route(DOCUMENT_INTAKE_WORKER_PREFIX, intakeWorkerRoutes(intakeFor));
+  }
+
+  const jsonLimit = bodyLimit({
     maxSize: 64 * 1024,
     onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413),
-  }));
+  });
+  // The PDF upload carries its own 20 MiB limit (routes/document-intake.ts).
+  app.use("/v1/*", (c, next) => (c.req.path === DOCUMENT_INTAKE_UPLOAD_PATH ? next() : jsonLimit(c, next)));
   app.use("/v1/*", async (c, next) => {
     const header = c.req.header("Authorization") ?? "";
     const match = /^Bearer ([A-Za-z0-9_\-.]+)$/.exec(header);
@@ -257,6 +274,7 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
   if (transcription) app.route("/v1/transcriptions", transcriptionRoutes(transcriptionFor));
+  if (intake) app.route("/v1/document-intake", intakeMemberRoutes(intakeFor));
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   app.onError((error, c) => {
@@ -295,6 +313,7 @@ export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
 export type { GoogleCalendarConfig } from "./public/google-calendar.js";
 export type { TwilioWebhookConfig } from "./public/twilio-webhook.js";
 export type { TranscriptionApiConfig } from "./routes/transcription.js";
+export type { DocumentIntakeApiConfig } from "./routes/document-intake.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";
