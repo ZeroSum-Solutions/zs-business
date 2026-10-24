@@ -139,6 +139,7 @@ import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { smsStatusHandlers } from "../delivery/sms-status.js";
+import { voiceHandlers } from "../voice/actions.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
 import { automationHandlers } from "../automation/handlers.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
@@ -227,7 +228,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers,
 });
 
