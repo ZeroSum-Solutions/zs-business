@@ -10,7 +10,7 @@ import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  AGENT_ACTIONS, agentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, documentIntakeHandlers, generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -58,6 +58,11 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "agent.kind.kill": "inbox.drafts",
   "agent.kind.resume": "agents",
   "business.profile.update": "business",
+  "enrichment.request": "enrich",
+  "contact.enrichment.block": "customers",
+  "contact.enrichment.unblock": "enrich",
+  "contact.region.attest": "enrich",
+  "contact.profile.apply": "enrich",
 };
 
 interface Tenant {
@@ -388,7 +393,7 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...documentIntakeHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1); the intake worker's result and fail actions
       // belong to its server-side principal (document-intake.md DL-5).
@@ -403,7 +408,7 @@ describe("permission map", () => {
 
   it("leaves members, billing, plan, publish, intake review, approving, reports, integrations, agents and the business profile to owners", () => {
     expect(ROLE_PERMISSIONS.staff).toEqual(["calendar", "customers", "inbox.drafts"]);
-    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations", "agents", "business"] as const) {
+    for (const permission of ["members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations", "agents", "business", "enrich"] as const) {
       expect(roleCan("staff", permission)).toBe(false);
       expect(roleCan("owner", permission)).toBe(true);
     }

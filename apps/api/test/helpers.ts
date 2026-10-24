@@ -8,7 +8,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryIntakeFileStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type SiteCompiler } from "@zs/core";
+import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryIntakeFileStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
 import {
   createApp,
@@ -138,6 +138,8 @@ export interface HarnessOptions {
   twilioWebhook?: Partial<TwilioWebhookConfig>;
   /** Turns the Activepieces routes on; the key defaults to ACTIVEPIECES_KEY_SECRET. */
   activepieces?: Partial<AutomationEdgeConfig>;
+  /** Enrichment gates and prices (enrichment.md E-5); absent, the routes answer enrichment_unavailable. */
+  enrichment?: EnrichmentConfigInput;
   /** Turns the /v1/transcriptions and /worker/v1 routes on over in-memory audio and voicemails. */
   transcription?: boolean;
   /** Turns the /v1/document-intake and /v1/workers/document-intake routes on over an in-memory PDF store. */
@@ -163,6 +165,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     db: database.db,
     generateId: randomUUID,
     config: { allowedOrigins: [ORIGIN] },
+    ...(options.enrichment ? { enrichment: options.enrichment } : {}),
     ...(options.publicIntake
       ? { publicIntake: {
         keySecrets: { current: KEY_SECRET },

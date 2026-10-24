@@ -367,7 +367,7 @@ describe("contact create/find on the runtime database", () => {
          (SELECT count(*)::int FROM pg_policy p WHERE p.polrelid=c.oid AND p.polqual IS NOT NULL AND p.polwithcheck IS NOT NULL) AS policies
        FROM pg_class c JOIN pg_attribute a ON a.attrelid=c.oid AND a.attname='tenant_id' AND a.attnotnull
        WHERE c.relnamespace='public'::regnamespace AND c.relname LIKE 'crm\\_%' ORDER BY 1`))).rows;
-    expect(rows).toEqual(["crm_contact_consent", "crm_contacts", "crm_deals", "crm_pipelines", "crm_stages"]
+    expect(rows).toEqual(["crm_contact_consent", "crm_contact_profile", "crm_contacts", "crm_deals", "crm_pipelines", "crm_stages"]
       .map((name) => ({ name, rls: true, forced: true, policies: 1 })));
   });
 });

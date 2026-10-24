@@ -24,7 +24,7 @@ const idSchema = z.uuid().toLowerCase();
  * `agent:` keys the follow-up agent's steps (agents.md G-6); `transcript:` keys the transcription worker's completions and a voicemail's job (transcription.md X-4); and `document-intake:` keys the document worker's result and failure steps (document-intake.md DL-15). Keys are unique per tenant, so a
  * member key with one of them could take the server's key first and turn its run into a conflict.
  */
-export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "public:", "unsubscribe:", "sms-inbound:", "sms-status:", "email-feedback:", "inbox:", "activepieces:", "oauth-google:", "agent:", "transcript:", "document-intake:"] as const);
+export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "public:", "unsubscribe:", "sms-inbound:", "sms-status:", "email-feedback:", "inbox:", "activepieces:", "oauth-google:", "agent:", "transcript:", "enrichment:", "twilio-voice:", "document-intake:"] as const);
 export const idempotencyKeySchema = z.string().min(1).max(200)
   .refine(isPostgresText, "Text is not valid in Postgres")
   .refine((key) => !SERVER_IDEMPOTENCY_PREFIXES.some((prefix) => key.toLowerCase().startsWith(prefix)),

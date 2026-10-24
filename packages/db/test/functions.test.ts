@@ -71,8 +71,11 @@ const expectedPath: Record<string, string> = {
   "calendar_connections_runtime_guard()": "pg_catalog, pg_temp",
   // M3c (20261020200000_inbox_home.sql): the won-date and reply-guard triggers.
   "crm_deals_won_at()": "pg_catalog, pg_temp",
+  // Enrichment (20261023600000_enrichment.sql, E-7): a changed email or phone clears the region mark.
+  "crm_contacts_clear_region_attest()": "pg_catalog, pg_temp",
   "inbox_replies_guard()": "pg_catalog, pg_temp",
   "site_history_append_only()": "pg_catalog, pg_temp",
+  "voice_textback_append_only()": "pg_catalog, pg_temp",
   "rate_limit_take(timestamp with time zone,jsonb)": "pg_catalog, pg_temp",
   "record_action_and_event(uuid,uuid,uuid,text,jsonb,jsonb,jsonb,text,jsonb,timestamp with time zone,uuid,text,jsonb)":
     "pg_catalog, pg_temp",

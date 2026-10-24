@@ -130,6 +130,7 @@ import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { smsStatusHandlers } from "../delivery/sms-status.js";
+import { voiceHandlers } from "../voice/actions.js";
 import { suppressionHandlers } from "../delivery/suppression.js";
 import { automationHandlers } from "../automation/handlers.js";
 import { intakeHandlers, linkIntakeItem, rejectIntakeItem, signBookingKey } from "../intake/index.js";
@@ -152,6 +153,7 @@ import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, l
 import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
 import { pendingGrantId, verifyPendingGrant, type PendingGrant } from "../calendar/pending-grant.js";
 import type { GoogleClient } from "../calendar/types.js";
+import { enrichmentHandlers } from "../enrichment/handlers.js";
 import { derivedId } from "./ids.js";
 import { SiteStoreUnavailable, validationError } from "./errors.js";
 
@@ -210,8 +212,8 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers, ...businessHandlers, ...transcriptionHandlers, ...documentIntakeHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
+  ...agentHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...documentIntakeHandlers,
 });
 
 /**
@@ -258,6 +260,12 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "catalog.intake.upload": "publish",
   "catalog.intake.apply": "publish",
   "catalog.intake.discard": "publish",
+  // enrichment.md E-4, E-6, E-7, E-14: owners enrich and decide; staff may stop enrichment of a contact.
+  "enrichment.request": "enrich",
+  "contact.enrichment.block": "customers",
+  "contact.enrichment.unblock": "enrich",
+  "contact.region.attest": "enrich",
+  "contact.profile.apply": "enrich",
 });
 
 /**

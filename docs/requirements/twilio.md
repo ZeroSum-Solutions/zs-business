@@ -4,7 +4,11 @@ Status: draft contract for M5, provider 3 of 5 (2026-10-20), revision 3 (2026-10
 (audit 2026-10-22): T-8 stored replies. Revision 3 adds missed-call text-back, T-10..T-14: a
 signed voice webhook for the tenant's number, a press-1 offer after an unanswered call, the
 consent and text that follow, voicemail into the Inbox, and limits and replays. T-1..T-9 are
-unchanged. T-10..T-14 are not built yet. Code follows this file; a change to a numbered rule
+unchanged. T-10..T-14: first slice built (2026-10-23, migration `20261023500000`); the audio
+route, the Inbox entry and the daily recording delete are not. The text body is
+`<business>: Book here: <url>` and the delivery worker adds the opt-out line (D-4).
+`voice_calls.disclosure_version` records which wording was offered. A full mailbox or an
+unreachable limiter ends the call with a spoken apology and no offer. Code follows this file; a change to a numbered rule
 needs a new revision of this file first.
 
 Scope: the SMS provider behind the M3d provider port (`delivery.md` D-7, D-8). It turns one

@@ -8,12 +8,14 @@ import {
   AuthUnavailable,
   authenticate,
   createDocumentIntakeSession,
+  createEnrichmentSession,
   createFollowUpAgent,
   createTranscriptionSession,
   DatabaseUnavailable,
   mapError,
   type AutomationEdgeConfig,
   type DocumentIntakeConfig,
+  type EnrichmentConfigInput,
   type FollowUpAgentConfig,
   type Session,
   type SessionCheck,
@@ -32,6 +34,7 @@ import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
+import { enrichmentRoutes } from "./routes/enrichment.js";
 import { homeRoutes } from "./routes/home.js";
 import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
@@ -97,6 +100,11 @@ export interface AppDependencies {
    * under /v1/integrations/activepieces and the flow routes under /integrations/activepieces are off.
    */
   readonly activepieces?: AutomationEdgeConfig;
+  /**
+   * Company enrichment (enrichment.md E-5, E-8, E-9): the gates, price and caps the request action
+   * reads. Absent means every request is refused `enrichment_unavailable`; reads still work.
+   */
+  readonly enrichment?: EnrichmentConfigInput;
   /**
    * Transcription (transcription.md X-1..X-4): the audio store, the optional voicemail source and
    * the pilot Mac worker's bearer token. Absent means /v1/transcriptions and /worker/v1 are off.
@@ -273,6 +281,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/agents", agentKindRoutes());
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
+  const enrichment = deps.enrichment;
+  app.route("/v1", enrichmentRoutes((c) => createEnrichmentSession(requestEdge(c), c.var.session.principal, enrichment)));
   if (transcription) app.route("/v1/transcriptions", transcriptionRoutes(transcriptionFor));
   if (intake) app.route("/v1/document-intake", intakeMemberRoutes(intakeFor));
 
