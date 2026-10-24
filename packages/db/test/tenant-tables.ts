@@ -62,6 +62,7 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         else if (name.startsWith("voice") && field.name === "call_sid") row[field.name] = `CA${"0".repeat(32)}`;
         // Text columns a CHECK limits to a list: a listed value that needs no foreign-key row (delivery.md D-11).
         else if (name === "wallet_reservations" && field.name === "job_kind") row[field.name] = "enrichment";
+        else if (name === "enrichment_results" && field.name === "field") row[field.name] = "name";
         else if (field.enum_value !== null) row[field.name] = field.enum_value;
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);

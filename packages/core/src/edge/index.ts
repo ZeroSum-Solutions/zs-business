@@ -13,6 +13,7 @@ export {
   type Principal,
   type Session,
 } from "./session.js";
+export { createEnrichmentSession, enrichmentActorId, type EnrichmentSession } from "./enrichment-session.js";
 export { createPublicSession, publicIntakeActorId, type PublicSession } from "./public-session.js";
 export {
   createInboundSmsSession,

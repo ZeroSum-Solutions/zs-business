@@ -20,6 +20,7 @@
     "build:vercel": "node scripts/build-vercel.mjs",
     "check:hosted": "tsx src/scripts/hosted-checks.ts",
     "delivery:worker": "tsx src/scripts/delivery-worker.ts",
+    "enrichment:worker": "tsx src/scripts/enrichment-worker.ts",
     "billing:worker": "tsx src/scripts/billing-worker.ts",
     "calendar:worker": "tsx src/scripts/calendar-worker.ts",
     "followup:worker": "tsx src/scripts/followup-worker.ts",
