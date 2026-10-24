@@ -71,6 +71,25 @@ const beforeMultiResource = beforeReadIndexes.filter((name) => name !== "2026101
 /** Main before the hardening follow-ups (#2): the state hosted databases upgraded from. */
 const beforeHardening = beforeMultiResource.filter((name) =>
   !["20261017155900_dispatcher_owner_role.sql", "20261018090000_function_hardening.sql"].includes(name));
+/**
+ * Names of the public functions the migrations leave behind: CREATE [OR REPLACE] FUNCTION adds
+ * one, DROP FUNCTION removes it, in file order. Comments are skipped; unqualified means public.
+ */
+function functionsInMigrations(sqlTexts: readonly string[]): string[] {
+  const names = new Set<string>();
+  const statement = /\b(CREATE(?:\s+OR\s+REPLACE)?|DROP)\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(?:"?([a-z_][a-z0-9_]*)"?\s*\.\s*)?"?([a-z_][a-z0-9_]*)"?\s*\(/gi;
+  for (const sql of sqlTexts) {
+    const code = sql.replace(/--[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const [, verb, schema, name] of code.matchAll(statement)) {
+      if ((schema ?? "public").toLowerCase() !== "public") continue;
+      if (verb!.toUpperCase() === "DROP") names.delete(name!.toLowerCase());
+      else names.add(name!.toLowerCase());
+    }
+  }
+  return [...names].sort();
+}
+const migrationSources = async () => Promise.all((await readdir(migrations)).filter((name) => name.endsWith(".sql")).sort()
+  .map((name) => readFile(new URL(name, migrations), "utf8")));
 const checksum = async (name: string) =>
   createHash("sha256").update(await readFile(new URL(name, migrations), "utf8")).digest("hex");
 
@@ -134,12 +153,24 @@ it.each([
       return schemaState(database.pool);
     }, undefined, { migrations: pathToFileURL(`${atMain}/`) });
     const fresh = await withTestDatabase((database) => schemaState(database.pool));
-    expect(upgraded.functions).toHaveLength(24);
+    // Not vacuous: both sides hold exactly the functions the migration files define.
+    const names = (upgraded.functions as { fn: string }[]).map((row) => row.fn.slice(0, row.fn.indexOf("(")));
+    expect([...new Set(names)].sort()).toEqual(functionsInMigrations(await migrationSources()));
     expect(upgraded).toEqual(fresh);
   } finally {
     await rm(atMain, { recursive: true, force: true });
   }
 }, 30000);
+
+it("reads the functions migrations create and drop, in order, public only", () => {
+  expect(functionsInMigrations([`
+    -- CREATE FUNCTION public.commented_out() RETURNS int;
+    CREATE OR REPLACE FUNCTION public.kept(a int) RETURNS int;
+    CREATE FUNCTION "Quoted"() RETURNS int;
+    CREATE FUNCTION zs_internal.hidden() RETURNS int;
+    CREATE FUNCTION public.gone() RETURNS int;
+  `, "DROP FUNCTION IF EXISTS public.gone();", "CREATE FUNCTION plain () RETURNS int;"])).toEqual(["kept", "plain", "quoted"]);
+});
 
 it("the full chain applies as a non-superuser CREATEROLE migrator and hands functions to their owner roles", async () => {
   await withTestDatabase(async (database) => {
@@ -170,11 +201,9 @@ it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requir
       first[statement.split(" ")[2]!] ??= statement;
     }
   }
-  expect(first).toEqual({
-    zs_dispatcher: "CREATE ROLE zs_dispatcher NOLOGIN;",
-    zs_function_owner: "CREATE ROLE zs_function_owner NOLOGIN;",
-    zs_rate_limiter: "CREATE ROLE zs_rate_limiter NOLOGIN;",
-  });
+  // Rule, not a list: a new role passes only if its first CREATE ROLE names NOLOGIN alone.
+  expect(Object.keys(first)).toEqual(expect.arrayContaining(["zs_dispatcher", "zs_function_owner", "zs_rate_limiter"]));
+  expect(first).toEqual(Object.fromEntries(Object.keys(first).map((role) => [role, `CREATE ROLE ${role} NOLOGIN;`])));
 });
 
 /** Applies migrations before 20261018090000, stores one resource, then runs the rest as the migrator. */
