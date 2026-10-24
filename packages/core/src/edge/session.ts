@@ -29,6 +29,8 @@ import {
   createDealRequestSchema,
   decideApprovalRequestSchema,
   draftReplyRequestSchema,
+  businessProfileOutputSchema,
+  updateBusinessProfileRequestSchema,
   followUpStatusOutputSchema,
   killFollowUpRequestSchema,
   listFollowUpRunsQuerySchema,
@@ -75,6 +77,8 @@ import {
   type FollowUpRunDetail,
   type FollowUpRunPage,
   type FollowUpStatus,
+  type BusinessProfile,
+  type BusinessProfileOutput,
   type FollowUpStatusOutput,
   type JsonValue,
   type BookingPageSummary,
@@ -104,6 +108,7 @@ import type { ScopedDatabase, Transaction } from "@zs/db";
 import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, followUpStatus, getRun, listRuns } from "../agents/index.js";
+import { businessHandlers, getBusinessProfile } from "../business/index.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
@@ -192,7 +197,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers,
+  ...agentHandlers, ...businessHandlers,
 });
 
 /**
@@ -230,6 +235,8 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "calendar.google.disconnect": "publish",
   // agents.md G-2, G-3: owners change settings and resume; any member may stop the agent.
   ...AGENT_MEMBER_PERMISSIONS,
+  // business-profile.md BP-6: only owners change who the business is.
+  "business.profile.update": "business",
 });
 
 /** Registered actions whose permission depends on their payload (payloadPermission below). */
@@ -362,6 +369,11 @@ function defined<T extends Record<string, unknown>>(value: T): { [K in keyof T]:
   return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as { [K in keyof T]: Exclude<T[K], undefined> };
 }
 
+/** A parsed value as the JSON a payload carries: optional keys left out are absent, never `undefined`. */
+function toJson(value: unknown): JsonValue {
+  return JSON.parse(JSON.stringify(value)) as JsonValue;
+}
+
 /** Drop trailing slashes in one linear pass; a /\/+$/ regex backtracks on long runs of "/". */
 export function trimTrailingSlashes(url: string): string {
   let end = url.length;
@@ -433,6 +445,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   };
   const notDraft = (status: string) => new Conflict("The reply is no longer a draft", { reason: "not_draft", status });
   /** agents.md G-2: the settings target is the tenant itself. */
+  /** business-profile.md BP-6: the profile target is the tenant itself, like the agent settings. */
+  const businessEnvelope = (rawKey: unknown) => {
+    const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
+    return {
+      target: { tenantId, type: "business_profile", id: tenantId },
+      approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
+      idempotencyKey,
+    };
+  };
   const agentSettingsEnvelope = (rawKey: unknown) => {
     const idempotencyKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
     return {
@@ -729,6 +750,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const id = parseInput(uuidSchema, siteId, "site ID");
       const site = await read("publish", (tx) => getSite(tx, tenantId, id));
       return { site, edge: await syncSite(sites, id) };
+    },
+
+    /** business-profile.md BP-5: who the business is; any member reads it. */
+    getBusiness: (): Promise<BusinessProfile> => read(null, (tx) => getBusinessProfile(tx, tenantId)),
+    /** BP-6, BP-7: owners change the fields named in `changes`, compare-and-set on the revision. */
+    async updateBusiness(body: unknown, key: unknown): Promise<BusinessProfileOutput> {
+      const request = parseInput(updateBusinessProfileRequestSchema, body);
+      return parseInput(businessProfileOutputSchema,
+        await run({ actionType: "business.profile.update", ...businessEnvelope(key), payload: toJson(request) }), "result");
     },
 
     /** The caller's own membership; any member may ask. `profile` adds the business name and email. */

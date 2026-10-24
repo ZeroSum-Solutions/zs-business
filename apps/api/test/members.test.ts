@@ -52,7 +52,7 @@ describe("role permissions", () => {
     const staff = await staffOf(h.a.tenantId);
     expect(meResponseSchema.parse((await call(h.app, "GET", "/v1/me?include=profile", { token: h.a.token })).body)).toEqual({
       tenantId: h.a.tenantId, userId: h.a.actorId, memberId: h.a.memberId, role: "owner",
-      permissions: ["calendar", "customers", "inbox.drafts", "members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations", "agents"],
+      permissions: ["calendar", "customers", "inbox.drafts", "members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations", "agents", "business"],
       businessName: "Tenant A", email: h.a.email,
     });
     expect(meResponseSchema.parse((await call(h.app, "GET", "/v1/me?include=profile", { token: staff.token })).body)).toMatchObject({

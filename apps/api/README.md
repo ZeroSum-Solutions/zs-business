@@ -220,6 +220,8 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `POST /v1/members` `{ email, role }` | 201 pending invite (no user yet); 409 `member_exists`; owners only |
 | `POST /v1/members/:id/role` `{ role }` | 200 member; 409 `last_owner` when it would leave no owner; owners only |
 | `DELETE /v1/members/:id` | 200 removed member; 409 `last_owner`; owners only |
+| `GET /v1/business` | The business profile `{ displayName, legalName, phoneE164, timeZone, currency, postalAddress, revision, updatedAt }`, any member (docs/requirements/business-profile.md BP-5); 404 on an API older than the profile, which the dashboard reads as "not available yet" |
+| `PUT /v1/business` `{ expectedRevision, changes }` | 200 `{ actionId, result: profile }` at `revision + 1`; `changes` holds only the fields being set, `null` clears all but `displayName` and `currency`; `Idempotency-Key` required; 409 `stale_revision` with `currentRevision`; 400 `ValidationFailed` with the field's path (`changes.timeZone`, `changes.currency`); 403 for staff (the owner-only `business` permission); `displayName` also renames the tenant (BP-6, BP-7, BP-9) |
 | `GET /v1/sites` | `{ items: Site[] }`, owners only (as every `/v1/sites` route) |
 | `POST /v1/sites` `{ name }` | 201 site, not yet published |
 | `GET /v1/sites/:id` | one site with its live release, pointer version and hosts |

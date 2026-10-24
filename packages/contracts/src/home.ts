@@ -2,6 +2,7 @@ import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
 import { bookingInstantSchema, bookingTimeZoneSchema } from "./booking.js";
 import { crmInstantSchema, dealRecordSchema } from "./crm.js";
+import { currencyCodeSchema, storedCurrencyCodeSchema } from "./currency.js";
 
 // M3c Home and deal details (docs/requirements/inbox-home.md H-1..H-6). The frozen F2 deal
 // record (crm.md C-13..C-20) keeps its shape; lists and set-details return it with details.
@@ -11,32 +12,6 @@ export const leadSourceSchema = z.enum(["website", "referral", "phone", "email",
 export type LeadSource = z.infer<typeof leadSourceSchema>;
 export const stageOutcomeSchema = z.enum(["open", "won", "lost"]);
 export type StageOutcome = z.infer<typeof stageOutcomeSchema>;
-/**
- * H-1: the ISO 4217 codes a deal value may carry: circulating currencies, recently withdrawn ones
- * and the IMF's units, without fund, metal, test or "no currency" codes. Migration
- * 20261022520000_deal_currency_iso.sql checks the same list.
- */
-export const CURRENCY_CODES: readonly string[] = Object.freeze([
-  "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF",
-  "BMD", "BND", "BOB", "BRL", "BSD", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY", "COP", "CRC",
-  "CUC", "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "FJD", "FKP", "GBP", "GEL",
-  "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS", "INR", "IQD", "IRR",
-  "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR",
-  "LRD", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR", "MVR", "MWK", "MXN", "MYR",
-  "MZN", "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR",
-  "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLE", "SLL", "SOS", "SRD", "SSP",
-  "STN", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX", "USD",
-  "UYU", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAF", "XCD", "XCG", "XDR", "XOF", "XPF", "XSU", "YER", "ZAR",
-  "ZMW", "ZWG", "ZWL",
-]);
-const currencyCodes: ReadonlySet<string> = new Set(CURRENCY_CODES);
-export const currencyCodeSchema = z.string().refine((code) => currencyCodes.has(code), "Expected an ISO 4217 code such as USD");
-/**
- * H-1 revision 4: a currency as reads show it. Deals stored under the earlier check may hold any
- * three capitals until the owner fixes them, so reads accept that shape; writes take only
- * currencyCodeSchema.
- */
-export const storedCurrencyCodeSchema = z.string().regex(/^[A-Z]{3}$/, "Expected three capital letters");
 const amountMinorSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 export const dealValueSchema = z.strictObject({
   /** Minor units (cents for USD). */
