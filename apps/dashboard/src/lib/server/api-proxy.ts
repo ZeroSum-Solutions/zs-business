@@ -10,7 +10,7 @@
  * Google Calendar connection also binds the flow to this browser, and reading or confirming a
  * staged grant sends the API the grant this browser holds (calendar-connect.ts).
  */
-import { PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
+import { DOCUMENT_INTAKE_APPLY_PATH, INTAKE_APPLY_BODY_LIMIT, PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
 import { readBoundedBody, type BodyTiming } from "./body";
 import { bindConnectStart, expiredGrantCookie, isConnectStart, namesGrant, pendingGrantOf, readsPendingGrant } from "./calendar-connect";
@@ -23,7 +23,7 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions"]);
+const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "document-intake"]);
 const SINGLE = new Set(["me", "members", "approvals", "sources", "sites", "business", "transcriptions"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
@@ -73,8 +73,10 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
   if (WITH_BODY.has(request.method)) {
     // A cross-site form can only send simple content types; JSON needs a CORS preflight.
     if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return auth.finish(reply(400, "ValidationFailed"));
-    // Never more than MAX_BODY_BYTES in memory, and never a slow upload held open for long.
-    const read = await readBoundedBody(request, { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
+    // Never more than the route's limit in memory, and never a slow upload held open for long. The intake
+    // apply request lists up to 5,000 row IDs (document-intake.md DL-13); every other route keeps 64 KiB.
+    const maxBytes = DOCUMENT_INTAKE_APPLY_PATH.test(`/${path.join("/")}`) ? INTAKE_APPLY_BODY_LIMIT : MAX_BODY_BYTES;
+    const read = await readBoundedBody(request, { maxBytes, deadlineMs: BODY_DEADLINE_MS, ...timing });
     if (!read.ok) return auth.finish(reply(BODY_REFUSED[read.reason], "ValidationFailed"));
     body = read.bytes;
   }
