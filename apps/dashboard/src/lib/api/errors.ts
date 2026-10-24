@@ -105,6 +105,14 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   no_email: "This customer has no email address yet. Add one in Customers, then approve the reply.",
   approved_by_other: "Another owner already approved this reply. They finish sending it, or revoke their approval first.",
   stale_release: "Another version went live since you opened this page.",
+  enrichment_unavailable: "Company details are not switched on for this business yet.",
+  enrichment_no_company_domain: "This customer has no company email address, so there is no company to look up.",
+  enrichment_blocked: "Company details are turned off for this customer.",
+  enrichment_region_blocked: "We do not look up company details for customers in the EU or UK.",
+  enrichment_region_unknown: "We cannot tell where this customer is. An owner can confirm they are outside the EU and UK first.",
+  insufficient_funds: "Your balance is too low for a lookup. Add funds, then try again.",
+  enrichment_daily_cap: "You reached today's limit on lookups. Try again tomorrow.",
+  enrichment_result_expired: "Those details expired. Ask for them again.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
