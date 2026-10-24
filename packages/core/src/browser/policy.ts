@@ -2,7 +2,7 @@
 // about every request the browser would send (the DevTools interception hook in the Python
 // service, the request queue in the fake runner) and sends nothing it refuses. The model picks
 // steps; this decides whether a step may run.
-import type { BrowserStopReason } from "@zs/contracts";
+import { canonicalOrigin, type BrowserStopReason } from "@zs/contracts";
 
 /** What started the request. Asset prefixes serve only the four asset types (BT-5). */
 export type BrowserResourceType = "document" | "script" | "style" | "image" | "font" | "xhr" | "fetch" | "form" | "other";
@@ -43,12 +43,13 @@ export function eventLocation(raw: string): { origin: string; path: string } | n
  */
 export function createRequestPolicy(target: BrowserPolicyTarget) {
   let signInUsed = false;
-  const origins = new Set(target.allowedOrigins.map((origin) => origin.toLowerCase()));
+  // BT-3: compare canonical origins (`https://x:443` is `https://x`); a value that is not an exact origin allows nothing.
+  const origins = new Set(target.allowedOrigins.map(canonicalOrigin).filter((origin): origin is string => origin !== null));
   return {
     check(request: BrowserRequest): PolicyVerdict {
       let url: URL;
       try { url = new URL(request.url); } catch { return { allow: false, reason: "origin_denied" }; }
-      if ((url.protocol !== "https:" && url.protocol !== "http:") || !origins.has(url.origin.toLowerCase()))
+      if ((url.protocol !== "https:" && url.protocol !== "http:") || !origins.has(url.origin))
         return { allow: false, reason: "origin_denied" };
       // An encoded separator hides a path from a prefix check; refuse it outright.
       if (/%2f|%5c|\\/i.test(url.pathname) || url.username !== "" || url.password !== "")

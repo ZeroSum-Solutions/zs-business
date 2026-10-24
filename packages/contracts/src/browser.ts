@@ -47,11 +47,36 @@ export const BROWSER_LIMITS = Object.freeze({
   maxScreenshotBytes: 5 * 1024 * 1024,
 });
 
-/** BT-3: an exact origin. https, or http on a loopback host (core refuses that unless the fixture is on). */
-export const browserOriginSchema = z.string().max(200).regex(
-  /^(https:\/\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?|http:\/\/(localhost|127\.0\.0\.1|\[::1\]))(:[0-9]{1,5})?$/,
-  "Must be an exact origin such as https://portal.example, with no path or wildcard",
-);
+/** BT-3: the hosts on which plain http is allowed, compared exactly after parsing (never as a prefix). */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+/** A DNS host name: lowercase labels, no empty label, so no trailing dot. */
+const HOST_NAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
+
+/**
+ * BT-3: the canonical form (`new URL(raw).origin`) of an exact origin, or null when `raw` is not one.
+ * https on a DNS name, or http on a loopback host (core refuses that unless the fixture is on). No
+ * path beyond `/`, query, fragment, userinfo, wildcard, whitespace or trailing dot. A default port
+ * drops out (`https://x:443` is `https://x`) and the scheme and host are lowercased.
+ */
+export function canonicalOrigin(raw: string): string | null {
+  if (raw.length > 200 || !/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#@\\]+\/?$/.test(raw)) return null;
+  let url: URL;
+  try { url = new URL(raw); } catch { return null; }
+  if (url.username !== "" || url.password !== "" || url.pathname !== "/" || url.search !== "" || url.hash !== "") return null;
+  if (url.protocol === "http:") return LOOPBACK_HOSTS.has(url.hostname) ? url.origin : null;
+  if (url.protocol !== "https:" || !HOST_NAME.test(url.hostname)) return null;
+  return url.origin;
+}
+
+/** BT-3: an exact origin, output in canonical form, so stored values and policy comparisons agree. */
+export const browserOriginSchema = z.string().max(200).transform((raw, ctx) => {
+  const origin = canonicalOrigin(raw);
+  if (origin === null) {
+    ctx.addIssue({ code: "custom", message: "Must be an exact origin such as https://portal.example, with no path or wildcard" });
+    return z.NEVER;
+  }
+  return origin;
+});
 /** BT-5: a path prefix, no query, fragment, dot segment or encoded separator. */
 export const browserPathSchema = z.string().min(1).max(200)
   .regex(/^\/[A-Za-z0-9._~\-/]*$/, "Must be a path prefix starting with /")
