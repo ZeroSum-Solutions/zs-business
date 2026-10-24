@@ -5,6 +5,8 @@ import { DEFAULT_FOLLOW_UP_SETTINGS, followUpSkipReasonSchema, followUpStopReaso
 import {
   agentState,
   blockedSentence,
+  costLine,
+  dollars,
   minuteLabel,
   quietHoursLabel,
   readSettingsForm,
@@ -20,7 +22,8 @@ import { actorName, AGENT_AUTHOR } from "../src/components/inbox/inbox-view";
 const AGENT = "703cddeb-3f35-8dec-8397-426f06fb05ee";
 const status = (patch: Partial<FollowUpStatus> = {}): FollowUpStatus => ({
   settings: { ...DEFAULT_FOLLOW_UP_SETTINGS, enabled: true, timeZone: "America/New_York" },
-  revision: 1, updatedAt: null, killed: null, globalKilled: false, canDraft: true, blockedBy: null, ...patch,
+  revision: 1, updatedAt: null, killed: null, globalKilled: false, canDraft: true, blockedBy: null,
+  costSpentMicros: 0, costCapMicros: 1_000_000, costWarning: false, ...patch,
 });
 
 describe("agent copy", () => {
@@ -44,6 +47,15 @@ describe("agent copy", () => {
     expect(blockedSentence(status({ canDraft: false, blockedBy: "daily_cap" }))).toMatch(/^It drafted 10 follow-ups in the last 24 hours/);
     expect(quietHoursLabel({ quietStartMinute: 600, quietEndMinute: 600, timeZone: "UTC" })).toBe("No quiet hours");
     expect([0, 59, 720, 1439].map(minuteLabel)).toEqual(["12:00 AM", "12:59 AM", "12:00 PM", "11:59 PM"]);
+  });
+
+  it("says what the writing service cost against its daily limit, and flags 80% (G-15)", () => {
+    expect([0, 1, 87, 10_000, 10_001, 250_000, 1_000_000, 12_340_000].map(dollars)).toEqual(["$0.00", "$0.01", "$0.01", "$0.01", "$0.02", "$0.25", "$1.00", "$12.34"]);
+    expect(costLine(status())).toEqual({ text: "Writing service cost in the last 24 hours: $0.00 of $1.00.", warning: false });
+    const near = costLine(status({ costSpentMicros: 800_000, costWarning: true }));
+    expect(near).toEqual({ text: "Writing service cost in the last 24 hours: $0.80 of $1.00. That is over 80% of the limit.", warning: true });
+    expect(blockedSentence(status({ canDraft: false, blockedBy: "cost_cap", costSpentMicros: 1_000_000 }))).toBe(
+      "The writing service cost $1.00 in the last 24 hours, its daily limit of $1.00. It drafts again as that cost drops.");
   });
 
   it("counts a run in words", () => {

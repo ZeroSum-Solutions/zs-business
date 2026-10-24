@@ -31,6 +31,7 @@ test("shows the agent's state, that drafts wait for approval, and its recent run
   await expect(page.getByRole("main").getByTestId("sample-badge")).toHaveCount(0);
   await expect(card(page).getByTestId("followup-state")).toHaveText(/^On(, waiting)?$/);
   await expect(card(page).getByTestId("followup-blocked")).toHaveText(/^(It can draft now\.|Why it can't draft right now: It is quiet hours \(9:00 PM to 8:00 AM, Eastern Time \(New York\)\)\. It drafts again when they end\.)$/);
+  await expect(card(page).getByTestId("followup-cost")).toHaveText(/^Writing service cost in the last 24 hours: \$\d+\.\d\d of \$1\.00\./);
   await expect(card(page)).toContainText("nobody has answered after 24 hours");
   await expect(card(page).getByTestId("approval-note")).toContainText("Agent drafts wait in the Inbox for an owner's approval. Nothing is sent to a customer without it.");
   await expect(card(page).getByRole("link", { name: "Open the Inbox" })).toHaveAttribute("href", "/inbox");

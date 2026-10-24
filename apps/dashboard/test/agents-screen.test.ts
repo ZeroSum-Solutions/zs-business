@@ -26,7 +26,8 @@ const keys = scopeKeys(DEMO_TENANT_ID);
 const AGENT = "703cddeb-3f35-8dec-8397-426f06fb05ee";
 const status = (patch: Partial<FollowUpStatus> = {}): FollowUpStatus => ({
   settings: { ...DEFAULT_FOLLOW_UP_SETTINGS, enabled: true, timeZone: "America/New_York" },
-  revision: 1, updatedAt: null, killed: null, globalKilled: false, canDraft: true, blockedBy: null, ...patch,
+  revision: 1, updatedAt: null, killed: null, globalKilled: false, canDraft: true, blockedBy: null,
+  costSpentMicros: 0, costCapMicros: 1_000_000, costWarning: false, ...patch,
 });
 const killed = { at: "2026-10-20T12:00:00.000Z", by: AGENT, note: null };
 
