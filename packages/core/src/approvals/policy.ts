@@ -15,6 +15,8 @@ export interface ApprovalPolicy {
 export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Object.freeze({
   // inbox-home.md I-6: staff and owners propose sending a reply; it runs only once an owner approves.
   "inbox.reply.send": Object.freeze({ request: "inbox.drafts", required: true }),
+  // image-port.md IM-12: only an owner's approval promotes a staged image.
+  "media.variant.approve": Object.freeze({ request: "publish", required: true }),
 });
 
 /** Never proposed through an approval: the approval actions themselves. */
@@ -32,7 +34,11 @@ export const isSiteAction = (actionType: string) => actionType.startsWith("site.
  * S-1: a top-up runs only from the member's top-up route, with the server's terms, and asks Stripe
  * for a Checkout Session after.
  */
-export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect", "wallet.topup.create"]);
+export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set([
+  "calendar.google.connect", "wallet.topup.create",
+  // image-port.md: these need the deploy's image config or the worker principal, which an approved run lacks.
+  "media.asset.upload", "media.variant.generate", "media.variant.stage", "media.variant.fail",
+]);
 export const cannotBeApproved = (actionType: string) =>
   isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);
 

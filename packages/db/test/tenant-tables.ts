@@ -59,6 +59,12 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         if (field.name === "phone_number" && field.type === "text") row[field.name] = `+1555${String(randomInt(0, 10_000_000)).padStart(7, "0")}`;
         // Text columns a CHECK limits to a list: a listed value that needs no foreign-key row (delivery.md D-11).
         else if (name === "wallet_reservations" && field.name === "job_kind") row[field.name] = "enrichment";
+        // Image port columns a CHECK limits to a shape (image-port.md IM-1, IM-2): digests, a content type, an origin, a preset, a currency.
+        else if ((name === "media_assets" || name === "image_variants") && /sha256$/.test(field.name)) row[field.name] = "0".repeat(64);
+        else if (name === "media_assets" && field.name === "content_type") row[field.name] = "image/png";
+        else if (name === "media_assets" && field.name === "origin") row[field.name] = "upload";
+        else if (name === "image_variants" && field.name === "preset") row[field.name] = "background_remove";
+        else if (name === "image_variants" && field.name === "currency") row[field.name] = "usd";
         else if (field.enum_value !== null) row[field.name] = field.enum_value;
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);
