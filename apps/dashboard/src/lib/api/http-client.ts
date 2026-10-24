@@ -11,6 +11,8 @@ import {
   bookingPageSchema,
   bookingPageSummarySchema,
   businessProfileReadSchema,
+  contactEnrichmentSchema,
+  enrichmentRequestRecordSchema,
   calendarConnectionListSchema,
   calendarConnectionSchema,
   connectGoogleCalendarResponseSchema,
@@ -40,6 +42,8 @@ import {
   siteReleaseResponseSchema,
   siteSyncResponseSchema,
   slotsResponseSchema,
+  transcriptionDetailSchema,
+  transcriptionListSchema,
   threadDetailSchema,
   threadIdSchema,
   threadPageSchema,
@@ -61,6 +65,7 @@ import {
   type AgentsApi,
   type BrowserApi,
   type BusinessApi,
+  type EnrichmentApi,
   type BookingApi,
   type CalendarSyncApi,
   type CrmApi,
@@ -69,6 +74,7 @@ import {
   type IntakeApi,
   type ListResult,
   type SitesApi,
+  type TranscriptionApi,
   type WriteOptions,
 } from "./types";
 
@@ -105,6 +111,8 @@ const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema
 /** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
 const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
 /** PUT /v1/business answers the action and the profile as it is now; a newer API's extra keys are dropped (BP-10). */
+/** POST /v1/enrichment/requests answers the action and the request as it is now. */
+const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
 
 /** `pageQuerySchema` caps `limit` at 100. */
@@ -115,7 +123,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & SitesApi & CalendarSyncApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -364,6 +372,14 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       });
     },
 
+    async listTranscriptions(options = {}) {
+      return (await request({ method: "GET", path: "/v1/transcriptions", schema: transcriptionListSchema, signal: options.signal })).items;
+    },
+
+    getTranscription(id, options = {}) {
+      return request({ method: "GET", path: `/v1/transcriptions/${encodeURIComponent(id)}`, schema: transcriptionDetailSchema, signal: options.signal });
+    },
+
     async listSites(options = {}) {
       return (await request({ method: "GET", path: "/v1/sites", schema: siteListSchema, signal: options.signal })).items;
     },
@@ -481,6 +497,19 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     async updateBusiness(input, options) {
       return (await write("/v1/business", input, businessOutputSchema, options, "PUT")).result;
+    },
+
+    async getContactEnrichment(contactId, options = {}) {
+      if (!uuidSchema.safeParse(contactId).success) throw contactNotFound();
+      try {
+        return await request({ method: "GET", path: `/v1/contacts/${encodeURIComponent(contactId)}/enrichment`, schema: contactEnrichmentSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? contactNotFound() : error;
+      }
+    },
+
+    async requestEnrichment(contactId, options) {
+      return (await write("/v1/enrichment/requests", { op: "company.enrich", contactId }, enrichmentOutputSchema, options)).result;
     },
 
     getFollowUpStatus(options = {}) {

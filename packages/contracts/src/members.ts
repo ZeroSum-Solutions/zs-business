@@ -19,7 +19,7 @@ export type MemberRole = z.infer<typeof memberRoleSchema>;
  */
 export const permissionSchema = z.enum([
   "calendar", "customers", "inbox.drafts", "members", "billing", "plan", "publish", "intake", "approve", "reports", "integrations",
-  "agents", "business",
+  "agents", "business", "enrich",
 ]);
 export type Permission = z.infer<typeof permissionSchema>;
 export const ROLE_PERMISSIONS: Readonly<Record<MemberRole, readonly Permission[]>> = Object.freeze({

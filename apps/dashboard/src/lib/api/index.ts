@@ -1,5 +1,6 @@
 import { createDemoAdapter, type DemoControls } from "./demo/adapter";
 import { createDemoSites, type DemoSiteControls } from "./demo/sites";
+import { createDemoTranscripts } from "./demo/transcripts";
 import { createDemoWorkspace } from "./demo/workspace";
 import { createHttpClient } from "./http-client";
 import type { ZsApi } from "./types";
@@ -33,7 +34,7 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
   if (config.mode !== "live") {
     const demo = createDemoAdapter({ latencyMs: 180 });
     const sites = createDemoSites({ latencyMs: 180 });
-    return { api: { ...demo, ...sites.api, ...createDemoWorkspace({ latencyMs: 180 }) }, mode: "demo", demo: { ...demo, ...sites.controls } };
+    return { api: { ...demo, ...sites.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }) }, mode: "demo", demo: { ...demo, ...sites.controls } };
   }
   // No token here: the proxy adds it on the server.
   const http = createHttpClient({ baseUrl: API_PROXY_PATH });

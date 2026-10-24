@@ -122,6 +122,7 @@ import { createDispatcher, type DispatchConfig, type DispatchContext } from "../
 import { BROWSER_MEMBER_PERMISSIONS, browserHandlers } from "../browser/handlers.js";
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, agentKindStatus, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { businessHandlers, getBusinessProfile } from "../business/index.js";
+import { transcriptionHandlers } from "../transcription/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingContactHandlers, bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
@@ -151,6 +152,7 @@ import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, l
 import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
 import { pendingGrantId, verifyPendingGrant, type PendingGrant } from "../calendar/pending-grant.js";
 import type { GoogleClient } from "../calendar/types.js";
+import { enrichmentHandlers } from "../enrichment/handlers.js";
 import { derivedId } from "./ids.js";
 import { SiteStoreUnavailable, validationError } from "./errors.js";
 
@@ -210,7 +212,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers, ...browserHandlers, ...businessHandlers,
+  ...agentHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers,
 });
 
 /**
@@ -254,6 +256,12 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   ...BROWSER_MEMBER_PERMISSIONS,
   // business-profile.md BP-6: only owners change who the business is.
   "business.profile.update": "business",
+  // enrichment.md E-4, E-6, E-7, E-14: owners enrich and decide; staff may stop enrichment of a contact.
+  "enrichment.request": "enrich",
+  "contact.enrichment.block": "customers",
+  "contact.enrichment.unblock": "enrich",
+  "contact.region.attest": "enrich",
+  "contact.profile.apply": "enrich",
 });
 
 /**

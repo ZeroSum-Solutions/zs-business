@@ -1,5 +1,7 @@
 import type {
   BusinessProfile,
+  ContactEnrichment,
+  EnrichmentRequestRecord,
   BookingContactResult,
   BookingPageSummary,
   BookingRecord,
@@ -29,6 +31,8 @@ import type {
   ReplyEntry,
   ReplyRecord,
   ReplyStatus,
+  TranscriptionDetail,
+  TranscriptionSummary,
   RequestEntry,
   ResourceSummary,
   SitePreview,
@@ -52,6 +56,8 @@ import type { WorkspaceApi } from "./workspace-types";
 
 export type {
   BusinessProfile,
+  ContactEnrichment,
+  EnrichmentRequestRecord,
   BookingContactResult,
   BookingPageSummary,
   BookingRecord,
@@ -394,6 +400,20 @@ export interface BusinessApi {
   updateBusiness(input: UpdateBusinessProfileRequest, options: WriteOptions): Promise<BusinessProfile>;
 }
 
+/**
+ * Company details for one customer (enrichment.md E-4, E-14, E-17). Anyone with `customers` reads;
+ * only an owner (`enrich`) asks. Found details arrive as approvals, never as edits to the customer.
+ */
+export interface EnrichmentApi {
+  /** Throws `not_found` for an unknown customer, or one of another business. */
+  getContactEnrichment(contactId: string, options?: ReadOptions): Promise<ContactEnrichment>;
+  /**
+   * Asks for the customer's company details. A conflict whose reason is one of `ENRICHMENT_ERROR_CODES`
+   * says why not (no company domain, a customer who opted out, low funds, ...).
+   */
+  requestEnrichment(contactId: string, options: WriteOptions): Promise<EnrichmentRequestRecord>;
+}
+
 /** Runs per page of the Agents page's run list. */
 export const RUN_PAGE_SIZE = 20;
 
@@ -467,7 +487,15 @@ export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & SitesApi & CalendarSyncApi & WorkspaceApi;
+/** Transcripts of uploaded audio and voicemails (transcription.md X-7). Members with `inbox.drafts` read them. */
+export interface TranscriptionApi {
+  /** Newest first. */
+  listTranscriptions(options?: ReadOptions): Promise<TranscriptionSummary[]>;
+  /** One job with its speaker-labelled segments, once a transcript exists. */
+  getTranscription(id: string, options?: ReadOptions): Promise<TranscriptionDetail>;
+}
+
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

@@ -2,11 +2,12 @@
 import process from "node:process";
 import { serve } from "@hono/node-server";
 import { parseServerEnv } from "./config.js";
+import { parseEnrichmentEnv } from "@zs/core";
 import { createServer } from "./server.js";
 
 const env = parseServerEnv(process.env);
 // DATABASE_URL must log in as the unprivileged runtime role (for example zs_runtime).
-const { app, pool } = await createServer(env, { now: () => new Date() });
+const { app, pool } = await createServer(env, { now: () => new Date() }, { enrichment: parseEnrichmentEnv(process.env) });
 
 const server = serve({ fetch: app.fetch, port: env.port }, (info) => {
   console.log(`zs-business API listening on http://localhost:${info.port}`);

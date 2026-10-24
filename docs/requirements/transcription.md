@@ -1,7 +1,12 @@
 # Transcription
 
-Status: draft contract, not built (2026-10-22). Code follows this file once its first slice
-lands; a change to a numbered rule needs a new revision of this file first.
+Status: first slice built (2026-10-23): queue and transcript tables, enqueue, the five worker
+routes, owner reads, a TypeScript fake worker, and the Transcripts view. Not built: the Python
+worker and benchmark (X-6, X-10), the storage-bucket adapter, the X-8 retention sweep, and the
+voicemail source (needs the missed-call slice). One gap against X-7: a completion is checked at
+1500 segments and 200000 characters, not 5000 segments, because it travels as an action payload
+under the shared JSON limits (10000 nodes). A change to a numbered rule needs a new revision of
+this file first.
 
 Scope: turn a tenant's audio into a speaker-labelled transcript that an owner reads in the
 Inbox. Two sources in v1: voicemails left after a missed call (`twilio.md` T-13), and audio an

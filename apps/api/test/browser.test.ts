@@ -57,7 +57,7 @@ const runnerCall = async (method: string, path: string, options: { lease?: strin
   if (options.lease) headers["Lease-Token"] = options.lease;
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   const response = await app.request(`/browser-runner/v1${path}`, {
-    method, headers, ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : options.raw ? { body: options.raw } : {}),
+    method, headers, ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : options.raw ? { body: new Blob([new Uint8Array(options.raw).buffer as ArrayBuffer]) } : {}),
   });
   const text = await response.text();
   return { status: response.status, body: text ? JSON.parse(text) : null };

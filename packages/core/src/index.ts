@@ -45,6 +45,7 @@ export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandle
 export * from "./delivery/index.js";
 export * from "./billing/index.js";
 export * from "./business/index.js";
+export * from "./transcription/index.js";
 export * from "./calendar/index.js";
 export * from "./automation/index.js";
 export {
@@ -115,3 +116,4 @@ export {
 } from "./agents/index.js";
 export { agentAuthorize, agentAuthorizeFor, createFollowUpAgent, type FollowUpAgent, type FollowUpAgentConfig } from "./edge/agent-session.js";
 export * from "./browser/index.js";
+export * from "./enrichment/index.js";
