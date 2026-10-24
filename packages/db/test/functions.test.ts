@@ -41,6 +41,7 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
   // M6 revision 2 (20261022510000_agent_runs_guard.sql): runs only close, once.
+  "agent_model_calls_guard()": "pg_catalog, pg_temp",
   "agent_runs_guard()": "pg_catalog, pg_temp",
   "approvals_transition()": "pg_catalog, pg_temp",
   "booking_overrides_valid(jsonb)": "pg_catalog, public, pg_temp",
