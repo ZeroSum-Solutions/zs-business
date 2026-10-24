@@ -10,15 +10,12 @@ import {
   scheduledRunKey,
   setGlobalAgentSwitch,
   type FollowUpAgent,
-  type FollowUpModel,
 } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
 import { parseFollowUpEnv, PLACEHOLDER_CRON_SECRET } from "../src/followup/config.js";
 import { followUpCronRoutes } from "../src/followup/cron.js";
 import {
   createScheduledFollowUps,
-  ModelTimedOut,
-  withModelTimeout,
   type ScheduledFollowUpReport,
   type ScheduledFollowUps,
 } from "../src/followup/runner.js";
@@ -32,12 +29,15 @@ const LOCAL_RUNTIME = "postgres://zs_runtime@127.0.0.1:55432/postgres";
 const LOCAL_SERVICE = "postgres://postgres@127.0.0.1:55432/postgres";
 const REMOTE_DB = `postgres://postgres:${DB_PASSWORD}@db.abcd.supabase.co:5432/postgres`;
 const HOUR = 3_600_000;
+/** Synthetic vendor keys, built at runtime so secret scanners do not flag a literal. */
+const CEREBRAS_KEY = ["csk", "e".repeat(24)].join("-");
+const DEEPSEEK_KEY = ["sk", "f".repeat(24)].join("-");
 
 const ON: Record<string, string> = {
   FOLLOWUP_AGENT: "on",
   FOLLOWUP_DATABASE_URL: LOCAL_RUNTIME,
   FOLLOWUP_SERVICE_DATABASE_URL: LOCAL_SERVICE,
-  FOLLOWUP_MODEL: "fake",
+  AGENT_MODEL_PERSONAL_DATA: "fake",
 };
 const without = (name: string) => Object.fromEntries(Object.entries(ON).filter(([key]) => key !== name));
 const errorOf = (env: Record<string, string | undefined>): string => {
@@ -68,7 +68,9 @@ describe("parseFollowUpEnv", () => {
         runtimeDatabaseUrl: LOCAL_RUNTIME,
         serviceDatabaseUrl: LOCAL_SERVICE,
         databaseCaCert: undefined,
-        model: "fake",
+        personalData: { provider: "fake" },
+        noPersonalData: null,
+        stallAfterMs: 900_000,
         slotMinutes: 60,
         maxCandidatesPerRun: 3,
         modelTimeoutMs: 5_000,
@@ -78,20 +80,63 @@ describe("parseFollowUpEnv", () => {
     });
   });
 
-  it.each(["FOLLOWUP_DATABASE_URL", "FOLLOWUP_SERVICE_DATABASE_URL", "FOLLOWUP_MODEL"])("with the switch on, requires %s", (name) => {
+  it.each(["FOLLOWUP_DATABASE_URL", "FOLLOWUP_SERVICE_DATABASE_URL", "AGENT_MODEL_PERSONAL_DATA"])("with the switch on, requires %s", (name) => {
     expect(errorOf(without(name))).toMatch(new RegExp(`Invalid environment: .*${name}`));
   });
 
-  it("knows no real model provider yet", () => {
-    for (const value of ["anthropic", "openai", "FAKE", ""])
-      expect(errorOf({ ...ON, FOLLOWUP_MODEL: value })).toMatch(/FOLLOWUP_MODEL: no real model provider is wired yet/);
+  it("takes FOLLOWUP_MODEL as the older name of the personal-data lane, and refuses two that disagree", () => {
+    const { AGENT_MODEL_PERSONAL_DATA: _lane, ...rest } = ON;
+    expect(parseFollowUpEnv({ ...rest, FOLLOWUP_MODEL: "fake" }).runner?.personalData).toEqual({ provider: "fake" });
+    expect(errorOf({ ...rest, FOLLOWUP_MODEL: "fake", AGENT_MODEL_PERSONAL_DATA: "cerebras", CEREBRAS_API_KEY: CEREBRAS_KEY })).toMatch(/disagree/);
+  });
+
+  it("builds the personal-data lane on Cerebras, with a priced default model, and keeps the key out of its errors", () => {
+    const lane = { ...ON, AGENT_MODEL_PERSONAL_DATA: "cerebras", FOLLOWUP_DATABASE_URL: LOCAL_RUNTIME };
+    expect(parseFollowUpEnv({ ...lane, CEREBRAS_API_KEY: CEREBRAS_KEY }).runner?.personalData)
+      .toEqual({ provider: "cerebras", apiKey: CEREBRAS_KEY, model: "gpt-oss-120b" });
+    expect(errorOf(lane)).toMatch(/CEREBRAS_API_KEY is required/);
+    // A model with no price cannot run (G-15), so it does not start.
+    const unpriced = errorOf({ ...lane, CEREBRAS_API_KEY: CEREBRAS_KEY, CEREBRAS_MODEL: "gpt-unpriced" });
+    expect(unpriced).toMatch(/CEREBRAS_MODEL=gpt-unpriced has no price/);
+    expect(unpriced).not.toContain(CEREBRAS_KEY);
+  });
+
+  it("refuses DeepSeek, and anything else, on the personal-data lane (G-18)", () => {
+    for (const name of ["AGENT_MODEL_PERSONAL_DATA", "FOLLOWUP_MODEL"] as const) {
+      const { AGENT_MODEL_PERSONAL_DATA: _lane, ...rest } = ON;
+      expect(errorOf({ ...rest, [name]: "deepseek", DEEPSEEK_API_KEY: DEEPSEEK_KEY })).toMatch(new RegExp(`${name}: DeepSeek cannot serve the personal-data lane`));
+      for (const value of ["anthropic", "openai", "FAKE", ""])
+        expect(errorOf({ ...rest, [name]: value })).toMatch(new RegExp(`${name}: the personal-data lane takes fake or cerebras|AGENT_MODEL_PERSONAL_DATA is required`));
+    }
+  });
+
+  it("builds the no-personal-data lane on DeepSeek only, and prices its model", () => {
+    const lane = { ...ON, AGENT_MODEL_NO_PERSONAL_DATA: "deepseek" };
+    expect(parseFollowUpEnv({ ...lane, DEEPSEEK_API_KEY: DEEPSEEK_KEY }).runner?.noPersonalData)
+      .toEqual({ provider: "deepseek", apiKey: DEEPSEEK_KEY, model: "deepseek-chat" });
+    expect(errorOf(lane)).toMatch(/DEEPSEEK_API_KEY is required/);
+    expect(errorOf({ ...lane, DEEPSEEK_API_KEY: DEEPSEEK_KEY, DEEPSEEK_MODEL: "deepseek-unpriced" })).toMatch(/has no price/);
+    expect(errorOf({ ...ON, AGENT_MODEL_NO_PERSONAL_DATA: "cerebras", CEREBRAS_API_KEY: CEREBRAS_KEY })).toMatch(/takes fake or deepseek/);
+    expect(parseFollowUpEnv({ ...ON, AGENT_MODEL_NO_PERSONAL_DATA: "fake" }).runner?.noPersonalData).toEqual({ provider: "fake" });
   });
 
   it("runs the fake model only against loopback databases", () => {
     expect(errorOf({ ...ON, FOLLOWUP_SERVICE_DATABASE_URL: REMOTE_DB, DATABASE_CA_CERT: CA_CERT }))
-      .toMatch(/FOLLOWUP_MODEL=fake runs only against loopback databases/);
+      .toMatch(/the fake model runs only against loopback databases/);
     expect(errorOf({ ...ON, FOLLOWUP_DATABASE_URL: REMOTE_DB, DATABASE_CA_CERT: CA_CERT }))
-      .toMatch(/FOLLOWUP_MODEL=fake runs only against loopback databases/);
+      .toMatch(/the fake model runs only against loopback databases/);
+    // A real lane is fine off loopback.
+    expect(parseFollowUpEnv({
+      ...ON, FOLLOWUP_DATABASE_URL: REMOTE_DB, FOLLOWUP_SERVICE_DATABASE_URL: REMOTE_DB, DATABASE_CA_CERT: CA_CERT,
+      AGENT_MODEL_PERSONAL_DATA: "cerebras", CEREBRAS_API_KEY: CEREBRAS_KEY,
+    }).runner?.personalData.provider).toBe("cerebras");
+  });
+
+  it("closes a stalled run only after a run could no longer be working (G-16)", () => {
+    expect(parseFollowUpEnv({ ...ON, AGENT_STALL_AFTER_MS: "60000" }).runner).not.toBeNull();
+    expect(errorOf({ ...ON, FOLLOWUP_RUN_BUDGET_MS: "60000", AGENT_STALL_AFTER_MS: "60000" })).toMatch(/AGENT_STALL_AFTER_MS must exceed/);
+    expect(errorOf({ ...ON, AGENT_STALL_AFTER_MS: "59999" })).toMatch(/AGENT_STALL_AFTER_MS/);
+    expect(parseFollowUpEnv({ ...ON, AGENT_STALL_AFTER_MS: "120000" }).runner?.stallAfterMs).toBe(120_000);
   });
 
   it("pins TLS off loopback", () => {
@@ -119,7 +164,7 @@ describe("parseFollowUpEnv", () => {
 describe("GET /cron/followup", () => {
   const summary = {
     slot: "2026-10-20T12:00:00.000Z", globalKilled: false, due: 1, finished: 1,
-    drafted: 1, skipped: 0, stopped: 0, errors: 0, budgetSpent: false,
+    drafted: 1, skipped: 0, stopped: 0, errors: 0, budgetSpent: false, stalled: 0,
   };
   const runner = (run: ScheduledFollowUps["run"]): ScheduledFollowUps => ({ run });
   const get = (app: ReturnType<typeof followUpCronRoutes>, authorization?: string) =>
@@ -166,21 +211,6 @@ describe("GET /cron/followup", () => {
   });
 });
 
-describe("withModelTimeout", () => {
-  const prompt = { businessName: "Halden & Rowe", customerName: "Mira Rowe", inquiry: null, booking: null } as unknown as Parameters<FollowUpModel["draft"]>[0];
-
-  it("passes a prompt answered in time through", async () => {
-    const model = createFakeFollowUpModel();
-    expect(await withModelTimeout(model, 1_000).draft(prompt)).toMatchObject({ subject: "Following up from Halden & Rowe" });
-    expect(model.prompts).toEqual([prompt]);
-  });
-
-  it("gives up on a model that does not answer", async () => {
-    const slow: FollowUpModel = { draft: () => new Promise(() => undefined) };
-    await expect(withModelTimeout(slow, 20).draft(prompt)).rejects.toBeInstanceOf(ModelTimedOut);
-  });
-});
-
 describe("scheduled runs against Postgres (G-13)", () => {
   // Monday 08:00 UTC; the clock moves only when a test moves it.
   let now = Date.parse(NOW);
@@ -190,10 +220,10 @@ describe("scheduled runs against Postgres (G-13)", () => {
   let model: ReturnType<typeof createFakeFollowUpModel>;
   let agent: FollowUpAgent;
   const service = <T>(work: (tx: Transaction) => Promise<T>) => asService(h.database.servicePool, work);
-  const scheduled = (options: { agent?: Pick<FollowUpAgent, "runScheduled">; budgetMs?: number; perTenantMs?: number; report?: (event: ScheduledFollowUpReport) => void } = {}) =>
+  const scheduled = (options: { agent?: Pick<FollowUpAgent, "runScheduled" | "stallRun">; stallAfterMs?: number; budgetMs?: number; perTenantMs?: number; report?: (event: ScheduledFollowUpReport) => void } = {}) =>
     createScheduledFollowUps({
       service, agent: options.agent ?? agent, clock: testClock, slotMinutes: 60,
-      budgetMs: options.budgetMs ?? 20_000, perTenantMs: options.perTenantMs ?? 1_000,
+      budgetMs: options.budgetMs ?? 20_000, stallAfterMs: options.stallAfterMs ?? 900_000, perTenantMs: options.perTenantMs ?? 1_000,
       ...(options.report ? { report: options.report } : {}),
     });
 
@@ -215,7 +245,7 @@ describe("scheduled runs against Postgres (G-13)", () => {
   const enable = (tenant: TenantSetup, over: { maxDraftsPerDay?: number; quiet?: [number, number] } = {}) => service((tx) => tx.query(
     `INSERT INTO agent_settings (tenant_id,enabled,max_drafts_per_day,quiet_start_minute,quiet_end_minute,updated_at)
      VALUES ($1,true,$2,$3,$4,$5)
-     ON CONFLICT (tenant_id) DO UPDATE SET enabled=true, max_drafts_per_day=$2, quiet_start_minute=$3, quiet_end_minute=$4,
+     ON CONFLICT (tenant_id, agent_kind) DO UPDATE SET enabled=true, max_drafts_per_day=$2, quiet_start_minute=$3, quiet_end_minute=$4,
        killed_at=NULL, killed_by=NULL, kill_note=NULL, revision=agent_settings.revision+1, updated_at=$5`,
     [tenant.tenantId, over.maxDraftsPerDay ?? 10, over.quiet?.[0] ?? 1260, over.quiet?.[1] ?? 480, new Date(now)],
   ));
@@ -251,7 +281,7 @@ describe("scheduled runs against Postgres (G-13)", () => {
     const summary = await scheduled().run();
     expect(summary).toEqual({
       slot: "2026-10-20T12:00:00.000Z", globalKilled: false, due: 1, finished: 1,
-      drafted: 1, skipped: 0, stopped: 0, errors: 0, budgetSpent: false,
+      drafted: 1, skipped: 0, stopped: 0, errors: 0, budgetSpent: false, stalled: 0,
     });
     const [run] = await runsOf(h.a);
     expect(run).toMatchObject({
@@ -329,7 +359,8 @@ describe("scheduled runs against Postgres (G-13)", () => {
   it("visits the tenant that ran least recently first, and stops before the budget runs out", async () => {
     now += HOUR;
     const order: string[] = [];
-    const recording: Pick<FollowUpAgent, "runScheduled"> = {
+    const recording: Pick<FollowUpAgent, "runScheduled" | "stallRun"> = {
+      stallRun: (tenantId, runId) => agent.stallRun(tenantId, runId),
       // Each tenant's run takes a second of the injected clock.
       runScheduled: async (tenantId, slot) => {
         order.push(tenantId);
@@ -366,7 +397,8 @@ describe("scheduled runs against Postgres (G-13)", () => {
     now += HOUR;
     const reports: ScheduledFollowUpReport[] = [];
     let first = true;
-    const flaky: Pick<FollowUpAgent, "runScheduled"> = {
+    const flaky: Pick<FollowUpAgent, "runScheduled" | "stallRun"> = {
+      stallRun: (tenantId, runId) => agent.stallRun(tenantId, runId),
       runScheduled: async (tenantId, slot) => {
         if (first) { first = false; throw new Error("connection reset"); }
         return agent.runScheduled(tenantId, slot);
@@ -378,5 +410,25 @@ describe("scheduled runs against Postgres (G-13)", () => {
     expect(reports[0]).toMatchObject({ slot: summary.slot, error: new Error("connection reset") });
     // The failed tenant is still due in this slot, and the next call reaches it.
     expect(await scheduled().run()).toMatchObject({ due: 1, finished: 1, errors: 0 });
+  });
+
+  it("closes a run that stayed running past the stall limit, once, and refuses nothing else (G-16)", async () => {
+    now += HOUR;
+    // A run that started and then died: running, no decisions, started longer ago than the limit.
+    const stuck = randomUUID();
+    await service((tx) => tx.query(
+      "INSERT INTO agent_runs (tenant_id,id,agent,started_at,max_decisions) VALUES ($1,$2,'inquiry_followup',$3,3)",
+      [h.a.tenantId, stuck, new Date(now - 16 * 60_000)]));
+    const fresh = randomUUID();
+    await service((tx) => tx.query(
+      "INSERT INTO agent_runs (tenant_id,id,agent,started_at,max_decisions) VALUES ($1,$2,'inquiry_followup',$3,3)",
+      [h.b.tenantId, fresh, new Date(now - 60_000)]));
+    const summary = await scheduled({ stallAfterMs: 15 * 60_000 }).run();
+    expect(summary.stalled).toBe(1);
+    const closed = (await service((tx) => tx.query<{ id: string; status: string; stop_reason: string | null }>(
+      "SELECT id, status, stop_reason FROM agent_runs WHERE id = ANY($1::uuid[]) ORDER BY id", [[stuck, fresh]]))).rows;
+    expect(closed.find((run) => run.id === stuck)).toMatchObject({ status: "stopped", stop_reason: "stalled" });
+    expect(closed.find((run) => run.id === fresh)).toMatchObject({ status: "running", stop_reason: null });
+    expect((await scheduled({ stallAfterMs: 15 * 60_000 }).run()).stalled).toBe(0);
   });
 });

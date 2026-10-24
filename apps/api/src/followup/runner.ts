@@ -1,12 +1,13 @@
 // The scheduled follow-up run (docs/requirements/agents.md G-13). One run lists the tenants whose
 // agent may draft now, as the service role, and runs each one's slot as its agent principal,
 // until none is left or starting another could outlast the time budget. Every switch and cap is
-// checked again inside the agent's own actions (G-3..G-5). Time comes in as a dependency.
+// checked again inside the agent's own actions (G-3..G-5). Before the tenants, it closes runs that
+// stayed `running` past the stall limit (G-16). Time comes in as a dependency.
 import {
   dueFollowUpTenants,
   scheduleSlot,
+  stalledRuns,
   type FollowUpAgent,
-  type FollowUpModel,
 } from "@zs/core";
 import type { Transaction } from "@zs/db";
 
@@ -24,6 +25,8 @@ export interface ScheduledFollowUpSummary {
   readonly errors: number;
   /** True when the budget ran out while tenants were still due. */
   readonly budgetSpent: boolean;
+  /** G-16: runs this call closed because they stayed `running` past the stall limit. */
+  readonly stalled: number;
 }
 
 export interface ScheduledFollowUpReport {
@@ -35,22 +38,36 @@ export interface ScheduledFollowUpReport {
 export function createScheduledFollowUps(input: {
   /** A transaction as the service role, for the due-tenant read only. */
   readonly service: <T>(work: (tx: Transaction) => Promise<T>) => Promise<T>;
-  readonly agent: Pick<FollowUpAgent, "runScheduled">;
+  readonly agent: Pick<FollowUpAgent, "runScheduled" | "stallRun">;
   readonly clock: { now(): Date };
   readonly slotMinutes: number;
   readonly budgetMs: number;
+  /** G-16: close a run that has been `running` this long. */
+  readonly stallAfterMs: number;
   /** The longest one tenant's run may take: its candidates times the model timeout. */
   readonly perTenantMs: number;
   readonly report?: (event: ScheduledFollowUpReport) => void;
 }) {
-  const { service, agent, clock, slotMinutes, budgetMs, perTenantMs } = input;
+  const { service, agent, clock, slotMinutes, budgetMs, perTenantMs, stallAfterMs } = input;
   return {
     async run(): Promise<ScheduledFollowUpSummary> {
       const startedAt = clock.now();
       const started = startedAt.getTime();
       const slot = scheduleSlot(startedAt, slotMinutes);
+      const totals = { finished: 0, drafted: 0, skipped: 0, stopped: 0, errors: 0, budgetSpent: false, stalled: 0 };
+      // G-16: close what stayed open first, so its late steps are refused and its counts are final.
+      // Only the follow-up kind runs here; another kind's runs are closed by its own runner.
+      for (const stuck of await service((tx) => stalledRuns(tx, startedAt, stallAfterMs))) {
+        if (stuck.agentKind !== "inquiry_followup") continue;
+        try {
+          await agent.stallRun(stuck.tenantId, stuck.runId);
+          totals.stalled += 1;
+        } catch (error) {
+          totals.errors += 1;
+          input.report?.({ tenantId: stuck.tenantId, slot, error });
+        }
+      }
       const due = await service((tx) => dueFollowUpTenants(tx, startedAt, slot));
-      const totals = { finished: 0, drafted: 0, skipped: 0, stopped: 0, errors: 0, budgetSpent: false };
       for (const tenantId of due.tenantIds) {
         if (clock.now().getTime() - started + perTenantMs > budgetMs) {
           totals.budgetSpent = true;
@@ -74,25 +91,3 @@ export function createScheduledFollowUps(input: {
   };
 }
 export type ScheduledFollowUps = ReturnType<typeof createScheduledFollowUps>;
-
-/** Thrown in place of a draft the model did not return in time; the run records `model_error`. */
-export class ModelTimedOut extends Error {
-  constructor(ms: number) {
-    super(`Model gave no draft within ${ms} ms`);
-    this.name = "ModelTimedOut";
-  }
-}
-
-/**
- * Bounds each model call, so one slow answer cannot hold a run past its budget. The port has no
- * abort signal (agents.md known limits), so a late answer is dropped, never used.
- */
-export function withModelTimeout(model: FollowUpModel, ms: number): FollowUpModel {
-  return {
-    draft(prompt) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new ModelTimedOut(ms)), ms); });
-      return Promise.race([model.draft(prompt), late]).finally(() => clearTimeout(timer));
-    },
-  };
-}
