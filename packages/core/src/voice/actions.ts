@@ -68,9 +68,9 @@ export const voiceCallHandler: ActionHandler = {
         "SELECT phone_number FROM voice_numbers WHERE tenant_id=$1", [tenantId])).rows[0];
       if (!number || number.phone_number !== payload.to) throw new NotFound();
       const written = await tx.query(
-        `INSERT INTO voice_calls (tenant_id, call_sid, from_e164, to_e164, created_at) VALUES ($1,$2,$3,$4,$5)
+        `INSERT INTO voice_calls (tenant_id, call_sid, from_e164, to_e164, incoming_twiml, created_at) VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (tenant_id, call_sid) DO NOTHING`,
-        [tenantId, payload.callSid, payload.from, payload.to, now]);
+        [tenantId, payload.callSid, payload.from, payload.to, payload.twiml, now]);
       const row = (await lockCall(tx, tenantId, payload.callSid))!;
       const result: VoiceCallResult = {
         callSid: payload.callSid, step: "incoming", recorded: written.rowCount === 1,
@@ -150,10 +150,13 @@ export const voiceOptinHandler: ActionHandler = {
       `INSERT INTO voice_textback_consents (tenant_id, call_sid, contact_id, caller_e164, disclosure_version, disclosure_text, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [tenantId, payload.callSid, contactId, caller, payload.disclosureVersion, disclosure.text, now]);
-    if (!consent)
+    if (!consent) {
       await tx.query(
         `INSERT INTO crm_contact_consent (tenant_id,contact_id,channel,status,source,recorded_at)
          VALUES ($1,$2,'sms','granted',$3,$4)`, [tenantId, contactId, `twilio-voice:${payload.callSid}`, now]);
+      // C-12: a filled-in consent counts as a change to the contact.
+      if (existing) await tx.query("UPDATE crm_contacts SET updated_at=$3 WHERE tenant_id=$1 AND id=$2", [tenantId, contactId, now]);
+    }
 
     // D-1: the stored consent, the action and this event commit together; D-6 re-checks at delivery.
     const event: MessageSendRequested = {

@@ -292,6 +292,46 @@ describe("tenant isolation", () => {
   });
 });
 
+describe("replays and races (T-14)", () => {
+  it("replays the stored answer to a repeated incoming webhook after the settings change", async () => {
+    const callSid = newSid("CA");
+    const from = caller();
+    const first = await incoming(tenantA(), callSid, from);
+    await q("UPDATE voice_numbers SET forward_to_e164='+15555550188', ring_seconds=30 WHERE tenant_id=$1", [tenantA()]);
+    try {
+      expect((await incoming(tenantA(), callSid, from)).text).toBe(first.text);
+    } finally {
+      await q("UPDATE voice_numbers SET forward_to_e164=$2, ring_seconds=20 WHERE tenant_id=$1", [tenantA(), FORWARD]);
+    }
+  });
+
+  it("charges the limits once when two dial callbacks arrive together", async () => {
+    let takes = 0;
+    const counting = await createApiHarness({
+      twilioWebhook: { limiter: { take: async () => { takes += 1; return { ok: true as const }; } } },
+    });
+    try {
+      await counting.fixture.service(async (tx) => {
+        await tx.query("INSERT INTO sms_numbers (tenant_id,phone_number,created_at,updated_at) VALUES ($1,$2,$3,$3)", [counting.a.tenantId, NUMBER_A, NOW]);
+        await assignVoiceNumber(tx, {
+          tenantId: counting.a.tenantId, forwardTo: FORWARD, bookingUrl: BOOKING_URL, textbackEnabled: true,
+          disclosure: { version: "v1", text: DISCLOSURE }, now: new Date(NOW),
+        });
+      });
+      const callSid = newSid("CA");
+      await post(counting.a.tenantId, "", { CallSid: callSid, From: caller(), To: NUMBER_A }, { app: counting.app });
+      const [one, two] = await Promise.all([
+        post(counting.a.tenantId, "/dial", { CallSid: callSid, DialCallStatus: "no-answer" }, { app: counting.app }),
+        post(counting.a.tenantId, "/dial", { CallSid: callSid, DialCallStatus: "no-answer" }, { app: counting.app }),
+      ]);
+      expect(one.text).toBe(two.text);
+      expect(takes).toBe(2);
+    } finally {
+      await counting.close();
+    }
+  });
+});
+
 describe("limiter failure (T-14)", () => {
   it("apologizes and hangs up without an offer or a recording", async () => {
     const broken = await createApiHarness({

@@ -26,6 +26,7 @@ import {
 import { parseOrFail } from "../crm/rows.js";
 import { voiceCallTargetId } from "../voice/actions.js";
 import { dial, gather, hangup, record, say, voiceResponse } from "../voice/twiml.js";
+import { retryableAsUnavailable } from "./errors.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, trimTrailingSlashes, type Authorize, type EdgeDependencies } from "./session.js";
 
@@ -63,6 +64,13 @@ export interface VoiceSessionOptions {
 
 export interface VoiceIncoming { readonly CallSid: string; readonly From: string; readonly To: string }
 
+/** A refusal by the action (changed wording, closed mailbox) is answered quietly; a busy database is not: Twilio retries on 503. */
+function refusal(error: unknown): void {
+  if (!(error instanceof ActionError)) throw error;
+  const retry = retryableAsUnavailable(error);
+  if (retry !== error) throw retry;
+}
+
 const MAILBOX_FULL = "Our mailbox is full. Please try again later. Goodbye.";
 const CANNOT_ANSWER = "We cannot take your call right now. Please try again later. Goodbye.";
 const MESSAGE_PROMPT = "Sorry we missed your call. Please leave a message after the beep.";
@@ -84,6 +92,7 @@ interface Call {
   readonly offerReason: OfferReason | null;
   readonly mailboxOpen: boolean | null;
   readonly disclosureVersion: string | null;
+  readonly incomingTwiml: string;
 }
 
 export function createVoiceSession(deps: EdgeDependencies, options: VoiceSessionOptions) {
@@ -121,12 +130,12 @@ export function createVoiceSession(deps: EdgeDependencies, options: VoiceSession
   const loadCall = (tenantId: string, callSid: string): Promise<Call | null> => deps.db.tenant(tenantId, async (tx) => {
     const row = (await tx.query<{
       from_e164: string | null; dial_status: string | null; offered: boolean | null; offer_reason: OfferReason | null;
-      mailbox_open: boolean | null; disclosure_version: string | null;
-    }>(`SELECT from_e164, dial_status, offered, offer_reason, mailbox_open, disclosure_version
+      mailbox_open: boolean | null; disclosure_version: string | null; incoming_twiml: string;
+    }>(`SELECT from_e164, dial_status, offered, offer_reason, mailbox_open, disclosure_version, incoming_twiml
           FROM voice_calls WHERE tenant_id=$1 AND call_sid=$2`, [tenantId, callSid])).rows[0];
     return row ? {
       from: row.from_e164, dialStatus: row.dial_status, offered: row.offered, offerReason: row.offer_reason,
-      mailboxOpen: row.mailbox_open, disclosureVersion: row.disclosure_version,
+      mailboxOpen: row.mailbox_open, disclosureVersion: row.disclosure_version, incomingTwiml: row.incoming_twiml,
     } : null;
   });
 
@@ -183,19 +192,25 @@ export function createVoiceSession(deps: EdgeDependencies, options: VoiceSession
       if (!tenantId.success || !callSid.success) return voiceResponse(hangup());
       const setup = await loadSetup(tenantId.data);
       if (!setup || setup.phone !== call.To) return voiceResponse(hangup());
+      // T-14: a repeated webhook replays the stored answer, whatever the settings are now.
+      const known = await loadCall(tenantId.data, callSid.data);
+      if (known) return known.incomingTwiml;
       const from = contactPhoneSchema.safeParse(call.From);
-      try {
-        await run(tenantId.data)(command(tenantId.data, callSid.data, "call", VOICE_CALL_RECORD_ACTION, {
-          step: "incoming", callSid: callSid.data, from: from.success ? from.data : null, to: setup.phone,
-        }));
-      } catch (error) {
-        // A repeat that differs only in what Twilio resent (the same CallSid) changes nothing.
-        if (!(error instanceof IdempotencyConflict)) throw error;
-      }
-      return voiceResponse(dial(setup.forward, {
+      const answer = voiceResponse(dial(setup.forward, {
         timeout: setup.ringSeconds,
         ...(setup.enabled ? { action: url(tenantId.data, "/dial") } : {}),
       }));
+      try {
+        await run(tenantId.data)(command(tenantId.data, callSid.data, "call", VOICE_CALL_RECORD_ACTION, {
+          step: "incoming", callSid: callSid.data, from: from.success ? from.data : null, to: setup.phone, twiml: answer,
+        }));
+      } catch (error) {
+        // A concurrent twin stored its answer first: replay that one.
+        if (!(error instanceof IdempotencyConflict)) throw error;
+        const stored = await loadCall(tenantId.data, callSid.data);
+        if (stored) return stored.incomingTwiml;
+      }
+      return answer;
     },
 
     /** T-11, T-14: the dial leg ended; decide once whether to offer the text and open the mailbox. */
@@ -204,6 +219,10 @@ export function createVoiceSession(deps: EdgeDependencies, options: VoiceSession
       const callSid = callSidSchema.safeParse(input.CallSid);
       const status = dialStatusSchema.safeParse(input.DialCallStatus);
       if (!tenantId.success || !callSid.success || !status.success) return voiceResponse(hangup());
+      // T-14: one callback at a time per call, across instances, so the limits are charged once and a
+      // twin waits for the stored decision. The lock lives in this transaction; the work uses its own.
+      return deps.db.tenant(tenantId.data, async (lock) => {
+      await lock.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`voice-dial:${tenantId.data}:${callSid.data}`]);
       let call = await loadCall(tenantId.data, callSid.data);
       if (!call) return voiceResponse(hangup());
       // A repeated callback answers from the stored decision and charges nothing again.
@@ -222,6 +241,7 @@ export function createVoiceSession(deps: EdgeDependencies, options: VoiceSession
       }
       call = await loadCall(tenantId.data, callSid.data);
       return call ? answerFor(tenantId.data, call) : voiceResponse(hangup());
+      });
     },
 
     /** T-12: the caller pressed a key. Only `1` on an offered call opts in. */
@@ -246,7 +266,7 @@ export function createVoiceSession(deps: EdgeDependencies, options: VoiceSession
             return voiceResponse(say(TEXT_ON_ITS_WAY), ...voicemail(tenantId.data));
         } catch (error) {
           // A refusal (changed wording, no booking link) sends nothing; database errors still propagate.
-          if (!(error instanceof ActionError)) throw error;
+          refusal(error);
         }
       }
       // No press, another key, a denial or a refusal: nothing is written and nothing is sent.
@@ -275,7 +295,7 @@ export function createVoiceSession(deps: EdgeDependencies, options: VoiceSession
         parseOrFail(voiceVoicemailResultSchema, output.result);
       } catch (error) {
         // A call with no open mailbox, an unknown call or a second recording for one call changes nothing.
-        if (!(error instanceof ActionError)) throw error;
+        refusal(error);
       }
       return voiceResponse();
     },

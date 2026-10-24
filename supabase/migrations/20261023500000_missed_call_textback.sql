@@ -22,7 +22,7 @@ CREATE TABLE public.voice_numbers (
   forward_to_e164 text NOT NULL CONSTRAINT voice_numbers_forward_e164 CHECK (forward_to_e164 ~ '^\+[1-9][0-9]{1,14}$'),
   ring_seconds integer NOT NULL DEFAULT 20 CONSTRAINT voice_numbers_ring_seconds CHECK (ring_seconds BETWEEN 5 AND 45),
   textback_enabled boolean NOT NULL DEFAULT false,
-  booking_url text CONSTRAINT voice_numbers_booking_url CHECK (booking_url ~ '^https://[^[:space:]<>"]+$' AND char_length(booking_url) <= 300),
+  booking_url text CONSTRAINT voice_numbers_booking_url CHECK (booking_url ~ '^https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?([/?#][^[:space:]<>"]*)?$' AND char_length(booking_url) <= 300),
   disclosure_version text,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
@@ -47,6 +47,8 @@ CREATE TABLE public.voice_calls (
   mailbox_open boolean,
   -- The wording the caller was offered; the gather callback must name the same version (T-12).
   disclosure_version text,
+  -- T-14: the answer given to the first incoming webhook; a repeat replays it exactly.
+  incoming_twiml text NOT NULL CONSTRAINT voice_calls_incoming_twiml CHECK (char_length(incoming_twiml) BETWEEN 1 AND 2000),
   created_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, call_sid),
   CONSTRAINT voice_calls_dial_decided CHECK ((dial_status IS NULL) = (offered IS NULL)
@@ -143,7 +145,7 @@ GRANT SELECT, INSERT ON public.voice_textback_disclosures TO service_role;
 GRANT SELECT, INSERT, UPDATE (phone_number, forward_to_e164, ring_seconds, textback_enabled, booking_url, disclosure_version, updated_at),
   DELETE ON public.voice_numbers TO service_role;
 -- Calls, consents and voicemails are written by the voice actions (runtime role) only.
-GRANT INSERT (tenant_id, call_sid, from_e164, to_e164, created_at) ON public.voice_calls TO authenticated;
+GRANT INSERT (tenant_id, call_sid, from_e164, to_e164, incoming_twiml, created_at) ON public.voice_calls TO authenticated;
 GRANT UPDATE (dial_status, offered, offer_reason, mailbox_open, disclosure_version) ON public.voice_calls TO authenticated;
 GRANT INSERT ON public.voice_textback_consents TO authenticated;
 GRANT INSERT ON public.voicemails TO authenticated;

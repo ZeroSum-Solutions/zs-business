@@ -54,7 +54,7 @@ export async function assignVoiceNumber(tx: Transaction, input: VoiceNumberInput
   if (!contactPhoneSchema.safeParse(input.forwardTo).success) throw new ValidationFailed("The forward-to number must be E.164, like +15555550100");
   if (input.ringSeconds !== undefined && !(Number.isInteger(input.ringSeconds) && input.ringSeconds >= 5 && input.ringSeconds <= 45))
     throw new ValidationFailed("Ring seconds must be a whole number from 5 to 45");
-  if (input.bookingUrl !== undefined && (!/^https:\/\/[^\s<>"]+$/.test(input.bookingUrl) || input.bookingUrl.length > 300))
+  if (input.bookingUrl !== undefined && (!/^https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?([/?#][^\s<>"]*)?$/.test(input.bookingUrl) || input.bookingUrl.length > 300))
     throw new ValidationFailed("The booking link must be an https URL of at most 300 characters");
   const sms = (await tx.query<{ phone_number: string }>("SELECT phone_number FROM sms_numbers WHERE tenant_id=$1", [input.tenantId])).rows[0];
   if (!sms) throw new ValidationFailed("Assign the tenant an SMS number first (pnpm sms:number); the voice number is the same number");

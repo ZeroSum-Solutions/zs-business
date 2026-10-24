@@ -26,7 +26,7 @@ export type OfferReason = z.infer<typeof offerReasonSchema>;
 /** `voice.call.record`: the incoming call, then the dial step's stored decision (T-10, T-11, T-14). */
 export const VOICE_CALL_RECORD_ACTION = "voice.call.record";
 export const voiceCallInputSchema = z.discriminatedUnion("step", [
-  z.strictObject({ step: z.literal("incoming"), callSid: callSidSchema, from: contactPhoneSchema.nullable(), to: contactPhoneSchema }),
+  z.strictObject({ step: z.literal("incoming"), callSid: callSidSchema, from: contactPhoneSchema.nullable(), to: contactPhoneSchema, twiml: z.string().min(1).max(2000) }),
   z.strictObject({
     step: z.literal("dial"),
     callSid: callSidSchema,
