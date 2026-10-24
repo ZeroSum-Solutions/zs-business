@@ -289,3 +289,45 @@ describe("live settings", () => {
     }
   });
 });
+
+describe("api proxy media routes", () => {
+  const upload = (cookie: string, body: BodyInit, type: string, headers: Record<string, string> = {}) =>
+    new Request(`${ORIGIN}/api/v1/media/assets`, { method: "POST", body, headers: { Cookie: cookie, "Content-Type": type, "Idempotency-Key": "k-up", Origin: ORIGIN, ...headers } });
+  const assets = ["v1", "media", "assets"];
+
+  it("forwards the media reads and JSON writes (image-port.md IM-22)", async () => {
+    const { harness, get, post } = await signedIn();
+    for (const path of [["v1", "media", "assets"], ["v1", "media", "assets", "a-1", "content"], ["v1", "media", "variants"], ["v1", "media", "variants", "v-1", "content"]])
+      expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
+    expect((await proxyApiRequest(get("v1/media"), ["v1", "media"], harness.setup)).status).toBe(404);
+    const reject = await proxyApiRequest(post("v1/media/variants/v-1/reject", { sha256: "a".repeat(64) }, { "Idempotency-Key": "k-r", Origin: ORIGIN }), ["v1", "media", "variants", "v-1", "reject"], harness.setup);
+    expect(reject.status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/media/variants/v-1/reject");
+    expect(reject.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("forwards an upload's raw image bytes past the JSON limit, with its type and key", async () => {
+    const { harness, jar } = await signedIn();
+    const bytes = new Uint8Array(200 * 1024).fill(7);
+    const response = await proxyApiRequest(upload(jar.header(), bytes, "image/png"), assets, harness.setup);
+    expect(response.status).toBe(200);
+    const sent = harness.apiCalls.at(-1)!;
+    expect(sent.url).toBe("http://api.internal:8787/v1/media/assets");
+    const sentHeaders = new Headers(sent.init.headers);
+    expect(sentHeaders.get("content-type")).toBe("image/png");
+    expect(sentHeaders.get("idempotency-key")).toBe("k-up");
+    expect(new Uint8Array(sent.init.body as ArrayBuffer)).toEqual(bytes);
+  });
+
+  it("refuses an upload of another type, a form, an image body on another route, an oversize file and another origin", async () => {
+    const { harness, jar } = await signedIn();
+    for (const type of ["text/plain", "image/svg+xml", "multipart/form-data; boundary=x", "application/json", "image/png; charset=x"])
+      expect((await proxyApiRequest(upload(jar.header(), "x", type), assets, harness.setup)).status, type).toBe(400);
+    const elsewhere = new Request(`${ORIGIN}/api/v1/media/variants`, { method: "POST", body: "x", headers: { Cookie: jar.header(), "Content-Type": "image/png", Origin: ORIGIN } });
+    expect((await proxyApiRequest(elsewhere, ["v1", "media", "variants"], harness.setup)).status).toBe(400);
+    const big = upload(jar.header(), "x", "image/png", { "Content-Length": String(10 * 1024 * 1024 + 1) });
+    expect((await proxyApiRequest(big, assets, harness.setup)).status).toBe(413);
+    expect((await proxyApiRequest(upload(jar.header(), "x", "image/png", { Origin: "https://evil.example" }), assets, harness.setup)).status).toBe(403);
+    expect(harness.apiCalls).toHaveLength(0);
+  });
+});

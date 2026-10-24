@@ -1,4 +1,5 @@
 import { createDemoAdapter, type DemoControls } from "./demo/adapter";
+import { createDemoMedia, type DemoMediaControls } from "./demo/media";
 import { createDemoSites, type DemoSiteControls } from "./demo/sites";
 import { createDemoTranscripts } from "./demo/transcripts";
 import { createDemoWorkspace } from "./demo/workspace";
@@ -21,7 +22,7 @@ export interface ApiRuntime {
   api: ZsApi;
   mode: "live" | "demo";
   /** Only set in demo mode: acts as a second person, to show conflicts. */
-  demo: (DemoControls & DemoSiteControls) | null;
+  demo: (DemoControls & DemoSiteControls & DemoMediaControls) | null;
 }
 
 /** next.config.ts sets NEXT_PUBLIC_API_MODE to "live" when the build has ZS_API_URL. It carries no URL or token. */
@@ -34,12 +35,17 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
   if (config.mode !== "live") {
     const demo = createDemoAdapter({ latencyMs: 180 });
     const sites = createDemoSites({ latencyMs: 180 });
-    return { api: { ...demo, ...sites.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }) }, mode: "demo", demo: { ...demo, ...sites.controls } };
+    const media = createDemoMedia({ latencyMs: 180 });
+    return {
+      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }) },
+      mode: "demo",
+      demo: { ...demo, ...sites.controls, ...media.controls },
+    };
   }
   // No token here: the proxy adds it on the server.
   const http = createHttpClient({ baseUrl: API_PROXY_PATH });
   // TODO(api): wallet and usage, the connections checklist, connections and plan have no routes
-  // yet. Inbox and Home results (inbox-home.md), the follow-up agent (agents.md), the site and
-  // Google Calendar connections (google-calendar.md) are live.
+  // yet. Inbox and Home results (inbox-home.md), the follow-up agent (agents.md), the site, its
+  // images (image-port.md IM-22) and Google Calendar connections (google-calendar.md) are live.
   return { api: { ...createDemoWorkspace(), ...http }, mode: "live", demo: null };
 }

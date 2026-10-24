@@ -4,13 +4,13 @@
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
  * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source, inbox, home, agent, business, site and calendar routes and /v1/me are forwarded (for
+ * approval, source, inbox, home, agent, business, site, media and calendar routes and /v1/me are forwarded (for
  * example /v1/approvals/:id/approve, /v1/inbox/threads, PUT /v1/business and PUT /v1/agents/followup/settings), only
  * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
  * Google Calendar connection also binds the flow to this browser, and reading or confirming a
  * staged grant sends the API the grant this browser holds (calendar-connect.ts).
  */
-import { PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
+import { MEDIA_CONTENT_TYPES, MEDIA_LIMITS, PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
 import { readBoundedBody, type BodyTiming } from "./body";
 import { bindConnectStart, expiredGrantCookie, isConnectStart, namesGrant, pendingGrantOf, readsPendingGrant } from "./calendar-connect";
@@ -23,7 +23,7 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions"]);
+const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "media"]);
 const SINGLE = new Set(["me", "members", "approvals", "sources", "sites", "business", "transcriptions"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
@@ -33,6 +33,15 @@ const MAX_BODY_BYTES = 64 * 1024;
 /** How long a request body may take to arrive. */
 const BODY_DEADLINE_MS = 15_000;
 const BODY_REFUSED = { too_large: 413, timeout: 408, failed: 400 } as const;
+/** An image upload (image-port.md IM-22): raw bytes under their own type, up to the media file limit. */
+const UPLOAD_DEADLINE_MS = 120_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
+const isUpload = (method: string, path: readonly string[]) => method === "POST" && path.length === 3 && path[1] === "media" && path[2] === "assets";
+/** One of IM-3's types, exactly. Like JSON, none of them is a type a cross-site form can send without a CORS preflight. */
+const uploadType = (request: Request) => {
+  const type = (request.headers.get("content-type") ?? "").trim().toLowerCase();
+  return MEDIA_CONTENT_TYPES.find((allowed) => allowed === type) ?? null;
+};
 
 function reply(status: number, code: ApiErrorCode): Response {
   return Response.json(demoErrorBody(code), { status, headers: { "Cache-Control": "no-store" } });
@@ -70,11 +79,16 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
   if (grant !== undefined) headers.set(PENDING_GRANT_HEADER, grant);
 
   let body: Uint8Array<ArrayBuffer> | undefined;
+  const upload = isUpload(request.method, path);
   if (WITH_BODY.has(request.method)) {
-    // A cross-site form can only send simple content types; JSON needs a CORS preflight.
-    if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return auth.finish(reply(400, "ValidationFailed"));
-    // Never more than MAX_BODY_BYTES in memory, and never a slow upload held open for long.
-    const read = await readBoundedBody(request, { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
+    // A cross-site form can only send simple content types; JSON and the image types need a CORS preflight.
+    const type = upload ? uploadType(request) : (request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json") ? "json" : null;
+    if (!type) return auth.finish(reply(400, "ValidationFailed"));
+    if (upload) headers.set("content-type", type);
+    // Never more than the limit in memory, and never a slow upload held open for long.
+    const read = await readBoundedBody(request, upload
+      ? { maxBytes: MEDIA_LIMITS.fileBytes, deadlineMs: UPLOAD_DEADLINE_MS, ...timing }
+      : { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
     if (!read.ok) return auth.finish(reply(BODY_REFUSED[read.reason], "ValidationFailed"));
     body = read.bytes;
   }
@@ -94,7 +108,7 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
       headers,
       ...(body ? { body } : {}),
       redirect: "manual",
-      signal: AbortSignal.timeout(config.timeoutMs ?? 15_000),
+      signal: AbortSignal.timeout(config.timeoutMs ?? (upload ? UPLOAD_TIMEOUT_MS : 15_000)),
     });
   } catch {
     return auth.finish(reply(502, "Internal"));
@@ -114,7 +128,8 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
 async function relay(upstream: Response, auth: AuthContext): Promise<Response> {
   // The API refused the session (signed out elsewhere, expired, revoked): drop its cookies.
   if (upstream.status === 401) auth.clearAll();
-  const responseHeaders = new Headers({ "Cache-Control": "no-store" });
+  // Image bytes are relayed too (IM-22): the browser takes the API's type as it is, never a guess.
+  const responseHeaders = new Headers({ "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
   const contentType = upstream.headers.get("content-type");
   if (contentType) responseHeaders.set("Content-Type", contentType);
   const empty = [204, 205, 304].includes(upstream.status);

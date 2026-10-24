@@ -1,5 +1,10 @@
 import type {
+  ApprovalRecord,
+  ApproveApprovalResponse,
   BusinessProfile,
+  GenerateVariantRequest,
+  ImageVariant,
+  MediaAsset,
   ContactEnrichment,
   EnrichmentRequestRecord,
   BookingContactResult,
@@ -55,7 +60,12 @@ import type {
 import type { WorkspaceApi } from "./workspace-types";
 
 export type {
+  ApprovalRecord,
+  ApproveApprovalResponse,
   BusinessProfile,
+  GenerateVariantRequest,
+  ImageVariant,
+  MediaAsset,
   ContactEnrichment,
   EnrichmentRequestRecord,
   BookingContactResult,
@@ -462,7 +472,41 @@ export interface TranscriptionApi {
   getTranscription(id: string, options?: ReadOptions): Promise<TranscriptionDetail>;
 }
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi;
+/** The variant an owner looked at, named by the digest of the bytes shown (image-port.md IM-12, IM-23). */
+export interface VariantDecision {
+  variantId: string;
+  sha256: string;
+}
+
+/**
+ * Product photos and their edits (image-port.md IM-22). Owners only (`publish`). An upload sends
+ * the raw image bytes; an edit is made by the server's worker and waits, staged, until an owner
+ * approves it (a stored approval, then its approve) or rejects it. Bytes come back as a Blob.
+ */
+export interface MediaApi {
+  /** Throws `not_found` when the server has no image settings (IM-21). */
+  listMediaAssets(options?: ReadOptions): Promise<MediaAsset[]>;
+  /** The file's own type is the Content-Type: PNG, JPEG or WebP, at most `MEDIA_LIMITS.fileBytes`. */
+  uploadMediaAsset(file: Blob, options: WriteOptions): Promise<MediaAsset>;
+  getMediaAssetContent(assetId: string, options?: ReadOptions): Promise<Blob>;
+  listImageVariants(options?: ReadOptions): Promise<ImageVariant[]>;
+  getImageVariant(variantId: string, options?: ReadOptions): Promise<ImageVariant>;
+  /** The staged bytes of a staged, approved or promoted variant; `not_found` otherwise. */
+  getImageVariantContent(variantId: string, options?: ReadOptions): Promise<Blob>;
+  /** Answers the new variant, `queued`. */
+  generateImageVariant(input: GenerateVariantRequest, options: WriteOptions): Promise<ImageVariant>;
+  /** Asks for `media.variant.approve`; an owner then approves the answer with `approveApproval`. */
+  requestVariantApproval(input: VariantDecision, options: WriteOptions): Promise<ApprovalRecord>;
+  /** A conflict with reason `variant_changed` or `variant_not_staged` when it cannot be rejected. */
+  rejectImageVariant(input: VariantDecision, options: WriteOptions): Promise<ImageVariant>;
+}
+
+/** The approvals path (approvals.md A-7): approving also runs the action. */
+export interface ApprovalsApi {
+  approveApproval(approvalId: string, options: WriteOptions): Promise<ApproveApprovalResponse>;
+}
+
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & MediaApi & ApprovalsApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

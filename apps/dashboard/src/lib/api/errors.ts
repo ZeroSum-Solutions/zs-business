@@ -85,6 +85,8 @@ const ISSUE_MESSAGES: Record<string, string> = {
 };
 
 const FIELD_MESSAGES: Record<string, string> = {
+  contentType: "Upload a PNG, JPEG or WebP photo.",
+  byteLength: "That photo is too large. Upload one under 10 MB.",
   email: "Enter an email address like name@example.com.",
   phone: "Enter a phone number with country code, like +1 212 555 0142.",
   displayName: "Names can be up to 200 characters.",
@@ -113,6 +115,9 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   insufficient_funds: "Your balance is too low for a lookup. Add funds, then try again.",
   enrichment_daily_cap: "You reached today's limit on lookups. Try again tomorrow.",
   enrichment_result_expired: "Those details expired. Ask for them again.",
+  variant_changed: "This image changed since you looked at it. Look at it again before you decide.",
+  variant_not_staged: "This image is no longer waiting for a decision. Someone may have decided already.",
+  variant_expired: "This image waited too long and was removed. Make it again if you still want it.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
