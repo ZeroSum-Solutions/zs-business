@@ -8,7 +8,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryIntakeFileStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
+import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryIntakeFileStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type EnrichmentConfigInput, type ImageDependencies, type SiteCompiler } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
 import {
   createApp,
@@ -147,6 +147,8 @@ export interface HarnessOptions {
   clock?: { now(): Date };
   /** Turns the /v1/sites routes on over this store and compiler. */
   sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
+  /** Turns the /v1/media routes on over this store and image config (image-port.md IM-22). */
+  images?: ImageDependencies;
 }
 
 export async function createApiHarness(options: HarnessOptions = {}): Promise<ApiHarness> {
@@ -175,6 +177,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
       } }
       : {}),
     ...(options.sites ? { sites: options.sites } : {}),
+    ...(options.images ? { images: options.images } : {}),
     ...(options.unsubscribe
       ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...shared, ...options.unsubscribe } }
       : {}),

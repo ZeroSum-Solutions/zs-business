@@ -7,6 +7,7 @@ import { useApi } from "./api/react";
 import { useTenantId } from "./session";
 import {
   CONTACT_IDS_PER_CALL,
+  isApiError,
   type BookingListQuery,
   type CalendarConnection,
   type ContactRecord,
@@ -20,7 +21,7 @@ import {
   type SlotQuery,
   type ThreadSummary,
 } from "./api";
-import type { BookingRecord, BusinessProfile, SlotsResponse } from "@zs/contracts";
+import type { BookingRecord, BusinessProfile, ImageVariant, SlotsResponse } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
 import { newerProfile } from "./business-profile";
 
@@ -95,6 +96,12 @@ export const keys = {
   /** The Google grant waiting in this browser for the owner to confirm (G-2). */
   calendarPending: ["calendarSync", "pending"] as const,
   plan: ["ws", "plan"] as const,
+  /** Product photos and their edits (image-port.md IM-22). */
+  mediaAssets: ["media", "assets"] as const,
+  imageVariants: ["media", "variants"] as const,
+  mediaAll: ["media"] as const,
+  /** An image's bytes. Outside "media", so refreshing the lists never reloads an image that cannot change. */
+  mediaContent: (kind: "asset" | "variant", id: string) => ["mediaContent", kind, id] as const,
 };
 
 type Keys = typeof keys;
@@ -637,3 +644,54 @@ export function usePlan() {
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.plan, queryFn: () => api.getPlan() });
 }
+
+/** How often the edits are read again while the worker has one to finish. */
+export const IMAGE_POLL_MS = 2_000;
+
+/** Waiting on the worker: an edit not made yet, or an approved one not yet in the library. */
+export function imageWorkPending(items: readonly ImageVariant[] | undefined): boolean {
+  return items?.some((item) => item.status === "queued" || item.status === "running" || item.status === "approved") ?? false;
+}
+
+export function useMediaAssets() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.mediaAssets, queryFn: ({ signal }) => api.listMediaAssets({ signal }), retry: (count, error) => !isNotFound(error) && count < 3 });
+}
+
+/** Every edit, newest first; read again every few seconds while the worker has one to finish. */
+export function useImageVariants() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled,
+    queryKey: keys.imageVariants,
+    queryFn: ({ signal }) => api.listImageVariants({ signal }),
+    refetchInterval: (query) => (imageWorkPending(query.state.data) ? IMAGE_POLL_MS : false),
+  });
+}
+
+/**
+ * An image's bytes as a URL the page can show, revoked when no longer shown. An asset never
+ * changes, nor do a variant's staged bytes, so each is read once.
+ */
+export function useImageUrl(kind: "asset" | "variant", id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  const content = useQuery({
+    enabled: enabled && id !== null,
+    queryKey: keys.mediaContent(kind, id ?? "none"),
+    queryFn: ({ signal }) => (kind === "asset" ? api.getMediaAssetContent(id!, { signal }) : api.getImageVariantContent(id!, { signal })),
+    staleTime: Infinity,
+  });
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!content.data) return undefined;
+    const made = URL.createObjectURL(content.data);
+    setUrl(made);
+    return () => { URL.revokeObjectURL(made); setUrl(null); };
+  }, [content.data]);
+  return { url, isError: content.isError, error: content.error, refetch: content.refetch };
+}
+
+const isNotFound = (error: unknown) => isApiError(error, "not_found");

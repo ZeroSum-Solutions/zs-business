@@ -64,6 +64,9 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
       : createR2SiteStore(env.sites.store, { fetch: globalThis.fetch, clock }),
     compiler: options.siteCompiler ?? plainSiteCompiler,
   };
+  // image-port.md IM-21: images share the site store (parseServerEnv requires SITES_STORE); the
+  // API only queues jobs, so it holds no vendor port. The image worker calls the vendor.
+  const images = env.images === null || sites === undefined ? undefined : { store: sites.store, config: env.images.config };
   const app = createApp({
     verifier: createVerifierFromConfig(env.jwt, clock),
     sessionCheck: createSessionCheckFromConfig(env.sessionCheck, { db, clock }),
@@ -74,6 +77,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
     config: { allowedOrigins: env.allowedOrigins, requestTimeoutMs: env.requestTimeoutMs },
     ...(publicIntake === undefined ? {} : { publicIntake }),
     ...(sites === undefined ? {} : { sites }),
+    ...(images === undefined ? {} : { images }),
     ...(unsubscribe === undefined ? {} : { unsubscribe }),
     ...(env.resendWebhook === null ? {} : {
       resendWebhook: {

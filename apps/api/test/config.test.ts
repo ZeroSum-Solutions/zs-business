@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseServerEnv, PLACEHOLDER_BOOKING_KEY_SECRET, PLACEHOLDER_JWT_SECRET, PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../src/config.js";
+import { parseImageRunnerEnv } from "../src/images/config.js";
+import { parseImageEnv, parseServerEnv, PLACEHOLDER_BOOKING_KEY_SECRET, PLACEHOLDER_JWT_SECRET, PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../src/config.js";
 import {
   KEY_SECRET,
   PREVIOUS_KEY_SECRET,
@@ -295,5 +296,55 @@ describe("parseServerEnv", () => {
   it("keeps the in-memory site store to loopback databases", () => {
     const remote = { ...base, SESSION_CHECK: "supabase", SUPABASE_URL: "https://abcd.supabase.co", DATABASE_URL: "postgres://zs_runtime@db.example.com:5432/postgres", DATABASE_CA_CERT: "-----BEGIN CERTIFICATE-----x" };
     expect(() => parseServerEnv({ ...remote, SITES_STORE: "memory" })).toThrow(/SITES_STORE: memory is for local runs/);
+  });
+});
+
+describe("image config (image-port.md IM-6, IM-20, IM-21)", () => {
+  /** TODO verify: placeholder prices and costs, test values only. */
+  const prices = JSON.stringify({ background_remove: 10, studio_background_swap: 25, upscale_2k: 30 });
+  const costs = JSON.stringify({ background_remove: 1_000, studio_background_swap: 2_000, upscale_2k: 3_000 });
+  const images = { ...base, SITES_STORE: "memory" };
+
+  it("is off without IMAGE_ADAPTER, and refuses image variables without it", () => {
+    expect(parseServerEnv(base).images).toBeNull();
+    expect(() => parseServerEnv({ ...base, IMAGE_PRICES_MINOR: prices })).toThrow(/IMAGE_PRICES_MINOR needs IMAGE_ADAPTER/);
+  });
+
+  it("reads a vendor's prices, costs and key once, and fails closed without them", () => {
+    const kie = { ...images, IMAGE_ADAPTER: "kie", IMAGE_PRICES_MINOR: prices, IMAGE_VENDOR_COST_MICROS: costs, KIE_API_KEY: "k".repeat(16) };
+    expect(parseServerEnv(kie).images).toMatchObject({
+      config: { adapter: "kie", environment: "production", currency: "usd", prices: JSON.parse(prices) },
+      apiKey: "k".repeat(16), vendorCostMicros: JSON.parse(costs),
+    });
+    expect(() => parseServerEnv({ ...kie, IMAGE_PRICES_MINOR: undefined })).toThrow(/needs its prices/);
+    expect(() => parseServerEnv({ ...kie, KIE_API_KEY: undefined })).toThrow(/needs KIE_API_KEY/);
+    expect(() => parseServerEnv({ ...kie, IMAGE_ADAPTER: "fal" })).toThrow(/needs FAL_API_KEY/);
+    expect(() => parseServerEnv({ ...kie, IMAGE_VENDOR_COST_MICROS: undefined })).toThrow(/needs IMAGE_VENDOR_COST_MICROS/);
+    expect(() => parseServerEnv({ ...kie, IMAGE_PRICES_MINOR: "{" })).toThrow(/IMAGE_PRICES_MINOR is not JSON/);
+    expect(() => parseServerEnv({ ...kie, IMAGE_PRICES_MINOR: JSON.stringify({ background_remove: 10 }) })).toThrow(/IMAGE_PRICES_MINOR needs one whole number/);
+    expect(() => parseServerEnv({ ...kie, SITES_STORE: undefined })).toThrow(/IMAGE_ADAPTER needs SITES_STORE/);
+  });
+
+  it("refuses the fake and unbuilt adapters where they cannot run", () => {
+    expect(() => parseServerEnv({ ...images, IMAGE_ADAPTER: "fake" })).toThrow(/cannot run in production/);
+    expect(() => parseServerEnv({ ...images, IMAGE_ADAPTER: "higgsfield", IMAGE_ENVIRONMENT: "development", IMAGE_PRICES_MINOR: prices }))
+      .toThrow(/not built/);
+    expect(parseServerEnv({ ...images, IMAGE_ADAPTER: "fake", IMAGE_ENVIRONMENT: "test" }).images?.config.adapter).toBe("fake");
+    expect(() => parseImageEnv({ IMAGE_ADAPTER: "fake", IMAGE_ENVIRONMENT: "test" }, "postgres://zs_runtime@db.example.com:5432/zs"))
+      .toThrow(/IMAGE_ADAPTER=fake needs a loopback database URL/);
+  });
+
+  it("runs the worker only with IMAGE_WORKER=on and the image config", () => {
+    expect(parseImageRunnerEnv({ IMAGE_ADAPTER: "kie" })).toBeNull();
+    const worker = {
+      IMAGE_WORKER: "on", IMAGE_DATABASE_URL: LOCAL.DATABASE_URL, IMAGE_SERVICE_DATABASE_URL: "postgres://postgres@127.0.0.1:55432/zs_dev",
+      R2_ENDPOINT: "https://acct.r2.cloudflarestorage.com", R2_BUCKET: "zs-sites", R2_ACCESS_KEY_ID: "id", R2_SECRET_ACCESS_KEY: "secret",
+    };
+    expect(() => parseImageRunnerEnv(worker)).toThrow(/IMAGE_WORKER=on needs IMAGE_ADAPTER/);
+    expect(() => parseImageRunnerEnv({ ...worker, IMAGE_DATABASE_URL: undefined, IMAGE_ADAPTER: "fake", IMAGE_ENVIRONMENT: "test" }))
+      .toThrow(/IMAGE_DATABASE_URL/);
+    expect(parseImageRunnerEnv({ ...worker, IMAGE_ADAPTER: "fake", IMAGE_ENVIRONMENT: "test" })).toMatchObject({
+      intervalMs: 15_000, images: { config: { adapter: "fake" } }, r2: { bucket: "zs-sites" },
+    });
   });
 });

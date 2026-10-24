@@ -67,8 +67,11 @@ export interface ImageWorkflowPort {
   /** The model the preset runs on, so the worker can check the allowlist before it reserves or calls. */
   modelId(preset: ImagePreset): string;
   runPreset(input: PresetInput): Promise<PresetOutput>;
-  /** Asks the vendor about a job whose answer never arrived. */
-  lookup(providerJobId: string): Promise<LookupResult>;
+  /**
+   * Asks the vendor about a job whose answer never arrived. The worker passes the job's input again
+   * (IM-18), so a vendor adapter can rebuild the composite from the source it no longer holds.
+   */
+  lookup(providerJobId: string, input: PresetInput): Promise<LookupResult>;
 }
 
 export interface FakeImageWorkflowPort extends ImageWorkflowPort {
@@ -240,7 +243,7 @@ export function createFakeImageWorkflowPort(): FakeImageWorkflowPort {
       jobs.set(providerJobId, { output, state: "done" });
       return output;
     },
-    async lookup(providerJobId) {
+    async lookup(providerJobId, _input) {
       lookups.push(providerJobId);
       const job = jobs.get(providerJobId);
       if (!job) return { state: "failed" };

@@ -5,12 +5,13 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ROLE_PERMISSIONS, TenantDenied, roleCan, type MemberRole, type Permission } from "@zs/contracts";
+import { asService, type Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  AGENT_ACTIONS, agentHandlers, browserHandlers, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, documentIntakeHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -31,6 +32,7 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "media.asset.upload": "publish",
   "media.variant.generate": "publish",
   "media.variant.approve": "publish",
+  "media.variant.reject": "publish",
   // booking-customer.md BC-3: the handler also needs `customers`; staff and owners hold both.
   "booking.contact.link": "calendar",
   "booking.contact.unlink": "calendar",
@@ -207,6 +209,29 @@ async function ownerDraft(): Promise<string> {
   return (await sessionFor(tenant.ownerId).draftReply({ contactId: tenant.contactId, body: "Thanks, see you soon." }, randomUUID())).result.id;
 }
 
+/** IM-22, IM-23: a fresh upload upscaled and staged by the image worker, for the variant decisions. */
+async function stagedVariant(): Promise<{ id: string; sha256: string }> {
+  const owner = sessionFor(tenant.ownerId);
+  const source = await owner.uploadMediaAsset(
+    encodeRgbaPng({ width: 2, height: 2, rgba: new Uint8Array(16).fill(shade++ % 250 + 1) }), "image/png", randomUUID());
+  const queued = await owner.generateImageVariant({ sourceAssetId: source.result.id, preset: "upscale_2k", params: {} }, randomUUID());
+  const service = <T>(work: (tx: Transaction) => Promise<T>) => asService(database.servicePool, work);
+  // Other operations leave queued jobs behind: pay for them too, and run until this one is done.
+  await service((tx) => creditWallet(tx, {
+    tenantId: tenant.tenantId, ledgerId: randomUUID(), amount: 100_000, idempotencyKey: `credit:${randomUUID()}`, now: new Date(NOW),
+  }));
+  const worker = createImageWorker({
+    service, db: database.db, store: images.store, port: createFakeImageWorkflowPort(), config: images.config, clock, generateId: randomUUID,
+  });
+  let staged = await owner.getImageVariant(queued.result.id);
+  for (let pass = 0; pass < 10 && staged.status === "queued"; pass += 1) {
+    await worker.runOnce();
+    staged = await owner.getImageVariant(queued.result.id);
+  }
+  expect(staged.status).toBe("staged");
+  return { id: staged.id, sha256: staged.sha256! };
+}
+
 /** A booking made by the tenant's owner, for the booking-contact steps. */
 let customerSlot = 0;
 let customerResource: string | undefined;
@@ -298,6 +323,20 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
         encodeRgbaPng({ width: 2, height: 2, rgba: new Uint8Array(16).fill(shade++ % 250 + 1) }), "image/png", randomUUID());
       const queued = await sessionFor(tenant.ownerId).generateImageVariant({ sourceAssetId: source.result.id, preset: "background_remove", params: {} }, randomUUID());
       return session.getImageVariant(queued.result.id);
+    } },
+    readMediaAssetContent: { permission: "publish", run: async () => {
+      const source = await sessionFor(tenant.ownerId).uploadMediaAsset(
+        encodeRgbaPng({ width: 2, height: 2, rgba: new Uint8Array(16).fill(shade++ % 250 + 1) }), "image/png", randomUUID());
+      return session.readMediaAssetContent(source.result.id);
+    } },
+    readImageVariantContent: { permission: "publish", run: async () => session.readImageVariantContent((await stagedVariant()).id) },
+    requestImageVariantApproval: { permission: "publish", run: async () => {
+      const staged = await stagedVariant();
+      return session.requestImageVariantApproval(staged.id, { sha256: staged.sha256 }, randomUUID());
+    } },
+    rejectImageVariant: { permission: "publish", run: async () => {
+      const staged = await stagedVariant();
+      return session.rejectImageVariant(staged.id, { sha256: staged.sha256 }, randomUUID());
     } },
     getWallet: { permission: "billing", run: () => session.getWallet() },
     // stripe.md S-1: only owners add money.

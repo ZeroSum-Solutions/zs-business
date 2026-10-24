@@ -1,5 +1,12 @@
 import { z } from "zod";
 import {
+  approvalOutputSchema,
+  approvalRecordSchema,
+  approveApprovalResponseSchema,
+  imageVariantOutputSchema,
+  imageVariantSchema,
+  mediaAssetOutputSchema,
+  mediaAssetSchema,
   bookingContactOutputSchema,
   browserRunDetailSchema,
   browserRunListSchema,
@@ -43,8 +50,6 @@ import {
   siteReleaseResponseSchema,
   siteSyncResponseSchema,
   slotsResponseSchema,
-  approvalOutputSchema,
-  approveApprovalResponseSchema,
   intakeDiscardResultSchema,
   intakeJobDetailSchema,
   intakeJobListSchema,
@@ -56,6 +61,8 @@ import {
   uuidSchema,
   type CreateBookingRequest,
   type DraftReplyRequest,
+  type GenerateVariantRequest,
+  type VariantDecisionRequest,
   type KillFollowUpRequest,
   type LinkIntakeItemRequest,
   type MoveDealStageRequest,
@@ -80,6 +87,8 @@ import {
   type InboxApi,
   type IntakeApi,
   type ListResult,
+  type ApprovalsApi,
+  type MediaApi,
   type SitesApi,
   type TranscriptionApi,
   type WriteOptions,
@@ -100,6 +109,8 @@ interface RequestSpec<T extends z.ZodType> {
   path: string;
   query?: Record<string, string | number | undefined>;
   body?: unknown;
+  /** Bytes sent as they are, with their own Content-Type, instead of a JSON body (an image upload). */
+  raw?: Blob;
   idempotencyKey?: string;
   /**
    * Why a request other than a GET takes no Idempotency-Key; every other write needs one from
@@ -121,6 +132,10 @@ const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: 
 /** POST /v1/enrichment/requests answers the action and the request as it is now. */
 const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
+const mediaAssetListSchema = z.object({ items: z.array(mediaAssetSchema) });
+const imageVariantListSchema = z.object({ items: z.array(imageVariantSchema) });
+/** POST /v1/media/variants/:id/approval answers 201 with the approval (IM-22): the action envelope, or the bare record. */
+const variantApprovalSchema = z.union([approvalOutputSchema.transform((output) => output.result), approvalRecordSchema]);
 
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
@@ -130,22 +145,24 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
   const base = config.baseUrl.replace(/\/+$/, "");
 
-  async function request<T extends z.ZodType>(spec: RequestSpec<T>): Promise<z.infer<T>> {
+  /** Sends one request and answers the raw response; a non-2xx answer is thrown as an ApiError. */
+  async function send(spec: Omit<RequestSpec<z.ZodType>, "schema">, accept = "application/json"): Promise<Response> {
     const search = new URLSearchParams();
     for (const [key, value] of Object.entries(spec.query ?? {})) {
       if (value !== undefined && value !== "") search.set(key, String(value));
     }
     const url = search.size > 0 ? `${base}${spec.path}?${search}` : `${base}${spec.path}`;
-    const headers: Record<string, string> = { Accept: "application/json" };
+    const headers: Record<string, string> = { Accept: accept };
     const token = config.getToken?.() ?? null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (spec.body !== undefined) headers["Content-Type"] = "application/json";
+    if (spec.raw !== undefined) headers["Content-Type"] = spec.raw.type;
     if (spec.method !== "GET" && !spec.keyless) {
       // The caller owns the key, so a retry can reuse it. A made-up key would turn a retry
       // after a lost answer into a second write.
@@ -160,7 +177,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
         headers,
         // Business data never goes to the HTTP cache, in the browser or in Next's fetch cache.
         cache: "no-store",
-        ...(spec.body !== undefined ? { body: JSON.stringify(spec.body) } : {}),
+        ...(spec.body !== undefined ? { body: JSON.stringify(spec.body) } : spec.raw !== undefined ? { body: spec.raw } : {}),
         ...(spec.signal ? { signal: spec.signal } : {}),
       });
     } catch (error) {
@@ -168,6 +185,31 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       if (spec.signal?.aborted) throw error;
       throw new ApiError("network", defaultMessage("network"));
     }
+    if (!response.ok) {
+      let json: unknown = null;
+      try {
+        json = await response.json();
+      } catch {
+        // A proxy page or an empty body still maps by status.
+      }
+      throw errorFromBody(response.status, json);
+    }
+    return response;
+  }
+
+  /** Image bytes (IM-22). The API's own type is kept, so the browser shows the image as it is. */
+  async function bytes(path: string, signal: AbortSignal | undefined): Promise<Blob> {
+    const response = await send({ method: "GET", path, signal }, "image/png, image/jpeg, image/webp");
+    try {
+      return await response.blob();
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new ApiError("network", defaultMessage("network"));
+    }
+  }
+
+  async function request<T extends z.ZodType>(spec: RequestSpec<T>): Promise<z.infer<T>> {
+    const response = await send(spec);
 
     let json: unknown;
     // 204 has no body; the schema says whether that is the expected answer.
@@ -175,11 +217,9 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       try {
         json = await response.json();
       } catch {
-        if (!response.ok) throw errorFromBody(response.status, null);
         throw new ApiError("invalid_response", defaultMessage("invalid_response"), response.status);
       }
     }
-    if (!response.ok) throw errorFromBody(response.status, json);
 
     const parsed = spec.schema.safeParse(json);
     if (!parsed.success) {
@@ -214,6 +254,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     request({ method, path, body, idempotencyKey: options?.idempotencyKey, schema });
 
   const FOLLOW_UP = "/v1/agents/followup";
+  const variantPath = (id: string, rest = "") => `/v1/media/variants/${encodeURIComponent(id)}${rest}`;
   const BROWSER = "/v1/browser";
 
   return {
@@ -538,6 +579,51 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     async requestEnrichment(contactId, options) {
       return (await write("/v1/enrichment/requests", { op: "company.enrich", contactId }, enrichmentOutputSchema, options)).result;
+    },
+
+    async listMediaAssets(options = {}) {
+      return (await request({ method: "GET", path: "/v1/media/assets", schema: mediaAssetListSchema, signal: options.signal })).items;
+    },
+
+    async uploadMediaAsset(file, options) {
+      // The bytes as they are, under their own type: the API reads and checks the image itself (IM-3).
+      return (await request({ method: "POST", path: "/v1/media/assets", raw: file, idempotencyKey: options?.idempotencyKey, schema: mediaAssetOutputSchema })).result;
+    },
+
+    getMediaAssetContent(assetId, options = {}) {
+      return bytes(`/v1/media/assets/${encodeURIComponent(assetId)}/content`, options.signal);
+    },
+
+    async listImageVariants(options = {}) {
+      return (await request({ method: "GET", path: "/v1/media/variants", schema: imageVariantListSchema, signal: options.signal })).items;
+    },
+
+    getImageVariant(variantId, options = {}) {
+      return request({ method: "GET", path: variantPath(variantId), schema: imageVariantSchema, signal: options.signal });
+    },
+
+    getImageVariantContent(variantId, options = {}) {
+      return bytes(variantPath(variantId, "/content"), options.signal);
+    },
+
+    async generateImageVariant(input, options) {
+      const body: GenerateVariantRequest = { sourceAssetId: input.sourceAssetId, preset: input.preset, params: input.params ?? {} };
+      return (await write("/v1/media/variants", body, imageVariantOutputSchema, options)).result;
+    },
+
+    requestVariantApproval(input, options) {
+      const body: VariantDecisionRequest = { sha256: input.sha256 };
+      return write(variantPath(input.variantId, "/approval"), body, variantApprovalSchema, options);
+    },
+
+    async rejectImageVariant(input, options) {
+      const body: VariantDecisionRequest = { sha256: input.sha256 };
+      return (await write(variantPath(input.variantId, "/reject"), body, imageVariantOutputSchema, options)).result;
+    },
+
+    approveApproval(approvalId, options) {
+      // No note: the owner's press is the decision (approvals.md A-7).
+      return write(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, {}, approveApprovalResponseSchema, options);
     },
 
     async listEnrichmentProposals(options = {}) {
