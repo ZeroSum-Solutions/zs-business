@@ -48,6 +48,18 @@ export {
   type SmsStatusSession,
   type TwilioInboundSession,
 } from "./sms-session.js";
+export {
+  createVoiceSession,
+  VOICE_LIMITS,
+  voiceActorId,
+  type VoiceCharge,
+  type VoiceIncoming,
+  type VoiceLimiter,
+  type VoiceSession,
+  type VoiceSessionOptions,
+} from "./voice-session.js";
+export { assignVoiceNumber, defaultDisclosure, type VoiceNumberInput, type VoiceNumberSettings } from "../voice/numbers.js";
+export { voiceHandlers, textbackBody } from "../voice/actions.js";
 export { apiErrorBody, mapError, retryableAsUnavailable, SiteStoreUnavailable, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
 export {
   createHs256Verifier,

@@ -115,3 +115,4 @@ export * from "./agents.js";
 export * from "./billing.js";
 export * from "./calendar.js";
 export * from "./automation.js";
+export * from "./voice.js";

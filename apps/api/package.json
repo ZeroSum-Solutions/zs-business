@@ -26,6 +26,7 @@
     "followup:worker": "tsx src/scripts/followup-worker.ts",
     "followup:global-switch": "tsx src/scripts/followup-global-switch.ts",
     "sms:number": "tsx src/scripts/sms-number.ts",
+    "voice:number": "tsx src/scripts/voice-number.ts",
     "activepieces:worker": "tsx src/scripts/activepieces-worker.ts"
   },
   "dependencies": {
