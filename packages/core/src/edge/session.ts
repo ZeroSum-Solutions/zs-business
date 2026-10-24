@@ -142,7 +142,7 @@ import {
 } from "../sites/index.js";
 import { assertImagesApproved } from "../images/gate.js";
 import { imageHandlers, type ImageDependencies } from "../images/handlers.js";
-import { readImageInfo, sizeAllowed } from "../images/png.js";
+import { decodePng, readImageInfo, sizeAllowed } from "../images/png.js";
 import { sha256Hex } from "../images/port.js";
 import { findVariant, listAssets, listVariants, variantRecord } from "../images/records.js";
 import { getWallet } from "../wallet/index.js";
@@ -792,10 +792,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       if (bytes.byteLength < 1 || bytes.byteLength > MEDIA_LIMITS.fileBytes) throw new ValidationFailed("Image size is not allowed");
       const info = readImageInfo(bytes);
       if (!info || info.contentType !== type || !sizeAllowed(info.width, info.height)) throw new ValidationFailed("Not a supported image");
+      // A PNG must decode, not only carry a header: a forged header would give the worker nothing to read.
+      if (type === "image/png") { try { decodePng(bytes); } catch { throw new ValidationFailed("Not a supported image"); } }
       const sha256 = sha256Hex(bytes);
       const objectKey = mediaObjectKeys.asset(tenantId, sha256);
       const written = await images.store.put(objectKey, bytes, { contentType: type, onlyIf: { absent: true } });
-      if (!written && (await images.store.head(objectKey))?.size !== bytes.byteLength) throw new Error("A stored image has the wrong size");
+      if (!written) {
+        const existing = await images.store.get(objectKey);
+        if (!existing || sha256Hex(existing.body) !== sha256) throw new Error("A stored image does not match its digest");
+      }
       const { id, ...rest } = envelope(key, "media_asset");
       const dispatchImage = directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), { images });
       return parseInput(mediaAssetOutputSchema, await dispatchImage({

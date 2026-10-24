@@ -2,6 +2,7 @@
 // two tenants. The acceptance flow follows the contract's list; the other tests pin the rules the
 // flow does not reach. No vendor, key or network is involved.
 import { randomUUID } from "node:crypto";
+import { crc32, deflateSync } from "node:zlib";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { idempotencyKeySchema, mediaObjectKeys, type MemberRole } from "@zs/contracts";
 import { asService, type Transaction } from "@zs/db";
@@ -24,7 +25,9 @@ import {
   type ImageReport,
   type SiteCompiler,
 } from "../src/index.js";
-import { encodeRgbaPng } from "../src/images/png.js";
+import { directDispatch } from "../src/edge/session.js";
+import { imageActorId, imageWorkerAuthorize } from "../src/images/worker.js";
+import { decodePng, encodeRgbaPng } from "../src/images/png.js";
 
 const START = Date.parse("2026-10-23T09:00:00.000Z");
 const DAY = 24 * 60 * 60 * 1000;
@@ -340,6 +343,64 @@ describe("worker rules", () => {
     await worker().runOnce();
     expect(await variant(queued.id)).toMatchObject({ status: "failed", failure_reason: "adapter_error" });
     expect((await reservation(queued.id))?.status).toBe("released");
+  });
+});
+
+function pngChunk(type: string, body: Buffer): Buffer {
+  const out = Buffer.alloc(12 + body.length);
+  out.writeUInt32BE(body.length, 0);
+  out.write(type, 4, "ascii");
+  body.copy(out, 8);
+  out.writeUInt32BE(crc32(out.subarray(4, 8 + body.length)), 8 + body.length);
+  return out;
+}
+
+describe("review fixes", () => {
+  it("reads a PNG colour key (tRNS) as transparent pixels", () => {
+    const header = Buffer.from([0, 0, 0, 2, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+    const raw = Buffer.from([0, 10, 20, 30, 200, 100, 50]);
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", header),
+      pngChunk("tRNS", Buffer.from([0, 10, 0, 20, 0, 30])), pngChunk("IDAT", deflateSync(raw)), pngChunk("IEND", Buffer.alloc(0)),
+    ]);
+    const image = decodePng(bytes);
+    expect([image.rgba[3], image.rgba[7]]).toEqual([0, 255]);
+  });
+
+  it("refuses an upload with a forged PNG header", async () => {
+    await expect(sessionFor(tenantA, ownerA).uploadMediaAsset(ringPhoto(31).slice(0, 40), "image/png", randomUUID()))
+      .rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
+  it("does not fail a job that another pass already started", async () => {
+    const source = await upload();
+    const queued = await generate({ sourceAssetId: source.id, preset: "background_remove", params: {} });
+    await service((tx) => tx.query("UPDATE image_variants SET status='running' WHERE id=$1", [queued.id]));
+    const dispatch = directDispatch(deps(), tenantA, imageActorId(tenantA), imageWorkerAuthorize);
+    await expect(dispatch({
+      actionType: "media.variant.fail", target: { tenantId: tenantA, type: "media_variant", id: queued.id },
+      payload: { variantId: queued.id, reason: "insufficient_funds", providerJobId: null, expectStatus: "queued" },
+      approvalReference: { tenantId: tenantA, id: randomUUID() }, idempotencyKey: randomUUID(),
+    } as never)).rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_changed" } });
+    expect((await variant(queued.id)).status).toBe("running");
+  });
+
+  it("refuses a worker whose port is not the configured adapter", () => {
+    const other = Object.create(port, { adapter: { value: "kie" } });
+    expect(() => createImageWorker({ service, db: database.db, store, port: other, config, clock, generateId: randomUUID })).toThrow();
+  });
+
+  it("keeps the vendor job ID when a staging write fails, so a later pass can finish", async () => {
+    const source = await upload();
+    const queued = await generate(swap(source.id, "retry after store error"));
+    const failing = { ...store, put: async () => { throw new Error("store down"); } } as unknown as typeof store;
+    const broken = createImageWorker({ service, db: database.db, store: Object.assign(Object.create(store), { put: failing.put }), port, config, clock, generateId: randomUUID, report: (event) => reports.push(event) });
+    await broken.runOnce();
+    expect(await variant(queued.id)).toMatchObject({ status: "running", provider_job_id: expect.stringMatching(/^fake-job-/) });
+    expect((await reservation(queued.id))?.status).toBe("held");
+    await worker().runOnce();
+    expect((await variant(queued.id)).status).toBe("staged");
+    expect(port.calls).toHaveLength(1);
   });
 });
 

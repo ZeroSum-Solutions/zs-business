@@ -223,6 +223,8 @@ export function createFakeImageWorkflowPort(): FakeImageWorkflowPort {
     async runPreset(input) {
       calls.push(input);
       if (!readImageInfo(input.source.bytes)) throw new ImageAdapterRefused("Unreadable source image");
+      // The fake reads PNG only: any other format is a definite refusal, never an unknown outcome.
+      if (input.source.contentType !== "image/png") throw new ImageAdapterRefused("The fake adapter reads PNG only");
       if (refuse) { refuse = false; throw new ImageAdapterRefused(); }
       counter += 1;
       const providerJobId = `fake-job-${counter}`;
@@ -234,6 +236,8 @@ export function createFakeImageWorkflowPort(): FakeImageWorkflowPort {
         jobs.set(named, { output: { ...output, provenance: { ...output.provenance, providerJobId: named } }, state: "pending" });
         throw new ImageOutcomeUnknown(named);
       }
+      // A finished job stays answerable, as at a real vendor, so a pass that lost its files can ask again.
+      jobs.set(providerJobId, { output, state: "done" });
       return output;
     },
     async lookup(providerJobId) {

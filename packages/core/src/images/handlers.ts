@@ -109,10 +109,12 @@ export const generateVariantHandler: ActionHandler = {
  */
 export const approveVariantHandler: ActionHandler = {
   resolveTarget: targetResolver("media_variant", "image_variants", true),
-  async handle({ tx, command, binding, now }) {
+  async handle({ tx, command, binding, clock }) {
     const { payload } = parseOrFail(approveVariantCommandSchema, command);
     const tenantId = binding.tenantId;
     const row = await loadVariant(tx, tenantId, payload.variantId);
+    // The row lock may have waited: judge expiry and stamp the approval at the instant it is decided.
+    const now = clock();
     if (row.status === "approved" || row.status === "promoted") {
       if (row.sha256 !== payload.sha256) throw new Conflict("The image changed since it was shown", { reason: "variant_changed" });
       return { result: json(variantRecord(row)) };
@@ -167,6 +169,8 @@ export const failVariantHandler: ActionHandler = {
     const tenantId = binding.tenantId;
     const row = await loadVariant(tx, tenantId, payload.variantId);
     if (row.status === "failed") return { result: json(variantRecord(row)) };
+    if (payload.expectStatus && row.status !== payload.expectStatus)
+      throw new Conflict("The image job moved on", { reason: "variant_changed", status: row.status });
     if (row.status !== "queued" && row.status !== "running")
       throw new Conflict("The image job already finished", { reason: "variant_not_running", status: row.status });
     await tx.query(

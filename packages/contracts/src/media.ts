@@ -158,6 +158,8 @@ export const failVariantInputSchema = z.strictObject({
   variantId: idSchema,
   reason: imageFailureReasonSchema,
   providerJobId: textField(200).nullable(),
+  /** The state the caller saw. A worker that lost a race to another worker must not fail its job. */
+  expectStatus: z.enum(["queued", "running"]).optional(),
 });
 export const failVariantCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("media.variant.fail"),

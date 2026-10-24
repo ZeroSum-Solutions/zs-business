@@ -98,6 +98,7 @@ export function decodePng(bytes: Uint8Array): DecodedPng {
   let height = 0;
   let colorType = -1;
   const data: Uint8Array[] = [];
+  let transparentKey: number[] | null = null;
   let i = 8;
   let sawEnd = false;
   while (i + 12 <= bytes.length) {
@@ -113,6 +114,10 @@ export function decodePng(bytes: Uint8Array): DecodedPng {
       colorType = body[9]!;
       if (![0, 2, 4, 6].includes(colorType)) throw new UnsupportedImage("Unsupported PNG colour type");
       if (body[10] !== 0 || body[11] !== 0 || body[12] !== 0) throw new UnsupportedImage("Interlaced PNG is not supported");
+    } else if (type === "tRNS") {
+      // A colour key makes one grey or RGB value fully transparent (8-bit samples sit in the low byte).
+      if (colorType === 0 && length >= 2) transparentKey = [body[1]!];
+      else if (colorType === 2 && length >= 6) transparentKey = [body[1]!, body[3]!, body[5]!];
     } else if (type === "IDAT") data.push(body);
     else if (type === "IEND") { sawEnd = true; break; }
     i += 12 + length;
@@ -153,8 +158,13 @@ export function decodePng(bytes: Uint8Array): DecodedPng {
   for (let p = 0; p < width * height; p += 1) {
     const s = p * channels;
     const d = p * 4;
-    if (colorType === 0) { rgba[d] = rgba[d + 1] = rgba[d + 2] = scan[s]!; rgba[d + 3] = 255; }
-    else if (colorType === 2) { rgba[d] = scan[s]!; rgba[d + 1] = scan[s + 1]!; rgba[d + 2] = scan[s + 2]!; rgba[d + 3] = 255; }
+    if (colorType === 0) {
+      rgba[d] = rgba[d + 1] = rgba[d + 2] = scan[s]!;
+      rgba[d + 3] = transparentKey && scan[s] === transparentKey[0] ? 0 : 255;
+    } else if (colorType === 2) {
+      rgba[d] = scan[s]!; rgba[d + 1] = scan[s + 1]!; rgba[d + 2] = scan[s + 2]!;
+      rgba[d + 3] = transparentKey && scan[s] === transparentKey[0] && scan[s + 1] === transparentKey[1] && scan[s + 2] === transparentKey[2] ? 0 : 255;
+    }
     else if (colorType === 4) { rgba[d] = rgba[d + 1] = rgba[d + 2] = scan[s]!; rgba[d + 3] = scan[s + 1]!; }
     else { rgba[d] = scan[s]!; rgba[d + 1] = scan[s + 1]!; rgba[d + 2] = scan[s + 2]!; rgba[d + 3] = scan[s + 3]!; }
   }

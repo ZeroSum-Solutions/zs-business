@@ -3,6 +3,8 @@
 // The vendor call never happens inside a database transaction, and no transaction here dispatches
 // an action on a row it holds: each step is a short transaction, a call, then a dispatch.
 import {
+  Conflict,
+  MEDIA_LIMITS,
   mediaObjectKeys,
   TenantDenied,
   type ActionCommand,
@@ -79,6 +81,7 @@ function verify(variant: VariantRow, source: { bytes: Uint8Array; sha256: string
   if (sha256Hex(output.bytes) !== output.sha256) return refuse("digest_mismatch");
   if (output.matte && sha256Hex(output.matte.bytes) !== output.matte.sha256) return refuse("digest_mismatch");
   if (output.background && sha256Hex(output.background.bytes) !== output.background.sha256) return refuse("digest_mismatch");
+  if (output.bytes.byteLength > MEDIA_LIMITS.fileBytes) return refuse("output_invalid");
 
   if (!MATTE_PRESETS.has(variant.preset)) {
     const sourceInfo = readImageInfo(source.bytes);
@@ -105,13 +108,18 @@ function verify(variant: VariantRow, source: { bytes: Uint8Array; sha256: string
   try { produced = decodePng(output.bytes); } catch { return refuse("output_invalid"); }
   const lock = checkProductPixels(expected, effectiveAlpha(sourceImage, matte.alpha), produced);
   if (!lock.ok) return refuse(lock.reason);
+  const staged = encodeRgbaPng(expected);
+  // Our composite is re-encoded, so its size is checked too: it must fit what an asset may hold.
+  if (staged.byteLength > MEDIA_LIMITS.fileBytes) return refuse("output_invalid");
   return {
-    ok: true, bytes: encodeRgbaPng(expected), contentType: PNG,
+    ok: true, bytes: staged, contentType: PNG,
     matte: output.matte.bytes, background: background ? output.background!.bytes : null,
   };
 }
 
 export function createImageWorker(deps: ImageWorkerDeps) {
+  // A configured adapter and a wired port must be the same one, or the allowlist checks prove nothing.
+  if (deps.port.adapter !== deps.config.adapter) throw new Error("The image port does not match the configured adapter");
   const now = () => new Date(readClock(deps.clock));
   const edge: EdgeDependencies = { db: deps.db, clock: deps.clock, generateId: deps.generateId };
   const report = (event: ImageReport) => { try { deps.report?.(event); } catch { /* a reporter never stops the worker */ } };
@@ -123,14 +131,26 @@ export function createImageWorker(deps: ImageWorkerDeps) {
   };
   const dispatchFor = (tenantId: string) => directDispatch(edge, tenantId, imageActorId(tenantId), imageWorkerAuthorize);
 
-  async function fail(tenantId: string, variantId: string, reason: ImageFailureReason, providerJobId: string | null = null): Promise<void> {
-    await dispatchFor(tenantId)(command(tenantId, variantId, "fail", "media.variant.fail", { variantId, reason, providerJobId }));
+  async function fail(
+    tenantId: string, variantId: string, reason: ImageFailureReason, providerJobId: string | null = null,
+    expectStatus: "queued" | "running" = "running",
+  ): Promise<void> {
+    try {
+      await dispatchFor(tenantId)(command(tenantId, variantId, "fail", "media.variant.fail", { variantId, reason, providerJobId, expectStatus }));
+    } catch (error) {
+      // Another pass moved this job on first: its answer stands, and a job that runs keeps its hold.
+      if (error instanceof Conflict && (error.details as { reason?: string } | undefined)?.reason === "variant_changed") return;
+      throw error;
+    }
     report({ kind: "failed", tenantId, variantId, reason });
   }
 
+  /** IM-13: a name taken by other bytes is an error; the same bytes are fine (a retry). */
   async function putOnce(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
     const written = await deps.store.put(key, bytes, { contentType, onlyIf: { absent: true } });
-    if (!written && (await deps.store.head(key))?.size !== bytes.byteLength) throw new Error("A stored image has the wrong size");
+    if (written) return;
+    const existing = await deps.store.get(key);
+    if (!existing || sha256Hex(existing.body) !== sha256Hex(bytes)) throw new Error("A stored image does not match its digest");
   }
 
   /** IM-10: verify a vendor output, write the staged files, then record the variant as staged. */
@@ -143,6 +163,8 @@ export function createImageWorker(deps: ImageWorkerDeps) {
     const sha256 = sha256Hex(verdict.bytes);
     const matteSha = verdict.matte ? sha256Hex(verdict.matte) : null;
     const backgroundSha = verdict.background ? sha256Hex(verdict.background) : null;
+    // Keep the vendor's job ID first: if a file write fails, a later pass can still ask about the job.
+    await rememberJob(tenantId, variant.id, jobId);
     await putOnce(mediaObjectKeys.staging(tenantId, variant.id, sha256), verdict.bytes, verdict.contentType);
     if (verdict.matte && matteSha) await putOnce(mediaObjectKeys.matte(tenantId, variant.id, matteSha), verdict.matte, PNG);
     if (verdict.background && backgroundSha) await putOnce(mediaObjectKeys.background(tenantId, variant.id, backgroundSha), verdict.background, PNG);
@@ -236,7 +258,11 @@ export function createImageWorker(deps: ImageWorkerDeps) {
         const variant = row as VariantRow;
         const waited = row.held_at ? now().getTime() - row.held_at.getTime() : Infinity;
         if (row.provider_job_id) {
-          const answer = await deps.port.lookup(row.provider_job_id);
+          // A lookup that throws is no answer: report it and let the wait below still run out.
+          let answer: Awaited<ReturnType<ImageWorkflowPort["lookup"]>> = { state: "pending" };
+          try { answer = await deps.port.lookup(row.provider_job_id); } catch (error) {
+            report({ kind: "error", tenantId, variantId: row.id, error: error instanceof Error ? error.message.slice(0, 300) : "lookup failed" });
+          }
           if (answer.state === "done") {
             const source = await loadSource(tenantId, variant);
             if (!source) { await fail(tenantId, row.id, "digest_mismatch", row.provider_job_id); summary.failed += 1; continue; }
@@ -284,9 +310,14 @@ export function createImageWorker(deps: ImageWorkerDeps) {
         WHERE (tenant_id, id) IN (SELECT tenant_id, id FROM image_variants WHERE status='staged' AND expires_at <= $1
                                    ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)
         RETURNING tenant_id, id, sha256`, [now()])).rows);
-    for (const row of expired) {
-      await deps.store.delete(mediaObjectKeys.staging(row.tenant_id, row.id, row.sha256)).catch(() => undefined);
-      report({ kind: "expired", tenantId: row.tenant_id, variantId: row.id });
+    for (const row of expired) report({ kind: "expired", tenantId: row.tenant_id, variantId: row.id });
+    // Deleting is idempotent, so each pass also retries the recent expiries: a failed delete is not lost.
+    const recent = await deps.service(async (tx) => (await tx.query<{ tenant_id: string; id: string; sha256: string }>(
+      `SELECT tenant_id, id, sha256 FROM image_variants WHERE status='expired' AND expires_at > $1 ORDER BY expires_at DESC LIMIT 100`,
+      [new Date(now().getTime() - 7 * 24 * 60 * 60 * 1000)])).rows);
+    for (const row of recent) {
+      await deps.store.delete(mediaObjectKeys.staging(row.tenant_id, row.id, row.sha256)).catch((error: unknown) =>
+        report({ kind: "error", tenantId: row.tenant_id, variantId: row.id, error: error instanceof Error ? error.message.slice(0, 300) : "delete failed" }));
     }
     return expired.length;
   }
@@ -353,7 +384,7 @@ export function createImageWorker(deps: ImageWorkerDeps) {
         skip.push(claimed.variant.id);
         handled.add(claimed.variant.id);
         try {
-          if (claimed.kind === "fail") { await fail(tenantId, claimed.variant.id, claimed.reason); summary.failed += 1; continue; }
+          if (claimed.kind === "fail") { await fail(tenantId, claimed.variant.id, claimed.reason, null, "queued"); summary.failed += 1; continue; }
           summary.started += 1;
           const outcome = await execute(claimed.variant, tenantId);
           if (outcome === "staged") summary.staged += 1;
