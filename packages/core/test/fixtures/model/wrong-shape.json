@@ -1,0 +1,4 @@
+{
+  "status": 200,
+  "body": { "id": "x", "choices": [], "usage": { "prompt_tokens": 1, "completion_tokens": 1 } }
+}

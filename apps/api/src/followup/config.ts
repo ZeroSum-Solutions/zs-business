@@ -1,6 +1,7 @@
 // The scheduled follow-up runner's environment (docs/requirements/agents.md G-13). Parsed from an
 // object an entry point passes in; this module never reads process.env. FOLLOWUP_AGENT is the
 // deploy's switch: anything but `on` runs nothing and needs no other variable.
+import { CEREBRAS_DEFAULT_MODEL, DEEPSEEK_DEFAULT_MODEL, VENDOR_MODEL_PRICES } from "@zs/core";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 
@@ -18,9 +19,17 @@ const onSchema = z.object({
   // A login that may SET ROLE service_role, used for one read: which tenants are due (G-13).
   FOLLOWUP_SERVICE_DATABASE_URL: z.string().min(1),
   DATABASE_CA_CERT: z.string().includes("BEGIN CERTIFICATE").optional(),
-  // The model behind the port (G-9). No real provider is wired yet; `fake` is the deterministic
-  // stand-in and is allowed only against loopback databases.
-  FOLLOWUP_MODEL: z.enum(["fake"], { error: "no real model provider is wired yet; only fake, on a loopback database" }),
+  // The model lanes (G-18). The personal-data lane is Cerebras (or the fake); DeepSeek is refused
+  // there. FOLLOWUP_MODEL is the older name for AGENT_MODEL_PERSONAL_DATA. `fake` is the
+  // deterministic stand-in and is allowed only against loopback databases.
+  AGENT_MODEL_PERSONAL_DATA: z.string().optional(),
+  FOLLOWUP_MODEL: z.string().optional(),
+  AGENT_MODEL_NO_PERSONAL_DATA: z.string().optional(),
+  // Vendor keys and model IDs. A key is read only for the vendor a lane names; no price is read from here.
+  CEREBRAS_API_KEY: z.string().min(1).optional(),
+  CEREBRAS_MODEL: z.string().min(1).max(200).optional(),
+  DEEPSEEK_API_KEY: z.string().min(1).optional(),
+  DEEPSEEK_MODEL: z.string().min(1).max(200).optional(),
   // One run per tenant per slot: a repeated call in the same slot continues that run.
   FOLLOWUP_SLOT_MINUTES: int(5, 1440).default(60),
   FOLLOWUP_MAX_CANDIDATES: int(1, 100).default(3),
@@ -29,13 +38,26 @@ const onSchema = z.object({
   FOLLOWUP_RUN_BUDGET_MS: int(1_000, 600_000).default(20_000),
   // The Node worker's pause between runs.
   FOLLOWUP_INTERVAL_MS: int(1_000, 3_600_000).default(300_000),
+  // G-16: a run still `running` this long after it started is closed as stalled.
+  AGENT_STALL_AFTER_MS: int(60_000, 86_400_000).default(900_000),
 });
+
+/** A lane's model choice as parsed; the key travels in it, so it never prints. */
+export type PersonalDataChoice =
+  | { readonly provider: "fake" }
+  | { readonly provider: "cerebras"; readonly apiKey: string; readonly model: string };
+export type NoPersonalDataChoice =
+  | { readonly provider: "fake" }
+  | { readonly provider: "deepseek"; readonly apiKey: string; readonly model: string };
 
 export interface FollowUpRunnerEnv {
   readonly runtimeDatabaseUrl: string;
   readonly serviceDatabaseUrl: string;
   readonly databaseCaCert: string | undefined;
-  readonly model: "fake";
+  readonly personalData: PersonalDataChoice;
+  /** Null when no agent uses the no-personal-data lane yet and none is configured. */
+  readonly noPersonalData: NoPersonalDataChoice | null;
+  readonly stallAfterMs: number;
   readonly slotMinutes: number;
   readonly maxCandidatesPerRun: number;
   readonly modelTimeoutMs: number;
@@ -88,18 +110,25 @@ export function parseFollowUpEnv(env: Readonly<Record<string, string | undefined
     checkDatabaseUrl("FOLLOWUP_DATABASE_URL", data.FOLLOWUP_DATABASE_URL, data.DATABASE_CA_CERT),
     checkDatabaseUrl("FOLLOWUP_SERVICE_DATABASE_URL", data.FOLLOWUP_SERVICE_DATABASE_URL, data.DATABASE_CA_CERT),
   ].every(Boolean);
-  if (data.FOLLOWUP_MODEL === "fake" && !loopback)
-    throw new Error("Invalid environment: FOLLOWUP_MODEL=fake runs only against loopback databases");
+  const personalData = personalDataChoice(data);
+  const noPersonalData = noPersonalDataChoice(data);
+  if ((personalData.provider === "fake" || noPersonalData?.provider === "fake") && !loopback)
+    throw new Error("Invalid environment: the fake model runs only against loopback databases");
   // A tenant's run may wait one model timeout per inquiry; one tenant must fit the budget.
   if (data.FOLLOWUP_MAX_CANDIDATES * data.FOLLOWUP_MODEL_TIMEOUT_MS > data.FOLLOWUP_RUN_BUDGET_MS)
     throw new Error("Invalid environment: FOLLOWUP_MAX_CANDIDATES × FOLLOWUP_MODEL_TIMEOUT_MS must fit in FOLLOWUP_RUN_BUDGET_MS");
+  // A run that is merely slow must not be closed under its own feet: stall only after it could not still be working.
+  if (data.AGENT_STALL_AFTER_MS <= data.FOLLOWUP_MAX_CANDIDATES * data.FOLLOWUP_MODEL_TIMEOUT_MS + data.FOLLOWUP_RUN_BUDGET_MS)
+    throw new Error("Invalid environment: AGENT_STALL_AFTER_MS must exceed FOLLOWUP_MAX_CANDIDATES × FOLLOWUP_MODEL_TIMEOUT_MS + FOLLOWUP_RUN_BUDGET_MS");
   return {
     cronSecret: cron.data ?? null,
     runner: {
       runtimeDatabaseUrl: data.FOLLOWUP_DATABASE_URL,
       serviceDatabaseUrl: data.FOLLOWUP_SERVICE_DATABASE_URL,
       databaseCaCert: data.DATABASE_CA_CERT,
-      model: data.FOLLOWUP_MODEL,
+      personalData,
+      noPersonalData,
+      stallAfterMs: data.AGENT_STALL_AFTER_MS,
       slotMinutes: data.FOLLOWUP_SLOT_MINUTES,
       maxCandidatesPerRun: data.FOLLOWUP_MAX_CANDIDATES,
       modelTimeoutMs: data.FOLLOWUP_MODEL_TIMEOUT_MS,
@@ -107,4 +136,39 @@ export function parseFollowUpEnv(env: Readonly<Record<string, string | undefined
       intervalMs: data.FOLLOWUP_INTERVAL_MS,
     },
   };
+}
+
+type LaneInput = z.infer<typeof onSchema>;
+
+/** A model ID is accepted only when the price table has it: an unpriced model cannot run (G-15). */
+function pricedModel(name: string, model: string): string {
+  if (!Object.hasOwn(VENDOR_MODEL_PRICES, model)) throw new Error(`Invalid environment: ${name}=${model} has no price in the price table`);
+  return model;
+}
+
+function personalDataChoice(data: LaneInput): PersonalDataChoice {
+  const { AGENT_MODEL_PERSONAL_DATA: primary, FOLLOWUP_MODEL: alias } = data;
+  if (primary !== undefined && alias !== undefined && primary !== alias)
+    throw new Error("Invalid environment: AGENT_MODEL_PERSONAL_DATA and FOLLOWUP_MODEL disagree; set only AGENT_MODEL_PERSONAL_DATA");
+  const name = primary !== undefined ? "AGENT_MODEL_PERSONAL_DATA" : "FOLLOWUP_MODEL";
+  const value = primary ?? alias;
+  if (value === undefined) throw new Error("Invalid environment: AGENT_MODEL_PERSONAL_DATA is required (fake or cerebras)");
+  if (value === "fake") return { provider: "fake" };
+  if (value === "cerebras") {
+    if (data.CEREBRAS_API_KEY === undefined) throw new Error("Invalid environment: CEREBRAS_API_KEY is required for the personal-data lane");
+    return { provider: "cerebras", apiKey: data.CEREBRAS_API_KEY, model: pricedModel("CEREBRAS_MODEL", data.CEREBRAS_MODEL ?? CEREBRAS_DEFAULT_MODEL) };
+  }
+  if (value === "deepseek") throw new Error(`Invalid environment: ${name}: DeepSeek cannot serve the personal-data lane; use cerebras`);
+  throw new Error(`Invalid environment: ${name}: the personal-data lane takes fake or cerebras`);
+}
+
+function noPersonalDataChoice(data: LaneInput): NoPersonalDataChoice | null {
+  const value = data.AGENT_MODEL_NO_PERSONAL_DATA;
+  if (value === undefined) return null;
+  if (value === "fake") return { provider: "fake" };
+  if (value === "deepseek") {
+    if (data.DEEPSEEK_API_KEY === undefined) throw new Error("Invalid environment: DEEPSEEK_API_KEY is required for the no-personal-data lane");
+    return { provider: "deepseek", apiKey: data.DEEPSEEK_API_KEY, model: pricedModel("DEEPSEEK_MODEL", data.DEEPSEEK_MODEL ?? DEEPSEEK_DEFAULT_MODEL) };
+  }
+  throw new Error("Invalid environment: AGENT_MODEL_NO_PERSONAL_DATA: the no-personal-data lane takes fake or deepseek");
 }
