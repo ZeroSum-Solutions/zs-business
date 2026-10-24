@@ -38,14 +38,24 @@ const IMAGES = { topic: "images" };
 /** A checkerboard from the tray tokens, so a cut-out's clear background shows as clear. */
 const CLEAR_BACKDROP = "bg-[repeating-conic-gradient(var(--border)_0%_25%,var(--surface)_0%_50%)] bg-[length:16px_16px]";
 
-function ImageView({ kind, id, alt, size, className }: {
+type ImageUrl = ReturnType<typeof useImageUrl>;
+
+function ImageView({ kind, id, ...rest }: {
   kind: "asset" | "variant";
   id: string;
   alt: string;
   size: { width: number; height: number };
   className?: string;
 }) {
-  const image = useImageUrl(kind, id);
+  return <ImageFrame image={useImageUrl(kind, id)} {...rest} />;
+}
+
+function ImageFrame({ image, alt, size, className }: {
+  image: ImageUrl;
+  alt: string;
+  size: { width: number; height: number };
+  className?: string;
+}) {
   const ratio = { aspectRatio: `${size.width} / ${size.height}` };
   if (image.isError) {
     return <div style={ratio} className={cn("flex items-center justify-center rounded-sm bg-inset p-2 text-center text-xs text-muted", className)}>Could not load this image.</div>;
@@ -233,6 +243,11 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
     },
   });
   const deciding = approve.isPending || reject.isPending;
+  // IM-12: the owner approves what they saw, so Approve waits until both images are on screen.
+  const original = useImageUrl("asset", actions.showResult ? source.id : null);
+  const edited = useImageUrl("variant", actions.showResult ? variant.id : null);
+  const seen = Boolean(original.url && edited.url);
+  const waitId = `image-approve-wait-${variant.id}`;
   const run = (which: typeof approve | typeof reject) => flight.run((done) => {
     clearToasts(IMAGES.topic);
     approve.reset();
@@ -255,11 +270,11 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
       {actions.showResult ? (
         <div className="grid grid-cols-2 gap-2 sm:gap-3">
           <figure className="min-w-0 space-y-1">
-            <ImageView kind="asset" id={source.id} alt="Original photo" size={source} className="lg:max-h-[360px]" />
+            <ImageFrame image={original} alt="Original photo" size={source} className="lg:max-h-[360px]" />
             <figcaption className="text-xs text-muted">Original</figcaption>
           </figure>
           <figure className="min-w-0 space-y-1">
-            <ImageView kind="variant" id={variant.id} alt={`Edited image: ${title}`} size={source} className="lg:max-h-[360px]" />
+            <ImageFrame image={edited} alt={`Edited image: ${title}`} size={source} className="lg:max-h-[360px]" />
             <figcaption className="text-xs text-muted">Edited</figcaption>
           </figure>
         </div>
@@ -272,12 +287,15 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
           </div>
         ))}
       </dl>
+      {actions.decide && !seen ? (
+        <DisabledReason id={waitId}>{original.isError || edited.isError ? "Approve once both images load. Reload the page to try again." : "Approve once both images have loaded."}</DisabledReason>
+      ) : null}
       {actions.decide ? (
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button variant="danger-outline" disabled={deciding} aria-busy={reject.isPending} onClick={() => run(reject)}>
             <X aria-hidden />{reject.isPending ? "Rejecting" : "Reject"}<span className="sr-only"> the edit: {title}</span>
           </Button>
-          <Button disabled={deciding} aria-busy={approve.isPending} onClick={() => run(approve)}>
+          <Button disabled={deciding || !seen} aria-busy={approve.isPending} aria-describedby={seen ? undefined : waitId} onClick={() => run(approve)}>
             <Check aria-hidden />{approve.isPending ? "Approving" : "Approve"}<span className="sr-only"> the edit: {title}</span>
           </Button>
         </div>
@@ -292,7 +310,7 @@ export function ImagesSection() {
   const assets = useMediaAssets();
   const variants = useImageVariants();
   const [picked, setPicked] = useState<string | null>(null);
-  const photos = uploadedPhotos(assets.data);
+  const photos = uploadedPhotos(assets.data, picked);
   const photoId = pickedPhoto(photos, picked);
   const photo = photos.find((item) => item.id === photoId) ?? null;
   const edits = variantsOf(variants.data, photoId);

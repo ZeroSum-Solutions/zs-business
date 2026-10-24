@@ -22,7 +22,7 @@ export const PRESET_LABELS: Readonly<Record<ImagePreset, string>> = Object.freez
 export const PRESET_HINTS: Readonly<Record<ImagePreset, string>> = Object.freeze({
   background_remove: "Cuts the item out onto a clear background. The item itself is never changed.",
   studio_background_swap: "Puts the item on a new background you describe. The item itself is never changed.",
-  upscale_2k: "Makes the photo 2048 pixels on its long side. Fine details can change, so check them closely.",
+  upscale_2k: "Enlarges the photo to about 2048 pixels on its long side, up to 8 times its size. Fine details can change, so check them closely.",
 });
 
 /** IM-2, IM-5, IM-7..IM-9 in the owner's words. */
@@ -87,12 +87,18 @@ const ADAPTER_NAMES: Readonly<Record<string, string>> = Object.freeze({
 
 export interface ProvenanceRow { term: string; detail: string }
 
-/** Who made the image, with which model and licence, and what it costs (IM-15, IM-24). */
+/**
+ * Who made the image, with which model, licence, prompt and workflow, the vendor's job and what it
+ * costs: the full provenance the approver sees (IM-12, IM-15, IM-24). Our own vendor cost stays out.
+ */
 export function provenanceRows(variant: ImageVariant): ProvenanceRow[] {
   const rows: ProvenanceRow[] = [{ term: "Price", detail: formatPrice(variant) }];
   if (variant.adapter) rows.push({ term: "Made with", detail: ADAPTER_NAMES[variant.adapter] ?? variant.adapter });
   if (variant.modelId) rows.push({ term: "Model", detail: variant.modelId });
   if (variant.modelLicense) rows.push({ term: "Licence", detail: variant.modelLicense });
+  if (variant.promptText) rows.push({ term: "Prompt", detail: variant.promptText });
+  if (variant.workflowHash) rows.push({ term: "Workflow", detail: variant.workflowHash });
+  if (variant.providerJobId) rows.push({ term: "Vendor job", detail: variant.providerJobId });
   return rows;
 }
 
@@ -130,9 +136,13 @@ export function variantsOf(variants: readonly ImageVariant[] | undefined, assetI
   return variants.filter((variant) => variant.sourceAssetId === assetId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-/** Photos the owner uploaded, newest first; edits that went into the library stay with their variant. */
-export function uploadedPhotos(assets: readonly MediaAsset[] | undefined): MediaAsset[] {
-  return (assets ?? []).filter((asset) => asset.origin === "upload").sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+/**
+ * Photos the owner uploaded, newest first; edits that went into the library stay with their variant.
+ * `keep` is the photo just uploaded or picked: an upload whose bytes match an approved edit comes back
+ * as that edit's asset, and stays listed.
+ */
+export function uploadedPhotos(assets: readonly MediaAsset[] | undefined, keep: string | null = null): MediaAsset[] {
+  return (assets ?? []).filter((asset) => asset.origin === "upload" || asset.id === keep).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 /** The photo to show: the one picked if it is still listed, else the newest. */

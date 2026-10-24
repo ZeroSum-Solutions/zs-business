@@ -87,14 +87,19 @@ describe("image variant actions", () => {
     expect(variantActions({ status: "rejected", sha256: SHA })).toMatchObject({ showResult: false, showProvenance: true });
   });
 
-  it("lists the price first, then the adapter, model and licence", () => {
+  it("lists the price first, then the adapter, model, licence and the rest of the provenance (IM-12)", () => {
     expect(provenanceRows(variant())).toEqual([
       { term: "Price", detail: "$0.08" },
       { term: "Made with", detail: "Test adapter (fake)" },
       { term: "Model", detail: "fake-matte-v1" },
       { term: "Licence", detail: "none: test double with no weights" },
+      { term: "Workflow", detail: "fake:background_remove:v1" },
+      { term: "Vendor job", detail: "fake-job-1" },
     ]);
-    expect(provenanceRows(variant({ adapter: null, modelId: null, modelLicense: null, priceMinor: 20 }))).toEqual([{ term: "Price", detail: "$0.20" }]);
+    expect(provenanceRows(variant({ promptText: "Studio product photo background: slate" })))
+      .toContainEqual({ term: "Prompt", detail: "Studio product photo background: slate" });
+    expect(provenanceRows(variant({ adapter: null, modelId: null, modelLicense: null, workflowHash: null, providerJobId: null, priceMinor: 20 })))
+      .toEqual([{ term: "Price", detail: "$0.20" }]);
   });
 
   it("names a swap by its background", () => {
@@ -132,6 +137,8 @@ describe("photo and edit lists", () => {
     expect(pickedPhoto(photos, "a")).toBe("a");
     expect(pickedPhoto(photos, "gone")).toBe("b");
     expect(pickedPhoto([], null)).toBeNull();
+    // An upload whose bytes match an approved edit comes back as that edit's asset: it stays pickable.
+    expect(uploadedPhotos([older, newer, made] as never, "c").map((photo) => photo.id)).toEqual(["c", "b", "a"]);
     const list = [variant({ id: "1", sourceAssetId: "a" }), variant({ id: "2", sourceAssetId: "b" })];
     expect(variantsOf(list, "a").map((item) => item.id)).toEqual(["1"]);
     expect(variantsOf(undefined, "a")).toEqual([]);
