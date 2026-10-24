@@ -8,6 +8,8 @@
 import type { z } from "zod";
 import {
   createBookingRequestSchema,
+  linkBookingContactInputSchema,
+  unlinkBookingContactInputSchema,
   draftReplyRequestSchema,
   linkIntakeItemRequestSchema,
   listIntakeItemsQuerySchema,
@@ -20,6 +22,7 @@ import {
   threadIdSchema,
   THREAD_ENTRY_LIMIT,
   upsertContactRequestSchema,
+  type BookingContactResult,
   type BookingRecord,
   type ContactRecord,
   type DealRecord,
@@ -105,6 +108,8 @@ export interface DemoControls extends DemoAgentControls, DemoBusinessControls, D
   loseNextResponse(options?: { goOffline?: boolean }): void;
   /** While offline every call fails with a network error before it touches the data. */
   setOffline(offline: boolean): void;
+  /** The next booking customer link fails with a network error before it saves; later ones work. */
+  failNextBookingLink(): void;
   /** Every write that reached the adapter, oldest first, with the key it carried. */
   writeLog(): DemoWrite[];
   /** From now on every call fails as a 401, like an API token that ran out. */
@@ -158,6 +163,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   const deals = new Map(seed.deals.map((item) => [item.id, item]));
   const bookings = new Map<string, StoredBooking>(seed.bookings.map((item) => [item.id, item]));
   const intakeItems = new Map(seed.intakeItems.map((item) => [item.id, item]));
+  /** booking-customer.md BC-3: a booking has a link row from its first change on; `contactId` null once cleared. */
+  const links = new Map<string, { contactId: string | null; revision: number }>();
   const replies = new Map(seed.replies.map((item) => [item.id, item]));
   const replays = new Map<string, { fingerprint: string; result: unknown }>();
   const writes: DemoWrite[] = [];
@@ -167,6 +174,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   let delayNext = 0;
   let dealReadsFail = false;
   let bookingReadsFail = false;
+  let nextLinkFails = false;
   let pipelines = clone(options.pipelines ?? [DEMO_PIPELINE]);
   // A copy per adapter: setOpenHours changes this business's calendars only.
   const resources = clone(DEMO_RESOURCES);
@@ -298,15 +306,39 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
   const toRecord = ({ title: _title, contactName: _contactName, source: _source, intakeItemId: _item, ...record }: StoredBooking): BookingRecord => record;
 
-  /** Like the API's bookings list: website bookings carry their customer (public-intake.md P-12). */
+  /**
+   * Like the API's bookings list: website bookings carry their customer (public-intake.md P-12) and
+   * an owner booking the contact it was linked to (booking-customer.md BC-6). Once a booking has a
+   * link row, the seed's display label no longer speaks for it.
+   */
   function toView(booking: StoredBooking): BookingView {
     const item = booking.intakeItemId ? intakeItems.get(booking.intakeItemId) : undefined;
     const contact = item?.contactId ? contacts.get(item.contactId) : undefined;
+    const link = links.get(booking.id);
+    const linked = link?.contactId ? contacts.get(link.contactId) : undefined;
     return {
       ...booking,
-      customer: item ? { contactId: item.contactId, name: contact?.displayName ?? item.submitted.name, status: item.status } : null,
+      ...(link ? { contactName: null } : {}),
+      customer: item
+        ? { contactId: item.contactId, name: contact?.displayName ?? item.submitted.name, status: item.status }
+        : link?.contactId
+          ? { contactId: link.contactId, name: linked?.displayName ?? null, status: "linked" }
+          : null,
     };
   }
+
+  /** The API's `NotFound` for a booking that is not this business's. */
+  function bookingOrThrow(id: string): StoredBooking {
+    const booking = bookings.get(id);
+    if (!booking) throw demoError("NotFound");
+    return booking;
+  }
+
+  const contactResult = (bookingId: string, contactId: string | null, revision: number): BookingContactResult => ({
+    bookingId,
+    customer: contactId ? { contactId, name: contacts.get(contactId)?.displayName ?? null, status: "linked" } : null,
+    revision,
+  });
 
   /** The API refuses a reviewed item and treats an unknown one as another tenant's (403). */
   function pendingItem(id: string): IntakeItemRecord {
@@ -422,7 +454,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       const toMs = query.to ? Date.parse(query.to) : Infinity;
       const rows: BookingView[] = [...bookings.values()]
         .filter((item) => (!query.resourceId || item.resourceId === query.resourceId) &&
-          Date.parse(item.endsAt) > fromMs && Date.parse(item.startsAt) < toMs)
+          Date.parse(item.endsAt) > fromMs && Date.parse(item.startsAt) < toMs &&
+          (!query.contactId || toView(item).customer?.contactId === query.contactId))
         .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
         .map(toView);
       return completeList(clone(query.limit === undefined ? rows : rows.slice(0, query.limit)));
@@ -439,6 +472,49 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
           throw demoError("Conflict", { reason: "slot_unavailable" });
         }
         return toRecord(insertBooking(resource, request.startsAt, newId(), null));
+      });
+    },
+
+    async getBooking(id) {
+      await wait();
+      if (bookingReadsFail) throw networkError();
+      parse(uuidSchema, id);
+      return clone({ ...toView(bookingOrThrow(id)), customerRevision: links.get(id)?.revision ?? 0 });
+    },
+
+    async linkBookingContact(input, options) {
+      if (nextLinkFails) {
+        nextLinkFails = false;
+        await wait();
+        throw networkError();
+      }
+      return idempotent("booking.contact.link", input, options, () => {
+        const request = parse(linkBookingContactInputSchema, input);
+        const booking = bookingOrThrow(request.bookingId);
+        // BC-2: a website booking takes its customer from the intake review only.
+        if (booking.source !== "owner") throw demoError("Conflict", { reason: "intake_booking" });
+        // BC-3: a customer of another business reads as missing, then the revision is compared.
+        if (!contacts.has(request.contactId)) throw demoError("NotFound");
+        const link = links.get(booking.id);
+        const revision = link?.revision ?? 0;
+        if (revision !== request.expectedRevision) throw demoError("Conflict", { reason: "stale_revision", currentRevision: revision });
+        if (link?.contactId === request.contactId) return contactResult(booking.id, request.contactId, revision);
+        links.set(booking.id, { contactId: request.contactId, revision: revision + 1 });
+        return contactResult(booking.id, request.contactId, revision + 1);
+      });
+    },
+
+    unlinkBookingContact(input, options) {
+      return idempotent("booking.contact.unlink", input, options, () => {
+        const request = parse(unlinkBookingContactInputSchema, input);
+        const booking = bookingOrThrow(request.bookingId);
+        const link = links.get(booking.id);
+        const revision = link?.revision ?? 0;
+        if (revision !== request.expectedRevision) throw demoError("Conflict", { reason: "stale_revision", currentRevision: revision });
+        // BC-4: the row stays so the revision only grows; clearing no customer changes nothing.
+        if (!link || link.contactId === null) return contactResult(booking.id, null, revision);
+        links.set(booking.id, { contactId: null, revision: revision + 1 });
+        return contactResult(booking.id, null, revision + 1);
       });
     },
 
@@ -742,6 +818,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
     setOffline(value) {
       offline = value;
+    },
+
+    failNextBookingLink() {
+      nextLinkFails = true;
     },
 
     writeLog() {
