@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, PencilSimple, Play, SealCheck, Sparkle, Star, Warning } from "@phosphor-icons/react";
+import { Bell, PencilSimple, SealCheck, Sparkle, Star, Warning } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent, type ReactNode } from "react";
 import {
@@ -68,7 +68,7 @@ const FIELDS: readonly TemplateField[] = ["subject", "body", "timingHours"];
 export const STALE_KIND_SETTINGS = "Someone else changed these settings first. The latest are shown. Try again.";
 
 const when = (instant: string, zone: string) => `${formatDay(instant, zone)}, ${formatTime(instant, zone)}`;
-const noticeClass = "flex items-start gap-2 rounded-md p-3 text-sm text-fg-2";
+const noticeClass = "flex items-start gap-3 rounded-md p-3 text-sm text-fg-2";
 
 /** The tray of templated kinds below the follow-up agent. */
 export function TemplatedKinds() {
@@ -246,6 +246,7 @@ function KindControls({ kind, status, current }: { kind: TemplatedKind; status: 
               placeholder="https://"
               value={link ?? savedLink}
               onChange={(event) => setLink(event.target.value)}
+              disabled={save.isPending}
               aria-invalid={linkError ? true : undefined}
               aria-describedby="review-link-hint"
             />
@@ -253,12 +254,12 @@ function KindControls({ kind, status, current }: { kind: TemplatedKind; status: 
               {linkError ?? "Where customers leave a review, starting https://. It fills in {review_link}."}
             </p>
           </div>
-          <Button type="submit" variant="secondary" disabled={save.isPending}>Save review link</Button>
+          <Button type="submit" variant="secondary" disabled={save.isPending} aria-busy={save.isPending}>Save review link</Button>
         </form>
       ) : null}
 
       {canManage ? (
-        <div className="space-y-2">
+        <div className="space-y-2 border-t border-border-soft pt-4">
           <Button
             variant="secondary"
             onClick={() => runOnce(() => run.mutateAsync())}
@@ -266,7 +267,7 @@ function KindControls({ kind, status, current }: { kind: TemplatedKind; status: 
             aria-busy={run.isPending}
             aria-describedby={status.canRun ? `${p}-run-help` : `${p}-run-reason`}
           >
-            <Play aria-hidden />Run now<span className="sr-only">: {copy.noun}</span>
+            Run now<span className="sr-only">: {copy.noun}</span>
           </Button>
           {status.canRun ? (
             <p id={`${p}-run-help`} className="text-xs text-meta">Looks once, now, for appointments that are due a message.</p>
@@ -295,9 +296,7 @@ function TemplateSection({ kind, state }: { kind: TemplatedKind; state: Template
   };
   return (
     <div className="space-y-4">
-      {current ? <CurrentWording kind={kind} revision={current} /> : (
-        <p data-testid={`${p}-none`} className="text-sm text-fg-2">No wording yet. Write the message it sends below.</p>
-      )}
+      {current ? <CurrentWording kind={kind} revision={current} formOpen={open} /> : null}
       {open ? (
         <WordingForm
           kind={kind}
@@ -332,7 +331,7 @@ function Row({ term, children }: { term: string; children: ReactNode }) {
 }
 
 /** A-15: the current revision as the owner approves it, by its digest. */
-function CurrentWording({ kind, revision }: { kind: TemplatedKind; revision: TemplateRevision }) {
+function CurrentWording({ kind, revision, formOpen }: { kind: TemplatedKind; revision: TemplateRevision; formOpen: boolean }) {
   const p = PREFIX[kind];
   const api = useApi();
   const queryClient = useQueryClient();
@@ -385,6 +384,8 @@ function CurrentWording({ kind, revision }: { kind: TemplatedKind; revision: Tem
       ) : (
         <div className="space-y-2">
           <Button
+            // While new wording is being written, saving it is the main action, not approving this one.
+            variant={formOpen ? "secondary" : "primary"}
             onClick={() => {
               setChanged(false);
               approveOnce(() => approve.mutateAsync({ revision: revision.revision, contentDigest: revision.contentDigest }));
@@ -439,6 +440,9 @@ function WordingForm({ kind, state, current, suggestions, onNoSuggestions, onCan
   const [form, setForm] = useState<TemplateForm>(() => toTemplateForm(kind, current));
   const [errors, setErrors] = useState<Partial<Record<TemplateField, string>>>({});
   const [stale, setStale] = useState(false);
+  // The revision this text was written against. It moves only when the owner is shown a newer one
+  // (a stale save), so a background refetch never lets a save overwrite wording nobody read.
+  const [baseline, setBaseline] = useState(state.currentRevision);
   const edit = (patch: Partial<TemplateForm>) => setForm((before) => ({ ...before, ...patch }));
   const fieldId = (field: TemplateField) => `${p}-${field === "timingHours" ? "timing" : field}`;
 
@@ -455,6 +459,8 @@ function WordingForm({ kind, state, current, suggestions, onNoSuggestions, onCan
       if (!isSettingsChanged(error)) return;
       setStale(true);
       await queryClient.invalidateQueries({ queryKey: keys.template(kind) });
+      const latest = queryClient.getQueryData<TemplateState>(keys.template(kind));
+      if (latest) setBaseline(latest.currentRevision);
     },
   });
   const suggest = useMutation({
@@ -470,9 +476,11 @@ function WordingForm({ kind, state, current, suggestions, onNoSuggestions, onCan
     },
   });
 
+  // One request at a time: a suggestion landing after a save, or a cancel mid-save, would lose text.
+  const busy = save.isPending || suggest.isPending;
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const read = readTemplateForm(kind, form, state.currentRevision);
+    const read = readTemplateForm(kind, form, baseline);
     if (!read.ok) {
       setErrors(read.errors);
       const first = FIELDS.find((field) => read.errors[field]);
@@ -495,7 +503,12 @@ function WordingForm({ kind, state, current, suggestions, onNoSuggestions, onCan
 
   return (
     <form id={`${p}-form`} className="space-y-4" onSubmit={submit} noValidate aria-labelledby={`${p}-form-title`}>
-      <h3 id={`${p}-form-title`} className="text-base font-bold text-fg">{current ? "Write new wording" : "Write the wording"}</h3>
+      <div>
+        <h3 id={`${p}-form-title`} className="text-base font-bold text-fg">{current ? "Write new wording" : "Write the wording"}</h3>
+        {current ? null : (
+          <p data-testid={`${p}-none`} className="mt-1 text-sm text-fg-2">No wording yet. Write the message it sends below.</p>
+        )}
+      </div>
       {stale ? (
         <p role="alert" data-testid={`${p}-stale`} className={cn(noticeClass, "bg-warn-tint")}>
           <Warning size={20} aria-hidden className="mt-px shrink-0 text-warn" />{TEMPLATE_STALE_MESSAGE}
@@ -521,7 +534,7 @@ function WordingForm({ kind, state, current, suggestions, onNoSuggestions, onCan
       ) : null}
       <div>
         <Label htmlFor={fieldId("body")}>Message</Label>
-        <Textarea {...fieldProps("body")} rows={6} value={form.body} onChange={(event) => edit({ body: event.target.value })} />
+        <Textarea {...fieldProps("body")} className="resize-y" rows={6} value={form.body} onChange={(event) => edit({ body: event.target.value })} />
         {hint("body", form.channel === "sms"
           ? "Up to 1,530 characters once the variables are filled in. Use only the variables below."
           : "Plain text. Use only the variables below; each is filled in for every customer.")}
@@ -540,6 +553,7 @@ function WordingForm({ kind, state, current, suggestions, onNoSuggestions, onCan
         <Label htmlFor={fieldId("timingHours")}>{copy.timingLabel}</Label>
         <Input
           {...fieldProps("timingHours")}
+          className="max-w-40"
           type="number"
           inputMode="numeric"
           min={range.min}
@@ -555,18 +569,18 @@ function WordingForm({ kind, state, current, suggestions, onNoSuggestions, onCan
       {save.isError && !stale ? <ErrorNote error={save.error} /> : null}
       {suggest.isError && !isApiError(suggest.error, "not_found") ? <ErrorNote error={suggest.error} /> : null}
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" disabled={save.isPending} aria-busy={save.isPending}>Save new wording</Button>
+        <Button type="submit" disabled={busy} aria-busy={save.isPending}>Save new wording</Button>
         {suggestions ? (
           <Button
             variant="secondary"
             onClick={() => suggestOnce(() => suggest.mutateAsync({ channel: form.channel }))}
-            disabled={suggest.isPending}
+            disabled={busy}
             aria-busy={suggest.isPending}
           >
             <Sparkle aria-hidden />Suggest wording
           </Button>
         ) : null}
-        {onCancel ? <Button variant="ghost" onClick={onCancel}>Cancel</Button> : null}
+        {onCancel ? <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button> : null}
       </div>
     </form>
   );

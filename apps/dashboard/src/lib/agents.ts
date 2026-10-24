@@ -325,7 +325,12 @@ export function kindState(status: AgentKindStatus, current: TemplateRevision | n
 
 /** The toast after Run now on a templated kind. */
 export function kindRunToast(run: Pick<FollowUpRun, "status" | "stopReason" | "considered" | "drafted" | "skipped">): string {
-  if (run.status === "stopped" && run.stopReason) return `It sent nothing: ${STOP_REASONS[run.stopReason]}.`;
+  if (run.status === "stopped" && run.stopReason) {
+    // A run can queue some messages before a switch, quiet hours or the cap stops it.
+    if (run.drafted > 0)
+      return `Run stopped after queuing ${run.drafted} ${run.drafted === 1 ? "message" : "messages"}: ${STOP_REASONS[run.stopReason]}.`;
+    return `It sent nothing: ${STOP_REASONS[run.stopReason]}.`;
+  }
   if (run.considered === 0) return "Run finished. Nothing to send right now.";
   return `Run finished. Queued ${run.drafted} ${run.drafted === 1 ? "message" : "messages"}, skipped ${run.skipped}.`;
 }

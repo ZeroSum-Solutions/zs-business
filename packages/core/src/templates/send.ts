@@ -25,6 +25,7 @@ import {
   type FollowUpRun,
   type Target,
   type TemplatedKind,
+  agentKindConfigSchemas,
   type TemplatedSkipReason,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
@@ -212,8 +213,10 @@ export interface TemplatedSettings {
   readonly reviewUrl: string | null;
   readonly timingHours: number;
 }
-export function templatedSettings(controls: AgentControls): TemplatedSettings {
-  const config = controls.config as Partial<Record<keyof TemplatedSettings, number | string>>;
+export function templatedSettings(controls: AgentControls, kind: TemplatedKind): TemplatedSettings {
+  // A field missing from the stored config reads as this kind's own default (G-14), never another kind's.
+  const config = { ...agentKindConfigSchemas[kind].parse({}), ...(controls.config as object) } as
+    Partial<Record<keyof TemplatedSettings, number | string>>;
   return {
     maxSendsPerDay: Number(config.maxSendsPerDay ?? 20),
     lookbackDays: Number(config.lookbackDays ?? 7),
@@ -330,7 +333,7 @@ export const startKindRunHandler: ActionHandler = {
     requireKindActor(tenantId, binding.actorId, kind);
     const controls = await loadControls(tx, tenantId, false, kind);
     let stop = gate(controls, await readGlobalKilled(tx, false), now);
-    if (!stop && (await queuedToday(tx, tenantId, kind, now)) >= templatedSettings(controls).maxSendsPerDay) stop = "daily_cap";
+    if (!stop && (await queuedToday(tx, tenantId, kind, now)) >= templatedSettings(controls, kind).maxSendsPerDay) stop = "daily_cap";
     await tx.query(
       `INSERT INTO agent_runs (tenant_id, id, agent, requested_by, started_at, finished_at, status, stop_reason, max_decisions)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
@@ -394,7 +397,7 @@ function queueHandler(kind: TemplatedKind, schema: typeof reminderQueueCommandSc
       const ref = { decisionId: payload.decisionId, runId: payload.runId, agentKind: kind, bookingId: payload.bookingId, contactId: payload.contactId };
       // Read the clock once the locks are held, so a wait on them counts toward quiet hours.
       const now = clock();
-      const settings = templatedSettings(controls);
+      const settings = templatedSettings(controls, kind);
       let stop: TemplatedSkipReason | null = gate(controls, globalKilled, now);
       if (!stop && (await queuedToday(tx, tenantId, kind, now)) >= settings.maxSendsPerDay) stop = "daily_cap";
       if (stop) return recordSkip(tx, tenantId, ref, stop, now);

@@ -73,6 +73,7 @@ const CONFLICT_REASONS = new Set([
   // agents.md G-15, G-19, G-21 and approvals.md A-15.
   "cost_cap", "model_error", "model_invalid", "kind_not_available",
   "template_changed", "template_superseded", "template_not_approved",
+  "suggestion_in_progress", "suggestion_used", "booking_link_unconfigured",
   // browser-tasks.md BT-9, BT-11, BT-12: why a website task cannot start or a write task is refused.
   "write_tasks_disabled", "disabled", "global_killed", "tenant_killed", "target_disabled", "daily_cap", "artifact_cap",
   "variant_expired", "variant_changed", "variant_not_staged", "variant_not_running", "image_not_approved", "upload_missing",

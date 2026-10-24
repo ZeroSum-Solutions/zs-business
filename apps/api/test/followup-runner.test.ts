@@ -585,6 +585,30 @@ describe("the templated kinds in the production wiring (G-19, G-20)", () => {
     expect(await runCount()).toBe(before);
   });
 
+  it("a follow-up allowance larger than the budget does not starve the templated kinds", async () => {
+    const tenantId = fixture.b.tenantId;
+    await service((tx) => tx.query(
+      `INSERT INTO agent_settings (tenant_id,agent_kind,enabled,quiet_start_minute,quiet_end_minute,config,updated_at)
+       VALUES ($1,'appointment_reminder',true,0,0,'{}'::jsonb,$2)
+       ON CONFLICT (tenant_id, agent_kind) DO UPDATE SET enabled=true, quiet_start_minute=0, quiet_end_minute=0, killed_at=NULL`,
+      [tenantId, new Date(now)]));
+    const ran: string[] = [];
+    const run = { status: "completed", drafted: 0, skipped: 0, stopReason: null };
+    const scheduled = createScheduledFollowUps({
+      service,
+      agent: { runScheduled: async () => { throw new Error("no follow-up tenant is due"); }, stallRun: async () => { throw new Error("unused"); } },
+      templated: {
+        runScheduled: async (kind, tenant) => { ran.push(`${kind}:${tenant}`); return run as never; },
+        stallRun: async () => { throw new Error("unused"); },
+      },
+      // A slot no earlier test used, so the tenant is due.
+      clock: testClock, slotMinutes: 7, budgetMs: 5_000, stallAfterMs: 900_000, perTenantMs: 160_000,
+    });
+    const summary = await scheduled.run();
+    expect(ran).toContain(`appointment_reminder:${tenantId}`);
+    expect(summary.budgetSpent).toBe(false);
+  });
+
   it("runs no templated kind while they are off", async () => {
     const { runner, close } = await startFollowUpRunner({ ...runnerEnv, templated: null }, { clock: testClock, generateId: randomUUID });
     try {

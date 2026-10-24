@@ -80,6 +80,9 @@ describe("templated kinds: copy", () => {
     expect(kindRunToast(run)).toBe("Run finished. Nothing to send right now.");
     expect(kindRunToast({ ...run, considered: 3, drafted: 2, skipped: 1 })).toBe("Run finished. Queued 2 messages, skipped 1.");
     expect(kindRunToast({ ...run, status: "stopped", stopReason: "disabled" })).toBe("It sent nothing: the agent was turned off.");
+    // A run that queued messages before it stopped says so.
+    expect(kindRunToast({ ...run, status: "stopped", stopReason: "daily_cap", considered: 4, drafted: 2, skipped: 1 }))
+      .toBe("Run stopped after queuing 2 messages: it reached the daily draft limit.");
   });
 });
 

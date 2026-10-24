@@ -50,6 +50,9 @@ export interface ScheduledFollowUpReport {
   readonly error: unknown;
 }
 
+/** The default allowance for one templated kind's run (no model call, a few dispatcher actions per booking). */
+export const DEFAULT_TEMPLATED_PER_TENANT_MS = 2_000;
+
 export function createScheduledFollowUps(input: {
   /** A transaction as the service role, for the due-tenant read only. */
   readonly service: <T>(work: (tx: Transaction) => Promise<T>) => Promise<T>;
@@ -63,9 +66,16 @@ export function createScheduledFollowUps(input: {
   readonly stallAfterMs: number;
   /** The longest one tenant's run may take: its candidates times the model timeout. */
   readonly perTenantMs: number;
+  /**
+   * The longest one templated run may take. It calls no model, so it is far shorter than
+   * `perTenantMs`; with the follow-up allowance the templated kinds would never start in a budget
+   * sized for one follow-up tenant. Default 2 s.
+   */
+  readonly templatedPerTenantMs?: number;
   readonly report?: (event: ScheduledFollowUpReport) => void;
 }) {
   const { service, agent, templated, clock, slotMinutes, budgetMs, perTenantMs, stallAfterMs } = input;
+  const templatedPerTenantMs = input.templatedPerTenantMs ?? DEFAULT_TEMPLATED_PER_TENANT_MS;
   return {
     async run(): Promise<ScheduledFollowUpSummary> {
       const startedAt = clock.now();
@@ -109,7 +119,7 @@ export function createScheduledFollowUps(input: {
         const kindDue = await service((tx) => dueKindTenants(tx, kind, startedAt, slot));
         const counts = { finished: 0, queued: 0, skipped: 0, stopped: 0, errors: 0 };
         for (const tenantId of kindDue.tenantIds) {
-          if (clock.now().getTime() - started + perTenantMs > budgetMs) {
+          if (clock.now().getTime() - started + templatedPerTenantMs > budgetMs) {
             totals.budgetSpent = true;
             break;
           }

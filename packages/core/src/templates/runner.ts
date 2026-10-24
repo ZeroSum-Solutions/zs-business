@@ -68,7 +68,14 @@ export async function runTemplatedKind(
 
   const existing = await read((tx) => loadKindRunDetail(tx, tenantId, runId, kind));
   if (!existing) {
-    parseOrFail(kindRunOutputSchema, await deps.dispatch(command(KIND_RUN_START_ACTION, `agent:start:${runId}`, "agent_run", runId,
+    // Without a link provider every reminder that uses {booking_link} would skip for no_link: a
+    // server set up wrong, not a tenant without a page. Refuse before a run is written (fail closed).
+    if (kind === "appointment_reminder" && !deps.bookingLink) {
+      const revision = await read((tx) => currentRevision(tx, tenantId, kind));
+      if (revision?.variables.includes("booking_link"))
+        throw new Conflict("Booking links are not set up on this server", { reason: "booking_link_unconfigured" });
+    }
+    parseOrFail(kindRunOutputSchema, await deps.dispatch(command(KIND_RUN_START_ACTION, `agent:${kind}:start:${runId}`, "agent_run", runId,
       { runId, agentKind: kind, requestedBy: input.requestedBy, maxDecisions: deps.maxCandidatesPerRun })));
   }
   const started = existing ?? (await detail());
@@ -83,7 +90,7 @@ export async function runTemplatedKind(
 
   const plan = stop ? null : await read(async (tx) => {
     const controls = await loadControls(tx, tenantId, false, kind);
-    const settings = templatedSettings(controls);
+    const settings = templatedSettings(controls, kind);
     const revision = await currentRevision(tx, tenantId, kind);
     const approvalId = revision ? await usableStandingApproval(tx, tenantId, revision, now()) : null;
     const window = { timingHours: revision?.timing_hours ?? settings.timingHours, lookbackDays: settings.lookbackDays };
@@ -93,7 +100,7 @@ export async function runTemplatedKind(
 
   for (const candidate of plan?.candidates ?? []) {
     const decisionId = kindDecisionId(tenantId, runId, candidate.bookingId);
-    const key = `agent:item:${runId}:${candidate.bookingId}`;
+    const key = `agent:${kind}:item:${runId}:${candidate.bookingId}`;
     const ref = { decisionId, runId, agentKind: kind, bookingId: candidate.bookingId, contactId: candidate.contactId };
     // Another call resuming the same run may have decided this booking already.
     const decidedElsewhere = async () => {
@@ -148,7 +155,7 @@ export async function runTemplatedKind(
   // continues it. A stop ends the run either way.
   if (failure && !stop) throw failure.error;
   parseOrFail(kindRunOutputSchema,
-    await deps.dispatch(command(KIND_RUN_FINISH_ACTION, `agent:finish:${runId}`, "agent_run", runId, { runId, agentKind: kind, stopReason: stop })));
+    await deps.dispatch(command(KIND_RUN_FINISH_ACTION, `agent:${kind}:finish:${runId}`, "agent_run", runId, { runId, agentKind: kind, stopReason: stop })));
   return detail();
 }
 

@@ -302,13 +302,13 @@ export function createApp(deps: AppDependencies) {
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
   const templated = deps.templated ?? { maxCandidatesPerRun: DEFAULT_TEMPLATED_CANDIDATES };
+  // Built once, so a bad booking-key secret or base URL fails at start, not on a request.
+  const bookingLink = deps.publicIntake
+    ? createBookingLinkProvider({ secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl })
+    : null;
   app.route("/v1/agents", agentKindRoutes({
     session: (c) => createTemplateSession(requestEdge(c), c.var.session.principal),
-    agents: (c) => createTemplatedAgents(requestEdge(c), {
-      ...templated,
-      ...(deps.publicIntake ? { bookingLink: createBookingLinkProvider({
-        secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl }) } : {}),
-    }),
+    agents: (c) => createTemplatedAgents(requestEdge(c), { ...templated, ...(bookingLink ? { bookingLink } : {}) }),
   }));
   const browser = deps.browser;
   if (browser)

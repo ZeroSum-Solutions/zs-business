@@ -106,7 +106,8 @@ export function createTemplateSession(deps: EdgeDependencies, principal: Princip
           payload: { templateId: state.templateId, revision: revision.revision, contentDigest: revision.contentDigest },
         },
         summary: `Send the ${kind === "appointment_reminder" ? "appointment reminder" : "review request"} wording, revision ${revision.revision}`,
-        ...(request.expiresInMinutes !== undefined ? { expiresInMinutes: request.expiresInMinutes } : {}),
+        // A-15 allows A-5's longest expiry; the screen promises 30 days unless the owner picks less.
+        expiresInMinutes: request.expiresInMinutes ?? STANDING_APPROVAL_MINUTES,
       }, key);
       return session.approveApproval(pending.result.id, {}, `tpl-approve-${derivedId(tenantId, key, "template-approve")}`);
     },
@@ -131,6 +132,9 @@ export interface TemplatedAgentsConfig {
     readonly report?: (event: { tenantId: string; error: unknown }) => void;
   };
 }
+
+/** A-5's longest expiry, 30 days: a standing template approval's default. */
+export const STANDING_APPROVAL_MINUTES = 43_200;
 
 export function createTemplatedAgents(deps: EdgeDependencies, agents: TemplatedAgentsConfig) {
   if (!Number.isInteger(agents.maxCandidatesPerRun) || agents.maxCandidatesPerRun < 1 || agents.maxCandidatesPerRun > 1000)
@@ -167,7 +171,8 @@ export function createTemplatedAgents(deps: EdgeDependencies, agents: TemplatedA
       const tenantId = uuidSchema.parse(principal.tenantId);
       const actorId = uuidSchema.parse(principal.actorId);
       await deps.db.tenant(tenantId, (tx) => requireMember(tx, tenantId, actorId, "agents"));
-      return runKind(kind, tenantId, `member:${actorId}:${key}`, actorId);
+      // The kind is in the key, so one key used for two kinds starts two runs, not one shared run ID.
+      return runKind(kind, tenantId, `member:${kind}:${actorId}:${key}`, actorId);
     },
     /** G-16: close a run of this kind that stayed `running` too long, as the kind's own principal. */
     async stallRun(kind: TemplatedKind, tenantId: string, runId: string): Promise<FollowUpRun> {

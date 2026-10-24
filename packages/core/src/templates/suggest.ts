@@ -8,6 +8,7 @@
 import {
   Conflict,
   TEMPLATE_VARIABLES,
+  agentKindConfigSchemas,
   ValidationFailed,
   parseTemplateDraft,
   type ActionCommand,
@@ -95,10 +96,29 @@ export async function suggestTemplate(
     }
   };
 
-  const reservation = await read((tx) => reserveModelCall(tx, tenantId, {
-    callKeyBase: `agent:${kind}:suggestion:${key}`, runId: null, kind,
-    subjectId: derivedId(tenantId, key, "suggestion"), lane: TEMPLATE_SUGGESTION_LANE, model: deps.model.model,
-  }, worst, now()));
+  const subjectId = derivedId(tenantId, key, "suggestion");
+  const reservation = await read(async (tx) => {
+    // G-15: the cost lock is the kind's settings row, so the row must exist before the lock is taken:
+    // with no row, two suggestions would both read the default cap unlocked. A missing row is the
+    // kind's defaults with the kind off (G-14), which is what this writes.
+    await tx.query(
+      `INSERT INTO agent_settings (tenant_id, agent_kind, config, updated_at) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (tenant_id, agent_kind) DO NOTHING`,
+      [tenantId, kind, JSON.stringify(agentKindConfigSchemas[kind].parse({})), now()],
+    );
+    const reserved = await reserveModelCall(tx, tenantId, {
+      callKeyBase: `agent:${kind}:suggestion:${key}`, runId: null, kind,
+      subjectId, lane: TEMPLATE_SUGGESTION_LANE, model: deps.model.model,
+    }, worst, now());
+    if (reserved.status !== "reserved") return reserved;
+    // A key whose call already came back was answered once: a replay never pays for a second call.
+    // Checked under the settings lock, so a replay racing the first call sees its settled row.
+    const earlier = (await tx.query(
+      `SELECT 1 FROM agent_model_calls WHERE tenant_id=$1 AND agent_kind=$2 AND run_id IS NULL AND subject_id=$3
+          AND call_key <> $4 LIMIT 1`, [tenantId, kind, subjectId, reserved.callKey])).rows.length > 0;
+    if (earlier) throw new Conflict("This suggestion request was already answered", { reason: "suggestion_used" });
+    return reserved;
+  });
   if (reservation.status === "cost_cap") {
     // The call that crossed the line may have failed to record its warning; it is once per date, so asking again is safe.
     if (atWarningLine(reservation.spent, reservation.capMicros)) await warnCost(now());

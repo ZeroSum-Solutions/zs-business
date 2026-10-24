@@ -196,11 +196,10 @@ describe("templates over HTTP (G-19, A-15)", () => {
     });
   });
 
-  it("skips no_link when the server has no booking link configured", async () => {
+  it("refuses a run whose wording uses {booking_link} when the server has no booking link configured", async () => {
     const ran = await runs(h.a);
-    expect(ran.status, JSON.stringify(ran.body)).toBe(201);
-    expect(ran.body.decisions).toHaveLength(1);
-    expect(ran.body.decisions[0]).toMatchObject({ subjectId: bookingId, outcome: "skipped", reason: "no_link", messageId: null });
+    expect(ran.status, JSON.stringify(ran.body)).toBe(409);
+    expect(ran.body).toMatchObject({ error: { code: "Conflict", details: { reason: "booking_link_unconfigured" } } });
   });
 
   it("queues a reminder once approved with a booking link, and a replayed run returns the same run", async () => {

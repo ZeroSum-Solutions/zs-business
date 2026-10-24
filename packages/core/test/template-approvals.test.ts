@@ -17,6 +17,7 @@ import {
   createSession,
   createTemplateSession,
   createTemplatedAgents,
+  createBookingLinkProvider,
   creditWallet,
   FAKE_MODEL_ID,
   FAKE_MODEL_PRICES,
@@ -26,6 +27,8 @@ import {
   type TemplatedAgents,
 } from "../src/index.js";
 import { suggestionRequest } from "../src/templates/suggest.js";
+import { templatedSettings } from "../src/templates/send.js";
+import { controlsFromRow } from "../src/agents/controls.js";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -718,6 +721,24 @@ describe("wording suggestions (G-19, G-15, G-18)", () => {
     expect(run.decisions.find((d) => d.subjectId === s.bookingId)?.outcome).toBe("queued");
   });
 
+  it("a replayed key never pays for a second call", async () => {
+    await enable("appointment_reminder");
+    suggestionModelCalls.length = 0;
+    const key = randomUUID();
+    await agents().suggest({ tenantId, actorId: owner }, "appointment_reminder", { channel: "email" }, key);
+    const replay = await rejection(agents().suggest({ tenantId, actorId: owner }, "appointment_reminder", { channel: "email" }, key));
+    expect(replay).toMatchObject({ code: "Conflict", details: { reason: "suggestion_used" } });
+    expect(suggestionModelCalls).toHaveLength(1);
+    expect(await rows("SELECT 1 FROM agent_model_calls WHERE tenant_id=$1 AND call_key LIKE $2", [tenantId, `%${key}%`])).toHaveLength(1);
+  });
+
+  it("writes the kind's settings row before it reserves, so the cost lock always holds a row", async () => {
+    await service((tx) => tx.query("DELETE FROM agent_settings WHERE tenant_id=$1 AND agent_kind='review_request'", [tenantB]));
+    await agents().suggest({ tenantId: tenantB, actorId: ownerB }, "review_request", { channel: "email" }, randomUUID());
+    expect(await rows("SELECT enabled FROM agent_settings WHERE tenant_id=$1 AND agent_kind='review_request'", [tenantB]))
+      .toEqual([{ enabled: false }]);
+  });
+
   it("is off without a configured model, needs the agents permission and refuses an unknown kind", async () => {
     await expect(agents(false).suggest({ tenantId, actorId: owner }, "appointment_reminder", { channel: "email" }, randomUUID())).rejects.toMatchObject({ code: "NotFound" });
     await expect(agents().suggest({ tenantId, actorId: staff }, "appointment_reminder", { channel: "email" }, randomUUID())).rejects.toBeInstanceOf(ActionError);
@@ -739,6 +760,63 @@ describe("wording suggestions (G-19, G-15, G-18)", () => {
     });
     const failed = await rejection(bad.suggest({ tenantId, actorId: owner }, "appointment_reminder", { channel: "email" }, randomUUID()));
     expect(failed).toMatchObject({ code: "Conflict", details: { reason: "model_invalid" } });
+  });
+});
+
+describe("standing approval expiry and run keys", () => {
+  it("the booking-link provider refuses a short signing key or a base URL that is not http(s)", () => {
+    const signing = "s".repeat(32);
+    expect(() => createBookingLinkProvider({ secret: "short", publicBaseUrl: "https://book.example.test" })).toThrow(/at least 32/);
+    expect(() => createBookingLinkProvider({ secret: signing, publicBaseUrl: "javascript:alert(1)" })).toThrow(/http or https/);
+    expect(() => createBookingLinkProvider({ secret: signing, publicBaseUrl: "not a url" })).toThrow(/not a URL/);
+    expect(createBookingLinkProvider({ secret: signing, publicBaseUrl: "https://book.example.test" })).toBeTypeOf("function");
+  });
+
+  it("a stored config with a missing field reads that kind's own default", () => {
+    const base = controlsFromRow(undefined, "appointment_reminder");
+    expect(templatedSettings({ ...base, config: {} } as never, "appointment_reminder").maxSendsPerDay).toBe(200);
+    expect(templatedSettings({ ...base, config: {} } as never, "review_request").maxSendsPerDay).toBe(20);
+    expect(templatedSettings({ ...base, config: { maxSendsPerDay: 7 } } as never, "appointment_reminder").maxSendsPerDay).toBe(7);
+  });
+
+  it("a template approval with no expiry given lasts 30 days, as the screen says", async () => {
+    await write("review_request");
+    const approved = await approve("review_request");
+    const row = (await rows<{ requested_at: Date; expires_at: Date }>(
+      "SELECT requested_at, expires_at FROM approvals WHERE tenant_id=$1 AND id=$2", [tenantId, approved.approval.result.id]))[0]!;
+    expect(row.expires_at.getTime() - row.requested_at.getTime()).toBe(30 * DAY);
+  });
+
+  it("a reminder whose wording uses {booking_link} does not run without a booking-link provider", async () => {
+    await booked();
+    await ready("appointment_reminder");
+    const bare = createTemplatedAgents(deps(), { maxCandidatesPerRun: 5 });
+    const runs = async () => (await rows<{ n: number }>("SELECT count(*)::int AS n FROM agent_runs WHERE tenant_id=$1 AND agent='appointment_reminder'", [tenantId]))[0]!.n;
+    const before = await runs();
+    const refused = await rejection(bare.runForMember({ tenantId, actorId: owner }, "appointment_reminder", {}, randomUUID()));
+    expect(refused).toMatchObject({ code: "Conflict", details: { reason: "booking_link_unconfigured" } });
+    expect(await runs()).toBe(before);
+    // Wording without the link runs as before.
+    await write("appointment_reminder", { body: "Hi {customer_first_name}, see you {booking_start_local} at {business_name}." });
+    await approve("appointment_reminder");
+    const run = await bare.runForMember({ tenantId, actorId: owner }, "appointment_reminder", {}, randomUUID());
+    expect(run.status).not.toBe("running");
+  });
+
+  it("one member key runs each kind as its own run, under agent:<kind>:<step> keys", async () => {
+    await booked();
+    await ready("appointment_reminder");
+    await ready("review_request");
+    const key = randomUUID();
+    const reminder = await agents().runForMember({ tenantId, actorId: owner }, "appointment_reminder", {}, key);
+    const review = await agents().runForMember({ tenantId, actorId: owner }, "review_request", {}, key);
+    expect(review.id).not.toBe(reminder.id);
+    expect(review.agent).toBe("review_request");
+    for (const run of [reminder, review]) {
+      const keys = (await rows<{ idempotency_key: string }>(
+        "SELECT idempotency_key FROM actions WHERE tenant_id=$1 AND target->>'id'=$2", [tenantId, run.id])).map((r) => r.idempotency_key);
+      expect(keys).toEqual(expect.arrayContaining([`agent:${run.agent}:start:${run.id}`, `agent:${run.agent}:finish:${run.id}`]));
+    }
   });
 });
 
