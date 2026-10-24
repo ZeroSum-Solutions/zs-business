@@ -5,7 +5,7 @@ import { createChatCompletionsModel, type FetchLike } from "./chat-completions.j
 import type { TextModel } from "../model.js";
 
 export const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
-export const DEEPSEEK_DEFAULT_MODEL = "deepseek-chat";
+export const DEEPSEEK_DEFAULT_MODEL = "deepseek-flash";
 
 export interface DeepSeekConfig {
   readonly apiKey: string;

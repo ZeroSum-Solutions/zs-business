@@ -22,14 +22,17 @@ import {
   createPublicSession,
   createSession,
   directDispatch,
+  FAKE_MODEL_ID,
   FAKE_MODEL_PRICES,
   followUpRunId,
   runFollowUps,
   setGlobalAgentSwitch,
   stalledRuns,
+  worstCase,
   type EdgeDependencies,
   type Session,
 } from "../src/index.js";
+import { reserveModelCall } from "../src/agents/cost.js";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -217,7 +220,7 @@ describe("usage and cost caps (G-15, G-17)", () => {
     const unpriced = createFakeFollowUpModel();
     expect(() => createFollowUpAgent(deps(), { model: unpriced, maxCandidatesPerRun: 1, modelPrices: {} })).toThrow(ValidationFailed);
     const deepseek = createFollowUpModel(createDeepSeekModel({ apiKey: "k", fetch: () => Promise.reject(new Error("no network")) }) as never);
-    expect(() => createFollowUpAgent(deps(), { model: deepseek, maxCandidatesPerRun: 1, modelPrices: { "deepseek-chat": { inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 } } }))
+    expect(() => createFollowUpAgent(deps(), { model: deepseek, maxCandidatesPerRun: 1, modelPrices: { "deepseek-flash": { inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 } } }))
       .toThrow(/personal_data/);
     expect(() => assertKindModel("inquiry_followup", { lane: "personal_data", model: "fake-follow-up" }, FAKE_MODEL_PRICES)).not.toThrow();
     return expect(runFollowUps({
@@ -303,6 +306,53 @@ describe("stalled runs (G-16)", () => {
     const agent = createFollowUpAgent(deps(), { model: createFakeFollowUpModel(), maxCandidatesPerRun: 3 });
     const done = await agent.runScheduled(tenantId, randomUUID());
     expect(await agent.stallRun(tenantId, done.id)).toMatchObject({ status: "completed", stopReason: null, drafted: 1 });
+  });
+
+  it("a run stalled while its model call is out keeps that call at its reserved worst case and writes nothing more", async () => {
+    await dueInquiries(1);
+    const agent = createFollowUpAgent(deps(), { model: createFakeFollowUpModel(), maxCandidatesPerRun: 3 });
+    const key = `schedule:${randomUUID()}`;
+    const runId = followUpRunId(tenantId, key);
+    const model = createFakeFollowUpModel(async () => {
+      await agent.stallRun(tenantId, runId);
+      return { subject: "Hello", body: "Thanks for asking." };
+    });
+    const run = await runFollowUps({
+      db: database.db, clock, model, config: { maxCandidatesPerRun: 3 }, report: () => undefined,
+      dispatch: directDispatch(deps(), tenantId, agentActorId(tenantId), agentAuthorize),
+    }, tenantId, { key, requestedBy: null });
+    expect(run).toMatchObject({ status: "stopped", stopReason: "stalled", considered: 0, drafted: 0 });
+    // The late settle was refused: the row still holds the worst case, and the closed run counted exactly that.
+    const [call] = await calls(runId);
+    expect(call).toMatchObject({ outcome: "started" });
+    expect(Number((await runTotals(runId)).cost_micros)).toBe(Number(call!.cost_micros));
+    expect(await rows("SELECT 1 FROM agent_decisions WHERE tenant_id=$1 AND run_id=$2", [tenantId, runId])).toEqual([]);
+  });
+
+  it("reserves nothing for a run that is already closed", async () => {
+    await dueInquiries(1);
+    const agent = createFollowUpAgent(deps(), { model: createFakeFollowUpModel(), maxCandidatesPerRun: 3 });
+    const done = await agent.runScheduled(tenantId, randomUUID());
+    const before = await calls(done.id);
+    const request = createFakeFollowUpModel().request({ businessName: "B" } as never);
+    const worst = worstCase(FAKE_MODEL_PRICES, FAKE_MODEL_ID, request);
+    const reserved = await database.db.tenant(tenantId, (tx) => reserveModelCall(tx, tenantId, {
+      callKeyBase: `agent:inquiry_followup:model:${done.id}:late`, runId: done.id, kind: "inquiry_followup",
+      subjectId: randomUUID(), lane: "personal_data", model: FAKE_MODEL_ID,
+    }, worst, clock.now()));
+    expect(reserved).toEqual({ status: "run_closed" });
+    expect(await calls(done.id)).toEqual(before);
+  });
+
+  it("the follow-up agent cannot finish another kind's run", async () => {
+    const runId = randomUUID();
+    await service((tx) => tx.query(
+      "INSERT INTO agent_runs (tenant_id,id,agent,started_at,max_decisions) VALUES ($1,$2,'review_request',$3,3)", [tenantId, runId, clock.now()]));
+    await expect(directDispatch(deps(), tenantId, agentActorId(tenantId), agentAuthorize)({
+      actionType: "agent.run.finish", idempotencyKey: `agent:finish:${runId}`, target: { tenantId, type: "agent_run", id: runId },
+      approvalReference: { tenantId, id: randomUUID() }, payload: { runId, stopReason: null },
+    })).rejects.toBeInstanceOf(TenantDenied);
+    expect((await rows<{ status: string }>("SELECT status FROM agent_runs WHERE tenant_id=$1 AND id=$2", [tenantId, runId]))[0]!.status).toBe("running");
   });
 
   it("only the run's own kind's principal may stall it, and a run of another tenant is not found", async () => {

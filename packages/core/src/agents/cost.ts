@@ -75,8 +75,22 @@ export interface ModelCallRef {
 }
 export type Reservation =
   | { readonly status: "reserved"; readonly callKey: string; readonly spentBefore: number; readonly spentAfter: number; readonly capMicros: number }
-  | { readonly status: "cost_cap" }
-  | { readonly status: "exists" };
+  | { readonly status: "cost_cap"; readonly spent: number; readonly capMicros: number }
+  | { readonly status: "exists" }
+  /** G-16: the run was closed (stalled, finished) before this step; nothing is written. */
+  | { readonly status: "run_closed" };
+
+/**
+ * G-16: share-lock the run's row and say whether it is still running. A close (finish, stall) takes
+ * the same row for update, so a model call reserved or settled here either lands before the close
+ * counts it, or finds the run closed and writes nothing. Always taken before the settings lock.
+ */
+async function runIsOpen(tx: Transaction, tenantId: string, runId: string | null): Promise<boolean> {
+  if (runId === null) return true;
+  const row = (await tx.query<{ status: string }>(
+    "SELECT status FROM agent_runs WHERE tenant_id=$1 AND id=$2 FOR SHARE", [tenantId, runId])).rows[0];
+  return row?.status === "running";
+}
 
 /**
  * G-15: under the kind's settings lock, add the 24-hour cost to this call's worst case. Above the
@@ -87,6 +101,7 @@ export type Reservation =
 export async function reserveModelCall(
   tx: Transaction, tenantId: string, call: ModelCallRef, worst: WorstCase, now: Date,
 ): Promise<Reservation> {
+  if (!(await runIsOpen(tx, tenantId, call.runId))) return { status: "run_closed" };
   const settings = (await tx.query<{ max_cost_micros_per_day: number }>(
     "SELECT max_cost_micros_per_day FROM agent_settings WHERE tenant_id=$1 AND agent_kind=$2 FOR UPDATE", [tenantId, call.kind],
   )).rows[0];
@@ -101,7 +116,7 @@ export async function reserveModelCall(
   if (prior.some((row) => row.outcome === "started")) return { status: "exists" };
   const callKey = `${call.callKeyBase}:${prior.length}`;
   const spentBefore = await costSpent(tx, tenantId, call.kind, now);
-  if (spentBefore + worst.costMicros > capMicros) return { status: "cost_cap" };
+  if (spentBefore + worst.costMicros > capMicros) return { status: "cost_cap", spent: spentBefore, capMicros };
   const inserted = await tx.query(
     `INSERT INTO agent_model_calls (tenant_id, id, call_key, run_id, agent_kind, subject_id, lane, model,
        input_tokens, output_tokens, cost_micros, outcome, created_at)
@@ -115,16 +130,19 @@ export async function reserveModelCall(
 
 /**
  * G-15: record what the call came to. With usage, the provider's numbers priced from the table;
- * without (a failure or an abort), the reserved worst case stands. A row settles once.
+ * without (a failure or an abort), the reserved worst case stands. A row settles once, and not
+ * after its run closed (G-16).
  */
 export async function settleModelCall(
-  tx: Transaction, tenantId: string, callKey: string,
+  tx: Transaction, tenantId: string, callKey: string, runId: string | null,
   result: {
     readonly outcome: "ok" | "error" | "invalid";
     readonly usage?: { readonly inputTokens: number; readonly outputTokens: number; readonly costMicros: number };
     readonly providerRequestId?: string | undefined;
   },
 ): Promise<void> {
+  // G-16: a run closed meanwhile already counted this call at its reserved worst case; that stands.
+  if (!(await runIsOpen(tx, tenantId, runId))) return;
   const requestId = result.providerRequestId?.slice(0, 200) || null;
   if (result.usage)
     await tx.query(

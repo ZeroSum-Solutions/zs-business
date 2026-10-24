@@ -307,6 +307,7 @@ export const finishRunHandler: ActionHandler = {
     const { payload } = parseOrFail(finishFollowUpRunCommandSchema, command);
     const tenantId = binding.tenantId;
     const run = (await loadRun(tx, tenantId, payload.runId, true))!;
+    if (run.agent !== "inquiry_followup") throw new TenantDenied();
     if (run.status === "running") await closeRun(tx, tenantId, payload.runId, run.agent, now, payload.stopReason);
     return { result: (await loadRun(tx, tenantId, payload.runId))! };
   },

@@ -45,6 +45,8 @@ export interface RunTimers {
 const GLOBAL_TIMERS: RunTimers = { setTimeout: (work, ms) => setTimeout(work, ms), clearTimeout: (handle) => clearTimeout(handle as never) };
 /** G-17: how long one model call may take when the caller sets no limit. */
 export const DEFAULT_MODEL_TIMEOUT_MS = 5_000;
+/** G-17: how often a running model call checks the kill switches. */
+export const DEFAULT_KILL_POLL_MS = 1_000;
 
 /** Aborts a model call that outlasted its deadline; the run records `model_error`. */
 export class ModelTimedOut extends Error {
@@ -67,7 +69,7 @@ export interface FollowUpRunDeps {
   /** G-17: abort a model call after this long. */
   readonly modelTimeoutMs?: number;
   readonly timers?: RunTimers;
-  /** While a model call is out, check the switches this often and abort it once the agent is stopped. Off when unset. */
+  /** While a model call is out, check the switches this often and abort it once the agent is stopped (G-17). Default 1 s; 0 turns it off. */
   readonly killPollMs?: number;
   /** Dispatches one command as the tenant's agent principal (G-1). */
   readonly dispatch: (command: ActionCommand) => Promise<ActionResult>;
@@ -159,12 +161,18 @@ export async function runFollowUps(
         callKeyBase, runId, kind: KIND,
         subjectId: candidate.intakeItemId, lane: deps.model.lane, model: deps.model.model,
       }, worst, now()));
-      if (reservation.status === "cost_cap") { stop = "cost_cap"; break; }
+      if (reservation.status === "run_closed") break; // G-16: closed under us; a late step writes nothing
+      if (reservation.status === "cost_cap") {
+        // The crossing call's warning may have failed; it is once per local date, so asking again is safe.
+        if (atWarningLine(reservation.spent, reservation.capMicros)) await warnCost(now());
+        stop = "cost_cap";
+        break;
+      }
       // Another call (or a crashed one) holds this step's model call: leave the run open, as a failure does.
       if (reservation.status === "exists") throw new Error("A model call for this inquiry is already out");
       if (atWarningLine(reservation.spentAfter, reservation.capMicros)) await warnCost(now());
       const answer = await askModel(deps, prompt, timers, timeoutMs, tenantId, read);
-      await read((tx) => settleModelCall(tx, tenantId, reservation.callKey, answer.result
+      await read((tx) => settleModelCall(tx, tenantId, reservation.callKey, runId, answer.result
         ? { outcome: answer.draft ? "ok" : "invalid", providerRequestId: answer.result.providerRequestId,
             usage: { ...answer.result.usage, costMicros: priceUsage(prices, deps.model.model, answer.result.usage) } }
         : { outcome: "error" }));
@@ -237,14 +245,15 @@ async function askModel(
   const controller = new AbortController();
   const deadline = timers.setTimeout(() => controller.abort(new ModelTimedOut(timeoutMs)), timeoutMs);
   let poll: unknown;
-  let polling = deps.killPollMs !== undefined;
+  const pollMs = deps.killPollMs ?? DEFAULT_KILL_POLL_MS;
+  let polling = pollMs > 0;
   const watch = () => {
     poll = timers.setTimeout(() => {
       read(async (tx) => gate(await loadControls(tx, tenantId, false), await readGlobalKilled(tx, false), deps.clock.now()))
         .then((stopped) => { if (stopped) controller.abort(new Error(`Agent stopped: ${stopped}`)); })
         .catch(() => undefined)
         .finally(() => { if (polling && !controller.signal.aborted) watch(); });
-    }, deps.killPollMs!);
+    }, pollMs);
   };
   if (polling) watch();
   try {

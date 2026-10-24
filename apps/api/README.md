@@ -488,7 +488,7 @@ Inbox for an owner's approval.
 | `FOLLOWUP_SERVICE_DATABASE_URL` | A login that may `SET ROLE service_role`, for the due-tenant read. Shares `DATABASE_CA_CERT`. |
 | `AGENT_MODEL_PERSONAL_DATA` | The personal-data lane: `fake` (loopback databases only) or `cerebras`. `FOLLOWUP_MODEL` is the older name. DeepSeek is refused here. |
 | `AGENT_MODEL_NO_PERSONAL_DATA` | Optional: `fake` or `deepseek`. |
-| `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_MODEL` | Key for the lane's vendor; model IDs default to `gpt-oss-120b` and `deepseek-chat`. A model with no price in `VENDOR_MODEL_PRICES` does not start. Prices and IDs are unverified. |
+| `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_MODEL` | Key for the lane's vendor; model IDs default to `gpt-oss-120b` and `deepseek-flash`. A model with no price in `VENDOR_MODEL_PRICES` does not start. Prices and IDs are unverified. |
 | `AGENT_STALL_AFTER_MS` | A run still `running` this long is closed as `stalled` (900000); must exceed candidates × timeout + budget. |
 | `FOLLOWUP_SLOT_MINUTES` | One run per tenant per slot (60). |
 | `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS` | 3, 5000, 20000; candidates × timeout must fit the budget. |

@@ -113,7 +113,7 @@ describe("parseFollowUpEnv", () => {
   it("builds the no-personal-data lane on DeepSeek only, and prices its model", () => {
     const lane = { ...ON, AGENT_MODEL_NO_PERSONAL_DATA: "deepseek" };
     expect(parseFollowUpEnv({ ...lane, DEEPSEEK_API_KEY: DEEPSEEK_KEY }).runner?.noPersonalData)
-      .toEqual({ provider: "deepseek", apiKey: DEEPSEEK_KEY, model: "deepseek-chat" });
+      .toEqual({ provider: "deepseek", apiKey: DEEPSEEK_KEY, model: "deepseek-flash" });
     expect(errorOf(lane)).toMatch(/DEEPSEEK_API_KEY is required/);
     expect(errorOf({ ...lane, DEEPSEEK_API_KEY: DEEPSEEK_KEY, DEEPSEEK_MODEL: "deepseek-unpriced" })).toMatch(/has no price/);
     expect(errorOf({ ...ON, AGENT_MODEL_NO_PERSONAL_DATA: "cerebras", CEREBRAS_API_KEY: CEREBRAS_KEY })).toMatch(/takes fake or deepseek/);

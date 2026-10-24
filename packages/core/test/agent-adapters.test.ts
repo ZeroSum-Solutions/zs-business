@@ -108,6 +108,33 @@ describe("Cerebras adapter (personal-data lane)", () => {
     expect(() => createCerebrasModel({ apiKey: "k", fetch, baseUrl: "http://api.cerebras.ai/v1" })).toThrow("https");
   });
 
+  it("closes every object in the strict schema, and never takes another vendor's host", async () => {
+    const { fetch, sent } = replay("cerebras-ok");
+    await createCerebrasModel({ apiKey: "k", fetch }).complete(request);
+    const format = sent[0]!.body.response_format as { json_schema: { strict: boolean; schema: { type: string; additionalProperties: boolean; required: string[]; properties: object } } };
+    expect(format.json_schema.strict).toBe(true);
+    expect(format.json_schema.schema).toMatchObject({ type: "object", additionalProperties: false, required: ["subject", "body"] });
+    // G-18: customer data cannot be pointed at DeepSeek (or any other host) through the adapter's own config.
+    for (const baseUrl of ["https://api.deepseek.com", "https://api.cerebras.ai.evil.example/v1", "https://evil.example/api.cerebras.ai", "not a url"])
+      expect(() => createCerebrasModel({ apiKey: "k", fetch, baseUrl })).toThrow("must be on api.cerebras.ai");
+  });
+
+  it("does not leave an unhandled rejection when the signal was already aborted", async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", record);
+    try {
+      const controller = new AbortController();
+      controller.abort(new Error("deadline"));
+      const failing: FetchLike = () => Promise.reject(new Error("aborted by transport"));
+      await expect(createCerebrasModel({ apiKey: "k", fetch: failing }).complete(request, controller.signal)).rejects.toThrow("deadline");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+  });
+
   it("plugs under the follow-up port", async () => {
     const { fetch } = replay("cerebras-ok");
     const followUp = createFollowUpModel(createCerebrasModel({ apiKey: "k", fetch }));

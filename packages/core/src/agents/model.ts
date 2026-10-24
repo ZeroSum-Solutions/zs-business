@@ -43,7 +43,10 @@ export function abortable<T>(work: Promise<T>, signal: AbortSignal | undefined):
   if (!signal) return work;
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason ?? new Error("Aborted"));
-    if (signal.aborted) return onAbort();
+    if (signal.aborted) {
+      work.catch(() => undefined); // the abandoned work may still reject; nobody else is watching it
+      return onAbort();
+    }
     signal.addEventListener("abort", onAbort, { once: true });
     work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
