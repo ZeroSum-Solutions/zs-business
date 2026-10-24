@@ -229,10 +229,11 @@ export function EnrichmentProposals() {
               <p id="enrichment-batch-hint" className="min-w-0 flex-1 text-sm text-muted" aria-live="polite">
                 {selected.length === 0 ? "Select details to decide them together." : `${selected.length} selected`}
               </p>
-              {selected.length > 0 ? <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+              {/* Below sm the row always holds its place (disabled while empty) so ticking a box never moves the list. */}
+              <div className={`flex w-full flex-wrap gap-2 sm:w-auto${selected.length === 0 ? " sm:hidden" : ""}`}>
                 <Button
                   className="flex-1 sm:flex-none"
-                  disabled={deciding}
+                  disabled={deciding || selected.length === 0}
                   aria-describedby="enrichment-batch-hint"
                   onClick={() => void decide(selected, "approve")}
                 >
@@ -241,13 +242,13 @@ export function EnrichmentProposals() {
                 <Button
                   className="flex-1 sm:flex-none"
                   variant="secondary"
-                  disabled={deciding}
+                  disabled={deciding || selected.length === 0}
                   aria-describedby="enrichment-batch-hint"
                   onClick={() => void decide(selected, "reject")}
                 >
                   Reject selected
                 </Button>
-              </div> : null}
+              </div>
             </div>
           ) : null}
           {groupByContact(proposals).map((group) => {

@@ -82,6 +82,12 @@ describe("company details to review", () => {
     expect(html).toMatch(/<button[^>]*min-h-11/);
   });
 
+  it("keeps the batch buttons in place but disabled until a detail is selected, so a phone layout does not jump", () => {
+    const html = render(PROPOSALS);
+    expect(html).toMatch(/<div class="[^"]*sm:hidden[^"]*"><button[^>]*disabled=""[^>]*>Approve selected/);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Reject selected/);
+  });
+
   it("shows staff the list read-only, with a note that an owner decides", () => {
     const text = textOf(render(PROPOSALS, true));
     expect(text).toContain("Brennan Studio");
