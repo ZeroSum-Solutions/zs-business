@@ -84,6 +84,11 @@ CREATE TABLE public.browser_runs (
   max_cost_micros bigint NOT NULL DEFAULT 500000 CONSTRAINT browser_runs_max_cost CHECK (max_cost_micros BETWEEN 0 AND 100000000),
   steps integer NOT NULL DEFAULT 0 CONSTRAINT browser_runs_steps CHECK (steps >= 0),
   cost_micros bigint NOT NULL DEFAULT 0 CONSTRAINT browser_runs_cost CHECK (cost_micros >= 0),
+  -- BT-9: admission reserves before a step starts. Each admitted step holds one step slot and one
+  -- step's model cost until its event settles it; a closed run holds none. Steps done plus steps in
+  -- flight never pass max_steps, so the wallet capture (steps x step price) never passes the hold.
+  steps_inflight integer NOT NULL DEFAULT 0 CONSTRAINT browser_runs_steps_inflight CHECK (steps_inflight >= 0),
+  reserved_cost_micros bigint NOT NULL DEFAULT 0 CONSTRAINT browser_runs_reserved_cost CHECK (reserved_cost_micros >= 0),
   attempt integer NOT NULL DEFAULT 0 CONSTRAINT browser_runs_attempt CHECK (attempt >= 0),
   -- BT-7: the lease. Only a hash of the token is stored.
   lease_hash text CONSTRAINT browser_runs_lease_hash CHECK (char_length(lease_hash) = 64),
@@ -93,6 +98,9 @@ CREATE TABLE public.browser_runs (
   CONSTRAINT browser_runs_stop_state CHECK ((status = 'stopped') = (stop_reason IS NOT NULL)),
   CONSTRAINT browser_runs_finished_state CHECK ((status IN ('completed', 'stopped')) = (finished_at IS NOT NULL)),
   CONSTRAINT browser_runs_lease_state CHECK ((lease_hash IS NULL) = (lease_until IS NULL)),
+  CONSTRAINT browser_runs_step_budget CHECK (steps + steps_inflight <= max_steps),
+  CONSTRAINT browser_runs_closed_unreserved CHECK (
+    status IN ('queued', 'running') OR (steps_inflight = 0 AND reserved_cost_micros = 0)),
   CONSTRAINT browser_runs_id_unique UNIQUE (id)
 );
 CREATE INDEX browser_runs_queue ON public.browser_runs (requested_at) WHERE status IN ('queued', 'running');
@@ -139,6 +147,8 @@ CREATE TABLE public.browser_run_events (
   FOREIGN KEY (tenant_id, run_id) REFERENCES public.browser_runs(tenant_id, id),
   FOREIGN KEY (tenant_id, screenshot_ref) REFERENCES public.browser_run_artifacts(tenant_id, id)
 );
+-- BT-9: the daily cost cap sums recorded usage by when it was recorded.
+CREATE INDEX browser_run_events_recent ON public.browser_run_events (tenant_id, created_at);
 
 DO $$
 DECLARE t text;
@@ -160,6 +170,9 @@ END $$;
 -- Members (the runtime role) change settings, targets and credential references and request runs
 -- through the dispatcher; everything else about a run they only read.
 GRANT SELECT, INSERT, UPDATE ON public.browser_task_settings, public.browser_targets, public.browser_credentials TO authenticated;
+-- BT-8: saving a target with `secretRef: null` clears its reference. Only this table gets DELETE, and the
+-- tenant_scope policy (FOR ALL) limits it to the member's own tenant.
+GRANT DELETE ON public.browser_credentials TO authenticated;
 GRANT SELECT, INSERT ON public.browser_runs TO authenticated;
 GRANT SELECT ON public.browser_run_artifacts, public.browser_run_events TO authenticated;
 

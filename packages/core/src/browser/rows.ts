@@ -10,11 +10,13 @@ export interface RunRow {
   tenant_id: string; id: string; target_id: string; task_kind: BrowserRun["taskKind"]; status: BrowserRun["status"];
   stop_reason: BrowserStopReason | null; requested_by: string; requested_at: Date; started_at: Date | null;
   finished_at: Date | null; params: { month?: string }; max_steps: number; deadline_ms: number; max_cost_micros: string | number;
-  steps: number; cost_micros: string | number; attempt: number; lease_hash: string | null; lease_until: Date | null;
+  steps: number; cost_micros: string | number; steps_inflight: number; reserved_cost_micros: string | number;
+  attempt: number; lease_hash: string | null; lease_until: Date | null;
   artifact_count?: string | number;
 }
 export const RUN_COLUMNS = `tenant_id, id, target_id, task_kind, status, stop_reason, requested_by, requested_at, started_at,
-  finished_at, params, max_steps, deadline_ms, max_cost_micros, steps, cost_micros, attempt, lease_hash, lease_until`;
+  finished_at, params, max_steps, deadline_ms, max_cost_micros, steps, cost_micros, steps_inflight, reserved_cost_micros, attempt,
+  lease_hash, lease_until`;
 
 const iso = (value: Date | null) => (value ? value.toISOString() : null);
 
@@ -63,12 +65,20 @@ export async function loadSettings(tx: Transaction, tenantId: string, lock: bool
 }
 
 const DAY_MS = 24 * 3_600_000;
-/** BT-9: runs requested and cost recorded in the 24 hours before `now`. */
-export async function dayFigures(tx: Transaction, tenantId: string, now: Date): Promise<{ runs: number; costMicros: number }> {
-  const row = (await tx.query<{ runs: string; cost: string }>(
-    `SELECT count(*)::text AS runs, coalesce(sum(cost_micros), 0)::text AS cost FROM browser_runs
-      WHERE tenant_id=$1 AND requested_at > $2`, [tenantId, new Date(now.getTime() - DAY_MS)])).rows[0]!;
-  return { runs: Number(row.runs), costMicros: Number(row.cost) };
+/**
+ * BT-9: the tenant's figures for the 24 hours before `now`. Runs count when they were requested;
+ * cost counts the model usage recorded in that window (whenever its run was queued), and
+ * `reservedMicros` is what admitted steps of open runs have reserved but not yet recorded.
+ */
+export async function dayFigures(tx: Transaction, tenantId: string, now: Date):
+  Promise<{ runs: number; costMicros: number; reservedMicros: number }> {
+  const row = (await tx.query<{ runs: string; cost: string; reserved: string }>(
+    `SELECT (SELECT count(*) FROM browser_runs WHERE tenant_id=$1 AND requested_at > $2)::text AS runs,
+            (SELECT coalesce(sum(cost_micros), 0) FROM browser_run_events WHERE tenant_id=$1 AND created_at > $2)::text AS cost,
+            (SELECT coalesce(sum(reserved_cost_micros), 0) FROM browser_runs
+              WHERE tenant_id=$1 AND status IN ('queued', 'running'))::text AS reserved`,
+    [tenantId, new Date(now.getTime() - DAY_MS)])).rows[0]!;
+  return { runs: Number(row.runs), costMicros: Number(row.cost), reservedMicros: Number(row.reserved) };
 }
 
 /** BT-12: the status an owner reads, with the first reason a run cannot start now. */
@@ -83,7 +93,7 @@ export async function browserStatus(tx: Transaction, tenantId: string, now: Date
   else if (!settings?.enabled) blockedBy = "disabled";
   else if (settings.killed_at) blockedBy = "tenant_killed";
   else if (figures.runs >= maxRuns) blockedBy = "daily_cap";
-  else if (figures.costMicros >= maxCost) blockedBy = "cost_cap";
+  else if (figures.costMicros + figures.reservedMicros >= maxCost) blockedBy = "cost_cap";
   const targets = (await tx.query<TargetRow>(`${TARGET_SELECT} WHERE t.tenant_id=$1 ORDER BY t.name, t.id`, [tenantId])).rows.map(mapTarget);
   return {
     settings: { enabled: settings?.enabled ?? false, maxRunsPerDay: maxRuns, maxCostMicrosPerDay: maxCost },

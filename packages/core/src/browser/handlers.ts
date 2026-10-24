@@ -164,7 +164,7 @@ const requestRunHandler: ActionHandler = {
     if (!found.enabled || !found.attestedBy) throw refuse("target_disabled");
     const figures = await dayFigures(tx, binding.tenantId, now);
     if (figures.runs >= settings.max_runs_per_day) throw refuse("daily_cap");
-    if (figures.costMicros >= Number(settings.max_cost_micros_per_day)) throw refuse("cost_cap");
+    if (figures.costMicros + figures.reservedMicros >= Number(settings.max_cost_micros_per_day)) throw refuse("cost_cap");
     await tx.query(
       `INSERT INTO browser_runs (tenant_id, id, target_id, task_kind, requested_by, requested_at, params, max_steps, deadline_ms, max_cost_micros)
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)`,

@@ -17,13 +17,21 @@ export interface BrowserConfig {
   readonly allowLoopback: boolean;
   /** G-15: the price table the planner's model usage is priced from. */
   readonly modelPrices: ModelPrices;
+  /**
+   * BT-9: the model cost, in micros, one step reserves when it is admitted (at least one planner
+   * call at its maximum tokens under `modelPrices`). A step whose call costs more is still recorded
+   * and closes the run `cost_cap`, so this bounds the overshoot to the excess of one call.
+   */
+  readonly stepModelReserveMicros: number;
 }
 
-export function browserConfig(input: Partial<BrowserConfig> & Pick<BrowserConfig, "stepPrice" | "modelPrices">): BrowserConfig {
+export function browserConfig(input: Partial<BrowserConfig> & Pick<BrowserConfig, "stepPrice" | "modelPrices" | "stepModelReserveMicros">): BrowserConfig {
   const config: BrowserConfig = {
     currency: "usd", leaseMs: 120_000, stallGraceMs: 300_000, allowLoopback: false, ...input,
   };
   if (!Number.isSafeInteger(config.stepPrice) || config.stepPrice < 1) throw new ValidationFailed("stepPrice must be a positive integer");
+  if (!Number.isSafeInteger(config.stepModelReserveMicros) || config.stepModelReserveMicros < 1)
+    throw new ValidationFailed("stepModelReserveMicros must be a positive integer");
   if (!Number.isSafeInteger(config.leaseMs) || config.leaseMs < 1000) throw new ValidationFailed("leaseMs must be at least 1000");
   if (!Number.isSafeInteger(config.stallGraceMs) || config.stallGraceMs < 0) throw new ValidationFailed("stallGraceMs must not be negative");
   return Object.freeze(config);

@@ -16,7 +16,7 @@ import { captureReservation, heldReservationForJob, releaseReservation, reserveF
 import type { BrowserConfig, BrowserCredentialResolver } from "./config.js";
 import { eventLocation } from "./policy.js";
 import { artifactKey } from "./profile.js";
-import { getBrowserRun, loadSettings, mapRun, RUN_COLUMNS, type RunRow } from "./rows.js";
+import { dayFigures, getBrowserRun, loadSettings, mapRun, RUN_COLUMNS, type RunRow } from "./rows.js";
 import type { BrowserArtifactStore } from "./store.js";
 
 export interface BrowserRunnerServiceDeps {
@@ -52,14 +52,15 @@ const startsWith = (bytes: Uint8Array, magic: readonly number[]) => magic.every(
 export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
   const { config } = deps;
   const now = () => deps.clock.now();
+  const reserve = config.stepModelReserveMicros;
 
   /** BT-9: close a run once. Captures what the steps cost and releases the rest of the hold (D-11). */
   async function closeRun(
     tx: Transaction, row: RunRow, outcome: { status: "completed" } | { status: "stopped"; reason: BrowserStopReason }, at: Date,
   ): Promise<RunRow> {
     const closed = (await tx.query<RunRow>(
-      `UPDATE browser_runs SET status=$3, stop_reason=$4, finished_at=$5 WHERE tenant_id=$1 AND id=$2 AND status IN ('queued','running')
-        RETURNING ${RUN_COLUMNS}`,
+      `UPDATE browser_runs SET status=$3, stop_reason=$4, finished_at=$5, steps_inflight=0, reserved_cost_micros=0
+        WHERE tenant_id=$1 AND id=$2 AND status IN ('queued','running') RETURNING ${RUN_COLUMNS}`,
       [row.tenant_id, row.id, outcome.status, outcome.status === "stopped" ? outcome.reason : null, at])).rows[0];
     if (!closed) return row;
     const held = await heldReservationForJob(tx, row.tenant_id, "browser_run", row.id);
@@ -74,22 +75,36 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
     return closed;
   }
 
-  /** BT-12: the first reason this run must stop now, from the switches and caps. */
-  async function stopReason(tx: Transaction, row: RunRow, at: Date): Promise<BrowserStopReason | null> {
-    if (await readGlobalKilled(tx, false)) return "killed";
+  /** BT-12: a switch that stops the run now: the global and tenant kill switches, the feature, the target. */
+  async function switchReason(tx: Transaction, row: RunRow) {
+    if (await readGlobalKilled(tx, false)) return { reason: "killed" as const, settings: null };
     const settings = await loadSettings(tx, row.tenant_id, false);
-    if (!settings?.enabled) return "disabled";
-    if (settings.killed_at) return "killed";
+    if (!settings?.enabled) return { reason: "disabled" as const, settings };
+    if (settings.killed_at) return { reason: "killed" as const, settings };
     const target = (await tx.query<{ enabled: boolean; attested_by: string | null }>(
       "SELECT enabled, attested_by FROM browser_targets WHERE tenant_id=$1 AND id=$2", [row.tenant_id, row.target_id])).rows[0];
-    if (!target?.enabled || !target.attested_by) return "disabled";
-    if (row.steps >= row.max_steps) return "step_cap";
-    if (row.started_at && at.getTime() > row.started_at.getTime() + row.deadline_ms) return "deadline";
-    if (Number(row.cost_micros) >= Number(row.max_cost_micros)) return "cost_cap";
-    const day = Number((await tx.query<{ cost: string }>(
-      "SELECT coalesce(sum(cost_micros),0)::text AS cost FROM browser_runs WHERE tenant_id=$1 AND requested_at > $2",
-      [row.tenant_id, new Date(at.getTime() - 24 * 3_600_000)])).rows[0]!.cost);
-    if (day >= Number(settings.max_cost_micros_per_day)) return "cost_cap";
+    if (!target?.enabled || !target.attested_by) return { reason: "disabled" as const, settings };
+    return { reason: null, settings };
+  }
+
+  const pastDeadline = (row: RunRow, at: Date) => row.started_at !== null && at.getTime() > row.started_at.getTime() + row.deadline_ms;
+
+  /**
+   * BT-9, BT-12: the first reason one more step may not start. A step is admitted only if its step
+   * slot and one step's model cost (`stepModelReserveMicros`) fit next to what is recorded and what
+   * steps already in flight reserved: the run's steps and cost, and the tenant's daily cost. A
+   * per-tenant advisory lock serializes admissions of one tenant's runs, so two cannot both pass the
+   * daily cap (the run's own caps are already serialized by its row lock).
+   */
+  async function admissionReason(tx: Transaction, row: RunRow, at: Date): Promise<BrowserStopReason | null> {
+    await tx.query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))", [`browser-day:${row.tenant_id}`]);
+    const { reason, settings } = await switchReason(tx, row);
+    if (reason) return reason;
+    if (pastDeadline(row, at)) return "deadline";
+    if (row.steps + row.steps_inflight + 1 > row.max_steps) return "step_cap";
+    if (Number(row.cost_micros) + Number(row.reserved_cost_micros) + reserve > Number(row.max_cost_micros)) return "cost_cap";
+    const day = await dayFigures(tx, row.tenant_id, at);
+    if (day.costMicros + day.reservedMicros + reserve > Number(settings!.max_cost_micros_per_day)) return "cost_cap";
     return null;
   }
 
@@ -109,7 +124,13 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
           ORDER BY requested_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [at])).rows[0];
       if (!row) return null;
       // A re-claim after an expired lease starts a new attempt; the same gates apply as to a first claim.
-      const reason = await stopReason(tx, row, at);
+      // The dead lease's admitted steps can no longer report, so their reservations end here.
+      if (row.steps_inflight > 0 || Number(row.reserved_cost_micros) > 0) {
+        await tx.query("UPDATE browser_runs SET steps_inflight=0, reserved_cost_micros=0 WHERE tenant_id=$1 AND id=$2", [row.tenant_id, row.id]);
+        row.steps_inflight = 0;
+        row.reserved_cost_micros = 0;
+      }
+      const reason = await admissionReason(tx, row, at);
       if (reason) { await closeRun(tx, row, { status: "stopped", reason }, at); return "closed"; }
       let held = await heldReservationForJob(tx, row.tenant_id, "browser_run", row.id);
       if (!held) {
@@ -167,10 +188,17 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
         if (row.status === "stopped") return { stop: row.stop_reason };
         if (row.status === "completed") return { stop: null };
         if (row.lease_until!.getTime() <= at.getTime()) throw new TenantDenied();
-        const reason = await stopReason(tx, row, at);
-        if (reason) { await closeRun(tx, row, { status: "stopped", reason }, at); return { stop: reason }; }
-        await tx.query("UPDATE browser_runs SET lease_until=$3 WHERE tenant_id=$1 AND id=$2",
-          [row.tenant_id, row.id, new Date(at.getTime() + config.leaseMs)]);
+        // Reserve first, then admit: the step slot and its model cost are taken under the row lock.
+        const reason = await admissionReason(tx, row, at);
+        if (reason) {
+          // A step still in flight closes the run when its event arrives (or the runner finishes), so its usage is kept.
+          if (row.steps_inflight === 0) await closeRun(tx, row, { status: "stopped", reason }, at);
+          return { stop: reason };
+        }
+        await tx.query(
+          `UPDATE browser_runs SET lease_until=$3, steps_inflight=steps_inflight+1, reserved_cost_micros=reserved_cost_micros+$4
+            WHERE tenant_id=$1 AND id=$2`,
+          [row.tenant_id, row.id, new Date(at.getTime() + config.leaseMs), reserve]);
         return { stop: null };
       });
     },
@@ -193,21 +221,43 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
             [row.tenant_id, row.id, input.screenshotRef]);
           if (found.rowCount !== 1) throw new ValidationFailed("The screenshot is not a file of this run");
         }
+        // BT-9, BT-12: the caps hold when the event arrives, not only when the step was admitted. A switch
+        // or a passed deadline closes the run after the event is recorded (the step already happened).
+        // A step that was never admitted and does not fit is recorded as the closing `stop` event,
+        // with its usage, and is not counted: steps never pass max_steps, nor the capture the hold.
+        const admitted = row.steps_inflight > 0;
+        const counts = input.action !== "stop";
+        let reason: BrowserStopReason | null = (await switchReason(tx, row)).reason ?? (pastDeadline(row, at) ? "deadline" : null);
+        let action = input.action;
+        if (counts && !admitted && row.steps + row.steps_inflight + 1 > row.max_steps) {
+          reason ??= "step_cap";
+          action = "stop";
+        }
         const seq = Number((await tx.query<{ next: number }>(
           "SELECT coalesce(max(seq), 0) + 1 AS next FROM browser_run_events WHERE tenant_id=$1 AND run_id=$2", [row.tenant_id, row.id])).rows[0]!.next);
         await tx.query(
           `INSERT INTO browser_run_events (tenant_id, run_id, seq, origin, path, action, screenshot_ref, lane, model, input_tokens, output_tokens, cost_micros, created_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-          [row.tenant_id, row.id, seq, location?.origin ?? null, location?.path ?? null, input.action, input.screenshotRef ?? null,
+          [row.tenant_id, row.id, seq, location?.origin ?? null, location?.path ?? null, action, input.screenshotRef ?? null,
             input.usage?.lane ?? null, input.usage?.model ?? null, input.usage?.inputTokens ?? 0, input.usage?.outputTokens ?? 0, cost, at]);
+        // Settle: the admitted step gives back its slot and reservation, and its actual cost is added.
         const updated = (await tx.query<RunRow>(
-          `UPDATE browser_runs SET steps = steps + $3, cost_micros = cost_micros + $4, lease_until = $5
+          `UPDATE browser_runs SET steps = steps + $3, cost_micros = cost_micros + $4, lease_until = $5,
+             steps_inflight = steps_inflight - $6,
+             reserved_cost_micros = CASE WHEN steps_inflight - $6 = 0 THEN 0 ELSE greatest(reserved_cost_micros - $6 * $7, 0) END
             WHERE tenant_id=$1 AND id=$2 RETURNING ${RUN_COLUMNS}`,
-          [row.tenant_id, row.id, input.action === "stop" ? 0 : 1, cost, new Date(at.getTime() + config.leaseMs)])).rows[0]!;
-        // A call that took the run past its cost cap closes it now, so the next step never starts.
-        if (Number(updated.cost_micros) > Number(updated.max_cost_micros)) {
-          await closeRun(tx, updated, { status: "stopped", reason: "cost_cap" }, at);
-          return { seq, stop: "cost_cap" as const };
+          [row.tenant_id, row.id, action === "stop" ? 0 : 1, cost, new Date(at.getTime() + config.leaseMs), admitted ? 1 : 0, reserve])).rows[0]!;
+        // A call that cost more than its reservation can take the run or the day past its cap: close now,
+        // so the next step never starts.
+        if (!reason && Number(updated.cost_micros) > Number(updated.max_cost_micros)) reason = "cost_cap";
+        if (!reason) {
+          const settings = await loadSettings(tx, row.tenant_id, false);
+          const day = await dayFigures(tx, row.tenant_id, at);
+          if (settings && day.costMicros + day.reservedMicros > Number(settings.max_cost_micros_per_day)) reason = "cost_cap";
+        }
+        if (reason) {
+          await closeRun(tx, updated, { status: "stopped", reason }, at);
+          return { seq, stop: reason };
         }
         return { seq, stop: null };
       });
@@ -249,9 +299,14 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
         const at = now();
         const row = await leasedRun(tx, lease, at, false);
         if (row.status === "running" && row.lease_until!.getTime() <= at.getTime()) throw new TenantDenied();
-        const closed = row.status === "queued" || row.status === "running"
-          ? await closeRun(tx, row, input.outcome === "read_done" ? { status: "completed" } : { status: "stopped", reason: input.reason }, at)
-          : row;
+        // BT-9: a result reported past the deadline or the caps is not a completed run.
+        const capped: BrowserStopReason | null = pastDeadline(row, at) ? "deadline"
+          : row.steps > row.max_steps ? "step_cap"
+            : Number(row.cost_micros) > Number(row.max_cost_micros) ? "cost_cap" : null;
+        const outcome = input.outcome === "read_done"
+          ? (capped ? { status: "stopped" as const, reason: capped } : { status: "completed" as const })
+          : { status: "stopped" as const, reason: input.reason };
+        const closed = row.status === "queued" || row.status === "running" ? await closeRun(tx, row, outcome, at) : row;
         // Reread with the file count: the closing UPDATE does not return it.
         return (await getBrowserRun(tx, closed.tenant_id, closed.id)) ?? mapRun(closed);
       });

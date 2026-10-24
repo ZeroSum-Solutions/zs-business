@@ -17,7 +17,7 @@ import { call, createApiHarness, NOW, ORIGIN, SECRET, signedInMember, type ApiHa
 const clock = { now: () => new Date(NOW) };
 const RUNNER_TOKEN = "runner-token-for-tests-0123456789";
 const PASSWORD = "p4ss-PLANTED-HTTP-5521";
-const config = browserConfig({ stepPrice: 10, modelPrices: FAKE_MODEL_PRICES, allowLoopback: true });
+const config = browserConfig({ stepPrice: 10, modelPrices: FAKE_MODEL_PRICES, allowLoopback: true, stepModelReserveMicros: 100 });
 
 let h: ApiHarness;
 let app: App;

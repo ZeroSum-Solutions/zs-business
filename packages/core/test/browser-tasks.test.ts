@@ -26,7 +26,9 @@ let database: TestDatabase;
 const service = <T>(work: (tx: Transaction) => Promise<T>) => asService(database.servicePool, work);
 const rows = async <T = Record<string, unknown>>(sql: string, params: unknown[] = []) => service(async (tx) => (await tx.query(sql, params)).rows as T[]);
 const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID });
-const config: BrowserConfig = browserConfig({ stepPrice: STEP_PRICE, modelPrices: FAKE_MODEL_PRICES, allowLoopback: true });
+/** The model cost one admitted step reserves (at least one planner call). */
+const STEP_RESERVE = 100;
+const config: BrowserConfig = browserConfig({ stepPrice: STEP_PRICE, modelPrices: FAKE_MODEL_PRICES, allowLoopback: true, stepModelReserveMicros: STEP_RESERVE });
 
 async function rejection(promise: Promise<unknown>): Promise<ActionError> {
   try { await promise; } catch (error) { if (error instanceof ActionError) return error; throw error; }
@@ -183,7 +185,7 @@ describe("tenant isolation and the profile (BT-6, BT-8)", () => {
       allowedPaths: ["/invoices"], assetPaths: [], signInPath: "/login", enabled: false,
     };
     await expect(owner.saveTarget({ ...base, secretRef: `browser/${randomUUID()}/supplier` }, randomUUID())).rejects.toBeInstanceOf(ValidationFailed);
-    const strict = browserConfig({ stepPrice: STEP_PRICE, modelPrices: FAKE_MODEL_PRICES });
+    const strict = browserConfig({ stepPrice: STEP_PRICE, modelPrices: FAKE_MODEL_PRICES, stepModelReserveMicros: STEP_RESERVE });
     await expect(w.sessionFor(w.owner, strict).saveTarget({ ...base, allowedOrigins: [w.site.origin] }, randomUUID())).rejects.toBeInstanceOf(ValidationFailed);
     // Enabling a target without the attestation is refused by the schema.
     expect((await rejection(owner.saveTarget({ ...base, enabled: true }, randomUUID()))).name).toBe("ValidationFailed");
@@ -330,8 +332,9 @@ describe("stop switches and caps (BT-9, BT-12)", () => {
 
     await requestRun(w, { maxCostMicros: 100 });
     const priced = (await runBrowserJob({ service: w.runner, runner: runnerFor(), browserRoot: "/var/zs-browser" }))?.run;
-    expect(priced).toMatchObject({ status: "stopped", stopReason: "cost_cap", steps: 2 });
-    expect(priced!.costMicros).toBe(2 * CALL_COST);
+    // The second step's reservation does not fit next to the first step's cost: it never starts.
+    expect(priced).toMatchObject({ status: "stopped", stopReason: "cost_cap", steps: 1 });
+    expect(priced!.costMicros).toBe(CALL_COST);
     expect(await wallet(w)).toMatchObject({ reserved: 0 });
   });
 
