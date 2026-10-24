@@ -10,7 +10,7 @@ import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  AGENT_ACTIONS, agentHandlers, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, browserHandlers, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, documentIntakeHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -64,6 +64,12 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "agent.kind.settings.update": "agents",
   "agent.kind.kill": "inbox.drafts",
   "agent.kind.resume": "agents",
+  // browser-tasks.md BT-9, BT-11: owners change and run website tasks; any member who drafts may stop them.
+  "browser.kill": "inbox.drafts",
+  "browser.resume": "agents",
+  "browser.run.request": "agents",
+  "browser.settings.update": "agents",
+  "browser.target.save": "agents",
   "business.profile.update": "business",
   "enrichment.request": "enrich",
   "contact.enrichment.block": "customers",
@@ -417,7 +423,7 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1); the intake worker's result and fail actions
       // belong to its server-side principal (document-intake.md DL-5); the image worker's to its own.

@@ -119,7 +119,7 @@ describe("reserve before the vendor call (D-11, D-5)", () => {
 
   it("refuses a kind with no registered job table, and a kind the contract does not list", async () => {
     await h.credit(tenant, 100);
-    for (const kind of ["voice_minutes", "browser_run"] as const)
+    for (const kind of ["voice_minutes"] as const)
       await expect(h.service((tx) => reserveForJob(tx, {
         tenantId: tenant, jobKind: kind, jobId: randomUUID(), reservationId: randomUUID(), amount: 5, currency: "usd", now: h.clock.now(),
       })), kind).rejects.toMatchObject({ code: "Conflict", details: { reason: "job_kind_unavailable" } });

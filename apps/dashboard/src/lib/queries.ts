@@ -57,6 +57,10 @@ export const keys = {
   /** Pages of the agent's runs, newest first. */
   followUpRuns: ["agents", "followup", "runs"] as const,
   followUpRun: (id: string) => ["agents", "followup", "run", id] as const,
+  /** Website tasks (browser-tasks.md): status, runs and one run's steps and files. */
+  browser: ["agents", "browser", "status"] as const,
+  browserRuns: ["agents", "browser", "runs"] as const,
+  browserRun: (id: string) => ["agents", "browser", "run", id] as const,
   /** The agent's actor ID, derived from the tenant (agents.md G-1). */
   agentActor: ["agents", "actor"] as const,
   agentsAll: ["agents"] as const,
@@ -363,6 +367,37 @@ export function useFollowUpStatus() {
   const { keys, enabled } = useKeys();
   return useQuery({
     enabled, queryKey: keys.followUp, queryFn: ({ signal }) => api.getFollowUpStatus({ signal }), staleTime: 0, refetchInterval: 60_000,
+  });
+}
+
+/** Website tasks: switches, caps and targets. Read afresh each visit and each minute: someone may stop it. */
+export function useBrowserStatus() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.browser, queryFn: ({ signal }) => api.getBrowserStatus({ signal }), staleTime: 0, refetchInterval: 60_000, retry: false,
+  });
+}
+
+/** Recent website task runs, newest first. A run in progress is read again every few seconds. */
+export function useBrowserRuns() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.browserRuns, queryFn: ({ signal }) => api.listBrowserRuns({ signal }),
+    refetchInterval: (query) => (query.state.data?.some((run) => run.status === "queued" || run.status === "running") ? 5_000 : false),
+  });
+}
+
+/** One run with its steps and files; null reads nothing. */
+export function useBrowserRun(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    queryKey: keys.browserRun(id ?? "none"),
+    queryFn: ({ signal }) => api.getBrowserRun(id!, { signal }),
+    enabled: enabled && id !== null,
+    refetchInterval: (query) => (query.state.data && (query.state.data.run.status === "queued" || query.state.data.run.status === "running") ? 5_000 : false),
   });
 }
 

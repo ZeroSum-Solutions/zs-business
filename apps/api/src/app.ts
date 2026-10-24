@@ -7,6 +7,7 @@ import {
   apiErrorBody,
   AuthUnavailable,
   authenticate,
+  createBrowserSession,
   createDocumentIntakeSession,
   createEnrichmentSession,
   createFollowUpAgent,
@@ -29,6 +30,7 @@ import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
 import { agentKindRoutes, followUpRoutes } from "./routes/agents.js";
 import { businessRoutes } from "./routes/business.js";
+import { browserRoutes, browserRunnerRoutes, type BrowserApiConfig } from "./routes/browser.js";
 import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
@@ -100,6 +102,11 @@ export interface AppDependencies {
    * under /v1/integrations/activepieces and the flow routes under /integrations/activepieces are off.
    */
   readonly activepieces?: AutomationEdgeConfig;
+  /**
+   * Website tasks (browser-tasks.md): the owner routes under /v1/browser, and with `runner` the
+   * runner's job interface under /browser-runner/v1. Absent means both are off (404).
+   */
+  readonly browser?: BrowserApiConfig;
   /**
    * Company enrichment (enrichment.md E-5, E-8, E-9): the gates, price and caps the request action
    * reads. Absent means every request is refused `enrichment_unavailable`; reads still work.
@@ -233,6 +240,12 @@ export function createApp(deps: AppDependencies) {
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
 
+  // The runner's calls carry a runner token and a lease, not a member session (BT-7).
+  if (deps.browser?.runner) {
+    app.use("/browser-runner/v1/*", deadline);
+    app.route("/browser-runner/v1", browserRunnerRoutes(deps.browser.runner));
+  }
+
   // The worker has its own bearer token and no member session, so it sits outside /v1 auth.
   const transcription = deps.transcription;
   const transcriptionFor = (c: Context<AppEnv>) => createTranscriptionSession(requestEdge(c), transcription!);
@@ -282,6 +295,10 @@ export function createApp(deps: AppDependencies) {
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
   app.route("/v1/agents", agentKindRoutes());
+  const browser = deps.browser;
+  if (browser)
+    app.route("/v1/browser", browserRoutes(browser, (c) =>
+      createBrowserSession(requestEdge(c), c.var.session.principal, { config: browser.config, artifacts: browser.artifacts })));
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
   const enrichment = deps.enrichment;
