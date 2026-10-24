@@ -5,7 +5,10 @@ import {
   bookingPageSchema,
   bookingPageSummarySchema,
   businessProfileReadSchema,
+  approvalOutputSchema,
+  approveApprovalResponseSchema,
   contactEnrichmentSchema,
+  enrichmentProposalListSchema,
   enrichmentRequestRecordSchema,
   calendarConnectionListSchema,
   calendarConnectionSchema,
@@ -50,7 +53,7 @@ import {
   type SetDealDetailsRequest,
   type UpdateFollowUpSettingsRequest,
 } from "@zs/contracts";
-import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, runNotFound, threadNotFound } from "./errors";
+import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, proposalNotFound, runNotFound, threadNotFound } from "./errors";
 import {
   CONTACT_PAGE_SIZE,
   RUN_PAGE_SIZE,
@@ -464,6 +467,21 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     async requestEnrichment(contactId, options) {
       return (await write("/v1/enrichment/requests", { op: "company.enrich", contactId }, enrichmentOutputSchema, options)).result;
+    },
+
+    async listEnrichmentProposals(options = {}) {
+      return (await request({ method: "GET", path: "/v1/enrichment/proposals", schema: enrichmentProposalListSchema, signal: options.signal })).items;
+    },
+
+    async decideEnrichmentProposal(approvalId, decision, options) {
+      if (!uuidSchema.safeParse(approvalId).success) throw proposalNotFound();
+      // Approve answers the approval and the apply it ran; reject answers the approval alone.
+      const schema = decision === "approve" ? approveApprovalResponseSchema : approvalOutputSchema;
+      try {
+        await write(`/v1/approvals/${encodeURIComponent(approvalId)}/${decision}`, {}, schema, options);
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? proposalNotFound() : error;
+      }
     },
 
     getFollowUpStatus(options = {}) {

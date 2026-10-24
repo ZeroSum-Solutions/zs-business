@@ -113,6 +113,8 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   insufficient_funds: "Your balance is too low for a lookup. Add funds, then try again.",
   enrichment_daily_cap: "You reached today's limit on lookups. Try again tomorrow.",
   enrichment_result_expired: "Those details expired. Ask for them again.",
+  approval_not_pending: "Someone already decided this. The list now shows what is left.",
+  approval_expired: "This expired before anyone decided it. Look up the company again for fresh details.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -225,6 +227,11 @@ export function contactNotFound(): ApiError {
  */
 export function isSettingsChanged(error: unknown): error is ApiError {
   return isDealChanged(error);
+}
+
+/** Both clients raise this for an unknown, foreign or malformed company-detail proposal (enrichment.md E-14). */
+export function proposalNotFound(): ApiError {
+  return new ApiError("not_found", "We could not find that suggested detail. It may have been decided already.", 404, "NotFound");
 }
 
 /** Both clients raise this for an unknown or malformed agent run ID. */

@@ -3,9 +3,10 @@
  * server reads the person's Supabase session from httpOnly cookies, refreshes it when it is
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
- * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source, inbox, home, agent, business, site and calendar routes and /v1/me are forwarded (for
- * example /v1/approvals/:id/approve, /v1/inbox/threads, PUT /v1/business and PUT /v1/agents/followup/settings), only
+ * A caller's own Authorization header is ignored. Only the booking, CRM, contact, enrichment, intake,
+ * member, approval, source, inbox, home, agent, business, site and calendar routes and /v1/me are forwarded (for
+ * example /v1/approvals/:id/approve, /v1/contacts/:id/enrichment, /v1/enrichment/proposals, /v1/inbox/threads,
+ * PUT /v1/business and PUT /v1/agents/followup/settings), only
  * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
  * Google Calendar connection also binds the flow to this browser, and reading or confirming a
  * staged grant sends the API the grant this browser holds (calendar-connect.ts).
@@ -23,7 +24,7 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions"]);
+const AREAS = new Set(["booking", "crm", "contacts", "enrichment", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions"]);
 const SINGLE = new Set(["me", "members", "approvals", "sources", "sites", "business", "transcriptions"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */

@@ -64,6 +64,8 @@ export const keys = {
   business: ["business"] as const,
   /** One customer's company details and lookups (enrichment.md E-17). */
   contactEnrichment: (id: string) => ["crm", "contact", id, "enrichment"] as const,
+  /** The business's company-detail proposals waiting for an owner (enrichment.md E-14, E-17). */
+  enrichmentProposals: ["crm", "enrichment", "proposals"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
@@ -378,6 +380,17 @@ export function useContactEnrichment(contactId: string) {
     queryKey: keys.contactEnrichment(contactId),
     queryFn: ({ signal }) => api.getContactEnrichment(contactId, { signal }),
     refetchInterval: (query) => (query.state.data?.requests.some((r) => r.status === "pending" || r.status === "leased" || r.status === "uncertain") ? 4_000 : false),
+  });
+}
+
+/** The company details found for customers that wait for an owner's decision, oldest first (E-14). */
+export function useEnrichmentProposals() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled,
+    queryKey: keys.enrichmentProposals,
+    queryFn: ({ signal }) => api.listEnrichmentProposals({ signal }),
   });
 }
 

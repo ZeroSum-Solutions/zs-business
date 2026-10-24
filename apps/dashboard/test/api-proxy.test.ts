@@ -138,12 +138,13 @@ describe("api proxy", () => {
     expect((await proxyApiRequest(request(behindProxy), contacts, trusted)).status).toBe(200);
   });
 
-  it("forwards only the booking, CRM, intake, member, approval, source, inbox, home, agent, business, site, calendar and /me routes, with GET, POST, PUT and DELETE", async () => {
+  it("forwards only the booking, CRM, contact, enrichment, intake, member, approval, source, inbox, home, agent, business, site, calendar and /me routes, with GET, POST, PUT and DELETE", async () => {
     const { harness, jar, get, post } = await signedIn();
     for (const path of [
       ["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"], ["v1", "me", "x"],
       ["v1", "approvals", ".."], ["v1", "approval"], ["v1", "inbox"], ["v1", "home"], ["v1", "agents"], ["v1", "agent", "followup"],
       ["v1", "calendar"], ["v1", "business", "x"], ["v1", "businesses"], ["oauth", "google", "callback"],
+      ["v1", "enrichment"], ["v1", "contacts"], ["v1", "enrichment", ".."], ["v1", "contact", "c-1", "enrichment"],
     ]) {
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(404);
     }
@@ -157,15 +158,18 @@ describe("api proxy", () => {
       ["v1", "inbox", "threads"], ["v1", "inbox", "threads", "c_x"], ["v1", "home", "results"],
       ["v1", "agents", "followup"], ["v1", "agents", "followup", "runs"], ["v1", "agents", "followup", "runs", "r-1"],
       ["v1", "sites"], ["v1", "sites", "s-1", "releases"], ["v1", "transcriptions"], ["v1", "transcriptions", "j-1"], ["v1", "calendar", "connections"], ["v1", "business"],
+      // enrichment.md E-17: a customer's company details and the proposals waiting for an owner.
+      ["v1", "contacts", "c-1", "enrichment"], ["v1", "enrichment", "proposals"], ["v1", "enrichment", "requests", "r-1"],
     ])
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
     const approve = await proxyApiRequest(post("v1/approvals/a-1/approve", {}, { "Idempotency-Key": "k-a", Origin: ORIGIN }), ["v1", "approvals", "a-1", "approve"], harness.setup);
     expect(approve.status).toBe(200);
     expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/approvals/a-1/approve");
-    for (const path of [["v1", "approvals"], ["v1", "sources"]]) {
+    for (const path of [["v1", "approvals"], ["v1", "sources"], ["v1", "enrichment", "requests"], ["v1", "contacts", "c-1", "enrichment", "block"]]) {
       const response = await proxyApiRequest(post(path.join("/"), {}, { "Idempotency-Key": `k-${path[1]}`, Origin: ORIGIN }), path, harness.setup);
       expect(response.status, path.join("/")).toBe(200);
       expect(harness.apiCalls.at(-1)!.init.method).toBe("POST");
+      expect(harness.apiCalls.at(-1)!.url).toBe(`http://api.internal:8787/${path.join("/")}`);
     }
     // business-profile.md BP-6: the profile is saved with PUT, which carries a JSON body like a POST.
     const savedBusiness = new Request(`${ORIGIN}/api/v1/business`, {
