@@ -1,0 +1,6 @@
+{
+  "status": 429,
+  "body": {
+    "error": { "message": "Rate limit reached. Your prompt: Guest Halden Rowe asked about parking", "type": "rate_limit_error" }
+  }
+}

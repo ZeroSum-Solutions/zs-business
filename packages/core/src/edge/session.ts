@@ -32,6 +32,11 @@ import {
   businessProfileOutputSchema,
   updateBusinessProfileRequestSchema,
   followUpStatusOutputSchema,
+  agentKindSchema,
+  agentKindStatusOutputSchema,
+  killAgentKindRequestSchema,
+  resumeAgentKindRequestSchema,
+  updateAgentKindSettingsRequestSchema,
   killFollowUpRequestSchema,
   listFollowUpRunsQuerySchema,
   resumeFollowUpRequestSchema,
@@ -80,6 +85,8 @@ import {
   type BusinessProfile,
   type BusinessProfileOutput,
   type FollowUpStatusOutput,
+  type AgentKindStatus,
+  type AgentKindStatusOutput,
   type JsonValue,
   type BookingPageSummary,
   type MeResponse,
@@ -107,7 +114,7 @@ import {
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
-import { AGENT_MEMBER_PERMISSIONS, agentHandlers, followUpStatus, getRun, listRuns } from "../agents/index.js";
+import { AGENT_MEMBER_PERMISSIONS, agentHandlers, agentKindStatus, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { businessHandlers, getBusinessProfile } from "../business/index.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
@@ -974,7 +981,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     async updateFollowUpSettings(body: unknown, key: unknown): Promise<FollowUpStatusOutput> {
       const request = parseInput(updateFollowUpSettingsRequestSchema, body);
       return parseInput(followUpStatusOutputSchema,
-        await run({ actionType: "agent.settings.update", ...agentSettingsEnvelope(key), payload: request }), "result");
+        await run({ actionType: "agent.settings.update", ...agentSettingsEnvelope(key), payload: toJson(request) }), "result");
     },
     /** G-3: stop the agent drafting for this tenant at once; staff may too. */
     async killFollowUp(body: unknown, key: unknown): Promise<FollowUpStatusOutput> {
@@ -986,7 +993,34 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     async resumeFollowUp(body: unknown, key: unknown): Promise<FollowUpStatusOutput> {
       const request = parseInput(resumeFollowUpRequestSchema, body);
       return parseInput(followUpStatusOutputSchema,
-        await run({ actionType: "agent.resume", ...agentSettingsEnvelope(key), payload: request }), "result");
+        await run({ actionType: "agent.resume", ...agentSettingsEnvelope(key), payload: toJson(request) }), "result");
+    },
+    /** G-11, G-14: the status of one of the other agent kinds. */
+    getAgentKindStatus: (kind: unknown): Promise<AgentKindStatus> => {
+      const agentKind = parseInput(agentKindSchema, kind, "agent kind");
+      const now = new Date(readClock(deps.clock));
+      return read("inbox.drafts", (tx) => agentKindStatus(tx, tenantId, agentKind, now));
+    },
+    /** G-14: owners replace one kind's settings, compare-and-set on the revision. */
+    async updateAgentKindSettings(kind: unknown, body: unknown, key: unknown): Promise<AgentKindStatusOutput> {
+      const agentKind = parseInput(agentKindSchema, kind, "agent kind");
+      const request = parseInput(updateAgentKindSettingsRequestSchema, body);
+      return parseInput(agentKindStatusOutputSchema,
+        await run({ actionType: "agent.kind.settings.update", ...agentSettingsEnvelope(key), payload: toJson({ ...request, agentKind }) }), "result");
+    },
+    /** G-14: stop one kind at once; staff may too. */
+    async killAgentKind(kind: unknown, body: unknown, key: unknown): Promise<AgentKindStatusOutput> {
+      const agentKind = parseInput(agentKindSchema, kind, "agent kind");
+      const request = parseInput(killAgentKindRequestSchema, body);
+      return parseInput(agentKindStatusOutputSchema,
+        await run({ actionType: "agent.kind.kill", ...agentSettingsEnvelope(key), payload: defined({ ...request, agentKind }) }), "result");
+    },
+    /** G-14: owners let one kind run again. */
+    async resumeAgentKind(kind: unknown, body: unknown, key: unknown): Promise<AgentKindStatusOutput> {
+      const agentKind = parseInput(agentKindSchema, kind, "agent kind");
+      const request = parseInput(resumeAgentKindRequestSchema, body);
+      return parseInput(agentKindStatusOutputSchema,
+        await run({ actionType: "agent.kind.resume", ...agentSettingsEnvelope(key), payload: { ...request, agentKind } }), "result");
     },
     listFollowUpRuns: (query: unknown): Promise<FollowUpRunPage> => {
       const parsed = parseInput(listFollowUpRunsQuerySchema, query, "query");

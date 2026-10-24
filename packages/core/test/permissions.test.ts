@@ -48,6 +48,9 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "agent.settings.update": "agents",
   "agent.kill": "inbox.drafts",
   "agent.resume": "agents",
+  "agent.kind.settings.update": "agents",
+  "agent.kind.kill": "inbox.drafts",
+  "agent.kind.resume": "agents",
   "business.profile.update": "business",
 };
 
@@ -284,6 +287,13 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     } },
     killFollowUp: { permission: "inbox.drafts", run: () => session.killFollowUp({ note: "Stop" }, randomUUID()) },
     resumeFollowUp: { permission: "agents", run: () => session.resumeFollowUp({}, randomUUID()) },
+    getAgentKindStatus: { permission: "inbox.drafts", run: () => session.getAgentKindStatus("review_request") },
+    updateAgentKindSettings: { permission: "agents", run: async () => {
+      const { settings, revision } = await sessionFor(tenant.ownerId).getAgentKindStatus("review_request");
+      return session.updateAgentKindSettings("review_request", { ...settings, expectedRevision: revision }, randomUUID());
+    } },
+    killAgentKind: { permission: "inbox.drafts", run: () => session.killAgentKind("review_request", { note: "Stop" }, randomUUID()) },
+    resumeAgentKind: { permission: "agents", run: () => session.resumeAgentKind("review_request", {}, randomUUID()) },
     listFollowUpRuns: { permission: "inbox.drafts", run: () => session.listFollowUpRuns({}) },
     getFollowUpRun: { permission: "inbox.drafts", run: async () => {
       const runId = randomUUID();
