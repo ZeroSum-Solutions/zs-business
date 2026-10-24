@@ -199,8 +199,11 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /readyz` | `{ ok: true }`, or 503 when a bounded `SELECT 1` fails. No auth. |
 | `GET /v1/booking/resources` | `{ items: ResourceSummary[] }` |
 | `GET /v1/booking/slots?resourceId&from&to[&zone]` | free slots; `from`/`to` are UTC instants with milliseconds, at most 31 days |
-| `GET /v1/booking/bookings?[resourceId&][from&][to&]limit&(cursor|offset)` | page of bookings in start order; with `from`/`to`, only those overlapping `[from, to)` |
+| `GET /v1/booking/bookings?[resourceId&][contactId&][from&][to&]limit&(cursor|offset)` | page of bookings in start order; with `from`/`to`, only those overlapping `[from, to)`; `contactId` keeps one contact's bookings (owner links and matched website bookings). `customer` is `{ contactId, name, status }`, `status: "linked"` for an owner link |
 | `POST /v1/booking/bookings` `{ resourceId, startsAt }` | 201 booking; 409 if the slot is taken |
+| `GET /v1/booking/bookings/:id` | one booking (`BookingSummary` plus `customerRevision`, 0 until a customer was ever linked); 404 if unknown or another tenant's |
+| `POST /v1/booking/bookings/:id/contact/link` `{ contactId, expectedRevision }` | 200 `{ result: { bookingId, customer, revision } }`; needs `calendar` and `customers`; 409 `stale_revision` (`details.currentRevision`) or `intake_booking` (a website booking takes its customer from the intake review); 404 for a booking or contact that is unknown or another tenant's |
+| `POST /v1/booking/bookings/:id/contact/unlink` `{ expectedRevision }` | 200, `customer: null` and the next revision; 409 `stale_revision`; 404 as above |
 | `GET /v1/crm/contacts?[search&][sort&][ids&]limit&(cursor|offset)` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
 | `GET /v1/crm/contacts/:id` | one contact; 404 if unknown or another tenant's |
 | `POST /v1/crm/contacts` `{ displayName?, email?, phone?, mode?, consent? }` | 201 created, 200 matched an existing contact |
