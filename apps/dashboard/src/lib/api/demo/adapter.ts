@@ -430,6 +430,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   const enrichment = createDemoEnrichment({
     now: () => clock.now(), newId, wait, idempotent, actor: () => actor,
     hasContact: (id) => contacts.has(id),
+    contactName: (id) => contacts.get(id)?.displayName ?? null,
     contactDomain: (id) => contacts.get(id)?.email?.split("@")[1] ?? null,
   });
 

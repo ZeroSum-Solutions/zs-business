@@ -11,7 +11,7 @@ export {
   REGION_ATTEST_ACTION,
 } from "./handlers.js";
 export * from "./port.js";
-export { getContactEnrichment, getEnrichmentRequest } from "./reads.js";
+export { getContactEnrichment, getEnrichmentRequest, listEnrichmentProposals } from "./reads.js";
 export * from "./region.js";
 export { ENRICHMENT_TOOLS, isAllowedTool } from "./tools.js";
 export { createTregEnrichment, TREG_DEFAULT_BASE_URL, type TregConfig } from "./treg.js";

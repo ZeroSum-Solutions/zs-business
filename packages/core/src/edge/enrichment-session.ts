@@ -3,6 +3,7 @@
 import {
   blockEnrichmentRequestSchema,
   contactEnrichmentSchema,
+  enrichmentProposalListSchema,
   createEnrichmentRequestSchema,
   enrichmentRequestOutputSchema,
   enrichmentRequestRecordSchema,
@@ -14,6 +15,7 @@ import {
   TenantDenied,
   uuidSchema,
   type ContactEnrichment,
+  type EnrichmentProposalList,
   type EnrichmentRequestOutput,
   type EnrichmentRequestRecord,
   type ProfileOutput,
@@ -26,7 +28,7 @@ import {
   ENRICHMENT_UNBLOCK_ACTION,
   REGION_ATTEST_ACTION,
 } from "../enrichment/handlers.js";
-import { getContactEnrichment, getEnrichmentRequest } from "../enrichment/reads.js";
+import { getContactEnrichment, getEnrichmentRequest, listEnrichmentProposals } from "../enrichment/reads.js";
 import { requireMember } from "../members/access.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, memberAuthorize, parseInput, type EdgeDependencies, type Principal } from "./session.js";
@@ -79,6 +81,12 @@ export function createEnrichmentSession(deps: EdgeDependencies, principal: Princ
       const found = await readEnrichment((tx) => getContactEnrichment(tx, tenantId, id, now));
       if (!found) throw new NotFound();
       return parseInput(contactEnrichmentSchema, found, "result");
+    },
+    /** E-14: the pending proposals, each with the current and the found value. */
+    async listProposals(): Promise<EnrichmentProposalList> {
+      const now = new Date(readClock(deps.clock));
+      const items = await readEnrichment((tx) => listEnrichmentProposals(tx, tenantId, actorId, now));
+      return parseInput(enrichmentProposalListSchema, { items }, "result");
     },
     /** E-6: staff and owners may stop enrichment of a contact. */
     async block(rawId: unknown, body: unknown, key: unknown): Promise<ProfileOutput> {
