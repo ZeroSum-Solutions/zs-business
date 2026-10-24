@@ -6,7 +6,7 @@ import { imageVariantSchema, IMAGE_PRESETS, MEDIA_CONTENT_TYPES, MEDIA_LIMITS, t
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, TrayHeader, TrayTitle } from "@/components/ui/card";
+import { Card, Tray, TrayBody, TrayHeader, TrayTitle } from "@/components/ui/card";
 import { Label, Select, Textarea } from "@/components/ui/input";
 import { DisabledReason } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, Skeleton } from "@/components/ui/states";
@@ -36,7 +36,7 @@ import { singleFlight } from "./site-status";
 const IMAGES = { topic: "images" };
 
 /** A checkerboard from the tray tokens, so a cut-out's clear background shows as clear. */
-const CLEAR_BACKDROP = "bg-[repeating-conic-gradient(var(--tray)_0%_25%,var(--surface)_0%_50%)] bg-[length:16px_16px]";
+const CLEAR_BACKDROP = "bg-[repeating-conic-gradient(var(--border)_0%_25%,var(--surface)_0%_50%)] bg-[length:16px_16px]";
 
 function ImageView({ kind, id, alt, size, className }: {
   kind: "asset" | "variant";
@@ -232,6 +232,7 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
       focusTitle();
     },
   });
+  const deciding = approve.isPending || reject.isPending;
   const run = (which: typeof approve | typeof reject) => flight.run((done) => {
     clearToasts(IMAGES.topic);
     approve.reset();
@@ -250,7 +251,7 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
         </div>
         <p className="text-xs text-meta">Started {relativeTime(variant.createdAt).toLowerCase()}</p>
       </div>
-      <p className="text-sm text-fg-2" data-testid="image-variant-summary">{status.summary}</p>
+      <p className="text-sm text-fg-2" aria-live="polite" data-testid="image-variant-summary">{status.summary}</p>
       {actions.showResult ? (
         <div className="grid grid-cols-2 gap-2 sm:gap-3">
           <figure className="min-w-0 space-y-1">
@@ -273,10 +274,10 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
       </dl>
       {actions.decide ? (
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Button variant="danger-outline" disabled={reject.isPending} aria-busy={reject.isPending} onClick={() => run(reject)}>
+          <Button variant="danger-outline" disabled={deciding} aria-busy={reject.isPending} onClick={() => run(reject)}>
             <X aria-hidden />{reject.isPending ? "Rejecting" : "Reject"}<span className="sr-only"> the edit: {title}</span>
           </Button>
-          <Button disabled={approve.isPending} aria-busy={approve.isPending} onClick={() => run(approve)}>
+          <Button disabled={deciding} aria-busy={approve.isPending} onClick={() => run(approve)}>
             <Check aria-hidden />{approve.isPending ? "Approving" : "Approve"}<span className="sr-only"> the edit: {title}</span>
           </Button>
         </div>
@@ -307,7 +308,7 @@ export function ImagesSection() {
         : <ErrorNote error={assets.error} retry={() => assets.refetch()} />;
   } else {
     body = (
-      <div className="grid gap-1.5 lg:gap-2">
+      <TrayBody>
         <Card className="space-y-4">
           <p className="text-sm text-muted">Upload a product photo, then pick an edit. Nothing goes on your site until you approve it.</p>
           <UploadButton onUploaded={(asset) => setPicked(asset.id)} />
@@ -328,16 +329,16 @@ export function ImagesSection() {
         ) : photo ? (
           <p className="card p-4 text-sm text-muted">No edits of this photo yet. Each one you make waits here for you to approve it.</p>
         ) : null}
-      </div>
+      </TrayBody>
     );
   }
 
   return (
-    <section aria-labelledby="site-images-title" className="tray mt-5" data-testid="site-images">
+    <Tray aria-labelledby="site-images-title" className="mt-5" data-testid="site-images">
       <TrayHeader className="px-3 lg:px-4">
         <TrayTitle id="site-images-title">Images</TrayTitle>
       </TrayHeader>
       {body}
-    </section>
+    </Tray>
   );
 }

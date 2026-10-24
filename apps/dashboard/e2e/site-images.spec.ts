@@ -33,6 +33,8 @@ test("uploads a photo, approves one edit and rejects another (image-port.md IM-2
   const removal = edits(page).first();
   await expect(removal.getByTestId("image-variant-status")).toHaveText(/Waiting|Working/);
   await expect(removal.getByTestId("image-variant-status")).toHaveText("Ready to review", WORKER);
+  // Polling changes the summary in place; it is a polite live region so the change is announced.
+  await expect(removal.getByTestId("image-variant-summary")).toHaveAttribute("aria-live", "polite");
   // The "Making your image" note is out of date once the edit is ready, so it goes (it would cover the images).
   await expect(page.getByRole("status").getByText("Making your image.", { exact: false })).toHaveCount(0);
   await expect(removal.getByRole("img", { name: "Original photo" })).toBeVisible();
