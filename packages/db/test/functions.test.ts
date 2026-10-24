@@ -60,6 +60,13 @@ const expectedPath: Record<string, string> = {
   "business_profiles_sync_name()": "pg_catalog, pg_temp",
   "business_profiles_tenant_name()": "pg_catalog, pg_temp",
   "business_profiles_time_zone_known()": "pg_catalog, pg_temp",
+  // Document intake (20261024100000_document_intake.sql): the job state moves, the rows guard, the box check, and the
+  // catalog revision step (DL-2, DL-4, DL-12).
+  "catalog_attributes_valid(jsonb)": "pg_catalog, pg_temp",
+  "catalog_revision_step()": "pg_catalog, pg_temp",
+  "document_intake_bbox_valid(jsonb)": "pg_catalog, pg_temp",
+  "document_intake_jobs_transition()": "pg_catalog, pg_temp",
+  "document_intake_rows_guard()": "pg_catalog, pg_temp",
   // M5 (20261020630000_google_calendar.sql): the runtime status guard on calendar connections.
   "calendar_connections_runtime_guard()": "pg_catalog, pg_temp",
   // M3c (20261020200000_inbox_home.sql): the won-date and reply-guard triggers.
