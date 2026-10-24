@@ -18,6 +18,7 @@ import { useApi } from "@/lib/api/react";
 import {
   agentState,
   blockedSentence,
+  costLine,
   FIELD_HINTS,
   quietHoursLabel,
   readSettingsForm,
@@ -174,6 +175,7 @@ function FollowUpControls({ status, runnable, onUnrunnable }: { status: FollowUp
   };
 
   const blocked = blockedSentence(status, { runnable });
+  const cost = costLine(status);
   const busy = stop.isPending || resume.isPending;
   const failure = [stop, resume].find((step) => step.isError)?.error ?? (run.isError && runnable ? run.error : null);
   // Stop stays open while it is off: a stop latches, so turning it on later still needs a Resume (G-3).
@@ -199,6 +201,12 @@ function FollowUpControls({ status, runnable, onUnrunnable }: { status: FollowUp
       ) : null}
       <p ref={stateLine} tabIndex={-1} className="outline-none" data-testid="followup-blocked">
         {blocked ? <><span className="font-medium text-fg">Why it can&apos;t draft right now:</span> {blocked}</> : "It can draft now."}
+      </p>
+      <p
+        data-testid="followup-cost"
+        className={cn("text-xs", cost.warning ? "rounded-md bg-warn-tint p-3 text-sm text-fg-2" : "text-meta")}
+      >
+        {cost.text}
       </p>
 
       <div className="flex items-start gap-3 rounded-md bg-accent-tint p-3" data-testid="approval-note">

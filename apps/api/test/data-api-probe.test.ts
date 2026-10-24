@@ -54,7 +54,7 @@ describe("tables to probe", () => {
   it("reads every table the migrations create, tenant_members included", async () => {
     const tables = await readMigrationTables(migrations);
     expect(tables.map((table) => `${table.schema}.${table.name}`)).toEqual([
-      "public.actions", "public.agent_followups", "public.agent_global_switch", "public.agent_runs", "public.agent_settings",
+      "public.actions", "public.agent_decisions", "public.agent_followups", "public.agent_global_switch", "public.agent_model_calls", "public.agent_runs", "public.agent_settings",
       "public.approvals", "public.automation_tokens", "public.booking_contacts", "public.booking_external_blocks", "public.booking_page_disclosures",
       "public.booking_page_resources",
       "public.booking_pages", "public.booking_resources", "public.bookings", "public.business_profiles",

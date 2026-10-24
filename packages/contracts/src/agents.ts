@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
+import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema, ValidationFailed } from "./index.js";
 import { bookingTimeZoneSchema } from "./booking.js";
 import { replyBodySchema, replySubjectSchema } from "./inbox.js";
 import { isPostgresText } from "./json.js";
@@ -17,10 +17,52 @@ export const followUpSkipReasonSchema = z.enum([
 ]);
 export type FollowUpSkipReason = z.infer<typeof followUpSkipReasonSchema>;
 /** G-3, G-4, G-5, G-8: reasons that apply to the whole tenant and end a run. */
-export const followUpStopReasonSchema = z.enum(["global_killed", "disabled", "tenant_killed", "quiet_hours", "daily_cap"]);
+export const followUpSwitchReasonSchema = z.enum(["global_killed", "disabled", "tenant_killed", "quiet_hours", "daily_cap"]);
+export type FollowUpSwitchReason = z.infer<typeof followUpSwitchReasonSchema>;
+/** Those, plus the two that come from the run itself: G-15's cost cap and G-16's stall. */
+export const followUpStopReasonSchema = z.enum([...followUpSwitchReasonSchema.options, "cost_cap", "stalled"]);
 export type FollowUpStopReason = z.infer<typeof followUpStopReasonSchema>;
-export const isStopReason = (reason: FollowUpSkipReason): reason is FollowUpStopReason =>
-  (followUpStopReasonSchema.options as readonly string[]).includes(reason);
+/** Whether a decision's skip reason ends the whole run (G-8). */
+export const isStopReason = (reason: FollowUpSkipReason): reason is FollowUpSwitchReason =>
+  (followUpSwitchReasonSchema.options as readonly string[]).includes(reason);
+
+/** G-14: the five agent kinds. A new kind needs a revision of agents.md. */
+export const AGENT_KINDS = ["inquiry_followup", "appointment_reminder", "review_request", "document_intake", "voice_receptionist"] as const;
+export const agentKindSchema = z.enum(AGENT_KINDS);
+export type AgentKind = z.infer<typeof agentKindSchema>;
+/** G-18: where a model call may go. `personal_data` input may hold a customer's personal data. */
+export const agentLaneSchema = z.enum(["personal_data", "no_personal_data"]);
+export type AgentLane = z.infer<typeof agentLaneSchema>;
+
+const httpsUrlSchema = z.url().max(500).refine((value) => value.startsWith("https://"), "Must be an https URL");
+/**
+ * G-14: each kind's own settings, held in `agent_settings.config`. Unknown keys are refused.
+ * `inquiry_followup` keeps its settings in columns (G-2), so its config is empty. The limits come
+ * from G-19..G-21 and `voice-receptionist.md`; the kinds that use them are built later.
+ */
+export const agentKindConfigSchemas = {
+  inquiry_followup: z.strictObject({}),
+  appointment_reminder: z.strictObject({
+    timingHours: z.number().int().min(1).max(168).default(24),
+    maxSendsPerDay: z.number().int().min(1).max(500).default(200),
+  }),
+  review_request: z.strictObject({
+    timingHours: z.number().int().min(1).max(720).default(24),
+    lookbackDays: z.number().int().min(1).max(30).default(7),
+    contactWindowDays: z.number().int().min(1).max(730).default(180),
+    maxSendsPerDay: z.number().int().min(1).max(100).default(20),
+    reviewUrl: httpsUrlSchema.optional(),
+  }),
+  document_intake: z.strictObject({
+    maxDocumentsPerDay: z.number().int().min(1).max(500).default(50),
+    maxPagesPerDocument: z.number().int().min(1).max(50).default(20),
+  }),
+  voice_receptionist: z.strictObject({}),
+} as const satisfies Record<AgentKind, z.ZodType>;
+
+/** G-15: USD millionths one kind may spend on model calls in 24 hours. */
+export const maxCostMicrosPerDaySchema = z.number().int().min(0).max(100_000_000);
+export const DEFAULT_MAX_COST_MICROS_PER_DAY = 1_000_000;
 
 const minuteOfDay = z.number().int().min(0).max(1439);
 /** G-2, G-4, G-5: what an owner sets. */
@@ -54,6 +96,8 @@ const noteSchema = z.string().min(1).max(500).refine(isPostgresText, "Text is no
 /** PUT /v1/agents/followup/settings: the whole settings, compare-and-set on `expectedRevision`. */
 export const updateFollowUpSettingsRequestSchema = followUpSettingsSchema.extend({
   expectedRevision: z.number().int().min(0).max(2_147_483_647),
+  /** G-15: left out, the kind keeps its current cap. */
+  maxCostMicrosPerDay: maxCostMicrosPerDaySchema.optional(),
 });
 export type UpdateFollowUpSettingsRequest = z.infer<typeof updateFollowUpSettingsRequestSchema>;
 /** POST /v1/agents/followup/kill; resume takes an empty object. */
@@ -74,6 +118,11 @@ export const followUpStatusSchema = z.strictObject({
   /** Whether a draft could commit now; `blockedBy` names the first reason it could not. */
   canDraft: z.boolean(),
   blockedBy: followUpStopReasonSchema.nullable(),
+  /** G-15: model cost in the last 24 hours against the daily cap (USD millionths). */
+  costSpentMicros: z.number().int().min(0),
+  costCapMicros: maxCostMicrosPerDaySchema,
+  /** True once the cost reaches 80% of the cap. */
+  costWarning: z.boolean(),
 });
 export type FollowUpStatus = z.infer<typeof followUpStatusSchema>;
 
@@ -81,7 +130,7 @@ export const followUpRunStatusSchema = z.enum(["running", "completed", "stopped"
 export type FollowUpRunStatus = z.infer<typeof followUpRunStatusSchema>;
 export const followUpRunSchema = z.strictObject({
   id: idSchema,
-  agent: z.literal("inquiry_followup"),
+  agent: agentKindSchema,
   /** The owner who started it; null for a scheduled run. */
   requestedBy: idSchema.nullable(),
   startedAt: instantSchema,
@@ -170,6 +219,106 @@ export const draftFollowUpCommandSchema = z.lazy(() => actionCommandSchema.exten
   payload: draftFollowUpInputSchema,
 }).refine((command) => command.target.id === command.payload.followupId, "Target must equal the decision ID"));
 export const followUpDecisionOutputSchema = z.lazy(() => actionResultSchema.extend({ result: followUpDecisionSchema }));
+
+// G-14: settings, kill and resume for the kinds besides inquiry_followup, on /v1/agents/:agentKind.
+const quietMinute = z.number().int().min(0).max(1439);
+const agentKindTimeZoneSchema = bookingTimeZoneSchema.refine((zone) => zone.length <= 100, "Time zone is too long");
+export const agentKindSettingsSchema = z.strictObject({
+  enabled: z.boolean(),
+  quietStartMinute: quietMinute,
+  quietEndMinute: quietMinute,
+  timeZone: agentKindTimeZoneSchema,
+  maxCostMicrosPerDay: maxCostMicrosPerDaySchema,
+  /** Checked against `agentKindConfigSchemas[kind]`, with the kind's defaults filled in. */
+  config: z.record(z.string(), z.json()),
+});
+export type AgentKindSettings = z.infer<typeof agentKindSettingsSchema>;
+/** G-14: a kind's settings when its row is missing: off, with the kind's defaults. */
+export function defaultAgentKindSettings(kind: AgentKind): AgentKindSettings {
+  return {
+    enabled: false, quietStartMinute: 21 * 60, quietEndMinute: 8 * 60, timeZone: "UTC",
+    maxCostMicrosPerDay: DEFAULT_MAX_COST_MICROS_PER_DAY, config: agentKindConfigSchemas[kind].parse({}) as AgentKindSettings["config"],
+  };
+}
+const checkKindConfig = (value: { agentKind: AgentKind; config: Record<string, unknown> }, ctx: z.RefinementCtx) => {
+  const parsed = agentKindConfigSchemas[value.agentKind].safeParse(value.config);
+  if (!parsed.success)
+    for (const issue of parsed.error.issues) ctx.addIssue({ code: "custom", message: issue.message, path: ["config", ...issue.path] });
+};
+/** The config parsed against the kind's schema, defaults filled in; a bad one is `ValidationFailed`. */
+export function parseAgentKindConfig(kind: AgentKind, config: Record<string, unknown>): AgentKindSettings["config"] {
+  const parsed = agentKindConfigSchemas[kind].safeParse(config);
+  if (!parsed.success) throw new ValidationFailed("Invalid agent settings");
+  return parsed.data as AgentKindSettings["config"];
+}
+
+/** PUT /v1/agents/:agentKind/settings: the whole settings, compare-and-set on `expectedRevision`. */
+export const updateAgentKindSettingsRequestSchema = agentKindSettingsSchema.extend({
+  expectedRevision: z.number().int().min(0).max(2_147_483_647),
+});
+export type UpdateAgentKindSettingsRequest = z.infer<typeof updateAgentKindSettingsRequestSchema>;
+export const killAgentKindRequestSchema = killFollowUpRequestSchema;
+export const resumeAgentKindRequestSchema = resumeFollowUpRequestSchema;
+
+export const agentKindStatusSchema = z.strictObject({
+  agentKind: agentKindSchema,
+  settings: agentKindSettingsSchema,
+  revision: z.number().int().min(0),
+  updatedAt: instantSchema.nullable(),
+  killed: z.strictObject({ at: instantSchema, by: idSchema, note: z.string().nullable() }).nullable(),
+  globalKilled: z.boolean(),
+  /** Whether the kind may act now; `blockedBy` names the first reason it may not. */
+  canRun: z.boolean(),
+  blockedBy: followUpStopReasonSchema.nullable(),
+  costSpentMicros: z.number().int().min(0),
+  costCapMicros: maxCostMicrosPerDaySchema,
+  costWarning: z.boolean(),
+});
+export type AgentKindStatus = z.infer<typeof agentKindStatusSchema>;
+
+const kindSettingsPayload = updateAgentKindSettingsRequestSchema.extend({ agentKind: agentKindSchema }).superRefine(checkKindConfig);
+export const updateAgentKindSettingsCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("agent.kind.settings.update"),
+  target: settingsTarget(),
+  payload: kindSettingsPayload,
+}).refine(tenantTarget, "Target must be the tenant's agent settings"));
+export const killAgentKindCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("agent.kind.kill"),
+  target: settingsTarget(),
+  payload: killFollowUpRequestSchema.extend({ agentKind: agentKindSchema }),
+}).refine(tenantTarget, "Target must be the tenant's agent settings"));
+export const resumeAgentKindCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("agent.kind.resume"),
+  target: settingsTarget(),
+  payload: z.strictObject({ agentKind: agentKindSchema }),
+}).refine(tenantTarget, "Target must be the tenant's agent settings"));
+export const agentKindStatusOutputSchema = z.lazy(() => actionResultSchema.extend({ result: agentKindStatusSchema }));
+export type AgentKindStatusOutput = z.infer<typeof agentKindStatusOutputSchema>;
+
+/** G-16: the scheduler closes a run that stayed `running` too long. Any kind's principal may run it for its own kind. */
+export const stallRunInputSchema = z.strictObject({ runId: idSchema, agentKind: agentKindSchema });
+export const stallRunCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("agent.run.stall"),
+  target: targetSchema.extend({ type: z.literal("agent_run") }),
+  payload: stallRunInputSchema,
+}).refine((command) => command.target.id === command.payload.runId, "Target must equal the run ID"));
+
+/** G-15: the call that took the 24-hour cost to 80% of the cap records one warning per local date. */
+export const costWarnInputSchema = z.strictObject({
+  agentKind: agentKindSchema,
+  localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
+/** The numbers are read when the action runs, so a replay with the same key carries the same input. */
+export const costWarnResultSchema = costWarnInputSchema.extend({
+  spentMicros: z.number().int().min(0),
+  capMicros: maxCostMicrosPerDaySchema,
+});
+export const costWarnCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal("agent.cost.warn"),
+  target: settingsTarget(),
+  payload: costWarnInputSchema,
+}).refine(tenantTarget, "Target must be the tenant's agent settings"));
+export const costWarnOutputSchema = z.lazy(() => actionResultSchema.extend({ result: costWarnResultSchema }));
 
 /** G-9: what the model sees about one inquiry, and nothing else. */
 export const followUpPromptSchema = z.strictObject({
