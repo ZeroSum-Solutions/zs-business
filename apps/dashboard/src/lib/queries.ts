@@ -20,7 +20,7 @@ import {
   type SlotQuery,
   type ThreadSummary,
 } from "./api";
-import type { BookingRecord, BusinessProfile, SlotsResponse } from "@zs/contracts";
+import type { BookingRecord, BusinessProfile, SlotsResponse, TemplatedKind } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
 import { newerProfile } from "./business-profile";
 
@@ -60,6 +60,10 @@ export const keys = {
   /** The agent's actor ID, derived from the tenant (agents.md G-1). */
   agentActor: ["agents", "actor"] as const,
   agentsAll: ["agents"] as const,
+  /** A templated kind's settings and switches (agents.md G-14). */
+  agentKind: (kind: TemplatedKind) => ["agents", "kind", kind] as const,
+  /** A templated kind's template and newest revisions (G-19, A-15). */
+  template: (kind: TemplatedKind) => ["agents", "template", kind] as const,
   /** The business profile (business-profile.md BP-5). */
   business: ["business"] as const,
   usage: ["ws", "usage"] as const,
@@ -355,6 +359,25 @@ export function useFollowUpStatus() {
   return useQuery({
     enabled, queryKey: keys.followUp, queryFn: ({ signal }) => api.getFollowUpStatus({ signal }), staleTime: 0, refetchInterval: 60_000,
   });
+}
+
+/**
+ * A templated kind's settings and switches (agents.md G-14). Read afresh like the follow-up
+ * agent's status: someone else may turn it off, and quiet hours follow the clock.
+ */
+export function useAgentKindStatus(kind: TemplatedKind) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.agentKind(kind), queryFn: ({ signal }) => api.getAgentKindStatus(kind, { signal }), staleTime: 0, refetchInterval: 60_000,
+  });
+}
+
+/** A templated kind's wording and its approvals (G-19, A-15). Owners only, so `allowed` is false for staff. */
+export function useTemplate(kind: TemplatedKind, allowed: boolean) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled: enabled && allowed, queryKey: keys.template(kind), queryFn: ({ signal }) => api.getTemplate(kind, { signal }), staleTime: 0 });
 }
 
 /**

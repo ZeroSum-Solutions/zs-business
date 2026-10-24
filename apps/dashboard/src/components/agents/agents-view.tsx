@@ -12,6 +12,7 @@ import { Input, Label, Select } from "@/components/ui/input";
 import { DisabledReason } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Switch } from "@/components/ui/switch";
+import { TemplatedKinds } from "./template-cards";
 import { useToast } from "@/components/ui/toast";
 import { isApiError, isSettingsChanged, type FollowUpRun } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
@@ -65,6 +66,7 @@ export function AgentsView() {
           <SettingsCard />
         </div>
       </div>
+      <TemplatedKinds />
     </>
   );
 }

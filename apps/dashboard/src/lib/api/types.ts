@@ -1,4 +1,7 @@
 import type {
+  AgentKindStatus,
+  ApproveApprovalResponse,
+  ApproveTemplateRequest,
   BusinessProfile,
   BookingContactResult,
   BookingPageSummary,
@@ -9,6 +12,7 @@ import type {
   ConsentEvidence,
   ContactRecord,
   CreateBookingRequest,
+  CreateTemplateRevisionRequest,
   DealRecord,
   DealSummary,
   DealValue,
@@ -23,6 +27,7 @@ import type {
   KillFollowUpRequest,
   IntakeItemRecord,
   IntakeStatus,
+  KindDecision,
   LeadSource,
   PendingGoogleConnect,
   PipelineSummary,
@@ -40,9 +45,14 @@ import type {
   SiteSyncResponse,
   SlotsResponse,
   StageOutcome,
+  SuggestTemplateRequest,
+  TemplatedKind,
+  TemplateState,
+  TemplateSuggestion,
   ThreadDetail,
   ThreadEntry,
   ThreadSummary,
+  UpdateAgentKindSettingsRequest,
   UpdateBusinessProfileRequest,
   UpdateFollowUpSettingsRequest,
   UpsertContactRequest,
@@ -51,6 +61,7 @@ import type {
 import type { WorkspaceApi } from "./workspace-types";
 
 export type {
+  AgentKindStatus,
   BusinessProfile,
   BookingContactResult,
   BookingPageSummary,
@@ -89,6 +100,9 @@ export type {
   SiteSyncResponse,
   SlotsResponse,
   StageOutcome,
+  TemplatedKind,
+  TemplateState,
+  TemplateSuggestion,
   ThreadDetail,
   ThreadEntry,
   ThreadSummary,
@@ -329,12 +343,15 @@ export interface FollowUpRunQuery {
   limit?: number;
 }
 
+/** Every agent route: the follow-up agent and the templated kinds. */
+export interface AgentsApi extends FollowUpApi, TemplatedKindsApi {}
+
 /**
  * The inquiry follow-up agent (agents.md G-11). Members with `inbox.drafts` read it and may
  * stop it; owners (`agents`) change its settings, resume it and run it now. It only drafts:
  * every draft waits in the Inbox for an owner's approval.
  */
-export interface AgentsApi {
+export interface FollowUpApi {
   getFollowUpStatus(options?: ReadOptions): Promise<FollowUpStatus>;
   /** Replaces the settings. A conflict with reason `stale_revision` when someone saved since `expectedRevision`. */
   updateFollowUpSettings(input: UpdateFollowUpSettingsRequest, options: WriteOptions): Promise<FollowUpStatus>;
@@ -349,6 +366,37 @@ export interface AgentsApi {
   /** Throws `not_found` for an unknown or malformed run ID. */
   getFollowUpRun(id: string, options?: ReadOptions): Promise<FollowUpRunDetail>;
 }
+
+/**
+ * The templated kinds, appointment reminders and review requests (agents.md G-14, G-19, G-20,
+ * approvals.md A-15). They send only wording an owner approved; a new revision needs approval again.
+ */
+export interface TemplatedKindsApi {
+  /** One kind's settings and switches; any member who drafts reads them. */
+  getAgentKindStatus(kind: TemplatedKind, options?: ReadOptions): Promise<AgentKindStatus>;
+  /**
+   * Owners only. Replaces the kind's settings; `stale_revision` when someone saved since
+   * `expectedRevision`. Turning review requests on without a review link is `validation`.
+   */
+  updateAgentKindSettings(kind: TemplatedKind, input: UpdateAgentKindSettingsRequest, options: WriteOptions): Promise<AgentKindStatus>;
+  /** Owners only: the template with its newest revisions, each with its standing approval. */
+  getTemplate(kind: TemplatedKind, options?: ReadOptions): Promise<TemplateState>;
+  /**
+   * Owners only. Writes the next revision and makes it current; the previous revision's approval
+   * ends, so nothing is sent until an owner approves the new one. `validation` for a placeholder
+   * outside the kind's variables, `stale_revision` when someone wrote a revision since.
+   */
+  createTemplateRevision(kind: TemplatedKind, input: CreateTemplateRevisionRequest, options: WriteOptions): Promise<TemplateState>;
+  /** Owners only. A standing approval of the revision with this digest; `conflict` when it changed or is no longer current. */
+  approveTemplate(kind: TemplatedKind, input: ApproveTemplateRequest, options: WriteOptions): Promise<ApproveApprovalResponse>;
+  /** Owners only. Suggested wording, not saved. Throws `not_found` when the server has no suggestion model. */
+  suggestTemplate(kind: TemplatedKind, input: SuggestTemplateRequest, options: WriteOptions): Promise<TemplateSuggestion>;
+  /** Owners only. Runs the kind once, now. */
+  startKindRun(kind: TemplatedKind, options: WriteOptions): Promise<KindRunDetail>;
+}
+
+/** A templated kind's run with what it decided for each booking (G-14). */
+export type KindRunDetail = FollowUpRun & { decisions: KindDecision[] };
 
 /**
  * The business profile (business-profile.md BP-5..BP-7): who the business is. Any member reads it;

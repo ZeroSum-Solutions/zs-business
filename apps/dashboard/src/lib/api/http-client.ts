@@ -1,5 +1,8 @@
 import { z } from "zod";
 import {
+  agentKindStatusOutputSchema,
+  agentKindStatusSchema,
+  approveApprovalResponseSchema,
   bookingContactOutputSchema,
   bookingDetailSchema,
   bookingPageSchema,
@@ -18,9 +21,11 @@ import {
   dealPageSchema,
   followUpRunDetailSchema,
   followUpRunPageSchema,
+  followUpRunSchema,
   followUpStatusOutputSchema,
   followUpStatusSchema,
   homeResultsSchema,
+  kindDecisionSchema,
   moveDealStageOutputSchema,
   pipelineSummarySchema,
   replyOutputSchema,
@@ -34,16 +39,21 @@ import {
   siteReleaseResponseSchema,
   siteSyncResponseSchema,
   slotsResponseSchema,
+  templateStateSchema,
+  templateSuggestionSchema,
   threadDetailSchema,
   threadIdSchema,
   threadPageSchema,
   uuidSchema,
+  type ApproveTemplateRequest,
   type CreateBookingRequest,
+  type CreateTemplateRevisionRequest,
   type DraftReplyRequest,
   type KillFollowUpRequest,
   type LinkIntakeItemRequest,
   type MoveDealStageRequest,
   type SetDealDetailsRequest,
+  type UpdateAgentKindSettingsRequest,
   type UpdateFollowUpSettingsRequest,
 } from "@zs/contracts";
 import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, runNotFound, threadNotFound } from "./errors";
@@ -99,6 +109,8 @@ const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema
 const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
 /** PUT /v1/business answers the action and the profile as it is now; a newer API's extra keys are dropped (BP-10). */
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
+/** POST /v1/agents/:agentKind/runs answers the run with each booking's decision (G-14). */
+const kindRunDetailSchema = followUpRunSchema.extend({ decisions: z.array(kindDecisionSchema) });
 
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
@@ -192,6 +204,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     request({ method, path, body, idempotencyKey: options?.idempotencyKey, schema });
 
   const FOLLOW_UP = "/v1/agents/followup";
+  const KIND = (kind: string) => `/v1/agents/${encodeURIComponent(kind)}`;
 
   return {
     async listResources(options = {}) {
@@ -479,6 +492,50 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
         signal: options.signal,
       });
       return { items: page.items, nextCursor: page.nextCursor };
+    },
+
+    getAgentKindStatus(kind, options = {}) {
+      return request({ method: "GET", path: KIND(kind), schema: agentKindStatusSchema, signal: options.signal });
+    },
+
+    async updateAgentKindSettings(kind, input, options) {
+      const body: UpdateAgentKindSettingsRequest = {
+        enabled: input.enabled,
+        quietStartMinute: input.quietStartMinute,
+        quietEndMinute: input.quietEndMinute,
+        timeZone: input.timeZone,
+        maxCostMicrosPerDay: input.maxCostMicrosPerDay,
+        config: input.config,
+        expectedRevision: input.expectedRevision,
+      };
+      return (await write(`${KIND(kind)}/settings`, body, agentKindStatusOutputSchema, options, "PUT")).result;
+    },
+
+    getTemplate(kind, options = {}) {
+      return request({ method: "GET", path: `${KIND(kind)}/template`, schema: templateStateSchema, signal: options.signal });
+    },
+
+    createTemplateRevision(kind, input, options) {
+      const body: CreateTemplateRevisionRequest = {
+        expectedRevision: input.expectedRevision, channel: input.channel, subject: input.subject, body: input.body, timingHours: input.timingHours,
+      };
+      return write(`${KIND(kind)}/template/revisions`, body, templateStateSchema, options);
+    },
+
+    approveTemplate(kind, input, options) {
+      const body: ApproveTemplateRequest = {
+        revision: input.revision, contentDigest: input.contentDigest,
+        ...(input.expiresInMinutes !== undefined ? { expiresInMinutes: input.expiresInMinutes } : {}),
+      };
+      return write(`${KIND(kind)}/template/approve`, body, approveApprovalResponseSchema, options);
+    },
+
+    suggestTemplate(kind, input, options) {
+      return write(`${KIND(kind)}/template-suggestion`, { channel: input.channel }, templateSuggestionSchema, options);
+    },
+
+    startKindRun(kind, options) {
+      return write(`${KIND(kind)}/runs`, {}, kindRunDetailSchema, options);
     },
 
     async getFollowUpRun(id, options = {}) {

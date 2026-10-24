@@ -42,6 +42,7 @@ import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationErr
 import { createDemoAgents, type DemoActor, type DemoAgentControls, type DemoRole } from "./agents";
 import { createDemoBusiness, type DemoBusinessControls } from "./business";
 import { createDemoCalendar, type DemoCalendarControls } from "./calendar";
+import { createDemoTemplates, type DemoTemplateControls } from "./templates";
 import {
   byContactName,
   completeList,
@@ -88,7 +89,7 @@ export interface DemoAdapterOptions {
 }
 
 /** Hooks that act as a second person using the business, to show conflicts. */
-export interface DemoControls extends DemoAgentControls, DemoBusinessControls, DemoCalendarControls {
+export interface DemoControls extends DemoAgentControls, DemoTemplateControls, DemoBusinessControls, DemoCalendarControls {
   /**
    * Signs the demo in as the owner or as a staff member. The screen then offers what that role
    * may do, and the agent routes refuse an owner-only step with the API's 403.
@@ -415,12 +416,17 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     seed: seed.followUp,
   });
 
+  const templates = createDemoTemplates({
+    now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor, globalKilled: () => agents.globalAgentKill(),
+  });
+
   const business = createDemoBusiness({ now: () => clock.now(), wait, idempotent, parse, actor: () => actor });
 
   const calendar = createDemoCalendar({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor, resources });
 
   return {
     ...agents,
+    ...templates,
     ...business,
     ...calendar,
 

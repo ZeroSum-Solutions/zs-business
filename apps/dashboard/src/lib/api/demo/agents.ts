@@ -26,7 +26,7 @@ import {
 } from "@zs/contracts";
 import { formatDay, zonedParts } from "../../time";
 import { demoError, runNotFound } from "../errors";
-import { RUN_PAGE_SIZE, type AgentsApi, type WriteOptions } from "../types";
+import { RUN_PAGE_SIZE, type FollowUpApi, type WriteOptions } from "../types";
 import { DEMO_AGENT, DEMO_BUSINESS, DEMO_FOLLOW_UP_SUBJECT, DEMO_TENANT_ID, type DemoFollowUp } from "./seed";
 
 export type DemoRole = "owner" | "staff";
@@ -42,6 +42,8 @@ export interface DemoAgentControls {
   editAgentSettingsElsewhere(change?: Partial<FollowUpSettings>): FollowUpStatus;
   /** The operator's switch that stops agents for every business (G-3). */
   setGlobalAgentKill(killed: boolean): void;
+  /** Whether that switch is engaged; the templated kinds read it too. */
+  globalAgentKill(): boolean;
   /** Whether this server has a model configured; without one `POST /runs` is a 404 (G-11). */
   setFollowUpModel(available: boolean): void;
 }
@@ -69,7 +71,7 @@ const DEMO_COST_CAP_MICROS = 1_000_000;
 const clone = <T>(value: T): T => structuredClone(value);
 const byNewest = (a: FollowUpRun, b: FollowUpRun) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id);
 
-export function createDemoAgents(ctx: DemoAgentContext): AgentsApi & DemoAgentControls {
+export function createDemoAgents(ctx: DemoAgentContext): FollowUpApi & DemoAgentControls {
   let settings = clone(ctx.seed.settings);
   let revision = ctx.seed.revision;
   let updatedAt = ctx.seed.updatedAt;
@@ -260,6 +262,10 @@ export function createDemoAgents(ctx: DemoAgentContext): AgentsApi & DemoAgentCo
 
     setGlobalAgentKill(value) {
       globalKilled = value;
+    },
+
+    globalAgentKill() {
+      return globalKilled;
     },
 
     setFollowUpModel(available) {
