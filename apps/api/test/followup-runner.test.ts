@@ -6,13 +6,19 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createFakeFollowUpModel,
   createFollowUpAgent,
+  createSession,
+  createTemplateSession,
+  signBookingKey,
   followUpRunId,
   scheduledRunKey,
   setGlobalAgentSwitch,
   type FollowUpAgent,
 } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
-import { parseFollowUpEnv, PLACEHOLDER_CRON_SECRET } from "../src/followup/config.js";
+import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
+import { PLACEHOLDER_BOOKING_KEY_SECRET } from "../src/config.js";
+import { parseFollowUpEnv, PLACEHOLDER_CRON_SECRET, type FollowUpRunnerEnv } from "../src/followup/config.js";
+import { startFollowUpRunner } from "../src/followup/start.js";
 import { followUpCronRoutes } from "../src/followup/cron.js";
 import {
   createScheduledFollowUps,
@@ -76,7 +82,45 @@ describe("parseFollowUpEnv", () => {
         modelTimeoutMs: 5_000,
         budgetMs: 20_000,
         intervalMs: 300_000,
+        templated: null,
       },
+    });
+  });
+
+  describe("AGENT_TEMPLATED (G-19, G-20)", () => {
+    const TEMPLATED = { ...ON, AGENT_TEMPLATED: "on", PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PUBLIC_BASE_URL: "https://book.example.test//" };
+    const templatedWithout = (name: string) => Object.fromEntries(Object.entries(TEMPLATED).filter(([key]) => key !== name));
+
+    it("is off unless switched on, and then needs no booking key or base URL", () => {
+      expect(parseFollowUpEnv(ON).runner?.templated).toBeNull();
+      expect(parseFollowUpEnv({ ...ON, AGENT_TEMPLATED: "off", PUBLIC_BOOKING_KEY_SECRET: "short" }).runner?.templated).toBeNull();
+      expect(errorOf({ ...ON, AGENT_TEMPLATED: "yes" })).toMatch(/Invalid environment: .*AGENT_TEMPLATED/);
+    });
+
+    it("reads the booking key, the trimmed base URL and the candidate cap when on", () => {
+      expect(parseFollowUpEnv(TEMPLATED).runner?.templated).toEqual({
+        bookingKeySecret: KEY_SECRET, publicBaseUrl: "https://book.example.test", maxCandidatesPerRun: 20,
+      });
+      expect(parseFollowUpEnv({ ...TEMPLATED, PUBLIC_BASE_URL: "http://localhost:8787", AGENT_TEMPLATED_MAX_CANDIDATES: "1000" }).runner?.templated)
+        .toEqual({ bookingKeySecret: KEY_SECRET, publicBaseUrl: "http://localhost:8787", maxCandidatesPerRun: 1000 });
+    });
+
+    it("fails closed without a booking key, with a short or placeholder one, or without a base URL", () => {
+      expect(errorOf(templatedWithout("PUBLIC_BOOKING_KEY_SECRET"))).toMatch(/Invalid environment: .*PUBLIC_BOOKING_KEY_SECRET/);
+      expect(errorOf({ ...TEMPLATED, PUBLIC_BOOKING_KEY_SECRET: "short" })).toMatch(/Invalid environment: .*at least 32 characters/);
+      const placeholder = errorOf({ ...TEMPLATED, PUBLIC_BOOKING_KEY_SECRET: PLACEHOLDER_BOOKING_KEY_SECRET });
+      expect(placeholder).toMatch(/Invalid environment: .*PUBLIC_BOOKING_KEY_SECRET.*placeholder/);
+      expect(errorOf(templatedWithout("PUBLIC_BASE_URL"))).toMatch(/Invalid environment: .*PUBLIC_BASE_URL/);
+      expect(errorOf({ ...TEMPLATED, PUBLIC_BASE_URL: "ftp://book.example.test" })).toMatch(/Invalid environment: .*PUBLIC_BASE_URL/);
+      expect(errorOf({ ...TEMPLATED, PUBLIC_BASE_URL: "not a url" })).toMatch(/Invalid environment: .*PUBLIC_BASE_URL/);
+    });
+
+    it("keeps the booking key out of its errors", () => {
+      expect(errorOf({ ...TEMPLATED, PUBLIC_BASE_URL: "nope" })).not.toContain(KEY_SECRET);
+    });
+
+    it.each(["0", "1001", "2.5"])("refuses AGENT_TEMPLATED_MAX_CANDIDATES=%s", (value) => {
+      expect(errorOf({ ...TEMPLATED, AGENT_TEMPLATED_MAX_CANDIDATES: value })).toMatch(/AGENT_TEMPLATED_MAX_CANDIDATES/);
     });
   });
 
@@ -281,7 +325,7 @@ describe("scheduled runs against Postgres (G-13)", () => {
     const summary = await scheduled().run();
     expect(summary).toEqual({
       slot: "2026-10-20T12:00:00.000Z", globalKilled: false, due: 1, finished: 1,
-      drafted: 1, skipped: 0, stopped: 0, errors: 0, budgetSpent: false, stalled: 0,
+      drafted: 1, skipped: 0, stopped: 0, errors: 0, budgetSpent: false, stalled: 0, templated: {},
     });
     const [run] = await runsOf(h.a);
     expect(run).toMatchObject({
@@ -430,5 +474,123 @@ describe("scheduled runs against Postgres (G-13)", () => {
     expect(closed.find((run) => run.id === stuck)).toMatchObject({ status: "stopped", stop_reason: "stalled" });
     expect(closed.find((run) => run.id === fresh)).toMatchObject({ status: "running", stop_reason: null });
     expect((await scheduled({ stallAfterMs: 15 * 60_000 }).run()).stalled).toBe(0);
+  });
+});
+
+describe("the templated kinds in the production wiring (G-19, G-20)", () => {
+  // Monday 2026-11-02 08:00 UTC; the booking is at 10:00, inside the reminder's 24-hour lead.
+  const now = Date.parse("2026-11-02T08:00:00.000Z");
+  const testClock = { now: () => new Date(now) };
+  const BASE_URL = "https://book.example.test";
+  let database: TestDatabase;
+  let fixture: TwoTenantFixture;
+  let runnerEnv: FollowUpRunnerEnv;
+  const service = <T>(work: (tx: Transaction) => Promise<T>) => asService(database.servicePool, work);
+  const deps = () => ({ db: database.db, clock: testClock, generateId: randomUUID });
+  const runCount = async () => Number((await service((tx) => tx.query<{ n: string }>("SELECT count(*) AS n FROM agent_runs"))).rows[0]!.n);
+
+  async function addMember(tenantId: string, role: "owner" | "staff") {
+    const userId = randomUUID();
+    await fixture.service((tx) => tx.query(
+      "INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$6)",
+      [tenantId, randomUUID(), `${role}-${userId.slice(0, 8)}@example.com`, userId, role, new Date(now)],
+    ));
+    return userId;
+  }
+
+  beforeAll(async () => {
+    database = await createTestDatabase();
+    fixture = await createTwoTenantFixture(database);
+    const runtime = new URL(database.url);
+    runtime.username = "zs_runtime";
+    const parsed = parseFollowUpEnv({
+      ...ON, FOLLOWUP_DATABASE_URL: runtime.href, FOLLOWUP_SERVICE_DATABASE_URL: database.url,
+      AGENT_TEMPLATED: "on", PUBLIC_BOOKING_KEY_SECRET: KEY_SECRET, PUBLIC_BASE_URL: `${BASE_URL}/`,
+    });
+    runnerEnv = parsed.runner!;
+  }, 60_000);
+  afterAll(async () => { await database?.close(); });
+
+  it("queues a reminder with a signed booking link under the base URL, for the enabled tenant only", async () => {
+    const tenantId = fixture.a.tenantId;
+    const resourceId = randomUUID();
+    const pageId = randomUUID();
+    await fixture.service(async (tx) => {
+      await tx.query(
+        `INSERT INTO booking_resources (tenant_id,id,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
+           buffer_before_minutes,buffer_after_minutes,minimum_notice_minutes,booking_horizon_minutes)
+         VALUES ($1,$2,'UTC',$3::jsonb,'[]'::jsonb,60,60,0,0,0,525600)`,
+        [tenantId, resourceId, JSON.stringify([1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, windows: [{ startMinute: 540, endMinute: 1020 }] })))],
+      );
+      await tx.query(
+        "INSERT INTO booking_pages (tenant_id,id,title,published,disclosure_version,created_at) VALUES ($1,$2,'Book a fitting',true,'v1',$3)",
+        [tenantId, pageId, new Date(now)],
+      );
+    });
+    const owner = await addMember(tenantId, "owner");
+    const staff = await addMember(tenantId, "staff");
+
+    // A confirmed booking at 10:00 with a customer who has an email address.
+    const staffSession = createSession(deps(), { tenantId, actorId: staff });
+    const bookingId = (await staffSession.createBooking({ resourceId, startsAt: "2026-11-02T10:00:00.000Z" }, randomUUID())).result.id;
+    const contactId = (await staffSession.upsertContact(
+      { displayName: "Ana Ruiz", email: `ana-${randomUUID().slice(0, 8)}@haldenrowe.example` }, randomUUID())).result.contact.id;
+    await staffSession.linkBookingContact(bookingId, { contactId, expectedRevision: 0 }, randomUUID());
+
+    // The owner writes and approves the reminder wording, then turns the kind on with no quiet hours.
+    const templates = createTemplateSession(deps(), { tenantId, actorId: owner });
+    const state = await templates.getTemplate("appointment_reminder");
+    await templates.createRevision("appointment_reminder", {
+      expectedRevision: state.currentRevision, channel: "email", subject: "A note from {business_name}",
+      body: "Hi {customer_first_name}, see you {booking_start_local}. Change it: {booking_link}", timingHours: 24,
+    }, randomUUID());
+    const revision = (await templates.getTemplate("appointment_reminder")).revisions[0]!;
+    await templates.approveTemplate("appointment_reminder", { revision: revision.revision, contentDigest: revision.contentDigest }, randomUUID());
+    const ownerSession = createSession(deps(), { tenantId, actorId: owner });
+    const status = await ownerSession.getAgentKindStatus("appointment_reminder");
+    await ownerSession.updateAgentKindSettings("appointment_reminder", {
+      enabled: true, quietStartMinute: 0, quietEndMinute: 0, timeZone: "UTC", maxCostMicrosPerDay: 1_000_000, config: {},
+      expectedRevision: status.revision,
+    }, randomUUID());
+
+    const { runner, close } = await startFollowUpRunner(runnerEnv, { clock: testClock, generateId: randomUUID });
+    try {
+      const summary = await runner.run();
+      expect(summary.templated?.appointment_reminder).toMatchObject({ due: 1, finished: 1, queued: 1, errors: 0 });
+      expect(summary.templated?.review_request).toMatchObject({ due: 0, queued: 0 });
+    } finally {
+      await close();
+    }
+
+    const link = `${BASE_URL}/book/${signBookingKey(KEY_SECRET, { tenantId, pageId })}`;
+    const sends = (await service((tx) => tx.query<{ tenant_id: string; payload: { body: string } }>(
+      "SELECT tenant_id, payload FROM outbox WHERE event_type='message.send_requested'"))).rows;
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.tenant_id).toBe(tenantId);
+    expect(sends[0]!.payload.body).toContain(`Change it: ${link}`);
+    const runs = (await service((tx) => tx.query<{ tenant_id: string; agent: string; status: string }>(
+      "SELECT tenant_id, agent, status FROM agent_runs"))).rows;
+    expect(runs).toEqual([{ tenant_id: tenantId, agent: "appointment_reminder", status: "completed" }]);
+  });
+
+  it("refuses to start with the templated kinds on but no booking key or base URL, before any run", async () => {
+    const before = await runCount();
+    for (const templated of [
+      { ...runnerEnv.templated!, bookingKeySecret: "" },
+      { ...runnerEnv.templated!, publicBaseUrl: "" },
+    ]) {
+      await expect(startFollowUpRunner({ ...runnerEnv, templated }, { clock: testClock, generateId: randomUUID }))
+        .rejects.toThrow(/Invalid environment: (PUBLIC_BOOKING_KEY_SECRET|PUBLIC_BASE_URL)/);
+    }
+    expect(await runCount()).toBe(before);
+  });
+
+  it("runs no templated kind while they are off", async () => {
+    const { runner, close } = await startFollowUpRunner({ ...runnerEnv, templated: null }, { clock: testClock, generateId: randomUUID });
+    try {
+      expect((await runner.run()).templated).toEqual({});
+    } finally {
+      await close();
+    }
   });
 });

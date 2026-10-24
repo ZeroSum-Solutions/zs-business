@@ -31,12 +31,15 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 export const PLACEHOLDER_BOOKING_KEY_SECRET = "replace-with-a-booking-key-secret-of-32-or-more-chars";
 /** The .env.example value for the unsubscribe token secret; refused like the booking placeholder. */
 export const PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET = "replace-with-an-unsubscribe-token-secret-of-32-or-more-chars";
-const signingSecretSchema = (what: string, placeholder: string) => z.string()
+/** A signing secret: 32 or more characters and not the .env.example placeholder. Shared with the follow-up runner. */
+export const signingSecretSchema = (what: string, placeholder: string) => z.string()
   .min(32, `${what} secrets must be at least 32 characters`)
   .refine((value) => value !== placeholder, `${what} secret is still the .env.example placeholder`);
 /** The .env.example value for the Activepieces key secret; refused like the others. */
 export const PLACEHOLDER_ACTIVEPIECES_KEY_SECRET = "replace-with-an-activepieces-key-secret-of-32-or-more-chars";
-const bookingKeySecretSchema = signingSecretSchema("booking key", PLACEHOLDER_BOOKING_KEY_SECRET);
+export const bookingKeySecretSchema = signingSecretSchema("booking key", PLACEHOLDER_BOOKING_KEY_SECRET);
+/** PUBLIC_BASE_URL: an http or https URL; callers trim its trailing slashes. */
+export const publicBaseUrlSchema = z.url({ protocol: /^https?$/ });
 export const activepiecesKeySecretSchema = signingSecretSchema("Activepieces key", PLACEHOLDER_ACTIVEPIECES_KEY_SECRET);
 /** Loopback receivers (http://127.0.0.1) for local development; only with a loopback database. */
 export const activepiecesLoopbackSchema = z.enum(["on", "off"]).default("off");
@@ -54,7 +57,7 @@ const envSchema = z.object({
   // The previous secret keeps verifying during a rotation; keys are re-signed with the current one.
   PUBLIC_BOOKING_KEY_PREVIOUS_SECRET: bookingKeySecretSchema.optional(),
   // Origin of the hosted booking page and embed script; defaults to http://localhost:<PORT>.
-  PUBLIC_BASE_URL: z.url({ protocol: /^https?$/ }).optional(),
+  PUBLIC_BASE_URL: publicBaseUrlSchema.optional(),
   // P-10: a header the host overwrites on every request (Vercel: x-vercel-forwarded-for or
   // x-real-ip), set only when the API is reachable through that host alone.
   PUBLIC_CLIENT_IP_HEADER: z.enum(CLIENT_IP_HEADERS).optional(),

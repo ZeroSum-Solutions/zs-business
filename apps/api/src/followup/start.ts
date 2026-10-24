@@ -1,10 +1,13 @@
 // Builds the scheduled follow-up runner from a parsed environment: a runtime pool for the agent's
 // actions, a service pool for the due-tenant read, and the model behind the port. Shared by the
-// Vercel cron function and the Node worker script, which own process.env and the clock.
+// Vercel cron function and the Node worker script, which own process.env and the clock. With
+// `templated` set, the templated kinds (G-19, G-20) run in the same slot, after the follow-up agent.
 import {
+  createBookingLinkProvider,
   createFollowUpModel,
   createFakeFollowUpModel,
   createFollowUpAgent,
+  createTemplatedAgents,
   modelForLane,
   VENDOR_MODEL_PRICES,
   type FetchLike,
@@ -27,6 +30,12 @@ export async function startFollowUpRunner(env: FollowUpRunnerEnv, deps: {
   /** The vendor transport; unset, the platform's fetch. */
   readonly fetch?: FetchLike;
 }): Promise<{ runner: ScheduledFollowUps; close(): Promise<void> }> {
+  // Fail closed before any pool opens: the parse refuses these too, but an env built by hand must not
+  // start the templated kinds without a booking key or base URL.
+  if (env.templated !== null) {
+    if (env.templated.bookingKeySecret === "") throw new Error("Invalid environment: PUBLIC_BOOKING_KEY_SECRET is required with AGENT_TEMPLATED=on");
+    if (env.templated.publicBaseUrl === "") throw new Error("Invalid environment: PUBLIC_BASE_URL is required with AGENT_TEMPLATED=on");
+  }
   const ssl = env.databaseCaCert === undefined ? {} : { ssl: { ca: env.databaseCaCert, rejectUnauthorized: true } };
   const runtimePool = createRuntimePool({
     connectionString: env.runtimeDatabaseUrl, max: 2, applicationName: "zs-followup", ...ssl,
@@ -48,6 +57,7 @@ export async function startFollowUpRunner(env: FollowUpRunnerEnv, deps: {
   });
   // G-18: a model on the wrong lane, or without a price, makes this throw before any tenant is run.
   let agent: ReturnType<typeof createFollowUpAgent>;
+  let templated: ReturnType<typeof createTemplatedAgents> | undefined;
   try {
     agent = createFollowUpAgent({ db, clock: deps.clock, generateId: deps.generateId }, {
       model: followUpModelFor(env, deps.fetch ?? ((url, init) => fetch(url, init))),
@@ -55,8 +65,14 @@ export async function startFollowUpRunner(env: FollowUpRunnerEnv, deps: {
       modelPrices: VENDOR_MODEL_PRICES,
       modelTimeoutMs: env.modelTimeoutMs,
       killPollMs: 1_000,
-        report: (event) => console.warn("Follow-up agent", event),
+      report: (event) => console.warn("Follow-up agent", event),
     });
+    if (env.templated !== null)
+      templated = createTemplatedAgents({ db, clock: deps.clock, generateId: deps.generateId }, {
+        maxCandidatesPerRun: env.templated.maxCandidatesPerRun,
+        bookingLink: createBookingLinkProvider({ secret: env.templated.bookingKeySecret, publicBaseUrl: env.templated.publicBaseUrl }),
+        report: (event) => console.warn("Templated agent", event),
+      });
   } catch (error) {
     await close();
     throw error;
@@ -64,6 +80,7 @@ export async function startFollowUpRunner(env: FollowUpRunnerEnv, deps: {
   const runner = createScheduledFollowUps({
     service: (work) => asService(servicePool, work),
     agent,
+    ...(templated ? { templated } : {}),
     clock: deps.clock,
     slotMinutes: env.slotMinutes,
     budgetMs: env.budgetMs,
