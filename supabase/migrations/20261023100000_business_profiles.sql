@@ -11,19 +11,20 @@ CREATE TABLE public.business_profiles (
   phone_e164 text CONSTRAINT business_profiles_phone CHECK (phone_e164 ~ '^\+[0-9]{8,15}$'),
   -- BP-3: null means not set. The trigger below checks the name against pg_timezone_names.
   time_zone text CONSTRAINT business_profiles_time_zone_shape CHECK (char_length(time_zone) BETWEEN 1 AND 100),
-  -- BP-4: the same codes as CURRENCY_CODES in packages/contracts/src/currency.ts (a test keeps them in step).
+  -- BP-4: the active codes, ACTIVE_CURRENCY_CODES in packages/contracts/src/currency.ts: the deal list
+  -- minus the codes ISO 4217 has withdrawn (a test keeps them in step).
   currency text NOT NULL DEFAULT 'USD' CONSTRAINT business_profiles_currency CHECK (currency IN (
   'AED', 'AFN', 'ALL', 'AMD', 'ANG', 'AOA', 'ARS', 'AUD', 'AWG', 'AZN', 'BAM', 'BBD', 'BDT', 'BGN', 'BHD', 'BIF',
   'BMD', 'BND', 'BOB', 'BRL', 'BSD', 'BTN', 'BWP', 'BYN', 'BZD', 'CAD', 'CDF', 'CHF', 'CLP', 'CNY', 'COP', 'CRC',
-  'CUC', 'CUP', 'CVE', 'CZK', 'DJF', 'DKK', 'DOP', 'DZD', 'EGP', 'ERN', 'ETB', 'EUR', 'FJD', 'FKP', 'GBP', 'GEL',
-  'GHS', 'GIP', 'GMD', 'GNF', 'GTQ', 'GYD', 'HKD', 'HNL', 'HRK', 'HTG', 'HUF', 'IDR', 'ILS', 'INR', 'IQD', 'IRR',
+  'CUP', 'CVE', 'CZK', 'DJF', 'DKK', 'DOP', 'DZD', 'EGP', 'ERN', 'ETB', 'EUR', 'FJD', 'FKP', 'GBP', 'GEL',
+  'GHS', 'GIP', 'GMD', 'GNF', 'GTQ', 'GYD', 'HKD', 'HNL', 'HTG', 'HUF', 'IDR', 'ILS', 'INR', 'IQD', 'IRR',
   'ISK', 'JMD', 'JOD', 'JPY', 'KES', 'KGS', 'KHR', 'KMF', 'KPW', 'KRW', 'KWD', 'KYD', 'KZT', 'LAK', 'LBP', 'LKR',
   'LRD', 'LSL', 'LYD', 'MAD', 'MDL', 'MGA', 'MKD', 'MMK', 'MNT', 'MOP', 'MRU', 'MUR', 'MVR', 'MWK', 'MXN', 'MYR',
   'MZN', 'NAD', 'NGN', 'NIO', 'NOK', 'NPR', 'NZD', 'OMR', 'PAB', 'PEN', 'PGK', 'PHP', 'PKR', 'PLN', 'PYG', 'QAR',
-  'RON', 'RSD', 'RUB', 'RWF', 'SAR', 'SBD', 'SCR', 'SDG', 'SEK', 'SGD', 'SHP', 'SLE', 'SLL', 'SOS', 'SRD', 'SSP',
+  'RON', 'RSD', 'RUB', 'RWF', 'SAR', 'SBD', 'SCR', 'SDG', 'SEK', 'SGD', 'SHP', 'SLE', 'SOS', 'SRD', 'SSP',
   'STN', 'SVC', 'SYP', 'SZL', 'THB', 'TJS', 'TMT', 'TND', 'TOP', 'TRY', 'TTD', 'TWD', 'TZS', 'UAH', 'UGX', 'USD',
   'UYU', 'UZS', 'VED', 'VES', 'VND', 'VUV', 'WST', 'XAF', 'XCD', 'XCG', 'XDR', 'XOF', 'XPF', 'XSU', 'YER', 'ZAR',
-  'ZMW', 'ZWG', 'ZWL'
+  'ZMW', 'ZWG'
   )),
   -- BP-2: { line1, line2?, city, region?, postalCode?, country }; optional keys are absent, never JSON null.
   -- A CHECK passes on NULL, so every clause is coalesced to false.
@@ -32,7 +33,24 @@ CREATE TABLE public.business_profiles (
     AND (postal_address - ARRAY['line1', 'line2', 'city', 'region', 'postalCode', 'country']) = '{}'::jsonb
     AND coalesce(jsonb_typeof(postal_address->'line1') = 'string' AND char_length(postal_address->>'line1') BETWEEN 1 AND 120, false)
     AND coalesce(jsonb_typeof(postal_address->'city') = 'string' AND char_length(postal_address->>'city') BETWEEN 1 AND 120, false)
-    AND coalesce(jsonb_typeof(postal_address->'country') = 'string' AND postal_address->>'country' ~ '^[A-Z]{2}$', false)
+    -- The codes of COUNTRY_CODES in packages/contracts/src/business.ts (a test keeps them in step).
+    AND coalesce(jsonb_typeof(postal_address->'country') = 'string' AND postal_address->>'country' IN (
+    'AD', 'AE', 'AF', 'AG', 'AI', 'AL', 'AM', 'AO', 'AQ', 'AR', 'AS', 'AT', 'AU', 'AW', 'AX', 'AZ',
+    'BA', 'BB', 'BD', 'BE', 'BF', 'BG', 'BH', 'BI', 'BJ', 'BL', 'BM', 'BN', 'BO', 'BQ', 'BR', 'BS',
+    'BT', 'BV', 'BW', 'BY', 'BZ', 'CA', 'CC', 'CD', 'CF', 'CG', 'CH', 'CI', 'CK', 'CL', 'CM', 'CN',
+    'CO', 'CR', 'CU', 'CV', 'CW', 'CX', 'CY', 'CZ', 'DE', 'DJ', 'DK', 'DM', 'DO', 'DZ', 'EC', 'EE',
+    'EG', 'EH', 'ER', 'ES', 'ET', 'FI', 'FJ', 'FK', 'FM', 'FO', 'FR', 'GA', 'GB', 'GD', 'GE', 'GF',
+    'GG', 'GH', 'GI', 'GL', 'GM', 'GN', 'GP', 'GQ', 'GR', 'GS', 'GT', 'GU', 'GW', 'GY', 'HK', 'HM',
+    'HN', 'HR', 'HT', 'HU', 'ID', 'IE', 'IL', 'IM', 'IN', 'IO', 'IQ', 'IR', 'IS', 'IT', 'JE', 'JM',
+    'JO', 'JP', 'KE', 'KG', 'KH', 'KI', 'KM', 'KN', 'KP', 'KR', 'KW', 'KY', 'KZ', 'LA', 'LB', 'LC',
+    'LI', 'LK', 'LR', 'LS', 'LT', 'LU', 'LV', 'LY', 'MA', 'MC', 'MD', 'ME', 'MF', 'MG', 'MH', 'MK',
+    'ML', 'MM', 'MN', 'MO', 'MP', 'MQ', 'MR', 'MS', 'MT', 'MU', 'MV', 'MW', 'MX', 'MY', 'MZ', 'NA',
+    'NC', 'NE', 'NF', 'NG', 'NI', 'NL', 'NO', 'NP', 'NR', 'NU', 'NZ', 'OM', 'PA', 'PE', 'PF', 'PG',
+    'PH', 'PK', 'PL', 'PM', 'PN', 'PR', 'PS', 'PT', 'PW', 'PY', 'QA', 'RE', 'RO', 'RS', 'RU', 'RW',
+    'SA', 'SB', 'SC', 'SD', 'SE', 'SG', 'SH', 'SI', 'SJ', 'SK', 'SL', 'SM', 'SN', 'SO', 'SR', 'SS',
+    'ST', 'SV', 'SX', 'SY', 'SZ', 'TC', 'TD', 'TF', 'TG', 'TH', 'TJ', 'TK', 'TL', 'TM', 'TN', 'TO',
+    'TR', 'TT', 'TV', 'TW', 'TZ', 'UA', 'UG', 'UM', 'US', 'UY', 'UZ', 'VA', 'VC', 'VE', 'VG', 'VI',
+    'VN', 'VU', 'WF', 'WS', 'YE', 'YT', 'ZA', 'ZM', 'ZW'), false)
     AND (postal_address->'line2' IS NULL
       OR coalesce(jsonb_typeof(postal_address->'line2') = 'string' AND char_length(postal_address->>'line2') BETWEEN 1 AND 120, false))
     AND (postal_address->'region' IS NULL
@@ -65,12 +83,19 @@ CREATE TRIGGER business_profiles_time_zone_known
   EXECUTE FUNCTION public.business_profiles_time_zone_known();
 
 -- BP-1: the row is created with the tenant. Tenants are inserted by the service role (provisioning,
--- seeds), which may write this table. display_name copies the name, trimmed and cut to the column's limit.
+-- seeds), which may write this table. A new tenant's name is first made a valid display name (trimmed,
+-- at most 120 characters, never empty), so display_name copies tenants.name exactly (BP-9).
+CREATE FUNCTION public.business_profiles_tenant_name() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  NEW.name := coalesce(nullif(btrim(left(btrim(NEW.name), 120)), ''), 'Business');
+  RETURN NEW;
+END $$;
 CREATE FUNCTION public.business_profiles_create() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
   INSERT INTO public.business_profiles (tenant_id, display_name, currency, revision, updated_at)
-  VALUES (NEW.tenant_id, coalesce(nullif(btrim(left(btrim(NEW.name), 120)), ''), 'Business'), 'USD', 1, now());
+  VALUES (NEW.tenant_id, NEW.name, 'USD', 1, now());
   RETURN NULL;
 END $$;
 
@@ -116,17 +141,20 @@ ALTER POLICY tenant_scope ON public.tenants TO authenticated, zs_dispatcher;
 -- Same owners as every function: invoker functions with zs_function_owner (20261018090000), the
 -- definer with zs_dispatcher (20261017160000). CREATE only for the transfer.
 REVOKE ALL ON FUNCTION public.business_profiles_time_zone_known() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.business_profiles_tenant_name() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.business_profiles_create() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.business_profiles_sync_name() FROM PUBLIC;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
     REVOKE ALL ON FUNCTION public.business_profiles_time_zone_known() FROM anon;
+    REVOKE ALL ON FUNCTION public.business_profiles_tenant_name() FROM anon;
     REVOKE ALL ON FUNCTION public.business_profiles_create() FROM anon;
     REVOKE ALL ON FUNCTION public.business_profiles_sync_name() FROM anon;
   END IF;
 END $$;
 GRANT CREATE ON SCHEMA public TO zs_function_owner;
 ALTER FUNCTION public.business_profiles_time_zone_known() OWNER TO zs_function_owner;
+ALTER FUNCTION public.business_profiles_tenant_name() OWNER TO zs_function_owner;
 ALTER FUNCTION public.business_profiles_create() OWNER TO zs_function_owner;
 REVOKE CREATE ON SCHEMA public FROM zs_function_owner;
 GRANT CREATE ON SCHEMA public TO zs_dispatcher;
@@ -142,10 +170,18 @@ INSERT INTO public.business_profiles (tenant_id, display_name, currency, revisio
   SELECT t.tenant_id, coalesce(nullif(btrim(left(btrim(t.name), 120)), ''), 'Business'), 'USD', 1, now()
   FROM public.tenants t
   ON CONFLICT (tenant_id) DO NOTHING;
+-- A legacy name that is too long or padded became a valid display name above: the tenant takes the
+-- same text, so the two never differ (BP-9).
+UPDATE public.tenants t SET name = p.display_name
+  FROM public.business_profiles p
+  WHERE p.tenant_id = t.tenant_id AND t.name IS DISTINCT FROM p.display_name;
 ALTER TABLE public.tenants FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.business_profiles FORCE ROW LEVEL SECURITY;
 
 -- Created after the backfill, so a tenant inserted from here on gets its row.
+CREATE TRIGGER business_profiles_tenant_name
+  BEFORE INSERT ON public.tenants
+  FOR EACH ROW EXECUTE FUNCTION public.business_profiles_tenant_name();
 CREATE TRIGGER business_profiles_create
   AFTER INSERT ON public.tenants
   FOR EACH ROW EXECUTE FUNCTION public.business_profiles_create();

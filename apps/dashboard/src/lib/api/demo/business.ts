@@ -50,11 +50,15 @@ export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & Demo
       return clone(profile);
     },
 
-    updateBusiness(input, options) {
+    async updateBusiness(input, options) {
+      // The `business` permission is the owner's alone, and it is checked before any replay: a key an
+      // owner used earlier answers a staff member with 403, as the API does.
+      if (ctx.actor().role !== "owner") {
+        await ctx.wait();
+        throw demoError("Forbidden");
+      }
       return ctx.idempotent("business.profile.update", input, options, () => {
         const request = ctx.parse(updateBusinessProfileRequestSchema, input);
-        // The `business` permission is the owner's alone.
-        if (ctx.actor().role !== "owner") throw demoError("Forbidden");
         if (request.expectedRevision !== profile.revision) {
           throw demoError("Conflict", { reason: "stale_revision", currentRevision: profile.revision });
         }

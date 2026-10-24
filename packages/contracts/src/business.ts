@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
 import { bookingTimeZoneSchema } from "./booking.js";
-import { currencyCodeSchema } from "./currency.js";
+import { activeCurrencyCodeSchema, currencyCodeSchema } from "./currency.js";
 import { isPostgresText } from "./json.js";
 
 // The business profile (docs/requirements/business-profile.md BP-1..BP-12). Root re-exports this
@@ -70,7 +70,7 @@ export const businessProfileChangesSchema = z.strictObject({
   legalName: businessLegalNameSchema.nullable(),
   phoneE164: businessPhoneSchema.nullable(),
   timeZone: businessTimeZoneSchema.nullable(),
-  currency: currencyCodeSchema,
+  currency: activeCurrencyCodeSchema,
   postalAddress: postalAddressSchema.nullable(),
 }).partial().refine((changes) => Object.keys(changes).length > 0, "Name at least one field to change");
 export type BusinessProfileChanges = z.infer<typeof businessProfileChangesSchema>;
@@ -86,13 +86,21 @@ export type UpdateBusinessProfileRequest = z.infer<typeof updateBusinessProfileR
  * How a client reads the profile: a newer API may add keys, which are dropped here, so neither order
  * of a rolling deploy breaks the Settings form (BP-10).
  */
+const postalAddressReadSchema = z.object({
+  line1: z.string(),
+  line2: z.string().optional(),
+  city: z.string(),
+  region: z.string().optional(),
+  postalCode: z.string().optional(),
+  country: z.string(),
+});
 export const businessProfileReadSchema = z.object({
   displayName: z.string(),
   legalName: z.string().nullable(),
   phoneE164: z.string().nullable(),
   timeZone: z.string().nullable(),
   currency: z.string(),
-  postalAddress: postalAddressSchema.nullable(),
+  postalAddress: postalAddressReadSchema.nullable(),
   revision: z.number().int(),
   updatedAt: z.string(),
 });

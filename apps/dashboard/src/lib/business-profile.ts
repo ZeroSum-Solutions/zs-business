@@ -93,8 +93,10 @@ export function readBusinessForm(profile: BusinessProfile, form: BusinessForm): 
   if (legalName.length > LEGAL_NAME_MAX) errors.legalName = BUSINESS_MESSAGES.legalName;
   else if (legalName !== (profile.legalName ?? "")) changes.legalName = legalName === "" ? null : legalName;
 
-  const phone = normalizePhone(form.phone.trim());
-  if (phone !== "" && !/^\+[0-9]{8,15}$/.test(phone)) errors.phone = BUSINESS_MESSAGES.phone;
+  // Empty means clear; text that strips down to nothing ("---") is a typo, never a clear.
+  const typedPhone = form.phone.trim();
+  const phone = typedPhone === "" ? "" : normalizePhone(typedPhone);
+  if (typedPhone !== "" && !/^\+[0-9]{8,15}$/.test(phone)) errors.phone = BUSINESS_MESSAGES.phone;
   else if (phone !== (profile.phoneE164 ?? "")) changes.phoneE164 = phone === "" ? null : phone;
 
   if (form.timeZone !== (profile.timeZone ?? "")) changes.timeZone = form.timeZone === "" ? null : form.timeZone;

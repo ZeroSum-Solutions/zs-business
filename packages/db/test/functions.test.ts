@@ -53,6 +53,7 @@ const expectedPath: Record<string, string> = {
   // that keeps tenants.name in step with the display name (BP-9), and the zone check.
   "business_profiles_create()": "pg_catalog, pg_temp",
   "business_profiles_sync_name()": "pg_catalog, pg_temp",
+  "business_profiles_tenant_name()": "pg_catalog, pg_temp",
   "business_profiles_time_zone_known()": "pg_catalog, pg_temp",
   // M5 (20261020630000_google_calendar.sql): the runtime status guard on calendar connections.
   "calendar_connections_runtime_guard()": "pg_catalog, pg_temp",

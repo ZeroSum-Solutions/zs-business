@@ -2,13 +2,13 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
-import { CURRENCIES, currencyLabel, isCurrencyCode } from "@zs/contracts";
+import { CURRENCIES, currencyLabel, isActiveCurrencyCode, isCurrencyCode } from "@zs/contracts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input, Label, Select } from "@/components/ui/input";
 import { ErrorNote } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isDealChanged, type DealDetailsChange, type DealSummary, type LeadSource } from "@/lib/api";
+import { isApiError, isDealChanged, type DealDetailsChange, type DealSummary, type LeadSource } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
@@ -89,7 +89,9 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
   const generation = useDialogGeneration(open);
   const profile = useBusinessProfile();
   // A stored profile currency outside the list cannot start a deal; fall back rather than offer it.
-  const profileCurrency = profile.data && isCurrencyCode(profile.data.currency) ? profile.data.currency : FALLBACK_CURRENCY;
+  const profileCurrency = profile.data && isActiveCurrencyCode(profile.data.currency) ? profile.data.currency : FALLBACK_CURRENCY;
+  // The business currency is "known" once the profile arrives, or the API has none (404, the older-API fallback).
+  const profileKnown = profile.isSuccess || (profile.isError && isApiError(profile.error, "not_found"));
   const [form, setForm] = useState(() => initialForm(deal, profileCurrency));
   // What the form was opened (or last rebased) from: a save sends this revision, never a newer
   // one a reload brought in, so a change made elsewhere always comes back as stale_revision.
@@ -166,6 +168,8 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
     if (form.amount.trim() !== "") {
       // BP-8: a stored code outside the list can be shown, but a value cannot be saved under it.
       if (!isCurrencyCode(currency)) return setProblem("currency");
+      // BP-8: never save a value under a guessed currency; the owner picks one while the profile is unknown.
+      if (!deal.value && !currencyChosen && !profileKnown) return setProblem("currency");
       const amountMinor = parseAmount(form.amount, currency);
       if (amountMinor === null) return setProblem("amount");
       value = { amountMinor, currency };
@@ -210,14 +214,14 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
                 }}
               >
                 {isCurrencyCode(form.currency) ? null : <option value={form.currency}>{form.currency} · not supported</option>}
-                {CURRENCIES.map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
+                {CURRENCIES.filter((currency) => isActiveCurrencyCode(currency.code) || currency.code === form.currency).map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
               </Select>
             </div>
           </div>
           {/* Right under the fields it is about, before the general hint. */}
           {problem ? (
             <p id={`${prefix}-problem`} role="alert" className="-mt-2 text-sm text-danger">
-              {problem === "amount" ? amountHint(form.currency.trim().toUpperCase()) : "Pick a supported currency to save a value."}
+              {problem === "amount" ? amountHint(form.currency.trim().toUpperCase()) : isCurrencyCode(form.currency.trim().toUpperCase()) ? "Pick the currency for this value. Your business currency has not loaded yet." : "Pick a supported currency to save a value."}
             </p>
           ) : null}
           <p id={`${prefix}-help`} className={problem ? "text-xs text-meta" : "-mt-2 text-xs text-meta"}>Leave the value empty if it is not known yet.</p>

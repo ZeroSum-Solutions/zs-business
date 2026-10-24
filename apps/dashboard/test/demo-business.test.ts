@@ -51,6 +51,21 @@ describe("demo adapter: business profile", () => {
     expect((await api.getBusiness()).revision).toBe(1);
   });
 
+  it("answers a staff member with 403 even for a key an owner already used", async () => {
+    const api = adapter();
+    const options = key();
+    const request = { expectedRevision: 1, changes: { currency: "EUR" } };
+    await api.updateBusiness(request, options);
+    api.actAs("staff");
+    expect(await failure(api.updateBusiness(request, options))).toMatchObject({ kind: "forbidden", status: 403 });
+  });
+
+  it("refuses a withdrawn currency such as CUC (BP-4)", async () => {
+    const api = adapter();
+    const error = await failure(api.updateBusiness({ expectedRevision: 1, changes: { currency: "CUC" } }, key()));
+    expect(error).toMatchObject({ kind: "validation", details: { issues: [{ path: "changes.currency" }] } });
+  });
+
   it("names the path of a bad zone, currency or phone", async () => {
     const api = adapter();
     for (const [changes, path] of [

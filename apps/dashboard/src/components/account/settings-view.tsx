@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { CURRENCIES, currencyLabel, type BusinessProfile, type UpdateBusinessProfileRequest } from "@zs/contracts";
+import { ACTIVE_CURRENCIES, currencyLabel, type BusinessProfile, type UpdateBusinessProfileRequest } from "@zs/contracts";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
@@ -179,7 +179,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
   const form = draft?.form ?? saved;
   const revision = draft?.revision ?? profile.revision;
   const dirty = !sameForm(form, saved);
-  const zones = useMemo(() => timeZoneChoices(form.timeZone), [form.timeZone]);
+  const zones = useMemo(() => timeZoneChoices(form.timeZone).filter((zone) => zone !== ""), [form.timeZone]);
   const countries = useMemo(() => countryChoices(), []);
   const locked = lockedReason !== null;
   const unchanged = !locked && !dirty;
@@ -188,10 +188,15 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
 
   const save = useMutation({
     mutationFn: (input: UpdateBusinessProfileRequest) => api.updateBusiness(input, { idempotencyKey: intents.keyFor(input) }),
+    // A read that started before the save must not land after it and put the old values back.
+    onMutate: () => queryClient.cancelQueries({ queryKey: keys.business }),
     onSettled: (_profile, error, input) => intents.settle(input, error),
     onSuccess: (next) => {
-      queryClient.setQueryData(keys.business, next);
-      setBusinessName(next.displayName);
+      // A replayed answer can be older than what is cached: never move the cache back a revision.
+      const current = queryClient.getQueryData<BusinessProfile>(keys.business);
+      const latest = current && current.revision > next.revision ? current : next;
+      queryClient.setQueryData(keys.business, latest);
+      setBusinessName(latest.displayName);
       setDraft(null);
       setErrors({});
       toast(demo ? BUSINESS_DEMO_SAVED : BUSINESS_SAVED);
@@ -253,7 +258,8 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
   return (
     <form className="space-y-4" onSubmit={submit} noValidate aria-labelledby="business-title">
       {stale ? <p role="alert" data-testid="business-stale" className="rounded-md bg-warn-tint p-3 text-sm text-fg-2">{STALE_BUSINESS_MESSAGE}</p> : null}
-      <fieldset disabled={locked} className="space-y-4">
+      {/* Held while a save is in flight, so an edit made meanwhile is not wiped when the answer clears the draft. */}
+      <fieldset disabled={locked || save.isPending} className="space-y-4">
         {text("displayName", "Business name", { hint: "Shown in the header and the account menu." })}
         {text("legalName", "Legal name", { hint: "The registered name, if it differs. Leave empty if not." })}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -270,7 +276,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
         <div>
           <Label htmlFor={FIELD_IDS.currency}>Currency</Label>
           <Select {...props("currency", true)} className="w-full" value={form.currency} onChange={(event) => edit({ currency: event.target.value })}>
-            {CURRENCIES.map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
+            {ACTIVE_CURRENCIES.map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
           </Select>
           {note("currency", "New deals start in this currency. Saved amounts do not change.")}
         </div>

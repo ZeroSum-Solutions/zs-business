@@ -66,7 +66,23 @@ export function currencyLabel(code: string): string {
   return name === undefined ? code : `${code} · ${name}`;
 }
 
+/**
+ * Codes the list keeps only so a deal stored under one still reads and moves (H-1): ISO 4217 has
+ * withdrawn them. A business currency (BP-4) must be active, so these are never offered or accepted.
+ */
+export const WITHDRAWN_CURRENCY_CODES: readonly string[] = Object.freeze(["CUC", "HRK", "SLL", "ZWL"]);
+const withdrawnCodes: ReadonlySet<string> = new Set(WITHDRAWN_CURRENCY_CODES);
+/** BP-4: the currencies a business may choose, in list order. */
+export const ACTIVE_CURRENCIES: readonly { readonly code: string; readonly name: string }[] = Object.freeze(
+  CURRENCIES.filter((currency) => !withdrawnCodes.has(currency.code)),
+);
+export const ACTIVE_CURRENCY_CODES: readonly string[] = Object.freeze(ACTIVE_CURRENCIES.map((currency) => currency.code));
+/** Whether `code` is on the list and not withdrawn. */
+export const isActiveCurrencyCode = (code: string): boolean => currencyCodes.has(code) && !withdrawnCodes.has(code);
+
 export const currencyCodeSchema = z.string().refine(isCurrencyCode, "Expected an ISO 4217 code such as USD");
+/** A currency a business may be set to (BP-4): on the list and not withdrawn. */
+export const activeCurrencyCodeSchema = z.string().refine(isActiveCurrencyCode, "Expected an active ISO 4217 code such as USD");
 /**
  * H-1 revision 4: a currency as reads show it. Deals stored under the earlier check may hold any
  * three capitals until the owner fixes them, so reads accept that shape; writes take only

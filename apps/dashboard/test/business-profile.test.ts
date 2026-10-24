@@ -41,6 +41,15 @@ describe("readBusinessForm", () => {
     expect(readBusinessForm(saved, form)).toEqual({ ok: true, changes: { legalName: null, phoneE164: null, timeZone: null, postalAddress: null } });
   });
 
+  it("never clears a saved phone number because the field holds only punctuation", () => {
+    const saved = profile({ phoneE164: "+442079460000" });
+    for (const typed of ["---", "( )", " . "]) {
+      const read = readBusinessForm(saved, { ...toBusinessForm(saved), phone: typed });
+      expect(read.ok, typed).toBe(false);
+    }
+    expect(readBusinessForm(saved, { ...toBusinessForm(saved), phone: "  " })).toEqual({ ok: true, changes: { phoneE164: null } });
+  });
+
   it("turns a typed phone number into E.164", () => {
     const form = { ...toBusinessForm(profile()), phone: "+44 (20) 7946-0000" };
     expect(readBusinessForm(profile(), form)).toEqual({ ok: true, changes: { phoneE164: "+442079460000" } });

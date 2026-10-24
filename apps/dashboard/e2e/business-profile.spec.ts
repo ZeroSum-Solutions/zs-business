@@ -68,6 +68,30 @@ test("a new deal starts at the business currency and a priced deal keeps its own
   await expect(priced.getByLabel("Currency")).toHaveValue("USD");
 });
 
+test("holds the fields while a save is in flight, so a later edit is not wiped by its answer", async ({ page }) => {
+  await openSettings(page);
+  const card = businessCard(page);
+  await card.getByLabel("Legal name").fill("Halden & Rowe Ltd");
+  await page.evaluate(() => window.__zsDemo!.delayNextWrite(800));
+  await card.getByRole("button", { name: "Save changes" }).click();
+  await expect(card.getByLabel("Business phone")).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  await expect(card.getByLabel("Business phone")).toBeEnabled();
+  await expect(card.getByLabel("Legal name")).toHaveValue("Halden & Rowe Ltd");
+});
+
+test("refuses a phone field that holds only punctuation instead of clearing the number", async ({ page }) => {
+  await openSettings(page);
+  const card = businessCard(page);
+  await card.getByLabel("Business phone").fill("+44 20 7946 0000");
+  await card.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Saved in this demo only" })).toBeVisible();
+  await card.getByLabel("Business phone").fill("---");
+  await card.getByRole("button", { name: "Save changes" }).click();
+  await expect(card.getByText("Enter a phone number with country code, like +1 212 555 0142.")).toBeVisible();
+  expect(await writes(page)).toHaveLength(1);
+});
+
 test("staff see the form read-only with the reason", async ({ page }) => {
   await openSettings(page);
   await page.evaluate(() => window.__zsDemo!.actAs("staff"));

@@ -43,8 +43,10 @@ describe("the row that comes with a tenant (BP-1)", () => {
     expect((await profileOf(long)).display_name).toBe("L".repeat(120));
     expect((await profileOf(padded)).display_name).toBe("Padded & Co");
     expect((await profileOf(blank)).display_name).toBe("Business");
-    // The tenant's own name is left as it was.
-    expect(await tenantName(long)).toBe("L".repeat(200));
+    // The tenant takes the same text, so the two names never differ (BP-9).
+    expect(await tenantName(long)).toBe("L".repeat(120));
+    expect(await tenantName(padded)).toBe("Padded & Co");
+    expect(await tenantName(blank)).toBe("Business");
   });
 });
 
@@ -70,6 +72,10 @@ describe("backfill (BP-1)", () => {
           { tenant_id: first, display_name: "Halden & Rowe", currency: "USD", revision: 1, legal_name: null, time_zone: null },
           { tenant_id: second, display_name: "N".repeat(120), currency: "USD", revision: 1, legal_name: null, time_zone: null },
         ]);
+        // The tenants carry the same names, so the header and the profile agree (BP-9).
+        expect((await asService(old.servicePool, (tx) => tx.query(
+          "SELECT t.name = p.display_name AS same FROM tenants t JOIN business_profiles p USING (tenant_id) WHERE t.tenant_id = ANY($1)",
+          [[first, second, blank]]))).rows).toEqual([{ same: true }, { same: true }, { same: true }]);
         // Forced RLS is back on both tables after the copy.
         expect((await old.pool.query(
           "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname IN ('tenants','business_profiles') ORDER BY 1")).rows)
@@ -105,6 +111,11 @@ describe("field shapes (BP-2, BP-4)", () => {
     ["currency", "XXZ"],
     ["currency", "usd"],
     ["currency", "XAU"],
+    // Withdrawn from ISO 4217: deals may still hold them, a business may not.
+    ["currency", "CUC"],
+    ["currency", "HRK"],
+    ["currency", "SLL"],
+    ["currency", "ZWL"],
     ["revision", 0],
   ])("refuses %s = %j", async (column, value) => {
     await expect(set(column, value)).rejects.toMatchObject({ code: "23514" });
@@ -126,7 +137,7 @@ describe("field shapes (BP-2, BP-4)", () => {
     await set("phone_e164", "+123456789012345");
     await set("phone_e164", null);
     await set("currency", "EUR");
-    await set("currency", "ZWL");
+    await set("currency", "ZWG");
     await set("legal_name", null);
     await rename("Tenant B");
     await set("currency", "USD");
@@ -141,6 +152,8 @@ describe("field shapes (BP-2, BP-4)", () => {
     ["a missing country", { line1: "1 High St", city: "London" }, false],
     ["a lowercase country", { ...ADDRESS, country: "gb" }, false],
     ["a three-letter country", { ...ADDRESS, country: "GBR" }, false],
+    ["two capitals that are no country", { ...ADDRESS, country: "ZZ" }, false],
+    ["a country at the end of the list", { ...ADDRESS, country: "ZW" }, true],
     ["an empty line", { ...ADDRESS, line1: "" }, false],
     ["a 121-character line", { ...ADDRESS, line2: "x".repeat(121) }, false],
     ["a JSON null optional line", { ...ADDRESS, line2: null }, false],
