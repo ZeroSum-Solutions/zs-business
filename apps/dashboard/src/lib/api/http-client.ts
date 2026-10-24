@@ -4,6 +4,12 @@ import {
   agentKindStatusSchema,
   approveApprovalResponseSchema,
   bookingContactOutputSchema,
+  browserRunDetailSchema,
+  browserRunListSchema,
+  browserRunOutputSchema,
+  browserStatusOutputSchema,
+  browserStatusSchema,
+  browserTargetOutputSchema,
   bookingDetailSchema,
   bookingPageSchema,
   bookingPageSummarySchema,
@@ -43,6 +49,10 @@ import {
   slotsResponseSchema,
   templateStateSchema,
   templateSuggestionSchema,
+  approvalOutputSchema,
+  intakeDiscardResultSchema,
+  intakeJobDetailSchema,
+  intakeJobListSchema,
   transcriptionDetailSchema,
   transcriptionListSchema,
   threadDetailSchema,
@@ -67,11 +77,13 @@ import {
   THREAD_PAGE_SIZE,
   toUpsertContactRequest,
   type AgentsApi,
+  type BrowserApi,
   type BusinessApi,
   type EnrichmentApi,
   type BookingApi,
   type CalendarSyncApi,
   type CrmApi,
+  type DocumentIntakeApi,
   type HomeApi,
   type InboxApi,
   type IntakeApi,
@@ -128,7 +140,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -213,6 +225,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
   const FOLLOW_UP = "/v1/agents/followup";
   const KIND = (kind: string) => `/v1/agents/${encodeURIComponent(kind)}`;
+  const BROWSER = "/v1/browser";
 
   return {
     async listResources(options = {}) {
@@ -385,6 +398,27 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       return request({ method: "GET", path: `/v1/transcriptions/${encodeURIComponent(id)}`, schema: transcriptionDetailSchema, signal: options.signal });
     },
 
+    async listIntakeJobs(options = {}) {
+      return (await request({ method: "GET", path: "/v1/document-intake/jobs", schema: intakeJobListSchema, signal: options.signal })).items;
+    },
+
+    getIntakeJob(id, options = {}) {
+      return request({ method: "GET", path: `/v1/document-intake/jobs/${encodeURIComponent(id)}`, schema: intakeJobDetailSchema, signal: options.signal });
+    },
+
+    async proposeIntakeApply(id, input, options) {
+      const output = await write(`/v1/document-intake/jobs/${encodeURIComponent(id)}/apply`, input, approvalOutputSchema, options);
+      return { approvalId: output.result.id };
+    },
+
+    async approveIntakeApply(approvalId, options) {
+      await write(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, {}, approveApprovalResponseSchema, options);
+    },
+
+    async discardIntakeJob(id, options) {
+      await write(`/v1/document-intake/jobs/${encodeURIComponent(id)}/discard`, {}, intakeDiscardResultSchema, options);
+    },
+
     async listSites(options = {}) {
       return (await request({ method: "GET", path: "/v1/sites", schema: siteListSchema, signal: options.signal })).items;
     },
@@ -456,6 +490,44 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     async disconnectCalendar(connectionId, options) {
       const path = `/v1/calendar/connections/${encodeURIComponent(connectionId)}/disconnect`;
       return (await write(path, {}, disconnectCalendarOutputSchema, options)).result;
+    },
+
+    getBrowserStatus(options = {}) {
+      return request({ method: "GET", path: BROWSER, schema: browserStatusSchema, signal: options.signal });
+    },
+
+    async updateBrowserSettings(input, options) {
+      return (await write(`${BROWSER}/settings`, input, browserStatusOutputSchema, options, "PUT")).result;
+    },
+
+    async killBrowser(input, options) {
+      const body = input.note === undefined ? {} : { note: input.note };
+      return (await write(`${BROWSER}/kill`, body, browserStatusOutputSchema, options)).result;
+    },
+
+    async resumeBrowser(options) {
+      return (await write(`${BROWSER}/resume`, {}, browserStatusOutputSchema, options)).result;
+    },
+
+    async saveBrowserTarget(input, options) {
+      return (await write(`${BROWSER}/targets`, input, browserTargetOutputSchema, options)).result;
+    },
+
+    async requestBrowserRun(input, options) {
+      return (await write(`${BROWSER}/runs`, input, browserRunOutputSchema, options)).result;
+    },
+
+    async listBrowserRuns(options = {}) {
+      return (await request({ method: "GET", path: `${BROWSER}/runs`, schema: browserRunListSchema, signal: options.signal })).items;
+    },
+
+    async getBrowserRun(id, options = {}) {
+      if (!uuidSchema.safeParse(id).success) throw runNotFound();
+      try {
+        return await request({ method: "GET", path: `${BROWSER}/runs/${encodeURIComponent(id)}`, schema: browserRunDetailSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? runNotFound() : error;
+      }
     },
 
     getBusiness(options = {}) {

@@ -73,10 +73,12 @@ const CONFLICT_REASONS = new Set([
   // agents.md G-15, G-19, G-21 and approvals.md A-15.
   "cost_cap", "model_error", "model_invalid", "kind_not_available",
   "template_changed", "template_superseded", "template_not_approved",
+  // browser-tasks.md BT-9, BT-11, BT-12: why a website task cannot start or a write task is refused.
+  "write_tasks_disabled", "disabled", "global_killed", "tenant_killed", "target_disabled", "daily_cap", "artifact_cap",
   "variant_expired", "variant_changed", "variant_not_staged", "variant_not_running", "image_not_approved", "upload_missing",
   // enrichment.md E-17: the only enrichment reasons a tenant sees.
   ...ENRICHMENT_ERROR_CODES,
-  "consent_required", "lease_lost",
+  "consent_required", "lease_lost", "intake_not_in_review", "intake_changed", "intake_target_changed",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);

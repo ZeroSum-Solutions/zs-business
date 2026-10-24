@@ -47,6 +47,7 @@ export * from "./delivery/index.js";
 export * from "./billing/index.js";
 export * from "./business/index.js";
 export * from "./transcription/index.js";
+export * from "./document-intake/index.js";
 export * from "./calendar/index.js";
 export * from "./automation/index.js";
 export {
@@ -125,4 +126,5 @@ export {
 export { TEMPLATE_SUGGESTION_LANE } from "./templates/suggest.js";
 export type { BookingLinkProvider } from "./templates/send.js";
 export { createBookingLinkProvider } from "./templates/booking-link.js";
+export * from "./browser/index.js";
 export * from "./enrichment/index.js";

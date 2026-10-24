@@ -1,7 +1,7 @@
 # Browser tasks
 
-Status: draft contract, not built (2026-10-22). Code follows this file once its first slice
-lands; a change to a numbered rule needs a new revision of this file first.
+Status: first slice built (2026-10-23, branch `feat/browser-tasks`); see "Built, and left out"
+under First slice. A change to a numbered rule needs a new revision of this file first.
 
 Scope: an assistant in the Agents area ("Website tasks") that does a chore on a website with
 no API, for one tenant, in a browser profile of its own. An owner sees each step. This
@@ -179,6 +179,34 @@ stops the run `origin_denied` and loads nothing; tenant B cannot read A's runs, 
 screenshots or profile path; a planted password appears nowhere outside the browser; a kill
 between steps stops the run before its next step; a fixture form other than sign-in ends the
 run `write_refused`; and `execute` is refused with `write_tasks_disabled`.
+
+### Built, and left out
+
+Built: the six tables (`browser_task_settings`, `browser_targets`, `browser_credentials`,
+`browser_runs`, `browser_run_artifacts`, `browser_run_events`) in
+`20261024200000_browser_tasks.sql`; `packages/contracts/src/browser.ts`; `packages/core/src/browser`
+(policy, profile path, store, handlers, runner service, session, fake runner, fixture site);
+`/v1/browser` and `/browser-runner/v1` in the API; a "Website tasks" card on the Agents screen
+(owners start and resume, the team stops, each run shows its steps and files; demo adapter
+included); `services/browser-runner` (README for the pilot Mac, settings checks, job client and
+claim loop, stdlib only). Wallet holds use the `browser_run` job (delivery.md D-11).
+
+Left out of this slice, on purpose:
+
+- The "send one to intake" step (BT-13): the document-intake slice is not in main.
+- `createHttpBrowserRunner` and running the Python service against the fixture site; the
+  Browser Use executor itself. The acceptance run uses the fake runner only.
+- A Supabase Storage adapter for artifacts (an in-memory store backs the tests), the profile
+  deletion when a target is deleted, and a download link for a file on the Agents screen.
+- Editing settings and targets from the Agents screen: owners use the API for now.
+- Production wiring of the runner service pool into the API process; `createApp` takes the
+  runner service as an injected dependency.
+- Model usage is recorded on `browser_run_events`, not on `agent_model_calls`, whose
+  `agent_kind` check covers only the five agent kinds.
+- Deviation from BT-7's dispatcher framing: the runner's writes are service-role transactions
+  in `createBrowserRunnerService`, checked against the run's lease, not dispatcher actions.
+- DevTools-level request interception exists only as the policy and the TypeScript fake runner.
+- The step price is a required configuration input, because the contract leaves it open.
 
 ## Known limits
 

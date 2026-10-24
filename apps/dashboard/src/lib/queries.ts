@@ -57,6 +57,10 @@ export const keys = {
   /** Pages of the agent's runs, newest first. */
   followUpRuns: ["agents", "followup", "runs"] as const,
   followUpRun: (id: string) => ["agents", "followup", "run", id] as const,
+  /** Website tasks (browser-tasks.md): status, runs and one run's steps and files. */
+  browser: ["agents", "browser", "status"] as const,
+  browserRuns: ["agents", "browser", "runs"] as const,
+  browserRun: (id: string) => ["agents", "browser", "run", id] as const,
   /** The agent's actor ID, derived from the tenant (agents.md G-1). */
   agentActor: ["agents", "actor"] as const,
   agentsAll: ["agents"] as const,
@@ -77,6 +81,10 @@ export const keys = {
   /** Transcripts of uploaded audio and voicemails (transcription.md X-7). */
   transcriptions: ["transcriptions", "list"] as const,
   transcription: (id: string) => ["transcriptions", "detail", id] as const,
+  /** Price lists read into rows for the owner to review (document-intake.md DL-12). */
+  intakeJobs: ["docIntake", "jobs"] as const,
+  intakeJob: (id: string) => ["docIntake", "job", id] as const,
+  docIntakeAll: ["docIntake"] as const,
   /**
    * Whether the site shows the release live at one pointer version. Outside "sites", so
    * refreshing the lists does not re-sync; per version, so an answer about an older version
@@ -366,6 +374,37 @@ export function useFollowUpStatus() {
   });
 }
 
+/** Website tasks: switches, caps and targets. Read afresh each visit and each minute: someone may stop it. */
+export function useBrowserStatus() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.browser, queryFn: ({ signal }) => api.getBrowserStatus({ signal }), staleTime: 0, refetchInterval: 60_000, retry: false,
+  });
+}
+
+/** Recent website task runs, newest first. A run in progress is read again every few seconds. */
+export function useBrowserRuns() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.browserRuns, queryFn: ({ signal }) => api.listBrowserRuns({ signal }),
+    refetchInterval: (query) => (query.state.data?.some((run) => run.status === "queued" || run.status === "running") ? 5_000 : false),
+  });
+}
+
+/** One run with its steps and files; null reads nothing. */
+export function useBrowserRun(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    queryKey: keys.browserRun(id ?? "none"),
+    queryFn: ({ signal }) => api.getBrowserRun(id!, { signal }),
+    enabled: enabled && id !== null,
+    refetchInterval: (query) => (query.state.data && (query.state.data.run.status === "queued" || query.state.data.run.status === "running") ? 5_000 : false),
+  });
+}
+
 /**
  * A templated kind's settings and switches (agents.md G-14). Read afresh like the follow-up
  * agent's status: someone else may turn it off, and quiet hours follow the clock.
@@ -474,6 +513,28 @@ export function useTranscription(id: string | null) {
     queryKey: keys.transcription(id ?? "none"),
     queryFn: ({ signal }) => api.getTranscription(id!, { signal }),
     refetchInterval: (query) => (query.state.data && ["queued", "running", "failed"].includes(query.state.data.status) ? 5000 : false),
+  });
+}
+
+export function useIntakeJobs(enabledByRole = true) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && enabledByRole,
+    queryKey: keys.intakeJobs,
+    queryFn: ({ signal }) => api.listIntakeJobs({ signal }),
+    // The service reads a file on its own clock: look again while one is waiting or being read.
+    refetchInterval: (query) => (query.state.data?.some((job) => job.status === "queued" || job.status === "claimed") ? 5000 : false),
+  });
+}
+
+export function useIntakeJob(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && id !== null,
+    queryKey: keys.intakeJob(id ?? "none"),
+    queryFn: ({ signal }) => api.getIntakeJob(id!, { signal }),
   });
 }
 
