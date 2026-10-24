@@ -2,6 +2,10 @@
 -- message delivery. Enrichment calls, image jobs, voice minutes and browser runs hold funds the
 -- same way a send does (D-4, D-5). wallet_reservations is already a tenant table with forced RLS,
 -- the tenant_scope policy and its grants (20261020300000); new columns inherit the table grants.
+--
+-- Rollout: reservation code from before this change inserts no job_kind or job_id, so it fails NOT
+-- NULL once this commits, and the new code needs the columns. Stop the delivery worker, apply this
+-- migration, then deploy the new code.
 
 ALTER TABLE public.wallet_reservations
   ADD COLUMN job_kind text,

@@ -187,7 +187,8 @@ export function heldReservation(tx: Transaction, tenantId: string, deliveryId: s
  * Captures `amount` (the real cost) when given, else the whole hold, and returns the remainder to
  * available in the same transaction: the wallet's `reserved` drops by the whole hold, its
  * `balance` by the captured amount. An amount above the hold is refused (`capture_exceeds_hold`)
- * before anything is written. The one ledger row is keyed `capture:<reservationId>`.
+ * before anything is written. The one ledger row is keyed `capture:<reservationId>`. A job that
+ * cost nothing releases its hold instead: a ledger row cannot be zero (`wallet_ledger_amount_nonzero`).
  */
 export async function captureReservation(tx: Transaction, input: {
   readonly tenantId: string;
@@ -252,15 +253,22 @@ export interface StaleHold {
  * D-11: reports `held` reservations older than 24 hours by `now` (the injected clock), oldest
  * first, across tenants (the service role). It reads only: it never captures or releases a hold,
  * because an unknown outcome stays held until the job's own lookup or an operator settles it
- * (D-7, D-8). A caller that needs the rest of a long list passes a larger `limit`.
+ * (D-7, D-8). A long list is read a page at a time: pass the last report of the previous page as
+ * `after` (the order is `created_at`, `tenant_id`, reservation id).
  */
-export async function findStaleHolds(tx: Transaction, input: { readonly now: Date; readonly limit?: number }): Promise<StaleHold[]> {
+export async function findStaleHolds(tx: Transaction, input: {
+  readonly now: Date;
+  readonly limit?: number;
+  readonly after?: StaleHold;
+}): Promise<StaleHold[]> {
   const limit = input.limit ?? 1000;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new ValidationFailed("Limit must be between 1 and 10000");
+  const after = input.after;
   const rows = (await tx.query<{ tenant_id: string; job_kind: WalletJobKind; job_id: string; id: string; amount: string; created_at: Date }>(
     `SELECT tenant_id, job_kind, job_id, id, amount, created_at FROM wallet_reservations
-      WHERE status='held' AND created_at < $1 ORDER BY created_at, tenant_id, id LIMIT $2`,
-    [new Date(input.now.getTime() - STALE_HOLD_MS), limit])).rows;
+      WHERE status='held' AND created_at < $1 AND ($3::timestamptz IS NULL OR (created_at, tenant_id, id) > ($3, $4::uuid, $5::uuid))
+      ORDER BY created_at, tenant_id, id LIMIT $2`,
+    [new Date(input.now.getTime() - STALE_HOLD_MS), limit, after?.heldSince ?? null, after?.tenantId ?? null, after?.reservationId ?? null])).rows;
   return rows.map((row) => ({
     code: "stale_hold", tenantId: row.tenant_id, jobKind: row.job_kind, jobId: row.job_id,
     reservationId: row.id, amount: minorUnits(row.amount), heldSince: row.created_at,

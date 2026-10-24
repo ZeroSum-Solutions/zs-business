@@ -264,6 +264,9 @@ describe("stale holds (D-11)", () => {
     await reserve(tenant, "enrichment", ids[2]!, 1, new Date(t0 + 1000));
     const report = await h.service((tx) => findStaleHolds(tx, { now: h.clock.now(), limit: 2 }));
     expect(report.map((s) => s.jobId)).toEqual([ids[1], ids[2]]);
+    // The next page starts after the last report, so a list longer than any limit can be read whole.
+    const next = await h.service((tx) => findStaleHolds(tx, { now: h.clock.now(), limit: 1, after: report[1]! }));
+    expect(next.map((s) => s.jobId)).toEqual([ids[0]]);
   });
 });
 
