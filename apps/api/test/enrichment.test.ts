@@ -1,8 +1,8 @@
 // enrichment.md E-4, E-6, E-7, E-17: the HTTP edge. Auth, owner vs staff, and tenant isolation. The
 // worker and the Treg call are covered in core; here no call is made.
 import { randomUUID } from "node:crypto";
-import { creditWallet } from "@zs/core";
-import { apiErrorBodySchema, contactEnrichmentSchema, enrichmentRequestRecordSchema } from "@zs/contracts";
+import { creditWallet, enrichmentActorId } from "@zs/core";
+import { apiErrorBodySchema, contactEnrichmentSchema, enrichmentProposalListSchema, enrichmentRequestRecordSchema } from "@zs/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { call, createApiHarness, NOW, signedInMember, type ApiHarness, type MemberSetup } from "./helpers.js";
 
@@ -99,6 +99,95 @@ describe("enrichment routes", () => {
     const none = await h.fixture.service(async (tx) => (await tx.query(
       "SELECT count(*)::int AS n FROM enrichment_requests WHERE tenant_id=$1", [h.b.tenantId])).rows[0].n);
     expect(none).toBe(0);
+  });
+});
+
+/**
+ * What the worker writes after a hit (E-13, E-14): a settled request, then one result and one
+ * approval per field. Inserted directly so these tests make no call.
+ */
+async function proposals(tenantId: string, contactId: string, fields: Record<string, string>, { at = NOW, expires = "2026-11-18T08:00:00.000Z" } = {}) {
+  const requestId = randomUUID();
+  await h.fixture.service(async (tx) => {
+    await tx.query(
+      `INSERT INTO enrichment_requests (tenant_id,id,contact_id,domain,price_cents,status,next_attempt_at,created_at,updated_at)
+       VALUES ($1,$2,$3,'acme.example',5,'succeeded',$4,$4,$4)`, [tenantId, requestId, contactId, at]);
+    for (const [field, value] of Object.entries(fields)) {
+      const approvalId = randomUUID();
+      const resultId = randomUUID();
+      await tx.query(
+        `INSERT INTO approvals (tenant_id,id,action_type,target_type,target_id,payload,summary,requested_by,requested_at,expires_at)
+         VALUES ($1,$2,'contact.profile.apply','contact',$3,$4,$5,$6,$7,$8)`,
+        [tenantId, approvalId, contactId, JSON.stringify({ contactId, resultId }), `Save the company ${field} found for this contact`,
+          enrichmentActorId(tenantId), at, expires]);
+      await tx.query(
+        `INSERT INTO enrichment_results (tenant_id,id,request_id,contact_id,field,value,provider,treg_call_id,approval_id,fetched_at,expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'fake','call_1',$7,$8,$9)`,
+        [tenantId, resultId, requestId, contactId, field, value, approvalId, at, expires]);
+    }
+  });
+}
+
+async function listProposals(token: string) {
+  const response = await call(h.app, "GET", "/v1/enrichment/proposals", { token });
+  expect(response.status).toBe(200);
+  return enrichmentProposalListSchema.parse(response.body).items;
+}
+
+describe("enrichment proposals", () => {
+  it("needs a token", async () => {
+    expect((await call(h.app, "GET", "/v1/enrichment/proposals")).status).toBe(401);
+  });
+
+  it("lists each pending field with the current and the found value; approve writes it, reject drops it", async () => {
+    const contactId = await contact(h.a.tenantId);
+    await h.fixture.service((tx) => tx.query(
+      `INSERT INTO crm_contact_profile (tenant_id,contact_id,company_name,updated_at) VALUES ($1,$2,'Acme Old',$3)`,
+      [h.a.tenantId, contactId, NOW]));
+    await proposals(h.a.tenantId, contactId, { name: "Acme Widgets", employees: "40", industry: "Hardware" });
+
+    const mine = (await listProposals(h.a.token)).filter((p) => p.contactId === contactId);
+    expect(mine.map((p) => [p.field, p.currentValue, p.proposedValue]).sort()).toEqual([
+      ["employees", null, "40"], ["industry", null, "Hardware"], ["name", "Acme Old", "Acme Widgets"],
+    ]);
+    expect(mine[0]).toMatchObject({ contactName: "Sam Buyer", provider: "fake", callId: "call_1" });
+    // Staff read the list too (E-17) but cannot decide.
+    expect((await listProposals(staff.token)).filter((p) => p.contactId === contactId)).toHaveLength(3);
+
+    const name = mine.find((p) => p.field === "name")!;
+    const industry = mine.find((p) => p.field === "industry")!;
+    const staffApprove = await call(h.app, "POST", `/v1/approvals/${name.approvalId}/approve`, { token: staff.token, key: randomUUID(), body: {} });
+    expect(staffApprove.status).toBe(403);
+
+    const approved = await call(h.app, "POST", `/v1/approvals/${name.approvalId}/approve`, { token: h.a.token, key: randomUUID(), body: {} });
+    expect(approved.status).toBe(200);
+    const rejected = await call(h.app, "POST", `/v1/approvals/${industry.approvalId}/reject`, { token: h.a.token, key: randomUUID(), body: {} });
+    expect(rejected.status).toBe(200);
+
+    const left = (await listProposals(h.a.token)).filter((p) => p.contactId === contactId);
+    expect(left.map((p) => p.field)).toEqual(["employees"]);
+    const read = contactEnrichmentSchema.parse((await call(h.app, "GET", `/v1/contacts/${contactId}/enrichment`, { token: h.a.token })).body);
+    expect(read.profile).toMatchObject({ companyName: "Acme Widgets", companyIndustry: null, companyEmployees: null });
+  });
+
+  it("leaves out expired proposals", async () => {
+    const contactId = await contact(h.a.tenantId);
+    await proposals(h.a.tenantId, contactId, { name: "Gone Co" }, { at: "2026-10-12T08:00:00.000Z", expires: "2026-10-19T07:59:00.000Z" });
+    expect((await listProposals(h.a.token)).filter((p) => p.contactId === contactId)).toEqual([]);
+  });
+
+  it("shows tenant B none of tenant A's proposals, and B's decisions answer like an unknown approval", async () => {
+    const contactId = await contact(h.a.tenantId);
+    await proposals(h.a.tenantId, contactId, { domain: "acme.example" });
+    const theirs = (await listProposals(h.a.token)).find((p) => p.contactId === contactId)!;
+    expect((await listProposals(h.b.token)).some((p) => p.contactId === contactId)).toBe(false);
+    for (const decision of ["approve", "reject"]) {
+      const foreign = await call(h.app, "POST", `/v1/approvals/${theirs.approvalId}/${decision}`, { token: h.b.token, key: randomUUID(), body: {} });
+      const unknown = await call(h.app, "POST", `/v1/approvals/${randomUUID()}/${decision}`, { token: h.b.token, key: randomUUID(), body: {} });
+      expect([foreign.status, foreign.body], decision).toEqual([unknown.status, unknown.body]);
+      expect(foreign.status, decision).toBeGreaterThanOrEqual(400);
+    }
+    expect((await listProposals(h.a.token)).some((p) => p.approvalId === theirs.approvalId)).toBe(true);
   });
 });
 

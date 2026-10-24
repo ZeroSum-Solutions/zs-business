@@ -98,6 +98,34 @@ export const contactEnrichmentSchema = z.strictObject({
 });
 export type ContactEnrichment = z.infer<typeof contactEnrichmentSchema>;
 
+/**
+ * One pending `contact.profile.apply` approval with the field it would change (E-14): the value the
+ * profile holds now (null when empty) and the value found, with its source. An owner decides it
+ * through `POST /v1/approvals/:id/approve` or `/reject`.
+ */
+export const enrichmentProposalSchema = z.strictObject({
+  approvalId: idSchema,
+  contactId: idSchema,
+  contactName: z.string(),
+  resultId: idSchema,
+  field: enrichmentFieldSchema,
+  currentValue: z.string().nullable(),
+  proposedValue: z.string(),
+  provider: z.string(),
+  callId: z.string(),
+  fetchedAt: instantSchema,
+  requestedAt: instantSchema,
+  expiresAt: instantSchema,
+});
+export type EnrichmentProposal = z.infer<typeof enrichmentProposalSchema>;
+
+/** The most proposals one read returns, oldest first. */
+export const ENRICHMENT_PROPOSALS_LIMIT = 200;
+
+/** `GET /v1/enrichment/proposals`: the tenant's undecided, unexpired proposals. */
+export const enrichmentProposalListSchema = z.strictObject({ items: z.array(enrichmentProposalSchema) });
+export type EnrichmentProposalList = z.infer<typeof enrichmentProposalListSchema>;
+
 /** E-17: `POST /v1/enrichment/requests`. */
 export const createEnrichmentRequestSchema = z.strictObject({
   op: enrichmentOpSchema,
