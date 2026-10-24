@@ -276,9 +276,14 @@ describe("other agent kinds (G-14)", () => {
 
   it("lets an owner configure one kind, staff stop it, and only an owner resume it", async () => {
     const current = await kindStatus();
+    // G-20: review requests cannot be turned on without the owner's review link.
+    const noLink = await kindAs(h.a, "PUT", "/settings", {
+      ...current.settings, enabled: true, config: { timingHours: 48 }, expectedRevision: 0,
+    });
+    expect(noLink.status).toBe(400);
     const saved = await kindAs(h.a, "PUT", "/settings", {
       ...current.settings, enabled: true, quietStartMinute: 0, quietEndMinute: 0, maxCostMicrosPerDay: 250_000,
-      config: { timingHours: 48 }, expectedRevision: 0,
+      config: { timingHours: 48, reviewUrl: "https://reviews.example.test/acme" }, expectedRevision: 0,
     });
     expect(saved.status, JSON.stringify(saved.body)).toBe(200);
     expect(agentKindStatusOutputSchema.parse(saved.body).result).toMatchObject({

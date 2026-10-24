@@ -15,6 +15,8 @@ export interface ApprovalPolicy {
 export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Object.freeze({
   // inbox-home.md I-6: staff and owners propose sending a reply; it runs only once an owner approves.
   "inbox.reply.send": Object.freeze({ request: "inbox.drafts", required: true }),
+  // approvals.md A-15: a standing approval of a message template runs only once an owner approves it.
+  "template.standing.grant": Object.freeze({ request: "agents", required: true }),
   // document-intake.md DL-13: no row goes live until an owner approves the whole diff.
   "catalog.intake.apply": Object.freeze({ request: "publish", required: true }),
   // image-port.md IM-12: only an owner's approval promotes a staged image.

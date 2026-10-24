@@ -70,8 +70,12 @@ const CONFLICT_REASONS = new Set([
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
   "stale_release", "host_in_use", "grant_changed", "invalid_currency",
+  // agents.md G-15, G-19, G-21 and approvals.md A-15.
+  "cost_cap", "model_error", "model_invalid", "kind_not_available",
+  "template_changed", "template_superseded", "template_not_approved",
+  "suggestion_in_progress", "suggestion_used", "booking_link_unconfigured",
   // browser-tasks.md BT-9, BT-11, BT-12: why a website task cannot start or a write task is refused.
-  "write_tasks_disabled", "disabled", "global_killed", "tenant_killed", "target_disabled", "daily_cap", "cost_cap", "artifact_cap",
+  "write_tasks_disabled", "disabled", "global_killed", "tenant_killed", "target_disabled", "daily_cap", "artifact_cap",
   "variant_expired", "variant_changed", "variant_not_staged", "variant_not_running", "image_not_approved", "upload_missing",
   // enrichment.md E-17: the only enrichment reasons a tenant sees.
   ...ENRICHMENT_ERROR_CODES,

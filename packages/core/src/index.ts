@@ -87,6 +87,8 @@ export {
   createHangingFollowUpModel,
   DEEPSEEK_DEFAULT_MODEL,
   dueFollowUpTenants,
+  dueKindTenants,
+  scheduledKindRunKey,
   FAKE_MODEL_ID,
   FAKE_MODEL_PRICES,
   followUpRunId,
@@ -117,5 +119,12 @@ export {
   type TextModelResult,
 } from "./agents/index.js";
 export { agentAuthorize, agentAuthorizeFor, createFollowUpAgent, type FollowUpAgent, type FollowUpAgentConfig } from "./edge/agent-session.js";
+export {
+  createTemplateSession, createTemplatedAgents,
+  type TemplateSession, type TemplatedAgents, type TemplatedAgentsConfig,
+} from "./edge/templates-session.js";
+export { TEMPLATE_SUGGESTION_LANE } from "./templates/suggest.js";
+export type { BookingLinkProvider } from "./templates/send.js";
+export { createBookingLinkProvider } from "./templates/booking-link.js";
 export * from "./browser/index.js";
 export * from "./enrichment/index.js";

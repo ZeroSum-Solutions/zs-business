@@ -3,7 +3,28 @@
  * draft, why a run stopped or a customer was skipped, and the settings form's fields. Shown copy
  * comes from these codes, never from a server message.
  */
-import { followUpSettingsSchema, type FollowUpRun, type FollowUpSettings, type FollowUpSkipReason, type FollowUpStatus, type FollowUpStopReason } from "@zs/contracts";
+import {
+  agentKindConfigSchemas,
+  createTemplateRevisionRequestSchema,
+  followUpSettingsSchema,
+  parseTemplateDraft,
+  SMS_BODY_MAX,
+  TEMPLATE_SUBJECT_MAX,
+  TEMPLATE_TIMING_HOURS,
+  TEMPLATE_VARIABLES,
+  templatePlaceholders,
+  ValidationFailed,
+  type AgentKindStatus,
+  type CreateTemplateRevisionRequest,
+  type DeliveryChannel,
+  type FollowUpRun,
+  type FollowUpSettings,
+  type FollowUpSkipReason,
+  type FollowUpStatus,
+  type FollowUpStopReason,
+  type TemplatedKind,
+  type TemplateRevision,
+} from "@zs/contracts";
 
 /** Why a run stopped, finishing "Stopped because …". */
 export const STOP_REASONS: Record<FollowUpStopReason, string> = {
@@ -221,4 +242,191 @@ export function timeZoneChoices(current: string): string[] {
     zones = [];
   }
   return [...new Set(["UTC", current, ...zones])].sort((a, b) => (a === "UTC" ? -1 : b === "UTC" ? 1 : a.localeCompare(b)));
+}
+
+// Templated kinds: appointment reminders and review requests (agents.md G-14, G-19, G-20,
+// approvals.md A-15). They send wording an owner approved; every send still checks consent.
+
+export const KIND_COPY: Record<TemplatedKind, {
+  title: string; description: string; sendLabel: string; noun: string; timingLabel: string; when: "before" | "after";
+}> = {
+  appointment_reminder: {
+    title: "Appointment reminders",
+    description: "Reminds each customer of their appointment, in wording an owner approved.",
+    sendLabel: "Send appointment reminders",
+    noun: "appointment reminders",
+    timingLabel: "Hours before the appointment",
+    when: "before",
+  },
+  review_request: {
+    title: "Review requests",
+    description: "Asks customers for a review after their appointment, in wording an owner approved. Only customers who said yes to marketing messages get one.",
+    sendLabel: "Send review requests",
+    noun: "review requests",
+    timingLabel: "Hours after the appointment",
+    when: "after",
+  },
+};
+
+/** What each variable fills in, by name. */
+export const VARIABLE_HELP: Record<string, string> = {
+  customer_first_name: "the customer's first name",
+  business_name: "your business name",
+  booking_start_local: "the appointment's date and time",
+  booking_link: "the link to book or change an appointment",
+  review_link: "your review link",
+};
+
+export const CHANNEL_LABELS: Record<DeliveryChannel, string> = { email: "Email", sms: "Text message" };
+
+/** Shown by the wording form whenever the current wording is approved (A-15). */
+export const UNAPPROVES_WARNING =
+  "Saving new wording un-approves sends: the approved wording stops being used at once, and nothing is sent until an owner approves the new wording.";
+/** Shown by the wording form when nothing approved would stop. */
+export const NEEDS_APPROVAL_NOTE = "New wording is not sent until an owner approves it.";
+/** G-20: the API refuses to turn review requests on without a review link (ValidationFailed, no detail). */
+export const ENABLE_NEEDS_REVIEW_LINK = "Review requests need your review link. Add it below and save it, then turn them on.";
+/** A-15: the revision changed or was replaced under the approval. */
+export const TEMPLATE_CHANGED_MESSAGE = "The wording changed since you loaded it. The latest wording is shown. Read it, then approve it.";
+export const TEMPLATE_STALE_MESSAGE = "Someone saved new wording while you were writing. It is shown above, and your text is still here. Save again to replace it.";
+
+const hours = (count: number) => `${count} ${count === 1 ? "hour" : "hours"}`;
+
+/** "24 hours before the appointment". */
+export function timingSentence(kind: TemplatedKind, timingHours: number): string {
+  return `${hours(timingHours)} ${KIND_COPY[kind].when} the appointment`;
+}
+
+/** The template's current revision, or null before the first. */
+export function currentRevisionOf(state: { revisions: readonly TemplateRevision[] }): TemplateRevision | null {
+  return state.revisions.find((revision) => revision.current) ?? null;
+}
+
+/** Whether sends may use this revision now, in a word. */
+export function revisionState(revision: TemplateRevision): { label: string; tone: "success" | "warn" } {
+  if (revision.approved) return { label: "Approved", tone: "success" };
+  if (revision.pendingApprovalId) return { label: "Waiting for approval", tone: "warn" };
+  if (revision.standing?.standing === "expired") return { label: "Approval ended", tone: "warn" };
+  return { label: "Needs approval", tone: "warn" };
+}
+
+/**
+ * The headline state of a templated kind. `current` is its current revision, null with none,
+ * or undefined when this reader cannot see the wording (staff).
+ */
+export function kindState(status: AgentKindStatus, current: TemplateRevision | null | undefined): { label: string; tone: "success" | "neutral" | "warn" } {
+  if (status.globalKilled) return { label: "Paused by support", tone: "warn" };
+  if (status.killed) return { label: "Stopped", tone: "warn" };
+  if (!status.settings.enabled) return { label: "Off", tone: "neutral" };
+  if (current !== undefined && !current?.approved) return { label: "On, needs approval", tone: "warn" };
+  if (status.canRun) return { label: "On", tone: "success" };
+  return { label: "On, waiting", tone: "neutral" };
+}
+
+/** The toast after Run now on a templated kind. */
+export function kindRunToast(run: Pick<FollowUpRun, "status" | "stopReason" | "considered" | "drafted" | "skipped">): string {
+  if (run.status === "stopped" && run.stopReason) {
+    // A run can queue some messages before a switch, quiet hours or the cap stops it.
+    if (run.drafted > 0)
+      return `Run stopped after queuing ${run.drafted} ${run.drafted === 1 ? "message" : "messages"}: ${STOP_REASONS[run.stopReason]}.`;
+    return `It sent nothing: ${STOP_REASONS[run.stopReason]}.`;
+  }
+  if (run.considered === 0) return "Run finished. Nothing to send right now.";
+  return `Run finished. Queued ${run.drafted} ${run.drafted === 1 ? "message" : "messages"}, skipped ${run.skipped}.`;
+}
+
+/** The wording form, as typed. */
+export interface TemplateForm {
+  channel: DeliveryChannel;
+  subject: string;
+  body: string;
+  timingHours: string;
+}
+export type TemplateField = "subject" | "body" | "timingHours";
+
+export function toTemplateForm(kind: TemplatedKind, revision: TemplateRevision | null): TemplateForm {
+  if (!revision) return { channel: "email", subject: "", body: "", timingHours: String(TEMPLATE_TIMING_HOURS[kind].fallback) };
+  return { channel: revision.channel, subject: revision.subject ?? "", body: revision.body, timingHours: String(revision.timingHours) };
+}
+
+/** Names between braces in the texts that are not the kind's variables, in order of first use. */
+export function unknownPlaceholders(kind: TemplatedKind, ...texts: string[]): string[] {
+  const allowed = new Set(TEMPLATE_VARIABLES[kind]);
+  return [...new Set(texts.flatMap((text) => templatePlaceholders(text)))].filter((name) => !allowed.has(name));
+}
+
+const braces = (names: readonly string[]) => names.map((name) => `{${name}}`);
+/** "a, b and c". */
+const listed = (items: readonly string[]) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
+
+function placeholderError(kind: TemplatedKind, unknown: readonly string[]): string {
+  const verb = unknown.length === 1 ? "is not a variable" : "are not variables";
+  return `${listed(braces(unknown))} ${verb} for ${KIND_COPY[kind].noun}. Use only ${listed(braces(TEMPLATE_VARIABLES[kind]))}.`;
+}
+
+/**
+ * The revision to send, or what to fix, field by field. The same checks as the server
+ * (`parseTemplateDraft`), with words for people; the server still decides.
+ */
+export function readTemplateForm(kind: TemplatedKind, form: TemplateForm, expectedRevision: number):
+  { ok: true; request: CreateTemplateRevisionRequest } | { ok: false; errors: Partial<Record<TemplateField, string>> } {
+  const errors: Partial<Record<TemplateField, string>> = {};
+  const email = form.channel === "email";
+  const subject = email ? form.subject.trim() : null;
+  const body = form.body.trim();
+  const range = TEMPLATE_TIMING_HOURS[kind];
+  const timing = form.timingHours.trim() === "" ? Number.NaN : Number(form.timingHours);
+
+  if (subject !== null) {
+    const unknown = unknownPlaceholders(kind, subject);
+    if (subject === "") errors.subject = "Add a subject for the email.";
+    else if (subject.length > TEMPLATE_SUBJECT_MAX) errors.subject = `A subject can be up to ${TEMPLATE_SUBJECT_MAX} characters.`;
+    else if (unknown.length > 0) errors.subject = placeholderError(kind, unknown);
+  }
+  const unknown = unknownPlaceholders(kind, body);
+  if (body === "") errors.body = "Write the message.";
+  else if (unknown.length > 0) errors.body = placeholderError(kind, unknown);
+  else if (!email && body.length > SMS_BODY_MAX) errors.body = `A text message can be up to ${SMS_BODY_MAX.toLocaleString("en-US")} characters.`;
+  if (!Number.isInteger(timing) || timing < range.min || timing > range.max)
+    errors.timingHours = `A whole number of hours from ${range.min} to ${range.max}.`;
+  if (Object.keys(errors).length > 0) return { ok: false, errors };
+
+  try {
+    parseTemplateDraft(kind, { channel: form.channel, subject, body, timingHours: timing });
+  } catch (error) {
+    if (!(error instanceof ValidationFailed)) throw error;
+    return { ok: false, errors: { body: /too long/.test(error.message) ? "The message is too long once its variables are filled in. Shorten it." : "This wording can't be used. Check it and try again." } };
+  }
+  const parsed = createTemplateRevisionRequestSchema.safeParse({ expectedRevision, channel: form.channel, subject, body, timingHours: timing });
+  if (!parsed.success) return { ok: false, errors: { body: "This wording can't be used. Check it and try again." } };
+  return { ok: true, request: parsed.data };
+}
+
+/** G-20: the review link as the kind's config takes it (https, at most 500 characters); empty is none. */
+export function readReviewLink(value: string): { ok: true; reviewUrl: string | undefined } | { ok: false; message: string } {
+  const trimmed = value.trim();
+  if (trimmed === "") return { ok: true, reviewUrl: undefined };
+  const parsed = agentKindConfigSchemas.review_request.shape.reviewUrl.safeParse(trimmed);
+  return parsed.success ? { ok: true, reviewUrl: parsed.data } : { ok: false, message: "Enter a full link that starts with https://." };
+}
+
+/** Why a templated kind that is on cannot send right now, as a sentence; null when it can or is off. */
+export function kindBlockedSentence(status: AgentKindStatus): string | null {
+  switch (status.blockedBy) {
+    case null:
+    case "disabled":
+      return null;
+    case "global_killed":
+      return "Support paused it. Nothing is sent until support turns it back on.";
+    case "tenant_killed":
+      return "It is stopped. Nothing is sent until an owner resumes it.";
+    case "quiet_hours":
+      return `It is quiet hours (${quietHoursLabel(status.settings)}). Messages wait until they end.`;
+    case "daily_cap":
+      return "It sent the most messages allowed in a day. It sends again as that count drops.";
+    case "cost_cap":
+      return `The writing service cost ${dollars(status.costSpentMicros)} in the last 24 hours, its daily limit. Suggestions wait until that cost drops.`;
+    case "stalled":
+      return "A run stopped answering and was closed. The next run starts fresh.";
+  }
 }

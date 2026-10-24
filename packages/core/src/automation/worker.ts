@@ -106,7 +106,9 @@ async function approvalStands(tx: Transaction, tenantId: string, outboxId: strin
     "SELECT action_id FROM outbox WHERE tenant_id=$1 AND id=$2", [tenantId, outboxId])).rows[0]?.action_id;
   if (!actionId) return false;
   const found = await approvalForAction(tx, tenantId, actionId, at);
-  return found !== null && (found.kind === "direct" || found.standing === "approved");
+  if (found === null || found.kind === "direct") return found !== null;
+  // A-15: a templated send also needs its revision to be the current one.
+  return found.standing === "approved" && (found.kind !== "standing" || found.current);
 }
 
 export function createWebhookWorker(deps: WebhookWorkerDeps) {

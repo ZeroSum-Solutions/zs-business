@@ -7,7 +7,17 @@ import { DEEPSEEK_DEFAULT_MODEL, createDeepSeekModel } from "./adapters/deepseek
 import type { FetchLike } from "./adapters/chat-completions.js";
 import type { ModelPrices } from "./cost.js";
 import { FAKE_MODEL_PRICES, priceFor } from "./cost.js";
-import { createFakeTextModel, type TextModel } from "./model.js";
+import { createFakeTextModel, type TextModel, type TextModelRequest } from "./model.js";
+
+/**
+ * The no-personal-data fake's answer: a template wording that uses only the variables its request
+ * names (G-19 suggestions). The default fake answer reads a follow-up prompt, which this lane never gets.
+ */
+function fakeTemplateWording(request: TextModelRequest): { subject: string | null; body: string } {
+  const input = (request.input ?? {}) as { channel?: unknown; variables?: unknown };
+  const names = Array.isArray(input.variables) ? input.variables.filter((name): name is string => typeof name === "string") : [];
+  return { subject: input.channel === "sms" ? null : "A note from us", body: ["Hello.", ...names.map((name) => `{${name}}`)].join(" ") };
+}
 
 /**
  * G-18: the lane each kind's model calls go to. Every kind built so far reads a customer's
@@ -50,7 +60,7 @@ export function modelForLane(lane: AgentLane, source: { readonly provider: strin
     if (source.provider === "cerebras") return createCerebrasModel({ apiKey: real.apiKey, fetch: real.fetch, ...(real.model ? { model: real.model } : {}) });
     throw new ValidationFailed(`The personal-data lane cannot use ${source.provider}`);
   }
-  if (source.provider === "fake") return createFakeTextModel("no_personal_data");
+  if (source.provider === "fake") return createFakeTextModel("no_personal_data", fakeTemplateWording);
   if (source.provider === "deepseek") return createDeepSeekModel({ apiKey: real.apiKey, fetch: real.fetch, ...(real.model ? { model: real.model } : {}) });
   throw new ValidationFailed(`The no-personal-data lane cannot use ${source.provider}`);
 }

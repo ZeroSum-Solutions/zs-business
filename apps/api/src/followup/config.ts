@@ -1,9 +1,10 @@
 // The scheduled follow-up runner's environment (docs/requirements/agents.md G-13). Parsed from an
 // object an entry point passes in; this module never reads process.env. FOLLOWUP_AGENT is the
 // deploy's switch: anything but `on` runs nothing and needs no other variable.
-import { CEREBRAS_DEFAULT_MODEL, DEEPSEEK_DEFAULT_MODEL, VENDOR_MODEL_PRICES } from "@zs/core";
+import { CEREBRAS_DEFAULT_MODEL, DEEPSEEK_DEFAULT_MODEL, VENDOR_MODEL_PRICES, trimTrailingSlashes } from "@zs/core";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
+import { bookingKeySecretSchema, publicBaseUrlSchema } from "../config.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 /** Vercel's cron requests carry `Authorization: Bearer <CRON_SECRET>`. */
@@ -40,7 +41,25 @@ const onSchema = z.object({
   FOLLOWUP_INTERVAL_MS: int(1_000, 3_600_000).default(300_000),
   // G-16: a run still `running` this long after it started is closed as stalled.
   AGENT_STALL_AFTER_MS: int(60_000, 86_400_000).default(900_000),
+  // G-19, G-20: the templated kinds (appointment_reminder, review_request) run in the same slot.
+  // On, they need the booking key and base URL below for `{booking_link}`.
+  AGENT_TEMPLATED: switchSchema,
+  AGENT_TEMPLATED_MAX_CANDIDATES: int(1, 1000).default(20),
 });
+
+// Read only with AGENT_TEMPLATED=on, with the API's own rules for the same variables.
+const templatedSchema = z.object({
+  PUBLIC_BOOKING_KEY_SECRET: bookingKeySecretSchema,
+  PUBLIC_BASE_URL: publicBaseUrlSchema,
+});
+
+/** The templated kinds' settings; the booking key signs `{booking_link}` like the API's page keys. */
+export interface TemplatedRunnerEnv {
+  readonly bookingKeySecret: string;
+  /** No trailing slash. */
+  readonly publicBaseUrl: string;
+  readonly maxCandidatesPerRun: number;
+}
 
 /** A lane's model choice as parsed; the key travels in it, so it never prints. */
 export type PersonalDataChoice =
@@ -63,6 +82,8 @@ export interface FollowUpRunnerEnv {
   readonly modelTimeoutMs: number;
   readonly budgetMs: number;
   readonly intervalMs: number;
+  /** Null when AGENT_TEMPLATED is not `on`: the templated kinds do not run. */
+  readonly templated: TemplatedRunnerEnv | null;
 }
 
 export interface FollowUpEnv {
@@ -134,7 +155,20 @@ export function parseFollowUpEnv(env: Readonly<Record<string, string | undefined
       modelTimeoutMs: data.FOLLOWUP_MODEL_TIMEOUT_MS,
       budgetMs: data.FOLLOWUP_RUN_BUDGET_MS,
       intervalMs: data.FOLLOWUP_INTERVAL_MS,
+      templated: templatedEnv(env, data),
     },
+  };
+}
+
+/** Fails closed: with the switch on, a missing or invalid booking key or base URL stops the parse. */
+function templatedEnv(env: Readonly<Record<string, string | undefined>>, data: LaneInput): TemplatedRunnerEnv | null {
+  if (data.AGENT_TEMPLATED === "off") return null;
+  const parsed = templatedSchema.safeParse(env);
+  if (!parsed.success) throw new Error(`Invalid environment: AGENT_TEMPLATED=on: ${problems(parsed.error)}`);
+  return {
+    bookingKeySecret: parsed.data.PUBLIC_BOOKING_KEY_SECRET,
+    publicBaseUrl: trimTrailingSlashes(parsed.data.PUBLIC_BASE_URL),
+    maxCandidatesPerRun: data.AGENT_TEMPLATED_MAX_CANDIDATES,
   };
 }
 

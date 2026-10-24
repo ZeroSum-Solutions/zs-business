@@ -12,6 +12,8 @@ import {
   type ListApprovalsQuery,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { queueActionKind } from "@zs/contracts";
+import { sendDigest } from "../templates/render.js";
 import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from "../reads/cursor.js";
 import { page } from "../reads/page.js";
 
@@ -126,7 +128,14 @@ export async function resolveStoredApproval(
 /** A-10: what a delivery re-checks before it sends. Direct approvals have no record. */
 export type ApprovalCheck =
   | { readonly kind: "stored"; readonly standing: ApprovalStanding; readonly approval: ApprovalRecord; readonly binding: ActionBinding | null }
-  | { readonly kind: "direct" };
+  | { readonly kind: "direct" }
+  /**
+   * A-15: a templated send runs under the standing approval of one template revision. It stands only
+   * while the approval is approved, the revision is still the template's current one and records
+   * that approval (`current`), and the delivery's content is the revision rendered with the values
+   * the send recorded (`contentMatches`, true when no content is supplied).
+   */
+  | { readonly kind: "standing"; readonly standing: ApprovalStanding; readonly current: boolean; readonly contentMatches: boolean };
 
 export async function checkApproval(tx: Transaction, tenantId: string, approvalId: string, now: Date): Promise<ApprovalCheck> {
   const row = await loadApproval(tx, tenantId, approvalId);
@@ -135,12 +144,46 @@ export async function checkApproval(tx: Transaction, tenantId: string, approvalI
   return { kind: "stored", standing: current, approval: approvalRecord(row, now), binding: current === "approved" ? approvedBinding(row) : null };
 }
 
-/** A-10 from an action row (outbox.action_id); null when the tenant has no such action. */
-export async function approvalForAction(tx: Transaction, tenantId: string, actionId: string, now: Date): Promise<ApprovalCheck | null> {
-  const action = (await tx.query<{ approval_id: string | null }>(
-    "SELECT approval_reference->>'id' AS approval_id FROM actions WHERE tenant_id=$1 AND id=$2", [tenantId, actionId],
+/** The delivery a templated send is checked against (A-15, D-6). */
+export interface DeliveredContent { readonly messageId: string; readonly contentDigest: string }
+
+interface QueuePayload { standingApprovalId?: string; templateRevisionId?: string; contactId?: string; messageId?: string; values?: Record<string, string> }
+
+/** A-15: the standing approval a templated queue action ran under, read from the action's own payload. */
+async function standingCheck(
+  tx: Transaction, tenantId: string, payload: QueuePayload, now: Date, content: DeliveredContent | undefined,
+): Promise<ApprovalCheck> {
+  const gone: ApprovalCheck = { kind: "standing", standing: "revoked", current: false, contentMatches: false };
+  if (!payload.standingApprovalId || !payload.templateRevisionId || !payload.contactId || !payload.messageId || !payload.values) return gone;
+  const approval = await loadApproval(tx, tenantId, payload.standingApprovalId);
+  const revision = (await tx.query<{
+    channel: "email" | "sms"; purpose: "transactional" | "marketing"; subject: string | null; body: string;
+    standing_approval_id: string | null; revision: number; current_revision: number;
+  }>(
+    `SELECT r.channel, r.purpose, r.subject, r.body, r.standing_approval_id, r.revision, t.current_revision
+       FROM message_template_revisions r
+       JOIN message_templates t ON t.tenant_id = r.tenant_id AND t.id = r.template_id
+      WHERE r.tenant_id=$1 AND r.id=$2`, [tenantId, payload.templateRevisionId],
+  )).rows[0];
+  if (!approval || !revision) return gone;
+  const current = revision.revision === revision.current_revision && revision.standing_approval_id === approval.id;
+  const contentMatches = !content || content.contentDigest === sendDigest(revision, payload.values, payload.messageId, payload.contactId);
+  return { kind: "standing", standing: standing(approval, now), current, contentMatches };
+}
+
+/**
+ * A-10 from an action row (outbox.action_id); null when the tenant has no such action. A-15: a
+ * templated queue action reports the standing approval it ran under; pass the delivery's content
+ * to compare it with what the revision renders.
+ */
+export async function approvalForAction(
+  tx: Transaction, tenantId: string, actionId: string, now: Date, content?: DeliveredContent,
+): Promise<ApprovalCheck | null> {
+  const action = (await tx.query<{ action_type: string; payload: QueuePayload; approval_id: string | null }>(
+    "SELECT action_type, payload, approval_reference->>'id' AS approval_id FROM actions WHERE tenant_id=$1 AND id=$2", [tenantId, actionId],
   )).rows[0];
   if (!action) return null;
+  if (queueActionKind(action.action_type)) return standingCheck(tx, tenantId, action.payload, now, content);
   if (action.approval_id === null) return { kind: "direct" };
   return checkApproval(tx, tenantId, action.approval_id, now);
 }

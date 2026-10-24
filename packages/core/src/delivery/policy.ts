@@ -76,10 +76,14 @@ export function consentBlock(input: {
 }): DeliveryFinalReason | null {
   if (input.suppressed) return "suppressed";
   if (input.consent === "denied") return "consent_denied";
-  if (input.purpose === "marketing" && input.consent === "granted" && input.source?.startsWith("twilio-voice:")) return "consent_missing";
+  if (input.purpose === "marketing" && input.consent === "granted" && isVoiceGrant(input.source)) return "consent_missing";
   if ((input.purpose === "marketing" || input.channel === "sms") && input.consent !== "granted") return "consent_missing";
   return null;
 }
+
+/** twilio.md T-12: the source of a grant a caller gave on a call. */
+export const VOICE_CONSENT_SOURCE_PREFIX = "twilio-voice:";
+export const isVoiceGrant = (source: string | null | undefined) => typeof source === "string" && source.startsWith(VOICE_CONSENT_SOURCE_PREFIX);
 
 /**
  * Placeholder addresses (crm.md) are never a real recipient: any address under the reserved

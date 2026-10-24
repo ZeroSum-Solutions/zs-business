@@ -28,6 +28,19 @@ export async function catalogTenantTables(tx: Transaction): Promise<TenantTable[
  */
 export async function seedTenantTables(tx: Transaction, tenantId: string, tables: TenantTable[]): Promise<void> {
   const pending = new Map(tables.map((table) => [table.name, table]));
+  // A template and its first revision point at each other (deferred key, check on the digest): written together.
+  if (pending.has("message_templates") && pending.has("message_template_revisions")) {
+    const templateId = randomUUID();
+    await tx.query(
+      `insert into public.message_templates (tenant_id,id,agent_kind,current_revision,created_at) values ($1,$2,'appointment_reminder',1,now())`,
+      [tenantId, templateId]);
+    await tx.query(
+      `insert into public.message_template_revisions (tenant_id,id,template_id,revision,channel,purpose,subject,body,variables,timing_hours,content_digest,created_by,created_at)
+       values ($1,$2,$3,1,'email','transactional','Hello','Hello {customer_first_name}','{customer_first_name}',24,repeat('a',64),$4,now())`,
+      [tenantId, randomUUID(), templateId, randomUUID()]);
+    pending.delete("message_templates");
+    pending.delete("message_template_revisions");
+  }
   while (pending.size) {
     let progress = false;
     for (const name of pending.keys()) {

@@ -114,6 +114,7 @@ export * from "./transcription.js";
 export * from "./document-intake.js";
 export * from "./delivery.js";
 export * from "./agents.js";
+export * from "./templates.js";
 export * from "./billing.js";
 export * from "./calendar.js";
 export * from "./automation.js";

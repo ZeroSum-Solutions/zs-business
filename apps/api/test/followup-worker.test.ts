@@ -56,6 +56,21 @@ describe("follow-up worker entry point", () => {
     expect(worker.output()).toContain("Refusing to start");
   });
 
+  it("refuses to start the templated kinds without a booking key or base URL", async () => {
+    const base = {
+      FOLLOWUP_AGENT: "on", FOLLOWUP_MODEL: "fake", AGENT_TEMPLATED: "on",
+      FOLLOWUP_DATABASE_URL: runtimeUrl(), FOLLOWUP_SERVICE_DATABASE_URL: database.url,
+    };
+    for (const [extra, message] of [
+      [{ PUBLIC_BASE_URL: "https://book.example.test" }, "PUBLIC_BOOKING_KEY_SECRET"],
+      [{ PUBLIC_BOOKING_KEY_SECRET: ["test", "booking", "k".repeat(32)].join("-") }, "PUBLIC_BASE_URL"],
+    ] as const) {
+      const worker = startWorker({ ...base, ...extra });
+      expect(await worker.exited).not.toBe(0);
+      expect(worker.output()).toContain(`Invalid environment: AGENT_TEMPLATED=on: ${message}`);
+    }
+  });
+
   it("runs each enabled tenant's slot as the agent, and stops cleanly on SIGTERM", async () => {
     // Tenant A turns the agent on with no quiet hours, so a run happens whatever the time.
     await fixture.service((tx) => tx.query(

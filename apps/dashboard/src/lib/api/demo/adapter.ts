@@ -44,6 +44,7 @@ import { createDemoAgents, type DemoActor, type DemoAgentControls, type DemoRole
 import { createDemoBusiness, type DemoBusinessControls } from "./business";
 import { createDemoEnrichment } from "./enrichment";
 import { createDemoCalendar, type DemoCalendarControls } from "./calendar";
+import { createDemoTemplates, type DemoTemplateControls } from "./templates";
 import {
   byContactName,
   completeList,
@@ -92,7 +93,7 @@ export interface DemoAdapterOptions {
 }
 
 /** Hooks that act as a second person using the business, to show conflicts. */
-export interface DemoControls extends DemoAgentControls, DemoBrowserControls, DemoBusinessControls, DemoCalendarControls {
+export interface DemoControls extends DemoAgentControls, DemoTemplateControls, DemoBrowserControls, DemoBusinessControls, DemoCalendarControls {
   /**
    * Signs the demo in as the owner or as a staff member. The screen then offers what that role
    * may do, and the agent routes refuse an owner-only step with the API's 403.
@@ -419,6 +420,9 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     seed: seed.followUp,
   });
 
+  const templates = createDemoTemplates({
+    now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor, globalKilled: () => agents.globalAgentKill(),
+  });
   const browser = createDemoBrowser({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
 
   const business = createDemoBusiness({ now: () => clock.now(), wait, idempotent, parse, actor: () => actor });
@@ -434,6 +438,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
   return {
     ...agents,
+    ...templates,
     ...browser,
     ...business,
     ...enrichment,

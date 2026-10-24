@@ -5,6 +5,13 @@
 import {
   APPROVAL_DEFAULT_MINUTES,
   Conflict,
+  KIND_RUN_FINISH_ACTION,
+  KIND_RUN_START_ACTION,
+  KIND_SKIP_ACTION,
+  REMINDER_QUEUE_ACTION,
+  REVIEW_QUEUE_ACTION,
+  TEMPLATE_REVISION_CREATE_ACTION,
+  TEMPLATE_STANDING_GRANT_ACTION,
   agentKindConfigSchemas,
   costWarnCommandSchema,
   draftFollowUpCommandSchema,
@@ -70,8 +77,9 @@ export const AGENT_COMMON_ACTIONS: readonly string[] = Object.freeze([STALL_RUN_
  */
 export const AGENT_KIND_ACTIONS: Readonly<Record<AgentKind, readonly string[]>> = Object.freeze({
   inquiry_followup: Object.freeze([START_RUN_ACTION, FINISH_RUN_ACTION, SKIP_ACTION, DRAFT_ACTION]),
-  appointment_reminder: Object.freeze([]),
-  review_request: Object.freeze([]),
+  // G-19, G-20: the templated kinds run their own run, skip and queue actions.
+  appointment_reminder: Object.freeze([REMINDER_QUEUE_ACTION, KIND_RUN_START_ACTION, KIND_RUN_FINISH_ACTION, KIND_SKIP_ACTION]),
+  review_request: Object.freeze([REVIEW_QUEUE_ACTION, KIND_RUN_START_ACTION, KIND_RUN_FINISH_ACTION, KIND_SKIP_ACTION]),
   document_intake: Object.freeze([]),
   voice_receptionist: Object.freeze([]),
 });
@@ -87,6 +95,9 @@ export const AGENT_MEMBER_PERMISSIONS: Readonly<Record<string, Permission>> = Ob
   [UPDATE_KIND_SETTINGS_ACTION]: "agents",
   [KILL_KIND_ACTION]: "inbox.drafts",
   [RESUME_KIND_ACTION]: "agents",
+  // G-19, A-15: a template revision is written by a member; its standing grant runs under an owner's approval.
+  [TEMPLATE_REVISION_CREATE_ACTION]: "agents",
+  [TEMPLATE_STANDING_GRANT_ACTION]: "agents",
 });
 
 /** The settings target is the tenant itself: one target per tenant, a settings row per kind. */
@@ -192,6 +203,11 @@ export const updateKindSettingsHandler: ActionHandler = {
     const kind = payload.agentKind;
     requireOtherKind(kind);
     const config = parseAgentKindConfig(kind, payload.config);
+    // G-21: a kind with no built path cannot be turned on. G-20: review requests need a review link.
+    if (payload.enabled && kind === "document_intake")
+      throw new Conflict("This agent kind is not available yet", { reason: "kind_not_available" });
+    if (payload.enabled && kind === "review_request" && !(config as { reviewUrl?: string }).reviewUrl)
+      throw new ValidationFailed("Review requests need a review link before they can be turned on");
     const current = await loadControls(tx, binding.tenantId, true, kind);
     if (current.revision !== payload.expectedRevision)
       throw new Conflict("The agent settings changed", { reason: "stale_revision", currentRevision: current.revision });
@@ -275,7 +291,7 @@ export const startRunHandler: ActionHandler = {
  * Close a running run (G-10, G-15, G-16): its counts come from the decisions that committed and
  * its usage from the model calls that were recorded for it. The run's row is locked by the caller.
  */
-async function closeRun(
+export async function closeRun(
   tx: Transaction, tenantId: string, runId: string, kind: AgentKind, now: Date, stopReason: FollowUpStopReason | null,
 ): Promise<void> {
   const counts = kind === "inquiry_followup"

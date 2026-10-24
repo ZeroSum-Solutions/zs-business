@@ -75,7 +75,13 @@ export interface DeliveryApprovals {
 /** M3b's re-check result (approvals.md A-10), typed by shape so this module needs no import of it. */
 export type ApprovalRecordCheck =
   | { readonly kind: "direct" }
-  | { readonly kind: "stored"; readonly standing: "pending" | "approved" | "rejected" | "revoked" | "expired" };
+  | { readonly kind: "stored"; readonly standing: "pending" | "approved" | "rejected" | "revoked" | "expired" }
+  | {
+      readonly kind: "standing";
+      readonly standing: "pending" | "approved" | "rejected" | "revoked" | "expired";
+      readonly current: boolean;
+      readonly contentMatches: boolean;
+    };
 
 /**
  * The port over M3b's `approvalForAction(tx, tenantId, actionId, now)`. A direct approval (the
@@ -84,14 +90,23 @@ export type ApprovalRecordCheck =
  * revoked, expired and rejected stop delivery; no action, or one still pending, is missing.
  */
 export function approvalsFromRecords(
-  approvalForAction: (tx: Transaction, tenantId: string, actionId: string, now: Date) => Promise<ApprovalRecordCheck | null>,
+  approvalForAction: (
+    tx: Transaction, tenantId: string, actionId: string, now: Date, content?: { messageId: string; contentDigest: string },
+  ) => Promise<ApprovalRecordCheck | null>,
   clock: { now(): Date },
 ): DeliveryApprovals {
   return {
     async check(tx, input) {
-      const found = await approvalForAction(tx, input.tenantId, input.actionId, new Date(clock.now().getTime()));
+      const found = await approvalForAction(tx, input.tenantId, input.actionId, new Date(clock.now().getTime()),
+        { messageId: input.messageId, contentDigest: input.contentDigest });
       if (!found) return "missing";
       if (found.kind === "direct") return "approved";
+      if (found.kind === "standing") {
+        // A-15: a superseded revision or a withdrawn grant is revoked; a changed rendering is not the approved text.
+        if (found.standing === "pending") return "missing";
+        if (found.standing !== "approved" || !found.current) return "revoked";
+        return found.contentMatches ? "approved" : "missing";
+      }
       if (found.standing === "approved") return "approved";
       return found.standing === "pending" ? "missing" : "revoked";
     },
