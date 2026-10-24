@@ -141,6 +141,32 @@ describe("image_variants state machine", () => {
     await expect(fixture.a.run((tx) => tx.query("DELETE FROM image_variants WHERE id=$1", [id]))).rejects.toMatchObject({ code: "42501" });
   });
 
+  // IM-23 (20261024300000): staged -> rejected with a set-once rejected_at, and nothing after it.
+  it("moves a staged variant to rejected, and only a staged one", async () => {
+    const tenant = fixture.a.tenantId;
+    const id = await staged(tenant, SHA("a"));
+    await expect(run(tenant, id, "status='rejected'")).rejects.toMatchObject({ code: "23514" });
+    await expect(run(tenant, id, `rejected_at='${T1}'`)).rejects.toMatchObject({ code: "23514" });
+    await run(tenant, id, `status='rejected', rejected_at='${T1}'`);
+    for (const set of [`status='approved', approved_at='${T1}'`, "status='expired'", `rejected_at='${T14}'`, "rejected_at=NULL"])
+      await expect(run(tenant, id, set)).rejects.toMatchObject({ code: "23514" });
+
+    const queued = await variant(tenant, await asset(tenant));
+    await expect(run(tenant, queued, `status='rejected', rejected_at='${T1}'`)).rejects.toMatchObject({ code: "23514" });
+    const approved = await staged(tenant);
+    await run(tenant, approved, `status='approved', approved_at='${T1}'`);
+    await expect(run(tenant, approved, `status='rejected', rejected_at='${T1}'`)).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("lets the runtime role reject its own tenant's staged variant and never the other tenant's", async () => {
+    const id = await staged(fixture.a.tenantId);
+    const update = "UPDATE image_variants SET status='rejected', rejected_at=$2 WHERE id=$1";
+    expect((await fixture.b.run((tx) => tx.query(update, [id, T1]))).rowCount).toBe(0);
+    expect((await fixture.service((tx) => tx.query("SELECT status FROM image_variants WHERE id=$1", [id]))).rows[0]).toEqual({ status: "staged" });
+    expect((await fixture.a.run((tx) => tx.query(update, [id, T1]))).rowCount).toBe(1);
+    expect((await fixture.b.run((tx) => tx.query("SELECT id FROM image_variants WHERE id=$1 AND status='rejected'", [id]))).rowCount).toBe(0);
+  });
+
   it("refuses a source asset of another tenant", async () => {
     const foreign = await asset(fixture.b.tenantId, SHA("8"));
     await expect(variant(fixture.a.tenantId, foreign)).rejects.toMatchObject({ code: "23503" });
