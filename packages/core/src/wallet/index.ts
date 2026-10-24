@@ -1,8 +1,9 @@
-// M3d prepaid wallet (delivery.md D-4, D-5, D-8). Original code. Every function runs inside a
-// service-role transaction the caller owns and names tenant_id in each statement. Lock order
-// is reservation row, then wallet row, so settlement and reservation never wait on each other
-// in opposite orders; a credit locks only the wallet row.
-import { Conflict, ValidationFailed, type WalletSummary } from "@zs/contracts";
+// M3d prepaid wallet (delivery.md D-4, D-5, D-8, D-11). Original code. Every function runs inside
+// a service-role transaction the caller owns and names tenant_id in each statement. Lock order
+// is the job's own row (reservation only), then the reservation row, then the wallet row, so
+// settlement and reservation never wait on each other in opposite orders; a credit locks only
+// the wallet row.
+import { Conflict, ValidationFailed, walletJobKindSchema, type WalletJobKind, type WalletSummary } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 
 /** Minor units travel as bigint text from Postgres; every amount here fits a safe integer. */
@@ -74,13 +75,80 @@ export interface Reservation {
 }
 
 /**
- * D-5: holds `amount` for one delivery, or returns null when the wallet cannot cover it (no
- * wallet, too little available, another currency, or money owed after a refund or dispute,
- * stripe.md S-6). The
- * conditional UPDATE takes the wallet row lock; a concurrent reservation waits for it and then
- * re-reads the committed balance, so two reservations can never spend the same funds. The
- * table constraints refuse any overdraw even if this condition were wrong.
+ * Locks the row of one job in its own table under the tenant (`FOR UPDATE`); false when the row is
+ * absent. Taken before the wallet row, like the delivery worker's own lease lock, so a job is
+ * never reserved or settled while another transaction changes it.
  */
+export type JobLock = (tx: Transaction, tenantId: string, jobId: string) => Promise<boolean>;
+
+/** D-11: which table holds each kind's jobs. A kind without an entry cannot reserve yet. */
+export type JobRegistry = Readonly<Partial<Record<WalletJobKind, JobLock>>>;
+
+/** A lock for a job table with `tenant_id` and `id` columns; the name is a fixed identifier. */
+export function jobRowLock(table: string): JobLock {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(table)) throw new ValidationFailed("Invalid job table name");
+  const sql = `SELECT 1 FROM public.${table} WHERE tenant_id=$1 AND id=$2 FOR UPDATE`;
+  return async (tx, tenantId, jobId) => (await tx.query(sql, [tenantId, jobId])).rowCount === 1;
+}
+
+/**
+ * Only message deliveries have a job table today. Each priced feature adds its kind here when its
+ * contract names the table (enrichment.md, image-port.md, voice-receptionist.md, browser-tasks.md).
+ */
+export const DEFAULT_JOB_REGISTRY: JobRegistry = Object.freeze({
+  message_delivery: jobRowLock("message_deliveries"),
+});
+
+export interface ReserveForJobInput {
+  readonly tenantId: string;
+  readonly jobKind: WalletJobKind;
+  readonly jobId: string;
+  readonly reservationId: string;
+  readonly amount: number;
+  /** A price in another currency than the wallet's is never covered. */
+  readonly currency: string;
+  readonly now: Date;
+}
+
+/**
+ * D-5, D-11: holds `amount` for one priced job, or returns null when the wallet cannot cover it
+ * (no wallet, too little available, another currency, or money owed after a refund or dispute,
+ * stripe.md S-6). The job then makes no vendor call. Runs in the transaction that starts the job's
+ * attempt, as the service role only (runtime roles cannot write the wallet, D-4).
+ *
+ * Locks the job's own row first and refuses `job_not_found` when it is absent under the tenant.
+ * Then one conditional UPDATE takes the wallet row lock; a concurrent reservation, of any kind,
+ * waits for it and re-reads the committed balance, so two reservations can never spend the same
+ * funds. The table constraints refuse any overdraw even if this condition were wrong, and the
+ * partial unique index refuses a second hold for the same job.
+ */
+export async function reserveForJob(
+  tx: Transaction,
+  input: ReserveForJobInput,
+  registry: JobRegistry = DEFAULT_JOB_REGISTRY,
+): Promise<Reservation | null> {
+  const kind = walletJobKindSchema.safeParse(input.jobKind);
+  if (!kind.success) throw new ValidationFailed("Unknown wallet job kind");
+  const jobKind = kind.data;
+  const amount = positiveAmount(input.amount);
+  const lockJob = registry[jobKind];
+  if (!lockJob)
+    throw new Conflict("No job table is registered for this wallet job kind", { reason: "job_kind_unavailable", jobKind });
+  if (!(await lockJob(tx, input.tenantId, input.jobId)))
+    throw new Conflict("The job does not exist for this tenant", { reason: "job_not_found", jobKind });
+  const reserved = await tx.query(
+    `UPDATE wallets SET reserved = reserved + $2, updated_at = $3
+      WHERE tenant_id=$1 AND balance - reserved >= $2 AND currency = $4 AND owed = 0`,
+    [input.tenantId, amount, input.now, input.currency]);
+  if (reserved.rowCount !== 1) return null;
+  await tx.query(
+    `INSERT INTO wallet_reservations (tenant_id, id, job_kind, job_id, delivery_id, amount, status, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'held',$7)`,
+    [input.tenantId, input.reservationId, jobKind, input.jobId, jobKind === "message_delivery" ? input.jobId : null, amount, input.now]);
+  return { id: input.reservationId, amount };
+}
+
+/** D-5: holds `amount` for one delivery; the delivery worker's entry to `reserveForJob`. */
 export async function reserveFunds(tx: Transaction, input: {
   readonly tenantId: string;
   readonly deliveryId: string;
@@ -90,51 +158,63 @@ export async function reserveFunds(tx: Transaction, input: {
   readonly currency?: string;
   readonly now: Date;
 }): Promise<Reservation | null> {
-  const amount = positiveAmount(input.amount);
-  const reserved = await tx.query(
-    `UPDATE wallets SET reserved = reserved + $2, updated_at = $3
-      WHERE tenant_id=$1 AND balance - reserved >= $2 AND currency = $4 AND owed = 0`,
-    [input.tenantId, amount, input.now, input.currency ?? "usd"]);
-  if (reserved.rowCount !== 1) return null;
-  await tx.query(
-    `INSERT INTO wallet_reservations (tenant_id, id, delivery_id, amount, status, created_at)
-     VALUES ($1,$2,$3,$4,'held',$5)`,
-    [input.tenantId, input.reservationId, input.deliveryId, amount, input.now]);
-  return { id: input.reservationId, amount };
+  return reserveForJob(tx, {
+    tenantId: input.tenantId, jobKind: "message_delivery", jobId: input.deliveryId, reservationId: input.reservationId,
+    amount: input.amount, currency: input.currency ?? "usd", now: input.now,
+  });
 }
 
-/** The reservation a delivery still holds, if any (at most one, by a partial unique index). */
-export async function heldReservation(tx: Transaction, tenantId: string, deliveryId: string): Promise<Reservation | null> {
+/** The reservation a job still holds, if any (at most one, by a partial unique index). */
+export async function heldReservationForJob(
+  tx: Transaction, tenantId: string, jobKind: WalletJobKind, jobId: string,
+): Promise<Reservation | null> {
   const row = (await tx.query<{ id: string; amount: string }>(
-    "SELECT id, amount FROM wallet_reservations WHERE tenant_id=$1 AND delivery_id=$2 AND status='held' FOR UPDATE",
-    [tenantId, deliveryId])).rows[0];
+    "SELECT id, amount FROM wallet_reservations WHERE tenant_id=$1 AND job_kind=$2 AND job_id=$3 AND status='held' FOR UPDATE",
+    [tenantId, jobKind, jobId])).rows[0];
   return row ? { id: row.id, amount: minorUnits(row.amount) } : null;
 }
 
+/** The reservation a delivery still holds, if any. */
+export function heldReservation(tx: Transaction, tenantId: string, deliveryId: string): Promise<Reservation | null> {
+  return heldReservationForJob(tx, tenantId, "message_delivery", deliveryId);
+}
+
 /**
- * D-8: settles a held reservation exactly once. The status test makes a second settlement a
- * no-op ("already_settled"); the partial unique indexes refuse a second capture for the same
- * delivery or reservation even if two settlements raced.
+ * D-8, D-11: settles a held reservation exactly once. The status test makes a second settlement a
+ * no-op ("already_settled"); the partial unique indexes refuse a second capture for the same job
+ * or reservation even if two settlements raced.
+ *
+ * Captures `amount` (the real cost) when given, else the whole hold, and returns the remainder to
+ * available in the same transaction: the wallet's `reserved` drops by the whole hold, its
+ * `balance` by the captured amount. An amount above the hold is refused (`capture_exceeds_hold`)
+ * before anything is written. The one ledger row is keyed `capture:<reservationId>`.
  */
 export async function captureReservation(tx: Transaction, input: {
   readonly tenantId: string;
   readonly reservationId: string;
   readonly ledgerId: string;
+  readonly amount?: number;
   readonly now: Date;
 }): Promise<"captured" | "already_settled"> {
+  const requested = input.amount === undefined ? undefined : positiveAmount(input.amount);
   const row = (await tx.query<{ amount: string }>(
-    `UPDATE wallet_reservations SET status='captured', settled_at=$3
-      WHERE tenant_id=$1 AND id=$2 AND status='held' RETURNING amount`,
-    [input.tenantId, input.reservationId, input.now])).rows[0];
+    "SELECT amount FROM wallet_reservations WHERE tenant_id=$1 AND id=$2 AND status='held' FOR UPDATE",
+    [input.tenantId, input.reservationId])).rows[0];
   if (!row) return "already_settled";
-  const amount = minorUnits(row.amount);
+  const held = minorUnits(row.amount);
+  const captured = requested ?? held;
+  if (captured > held)
+    throw new Conflict("A capture cannot exceed the held amount", { reason: "capture_exceeds_hold", held, requested: captured });
   await tx.query(
-    "UPDATE wallets SET balance = balance - $2, reserved = reserved - $2, updated_at = $3 WHERE tenant_id=$1",
-    [input.tenantId, amount, input.now]);
+    "UPDATE wallet_reservations SET status='captured', settled_at=$3 WHERE tenant_id=$1 AND id=$2 AND status='held'",
+    [input.tenantId, input.reservationId, input.now]);
+  await tx.query(
+    "UPDATE wallets SET balance = balance - $2, reserved = reserved - $3, updated_at = $4 WHERE tenant_id=$1",
+    [input.tenantId, captured, held, input.now]);
   await tx.query(
     `INSERT INTO wallet_ledger (tenant_id, id, kind, amount, reservation_id, idempotency_key, created_at)
      VALUES ($1,$2,'capture',$3,$4,$5,$6)`,
-    [input.tenantId, input.ledgerId, -amount, input.reservationId, `capture:${input.reservationId}`, input.now]);
+    [input.tenantId, input.ledgerId, -captured, input.reservationId, `capture:${input.reservationId}`, input.now]);
   return "captured";
 }
 
@@ -152,6 +232,39 @@ export async function releaseReservation(tx: Transaction, input: {
   await tx.query("UPDATE wallets SET reserved = reserved - $2, updated_at = $3 WHERE tenant_id=$1",
     [input.tenantId, minorUnits(row.amount), input.now]);
   return "released";
+}
+
+/** D-11: a hold older than this, by the injected clock, is reported as stale. */
+export const STALE_HOLD_MS = 24 * 60 * 60 * 1000;
+
+export interface StaleHold {
+  readonly code: "stale_hold";
+  readonly tenantId: string;
+  readonly jobKind: WalletJobKind;
+  readonly jobId: string;
+  readonly reservationId: string;
+  readonly amount: number;
+  /** When the hold was made. */
+  readonly heldSince: Date;
+}
+
+/**
+ * D-11: reports `held` reservations older than 24 hours by `now` (the injected clock), oldest
+ * first, across tenants (the service role). It reads only: it never captures or releases a hold,
+ * because an unknown outcome stays held until the job's own lookup or an operator settles it
+ * (D-7, D-8). A caller that needs the rest of a long list passes a larger `limit`.
+ */
+export async function findStaleHolds(tx: Transaction, input: { readonly now: Date; readonly limit?: number }): Promise<StaleHold[]> {
+  const limit = input.limit ?? 1000;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new ValidationFailed("Limit must be between 1 and 10000");
+  const rows = (await tx.query<{ tenant_id: string; job_kind: WalletJobKind; job_id: string; id: string; amount: string; created_at: Date }>(
+    `SELECT tenant_id, job_kind, job_id, id, amount, created_at FROM wallet_reservations
+      WHERE status='held' AND created_at < $1 ORDER BY created_at, tenant_id, id LIMIT $2`,
+    [new Date(input.now.getTime() - STALE_HOLD_MS), limit])).rows;
+  return rows.map((row) => ({
+    code: "stale_hold", tenantId: row.tenant_id, jobKind: row.job_kind, jobId: row.job_id,
+    reservationId: row.id, amount: minorUnits(row.amount), heldSince: row.created_at,
+  }));
 }
 
 /**

@@ -57,6 +57,8 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         };
         // E.164 columns (sms_numbers.phone_number) are unique across tenants: a fresh test number each time.
         if (field.name === "phone_number" && field.type === "text") row[field.name] = `+1555${String(randomInt(0, 10_000_000)).padStart(7, "0")}`;
+        // Text columns a CHECK limits to a list: a listed value that needs no foreign-key row (delivery.md D-11).
+        else if (name === "wallet_reservations" && field.name === "job_kind") row[field.name] = "enrichment";
         else if (field.enum_value !== null) row[field.name] = field.enum_value;
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);
