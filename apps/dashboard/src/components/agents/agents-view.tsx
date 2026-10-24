@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useMemo, useRef, useState, type FormEvent } from "react";
 import type { FollowUpRunDetail, FollowUpStatus, KillFollowUpRequest, UpdateFollowUpSettingsRequest } from "@zs/contracts";
+import { BrowserTasksCard } from "@/components/agents/browser-tasks";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -61,6 +62,7 @@ export function AgentsView() {
         <div className="tray grid min-w-0 gap-1.5 lg:gap-2">
           <FollowUpCard />
           <RunsCard />
+          <BrowserTasksCard />
           <IntakeCard />
         </div>
         <div className="tray min-w-0">

@@ -206,6 +206,55 @@ describe("api proxy", () => {
     expect(harness.apiCalls.at(-1)!.init.method).toBe("DELETE");
   });
 
+  it("forwards the owner's website-task routes under /v1/browser, never the runner's", async () => {
+    const { harness, jar, get, post } = await signedIn();
+    for (const path of [
+      ["v1", "browser-runner", "claim"], ["v1", "browser-runner", "runs", "r-1", "finish"], ["browser-runner", "v1", "claim"],
+      ["v1", "browsers"], ["v1", "browser", ".."], ["v1", "browser", "runs", "r-1", ".."],
+    ]) {
+      expect((await proxyApiRequest(post(path.join("/"), {}, { Origin: ORIGIN }), path, harness.setup)).status, path.join("/")).toBe(404);
+    }
+    expect(harness.apiCalls).toHaveLength(0);
+    for (const path of [["v1", "browser"], ["v1", "browser", "runs"], ["v1", "browser", "runs", "r-1"]]) {
+      expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
+      expect(harness.apiCalls.at(-1)!.url).toBe(`http://api.internal:8787/${path.join("/")}`);
+      expect(harness.apiCalls.at(-1)!.init.method).toBe("GET");
+    }
+    for (const path of [["v1", "browser", "kill"], ["v1", "browser", "resume"], ["v1", "browser", "targets"], ["v1", "browser", "runs"]]) {
+      const response = await proxyApiRequest(post(path.join("/"), { x: 1 }, { "Idempotency-Key": `k-${path.at(-1)}`, Origin: ORIGIN }), path, harness.setup);
+      expect(response.status, path.join("/")).toBe(200);
+      const sent = harness.apiCalls.at(-1)!;
+      expect(sent.url).toBe(`http://api.internal:8787/${path.join("/")}`);
+      expect(sent.init.method).toBe("POST");
+      expect(new Headers(sent.init.headers).get("idempotency-key")).toBe(`k-${path.at(-1)}`);
+    }
+    const settings = new Request(`${ORIGIN}/api/v1/browser/settings`, {
+      method: "PUT", body: JSON.stringify({ enabled: true }), headers: { Cookie: jar.header(), Origin: ORIGIN, "Content-Type": "application/json", "Idempotency-Key": "k-settings" },
+    });
+    expect((await proxyApiRequest(settings, ["v1", "browser", "settings"], harness.setup)).status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/browser/settings");
+    expect(harness.apiCalls.at(-1)!.init.method).toBe("PUT");
+    // A run's file is a download: its bytes, type and attachment disposition pass through untouched.
+    const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0x80, 0x0a]);
+    const api = harness.api;
+    harness.api = async (call) => {
+      const refused = await api(call);
+      if (refused.status === 401) return refused;
+      return new Response(new Blob([pdf], { type: "application/pdf" }), {
+        headers: { "Content-Type": "application/pdf", "Content-Disposition": 'attachment; filename="2026-09-001.pdf"', "X-Content-Type-Options": "nosniff" },
+      });
+    };
+    const file = ["v1", "browser", "runs", "r-1", "artifacts", "a-1"];
+    const download = await proxyApiRequest(get(file.join("/")), file, harness.setup);
+    expect(download.status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/browser/runs/r-1/artifacts/a-1");
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(pdf);
+    expect(download.headers.get("content-type")).toBe("application/pdf");
+    expect(download.headers.get("content-disposition")).toBe('attachment; filename="2026-09-001.pdf"');
+    expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(download.headers.get("cache-control")).toBe("no-store");
+  });
+
   it("answers 503 in demo mode or without the Supabase settings, and 502 when the API is unreachable", async () => {
     const anonymous = new Request(`${ORIGIN}/api/v1/crm/deals`);
     expect((await proxyApiRequest(anonymous, ["v1", "crm", "deals"], null)).status).toBe(503);

@@ -337,6 +337,16 @@ export interface HomeApi {
   getResults(query: HomeResultsQuery, options?: ReadOptions): Promise<HomeResults>;
 }
 
+import type {
+  BrowserRun,
+  BrowserRunDetail,
+  BrowserStatus,
+  RequestBrowserRunRequest,
+  SaveBrowserTargetRequest,
+  UpdateBrowserSettingsRequest,
+  BrowserTarget,
+} from "@zs/contracts";
+
 export interface FollowUpRunQuery {
   /** The previous page's `nextCursor`. */
   cursor?: string;
@@ -362,6 +372,29 @@ export interface AgentsApi {
   listFollowUpRuns(query?: FollowUpRunQuery, options?: ReadOptions): Promise<Page<FollowUpRun>>;
   /** Throws `not_found` for an unknown or malformed run ID. */
   getFollowUpRun(id: string, options?: ReadOptions): Promise<FollowUpRunDetail>;
+}
+
+/**
+ * Website tasks (browser-tasks.md BT-3, BT-9, BT-12): read-only browser tasks on a supplier site.
+ * Members with `inbox.drafts` read the tasks and may stop them; owners (`agents`) change the
+ * settings, targets, resume and request a run. A task only reads and downloads: it submits nothing.
+ */
+export interface BrowserApi {
+  getBrowserStatus(options?: ReadOptions): Promise<BrowserStatus>;
+  /** Owners only. A conflict with reason `stale_revision` when someone saved since `expectedRevision`. */
+  updateBrowserSettings(input: UpdateBrowserSettingsRequest, options: WriteOptions): Promise<BrowserStatus>;
+  /** Stops new runs at once and stops a run between steps. */
+  killBrowser(input: { note?: string }, options: WriteOptions): Promise<BrowserStatus>;
+  /** Owners only. */
+  resumeBrowser(options: WriteOptions): Promise<BrowserStatus>;
+  /** Owners only. */
+  saveBrowserTarget(input: SaveBrowserTargetRequest, options: WriteOptions): Promise<BrowserTarget>;
+  /** Owners only. A conflict (reason `blocked`, `daily_cap`, ...) when a run cannot start now. */
+  requestBrowserRun(input: Pick<RequestBrowserRunRequest, "targetId" | "month">, options: WriteOptions): Promise<BrowserRun>;
+  /** Newest first. */
+  listBrowserRuns(options?: ReadOptions): Promise<BrowserRun[]>;
+  /** One run with its steps and files. Throws `not_found` for an unknown or malformed ID. */
+  getBrowserRun(id: string, options?: ReadOptions): Promise<BrowserRunDetail>;
 }
 
 /**
@@ -502,7 +535,7 @@ export interface DocumentIntakeApi {
   discardIntakeJob(id: string, options: WriteOptions): Promise<void>;
 }
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi;
 
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */

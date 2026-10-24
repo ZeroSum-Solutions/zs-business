@@ -39,6 +39,7 @@ import {
 import { addDays, localIso, wallTimeInstants, weekdayOf, weekRanges, zonedDateKey } from "../../time";
 import { newId as defaultNewId } from "../../id";
 import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError, threadNotFound } from "../errors";
+import { createDemoBrowser, type DemoBrowserControls } from "./browser";
 import { createDemoAgents, type DemoActor, type DemoAgentControls, type DemoRole } from "./agents";
 import { createDemoBusiness, type DemoBusinessControls } from "./business";
 import { createDemoEnrichment } from "./enrichment";
@@ -51,6 +52,7 @@ import {
   THREAD_PAGE_SIZE,
   toUpsertContactRequest,
   type AgentsApi,
+  type BrowserApi,
   type BusinessApi,
   type EnrichmentApi,
   type BookingApi,
@@ -90,7 +92,7 @@ export interface DemoAdapterOptions {
 }
 
 /** Hooks that act as a second person using the business, to show conflicts. */
-export interface DemoControls extends DemoAgentControls, DemoBusinessControls, DemoCalendarControls {
+export interface DemoControls extends DemoAgentControls, DemoBrowserControls, DemoBusinessControls, DemoCalendarControls {
   /**
    * Signs the demo in as the owner or as a staff member. The screen then offers what that role
    * may do, and the agent routes refuse an owner-only step with the API's 403.
@@ -135,7 +137,7 @@ export interface DemoControls extends DemoAgentControls, DemoBusinessControls, D
   approveReplyElsewhere(replyId: string): ReplyRecord;
 }
 
-export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & CalendarSyncApi & DemoControls;
+export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & CalendarSyncApi & DemoControls;
 
 export interface DemoWrite {
   operation: string;
@@ -417,6 +419,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     seed: seed.followUp,
   });
 
+  const browser = createDemoBrowser({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
+
   const business = createDemoBusiness({ now: () => clock.now(), wait, idempotent, parse, actor: () => actor });
 
   const enrichment = createDemoEnrichment({
@@ -430,6 +434,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
   return {
     ...agents,
+    ...browser,
     ...business,
     ...enrichment,
     ...calendar,
