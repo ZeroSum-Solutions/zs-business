@@ -3,12 +3,13 @@
 Status: draft contract for M3d (2026-10-20), revision 5 (2026-10-22). Code follows this file;
 a change to a numbered rule needs a new revision of this file first. Revision 5 changes D-6 and
 D-9 so a one-click unsubscribe stops marketing email only, and adds D-11 (wallet reservations
-for any priced job). Neither change is built yet. Today the one-click POST records reason
-`unsubscribe` (`packages/core/src/edge/delivery-session.ts:63`), and any suppression row blocks
-every purpose (`packages/core/src/delivery/worker.ts:325-331`, `policy.ts:75`). Today
-`wallet_reservations` has only `delivery_id`, a foreign key to `message_deliveries`
-(`supabase/migrations/20261020300000_wallet_and_delivery.sql:117-132`), and
-`captureReservation` always captures the whole held amount (`packages/core/src/wallet/index.ts`).
+for any priced job). D-11 is built (migration `20261023300000_wallet_job_reservations.sql`,
+`packages/core/src/wallet/index.ts`); the D-6 and D-9 change is not. Only `message_delivery` has
+a registered job table (`DEFAULT_JOB_REGISTRY`): another kind's reservation is refused
+`job_kind_unavailable` until its contract adds its table there. Today the one-click POST
+records reason `unsubscribe` (`packages/core/src/edge/delivery-session.ts:63`), and any
+suppression row blocks every purpose (`packages/core/src/delivery/worker.ts:325-331`,
+`policy.ts:75`).
 
 Scope: how an approved outbound message (an Inbox reply today, agent messages later) becomes
 exactly one provider send, paid from the tenant's prepaid wallet, and how a recipient stops
@@ -186,7 +187,7 @@ member cannot take a recipient's key first:
 catalog isolation test. The worker runs as the service role (the outbox processing entry
 point) and names `tenant_id` in every statement.
 
-**D-11. Reservations for any priced job (revision 5, not built).** A wallet reservation names a
+**D-11. Reservations for any priced job (revision 5).** A wallet reservation names a
 job by `job_kind` and `job_id` instead of only a message delivery. The kinds are
 `message_delivery`, `enrichment` (`enrichment.md` E-8), `image_job`, `voice_minutes` and
 `browser_run`; a new
