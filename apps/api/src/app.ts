@@ -15,6 +15,7 @@ import {
   type AutomationEdgeConfig,
   type EnrichmentConfigInput,
   type FollowUpAgentConfig,
+  type ImageDependencies,
   type Session,
   type SessionCheck,
   type StripeClient,
@@ -36,6 +37,7 @@ import { enrichmentRoutes } from "./routes/enrichment.js";
 import { homeRoutes } from "./routes/home.js";
 import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
+import { MEDIA_UPLOAD_PATH, mediaRoutes } from "./routes/media.js";
 import { memberRoutes } from "./routes/members.js";
 import { siteRoutes } from "./routes/sites.js";
 import { sourceRoutes } from "./routes/sources.js";
@@ -71,6 +73,8 @@ export interface AppDependencies {
   readonly publicIntake?: PublicIntakeConfig;
   /** Site publishing (M4b): where releases are stored and how specs compile; absent means /v1/sites is off. */
   readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler; readonly syncTimeoutMs?: number };
+  /** Image jobs (image-port.md IM-21, IM-22): the object store and the adapter config; absent means /v1/media is off. */
+  readonly images?: ImageDependencies;
   /** One-click email unsubscribe (delivery.md D-9); absent means the routes are off. */
   readonly unsubscribe?: UnsubscribeConfig;
   /**
@@ -206,6 +210,7 @@ export function createApp(deps: AppDependencies) {
       },
     } : {}),
     ...(deps.sites ? { sites: deps.sites } : {}),
+    ...(deps.images ? { images: deps.images } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
   const requestEdge = (c: Context<AppEnv>) => {
@@ -233,10 +238,15 @@ export function createApp(deps: AppDependencies) {
     app.route("/worker/v1/transcription", workerRoutes(transcriptionFor));
   }
 
-  app.use("/v1/*", bodyLimit({
+  const jsonBodyLimit = bodyLimit({
     maxSize: 64 * 1024,
     onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413),
-  }));
+  });
+  // IM-22: an image upload is raw bytes with its own limit, checked after auth in mediaRoutes.
+  // Only that exact route skips this one; with images off it keeps 64 KiB and answers 404.
+  const images = deps.images;
+  app.use("/v1/*", (c, next) =>
+    images && c.req.method === "POST" && c.req.path === MEDIA_UPLOAD_PATH ? next() : jsonBodyLimit(c, next));
   app.use("/v1/*", async (c, next) => {
     const header = c.req.header("Authorization") ?? "";
     const match = /^Bearer ([A-Za-z0-9_\-.]+)$/.exec(header);
@@ -254,6 +264,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/home", homeRoutes);
   // Off without a site store: /v1/sites is then an unknown route (404), like the session's check.
   if (deps.sites) app.route("/v1/sites", siteRoutes);
+  // Off without image config: /v1/media is then an unknown route (404), like sites (IM-21).
+  if (images) app.route("/v1/media", mediaRoutes);
   app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);

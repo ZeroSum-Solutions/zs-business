@@ -40,6 +40,8 @@ export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set([
   "calendar.google.connect", "wallet.topup.create",
   // image-port.md: these need the deploy's image config or the worker principal, which an approved run lacks.
   "media.asset.upload", "media.variant.generate", "media.variant.stage", "media.variant.fail",
+  // IM-23: rejecting is the owner's direct decision; it publishes nothing, so nothing approves it.
+  "media.variant.reject",
 ]);
 export const cannotBeApproved = (actionType: string) =>
   isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);

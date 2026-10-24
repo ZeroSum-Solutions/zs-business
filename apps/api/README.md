@@ -116,6 +116,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `R2_ENDPOINT` | `r2` only: `https://<account-id>.r2.cloudflarestorage.com`. https only. |
 | `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
+| `IMAGE_ADAPTER` | Optional: turns image jobs on (image-port.md IM-21): `kie` or `fal`; `fake` only with `IMAGE_ENVIRONMENT=test` and a loopback `DATABASE_URL`. Needs `SITES_STORE` (images share the site store). Unset, every `/v1/media` route answers 404. See "Images". |
 | `PUBLIC_RATE_LIMIT_STORE` | Where the public booking and unsubscribe limits count. `postgres` (default): `public.rate_limit_buckets`, shared by every API instance on the database. `memory`: this process only, refused unless `DATABASE_URL` is a loopback host. |
 | `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets of the `PUBLIC_RATE_LIMIT_STORE` store. |
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
@@ -339,6 +340,45 @@ the old site has a lower one and changes nothing. Retraction is safe to repeat.
 
   The Mish publisher's own refusals (`invalid-spec` and the family's validation errors)
   should become `ValidationFailed` in the adapter, so a bad recipe is a 400.
+## Images (`/v1/media`, `pnpm image:worker`)
+
+docs/requirements/image-port.md IM-21..IM-23. Owners only (`publish`). Off unless
+`IMAGE_ADAPTER` is set; the API and the worker read the same variables once at start-up and
+refuse the same configs.
+
+| Method and path | Result |
+|---|---|
+| `POST /v1/media/assets` | Upload: the raw bytes as the body, `Content-Type` `image/png`, `image/jpeg` or `image/webp`, at most `MEDIA_LIMITS.fileBytes` (10 MiB; the 64 KiB JSON limit does not apply to this route). 201 `MediaAssetOutput`; the same bytes again return the same asset. |
+| `GET /v1/media/assets` | `{ items: MediaAsset[] }` |
+| `GET /v1/media/assets/:id/content` | The bytes, with `Cache-Control: private, no-store` and `X-Content-Type-Options: nosniff`. |
+| `POST /v1/media/variants` | `{ sourceAssetId, preset, params }`: 201 `ImageVariantOutput`, `queued`. Nothing is reserved or called until the worker takes it. |
+| `GET /v1/media/variants`, `GET /v1/media/variants/:id` | The list, and one variant (the status check). |
+| `GET /v1/media/variants/:id/content` | The staged bytes of a `staged`, `approved` or `promoted` variant, headers as above; 404 otherwise. |
+| `POST /v1/media/variants/:id/approval` | `{ sha256 }`: 201 the approval of `media.variant.approve`. An owner then approves it at `POST /v1/approvals/:id/approve`. |
+| `POST /v1/media/variants/:id/reject` | `{ sha256 }`: the variant, now `rejected`. A repeat returns it unchanged. |
+
+Another tenant's ID is `NotFound`. A changed digest is `Conflict` `variant_changed`; a variant
+that is not staged is `variant_not_staged`; one past its 14 days is `variant_expired`.
+
+| Variable | Meaning |
+|---|---|
+| `IMAGE_ADAPTER` | `kie` or `fal` in production; `fake` for tests. `higgsfield` and `comfyui` are not built and refused. |
+| `IMAGE_ENVIRONMENT` | `production` (default), `development` or `test`. Production accepts only `kie` and `fal`. |
+| `IMAGE_CURRENCY` | The wallet currency of the prices, default `usd`. |
+| `IMAGE_PRICES_MINOR` | JSON, one whole number per preset: `{"background_remove":…,"studio_background_swap":…,"upscale_2k":…}`, minor units charged to the tenant per job. Required except for the fake in tests. No price is written in code; the deploy's values are TODO verify against the vendor's price page. |
+| `IMAGE_VENDOR_COST_MICROS` | JSON, the same keys: the vendor's cost per job in micros of USD, recorded as provenance. Required for `kie` and `fal`. TODO verify. |
+| `KIE_API_KEY`, `FAL_API_KEY` | The configured vendor's key. Required for that adapter; only the worker calls the vendor. They live on the Mac, never in a cloud session. |
+| `IMAGE_WORKER` | Worker kill switch. `on` runs; anything else, or unset, runs nothing. |
+| `IMAGE_DATABASE_URL` | Worker: runtime login (like `DATABASE_URL`); refused if privileged. Its stage and fail actions run under RLS. |
+| `IMAGE_SERVICE_DATABASE_URL` | Worker: a login that may `SET ROLE service_role`, for the claim, the wallet and the sweeps. Shares `DATABASE_CA_CERT`. |
+| `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Worker: the API's site bucket (`SITES_STORE=r2`). |
+| `IMAGE_INTERVAL_MS` | The Node worker's pause between passes (15000). |
+
+Each worker pass starts queued jobs (reserve, call, verify, stage, capture), asks the vendor about
+unknown outcomes, promotes approved variants, expires staged ones after 14 days and deletes the
+staging files of expired and rejected ones. There is no cron function: vendor jobs poll for
+longer than a function may run.
+
 ## Unsubscribe (`/public/v1/unsubscribe/:token`, no auth)
 
 Every email carries `List-Unsubscribe: <…/public/v1/unsubscribe/zsu1_…>` and

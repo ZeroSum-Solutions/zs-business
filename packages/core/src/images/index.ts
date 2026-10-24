@@ -1,6 +1,6 @@
 export { imageHandlers, type ImageDependencies } from "./handlers.js";
 export { findAllowedModel, FORBIDDEN_MODEL_PATTERNS, IMAGE_MODEL_ALLOWLIST, isForbiddenModel, isSafeWeightsFile, NON_COMMERCIAL_LICENSE, type ModelEntry } from "./allowlist.js";
-export { FAKE_TEST_PRICES, imagePrice, parseImageConfig, type ImageConfig } from "./config.js";
+export { FAKE_TEST_PRICES, IMAGE_ENVIRONMENTS, imagePrice, parseImageConfig, type ImageConfig } from "./config.js";
 export {
   createFakeImageWorkflowPort,
   ImageAdapterRefused,

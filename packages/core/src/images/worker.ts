@@ -293,7 +293,7 @@ export function createImageWorker(deps: ImageWorkerDeps) {
       `SELECT r.tenant_id, r.job_id, v.status, v.failure_reason
          FROM wallet_reservations r JOIN image_variants v ON v.tenant_id=r.tenant_id AND v.id=r.job_id
         WHERE r.job_kind='image_job' AND r.status='held'
-          AND (v.status IN ('staged','approved','promoted','expired') OR (v.status='failed' AND v.failure_reason <> 'outcome_unknown'))
+          AND (v.status IN ('staged','approved','promoted','expired','rejected') OR (v.status='failed' AND v.failure_reason <> 'outcome_unknown'))
         ORDER BY r.created_at LIMIT 200`)).rows);
     let captured = 0;
     let released = 0;
@@ -312,7 +312,7 @@ export function createImageWorker(deps: ImageWorkerDeps) {
     return { captured, released };
   }
 
-  /** IM-11: past its 14 days a staged image expires and its staging file goes. */
+  /** IM-11, IM-23: past its 14 days a staged image expires; an expired or rejected image's staging file goes. */
   async function expire(): Promise<number> {
     const expired = await deps.service(async (tx) => (await tx.query<{ tenant_id: string; id: string; sha256: string }>(
       `UPDATE image_variants SET status='expired'
@@ -320,10 +320,13 @@ export function createImageWorker(deps: ImageWorkerDeps) {
                                    ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)
         RETURNING tenant_id, id, sha256`, [now()])).rows);
     for (const row of expired) report({ kind: "expired", tenantId: row.tenant_id, variantId: row.id });
-    // Deleting is idempotent, so each pass also retries the recent expiries: a failed delete is not lost.
+    // Deleting is idempotent, so each pass also retries the recent expiries and rejections: a failed delete is not lost.
+    const since = new Date(now().getTime() - 7 * 24 * 60 * 60 * 1000);
     const recent = await deps.service(async (tx) => (await tx.query<{ tenant_id: string; id: string; sha256: string }>(
-      `SELECT tenant_id, id, sha256 FROM image_variants WHERE status='expired' AND expires_at > $1 ORDER BY expires_at DESC LIMIT 100`,
-      [new Date(now().getTime() - 7 * 24 * 60 * 60 * 1000)])).rows);
+      `(SELECT tenant_id, id, sha256 FROM image_variants WHERE status='expired' AND expires_at > $1 ORDER BY expires_at DESC LIMIT 100)
+       UNION ALL
+       (SELECT tenant_id, id, sha256 FROM image_variants WHERE status='rejected' AND rejected_at > $1 ORDER BY rejected_at DESC LIMIT 100)`,
+      [since])).rows);
     for (const row of recent) {
       await deps.store.delete(mediaObjectKeys.staging(row.tenant_id, row.id, row.sha256)).catch((error: unknown) =>
         report({ kind: "error", tenantId: row.tenant_id, variantId: row.id, error: error instanceof Error ? error.message.slice(0, 300) : "delete failed" }));

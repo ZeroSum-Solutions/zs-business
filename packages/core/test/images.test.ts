@@ -500,3 +500,111 @@ describe("allowlist, config and keys (IM-6, IM-8, IM-16)", () => {
     expect(idempotencyKeySchema.safeParse("image-jobs-are-fine").success).toBe(true);
   });
 });
+
+describe("rejection and content reads (IM-22, IM-23)", () => {
+  async function stagedVariant(preset: "background_remove" | "studio_background_swap" = "background_remove") {
+    const source = await upload();
+    const queued = await generate(preset === "background_remove"
+      ? { sourceAssetId: source.id, preset, params: {} } : swap(source.id, `staged ${photoSeed}`));
+    await worker().runOnce();
+    const row = await variant(queued.id);
+    expect(row.status).toBe("staged");
+    return { source, row };
+  }
+
+  it("rejects a staged variant once, keeps the capture and sweeps its staging file", async () => {
+    const { row } = await stagedVariant();
+    const owner = sessionFor(tenantA, ownerA);
+    await expect(owner.rejectImageVariant(row.id, { sha256: "0".repeat(64) }, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_changed" } });
+    now = START + 60_000;
+    const rejected = (await owner.rejectImageVariant(row.id, { sha256: row.sha256 }, randomUUID())).result;
+    expect(rejected).toMatchObject({ status: "rejected", rejectedAt: new Date(START + 60_000).toISOString(), sha256: row.sha256 });
+    expect(await rows("SELECT payload FROM outbox WHERE tenant_id=$1 AND event_type='media.variant.rejected' AND payload->>'variantId'=$2",
+      [tenantA, row.id])).toEqual([{ payload: { variantId: row.id, sha256: row.sha256 } }]);
+    // A repeat under a new key returns it unchanged.
+    now = START + 120_000;
+    const again = (await owner.rejectImageVariant(row.id, { sha256: row.sha256 }, randomUUID())).result;
+    expect(again).toEqual(rejected);
+    // The vendor ran: the hold stays captured.
+    expect((await reservation(row.id))?.status).toBe("captured");
+    await worker().runOnce();
+    expect(await store.head(mediaObjectKeys.staging(tenantA, row.id, row.sha256))).toBeNull();
+    expect((await variant(row.id)).status).toBe("rejected");
+    await expect(approve(row.id, row.sha256)).rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_not_staged" } });
+    await expect(owner.readImageVariantContent(row.id)).rejects.toMatchObject({ code: "NotFound" });
+  });
+
+  it("refuses to reject a variant that is not staged, another tenant's, or without publish", async () => {
+    const source = await upload();
+    const queued = await generate({ sourceAssetId: source.id, preset: "background_remove", params: {} });
+    await expect(sessionFor(tenantA, ownerA).rejectImageVariant(queued.id, { sha256: "a".repeat(64) }, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_not_staged" } });
+    await worker().runOnce();
+    const row = await variant(queued.id);
+    await expect(sessionFor(tenantB, ownerB).rejectImageVariant(queued.id, { sha256: row.sha256 }, randomUUID()))
+      .rejects.toMatchObject({ code: "NotFound" });
+    await expect(sessionFor(tenantA, memberA).rejectImageVariant(queued.id, { sha256: row.sha256 }, randomUUID()))
+      .rejects.toMatchObject({ code: "TenantDenied" });
+    await expect(sessionFor(tenantA, ownerA).rejectImageVariant(queued.id, { sha256: row.sha256, note: "x" }, randomUUID()))
+      .rejects.toMatchObject({ code: "ValidationFailed" });
+    expect((await variant(queued.id)).status).toBe("staged");
+  });
+
+  it("never runs a rejection through an approval", async () => {
+    const { row } = await stagedVariant();
+    await expect(sessionFor(tenantA, ownerA).requestApproval({
+      action: { actionType: "media.variant.reject", target: { type: "media_variant", id: row.id }, payload: { variantId: row.id, sha256: row.sha256 } },
+      summary: "Reject it",
+    }, randomUUID())).rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
+  it("reads an asset's and a staged variant's bytes for the session tenant only", async () => {
+    const owner = sessionFor(tenantA, ownerA);
+    const photo = ringPhoto(500);
+    const asset = (await owner.uploadMediaAsset(photo, "image/png", randomUUID())).result;
+    const content = await owner.readMediaAssetContent(asset.id);
+    expect(content.contentType).toBe("image/png");
+    expect(Buffer.from(content.bytes).equals(Buffer.from(photo))).toBe(true);
+    await expect(sessionFor(tenantB, ownerB).readMediaAssetContent(asset.id)).rejects.toMatchObject({ code: "NotFound" });
+    await expect(sessionFor(tenantA, memberA).readMediaAssetContent(asset.id)).rejects.toMatchObject({ code: "TenantDenied" });
+    await expect(owner.readMediaAssetContent(randomUUID())).rejects.toMatchObject({ code: "NotFound" });
+
+    const queued = await generate({ sourceAssetId: asset.id, preset: "background_remove", params: {} });
+    await expect(owner.readImageVariantContent(queued.id)).rejects.toMatchObject({ code: "NotFound" });
+    await worker().runOnce();
+    const row = await variant(queued.id);
+    const staged = await owner.readImageVariantContent(queued.id);
+    expect(staged.contentType).toBe("image/png");
+    expect(Buffer.from(staged.bytes).equals(Buffer.from(await stagedBytes(row)))).toBe(true);
+    await expect(sessionFor(tenantB, ownerB).readImageVariantContent(queued.id)).rejects.toMatchObject({ code: "NotFound" });
+
+    // A stored object that no longer matches its row is an error, never served.
+    await store.delete(mediaObjectKeys.staging(tenantA, row.id, row.sha256));
+    await store.put(mediaObjectKeys.staging(tenantA, row.id, row.sha256), ringPhoto(501), { contentType: "image/png" });
+    await expect(owner.readImageVariantContent(queued.id)).rejects.toThrow(/digest/);
+  });
+
+  it("requests the approval of a staged variant through the approvals path", async () => {
+    const { row } = await stagedVariant("studio_background_swap");
+    const owner = sessionFor(tenantA, ownerA);
+    await expect(owner.requestImageVariantApproval(row.id, { sha256: "b".repeat(64) }, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_changed" } });
+    await expect(sessionFor(tenantB, ownerB).requestImageVariantApproval(row.id, { sha256: row.sha256 }, randomUUID()))
+      .rejects.toMatchObject({ code: "NotFound" });
+    const key = randomUUID();
+    const proposal = await owner.requestImageVariantApproval(row.id, { sha256: row.sha256 }, key);
+    expect(proposal.result).toMatchObject({
+      status: "pending", actionType: "media.variant.approve", target: { tenantId: tenantA, type: "media_variant", id: row.id },
+      payload: { variantId: row.id, sha256: row.sha256 },
+    });
+    expect((await owner.requestImageVariantApproval(row.id, { sha256: row.sha256 }, key)).result.id).toBe(proposal.result.id);
+    const decided = await owner.approveApproval(proposal.result.id, {}, randomUUID());
+    expect(decided.execution.result).toMatchObject({ status: "approved" });
+    // A retry of the request after the approval replays it.
+    expect((await owner.requestImageVariantApproval(row.id, { sha256: row.sha256 }, key)).result.id).toBe(proposal.result.id);
+    await worker().runOnce();
+    expect((await variant(row.id)).status).toBe("promoted");
+    expect((await owner.readImageVariantContent(row.id)).contentType).toBe("image/png");
+  });
+});
