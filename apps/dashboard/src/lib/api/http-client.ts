@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   bookingPageSchema,
   bookingPageSummarySchema,
+  businessProfileReadSchema,
   calendarConnectionListSchema,
   calendarConnectionSchema,
   connectGoogleCalendarResponseSchema,
@@ -50,6 +51,7 @@ import {
   THREAD_PAGE_SIZE,
   toUpsertContactRequest,
   type AgentsApi,
+  type BusinessApi,
   type BookingApi,
   type CalendarSyncApi,
   type CrmApi,
@@ -93,6 +95,8 @@ const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
 const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema) });
 /** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
 const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
+/** PUT /v1/business answers the action and the profile as it is now; a newer API's extra keys are dropped (BP-10). */
+const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
 
 /** `pageQuerySchema` caps `limit` at 100. */
 const PAGE_LIMIT = 100;
@@ -102,7 +106,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & CalendarSyncApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & SitesApi & CalendarSyncApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -407,6 +411,14 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     async disconnectCalendar(connectionId, options) {
       const path = `/v1/calendar/connections/${encodeURIComponent(connectionId)}/disconnect`;
       return (await write(path, {}, disconnectCalendarOutputSchema, options)).result;
+    },
+
+    getBusiness(options = {}) {
+      return request({ method: "GET", path: "/v1/business", schema: businessProfileReadSchema, signal: options.signal });
+    },
+
+    async updateBusiness(input, options) {
+      return (await write("/v1/business", input, businessOutputSchema, options, "PUT")).result;
     },
 
     getFollowUpStatus(options = {}) {

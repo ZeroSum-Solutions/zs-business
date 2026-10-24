@@ -20,8 +20,9 @@ import {
   type SlotQuery,
   type ThreadSummary,
 } from "./api";
-import type { BookingRecord, SlotsResponse } from "@zs/contracts";
+import type { BookingRecord, BusinessProfile, SlotsResponse } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
+import { newerProfile } from "./business-profile";
 
 /** Key suffixes. Queries and invalidations go through `useKeys`, which puts the tenant first. */
 export const keys = {
@@ -56,6 +57,8 @@ export const keys = {
   /** The agent's actor ID, derived from the tenant (agents.md G-1). */
   agentActor: ["agents", "actor"] as const,
   agentsAll: ["agents"] as const,
+  /** The business profile (business-profile.md BP-5). */
+  business: ["business"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
@@ -324,6 +327,26 @@ export function useFollowUpStatus() {
   const { keys, enabled } = useKeys();
   return useQuery({
     enabled, queryKey: keys.followUp, queryFn: ({ signal }) => api.getFollowUpStatus({ signal }), staleTime: 0, refetchInterval: 60_000,
+  });
+}
+
+/**
+ * The business profile (business-profile.md BP-5). An API older than the profile answers 404; the
+ * caller shows that as "not available yet" (BP-10), so a 404 is not retried.
+ */
+export function useBusinessProfile() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  const queryClient = useQueryClient();
+  return useQuery({
+    enabled,
+    queryKey: keys.business,
+    // A read that started before a save can land after it: never replace a newer cached revision with an older one.
+    queryFn: async ({ signal }) => {
+      const read = await api.getBusiness({ signal });
+      return newerProfile(queryClient.getQueryData<BusinessProfile>(keys.business), read);
+    },
+    staleTime: 60_000,
   });
 }
 

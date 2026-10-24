@@ -22,6 +22,7 @@ import type { SiteCompiler } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
 import { followUpRoutes } from "./routes/agents.js";
+import { businessRoutes } from "./routes/business.js";
 import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
@@ -236,6 +237,7 @@ export function createApp(deps: AppDependencies) {
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
   app.route("/v1", memberRoutes);
+  app.route("/v1", businessRoutes);
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   app.onError((error, c) => {

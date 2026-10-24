@@ -49,6 +49,12 @@ const expectedPath: Record<string, string> = {
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_windows_valid(jsonb)": "pg_catalog, pg_temp",
+  // Business profile (20261023100000_business_profiles.sql): the row that comes with a tenant, the definer
+  // that keeps tenants.name in step with the display name (BP-9), and the zone check.
+  "business_profiles_create()": "pg_catalog, pg_temp",
+  "business_profiles_sync_name()": "pg_catalog, pg_temp",
+  "business_profiles_tenant_name()": "pg_catalog, pg_temp",
+  "business_profiles_time_zone_known()": "pg_catalog, pg_temp",
   // M5 (20261020630000_google_calendar.sql): the runtime status guard on calendar connections.
   "calendar_connections_runtime_guard()": "pg_catalog, pg_temp",
   // M3c (20261020200000_inbox_home.sql): the won-date and reply-guard triggers.
@@ -111,7 +117,10 @@ it("skips only planted logins: any other login that can reach an owner is caught
     await client.query(`CREATE ROLE ${planted} LOGIN; GRANT authenticated, zs_dispatcher TO ${planted}`);
     expect(await assumable()).toEqual([]);
     await client.query("CREATE ROLE zs_probe_login LOGIN; GRANT authenticated, zs_dispatcher TO zs_probe_login");
-    expect(await assumable()).toEqual([expect.stringMatching(/^record_action_and_event\(/)]);
+    // The two functions that run as zs_dispatcher.
+    expect(await assumable()).toEqual([
+      expect.stringMatching(/^business_profiles_sync_name\(/), expect.stringMatching(/^record_action_and_event\(/),
+    ]);
   } finally {
     await client.query("ROLLBACK");
     client.release();

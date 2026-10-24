@@ -2,17 +2,18 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
+import { CURRENCIES, currencyLabel, isActiveCurrencyCode, isCurrencyCode } from "@zs/contracts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input, Label, Select } from "@/components/ui/input";
 import { ErrorNote } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isDealChanged, type DealDetailsChange, type DealSummary, type LeadSource } from "@/lib/api";
+import { isApiError, isDealChanged, type DealDetailsChange, type DealSummary, type LeadSource } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
 import { LEAD_SOURCE_LABELS, LEAD_SOURCES } from "@/lib/lead-sources";
-import { useKeys } from "@/lib/queries";
+import { useBusinessProfile, useKeys } from "@/lib/queries";
 import { currencyDigits } from "@/lib/utils";
 
 export const STALE_DETAILS_MESSAGE = "Someone changed this deal since you opened it. Reloaded: your changes are kept and theirs fill the rest. Check the details and save again.";
@@ -41,15 +42,8 @@ export function amountHint(currency: string): string {
   return digits === 0 ? "Enter a whole amount like 1250." : `Enter an amount like 1250 or 1250.${"50".padEnd(digits, "0")}.`;
 }
 
-const isCurrency = (code: string) => {
-  if (!/^[A-Z]{3}$/.test(code)) return false;
-  try {
-    new Intl.NumberFormat("en-US", { style: "currency", currency: code });
-    return true;
-  } catch {
-    return false;
-  }
-};
+/** The currency a deal with no value starts at when the business profile is not known (an older API, or not yet loaded). */
+export const FALLBACK_CURRENCY = "USD";
 
 export interface DetailsForm {
   amount: string;
@@ -57,9 +51,10 @@ export interface DetailsForm {
   leadSource: string;
 }
 
-export const initialForm = (deal: DealSummary): DetailsForm => ({
+/** A deal with a value shows its stored currency; one without starts at the business's (business-profile.md BP-8). */
+export const initialForm = (deal: DealSummary, profileCurrency: string = FALLBACK_CURRENCY): DetailsForm => ({
   amount: deal.value ? formatAmountInput(deal.value.amountMinor, deal.value.currency) : "",
-  currency: deal.value?.currency ?? "USD",
+  currency: deal.value?.currency ?? profileCurrency,
   leadSource: deal.leadSource ?? "",
 });
 
@@ -92,10 +87,17 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
   const toast = useToast();
   const intents = useIntentKey();
   const generation = useDialogGeneration(open);
-  const [form, setForm] = useState(() => initialForm(deal));
+  const profile = useBusinessProfile();
+  // A stored profile currency outside the list cannot start a deal; fall back rather than offer it.
+  const profileCurrency = profile.data && isActiveCurrencyCode(profile.data.currency) ? profile.data.currency : FALLBACK_CURRENCY;
+  // The business currency is "known" once the profile arrives, or the API has none (404, the older-API fallback).
+  const profileKnown = profile.isSuccess || (profile.isError && isApiError(profile.error, "not_found"));
+  const [form, setForm] = useState(() => initialForm(deal, profileCurrency));
   // What the form was opened (or last rebased) from: a save sends this revision, never a newer
   // one a reload brought in, so a change made elsewhere always comes back as stale_revision.
-  const [base, setBase] = useState(() => ({ revision: deal.revision, form: initialForm(deal) }));
+  const [base, setBase] = useState(() => ({ revision: deal.revision, form: initialForm(deal, profileCurrency) }));
+  // Whether the owner chose a currency; until then a profile that arrives late still sets the start.
+  const [currencyChosen, setCurrencyChosen] = useState(false);
   const [rebasing, setRebasing] = useState(false);
   const [problem, setProblem] = useState<"amount" | "currency" | null>(null);
   const [stale, setStale] = useState<"reloaded" | "failed" | null>(null);
@@ -133,30 +135,41 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
   useEffect(() => {
     if (!open) return;
     reset();
-    setForm(initialForm(deal));
-    setBase({ revision: deal.revision, form: initialForm(deal) });
+    setForm(initialForm(deal, profileCurrency));
+    setBase({ revision: deal.revision, form: initialForm(deal, profileCurrency) });
+    setCurrencyChosen(false);
     setRebasing(false);
     setProblem(null);
     setStale(null);
     // Only on opening (`deal` is left out on purpose): a reload while open must not wipe what the owner typed.
   }, [open, reset]);
 
+  // The profile may answer after the dialog opened: a deal with no value follows it until the owner picks.
+  useEffect(() => {
+    if (!open || deal.value || currencyChosen) return;
+    setForm((mine) => (mine.currency === profileCurrency ? mine : { ...mine, currency: profileCurrency }));
+    setBase((current) => (current.form.currency === profileCurrency ? current : { ...current, form: { ...current.form, currency: profileCurrency } }));
+  }, [open, deal.value, currencyChosen, profileCurrency]);
+
   // After a stale save, once the reloaded deal arrives: keep the owner's edits, take the rest
   // and the new revision from it. The owner saves again to accept the result.
   useEffect(() => {
     if (!open || !rebasing || deal.revision === base.revision) return;
-    const saved = initialForm(deal);
+    const saved = initialForm(deal, profileCurrency);
     setForm((mine) => rebaseForm(base.form, mine, saved));
     setBase({ revision: deal.revision, form: saved });
     setRebasing(false);
-  }, [open, rebasing, deal, base]);
+  }, [open, rebasing, deal, base, profileCurrency]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const currency = form.currency.trim().toUpperCase();
     let value: DealDetailsChange["value"] = null;
     if (form.amount.trim() !== "") {
-      if (!isCurrency(currency)) return setProblem("currency");
+      // BP-8: a stored code outside the list can be shown, but a value cannot be saved under it.
+      if (!isCurrencyCode(currency)) return setProblem("currency");
+      // BP-8: never save a value under a guessed currency; the owner picks one while the profile is unknown.
+      if (!deal.value && !currencyChosen && !profileKnown) return setProblem("currency");
       const amountMinor = parseAmount(form.amount, currency);
       if (amountMinor === null) return setProblem("amount");
       value = { amountMinor, currency };
@@ -174,7 +187,7 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
     <Dialog open={open} onOpenChange={(next) => { onOpenChange(next); if (!next) save.reset(); }}>
       <DialogContent title="Deal details" description={deal.title}>
         <form onSubmit={submit} noValidate className="space-y-4">
-          <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,11rem)] gap-3">
             <div>
               <Label htmlFor={`${prefix}-amount`}>Value</Label>
               <Input
@@ -189,21 +202,26 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
             </div>
             <div>
               <Label htmlFor={`${prefix}-currency`}>Currency</Label>
-              <Input
+              <Select
                 id={`${prefix}-currency`}
-                maxLength={3}
-                autoCapitalize="characters"
+                className="w-full"
                 value={form.currency}
                 aria-invalid={problem === "currency" || undefined}
                 aria-describedby={problem === "currency" ? `${prefix}-problem` : undefined}
-                onChange={(event) => setForm({ ...form, currency: event.target.value.toUpperCase() })}
-              />
+                onChange={(event) => {
+                  setCurrencyChosen(true);
+                  setForm({ ...form, currency: event.target.value });
+                }}
+              >
+                {isCurrencyCode(form.currency) ? null : <option value={form.currency}>{form.currency} · not supported</option>}
+                {CURRENCIES.filter((currency) => isActiveCurrencyCode(currency.code) || currency.code === form.currency).map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
+              </Select>
             </div>
           </div>
           {/* Right under the fields it is about, before the general hint. */}
           {problem ? (
             <p id={`${prefix}-problem`} role="alert" className="-mt-2 text-sm text-danger">
-              {problem === "amount" ? amountHint(form.currency.trim().toUpperCase()) : "Enter a three-letter currency code such as USD."}
+              {problem === "amount" ? amountHint(form.currency.trim().toUpperCase()) : isCurrencyCode(form.currency.trim().toUpperCase()) ? "Pick the currency for this value. Your business currency has not loaded yet." : "Pick a supported currency to save a value."}
             </p>
           ) : null}
           <p id={`${prefix}-help`} className={problem ? "text-xs text-meta" : "-mt-2 text-xs text-meta"}>Leave the value empty if it is not known yet.</p>
