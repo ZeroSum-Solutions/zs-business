@@ -580,7 +580,7 @@ describe("review requests (G-20)", () => {
     now += 60_000;
     await worker().runOnce();
     expect(await deliveryOf(s.bookingId)).toMatchObject({ status: "sent", final_reason: null });
-    const sent = provider.delivered.find((d) => d.request.text.includes(REVIEW_URL))!.request;
+    const sent = provider.delivered.find((d) => d.request.text.split(/\s+/).includes(REVIEW_URL))!.request;
     expect(sent.headers["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click");
     expect(await sendEvents(s.bookingId)).toHaveLength(1);
   });

@@ -55,7 +55,7 @@ function cardOf(html: string, kind: TemplatedKind): string {
   expect(start, `${kind} card`).toBeGreaterThan(-1);
   return html.slice(start, html.indexOf("</section>", start));
 }
-const textOf = (html: string) => html.replace(/<[^>]+>/g, " ").replaceAll("&#x27;", "'").replaceAll("&amp;", "&").replaceAll("&quot;", "\"").replace(/\s+/g, " ");
+const textOf = (html: string) => html.replace(/<[^>]+>/g, " ").replaceAll("&#x27;", "'").replaceAll("&quot;", "\"").replaceAll("&amp;", "&").replace(/\s+/g, " ");
 const button = (html: string, label: string) => html.match(new RegExp(`<button([^>]*)>(?:(?!</button>).)*?${label}`))?.[1] ?? null;
 
 describe("agents screen: templated kinds", () => {
