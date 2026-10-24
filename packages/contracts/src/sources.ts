@@ -10,7 +10,7 @@ const idSchema = z.lazy(() => uuidSchema);
 const instantSchema = storedInstantSchema;
 
 /** F-2: what a source record may describe. */
-export const sourceSubjectTypeSchema = z.enum(["contact", "deal", "booking", "booking_resource", "intake_item", "media_asset"]);
+export const sourceSubjectTypeSchema = z.enum(["contact", "deal", "booking", "booking_resource", "intake_item", "media_asset", "catalog_item", "knowledge_entry"]);
 export type SourceSubjectType = z.infer<typeof sourceSubjectTypeSchema>;
 export const sourceSubjectSchema = z.strictObject({ type: sourceSubjectTypeSchema, id: idSchema });
 export type SourceSubject = z.infer<typeof sourceSubjectSchema>;
