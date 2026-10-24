@@ -1,0 +1,12 @@
+{
+  "status": 200,
+  "body": {
+    "id": "chatcmpl-cb-0b77e2aa",
+    "object": "chat.completion",
+    "model": "gpt-oss-120b",
+    "choices": [
+      { "index": 0, "finish_reason": "length", "message": { "role": "assistant", "content": "{\"subject\":\"Parking at Hal" } }
+    ],
+    "usage": { "prompt_tokens": 300, "completion_tokens": 600, "total_tokens": 900 }
+  }
+}

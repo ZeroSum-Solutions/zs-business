@@ -489,7 +489,10 @@ Inbox for an owner's approval.
 | `CRON_SECRET` | Bearer secret Vercel Cron sends, 32+ characters, shared with the delivery runner. Unset: the route is 404. |
 | `FOLLOWUP_DATABASE_URL` | Runtime login (like `DATABASE_URL`); refused if privileged. |
 | `FOLLOWUP_SERVICE_DATABASE_URL` | A login that may `SET ROLE service_role`, for the due-tenant read. Shares `DATABASE_CA_CERT`. |
-| `FOLLOWUP_MODEL` | Only `fake` today, on loopback databases. A real provider is not wired yet. |
+| `AGENT_MODEL_PERSONAL_DATA` | The personal-data lane: `fake` (loopback databases only) or `cerebras`. `FOLLOWUP_MODEL` is the older name. DeepSeek is refused here. |
+| `AGENT_MODEL_NO_PERSONAL_DATA` | Optional: `fake` or `deepseek`. |
+| `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_MODEL` | Key for the lane's vendor; model IDs default to `gpt-oss-120b` and `deepseek-flash`. A model with no price in `VENDOR_MODEL_PRICES` does not start. Prices and IDs are unverified. |
+| `AGENT_STALL_AFTER_MS` | A run still `running` this long is closed as `stalled` (900000); must exceed candidates × timeout + budget. |
 | `FOLLOWUP_SLOT_MINUTES` | One run per tenant per slot (60). |
 | `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS` | 3, 5000, 20000; candidates × timeout must fit the budget. |
 | `FOLLOWUP_INTERVAL_MS` | The Node worker's pause between runs (300000). |
@@ -819,3 +822,14 @@ Owner routes (Bearer member token, `integrations` permission, owners only): `GET
 `POST /deliveries/:id/replay`, `GET|POST /tokens`, `POST /tokens/:id/revoke`. Flow routes (Bearer
 `zsap1_…` token): `GET /me`, `POST /proposals` (Idempotency-Key), `GET /proposals/:id`.
 `GET /cron/activepieces` answers like `/cron/delivery`, with `delivered` in place of `sent`.
+
+## Transcription
+
+Owner routes under `/v1/transcriptions` (Bearer member token, `inbox.drafts`): `POST /uploads`
+(a signed upload for a job), `POST /` (enqueue), `GET /`, `GET /:id`. Worker routes under
+`/worker/v1/transcription` take `Authorization: Bearer <TRANSCRIPTION_WORKER_TOKEN>` (32+
+characters, compared in constant time) and `X-Lease-Token` after claim: `POST /claim`,
+`GET /jobs/:id/audio`, `POST /jobs/:id/heartbeat`, `/complete`, `/fail`. The routes exist only
+when `createApp` gets a `transcription` dependency (audio store and token); the production
+audio-store adapter is not built yet, so the server does not mount them. Setup for the worker
+itself: `apps/transcription-worker/README.md`.

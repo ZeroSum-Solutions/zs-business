@@ -31,6 +31,8 @@ import type {
   ReplyEntry,
   ReplyRecord,
   ReplyStatus,
+  TranscriptionDetail,
+  TranscriptionSummary,
   RequestEntry,
   ResourceSummary,
   SitePreview,
@@ -452,7 +454,15 @@ export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi;
+/** Transcripts of uploaded audio and voicemails (transcription.md X-7). Members with `inbox.drafts` read them. */
+export interface TranscriptionApi {
+  /** Newest first. */
+  listTranscriptions(options?: ReadOptions): Promise<TranscriptionSummary[]>;
+  /** One job with its speaker-labelled segments, once a transcript exists. */
+  getTranscription(id: string, options?: ReadOptions): Promise<TranscriptionDetail>;
+}
+
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

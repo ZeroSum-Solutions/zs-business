@@ -14,6 +14,7 @@ import { decodeCursor, encodeCursor, microsToTimestamp, timestampToMicros } from
 import { page } from "../reads/page.js";
 
 interface RunRow {
+  agent: FollowUpRun["agent"];
   id: string;
   requested_by: string | null;
   started_at: Date;
@@ -36,12 +37,12 @@ interface DecisionRow {
   created_at: Date;
 }
 
-const RUN_COLUMNS = "id, requested_by, started_at, finished_at, status, stop_reason, considered, drafted, skipped";
+const RUN_COLUMNS = "id, agent, requested_by, started_at, finished_at, status, stop_reason, considered, drafted, skipped";
 const DECISION_COLUMNS = "id, run_id, intake_item_id, contact_id, outcome, reason, reply_id, approval_id, created_at";
 
 const runRecord = (row: RunRow): FollowUpRun => ({
   id: row.id,
-  agent: "inquiry_followup",
+  agent: row.agent,
   requestedBy: row.requested_by,
   startedAt: row.started_at.toISOString(),
   finishedAt: row.finished_at?.toISOString() ?? null,
@@ -80,7 +81,8 @@ export async function loadDecision(tx: Transaction, tenantId: string, id: string
 /** A run with its decisions, oldest first, or null when the tenant has no such run. */
 export async function getRun(tx: Transaction, tenantId: string, runId: string): Promise<FollowUpRunDetail | null> {
   const run = await loadRun(tx, tenantId, runId);
-  if (!run) return null;
+  // This read serves /v1/agents/followup; another kind's run is not its run.
+  if (!run || run.agent !== "inquiry_followup") return null;
   const decisions = (await tx.query<DecisionRow>(
     `SELECT ${DECISION_COLUMNS} FROM agent_followups WHERE tenant_id=$1 AND run_id=$2 ORDER BY created_at, id`,
     [tenantId, runId],
@@ -93,7 +95,7 @@ export async function listRuns(tx: Transaction, tenantId: string, query: ListFol
   const after = decodeCursor("agents.runs", query);
   const rows = (await tx.query<RunRow & { position: string }>(
     `SELECT ${RUN_COLUMNS}, ${timestampToMicros("started_at")} AS position FROM agent_runs
-      WHERE tenant_id=$1 ${after ? `AND (started_at, id) < (${microsToTimestamp("$4")}, $5::uuid)` : ""}
+      WHERE tenant_id=$1 AND agent='inquiry_followup' ${after ? `AND (started_at, id) < (${microsToTimestamp("$4")}, $5::uuid)` : ""}
       ORDER BY started_at DESC, id DESC LIMIT $2 OFFSET $3`,
     after ? [tenantId, query.limit + 1, 0, after[0], after[1]] : [tenantId, query.limit + 1, query.offset],
   )).rows;

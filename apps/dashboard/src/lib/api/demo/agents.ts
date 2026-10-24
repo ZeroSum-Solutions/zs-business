@@ -62,6 +62,9 @@ export interface DemoAgentContext {
 const HOUR_MS = 3_600_000;
 /** `maxCandidatesPerRun`, the server's injected config. */
 const MAX_CANDIDATES_PER_RUN = 5;
+/** G-15: the demo prices a draft like the fake model (87 USD millionths) under the default daily cost limit. */
+const DEMO_COST_PER_DRAFT_MICROS = 87;
+const DEMO_COST_CAP_MICROS = 1_000_000;
 
 const clone = <T>(value: T): T => structuredClone(value);
 const byNewest = (a: FollowUpRun, b: FollowUpRun) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id);
@@ -99,12 +102,23 @@ export function createDemoAgents(ctx: DemoAgentContext): AgentsApi & DemoAgentCo
     if (killed) return "tenant_killed";
     if (inQuietHours(now)) return "quiet_hours";
     if (draftsSince(now.getTime() - 24 * HOUR_MS) >= settings.maxDraftsPerDay) return "daily_cap";
+    if (costSpent(now) >= DEMO_COST_CAP_MICROS) return "cost_cap";
     return null;
+  }
+
+  /** G-15: what the demo's drafts cost in the last 24 hours, at a fixed price per draft. */
+  function costSpent(now: Date): number {
+    return draftsSince(now.getTime() - 24 * HOUR_MS) * DEMO_COST_PER_DRAFT_MICROS;
   }
 
   function status(): FollowUpStatus {
     const reason = blockedBy(ctx.now());
-    return { settings: { ...settings }, revision, updatedAt, killed: killed && { ...killed }, globalKilled, canDraft: reason === null, blockedBy: reason };
+    const now = ctx.now();
+    const spent = costSpent(now);
+    return {
+      settings: { ...settings }, revision, updatedAt, killed: killed && { ...killed }, globalKilled, canDraft: reason === null, blockedBy: reason,
+      costSpentMicros: spent, costCapMicros: DEMO_COST_CAP_MICROS, costWarning: spent * 5 >= DEMO_COST_CAP_MICROS * 4,
+    };
   }
 
   /** G-7: each customer's latest website request in the window, not drafted for and not answered since. */

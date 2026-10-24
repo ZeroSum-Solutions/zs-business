@@ -45,6 +45,7 @@ export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandle
 export * from "./delivery/index.js";
 export * from "./billing/index.js";
 export * from "./business/index.js";
+export * from "./transcription/index.js";
 export * from "./calendar/index.js";
 export * from "./automation/index.js";
 export {
@@ -73,18 +74,45 @@ export {
   agentActorId,
   AGENT_ACTIONS,
   agentHandlers,
+  AGENT_KIND_LANES,
+  assertKindModel,
+  CEREBRAS_DEFAULT_MODEL,
+  createCerebrasModel,
+  createDeepSeekModel,
   createFakeFollowUpModel,
+  createFakeTextModel,
+  createFollowUpModel,
+  createHangingFollowUpModel,
+  DEEPSEEK_DEFAULT_MODEL,
   dueFollowUpTenants,
+  FAKE_MODEL_ID,
+  FAKE_MODEL_PRICES,
   followUpRunId,
   inQuietHours,
+  modelForLane,
+  ModelTimedOut,
+  priceUsage,
   runFollowUps,
   scheduledRunKey,
   scheduleSlot,
   setGlobalAgentSwitch,
+  stalledRuns,
+  VENDOR_MODEL_PRICES,
+  worstCase,
   type DueFollowUpTenants,
   type FakeFollowUpModel,
+  type FetchLike,
   type FollowUpModel,
   type FollowUpRunReport,
+  type ModelPrice,
+  type ModelPrices,
+  type NoPersonalDataSource,
+  type PersonalDataSource,
+  type RunTimers,
+  type StalledRun,
+  type TextModel,
+  type TextModelRequest,
+  type TextModelResult,
 } from "./agents/index.js";
-export { agentAuthorize, createFollowUpAgent, type FollowUpAgent, type FollowUpAgentConfig } from "./edge/agent-session.js";
+export { agentAuthorize, agentAuthorizeFor, createFollowUpAgent, type FollowUpAgent, type FollowUpAgentConfig } from "./edge/agent-session.js";
 export * from "./enrichment/index.js";

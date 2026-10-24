@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  agentKindStatusOutputSchema,
+  agentKindStatusSchema,
   apiErrorBodySchema,
   DEFAULT_FOLLOW_UP_SETTINGS,
   followUpRunDetailSchema,
@@ -89,6 +91,7 @@ describe("status and settings (G-2, G-11)", () => {
     expect(await status()).toEqual({
       settings: DEFAULT_FOLLOW_UP_SETTINGS, revision: 0, updatedAt: null, killed: null,
       globalKilled: false, canDraft: false, blockedBy: "disabled",
+      costSpentMicros: 0, costCapMicros: 1_000_000, costWarning: false,
     });
     // Staff read it too (inbox.drafts).
     expect((await status(staff)).revision).toBe(0);
@@ -248,6 +251,75 @@ describe("runs (G-7, G-11)", () => {
     expect((await as(h.a, "GET", `/runs/${randomUUID()}`)).status).toBe(404);
     expect((await as(h.a, "GET", "/runs/not-a-uuid")).status).toBe(400);
     expect((await as(h.a, "GET", "/runs?limit=0")).status).toBe(400);
+  });
+});
+
+describe("other agent kinds (G-14)", () => {
+  const KIND = "/v1/agents/review_request";
+  const kindAs = async (member: MemberSetup, method: string, path: string, body?: unknown) =>
+    call(h.app, method, `${KIND}${path}`, {
+      token: await tokenOf(member),
+      ...(body === undefined ? {} : { body, key: randomUUID() }),
+    });
+  const kindStatus = async (member: MemberSetup = h.a) => {
+    const response = await kindAs(member, "GET", "");
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    return agentKindStatusSchema.parse(response.body);
+  };
+
+  it("is off by default, with its own cost figures and config defaults", async () => {
+    expect(await kindStatus()).toMatchObject({
+      agentKind: "review_request", revision: 0, canRun: false, blockedBy: "disabled", killed: null,
+      costSpentMicros: 0, costCapMicros: 1_000_000, costWarning: false, settings: { enabled: false, maxCostMicrosPerDay: 1_000_000 },
+    });
+  });
+
+  it("lets an owner configure one kind, staff stop it, and only an owner resume it", async () => {
+    const current = await kindStatus();
+    const saved = await kindAs(h.a, "PUT", "/settings", {
+      ...current.settings, enabled: true, quietStartMinute: 0, quietEndMinute: 0, maxCostMicrosPerDay: 250_000,
+      config: { timingHours: 48 }, expectedRevision: 0,
+    });
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    expect(agentKindStatusOutputSchema.parse(saved.body).result).toMatchObject({
+      revision: 1, canRun: true, costCapMicros: 250_000, settings: { enabled: true, config: { timingHours: 48 } },
+    });
+
+    // A stale revision, a config the kind does not allow, and another kind are refused.
+    const stale = await kindAs(h.a, "PUT", "/settings", { ...current.settings, expectedRevision: 0 });
+    expect(stale.status).toBe(409);
+    const bad = await kindAs(h.a, "PUT", "/settings", { ...current.settings, config: { sendLimit: 5 }, expectedRevision: 1 });
+    expect(bad.status).toBe(400);
+
+    const killed = await kindAs(staff, "POST", "/kill", { note: "Paused" });
+    expect(killed.status, JSON.stringify(killed.body)).toBe(200);
+    expect(agentKindStatusOutputSchema.parse(killed.body).result).toMatchObject({ canRun: false, blockedBy: "tenant_killed" });
+    expect((await kindAs(staff, "POST", "/resume", {})).status).toBe(403);
+    const resumed = await kindAs(h.a, "POST", "/resume", {});
+    expect(resumed.status, JSON.stringify(resumed.body)).toBe(200);
+    expect(agentKindStatusOutputSchema.parse(resumed.body).result).toMatchObject({ canRun: true, killed: null });
+    // The follow-up agent never moved.
+    expect((await status()).killed).toBe(null);
+    // The other tenant's review agent is still off.
+    expect(await kindStatus(h.b)).toMatchObject({ revision: 0, canRun: false });
+  });
+
+  it("refuses an unknown kind and the follow-up kind on the generic routes, and staff settings", async () => {
+    expect((await call(h.app, "GET", "/v1/agents/nope", { token: await tokenOf(h.a) })).status).toBe(400);
+    const ownSwitches = { ...DEFAULT_FOLLOW_UP_SETTINGS, expectedRevision: 0 };
+    for (const [method, path, body] of [["PUT", "/settings", ownSwitches], ["POST", "/kill", {}], ["POST", "/resume", {}]] as const) {
+      const response = await call(h.app, method, `/v1/agents/inquiry_followup${path}`, { token: await tokenOf(h.a), body, key: randomUUID() });
+      expect(response.status, `${method} ${path}`).toBe(400);
+    }
+    const body = { ...(await kindStatus()).settings, expectedRevision: 1 };
+    expect((await kindAs(staff, "PUT", "/settings", body)).status).toBe(403);
+  });
+
+  it("answers 401 without a token", async () => {
+    for (const [method, path] of [["GET", ""], ["PUT", "/settings"], ["POST", "/kill"], ["POST", "/resume"]] as const) {
+      const response = await call(h.app, method, `${KIND}${path}`, method === "GET" ? {} : { body: {}, key: randomUUID() });
+      expect(response.status, `${method} ${path}`).toBe(401);
+    }
   });
 });
 

@@ -41,6 +41,9 @@ const status = {
   globalKilled: false,
   canDraft: false,
   blockedBy: "quiet_hours",
+  costSpentMicros: 0,
+  costCapMicros: 1000000,
+  costWarning: false,
 };
 const run = {
   id: RUN, agent: "inquiry_followup", requestedBy: USER, startedAt: "2026-10-20T12:00:00.000Z", finishedAt: "2026-10-20T12:00:05.000Z",
