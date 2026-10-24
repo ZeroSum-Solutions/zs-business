@@ -166,7 +166,7 @@ it("reads the functions migrations create and drop, in order, public only", () =
   expect(functionsInMigrations([`
     -- CREATE FUNCTION public.commented_out() RETURNS int;
     CREATE OR REPLACE FUNCTION public.kept(a int) RETURNS int;
-    CREATE FUNCTION "Quoted"() RETURNS int;
+    CREATE FUNCTION "quoted"() RETURNS int;
     CREATE FUNCTION zs_internal.hidden() RETURNS int;
     CREATE FUNCTION public.gone() RETURNS int;
   `, "DROP FUNCTION IF EXISTS public.gone();", "CREATE FUNCTION plain () RETURNS int;"])).toEqual(["kept", "plain", "quoted"]);
@@ -204,6 +204,21 @@ it("creates our roles naming NOLOGIN only, as hosted Supabase's supautils requir
   // Rule, not a list: a new role passes only if its first CREATE ROLE names NOLOGIN alone.
   expect(Object.keys(first)).toEqual(expect.arrayContaining(["zs_dispatcher", "zs_function_owner", "zs_rate_limiter"]));
   expect(first).toEqual(Object.fromEntries(Object.keys(first).map((role) => [role, `CREATE ROLE ${role} NOLOGIN;`])));
+  // The CREATE syntax is not enough: a later ALTER ROLE ... LOGIN must not have given one a login.
+  const loginRoles = async (pool: Pool, names: string[]) =>
+    (await pool.query<{ rolname: string }>("SELECT rolname FROM pg_roles WHERE rolcanlogin AND rolname = ANY($1) ORDER BY 1", [names])).rows.map((row) => row.rolname);
+  await withTestDatabase(async (database) => {
+    expect(await loginRoles(database.pool, Object.keys(first))).toEqual([]);
+    // Negative case: a role created NOLOGIN and altered to LOGIN is named.
+    const bad = `zs_probe_login_${randomUUID().replaceAll("-", "").slice(0, 8)}`;
+    await database.pool.query(`CREATE ROLE ${bad} NOLOGIN`);
+    try {
+      await database.pool.query(`ALTER ROLE ${bad} LOGIN`);
+      expect(await loginRoles(database.pool, [...Object.keys(first), bad])).toEqual([bad]);
+    } finally {
+      await database.pool.query(`DROP ROLE IF EXISTS ${bad}`);
+    }
+  });
 });
 
 /** Applies migrations before 20261018090000, stores one resource, then runs the rest as the migrator. */

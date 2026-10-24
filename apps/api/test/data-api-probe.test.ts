@@ -85,9 +85,9 @@ async function exposureViolations(pool: Pool): Promise<string[]> {
     )
     SELECT name || ': RLS not enabled' AS violation FROM t WHERE schema='public' AND NOT relrowsecurity
     UNION ALL SELECT name || ': RLS not forced' FROM t WHERE schema='public' AND NOT relforcerowsecurity
-    UNION ALL SELECT name || ': granted to ' || grantee FROM grantees
-    ORDER BY 1`);
-  return rows.map((row) => row.violation);
+    UNION ALL SELECT name || ': granted to ' || grantee FROM grantees`);
+  // Sorted here, not in SQL: ORDER BY follows the cluster's collation, which differs between machines.
+  return rows.map((row) => row.violation).sort();
 }
 
 /** PostgREST with public exposed: no such function for the control, permission denied for the action RPC, `tables` for the rest. */
@@ -118,7 +118,7 @@ describe("tables to probe", () => {
       expect(await exposureViolations(database.pool)).toEqual([
         "public.zs_probe_exposed: RLS not enabled", "public.zs_probe_exposed: RLS not forced", "public.zs_probe_exposed: granted to PUBLIC",
         "zs_internal.schema_migrations: granted to authenticated",
-      ]);
+      ].sort());
     });
   });
 
