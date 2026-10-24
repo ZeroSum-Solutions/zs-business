@@ -1,5 +1,6 @@
 import {
   ActionError,
+  Refused,
   type ApiErrorBody,
   type ApiErrorCode,
   type JsonValue,
@@ -7,7 +8,7 @@ import {
 import { DatabaseUnavailable } from "@zs/db";
 import { StripeRequestFailed } from "../billing/stripe.js";
 
-export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 500 | 503;
+export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 422 | 500 | 503;
 export interface MappedError {
   readonly status: ApiErrorStatus;
   readonly body: ApiErrorBody;
@@ -69,6 +70,7 @@ const CONFLICT_REASONS = new Set([
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
   "stale_release", "host_in_use", "grant_changed", "invalid_currency",
   "variant_expired", "variant_changed", "variant_not_staged", "variant_not_running", "image_not_approved", "upload_missing",
+  "consent_required", "lease_lost",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
@@ -134,6 +136,8 @@ export function mapError(error: unknown): MappedError {
   if (error instanceof StripeRequestFailed) return error.retry ? mapped(503, "Unavailable") : mapped(500, "Internal");
   // The release's files could not be stored, and the publish was not recorded: retry later.
   if (error instanceof SiteStoreUnavailable) return mapped(503, "Unavailable");
+  // transcription.md X-1, X-9: 413 and 422 keep the ValidationFailed code and name the reason.
+  if (error instanceof Refused) return mapped(error.status, "ValidationFailed", { reason: error.reason });
   if (!(error instanceof ActionError)) return mapped(500, "Internal");
   switch (error.code) {
     case "ValidationFailed":

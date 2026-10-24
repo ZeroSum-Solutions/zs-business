@@ -109,6 +109,7 @@ export * from "./media.js";
 export * from "./members.js";
 export * from "./sites.js";
 export * from "./sources.js";
+export * from "./transcription.js";
 export * from "./delivery.js";
 export * from "./agents.js";
 export * from "./billing.js";

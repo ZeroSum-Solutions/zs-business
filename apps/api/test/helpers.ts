@@ -8,7 +8,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, signBookingKey, type AutomationEdgeConfig, type SiteCompiler } from "@zs/core";
+import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type SiteCompiler } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
 import {
   createApp,
@@ -42,6 +42,8 @@ export const TWILIO_AUTH_TOKEN = "0123456789abcdef".repeat(2);
 export const PREVIOUS_TWILIO_AUTH_TOKEN = "fedcba9876543210".repeat(2);
 export const TWILIO_ACCOUNT_SID = `AC${"a1".repeat(16)}`;
 export const TWILIO_WEBHOOK_BASE_URL = "https://api.example.test";
+/** Synthetic transcription worker bearer token, built at runtime like SECRET. */
+export const WORKER_TOKEN = ["test", "worker", "w".repeat(32)].join("-");
 export const ACTIVEPIECES_KEY_SECRET = ["test", "activepieces", "a".repeat(32)].join("-");
 export const PREVIOUS_RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "r".repeat(32)].join("-")).toString("base64");
 
@@ -66,6 +68,8 @@ export interface ApiHarness {
   app: App;
   a: TenantSetup;
   b: TenantSetup;
+  /** The transcription fakes, when the harness turned the routes on. */
+  transcription?: { audio: InMemoryAudioStore; voicemails: InMemoryVoicemails };
   close(): Promise<void>;
 }
 
@@ -130,6 +134,8 @@ export interface HarnessOptions {
   twilioWebhook?: Partial<TwilioWebhookConfig>;
   /** Turns the Activepieces routes on; the key defaults to ACTIVEPIECES_KEY_SECRET. */
   activepieces?: Partial<AutomationEdgeConfig>;
+  /** Turns the /v1/transcriptions and /worker/v1 routes on over in-memory audio and voicemails. */
+  transcription?: boolean;
   clock?: { now(): Date };
   /** Turns the /v1/sites routes on over this store and compiler. */
   sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
@@ -141,6 +147,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
   const appClock = options.clock ?? clock;
   // As in the server: one shared limiter for the booking and unsubscribe routes.
   const shared = options.limiterStore === "postgres" ? { limiter: createPostgresRateLimiter(database.db, appClock) } : {};
+  const transcription = options.transcription ? { audio: new InMemoryAudioStore(), voicemails: new InMemoryVoicemails() } : undefined;
   const app = createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
     // The loopback auth stub stands in for Supabase Auth; core's tests cover the Supabase check.
@@ -173,6 +180,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     ...(options.activepieces
       ? { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET }, ...options.activepieces } }
       : {}),
+    ...(transcription ? { transcription: { ...transcription, workerToken: WORKER_TOKEN } } : {}),
   });
   return {
     database,
@@ -180,6 +188,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     app,
     a: await provision(database, fixture, fixture.a.tenantId),
     b: await provision(database, fixture, fixture.b.tenantId),
+    ...(transcription ? { transcription } : {}),
     close: () => database.close(),
   };
 }

@@ -822,3 +822,14 @@ Owner routes (Bearer member token, `integrations` permission, owners only): `GET
 `POST /deliveries/:id/replay`, `GET|POST /tokens`, `POST /tokens/:id/revoke`. Flow routes (Bearer
 `zsap1_…` token): `GET /me`, `POST /proposals` (Idempotency-Key), `GET /proposals/:id`.
 `GET /cron/activepieces` answers like `/cron/delivery`, with `delivered` in place of `sent`.
+
+## Transcription
+
+Owner routes under `/v1/transcriptions` (Bearer member token, `inbox.drafts`): `POST /uploads`
+(a signed upload for a job), `POST /` (enqueue), `GET /`, `GET /:id`. Worker routes under
+`/worker/v1/transcription` take `Authorization: Bearer <TRANSCRIPTION_WORKER_TOKEN>` (32+
+characters, compared in constant time) and `X-Lease-Token` after claim: `POST /claim`,
+`GET /jobs/:id/audio`, `POST /jobs/:id/heartbeat`, `/complete`, `/fail`. The routes exist only
+when `createApp` gets a `transcription` dependency (audio store and token); the production
+audio-store adapter is not built yet, so the server does not mount them. Setup for the worker
+itself: `apps/transcription-worker/README.md`.
