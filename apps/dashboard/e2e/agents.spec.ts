@@ -242,3 +242,30 @@ test("Run now drafts a follow-up that waits in the Inbox under the agent's name"
   await expect(draft.getByRole("button", { name: "Approve and queue" })).toBeVisible();
   expect((await page.evaluate(() => window.__zsDemo!.writeLog())).map((write) => write.operation)).toEqual(["agent.run.start"]);
 });
+
+// Website tasks (browser-tasks.md): the demo adapter finishes a requested run at once.
+test("an owner saves last month's invoices, sees the steps and files, and stops website tasks", async ({ page }) => {
+  await openAgents(page);
+  const tasks = page.getByRole("region", { name: "Website tasks" });
+  await expect(tasks.getByTestId("browser-state")).toHaveText("Ready");
+  await expect(tasks).toContainText("It only reads");
+  await expect(tasks).toContainText("No runs yet");
+
+  await tasks.getByRole("button", { name: "Save invoices now" }).click();
+  await expect(page.getByRole("status").getByText("Run started. Watch its steps below.")).toBeVisible();
+  const downloads = tasks.getByRole("list", { name: "Website downloads" }).locator(":scope > li");
+  await expect(downloads).toHaveCount(1);
+  await expect(downloads.first()).toContainText("Done");
+  await expect(downloads.first().getByTestId("browser-run-counts")).toContainText("5 steps, 2 files");
+  await downloads.first().getByRole("button", { name: "Show the steps and files" }).click();
+  await expect(tasks.getByTestId("browser-step")).toHaveCount(5);
+  await expect(tasks.getByTestId("browser-file")).toHaveCount(2);
+  await expect(tasks.getByTestId("browser-usage")).toContainText("Today: 1 run of 5");
+
+  await tasks.getByRole("button", { name: "Stop website tasks" }).click();
+  await expect(tasks.getByTestId("browser-state")).toHaveText("Stopped");
+  await expect(tasks.getByTestId("browser-blocked")).toHaveText("Website tasks are stopped. An owner can resume them.");
+  await expect(tasks.getByRole("button", { name: "Save invoices now" })).toBeDisabled();
+  await tasks.getByRole("button", { name: "Resume website tasks" }).click();
+  await expect(tasks.getByTestId("browser-state")).toHaveText("Ready");
+});

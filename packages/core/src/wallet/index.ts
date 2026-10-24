@@ -97,6 +97,7 @@ export function jobRowLock(table: string): JobLock {
  */
 export const DEFAULT_JOB_REGISTRY: JobRegistry = Object.freeze({
   message_delivery: jobRowLock("message_deliveries"),
+  browser_run: jobRowLock("browser_runs"),
 });
 
 export interface ReserveForJobInput {

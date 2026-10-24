@@ -119,6 +119,7 @@ import {
 import type { ScopedDatabase, Transaction } from "@zs/db";
 import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
+import { BROWSER_MEMBER_PERMISSIONS, browserHandlers } from "../browser/handlers.js";
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, agentKindStatus, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { businessHandlers, getBusinessProfile } from "../business/index.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
@@ -209,7 +210,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers, ...businessHandlers,
+  ...agentHandlers, ...browserHandlers, ...businessHandlers,
 });
 
 /**
@@ -250,6 +251,7 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "calendar.google.disconnect": "publish",
   // agents.md G-2, G-3: owners change settings and resume; any member may stop the agent.
   ...AGENT_MEMBER_PERMISSIONS,
+  ...BROWSER_MEMBER_PERMISSIONS,
   // business-profile.md BP-6: only owners change who the business is.
   "business.profile.update": "business",
 });

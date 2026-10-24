@@ -68,6 +68,8 @@ const CONFLICT_REASONS = new Set([
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
   "stale_release", "host_in_use", "grant_changed", "invalid_currency",
+  // browser-tasks.md BT-9, BT-11, BT-12: why a website task cannot start or a write task is refused.
+  "write_tasks_disabled", "disabled", "global_killed", "tenant_killed", "target_disabled", "daily_cap", "cost_cap", "artifact_cap",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);

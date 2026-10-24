@@ -1,6 +1,12 @@
 import { z } from "zod";
 import {
   bookingContactOutputSchema,
+  browserRunDetailSchema,
+  browserRunListSchema,
+  browserRunOutputSchema,
+  browserStatusOutputSchema,
+  browserStatusSchema,
+  browserTargetOutputSchema,
   bookingDetailSchema,
   bookingPageSchema,
   bookingPageSummarySchema,
@@ -53,6 +59,7 @@ import {
   THREAD_PAGE_SIZE,
   toUpsertContactRequest,
   type AgentsApi,
+  type BrowserApi,
   type BusinessApi,
   type BookingApi,
   type CalendarSyncApi,
@@ -108,7 +115,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & SitesApi & CalendarSyncApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & SitesApi & CalendarSyncApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -192,6 +199,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     request({ method, path, body, idempotencyKey: options?.idempotencyKey, schema });
 
   const FOLLOW_UP = "/v1/agents/followup";
+  const BROWSER = "/v1/browser";
 
   return {
     async listResources(options = {}) {
@@ -427,6 +435,44 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     async disconnectCalendar(connectionId, options) {
       const path = `/v1/calendar/connections/${encodeURIComponent(connectionId)}/disconnect`;
       return (await write(path, {}, disconnectCalendarOutputSchema, options)).result;
+    },
+
+    getBrowserStatus(options = {}) {
+      return request({ method: "GET", path: BROWSER, schema: browserStatusSchema, signal: options.signal });
+    },
+
+    async updateBrowserSettings(input, options) {
+      return (await write(`${BROWSER}/settings`, input, browserStatusOutputSchema, options, "PUT")).result;
+    },
+
+    async killBrowser(input, options) {
+      const body = input.note === undefined ? {} : { note: input.note };
+      return (await write(`${BROWSER}/kill`, body, browserStatusOutputSchema, options)).result;
+    },
+
+    async resumeBrowser(options) {
+      return (await write(`${BROWSER}/resume`, {}, browserStatusOutputSchema, options)).result;
+    },
+
+    async saveBrowserTarget(input, options) {
+      return (await write(`${BROWSER}/targets`, input, browserTargetOutputSchema, options)).result;
+    },
+
+    async requestBrowserRun(input, options) {
+      return (await write(`${BROWSER}/runs`, input, browserRunOutputSchema, options)).result;
+    },
+
+    async listBrowserRuns(options = {}) {
+      return (await request({ method: "GET", path: `${BROWSER}/runs`, schema: browserRunListSchema, signal: options.signal })).items;
+    },
+
+    async getBrowserRun(id, options = {}) {
+      if (!uuidSchema.safeParse(id).success) throw runNotFound();
+      try {
+        return await request({ method: "GET", path: `${BROWSER}/runs/${encodeURIComponent(id)}`, schema: browserRunDetailSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? runNotFound() : error;
+      }
     },
 
     getBusiness(options = {}) {
