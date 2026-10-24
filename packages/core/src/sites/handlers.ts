@@ -17,6 +17,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { parseOrFail } from "../crm/rows.js";
+import { assertImagesApproved } from "../images/gate.js";
 import { findRelease, getSite } from "./reads.js";
 
 async function resolveSite(tx: Transaction, target: Target): Promise<Target | null> {
@@ -90,6 +91,7 @@ export const publishSiteReleaseHandler: ActionHandler = {
     const tenantId = binding.tenantId;
     if (await siteReleaseDigest(payload.files) !== payload.digest)
       throw new ValidationFailed("Release digest does not match its files");
+    await assertImagesApproved(tx, tenantId, payload.files);
     const pointer = await lockSite(tx, tenantId, payload.siteId);
     // The edit started from this live release (null: from no release). Absent: no check.
     if (payload.expectedCurrentReleaseId !== undefined && (pointer?.release_id ?? null) !== payload.expectedCurrentReleaseId)

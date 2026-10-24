@@ -17,6 +17,7 @@ export const SOURCE_SUBJECTS: Readonly<Record<SourceSubjectType, { readonly tabl
     booking: { table: "bookings", permission: "calendar" },
     booking_resource: { table: "booking_resources", permission: "calendar" },
     intake_item: { table: "intake_items", permission: "intake" },
+    media_asset: { table: "media_assets", permission: "publish" },
   });
 
 export interface SourceRow {

@@ -54,6 +54,7 @@ const expectedPath: Record<string, string> = {
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_windows_valid(jsonb)": "pg_catalog, pg_temp",
+  "image_variants_guard()": "pg_catalog, pg_temp",
   // Business profile (20261023100000_business_profiles.sql): the row that comes with a tenant, the definer
   // that keeps tenants.name in step with the display name (BP-9), and the zone check.
   "business_profiles_create()": "pg_catalog, pg_temp",
@@ -68,6 +69,7 @@ const expectedPath: Record<string, string> = {
   "crm_contacts_clear_region_attest()": "pg_catalog, pg_temp",
   "inbox_replies_guard()": "pg_catalog, pg_temp",
   "site_history_append_only()": "pg_catalog, pg_temp",
+  "voice_textback_append_only()": "pg_catalog, pg_temp",
   "rate_limit_take(timestamp with time zone,jsonb)": "pg_catalog, pg_temp",
   "record_action_and_event(uuid,uuid,uuid,text,jsonb,jsonb,jsonb,text,jsonb,timestamp with time zone,uuid,text,jsonb)":
     "pg_catalog, pg_temp",

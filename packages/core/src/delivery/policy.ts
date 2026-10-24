@@ -71,9 +71,12 @@ export function consentBlock(input: {
   readonly purpose: DeliveryPurpose;
   readonly consent: ConsentStatus;
   readonly suppressed: boolean;
+  /** Where the recorded consent came from (D-6 rev 5); a voice opt-in never counts for marketing. */
+  readonly source?: string | null;
 }): DeliveryFinalReason | null {
   if (input.suppressed) return "suppressed";
   if (input.consent === "denied") return "consent_denied";
+  if (input.purpose === "marketing" && input.consent === "granted" && input.source?.startsWith("twilio-voice:")) return "consent_missing";
   if ((input.purpose === "marketing" || input.channel === "sms") && input.consent !== "granted") return "consent_missing";
   return null;
 }

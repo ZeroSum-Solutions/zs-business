@@ -3,12 +3,14 @@
 // base, never from the Host header) and every form field is checked before anything is parsed or
 // any database work, and the core sessions take the tenant and delivery from that signed URL.
 // Original code.
+import { callSidSchema } from "@zs/contracts";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import {
   apiErrorBody,
   createSmsStatusSession,
   createTwilioInboundSession,
+  createVoiceSession,
   formFields,
   parseTwilioForm,
   retryableAsUnavailable,
@@ -25,6 +27,7 @@ import {
   type TwilioAuthTokens,
 } from "@zs/core";
 import type { AppEnv } from "../app.js";
+import { createMemoryRateLimiter, type RateLimiter } from "./limiter.js";
 
 export interface TwilioWebhookConfig {
   /** The account's auth token; `previous` keeps verifying through a rotation. */
@@ -37,6 +40,8 @@ export interface TwilioWebhookConfig {
   readonly keywordReplies?: KeywordReplies;
   /** The adapter's provider name, as recorded on deliveries; defaults to `twilio`. */
   readonly providerName?: string;
+  /** T-14: the limiter the voice routes charge; defaults to an in-memory one on the app clock. */
+  readonly limiter?: RateLimiter;
   /** Receives what each signed webhook did, for logs. */
   readonly report?: (event:
     | { readonly kind: "status"; readonly messageSid: string; readonly outcome: SmsStatusOutcome }
@@ -50,7 +55,7 @@ const xml = (c: Context<AppEnv>, reply: string | null) =>
   c.body(twiml(reply), 200, { "Content-Type": "text/xml; charset=utf-8" });
 
 export function twilioWebhookRoutes(
-  _edge: EdgeDependencies,
+  edge: EdgeDependencies,
   config: TwilioWebhookConfig,
   requestEdge: (c: Context<AppEnv>) => EdgeDependencies,
 ) {
@@ -72,6 +77,22 @@ export function twilioWebhookRoutes(
     const fields = formFields(params);
     return fields.AccountSid === config.accountSid ? fields : null;
   }
+
+  // T-14: the voice routes' limiter, behind the core session's port.
+  const limiter = config.limiter ?? createMemoryRateLimiter(edge.clock);
+  const voiceLimiter = { take: (charges: Parameters<RateLimiter["take"]>[0]) => limiter.take(charges) };
+
+  /** T-10: a signed voice webhook with a valid CallSid, handed to the voice session; 401 and 400 come first. */
+  const voice = (answer: (c: Context<AppEnv>, fields: Record<string, string>) => Promise<string>) =>
+    async (c: Context<AppEnv>) => {
+      const fields = await verified(c);
+      if (!fields) return unauthorized(c);
+      if (!callSidSchema.safeParse(fields.CallSid).success) return c.json(apiErrorBody("ValidationFailed", "Invalid CallSid"), 400);
+      const reply = await answer(c, fields).catch(retryable);
+      return c.body(reply, 200, { "Content-Type": "text/xml; charset=utf-8" });
+    };
+  const tenantOf = (c: Context<AppEnv>) => c.req.param("tenantId") ?? "";
+  const session = (c: Context<AppEnv>) => createVoiceSession(requestEdge(c), { webhookBaseUrl: base, limiter: voiceLimiter });
 
   return new Hono<AppEnv>()
     .use("/webhooks/twilio/*", bodyLimit({
@@ -102,5 +123,15 @@ export function twilioWebhookRoutes(
       const outcome = await session.receive(c.req.param("tenantId"), message.data).catch(retryable);
       config.report?.({ kind: "inbound", messageSid: message.data.MessageSid, outcome });
       return xml(c, outcome.handled ? outcome.reply : null);
-    });
+    })
+    .post("/webhooks/twilio/voice/:tenantId", voice((c, f) =>
+      session(c).incoming(tenantOf(c), { CallSid: f.CallSid!, From: f.From ?? "", To: f.To ?? "" })))
+    .post("/webhooks/twilio/voice/:tenantId/dial", voice((c, f) =>
+      session(c).dial(tenantOf(c), { CallSid: f.CallSid!, DialCallStatus: f.DialCallStatus ?? "" })))
+    .post("/webhooks/twilio/voice/:tenantId/gather", voice((c, f) =>
+      session(c).gather(tenantOf(c), { CallSid: f.CallSid!, Digits: f.Digits }, c.req.query("v"))))
+    .post("/webhooks/twilio/voice/:tenantId/recording", voice((c, f) =>
+      session(c).recording(tenantOf(c), {
+        CallSid: f.CallSid!, RecordingSid: f.RecordingSid, RecordingStatus: f.RecordingStatus, RecordingDuration: f.RecordingDuration,
+      }, c.req.query("step"))));
 }
