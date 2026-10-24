@@ -66,7 +66,16 @@ export const walletSummarySchema = z.strictObject({
 });
 export type WalletSummary = z.infer<typeof walletSummarySchema>;
 
-export const suppressionReasonSchema = z.enum(["unsubscribe", "stop", "bounce", "complaint", "manual"]);
+/**
+ * D-11: the priced jobs a wallet reservation can name. A new kind needs a revision of
+ * delivery.md and a contract that names its job table and its price; the SQL check on
+ * `wallet_reservations.job_kind` lists the same strings (a test keeps them in step).
+ */
+export const WALLET_JOB_KINDS = ["message_delivery", "enrichment", "image_job", "voice_minutes", "browser_run"] as const;
+export const walletJobKindSchema = z.enum(WALLET_JOB_KINDS);
+export type WalletJobKind = z.infer<typeof walletJobKindSchema>;
+
+export const suppressionReasonSchema =z.enum(["unsubscribe", "stop", "bounce", "complaint", "manual"]);
 export type SuppressionReason = z.infer<typeof suppressionReasonSchema>;
 
 /** D-9: one channel and address; email canonical (lower case), SMS in E.164. */
