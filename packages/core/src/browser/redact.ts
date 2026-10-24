@@ -31,16 +31,17 @@ export function createSecretRedactor(secrets: SecretValues | null | undefined): 
     for (const [value, placeholder] of [[secrets.password, "{{password}}"], [secrets.username, "{{username}}"]] as const)
       if (value) for (const form of variants(value)) entries.push({ form, placeholder });
   }
-  // Longest first, so a value that contains the other is replaced whole.
-  entries.sort((a, b) => b.form.length - a.form.length);
+  // One pattern, longest form first (a credential that contains a placeholder, such as `{{username}}-x`, is
+  // matched whole), and on a tie a credential before a placeholder. A placeholder that is not part of a
+  // credential matches as itself, so a second pass changes nothing (a user name such as `name` also occurs
+  // inside `{{username}}`).
+  const forms = [...entries.map((entry) => entry.form), ...PLACEHOLDERS].sort((a, b) => b.length - a.length);
   const placeholderOf = new Map<string, string>();
   for (const entry of entries) if (!placeholderOf.has(entry.form.toLowerCase())) placeholderOf.set(entry.form.toLowerCase(), entry.placeholder);
-  // The placeholders come first in the pattern and match as themselves, so a second pass changes nothing
-  // (a user name such as `name` also occurs inside `{{username}}`).
-  const pattern = entries.length > 0 ? new RegExp([...PLACEHOLDERS.map(escape), ...entries.map((entry) => escape(entry.form))].join("|"), "gi") : null;
+  const pattern = entries.length > 0 ? new RegExp(forms.map(escape).join("|"), "gi") : null;
 
   const text = (value: string) => (pattern
-    ? value.replace(pattern, (match) => (PLACEHOLDERS.includes(match) ? match : placeholderOf.get(match.toLowerCase()) ?? "{{password}}"))
+    ? value.replace(pattern, (match) => placeholderOf.get(match.toLowerCase()) ?? match)
     : value);
   const url = (value: string) => {
     const redacted = text(value);

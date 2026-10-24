@@ -218,6 +218,7 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
         // Reserve first, then admit: the step slot and its model cost are taken under the row lock.
         const reason = await admissionReason(tx, row);
         const admittedAt = now(); // the admission lock may have made this wait
+        if (row.lease_until!.getTime() <= admittedAt.getTime()) throw new TenantDenied();
         if (reason) {
           // A step still in flight closes the run when its event arrives (or the runner finishes), so its usage is kept.
           if (row.steps_inflight === 0) await closeRun(tx, row, { status: "stopped", reason }, admittedAt);
@@ -324,7 +325,9 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
       return deps.service(async (tx) => {
         const { row, at } = await leasedRun(tx, lease, false);
         if (row.status === "running" && row.lease_until!.getTime() <= at.getTime()) throw new TenantDenied();
-        // BT-9: a result reported past the deadline or the caps is not a completed run.
+        // BT-9: a result reported past the deadline or the caps is not a completed run. Steps admitted and
+        // never reported count at their worst case first, so the cost cap judges the whole run.
+        if (row.status === "running") await abandonInflight(tx, row, at);
         const capped: BrowserStopReason | null = pastDeadline(row, at) ? "deadline"
           : row.steps > row.max_steps ? "step_cap"
             : Number(row.cost_micros) > Number(row.max_cost_micros) ? "cost_cap" : null;

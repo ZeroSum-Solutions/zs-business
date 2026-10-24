@@ -30,16 +30,17 @@ class Redactor:
         self._placeholder: dict[str, str] = {}
         for form, placeholder in entries:
             self._placeholder.setdefault(form.lower(), placeholder)
-        # The placeholders come first and match as themselves, so a second pass changes nothing (a user name
-        # such as "name" also occurs inside "{{username}}").
-        forms = [*_PLACEHOLDERS, *(form for form, _ in entries)]
+        # One pattern, longest form first, so a credential that contains a placeholder (`{{username}}-x`) is matched
+        # whole; on a tie a credential comes before a placeholder (sorted() is stable). A placeholder that is not part
+        # of a credential matches as itself, so a second pass changes nothing (a user name such as "name" also
+        # occurs inside "{{username}}").
+        forms = sorted([*(form for form, _ in entries), *_PLACEHOLDERS], key=len, reverse=True)
         self._pattern = re.compile("|".join(re.escape(form) for form in forms), re.IGNORECASE) if entries else None
 
     def text(self, value: str) -> str:
         if self._pattern is None:
             return value
-        return self._pattern.sub(
-            lambda match: match.group(0) if match.group(0) in _PLACEHOLDERS else self._placeholder.get(match.group(0).lower(), "{{password}}"), value)
+        return self._pattern.sub(lambda match: self._placeholder.get(match.group(0).lower(), match.group(0)), value)
 
     def event(self, event: dict[str, Any]) -> dict[str, Any]:
         url = event.get("url")

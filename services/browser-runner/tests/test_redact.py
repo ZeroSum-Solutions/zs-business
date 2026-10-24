@@ -35,6 +35,11 @@ class RedactorTests(unittest.TestCase):
             self.assertEqual(redact.text(once), once)
             self.assertIn("{{username}}", once)
 
+    def test_a_credential_that_contains_a_placeholder_is_matched_whole(self):
+        redact = Redactor({"username": "alice", "password": "{{username}}-Tail9!"})
+        self.assertEqual(redact.text("pw={{username}}-Tail9! user=alice"), "pw={{password}} user={{username}}")
+        self.assertEqual(redact.text("{{username}} {{password}}"), "{{username}} {{password}}")
+
     def test_no_credentials_changes_nothing(self):
         self.assertEqual(Redactor(None).text("anything"), "anything")
 

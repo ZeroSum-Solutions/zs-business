@@ -261,7 +261,44 @@ describe("an admitted call that never reports keeps its worst case (BT-9, G-15)"
   });
 });
 
+describe("abandoned cost counts before the result is judged (BT-9)", () => {
+  it("closes a read_done result as cost_cap when the unreported step's reservation passes the run cap", async () => {
+    const w = await world();
+    const requested = await w.requestRun({ maxCostMicros: 200 });
+    const lease = await w.claim();
+    expect((await w.runner.control(lease)).stop).toBeNull();
+    expect((await w.runner.control(lease)).stop).toBeNull();
+    // One call reports 150 micros; the other never reports and keeps its 100.
+    const big = { lane: "personal_data" as const, model: "fake-follow-up", inputTokens: 240, outputTokens: 88 };
+    expect((await w.runner.appendEvent(lease, { action: "open", url: `${w.site.origin}/invoices`, usage: big })).stop).toBeNull();
+    expect(await w.runner.finish(lease, { outcome: "read_done" })).toMatchObject({ status: "stopped", stopReason: "cost_cap", costMicros: 250 });
+    expect(await w.run(requested.result.id)).toMatchObject({ status: "stopped", stopReason: "cost_cap" });
+  });
+});
+
 describe("time is read after the lock is held (BT-9)", () => {
+  it("refuses a control that waited on the admission lock past its lease", async () => {
+    const w = await world();
+    await w.requestRun();
+    const lease = await w.claim();
+    let release!: () => void;
+    let locked!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { locked = resolve; });
+    const holder = service(async (tx) => {
+      await tx.query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))", [`browser-day:${w.tenantId}`]);
+      locked();
+      await held;
+    });
+    await ready;
+    const waiting = w.runner.control(lease).then(() => "admitted", (error: Error) => error.constructor.name);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    now += config.leaseMs + 5000;
+    release();
+    await holder;
+    expect(await waiting).toBe("TenantDenied");
+  });
+
   it("refuses an event that waited on the run lock past its lease", async () => {
     const w = await world();
     const requested = await w.requestRun({ deadlineMs: 600_000 });

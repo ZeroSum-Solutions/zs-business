@@ -57,7 +57,9 @@ interface World {
   session: ReturnType<typeof createBrowserSession>;
 }
 
-async function world(credentials = { username: USERNAME, password: PASSWORD }): Promise<World> {
+async function world(
+  credentials = { username: USERNAME, password: PASSWORD }, options: { redirect?: string; extraHtml?: string; signInPath?: string } = {},
+): Promise<World> {
   const tenantId = randomUUID();
   await service((tx) => tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,$2)", [tenantId, "Clinic"]));
   const owner = await member(tenantId, "owner");
@@ -65,13 +67,13 @@ async function world(credentials = { username: USERNAME, password: PASSWORD }): 
   const site = await startFixtureSite({
     ...credentials,
     // The sign-in lands on a page whose path is the user name, and two invoice files are named after the values.
-    signInRedirect: `/users/${USERNAME}`,
+    signInRedirect: options.redirect ?? `/users/${USERNAME}`,
     invoices: [
       { name: "2026-09-001.pdf", bytes: fixturePdf("one") },
       { name: `${USERNAME}-2026-09.pdf`, bytes: fixturePdf("named after the user") },
       { name: `${PASSWORD}.pdf`, bytes: fixturePdf("named after the password") },
     ],
-    listExtraHtml: ECHO_HTML,
+    listExtraHtml: options.extraHtml ?? ECHO_HTML,
   });
   sites.push(site);
   const store = createMemoryArtifactStore();
@@ -84,7 +86,7 @@ async function world(credentials = { username: USERNAME, password: PASSWORD }): 
   await session.updateSettings({ expectedRevision: 0, enabled: true, maxRunsPerDay: 50, maxCostMicrosPerDay: 5_000_000 }, randomUUID());
   await session.saveTarget({
     expectedRevision: 0, name: "Supplier portal", taskKind: "supplier_invoice_download", allowedOrigins: [site.origin],
-    allowedPaths: ["/invoices", "/users"], assetPaths: [], signInPath: "/login", enabled: true, secretRef,
+    allowedPaths: ["/invoices", "/users"], assetPaths: [], signInPath: options.signInPath ?? "/login", enabled: true, secretRef,
     attestation: { termsAllowAutomatedAccess: true, notInsurerOrPayerPortal: true },
   }, randomUUID());
   return { tenantId, owner, site, store, runner, session };
@@ -197,6 +199,37 @@ describe("redaction keeps the planner protocol intact (BT-8)", () => {
       expect(redact.deep(once)).toEqual(once);
       expect(redact.text(redact.text(`x ${secrets.username} y`))).toBe(redact.text(`x ${secrets.username} y`));
     }
+  });
+
+  it("matches a credential that contains a placeholder before it keeps the placeholder", () => {
+    const redact = createSecretRedactor({ username: "alice", password: "{{username}}-Tail9!" });
+    expect(redact.text("pw={{username}}-Tail9! user=alice")).toBe("pw={{password}} user={{username}}");
+    expect(redact.text("{{username}} {{password}}")).toBe("{{username}} {{password}}");
+  });
+
+  it("keeps a credential out of the goal's start URL and still opens it", async () => {
+    // The sign-in page's own path is the user name's value, so the goal URL itself would carry it.
+    const w = await world({ username: "login", password: PASSWORD }, { redirect: "/invoices" });
+    await requestRun(w);
+    const runner = createFakeBrowserRunner({ model: createFakeTextModel("personal_data", invoicePlannerAnswer) });
+    const done = await runBrowserJob({ service: w.runner, runner, browserRoot: "/var/zs-browser" });
+    expect(done?.run.status).toBe("completed");
+    const first = JSON.parse(runner.modelRequests[0]!) as { goal: { startUrl: string } };
+    expect(first.goal.startUrl).toBe(`${w.site.origin}/%7B%7Busername%7D%7D`);
+    expect(w.site.requests.some((request) => request.path === "/login" && request.method === "GET")).toBe(true);
+  });
+
+  it("clicks a self-link whose href equals the current page", async () => {
+    const w = await world({ username: USERNAME, password: PASSWORD }, { redirect: "/invoices", extraHtml: '<a href="/invoices">All invoices</a>' });
+    await requestRun(w);
+    const answer = (request: TextModelRequest) => {
+      const input = request.input as { page: { url: string } | null; history: { action: string }[] };
+      const signedIn = input.page && !input.page.url.endsWith("/login");
+      return signedIn && !input.history.some((step) => step.action === "click_link") ? { action: "click_link", href: "/invoices" } : invoicePlannerAnswer(request);
+    };
+    const runner = createFakeBrowserRunner({ model: createFakeTextModel("personal_data", answer) });
+    const done = await runBrowserJob({ service: w.runner, runner, browserRoot: "/var/zs-browser" });
+    expect(done?.run.status).toBe("completed");
   });
 
   it("still signs in and downloads when the user name is a word the planner protocol uses", async () => {
