@@ -51,7 +51,8 @@ async function readJson(response: Response): Promise<Record<string, unknown> | n
 
 export function createTregEnrichment(config: TregConfig): EnrichmentPort {
   if (!config.token) throw new ValidationFailed("A Treg token is required");
-  const base = (config.baseUrl ?? TREG_DEFAULT_BASE_URL).replace(/\/+$/, "");
+  let base = config.baseUrl ?? TREG_DEFAULT_BASE_URL;
+  while (base.endsWith("/")) base = base.slice(0, -1);
   // The token is sent in a header: only over HTTPS (a loopback address is allowed for local tests).
   const baseUrl = new URL(base);
   if (baseUrl.protocol !== "https:" && !(baseUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(baseUrl.hostname)))
