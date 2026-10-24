@@ -2,7 +2,7 @@
 // `changes` a save sends: only what changed, a phone in E.164, an address all or nothing.
 import { describe, expect, it } from "vitest";
 import type { BusinessProfile } from "@zs/contracts";
-import { countryChoices, fieldFromIssuePath, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
+import { countryChoices, fieldFromIssuePath, newerProfile, readBusinessForm, toBusinessForm } from "../src/lib/business-profile";
 
 const profile = (change: Partial<BusinessProfile> = {}): BusinessProfile => ({
   displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
@@ -103,5 +103,19 @@ describe("countryChoices", () => {
     const choices = countryChoices();
     expect(choices.find((choice) => choice.code === "GB")?.name).toMatch(/United Kingdom/);
     expect(choices.every((choice, index) => index === 0 || choices[index - 1]!.name.localeCompare(choice.name) <= 0)).toBe(true);
+  });
+});
+
+describe("newerProfile", () => {
+  it("keeps a cached copy that is newer than a late read", () => {
+    const cached = profile({ revision: 2, displayName: "Saved" });
+    expect(newerProfile(cached, profile({ revision: 1 }))).toBe(cached);
+  });
+
+  it("takes the read when it is newer, equal or there is no cache", () => {
+    const incoming = profile({ revision: 3 });
+    expect(newerProfile(profile({ revision: 2 }), incoming)).toBe(incoming);
+    expect(newerProfile(profile({ revision: 3 }), incoming)).toBe(incoming);
+    expect(newerProfile(undefined, incoming)).toBe(incoming);
   });
 });

@@ -20,8 +20,9 @@ import {
   type SlotQuery,
   type ThreadSummary,
 } from "./api";
-import type { BookingRecord, SlotsResponse } from "@zs/contracts";
+import type { BookingRecord, BusinessProfile, SlotsResponse } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
+import { newerProfile } from "./business-profile";
 
 /** Key suffixes. Queries and invalidations go through `useKeys`, which puts the tenant first. */
 export const keys = {
@@ -336,7 +337,17 @@ export function useFollowUpStatus() {
 export function useBusinessProfile() {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.business, queryFn: ({ signal }) => api.getBusiness({ signal }), staleTime: 60_000 });
+  const queryClient = useQueryClient();
+  return useQuery({
+    enabled,
+    queryKey: keys.business,
+    // A read that started before a save can land after it: never replace a newer cached revision with an older one.
+    queryFn: async ({ signal }) => {
+      const read = await api.getBusiness({ signal });
+      return newerProfile(queryClient.getQueryData<BusinessProfile>(keys.business), read);
+    },
+    staleTime: 60_000,
+  });
 }
 
 /** The agent's runs, newest first, a page at a time by keyset cursor. */

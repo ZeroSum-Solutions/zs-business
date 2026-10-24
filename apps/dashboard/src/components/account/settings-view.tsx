@@ -17,6 +17,7 @@ import { timeZoneChoices, zoneName } from "@/lib/agents";
 import {
   countryChoices,
   fieldFromIssuePath,
+  newerProfile,
   readBusinessForm,
   serverFieldMessage,
   toBusinessForm,
@@ -193,8 +194,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
     onSettled: (_profile, error, input) => intents.settle(input, error),
     onSuccess: (next) => {
       // A replayed answer can be older than what is cached: never move the cache back a revision.
-      const current = queryClient.getQueryData<BusinessProfile>(keys.business);
-      const latest = current && current.revision > next.revision ? current : next;
+      const latest = newerProfile(queryClient.getQueryData<BusinessProfile>(keys.business), next);
       queryClient.setQueryData(keys.business, latest);
       setBusinessName(latest.displayName);
       setDraft(null);

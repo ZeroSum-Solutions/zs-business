@@ -133,6 +133,11 @@ export function fieldFromIssuePath(path: string): BusinessField | null {
   return key === "displayName" || key === "legalName" || key === "timeZone" || key === "currency" ? key : null;
 }
 
+/** Whichever of two copies of the profile has the higher revision; a tie takes `incoming`. Revisions only grow, so the lower one is stale. */
+export function newerProfile(cached: BusinessProfile | undefined, incoming: BusinessProfile): BusinessProfile {
+  return cached && cached.revision > incoming.revision ? cached : incoming;
+}
+
 /** Countries a postal address may name, by English name. */
 export function countryChoices(): { code: string; name: string }[] {
   let names: Intl.DisplayNames | null = null;
