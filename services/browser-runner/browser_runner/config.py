@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class ConfigError(Exception):
@@ -23,8 +26,8 @@ def load_config(env: dict[str, str]) -> RunnerConfig:
         if env.get(name) != "false":
             raise ConfigError(f"{name} must be set to false")
     api_url = env.get("ZS_API_URL", "").rstrip("/")
-    if not api_url.startswith("https://") and not api_url.startswith("http://127.0.0.1"):
-        raise ConfigError("ZS_API_URL must be an https URL (http only on 127.0.0.1)")
+    if not _api_url_ok(api_url):
+        raise ConfigError("ZS_API_URL must be an https URL (http only on 127.0.0.1, localhost or ::1), with no user, query or fragment")
     token = env.get("BROWSER_RUNNER_TOKEN", "")
     if len(token) < 24:
         raise ConfigError("BROWSER_RUNNER_TOKEN is missing or too short")
@@ -38,6 +41,25 @@ def load_config(env: dict[str, str]) -> RunnerConfig:
     if not 1 <= poll <= 300:
         raise ConfigError("BROWSER_POLL_SECONDS must be between 1 and 300")
     return RunnerConfig(api_url=api_url, runner_token=token, browser_root=Path(root), poll_seconds=poll)
+
+
+def _api_url_ok(url: str) -> bool:
+    # Characters that mean userinfo, query or fragment, or that parsers disagree on, are refused outright.
+    if not url or any(ch in url for ch in "@?#\\") or any(ch.isspace() or ord(ch) < 32 for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        parts.port  # raises ValueError on a bad port
+    except ValueError:
+        return False
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        return False
+    host = parts.hostname
+    if not host:
+        return False
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and host in LOOPBACK_HOSTS
 
 
 def profile_dir(config: RunnerConfig, tenant_id: str, target_id: str) -> Path:

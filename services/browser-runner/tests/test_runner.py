@@ -86,6 +86,27 @@ class ConfigTests(unittest.TestCase):
             load_config(dict(GOOD_ENV, BROWSER_ROOT="relative/path"))
         load_config(dict(GOOD_ENV, ZS_API_URL="http://127.0.0.1:8787"))
 
+    def test_plain_http_only_on_an_exact_loopback_host(self):
+        for bad in (
+            "http://127.0.0.1.attacker.example",
+            "http://127.0.0.1.attacker.example:8787",
+            "http://127.0.0.1@evil.example",
+            "http://user:pw@127.0.0.1:8787",
+            "https://user@api.example.test",
+            "http://127.0.0.1:8787?x=1",
+            "http://127.0.0.1:8787#frag",
+            "https://api.example.test?x=1",
+            "http://localhost.evil.example",
+            "http://[::1].evil.example",
+            "https://",
+            "ftp://127.0.0.1",
+            "http://127.0.0.1:notaport",
+        ):
+            with self.assertRaises(ConfigError, msg=bad):
+                load_config(dict(GOOD_ENV, ZS_API_URL=bad))
+        for good in ("http://127.0.0.1:8787", "http://localhost:8787", "http://[::1]:8787", "http://127.0.0.1", "https://api.example.test/base"):
+            self.assertEqual(load_config(dict(GOOD_ENV, ZS_API_URL=good)).api_url, good)
+
     def test_profile_path_comes_only_from_uuids(self):
         config = load_config(GOOD_ENV)
         self.assertEqual(profile_dir(config, TENANT, TARGET), Path("/var/zs-browser") / TENANT / TARGET / "profile")
@@ -163,6 +184,57 @@ class LoopTests(unittest.TestCase):
         with self.assertRaises(ApiFailure) as caught:
             bad.claim()
         self.assertEqual(caught.exception.status, 401)
+
+
+class RedirectTests(unittest.TestCase):
+    """A 3xx from the API is a failure; the runner token and lease never follow it anywhere."""
+
+    def test_a_redirect_is_an_api_failure_and_carries_no_credentials(self):
+        second_hits = []
+
+        class Second(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _any(self):
+                second_hits.append((self.command, self.path, self.headers.get("Authorization"), self.headers.get("Lease-Token")))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            do_GET = do_POST = _any
+
+        second = HTTPServer(("127.0.0.1", 0), Second)
+        threading.Thread(target=second.serve_forever, daemon=True).start()
+        self.addCleanup(second.server_close)
+        self.addCleanup(second.shutdown)
+        status_box = {}
+
+        class First(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(status_box["status"])
+                self.send_header("Location", f"http://127.0.0.1:{second.server_port}/stolen")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        first = HTTPServer(("127.0.0.1", 0), First)
+        threading.Thread(target=first.serve_forever, daemon=True).start()
+        self.addCleanup(first.server_close)
+        self.addCleanup(first.shutdown)
+        client = JobClient(RunnerConfig(f"http://127.0.0.1:{first.server_port}", TOKEN, Path("/var/zs-browser"), 1))
+        for status in (301, 302, 303, 307, 308):
+            status_box["status"] = status
+            with self.assertRaises(ApiFailure, msg=status) as caught:
+                client.claim()
+            self.assertEqual(caught.exception.status, status)
+            with self.assertRaises(ApiFailure, msg=status):
+                client.event(RUN, LEASE, {"type": "step"})
+        self.assertEqual(second_hits, [])
 
 
 if __name__ == "__main__":

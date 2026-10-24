@@ -22,6 +22,19 @@ class ApiFailure(Exception):
         self.status = status
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Never follow a 3xx: it would copy `Authorization` and `Lease-Token` to another location.
+
+    Returning None makes urllib raise the 3xx as an HTTPError, which `_call` turns into ApiFailure.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401, ANN001
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirects)
+
+
 class JobClient:
     def __init__(self, config: RunnerConfig, timeout: float = 30.0):
         self._config = config
@@ -40,7 +53,7 @@ class JobClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(f"{self._config.api_url}{BASE}{path}", data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310 - https or loopback, checked in config
+            with _OPENER.open(request, timeout=self._timeout) as response:  # noqa: S310 - https or loopback, checked in config; no redirects
                 text = response.read().decode()
         except urllib.error.HTTPError as error:
             raise ApiFailure(error.code) from None

@@ -21,7 +21,7 @@ Do this by hand on the pilot Mac, once. Nothing in this repository does it for y
    |---|---|
    | `ANONYMIZED_TELEMETRY` | `false` (Browser Use telemetry stays off) |
    | `BROWSER_USE_CLOUD_SYNC` | `false` (no Browser Use Cloud, ever) |
-   | `ZS_API_URL` | the API origin, `https://...` (plain http only on `127.0.0.1`) |
+   | `ZS_API_URL` | the API origin, `https://host[:port][/path]`; plain http only when the host is exactly `127.0.0.1`, `localhost` or `::1`; no user, query or fragment. Redirects are never followed. |
    | `BROWSER_RUNNER_TOKEN` | the runner's scoped bearer token, 24 characters or more |
    | `BROWSER_ROOT` | an absolute path, for example `/var/zs-browser` |
    | `BROWSER_POLL_SECONDS` | optional, 1 to 300, default 10 |
