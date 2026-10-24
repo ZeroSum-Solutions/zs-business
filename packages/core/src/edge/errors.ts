@@ -3,6 +3,7 @@ import {
   Refused,
   type ApiErrorBody,
   type ApiErrorCode,
+  ENRICHMENT_ERROR_CODES,
   type JsonValue,
 } from "@zs/contracts";
 import { DatabaseUnavailable } from "@zs/db";
@@ -70,6 +71,8 @@ const CONFLICT_REASONS = new Set([
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
   "stale_release", "host_in_use", "grant_changed", "invalid_currency",
   "variant_expired", "variant_changed", "variant_not_staged", "variant_not_running", "image_not_approved", "upload_missing",
+  // enrichment.md E-17: the only enrichment reasons a tenant sees.
+  ...ENRICHMENT_ERROR_CODES,
   "consent_required", "lease_lost",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */

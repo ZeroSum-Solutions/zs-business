@@ -65,6 +65,7 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         else if (name === "media_assets" && field.name === "origin") row[field.name] = "upload";
         else if (name === "image_variants" && field.name === "preset") row[field.name] = "background_remove";
         else if (name === "image_variants" && field.name === "currency") row[field.name] = "usd";
+        else if (name === "enrichment_results" && field.name === "field") row[field.name] = "name";
         else if (field.enum_value !== null) row[field.name] = field.enum_value;
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);

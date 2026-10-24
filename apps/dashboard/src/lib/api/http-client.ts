@@ -5,6 +5,8 @@ import {
   bookingPageSchema,
   bookingPageSummarySchema,
   businessProfileReadSchema,
+  contactEnrichmentSchema,
+  enrichmentRequestRecordSchema,
   calendarConnectionListSchema,
   calendarConnectionSchema,
   connectGoogleCalendarResponseSchema,
@@ -56,6 +58,7 @@ import {
   toUpsertContactRequest,
   type AgentsApi,
   type BusinessApi,
+  type EnrichmentApi,
   type BookingApi,
   type CalendarSyncApi,
   type CrmApi,
@@ -101,6 +104,8 @@ const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema
 /** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
 const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
 /** PUT /v1/business answers the action and the profile as it is now; a newer API's extra keys are dropped (BP-10). */
+/** POST /v1/enrichment/requests answers the action and the request as it is now. */
+const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
 
 /** `pageQuerySchema` caps `limit` at 100. */
@@ -111,7 +116,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & SitesApi & CalendarSyncApi & TranscriptionApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -446,6 +451,19 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     async updateBusiness(input, options) {
       return (await write("/v1/business", input, businessOutputSchema, options, "PUT")).result;
+    },
+
+    async getContactEnrichment(contactId, options = {}) {
+      if (!uuidSchema.safeParse(contactId).success) throw contactNotFound();
+      try {
+        return await request({ method: "GET", path: `/v1/contacts/${encodeURIComponent(contactId)}/enrichment`, schema: contactEnrichmentSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? contactNotFound() : error;
+      }
+    },
+
+    async requestEnrichment(contactId, options) {
+      return (await write("/v1/enrichment/requests", { op: "company.enrich", contactId }, enrichmentOutputSchema, options)).result;
     },
 
     getFollowUpStatus(options = {}) {

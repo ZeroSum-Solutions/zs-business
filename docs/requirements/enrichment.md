@@ -1,7 +1,17 @@
 # Enrichment: company data for a contact (Treg)
 
-Status: draft contract, not built (2026-10-22). Code follows this file once its first slice
-lands; a change to a numbered rule needs a new revision of this file first.
+Status: first slice built (2026-10-23): E-1 to E-18 and E-20 (migration
+`20261023600000_enrichment.sql`). E-19 (daily reconcile) is left for a later slice. A change to a
+numbered rule needs a new revision of this file first.
+
+Built, with three notes. (1) The worker's attempt, settle and record steps are service-role SQL
+(leases, `FOR UPDATE SKIP LOCKED`, wallet calls, approval inserts), not dispatcher actions; the
+request, block, unblock, attest and apply writes are dispatcher actions. (2) The Treg adapter's
+paths and headers (`/v1/call`, `/v1/whoami`, `/v1/balance`, `/v1/calls`, `X-Treg-Token`,
+`Idempotency-Key`, `X-Treg-Route-Max-Cost`, `X-Treg-Meta`) are configuration that no live call has
+verified; the fake and a stubbed `fetch` are the only evidence. (3) The worker is
+`pnpm --filter @zs/api enrichment:worker`; `ENRICHMENT_WORKER=on` starts it, and the API process
+never sees `TREG_TOKEN`.
 
 Scope (Customers area): an owner asks for the company behind one of the tenant's contacts.
 The server calls Treg (a hosted pay-per-call tool gateway) once, pays from the tenant's prepaid

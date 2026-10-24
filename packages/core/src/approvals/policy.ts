@@ -17,6 +17,8 @@ export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Objec
   "inbox.reply.send": Object.freeze({ request: "inbox.drafts", required: true }),
   // image-port.md IM-12: only an owner's approval promotes a staged image.
   "media.variant.approve": Object.freeze({ request: "publish", required: true }),
+  // enrichment.md E-14: a looked-up field reaches the profile only once an owner approves it.
+  "contact.profile.apply": Object.freeze({ request: "enrich", required: true }),
 });
 
 /** Never proposed through an approval: the approval actions themselves. */
