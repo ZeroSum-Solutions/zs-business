@@ -3,6 +3,7 @@
 import type { BrowserClaim, BrowserFinishInput, BrowserRun } from "@zs/contracts";
 import type { BrowserRunner } from "./port.js";
 import { profilePath } from "./profile.js";
+import { createSecretRedactor } from "./redact.js";
 import type { BrowserRunnerService } from "./service.js";
 
 export interface BrowserJobDeps {
@@ -18,14 +19,17 @@ export async function runBrowserJob(deps: BrowserJobDeps): Promise<{ claim: Brow
   if (!claim) return null;
   const lease = { runId: claim.runId, token: claim.leaseToken };
   let finish: BrowserFinishInput;
+  // BT-8: the last line before the server. Whatever runner this is, an event URL or a file name that
+  // still holds a sign-in value is redacted here, because the server never sees the values to check.
+  const redact = createSecretRedactor(claim.credentials);
   try {
     const outcome = await deps.runner.plan({
       claim,
       profileDir: profilePath(deps.browserRoot, claim.tenantId, claim.targetId),
       hooks: {
         beforeStep: async () => (await deps.service.control(lease)).stop,
-        recordStep: (input) => deps.service.appendEvent(lease, input),
-        saveArtifact: (input) => deps.service.putArtifact(lease, input),
+        recordStep: (input) => deps.service.appendEvent(lease, input.url === undefined ? input : { ...input, url: redact.url(input.url) }),
+        saveArtifact: (input) => deps.service.putArtifact(lease, { ...input, name: redact.text(input.name) }),
       },
     }, deps.signal);
     finish = outcome.outcome === "read_done" ? { outcome: "read_done" }

@@ -14,6 +14,7 @@ from typing import Any, Callable, Protocol
 
 from .client import ApiFailure, JobClient
 from .config import RunnerConfig, profile_dir
+from .redact import Redactor
 
 
 class Hooks(Protocol):
@@ -37,17 +38,19 @@ class BrowserExecutor(Protocol):
 
 
 class _ClientHooks:
-    def __init__(self, client: JobClient, run_id: str, lease: str):
+    def __init__(self, client: JobClient, run_id: str, lease: str, redactor: Redactor):
         self._client, self._run_id, self._lease = client, run_id, lease
+        # BT-8: the last line before the API, which never sees the values to check them.
+        self._redact = redactor
 
     def before_step(self) -> str | None:
         return self._client.control(self._run_id, self._lease).get("stop")
 
     def record_step(self, event: dict[str, Any]) -> dict[str, Any]:
-        return self._client.event(self._run_id, self._lease, event)
+        return self._client.event(self._run_id, self._lease, self._redact.event(event))
 
     def save_artifact(self, kind: str, name: str, data: bytes) -> dict[str, Any]:
-        return self._client.artifact(self._run_id, self._lease, kind, name, data)
+        return self._client.artifact(self._run_id, self._lease, kind, self._redact.text(name), data)
 
 
 def run_once(config: RunnerConfig, client: JobClient, executor: BrowserExecutor) -> bool:
@@ -59,7 +62,7 @@ def run_once(config: RunnerConfig, client: JobClient, executor: BrowserExecutor)
     profile = profile_dir(config, claim["tenantId"], claim["targetId"])
     profile.mkdir(parents=True, exist_ok=True)
     try:
-        outcome = executor.run(claim, profile, _ClientHooks(client, run_id, lease))
+        outcome = executor.run(claim, profile, _ClientHooks(client, run_id, lease, Redactor(claim.get("credentials"))))
     except ApiFailure:
         # The lease is gone or the API refused a call: leave the job to the lease expiry.
         return True

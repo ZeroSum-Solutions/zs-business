@@ -14,6 +14,8 @@ export interface FixtureSiteOptions {
   readonly invoices: readonly FixtureInvoice[];
   /** Extra HTML placed on the invoice list page: the trap links, buttons and forms of a test. `{{outside}}` becomes the other origin. */
   readonly listExtraHtml?: string;
+  /** Where a good sign-in redirects (default `/invoices`). A path under `/users/` serves the invoice list too. */
+  readonly signInRedirect?: string;
 }
 export interface FixtureRequest {
   readonly method: string;
@@ -68,9 +70,9 @@ export async function startFixtureSite(options: FixtureSiteOptions): Promise<Fix
       const form = new URLSearchParams(await readBody(request));
       if (form.get("username") !== options.username || form.get("password") !== options.password)
         return send(401, "text/html", "<html><body>Wrong sign-in</body></html>");
-      return send(303, "text/plain", "", { location: "/invoices", "set-cookie": "sid=ok; Path=/; HttpOnly" });
+      return send(303, "text/plain", "", { location: options.signInRedirect ?? "/invoices", "set-cookie": "sid=ok; Path=/; HttpOnly" });
     }
-    if (url.pathname === "/invoices" && method === "GET") {
+    if ((url.pathname === "/invoices" || url.pathname.startsWith("/users/")) && method === "GET") {
       if (!signedIn) return send(302, "text/plain", "", { location: "/login" });
       const links = options.invoices
         .map((invoice) => `<li><a href="/invoices/${invoice.name}">${invoice.name}</a></li>`).join("\n");

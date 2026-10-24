@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { BrowserStopReason } from "@zs/contracts";
 import { createFakeTextModel, type TextModel, type TextModelRequest } from "../agents/model.js";
 import { createRequestPolicy, type BrowserResourceType } from "./policy.js";
+import { createSecretRedactor } from "./redact.js";
 import { refuseWriteTasks, type BrowserPlanCommand, type BrowserPlanOutcome, type BrowserRunner } from "./port.js";
 
 /** What the planner may ask for. Fixed text; the page is data in `input`, never part of it (G-17). */
@@ -107,6 +108,10 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
       profiles.push(command.profileDir);
       const policy = createRequestPolicy({ ...claim.target });
       const credentials = claim.credentials;
+      // BT-8: a page may echo the sign-in values back; nothing derived from a page leaves the runner unredacted.
+      const redact = createSecretRedactor(credentials);
+      const record = (input: Parameters<typeof hooks.recordStep>[0]) =>
+        hooks.recordStep(input.url === undefined ? input : { ...input, url: redact.url(input.url) });
       const cookies = new Map<string, string>();
       const history: { action: string; url?: string }[] = [];
       let page: Page | null = null;
@@ -155,7 +160,7 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
       for (;;) {
         const stop = await hooks.beforeStep();
         if (stop) return stopped(stop);
-        const input = { goal: { month: claim.month, startUrl }, page, history, placeholders: ["{{username}}", "{{password}}"] };
+        const input = redact.deep({ goal: { month: claim.month, startUrl }, page, history, placeholders: ["{{username}}", "{{password}}"] });
         const asked: TextModelRequest = {
           system: BROWSER_PLANNER_SYSTEM, input, schema: plannerActionSchema, maxOutputTokens: 300,
         };
@@ -164,7 +169,11 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
         try {
           const result = await options.model.complete(asked, signal);
           const parsed = plannerActionSchema.safeParse(result.output);
-          if (!parsed.success) return stopped("model_error");
+          if (!parsed.success) {
+            // The rejected call was still paid for: record its usage before stopping (BT-9).
+            await hooks.recordStep({ action: "stop", usage: { lane: "personal_data", model: result.model, ...result.usage } });
+            return stopped("model_error");
+          }
           answer = { action: parsed.data, usage: result.usage, model: result.model };
         } catch (error) {
           if (signal?.aborted) throw error;
@@ -186,6 +195,12 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
         let eventUrl: string | undefined;
         let eventAction: "sign_in" | "open" | "click_link" | "set_date_filter" | "download" = "open";
         const resolve = (href: string) => new URL(href, page?.url ?? startUrl).href;
+        // The planner saw redacted hrefs; map one back to the page's real href. Placeholders are never filled in here.
+        const real = (href: string) => {
+          const current = page as Page | null;
+          const known = [current?.url, ...(current?.elements.map((entry) => entry.href) ?? []), ...(current?.forms.map((entry) => entry.action) ?? [])];
+          return known.find((candidate): candidate is string => typeof candidate === "string" && redact.text(candidate) === href) ?? href;
+        };
         if (act.action === "sign_in") {
           if (!credentials) return stopped("needs_owner");
           const form = (page as Page | null)?.forms.find((entry) => entry.fields.includes("password"));
@@ -198,13 +213,13 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
           else page = parsePage(result.url, new TextDecoder().decode(result.bytes));
         } else if (act.action === "open") {
           eventAction = "open";
-          eventUrl = act.url;
-          const result = await load(act.url);
+          eventUrl = real(act.url);
+          const result = await load(eventUrl);
           if ("denied" in result) outcome = result;
         } else if (act.action === "click_link" || act.action === "click_button") {
           eventAction = "click_link";
           const element = act.action === "click_link"
-            ? (page as Page | null)?.elements.find((entry) => entry.href === act.href)
+            ? (page as Page | null)?.elements.find((entry) => entry.href !== null && redact.text(entry.href) === act.href)
             : (page as Page | null)?.elements.filter((entry) => entry.kind === "button")[act.index];
           if (!element) return stopped("runner_error");
           eventUrl = element.href ? resolve(element.href) : (page as Page | null)?.url;
@@ -229,11 +244,11 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
           if ("denied" in result) outcome = result;
         } else if (act.action === "download") {
           eventAction = "download";
-          eventUrl = resolve(act.href);
+          eventUrl = resolve(real(act.href));
           const result = await request("GET", eventUrl, "document");
           if ("denied" in result) outcome = result;
           else {
-            const saved = await hooks.saveArtifact({ kind: "invoice_pdf", name: new URL(result.url).pathname.split("/").pop() ?? "invoice.pdf", bytes: result.bytes });
+            const saved = await hooks.saveArtifact({ kind: "invoice_pdf", name: redact.text(new URL(result.url).pathname.split("/").pop() ?? "invoice.pdf"), bytes: result.bytes });
             if (!saved.duplicate) artifacts += 1;
           }
         } else {
@@ -247,11 +262,11 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
         }
 
         if (outcome) {
-          await hooks.recordStep({ action: "stop", ...(eventUrl ? { url: eventUrl } : {}), usage });
+          await record({ action: "stop", ...(eventUrl ? { url: eventUrl } : {}), usage });
           return stopped(outcome.denied);
         }
-        history.push({ action: act.action, ...(eventUrl ? { url: eventUrl } : {}) });
-        const recorded = await hooks.recordStep({ action: eventAction, ...(eventUrl ? { url: eventUrl } : {}), usage });
+        history.push({ action: act.action, ...(eventUrl ? { url: redact.url(eventUrl) } : {}) });
+        const recorded = await record({ action: eventAction, ...(eventUrl ? { url: eventUrl } : {}), usage });
         steps += 1;
         if (recorded.stop) return stopped(recorded.stop);
       }
