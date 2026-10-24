@@ -2,7 +2,7 @@
 // goes through `vendorFetch`: HTTPS only, to a fixed host list, and never follows a redirect. The
 // output is built here from the vendor's cut-out and background, so a vendor never decides the
 // product's pixels (IM-9); the worker then checks it again.
-import type { ImagePreset } from "@zs/contracts";
+import { IMAGE_PRESETS, ValidationFailed, type ImagePreset } from "@zs/contracts";
 import { composite } from "../compose.js";
 import { decodePng, encodeGrayPng, encodeRgbaPng, readImageInfo, type RgbaImage } from "../png.js";
 import { ImageAdapterRefused, sha256Hex, type PortFile, type PresetInput, type PresetOutput } from "../port.js";
@@ -19,21 +19,73 @@ export interface VendorAdapterOptions {
   readonly pollIntervalMs?: number;
   /** How long `runPreset` polls before it gives up with an unknown outcome. */
   readonly timeoutMs?: number;
+  /** How long one request may take, its body included, before it is aborted (a lost answer). */
+  readonly requestTimeoutMs?: number;
 }
 
 export const DEFAULT_POLL_INTERVAL_MS = 2_000;
 export const DEFAULT_TIMEOUT_MS = 120_000;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+/** The most a vendor's JSON answer may be; a larger one is read as unreadable. */
+export const MAX_JSON_BYTES = 1024 * 1024;
 
-/** IM-6: a vendor call to one of its fixed HTTPS hosts. A redirect or any other host is refused. */
+/** IM-20, IM-21: every preset's vendor cost must come from config as a whole, nonnegative number. */
+export function requireVendorCosts(adapter: string, costs: Readonly<Record<ImagePreset, number>> | undefined): void {
+  for (const preset of IMAGE_PRESETS) {
+    const cost = costs?.[preset];
+    if (typeof cost !== "number" || !Number.isSafeInteger(cost) || cost < 0)
+      throw new ValidationFailed(`The ${adapter} image adapter needs a vendor cost for ${preset} in config`);
+  }
+}
+
+/**
+ * IM-6: a vendor call to one of its fixed HTTPS hosts. A redirect or any other host is refused.
+ * The request, its body included, is aborted after `timeoutMs`, so a stalled vendor reads as a lost
+ * answer and never holds the worker.
+ */
 export async function vendorFetch(
-  fetcher: typeof fetch, hosts: ReadonlySet<string>, url: string, init: RequestInit = {},
+  fetcher: typeof fetch, hosts: ReadonlySet<string>, url: string, init: RequestInit = {}, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   let parsed: URL;
   try { parsed = new URL(url); } catch { throw new ImageAdapterRefused("The vendor named an invalid URL"); }
   if (parsed.protocol !== "https:" || !hosts.has(parsed.hostname)) throw new ImageAdapterRefused("The vendor named a host outside its list");
-  const response = await fetcher(parsed.toString(), { ...init, redirect: "manual" });
+  const response = await fetcher(parsed.toString(), { ...init, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
   if (response.status >= 300 && response.status < 400) throw new ImageAdapterRefused("The vendor answered with a redirect");
   return response;
+}
+
+/** A body over its limit. The adapters treat it as a definite refusal for files, unreadable for JSON. */
+export class BodyTooLarge extends Error {
+  constructor() { super("The vendor's answer is too large"); this.name = "BodyTooLarge"; }
+}
+
+/** Reads a body up to `limit` bytes and stops reading past it, so a large answer never fills memory. */
+export async function readBounded(response: Response, limit: number): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) { await response.body?.cancel().catch(() => undefined); throw new BodyTooLarge(); }
+  if (!response.body) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) { await reader.cancel().catch(() => undefined); throw new BodyTooLarge(); }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.byteLength; }
+  return bytes;
+}
+
+/** A JSON object answer, or null when it is missing, too large or not an object. */
+export async function readJsonObject(response: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const body: unknown = JSON.parse(new TextDecoder().decode(await readBounded(response, MAX_JSON_BYTES)));
+    return typeof body === "object" && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : null;
+  } catch { return null; }
 }
 
 const file = (bytes: Uint8Array): PortFile => ({ bytes, sha256: sha256Hex(bytes) });

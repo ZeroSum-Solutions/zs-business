@@ -7,15 +7,15 @@
 // TODO verify: docs.kie.ai could not be reached from the build machine (2026-10-24). Paths, field
 // names, model IDs, input fields and hosts below follow Kie's public docs as generally described and
 // third-party search summaries; each unconfirmed detail is marked `TODO verify`.
-import { ValidationFailed, type ImagePreset } from "@zs/contracts";
+import { MEDIA_LIMITS, ValidationFailed, type ImagePreset } from "@zs/contracts";
 import { decodePng, readImageInfo } from "../png.js";
 import {
   ImageAdapterRefused, ImageOutcomeUnknown,
   type ImageWorkflowPort, type LookupResult, type PresetInput, type PresetOutput,
 } from "../port.js";
 import {
-  buildMatteOutput, buildUpscaleOutput, DEFAULT_POLL_INTERVAL_MS, DEFAULT_TIMEOUT_MS, vendorFetch, workflowHash,
-  type Provenance, type VendorAdapterOptions,
+  BodyTooLarge, buildMatteOutput, buildUpscaleOutput, DEFAULT_POLL_INTERVAL_MS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TIMEOUT_MS,
+  readBounded, readJsonObject, requireVendorCosts, vendorFetch, workflowHash, type Provenance, type VendorAdapterOptions,
 } from "./shared.js";
 
 export type KieAdapterConfig = VendorAdapterOptions;
@@ -95,9 +95,7 @@ const SHAPES: Readonly<Record<ImagePreset, unknown>> = {
 
 type JsonObject = Record<string, unknown>;
 const isObject = (value: unknown): value is JsonObject => typeof value === "object" && value !== null && !Array.isArray(value);
-async function readJson(response: Response): Promise<JsonObject | null> {
-  try { const body: unknown = await response.json(); return isObject(body) ? body : null; } catch { return null; }
-}
+const readJson = readJsonObject;
 /** Kie answers HTTP 200 with its own `code`; either one in 4xx is a definite refusal. TODO verify the code list. */
 const bodyCode = (body: JsonObject | null): number | null => (body && typeof body.code === "number" ? body.code : null);
 
@@ -105,10 +103,12 @@ type TaskState = { readonly state: "pending" } | { readonly state: "failed" } | 
 
 export function createKieImageWorkflowPort(config: KieAdapterConfig): ImageWorkflowPort {
   if (!config.apiKey) throw new ValidationFailed("A Kie.ai API key is required");
+  requireVendorCosts("Kie.ai", config.vendorCostMicros);
   const pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const authed = { authorization: `Bearer ${config.apiKey}`, accept: "application/json" };
-  const send = (url: string, init: RequestInit) => vendorFetch(config.fetch, KIE_HOSTS, url, init);
+  const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const send = (url: string, init: RequestInit) => vendorFetch(config.fetch, KIE_HOSTS, url, init, requestTimeoutMs);
 
   /** Before any task exists: every failure is definite, since nothing ran or was billed. */
   async function upload(input: PresetInput): Promise<string> {
@@ -147,6 +147,8 @@ export function createKieImageWorkflowPort(config: KieAdapterConfig): ImageWorkf
       if (error instanceof ImageAdapterRefused) throw error;
       return unknown();
     }
+    // A 5xx may have created the task whatever its body says, so it is unknown before any refusal code.
+    if (response.status >= 500) return unknown();
     const body = await readJson(response);
     const code = bodyCode(body);
     if ((response.status >= 400 && response.status < 500) || (code !== null && code >= 400 && code < 500))
@@ -181,15 +183,22 @@ export function createKieImageWorkflowPort(config: KieAdapterConfig): ImageWorkf
     return typeof urls[0] === "string" ? { state: "success", url: urls[0] } : { state: "unreadable" };
   }
 
-  /** Fetched once, without the key. A host outside the list is refused by `vendorFetch`. */
+  /**
+   * Fetched without the key. A host outside the list is refused by `vendorFetch`; a 4xx or a file
+   * over the size limit is definite; a 5xx or a lost connection is `null`, so the next poll retries.
+   */
   async function download(url: string): Promise<Uint8Array | null> {
     let response: Response;
     try { response = await send(url, { method: "GET" }); } catch (error) {
       if (error instanceof ImageAdapterRefused) throw error;
       return null;
     }
+    if (response.status >= 400 && response.status < 500) throw new ImageAdapterRefused(`The Kie.ai result file is unavailable (http_${response.status})`);
     if (!response.ok) return null;
-    try { return new Uint8Array(await response.arrayBuffer()); } catch { return null; }
+    try { return await readBounded(response, MEDIA_LIMITS.fileBytes); } catch (error) {
+      if (error instanceof BodyTooLarge) throw new ImageAdapterRefused("The Kie.ai result file is too large");
+      return null;
+    }
   }
 
   const provenance = (input: PresetInput, providerJobId: string): Provenance => ({
@@ -252,8 +261,8 @@ export function createKieImageWorkflowPort(config: KieAdapterConfig): ImageWorkf
         const imageUrl = await upload(input);
         ids.push(await submit(KIE_MODELS.cutout, { image: imageUrl }, null));
         if (input.preset === "studio_background_swap") {
-          // TODO verify: input fields. If this answer is lost, the job ID names only the cut-out, and a
-          // lookup of it answers `failed`: the tenant got nothing, and we absorb the vendor cost.
+          // TODO verify: input fields. If this answer is lost, the job ID names only the cut-out; a
+          // lookup of it stays `pending`, so the variant ends `outcome_unknown` with its hold kept (IM-7).
           ids.push(await submit(KIE_MODELS.background, {
             prompt: prompt(input), image_size: backgroundSize(width, height), image_resolution: "1K", max_images: 1,
           }, `${ids[0]!}${SEPARATOR}`));
@@ -272,7 +281,9 @@ export function createKieImageWorkflowPort(config: KieAdapterConfig): ImageWorkf
 
     async lookup(providerJobId, input) {
       const ids = taskIds(providerJobId, input.preset);
-      if (!ids) return { state: "failed" };
+      // A swap whose second answer was lost, or an ID this adapter did not write (the adapter changed
+      // since), has no answer here: it stays pending, so the hold is kept for an operator (IM-7).
+      if (!ids) return { state: "pending" };
       try { return await settle(input, providerJobId, ids); } catch (error) {
         // A result that is unreadable or on another host will never become readable.
         if (error instanceof ImageAdapterRefused) return { state: "failed" };

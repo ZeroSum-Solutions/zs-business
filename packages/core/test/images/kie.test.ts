@@ -31,7 +31,7 @@ function input(preset: ImagePreset, bytes = preset === "upscale_2k" ? UP_SOURCE 
   };
 }
 
-interface Seen { url: string; method: string; headers: Record<string, string>; body: string }
+interface Seen { url: string; method: string; headers: Record<string, string>; body: string; signal?: AbortSignal | null }
 type Route = (seen: Seen) => Response | Promise<Response>;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const png = (bytes: Uint8Array) => new Response(new Uint8Array(bytes), { status: 200, headers: { "content-type": "image/png" } });
@@ -50,7 +50,7 @@ function fakeKie(options: {
   };
   const resultUrl = options.resultUrl ?? ((model: string) => `${RESULT_HOST}/r/${model.replace(/\W/g, "-")}.png`);
   const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
-    const entry: Seen = { url: String(url), method: init?.method ?? "GET", headers: { ...(init?.headers as Record<string, string>) }, body: String(init?.body ?? "") };
+    const entry: Seen = { url: String(url), method: init?.method ?? "GET", headers: { ...(init?.headers as Record<string, string>) }, body: String(init?.body ?? ""), signal: init?.signal ?? null };
     expect(init?.redirect).toBe("manual");
     seen.push(entry);
     const u = new URL(entry.url);
@@ -78,7 +78,7 @@ function fakeKie(options: {
   return { seen, tasks, fetcher: fetcher as unknown as typeof fetch };
 }
 
-function adapter(fetcher: typeof fetch, extra: { timeoutMs?: number } = {}) {
+function adapter(fetcher: typeof fetch, extra: { timeoutMs?: number; requestTimeoutMs?: number } = {}) {
   let now = Date.parse("2026-10-24T09:00:00.000Z");
   const sleeps: number[] = [];
   const port = createKieImageWorkflowPort({
@@ -214,7 +214,8 @@ describe("failures (IM-7, IM-17)", () => {
   });
 
   it("a 5xx or a lost connection on submit is ImageOutcomeUnknown, never resent", async () => {
-    for (const create of [() => json({ code: 500, msg: "oops" }, 500), () => { throw new TypeError("socket hang up"); }]) {
+    // A 5xx wins over a refusal code in its body: the task may exist.
+    for (const create of [() => json({ code: 500, msg: "oops" }, 500), () => json({ code: 402, msg: "credits" }, 503), () => { throw new TypeError("socket hang up"); }]) {
       const kie = fakeKie({ override: { create } });
       const error = await adapter(kie.fetcher).port.runPreset(input("upscale_2k")).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(ImageOutcomeUnknown);
@@ -237,6 +238,34 @@ describe("failures (IM-7, IM-17)", () => {
     const error = await adapter(broken.fetcher, { timeoutMs: 4_000 }).port.runPreset(input("upscale_2k")).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ImageOutcomeUnknown);
     expect((error as ImageOutcomeUnknown).providerJobId).toBe("task1_topaz");
+  });
+
+  it("a stalled request is aborted after the request timeout and read as unknown", async () => {
+    const stalled: Route = (seen) => new Promise<Response>((_, reject) => {
+      seen.signal?.addEventListener("abort", () => reject(seen.signal!.reason));
+    });
+    const kie = fakeKie({ override: { create: stalled } });
+    const error = await adapter(kie.fetcher, { requestTimeoutMs: 20 }).port.runPreset(input("upscale_2k")).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ImageOutcomeUnknown);
+    expect(creates(kie.seen)).toHaveLength(1);
+    expect(creates(kie.seen)[0]!.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("a result file that answers 4xx is ImageAdapterRefused, not polled until the timeout", async () => {
+    const kie = fakeKie({ override: { file: () => new Response("gone", { status: 404 }) } });
+    const { port, sleeps } = adapter(kie.fetcher, { timeoutMs: 60_000 });
+    await expect(port.runPreset(input("background_remove"))).rejects.toBeInstanceOf(ImageAdapterRefused);
+    expect(sleeps).toHaveLength(1);
+  });
+
+  it("a result file over the size limit is refused without reading all of it", async () => {
+    let pulls = 0;
+    const endless = () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { pulls += 1; controller.enqueue(new Uint8Array(1024 * 1024)); },
+    }), { status: 200, headers: { "content-type": "image/png" } });
+    const kie = fakeKie({ override: { file: endless } });
+    await expect(adapter(kie.fetcher).port.runPreset(input("upscale_2k"))).rejects.toBeInstanceOf(ImageAdapterRefused);
+    expect(pulls).toBeLessThanOrEqual(13);
   });
 
   it("an unreadable result is ImageAdapterRefused", async () => {
@@ -281,14 +310,32 @@ describe("lookup (IM-18)", () => {
     passesWorkerChecks(SOURCE, answer.output);
   });
 
-  it("answers failed for a failed task and for a job ID it cannot read, and makes no submit", async () => {
+  it("answers failed for a failed task, pending for a job ID it cannot read, and makes no submit", async () => {
     const kie = fakeKie({ states: { [KIE_MODELS.upscale]: ["fail"] } });
     const { port } = adapter(kie.fetcher);
     await expect(port.runPreset(input("upscale_2k"))).rejects.toBeInstanceOf(ImageAdapterRefused);
     expect(await port.lookup("task1_topaz", input("upscale_2k"))).toEqual({ state: "failed" });
-    expect(await port.lookup("task1_recraft,", input("studio_background_swap"))).toEqual({ state: "failed" });
-    expect(await port.lookup("bad id!", input("upscale_2k"))).toEqual({ state: "failed" });
+    // IM-7: an unknown outcome keeps its hold. A half-recorded swap or another adapter's ID is no answer.
+    expect(await port.lookup("task1_recraft,", input("studio_background_swap"))).toEqual({ state: "pending" });
+    expect(await port.lookup("bad id!", input("upscale_2k"))).toEqual({ state: "pending" });
+    expect(await port.lookup("fal:up:0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", input("upscale_2k"))).toEqual({ state: "pending" });
     expect(creates(kie.seen)).toHaveLength(1);
+  });
+
+  it("a swap whose background submit is lost is unknown with the cut-out ID, and lookup keeps it pending", async () => {
+    let calls = 0;
+    const kie = fakeKie({ override: { create: (seen) => {
+      calls += 1;
+      if (calls === 2) return json({ code: 500 }, 502);
+      const { model } = JSON.parse(seen.body) as { model: string };
+      return json(createOk(`task${calls}_${model.split("/")[0]}`));
+    } } });
+    const job = input("studio_background_swap");
+    const error = await adapter(kie.fetcher).port.runPreset(job).catch((e: unknown) => e) as ImageOutcomeUnknown;
+    expect(error).toBeInstanceOf(ImageOutcomeUnknown);
+    expect(error.providerJobId).toBe("task1_recraft,");
+    expect(await adapter(kie.fetcher).port.lookup(error.providerJobId!, job)).toEqual({ state: "pending" });
+    expect(creates(kie.seen)).toHaveLength(2);
   });
 });
 
@@ -297,6 +344,16 @@ describe("construction and the allowlist (IM-8, IM-19, IM-21)", () => {
     const { fetcher } = fakeKie();
     expect(() => createKieImageWorkflowPort({ apiKey: "", fetch: fetcher, clock: { now: () => new Date() }, sleep: async () => {}, vendorCostMicros: COSTS }))
       .toThrow(expect.objectContaining({ code: "ValidationFailed" }));
+  });
+
+  it("missing, partial or negative vendor costs fail at construction (IM-20)", () => {
+    const { fetcher } = fakeKie();
+    for (const costs of [{}, { background_remove: 1, studio_background_swap: 2 }, { ...COSTS, upscale_2k: -1 }, { ...COSTS, upscale_2k: 1.5 }]) {
+      expect(() => createKieImageWorkflowPort({
+        apiKey: KIE_TEST_KEY, fetch: fetcher, clock: { now: () => new Date() }, sleep: async () => {},
+        vendorCostMicros: costs as typeof COSTS,
+      })).toThrow(expect.objectContaining({ code: "ValidationFailed" }));
+    }
   });
 
   it("every Kie model ID is listed, unverified, with no forbidden weights or non-commercial licence", () => {

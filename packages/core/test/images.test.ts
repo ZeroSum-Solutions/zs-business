@@ -22,6 +22,7 @@ import {
   memberDispatch,
   NON_COMMERCIAL_LICENSE,
   parseImageConfig,
+  sha256Hex,
   type EdgeDependencies,
   type FakeImageWorkflowPort,
   type ImageReport,
@@ -406,6 +407,22 @@ describe("review fixes", () => {
     expect((await variant(queued.id)).status).toBe("staged");
     expect(port.calls).toHaveLength(1);
   });
+
+  it("fails an upscale whose file is only a header, and releases its hold", async () => {
+    const headerOnly = {
+      ...port,
+      runPreset: async (input: Parameters<typeof port.runPreset>[0]) => {
+        const output = await port.runPreset(input);
+        const bytes = output.bytes.slice(0, 33); // signature and IHDR, no image data
+        return { ...output, bytes, sha256: sha256Hex(bytes) };
+      },
+    } as typeof port;
+    const source = await upload();
+    const queued = await generate({ sourceAssetId: source.id, preset: "upscale_2k", params: {} });
+    await createImageWorker({ service, db: database.db, store, port: headerOnly, config, clock, generateId: randomUUID, report: (event) => reports.push(event) }).runOnce();
+    expect(await variant(queued.id)).toMatchObject({ status: "failed", failure_reason: "output_invalid" });
+    expect((await reservation(queued.id))?.status).toBe("released");
+  });
 });
 
 describe("edge rules", () => {
@@ -533,6 +550,34 @@ describe("rejection and content reads (IM-22, IM-23)", () => {
     expect((await variant(row.id)).status).toBe("rejected");
     await expect(approve(row.id, row.sha256)).rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_not_staged" } });
     await expect(owner.readImageVariantContent(row.id)).rejects.toMatchObject({ code: "NotFound" });
+  });
+
+  it("sweeps every rejected staging file in the window, past the first hundred", async () => {
+    const source = await upload();
+    const keys: string[] = [];
+    const STAGE = `status='staged', staged_at=$3, expires_at=$4, adapter='fake', model_id='fake-matte-v1', model_license='apache-2.0', workflow_hash='w1'`;
+    for (let i = 0; i < 101; i += 1) {
+      const id = randomUUID();
+      const sha = sha256Hex(new TextEncoder().encode(`rejected ${id}`));
+      const rejectedAt = new Date(START - (i + 1) * 60_000);
+      await service(async (tx) => {
+        await tx.query(`INSERT INTO image_variants (tenant_id,id,source_asset_id,source_sha256,preset,params,price_minor,currency,created_by,created_at)
+          VALUES ($1,$2,$3,$4,'background_remove','{}',10,'usd',$5,$6)`, [tenantA, id, source.id, source.sha256, ownerA, new Date(START - DAY)]);
+        await tx.query("UPDATE image_variants SET status='running' WHERE tenant_id=$1 AND id=$2", [tenantA, id]);
+        await tx.query(`UPDATE image_variants SET ${STAGE}, sha256='${sha}' WHERE tenant_id=$1 AND id=$2`, [tenantA, id, new Date(START - DAY), new Date(START + 13 * DAY)]);
+        await tx.query("UPDATE image_variants SET status='rejected', rejected_at=$3 WHERE tenant_id=$1 AND id=$2", [tenantA, id, rejectedAt]);
+      });
+      const key = mediaObjectKeys.staging(tenantA, id, sha);
+      await store.put(key, new Uint8Array([i & 0xff]), { contentType: "image/png" });
+      keys.push(key);
+    }
+    // One long-lived worker, as apps/api runs it: each pass takes the next part of the backlog.
+    const sweeper = worker();
+    await sweeper.runOnce();
+    await sweeper.runOnce();
+    const left = [];
+    for (const key of keys) if (await store.head(key)) left.push(key);
+    expect(left).toEqual([]);
   });
 
   it("refuses to reject a variant that is not staged, another tenant's, or without publish", async () => {

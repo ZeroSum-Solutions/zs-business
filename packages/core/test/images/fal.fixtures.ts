@@ -30,7 +30,10 @@ export const imagesResult = (url: string, width: number, height: number) => ({
 });
 export const errorResult = { detail: [{ loc: ["body", "image_url"], msg: "our own test message", type: "value_error" }], error_type: "validation_error" };
 
-export interface Seen { readonly method: string; readonly url: string; readonly headers: Record<string, string>; readonly body: unknown }
+export interface Seen {
+  readonly method: string; readonly url: string; readonly headers: Record<string, string>; readonly body: unknown;
+  readonly signal?: AbortSignal | null;
+}
 type Route = (seen: Seen) => Response | Promise<Response>;
 
 export const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -45,7 +48,7 @@ export function router(routes: Record<string, Route>) {
     new Headers(init?.headers).forEach((value, name) => { headers[name] = value; });
     const entry: Seen = {
       method: init?.method ?? "GET", url: String(url), headers,
-      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined, signal: init?.signal ?? null,
     };
     seen.push(entry);
     const route = routes[`${entry.method} ${entry.url}`];

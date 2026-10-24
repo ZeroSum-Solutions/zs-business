@@ -11,7 +11,8 @@
 import { MEDIA_LIMITS, ValidationFailed, type ImagePreset } from "@zs/contracts";
 import { ImageAdapterRefused, ImageOutcomeUnknown, type ImageWorkflowPort, type LookupResult, type PresetInput, type PresetOutput } from "../port.js";
 import {
-  buildMatteOutput, buildUpscaleOutput, DEFAULT_POLL_INTERVAL_MS, DEFAULT_TIMEOUT_MS, vendorFetch, workflowHash, type VendorAdapterOptions,
+  BodyTooLarge, buildMatteOutput, buildUpscaleOutput, DEFAULT_POLL_INTERVAL_MS, DEFAULT_REQUEST_TIMEOUT_MS, DEFAULT_TIMEOUT_MS,
+  readBounded, readJsonObject, requireVendorCosts, vendorFetch, workflowHash, type VendorAdapterOptions,
 } from "./shared.js";
 
 export type FalAdapterConfig = VendorAdapterOptions;
@@ -91,16 +92,13 @@ function stepsFor(input: PresetInput): Step[] {
   });
 }
 
-async function readJson(response: Response): Promise<Record<string, unknown> | null> {
-  try {
-    const body: unknown = await response.json();
-    return typeof body === "object" && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : null;
-  } catch { return null; }
-}
+const readJson = readJsonObject;
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 export function createFalImageWorkflowPort(config: FalAdapterConfig): ImageWorkflowPort {
   if (!config.apiKey) throw new ValidationFailed("A FAL API key is required");
+  requireVendorCosts("FAL", config.vendorCostMicros);
+  const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -108,7 +106,7 @@ export function createFalImageWorkflowPort(config: FalAdapterConfig): ImageWorkf
   async function queue(url: string, init: RequestInit = {}): Promise<Response | null> {
     const headers: Record<string, string> = { Authorization: `Key ${config.apiKey}`, accept: "application/json" };
     if (init.body !== undefined) headers["content-type"] = "application/json";
-    try { return await vendorFetch(config.fetch, QUEUE_HOSTS, url, { ...init, headers }); } catch (error) {
+    try { return await vendorFetch(config.fetch, QUEUE_HOSTS, url, { ...init, headers }, requestTimeoutMs); } catch (error) {
       if (error instanceof ImageAdapterRefused) throw error;
       return null;
     }
@@ -160,14 +158,17 @@ export function createFalImageWorkflowPort(config: FalAdapterConfig): ImageWorkf
   async function download(url: unknown, providerJobId: string): Promise<Uint8Array> {
     if (typeof url !== "string") throw new ImageAdapterRefused("The FAL result names no file");
     let response: Response;
-    try { response = await vendorFetch(config.fetch, MEDIA_HOSTS, url, { method: "GET" }); } catch (error) {
+    try { response = await vendorFetch(config.fetch, MEDIA_HOSTS, url, { method: "GET" }, requestTimeoutMs); } catch (error) {
       if (error instanceof ImageAdapterRefused) throw error;
       throw new ImageOutcomeUnknown(providerJobId, "The FAL file download was lost");
     }
     if (response.status >= 500) throw new ImageOutcomeUnknown(providerJobId, "The FAL file download failed");
     if (response.status < 200 || response.status >= 300) throw new ImageAdapterRefused(`The FAL file is unavailable (HTTP ${response.status})`);
     let bytes: Uint8Array;
-    try { bytes = new Uint8Array(await response.arrayBuffer()); } catch { throw new ImageOutcomeUnknown(providerJobId, "The FAL file download was lost"); }
+    try { bytes = await readBounded(response, MEDIA_LIMITS.fileBytes); } catch (error) {
+      if (error instanceof BodyTooLarge) throw new ImageAdapterRefused("The FAL file has a bad size");
+      throw new ImageOutcomeUnknown(providerJobId, "The FAL file download was lost");
+    }
     if (bytes.byteLength === 0 || bytes.byteLength > MEDIA_LIMITS.fileBytes) throw new ImageAdapterRefused("The FAL file has a bad size");
     return bytes;
   }
@@ -204,7 +205,8 @@ export function createFalImageWorkflowPort(config: FalAdapterConfig): ImageWorkf
     async runPreset(input) {
       const steps = stepsFor(input);
       const jobs: Job[] = [];
-      // A swap's second submit that fails leaves the first job billed and unused: we absorb that cost.
+      // A swap's second submit that is refused leaves the first job billed and unused: we absorb that
+      // cost. One whose answer is lost is unknown with the first ID only, and its hold is kept (IM-7).
       for (const step of steps) jobs.push(await submit(step, jobs.length ? jobIdFor(input.preset, jobs.map((job) => job.requestId)) : null));
       const providerJobId = jobIdFor(input.preset, jobs.map((job) => job.requestId));
       const deadline = config.clock.now().getTime() + timeoutMs;
@@ -221,8 +223,10 @@ export function createFalImageWorkflowPort(config: FalAdapterConfig): ImageWorkf
     async lookup(providerJobId, input): Promise<LookupResult> {
       const parsed = parseJobId(providerJobId);
       const roles = PRESET_SHAPES[input.preset];
-      // A swap whose second submit was lost names one job: it can never finish.
-      if (!parsed || parsed.code !== PRESET_CODES[input.preset] || parsed.ids.length !== roles.length) return { state: "failed" };
+      // A swap whose second submit was lost names one job, and an ID this adapter did not write (the
+      // adapter changed since) names none: neither has an answer here, so it stays pending and the
+      // variant ends `outcome_unknown` with its hold kept for an operator (IM-7).
+      if (!parsed || parsed.code !== PRESET_CODES[input.preset] || parsed.ids.length !== roles.length) return { state: "pending" };
       const jobs: Job[] = roles.map((role, index) => {
         const model = SHAPES[role].model;
         const requestId = parsed.ids[index]!;

@@ -43,14 +43,14 @@ function job(model: string, id: string, file: { name: string; bytes: Uint8Array;
   return { routes, state, url };
 }
 
-function harness(routes: Record<string, Route>) {
+function harness(routes: Record<string, Route>, extra: { requestTimeoutMs?: number } = {}) {
   let now = Date.parse("2026-10-24T10:00:00.000Z");
   const sleeps: number[] = [];
   const { seen, fetcher } = router(routes);
   const port = createFalImageWorkflowPort({
     apiKey: FAL_KEY, fetch: fetcher, clock: { now: () => new Date(now) },
     sleep: async (ms) => { sleeps.push(ms); now += ms; },
-    vendorCostMicros: COSTS, pollIntervalMs: 1_000, timeoutMs: 5_000,
+    vendorCostMicros: COSTS, pollIntervalMs: 1_000, timeoutMs: 5_000, ...extra,
   });
   return { port, seen, sleeps, posts: () => seen.filter((entry) => entry.method === "POST") };
 }
@@ -262,18 +262,54 @@ describe("unknown outcomes and lookup (IM-7, IM-17, IM-18)", () => {
     expectKeyInHeaderOnly(seen);
   });
 
-  it("lookup answers failed for a failed job, a foreign or partial id, or another preset", async () => {
+  it("lookup answers failed for a failed job, and pending for a foreign or partial id or another preset", async () => {
     const matte = matteJob();
     matte.state.statuses = ["COMPLETED"];
     matte.state.result = () => json(errorResult, 422);
     const { port, posts } = harness(matte.routes);
     const input = inputFor("background_remove", source);
     expect(await port.lookup(`fal:rm:${MATTE_ID}`, input)).toEqual({ state: "failed" });
-    expect(await port.lookup(`fal:sw:${MATTE_ID}`, inputFor("studio_background_swap", source, { backgroundDescription: "x" }))).toEqual({ state: "failed" });
-    expect(await port.lookup(`fal:up:${MATTE_ID}`, input)).toEqual({ state: "failed" });
-    expect(await port.lookup("kie:rm:abc", input)).toEqual({ state: "failed" });
-    expect(await port.lookup("fal:rm:../../x", input)).toEqual({ state: "failed" });
+    // IM-7: an unknown outcome keeps its hold. An ID this adapter cannot finish is no answer.
+    expect(await port.lookup(`fal:sw:${MATTE_ID}`, inputFor("studio_background_swap", source, { backgroundDescription: "x" }))).toEqual({ state: "pending" });
+    expect(await port.lookup(`fal:up:${MATTE_ID}`, input)).toEqual({ state: "pending" });
+    expect(await port.lookup("task1_recraft", input)).toEqual({ state: "pending" });
+    expect(await port.lookup("fal:rm:../../x", input)).toEqual({ state: "pending" });
     expect(posts()).toHaveLength(0);
+  });
+
+  it("a swap whose background submit answers 5xx is unknown with the cut-out ID only, and lookup keeps it pending", async () => {
+    const matte = matteJob();
+    const bg = job("fal-ai/flux/schnell", BG_ID, { name: "bg-9.png", bytes: flat(32, 32, [1, 2, 3]), width: 32, height: 32, many: true });
+    bg.state.submit = () => json({ detail: "busy" }, 503);
+    const { port, posts } = harness({ ...matte.routes, ...bg.routes });
+    const input = inputFor("studio_background_swap", source, { backgroundDescription: "slate" });
+    const error = await port.runPreset(input).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ name: "ImageOutcomeUnknown", providerJobId: `fal:sw:${MATTE_ID}` });
+    expect(await port.lookup(`fal:sw:${MATTE_ID}`, input)).toEqual({ state: "pending" });
+    expect(posts()).toHaveLength(2);
+  });
+
+  it("a stalled status poll is aborted after the request timeout and read as unknown", async () => {
+    const matte = matteJob();
+    const routes: Record<string, Route> = {
+      ...matte.routes,
+      [`GET ${QUEUE}/fal-ai/birefnet/requests/${MATTE_ID}/status`]: (seen) => new Promise<Response>((_, reject) => {
+        seen.signal?.addEventListener("abort", () => reject(seen.signal!.reason));
+      }),
+    };
+    const { port, posts } = harness(routes, { requestTimeoutMs: 20 });
+    await expect(port.runPreset(inputFor("background_remove", source))).rejects.toMatchObject({ name: "ImageOutcomeUnknown", providerJobId: `fal:rm:${MATTE_ID}` });
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("a result file over the size limit is refused without reading all of it", async () => {
+    let pulls = 0;
+    const matte = matteJob();
+    matte.routes[`GET ${matte.url}`] = () => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) { pulls += 1; controller.enqueue(new Uint8Array(1024 * 1024)); },
+    }), { status: 200, headers: { "content-type": "image/png" } });
+    await expect(harness(matte.routes).port.runPreset(inputFor("background_remove", source))).rejects.toBeInstanceOf(ImageAdapterRefused);
+    expect(pulls).toBeLessThanOrEqual(13);
   });
 
   it("lookup of a finished upscale returns the vendor's file", async () => {
@@ -292,6 +328,15 @@ describe("config and models (IM-8, IM-19, IM-21)", () => {
     expect(() => createFalImageWorkflowPort({
       apiKey: "", fetch: fetcher, clock: { now: () => new Date() }, sleep: async () => {}, vendorCostMicros: COSTS,
     })).toThrow(ValidationFailed);
+  });
+
+  it("missing, partial or negative vendor costs fail at construction (IM-20)", () => {
+    const { fetcher } = router({});
+    for (const costs of [{}, { background_remove: 1, studio_background_swap: 2 }, { ...COSTS, upscale_2k: -1 }]) {
+      expect(() => createFalImageWorkflowPort({
+        apiKey: FAL_KEY, fetch: fetcher, clock: { now: () => new Date() }, sleep: async () => {}, vendorCostMicros: costs as typeof COSTS,
+      })).toThrow(ValidationFailed);
+    }
   });
 
   it("every model the adapter names is on the allowlist, unverified, commercial-safe; no stray FAL entries", () => {

@@ -28,7 +28,7 @@ import {
   type PresetInput,
   type PresetOutput,
 } from "./port.js";
-import { decodePng, encodeRgbaPng, readImageInfo, sizeAllowed } from "./png.js";
+import { decodePng, encodeRgbaPng, imageIsComplete, readImageInfo, sizeAllowed } from "./png.js";
 import type { VariantRow } from "./records.js";
 
 export const IMAGE_WORKER_ACTIONS: readonly string[] = Object.freeze(["media.variant.stage", "media.variant.fail"]);
@@ -69,6 +69,8 @@ export interface ImageRunSummary {
 }
 
 const BATCH = 10;
+const SWEEP_PAGE = 100;
+const SWEEP_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const PNG = "image/png";
 
 type Verdict =
@@ -88,6 +90,8 @@ function verify(variant: VariantRow, source: { bytes: Uint8Array; sha256: string
     const sourceInfo = readImageInfo(source.bytes);
     const info = readImageInfo(output.bytes);
     if (!sourceInfo || !info || !sizeAllowed(info.width, info.height) || info.width !== output.width || info.height !== output.height) return refuse("output_invalid");
+    // A header alone is not an image: the file must be whole before it is staged and paid for.
+    if (info.contentType !== output.contentType || !imageIsComplete(output.bytes, info.contentType)) return refuse("output_invalid");
     // The upscale keeps the picture's proportions: width x source height may differ from height x source width by one source pixel row.
     if (Math.abs(info.width * sourceInfo.height - info.height * sourceInfo.width) > Math.max(sourceInfo.width, sourceInfo.height)) return refuse("size_changed");
     return { ok: true, bytes: output.bytes, contentType: output.contentType, matte: null, background: null };
@@ -312,6 +316,9 @@ export function createImageWorker(deps: ImageWorkerDeps) {
     return { captured, released };
   }
 
+  /** Where the staging sweep stopped, per state; held by this long-lived worker. */
+  const sweepCursor: Record<"expired" | "rejected", { at: Date; id: string } | null> = { expired: null, rejected: null };
+
   /** IM-11, IM-23: past its 14 days a staged image expires; an expired or rejected image's staging file goes. */
   async function expire(): Promise<number> {
     const expired = await deps.service(async (tx) => (await tx.query<{ tenant_id: string; id: string; sha256: string }>(
@@ -320,13 +327,23 @@ export function createImageWorker(deps: ImageWorkerDeps) {
                                    ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)
         RETURNING tenant_id, id, sha256`, [now()])).rows);
     for (const row of expired) report({ kind: "expired", tenantId: row.tenant_id, variantId: row.id });
-    // Deleting is idempotent, so each pass also retries the recent expiries and rejections: a failed delete is not lost.
-    const since = new Date(now().getTime() - 7 * 24 * 60 * 60 * 1000);
-    const recent = await deps.service(async (tx) => (await tx.query<{ tenant_id: string; id: string; sha256: string }>(
-      `(SELECT tenant_id, id, sha256 FROM image_variants WHERE status='expired' AND expires_at > $1 ORDER BY expires_at DESC LIMIT 100)
-       UNION ALL
-       (SELECT tenant_id, id, sha256 FROM image_variants WHERE status='rejected' AND rejected_at > $1 ORDER BY rejected_at DESC LIMIT 100)`,
-      [since])).rows);
+    // Deleting is idempotent, so the passes keep walking the last 7 days of expiries and rejections,
+    // 100 of each at a time from where the last pass stopped, then start over: a failed delete is
+    // retried and a backlog over 100 is reached.
+    const since = new Date(now().getTime() - SWEEP_WINDOW_MS);
+    const recent: { tenant_id: string; id: string; sha256: string }[] = [];
+    for (const kind of ["expired", "rejected"] as const) {
+      const at = kind === "expired" ? "expires_at" : "rejected_at";
+      const after = sweepCursor[kind];
+      const page = await deps.service(async (tx) => (await tx.query<{ tenant_id: string; id: string; sha256: string; at: Date }>(
+        `SELECT tenant_id, id, sha256, ${at} AS at FROM image_variants
+          WHERE status=$1 AND ${at} > $2 AND ($3::timestamptz IS NULL OR (${at}, id) > ($3::timestamptz, $4::uuid))
+          ORDER BY ${at}, id LIMIT ${SWEEP_PAGE}`,
+        [kind, since, after?.at ?? null, after?.id ?? null])).rows);
+      const last = page.at(-1);
+      sweepCursor[kind] = page.length === SWEEP_PAGE && last ? { at: last.at, id: last.id } : null;
+      recent.push(...page);
+    }
     for (const row of recent) {
       await deps.store.delete(mediaObjectKeys.staging(row.tenant_id, row.id, row.sha256)).catch((error: unknown) =>
         report({ kind: "error", tenantId: row.tenant_id, variantId: row.id, error: error instanceof Error ? error.message.slice(0, 300) : "delete failed" }));
