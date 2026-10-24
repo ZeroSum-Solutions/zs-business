@@ -1,7 +1,9 @@
 // M1 tenant-scoped booking reads. Every function runs inside ScopedDatabase.tenant, so RLS
 // limits rows to the caller's tenant; the explicit tenant_id filter is defence in depth.
 import {
+  NotFound,
   ValidationFailed,
+  type BookingDetail,
   type BookingPage,
   type BookingRecord,
   type BookingSummary,
@@ -36,6 +38,10 @@ interface SummaryRow extends BookingRow {
   intake_status: IntakeStatus;
   customer_contact_id: string | null;
   customer_name: string | null;
+  /** The booking-contact link (booking-customer.md BC-6): null while the booking has none. */
+  link_contact_id: string | null;
+  link_name: string | null;
+  link_revision: number | null;
 }
 
 const bookingRecord = (row: BookingRow): BookingRecord => ({
@@ -52,18 +58,46 @@ const bookingRecord = (row: BookingRow): BookingRecord => ({
   createdAt: row.created_at.toISOString(),
 });
 
-/** P-12: a website booking names its intake item; the customer is the contact once known. */
+/**
+ * P-12: a website booking names its intake item; the customer is the contact once known.
+ * BC-6: an owner-made booking with a link shows that contact, by its current name.
+ */
 const bookingSummary = (row: SummaryRow): BookingSummary => ({
   ...bookingRecord(row),
   source: row.source,
   intakeItemId: row.intake_item_id,
-  customer: row.intake_item_id === null
-    ? null
-    : { contactId: row.customer_contact_id, name: row.customer_name, status: row.intake_status },
+  customer: row.intake_item_id !== null
+    ? { contactId: row.customer_contact_id, name: row.customer_name, status: row.intake_status }
+    : row.link_contact_id !== null
+      ? { contactId: row.link_contact_id, name: row.link_name, status: "linked" }
+      : null,
 });
 
 const bookingColumns = `id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
             buffer_before_minutes, buffer_after_minutes, created_at, source, intake_item_id`;
+
+/**
+ * P-12, BC-6: name each page's customers after the page is chosen, so the joins never change
+ * which bookings are on it.
+ */
+const withCustomers = (hits: string) => `SELECT b.*, i.status AS intake_status, i.contact_id AS customer_contact_id,
+          coalesce(c.display_name, i.submitted_name) AS customer_name,
+          l.contact_id AS link_contact_id, lc.display_name AS link_name, l.revision AS link_revision
+     FROM (${hits}) b
+     LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id
+     LEFT JOIN crm_contacts c ON c.tenant_id = i.tenant_id AND c.id = i.contact_id
+     LEFT JOIN booking_contacts l ON l.tenant_id = b.tenant_id AND l.booking_id = b.id
+     LEFT JOIN crm_contacts lc ON lc.tenant_id = l.tenant_id AND lc.id = l.contact_id
+    ORDER BY b.starts_at, b.id`;
+
+/** BC-6, BC-9: one booking with its customer and the revision to send with the next change. */
+export async function getBooking(tx: Transaction, tenantId: string, id: string): Promise<BookingDetail> {
+  const row = (await tx.query<SummaryRow>(
+    withCustomers(`SELECT ${bookingColumns} FROM bookings WHERE tenant_id=$1 AND id=$2`), [tenantId, id],
+  )).rows[0];
+  if (!row) throw new NotFound();
+  return { ...bookingSummary(row), customerRevision: row.link_revision ?? 0 };
+}
 
 /**
  * Bookings overlapping [from, to) when given, in start order, so a day or week is one short
@@ -89,14 +123,21 @@ export async function listBookings(tx: Transaction, tenantId: string, query: Lis
   type Row = SummaryRow & { sort_value: string };
   const toPage = (rows: Row[]) =>
     page(rows.map(bookingSummary), query, (index) => encodeCursor("bookings.start", [rows[index]!.sort_value, rows[index]!.id]));
-  // P-12: name each page's website customers after the page is chosen, so the join never
-  // changes which bookings are on it.
-  const withCustomers = (hits: string) => `SELECT b.*, i.status AS intake_status, i.contact_id AS customer_contact_id,
-          coalesce(c.display_name, i.submitted_name) AS customer_name
-     FROM (${hits}) b
-     LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id
-     LEFT JOIN crm_contacts c ON c.tenant_id = i.tenant_id AND c.id = i.contact_id
-    ORDER BY b.starts_at, b.id`;
+  if (query.contactId !== undefined) {
+    // BC-6: one contact's bookings, owner links and website matches alike. The set is small, so a
+    // plain overlap test replaces the range split below, which assumes any booking can be next.
+    const rows = (await tx.query<Row>(
+      withCustomers(`SELECT ${columns} FROM bookings
+        WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2)
+          AND ($5::timestamptz IS NULL OR ends_at > $5) AND ($6::timestamptz IS NULL OR starts_at < $6)
+          AND (EXISTS (SELECT 1 FROM booking_contacts l WHERE l.tenant_id = bookings.tenant_id AND l.booking_id = bookings.id AND l.contact_id = $7)
+            OR EXISTS (SELECT 1 FROM intake_items m WHERE m.tenant_id = bookings.tenant_id AND m.id = bookings.intake_item_id AND m.contact_id = $7))
+          ${position("$8", "$9")}
+        ORDER BY starts_at, id LIMIT $3 OFFSET $4`),
+      [...scope, query.from ?? null, query.to ?? null, query.contactId, ...cursorParams],
+    )).rows;
+    return toPage(rows);
+  }
   if (query.from === undefined) {
     // $5 is the end of the range, so the cursor's parameters follow it.
     const rows = (await tx.query<Row>(

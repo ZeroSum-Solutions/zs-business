@@ -10,7 +10,7 @@ import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
-  AGENT_ACTIONS, agentHandlers, approvalHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -31,6 +31,9 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "media.asset.upload": "publish",
   "media.variant.generate": "publish",
   "media.variant.approve": "publish",
+  // booking-customer.md BC-3: the handler also needs `customers`; staff and owners hold both.
+  "booking.contact.link": "calendar",
+  "booking.contact.unlink": "calendar",
   "crm.contact.create-or-find": "customers",
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
@@ -187,11 +190,39 @@ async function ownerDraft(): Promise<string> {
   return (await sessionFor(tenant.ownerId).draftReply({ contactId: tenant.contactId, body: "Thanks, see you soon." }, randomUUID())).result.id;
 }
 
+/** A booking made by the tenant's owner, for the booking-contact steps. */
+let customerSlot = 0;
+let customerResource: string | undefined;
+async function ownerBooking(): Promise<string> {
+  // A resource open every day, so these steps never use the Monday hours the other operations count on.
+  if (!customerResource) {
+    customerResource = await freshResource();
+    await fixture.service((tx) => tx.query(
+      "UPDATE booking_resources SET weekly=$3::jsonb, slot_step_minutes=60 WHERE tenant_id=$1 AND id=$2",
+      [tenant.tenantId, customerResource, JSON.stringify([1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, windows: [{ startMinute: 540, endMinute: 1020 }] })))],
+    ));
+  }
+  const n = customerSlot++;
+  const startsAt = `2026-10-${20 + Math.floor(n / 8)}T${String(9 + (n % 8)).padStart(2, "0")}:00:00.000Z`;
+  return (await sessionFor(tenant.ownerId).createBooking({ resourceId: customerResource, startsAt }, randomUUID())).result.id;
+}
+
 /** One call per session operation. Each builds fresh inputs, so it can run for any caller. */
 function operations(session: Session, actorId: string = randomUUID()): Record<string, { permission: Permission | null; run: () => Promise<unknown> }> {
   return {
     createBooking: { permission: "calendar", run: () => session.createBooking(
       { resourceId: tenant.resourceId, startsAt: `2026-10-19T${String(hour++).padStart(2, "0")}:00:00.000Z` }, randomUUID()) },
+    // booking-customer.md BC-3: the booking is the owner's; the caller under test links its customer.
+    linkBookingContact: { permission: "calendar", run: async () => {
+      const bookingId = await ownerBooking();
+      return session.linkBookingContact(bookingId, { contactId: tenant.contactId, expectedRevision: 0 }, randomUUID());
+    } },
+    unlinkBookingContact: { permission: "calendar", run: async () => {
+      const bookingId = await ownerBooking();
+      await sessionFor(tenant.ownerId).linkBookingContact(bookingId, { contactId: tenant.contactId, expectedRevision: 0 }, randomUUID());
+      return session.unlinkBookingContact(bookingId, { expectedRevision: 1 }, randomUUID());
+    } },
+    getBooking: { permission: "calendar", run: async () => session.getBooking(await ownerBooking()) },
     upsertContact: { permission: "customers", run: () => session.upsertContact({ displayName: "Bo", email: `${randomUUID()}@example.com` }, randomUUID()) },
     createDeal: { permission: "customers", run: async () => {
       const contact = await sessionFor(tenant.ownerId).upsertContact({ email: `${randomUUID()}@example.com` }, randomUUID());
@@ -367,7 +398,7 @@ describe("permission map", () => {
     // The public request is the one action no member session may run (public-intake.md P-1).
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
-      ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
+      ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
       ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...imageHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1).

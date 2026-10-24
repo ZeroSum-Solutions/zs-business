@@ -43,6 +43,10 @@ const expectedPath: Record<string, string> = {
   // M6 revision 2 (20261022510000_agent_runs_guard.sql): runs only close, once.
   "agent_runs_guard()": "pg_catalog, pg_temp",
   "approvals_transition()": "pg_catalog, pg_temp",
+  // Booking customer link (20261023200000_booking_contacts.sql): the revision and owner-made guard, and the
+  // trigger that clears a deleted contact's links (BC-7).
+  "booking_contacts_contact_deleted()": "pg_catalog, pg_temp",
+  "booking_contacts_guard()": "pg_catalog, pg_temp",
   "booking_overrides_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_pages_disclosure_versioned()": "pg_catalog, pg_temp",
   "booking_page_disclosures_append_only()": "pg_catalog, pg_temp",
