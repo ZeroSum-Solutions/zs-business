@@ -26,6 +26,7 @@ import { createIntentKeys, fingerprint, isDefinitive, useIntentKey, type IntentK
 import { useKeys, useSiteEdge, useSiteRelease, useSiteReleases, useSites } from "@/lib/queries";
 import { useSession } from "@/lib/session";
 import { draftFrom, draftProblem, LIMITS, MAX_SECTIONS, newSectionKey, specFrom, type Draft } from "./draft";
+import { ImagesSection } from "./images-section";
 import { releaseMeta, singleFlight, siteStatus, withSite } from "./site-status";
 
 /** Site toasts share a topic: each new answer replaces the last, so two never disagree. */
@@ -553,5 +554,7 @@ export function SiteView() {
     );
   }
   const site = sites.data[0];
-  return site ? <SitePanel key={site.id} site={site} /> : <><PageHeader title="Site" /><CreateSite /></>;
+  return site
+    ? <><SitePanel key={site.id} site={site} /><ImagesSection /></>
+    : <><PageHeader title="Site" /><CreateSite /><ImagesSection /></>;
 }

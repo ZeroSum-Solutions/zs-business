@@ -12,6 +12,7 @@ export {
   type EdgeDependencies,
   type Principal,
   type Session,
+  type StoredImage,
 } from "./session.js";
 export { createEnrichmentSession, enrichmentActorId, type EnrichmentSession } from "./enrichment-session.js";
 export { createPublicSession, publicIntakeActorId, type PublicSession } from "./public-session.js";

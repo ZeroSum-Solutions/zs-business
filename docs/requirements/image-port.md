@@ -1,7 +1,8 @@
 # Image port: product image variants
 
-Status: draft contract, not built (2026-10-22). Code follows this file once its first slice
-lands; a change to a numbered rule needs a new revision of this file first.
+Status: first slice built (2026-10-23); revision 2 (2026-10-24) adds IM-17 to IM-24 for vendor
+adapters, HTTP routes, rejection and the dashboard. A change to a numbered rule needs a new
+revision of this file first.
 
 Scope: an owner uploads a product photo and asks for a variant from a fixed preset (background
 removed, studio background, upscaled). A server worker runs the preset through one image port,
@@ -12,7 +13,8 @@ TypeScript fake, so `pnpm -r test` needs no vendor key, no Python and no network
 
 Out of scope: social posts (`integrations.md`, social publishing), any preset that re-renders
 the product itself (Known limits), linking images to catalog items, image search or
-recommendations (`future/discovery.md`), and dashboard screens beyond the approval view.
+recommendations (`future/discovery.md`), and dashboard screens beyond the Site screen's image
+section (IM-24).
 
 ## Evidence and decisions
 
@@ -199,13 +201,114 @@ Acceptance test (`packages/core/test/images.test.ts`, fake port, injected clock,
 Unit tests: the allowlist holds no forbidden weights; production config with `higgsfield` fails
 start-up; a key starting `image-job:` is refused by `idempotencyKeySchema`.
 
+## Revision 2 (2026-10-24): adapters, routes, rejection and the Site screen
+
+Rules IM-1 to IM-16 stand. These rules add to them; where one narrows an earlier rule it says so.
+
+**IM-17. Kie.ai and FAL adapters.** `packages/core/src/images/adapters/{kie,fal}.ts` implement
+`ImageWorkflowPort`. Each takes an injected `fetch`, clock and sleep, its API key and its vendor
+costs from config (`VendorAdapterOptions`), and sends every request through `vendorFetch`: HTTPS
+only, to the adapter's fixed host list (`KIE_HOSTS`, `FAL_HOSTS`), redirects refused. The key goes
+only in the vendor's auth header and never into a URL, an error message or a log. A job is
+submitted once, with the variant ID as the vendor's idempotency or client reference where the
+vendor has one, then polled. Matte presets ask the vendor for a cut-out PNG with alpha at the
+source's size; `buildMatteOutput` (adapters/shared.ts) takes the matte from that alpha and builds
+our own composite (IM-9). A swap also asks for a background generated from the preset's fixed
+prompt at the source's size, as PNG; it is fitted to the source's size if it differs. `upscale_2k`
+returns the vendor's PNG or WebP. Result files are fetched once from the vendor's result hosts
+(in the host list). A vendor answer that the job failed, a 4xx on submit, or an unreadable result
+is `ImageAdapterRefused`; a timeout, a lost connection or a 5xx after submit is
+`ImageOutcomeUnknown` with the provider job ID when it is known, and is never resubmitted. A swap
+runs two vendor jobs; its provider job ID records both. Tests run only against handwritten
+fixtures shaped like each vendor's public API docs (our own values, no copied text); no test,
+script or CI job calls a vendor.
+
+**IM-18. Lookup gets the job.** `lookup(providerJobId, input)` receives the same `PresetInput`
+the job ran with (IM-5 changed), so an adapter can rebuild the composite after an unknown
+outcome. The worker loads the source before it asks; a missing source fails `digest_mismatch`.
+
+**IM-19. Vendor models start unverified.** Each `IMAGE_MODEL_ALLOWLIST` entry gains `verified`.
+`findAllowedModel` returns only verified entries, so a listed but unverified model fails
+`model_not_allowed` before any reservation or call (IM-8). Each adapter lists its model IDs with
+the weights' licence and `verified: false`, marked `TODO verify`, until the owner has checked the
+vendor's hosted-use terms. This settles which IDs are named; it does not settle their terms.
+
+**IM-20. Prices and costs from config.** `parseImageConfig` takes `prices` (minor units of the
+wallet currency, per preset). Only the fake adapter in the test environment may omit them
+(`FAKE_TEST_PRICES`); any other config without prices fails at start-up. The vendor's cost per
+preset (`vendorCostMicros`, micros of USD) is adapter config, recorded on the variant as
+provenance. No price or cost for a real vendor is written in code; the deploy's values are marked
+`TODO verify` until the owner confirms them against the vendor's price page.
+
+**IM-21. Selection fails closed.** `createImageWorkflowPort(config, deps)` builds the configured
+adapter. `kie` or `fal` without an API key or without vendor costs throws at start-up;
+`higgsfield` and `comfyui` throw as not built. The API reads the adapter, environment, prices,
+costs and key from its environment once at start-up (`apps/api/src/config.ts`); when image config
+is absent, every `/v1/media` route is 404, as sites are.
+
+**IM-22. HTTP routes.** Under `/v1/media`, member auth, the `publish` permission, every write
+through the core session and the dispatcher with the `Idempotency-Key` header:
+
+| Route | Does |
+|---|---|
+| `POST /v1/media/assets` | Upload: the raw image bytes as the body, its `Content-Type` one of IM-3's. Body limit `MEDIA_LIMITS.fileBytes` (not the 64 KiB JSON limit). 201 `MediaAssetOutput`. |
+| `GET /v1/media/assets` | `{items: MediaAsset[]}` |
+| `GET /v1/media/assets/:id/content` | The asset's bytes, `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff`. |
+| `POST /v1/media/variants` | Generate (IM-4): `{sourceAssetId, preset, params}`. 201 `ImageVariantOutput`, status `queued`. |
+| `GET /v1/media/variants` | `{items: ImageVariant[]}` |
+| `GET /v1/media/variants/:id` | One variant: the status check. |
+| `GET /v1/media/variants/:id/content` | The staged bytes of a `staged`, `approved` or `promoted` variant; 404 otherwise. Headers as above. |
+| `POST /v1/media/variants/:id/approval` | `{sha256}`: requests `media.variant.approve` through the approvals path (IM-12). 201 the approval; an owner then approves it at `POST /v1/approvals/:id/approve`. |
+| `POST /v1/media/variants/:id/reject` | `{sha256}`: `media.variant.reject` (IM-23). |
+
+Generating never reserves or calls a vendor: the worker reserves before its call (IM-7). Object
+keys come from the session's tenant, never from the path. Another tenant's ID is `NotFound`.
+
+**IM-23. Rejection.** `media.variant.reject` (payload `{variantId, sha256}`, needs `publish`, a
+direct action, not approvable) moves a `staged` variant to the new state `rejected` with
+`rejected_at` (IM-2 gains `staged -> rejected`). A digest that differs is `Conflict`
+`variant_changed`; any other state is `Conflict` `variant_not_staged`; a repeat on a rejected
+variant returns it unchanged. The expiry sweep deletes a rejected variant's staging file as it does
+an expired one's. The reservation was captured at staging and stays captured: the vendor ran.
+
+**IM-24. Site screen.** The dashboard's Site screen gains an Images section: upload a photo, pick
+a preset (and a background description for a swap), see each variant's status, and for a staged
+one the source and the variant side by side with its provenance and price, with Approve (request
+then approve, as one owner action) and Reject. It uses the light-tray tokens
+(`apps/dashboard/src/styles/theme.css`) and existing UI components, and the demo API adapter
+serves it with no backend.
+
+## Second slice
+
+Build IM-17 to IM-24. Migration timestamps 20261024300000 to 20261024399999 (`rejected`,
+`rejected_at`, the guard's new move), runs on PG 15 and 16, keeps forced RLS, and the isolation
+suite still covers both tables.
+
+Acceptance tests:
+1. Route tests (`apps/api/test/media.test.ts`, fake port, two tenants): upload over HTTP, generate,
+   run the worker, read the status and the staged bytes, request and approve, and the variant
+   becomes `promoted`; tenant B's token gets `NotFound` for A's asset, variant and content; a
+   member without `publish` is `Forbidden`; a generate with `params.modelId` is 400; a repeat with
+   the same `Idempotency-Key` returns the same variant; with an empty wallet the variant fails
+   `insufficient_funds` and the port saw no call; reject moves a staged variant to `rejected`.
+2. Adapter fixture tests (`packages/core/test/images/{kie,fal}.test.ts`): each preset end to end
+   against fixtures; the request goes to the fixed host with the key in its header only; a
+   redirect and a result URL on another host are refused; a vendor failure is
+   `ImageAdapterRefused`; a poll that runs past the timeout is `ImageOutcomeUnknown` with the job ID
+   and no second submit; `lookup` finishes a job that was pending; a missing key fails at
+   construction; the adapter's model IDs are on the allowlist, unverified, with no forbidden weights.
+3. Config tests: `kie` without prices fails; `createImageWorkflowPort` without a key fails.
+4. Dashboard unit tests for the image section's state logic, and a Playwright spec
+   (`apps/dashboard/e2e/site-images.spec.ts`) in demo mode: upload, generate, see `staged`,
+   approve, see `approved`; reject another.
+
 ## Known limits
 
 - Open question: whether any preset that re-renders the product (a lifestyle scene) is ever
   allowed. It would break the pixel lock, so it is out until decided.
-- Open question: which hosted model IDs on Kie.ai and FAL, and their licence terms for hosted
-  use, go on the allowlist. That is settled when the first vendor adapter is written.
-- Open question: per-job prices per preset, and whether a failed check should charge the
+- Open question: the hosted-use terms of the Kie.ai and FAL model IDs the adapters name. They
+  are listed unverified (IM-19) until the owner checks them.
+- Open question: per-job prices per preset (config since IM-20, values `TODO verify`), and whether a failed check should charge the
   tenant. This file releases the reservation, so we absorb the vendor cost of a failed check.
 - `upscale_2k` changes pixels by design; only the side-by-side review guards fine details
   such as prongs and hallmarks.

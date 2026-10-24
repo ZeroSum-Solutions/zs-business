@@ -109,6 +109,7 @@ import {
   mediaAssetOutputSchema,
   mediaContentTypeSchema,
   mediaObjectKeys,
+  variantDecisionRequestSchema,
   type ImageVariant,
   type ImageVariantOutput,
   type MediaAsset,
@@ -162,7 +163,7 @@ import { assertImagesApproved } from "../images/gate.js";
 import { imageHandlers, type ImageDependencies } from "../images/handlers.js";
 import { pngIsComplete, readImageInfo, sizeAllowed } from "../images/png.js";
 import { sha256Hex } from "../images/port.js";
-import { findVariant, listAssets, listVariants, variantRecord } from "../images/records.js";
+import { assetColumns, findVariant, listAssets, listVariants, variantRecord, type AssetRow } from "../images/records.js";
 import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
 import { getTopUpForCheckout, listTopUps, rememberCheckoutUrl, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
@@ -202,6 +203,24 @@ export interface EdgeDependencies {
   readonly images?: ImageDependencies;
   /** Milliseconds left before the request's deadline, when it has one. */
   readonly timeLeft?: () => number;
+}
+
+/** IM-22: an image's bytes and media type, read back from the store. */
+export interface StoredImage {
+  readonly bytes: Uint8Array;
+  readonly contentType: string;
+}
+/** IM-22: the variant states whose staged bytes an owner may see. */
+const SHOWN_VARIANT_STATUSES: ReadonlySet<string> = new Set(["staged", "approved", "promoted"]);
+
+/** The object at `key` when its bytes still hash to `sha256`; a changed object is an error, not a 404. */
+async function storedImage(store: SiteObjectStore, key: string, sha256: string): Promise<StoredImage | null> {
+  const object = await store.get(key);
+  if (!object) return null;
+  if (sha256Hex(object.body) !== sha256) throw new Error("A stored image does not match its digest");
+  const info = readImageInfo(object.body);
+  if (!info) throw new Error("A stored image is not readable");
+  return { bytes: object.body, contentType: info.contentType };
 }
 
 /** The edge projection's default time, and the time kept back to send the answer. */
@@ -265,10 +284,11 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "site.create": "publish",
   "site.release.publish": "publish",
   "site.release.activate": "publish",
-  // image-port.md IM-3, IM-4, IM-12: approve is also `required` in APPROVAL_POLICIES.
+  // image-port.md IM-3, IM-4, IM-12, IM-23: approve is also `required` in APPROVAL_POLICIES.
   "media.asset.upload": "publish",
   "media.variant.generate": "publish",
   "media.variant.approve": "publish",
+  "media.variant.reject": "publish",
   "approval.approve": "approve",
   "approval.reject": "approve",
   // stripe.md S-1: only owners add money.
@@ -907,6 +927,63 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         if (!row) throw new NotFound();
         return variantRecord(row);
       });
+    },
+    /** IM-22: an asset's bytes, from the session tenant's key; another tenant's ID is unknown. */
+    async readMediaAssetContent(assetId: unknown): Promise<StoredImage> {
+      const images = requireImages();
+      const id = parseInput(uuidSchema, assetId, "asset ID");
+      const row = await read("publish", async (tx) => (await tx.query<AssetRow>(
+        `SELECT ${assetColumns} FROM media_assets WHERE tenant_id=$1 AND id=$2`, [tenantId, id])).rows[0]);
+      if (!row) throw new NotFound();
+      const image = await storedImage(images.store, mediaObjectKeys.asset(tenantId, row.sha256), row.sha256);
+      if (!image) throw new NotFound();
+      return { bytes: image.bytes, contentType: row.content_type };
+    },
+    /** IM-22: the staged bytes of a staged, approved or promoted variant; anything else is unknown. */
+    async readImageVariantContent(variantId: unknown): Promise<StoredImage> {
+      const images = requireImages();
+      const id = parseInput(uuidSchema, variantId, "variant ID");
+      const row = await read("publish", (tx) => findVariant(tx, tenantId, id));
+      if (!row?.sha256 || !SHOWN_VARIANT_STATUSES.has(row.status)) throw new NotFound();
+      const image = await storedImage(images.store, mediaObjectKeys.staging(tenantId, id, row.sha256), row.sha256)
+        // A promoted variant's bytes are also its asset's.
+        ?? (row.status === "promoted" ? await storedImage(images.store, mediaObjectKeys.asset(tenantId, row.sha256), row.sha256) : null);
+      if (!image) throw new NotFound();
+      return image;
+    },
+    /**
+     * IM-12, IM-22: propose `media.variant.approve` for the digest the owner saw, through the same
+     * approvals path as requestApproval; an owner then approves it at /v1/approvals/:id/approve.
+     */
+    async requestImageVariantApproval(variantId: unknown, body: unknown, key: unknown): Promise<ApprovalOutput> {
+      requireImages();
+      const id = parseInput(uuidSchema, variantId, "variant ID");
+      const { sha256 } = parseInput(variantDecisionRequestSchema, body);
+      const { id: approvalId, ...rest } = envelope(key, "approval");
+      // Fail early on an image nobody can approve. Approved and promoted pass, so a retry replays.
+      const row = await read("publish", (tx) => findVariant(tx, tenantId, id));
+      if (!row) throw new NotFound();
+      if (row.status === "expired") throw new Conflict("The staged image expired", { reason: "variant_expired" });
+      if (!SHOWN_VARIANT_STATUSES.has(row.status)) throw new Conflict("The image is not ready to approve", { reason: "variant_not_staged", status: row.status });
+      if (row.sha256 !== sha256) throw new Conflict("The image changed since it was shown", { reason: "variant_changed" });
+      const request = requestApprovalRequestSchema.parse({
+        action: { actionType: "media.variant.approve", target: { type: "media_variant", id }, payload: { variantId: id, sha256 } },
+        summary: `Use the ${row.preset.replaceAll("_", " ")} image on the site`,
+      });
+      return parseInput(approvalOutputSchema,
+        await run({ actionType: "approval.request", ...rest, payload: { approvalId, ...request } }), "result");
+    },
+    /** IM-23: turn a staged variant down, directly; a repeat on a rejected variant returns it. */
+    async rejectImageVariant(variantId: unknown, body: unknown, key: unknown): Promise<ImageVariantOutput> {
+      requireImages();
+      const id = parseInput(uuidSchema, variantId, "variant ID");
+      const { sha256 } = parseInput(variantDecisionRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "media_variant", id);
+      // IM-22: another tenant's ID is unknown here, not a denied target.
+      if (!(await read("publish", (tx) => findVariant(tx, tenantId, id)))) throw new NotFound();
+      return parseInput(imageVariantOutputSchema, await run({
+        actionType: "media.variant.reject", ...rest, payload: { variantId: id, sha256 },
+      } as ActionCommand), "result");
     },
 
     /** business-profile.md BP-5: who the business is; any member reads it. */

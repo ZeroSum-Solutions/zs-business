@@ -111,6 +111,17 @@ export function pngIsComplete(bytes: Uint8Array): boolean {
   return false;
 }
 
+/** A WebP that is whole: its RIFF size covers exactly the bytes there are, with a bitstream chunk after the header. */
+export function webpIsComplete(bytes: Uint8Array): boolean {
+  if (bytes.length < 30 || ascii(bytes, 0, 4) !== "RIFF" || ascii(bytes, 8, 4) !== "WEBP") return false;
+  const riff = bytes[4]! | (bytes[5]! << 8) | (bytes[6]! << 16) | (bytes[7]! * 2 ** 24);
+  return riff + 8 === bytes.length;
+}
+
+/** The output check for an image we cannot fully decode: whole by its own container (IM-9 for upscales). */
+export const imageIsComplete = (bytes: Uint8Array, contentType: string): boolean =>
+  contentType === "image/png" ? pngIsComplete(bytes) : contentType === "image/webp" ? webpIsComplete(bytes) : false;
+
 export function decodePng(bytes: Uint8Array): DecodedPng {
   if (!startsWith(bytes, PNG_SIGNATURE)) throw new UnsupportedImage("Not a PNG");
   let width = 0;

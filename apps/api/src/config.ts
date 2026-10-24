@@ -2,7 +2,9 @@ import { parse } from "pg-connection-string";
 import { z } from "zod";
 import {
   formatEnvIssues,
+  IMAGE_ENVIRONMENTS,
   jwtEnvSchema,
+  parseImageConfig,
   parseStripeEnv,
   resendWebhookSecretSchema,
   secureUrlProblem,
@@ -10,11 +12,13 @@ import {
   trimTrailingSlashes,
   twilioAccountSidSchema,
   twilioAuthTokenSchema,
+  type ImageConfig,
   type JwtConfig,
   type KeywordReplies,
   type SessionCheckConfig,
   type StripeEnv,
 } from "@zs/core";
+import { IMAGE_ADAPTERS, IMAGE_PRESETS, type ImagePreset } from "@zs/contracts";
 import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 import { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
@@ -163,6 +167,15 @@ export interface ServerEnv {
   readonly google: GoogleEnv | null;
   readonly twilioWebhook: TwilioWebhookEnv | null;
   readonly activepieces: ActivepiecesEnv | null;
+  /** image-port.md IM-21: image jobs; null (every /v1/media route 404) when IMAGE_ADAPTER is unset. */
+  readonly images: ImageEnv | null;
+}
+export interface ImageEnv {
+  readonly config: ImageConfig;
+  /** IM-17: the configured vendor's key (KIE_API_KEY or FAL_API_KEY); the worker calls the vendor, the API never does. */
+  readonly apiKey: string | undefined;
+  /** IM-20: the vendor's cost per preset, micros of USD; required for `kie` and `fal`. */
+  readonly vendorCostMicros: Readonly<Record<ImagePreset, number>> | undefined;
 }
 export interface ActivepiecesEnv {
   readonly keySecrets: { readonly current: string; readonly previous?: string };
@@ -229,7 +242,88 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     google: parseGoogleEnv(env),
     twilioWebhook: parseTwilioWebhook(parsed.data),
     activepieces: parseActivepieces(parsed.data),
+    images: imagesWithStore(parseImageEnv(env), parsed.data.SITES_STORE),
   };
+}
+
+/** Images live in the site store, beside the releases that publish them (IM-14). */
+function imagesWithStore(images: ImageEnv | null, store: string | undefined): ImageEnv | null {
+  if (images !== null && store === undefined) throw new Error("Invalid environment: IMAGE_ADAPTER needs SITES_STORE (images live in the site store)");
+  return images;
+}
+
+const IMAGE_KEYS = { kie: "KIE_API_KEY", fal: "FAL_API_KEY" } as const;
+/** A JSON object of one whole number per preset, and nothing else. */
+const perPresetSchema = (min: number) => z.strictObject(Object.fromEntries(
+  IMAGE_PRESETS.map((preset) => [preset, z.number().int().min(min).max(Number.MAX_SAFE_INTEGER)]))) as unknown as z.ZodType<Record<ImagePreset, number>>;
+const imageEnvSchema = z.object({
+  IMAGE_ADAPTER: z.enum(IMAGE_ADAPTERS),
+  // Unset is production: the strictest, where only `kie` and `fal` start (IM-6).
+  IMAGE_ENVIRONMENT: z.enum(IMAGE_ENVIRONMENTS).default("production"),
+  IMAGE_CURRENCY: z.string().regex(/^[a-z]{3}$/).optional(),
+  // IM-20: no price or cost is written in code. The deploy's values are TODO verify until the
+  // owner checks them against the vendor's price page.
+  IMAGE_PRICES_MINOR: z.string().optional(),
+  IMAGE_VENDOR_COST_MICROS: z.string().optional(),
+  KIE_API_KEY: z.string().min(1).optional(),
+  FAL_API_KEY: z.string().min(1).optional(),
+});
+
+function jsonVariable<T>(name: string, value: string | undefined, schema: z.ZodType<T>): T | undefined {
+  if (value === undefined) return undefined;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error(`Invalid environment: ${name} is not JSON`);
+  }
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) throw new Error(`Invalid environment: ${name} needs one whole number for each of ${IMAGE_PRESETS.join(", ")}`);
+  return parsed.data;
+}
+
+/**
+ * IM-6, IM-20, IM-21: the image adapter, its environment, prices, vendor costs and key, read once
+ * at start-up. Unset IMAGE_ADAPTER means images are off. A vendor without its key or costs, a
+ * deploy without prices, and the fake on a database that is not loopback all fail here, closed.
+ */
+export function parseImageEnv(env: Readonly<Record<string, string | undefined>>, databaseUrl = env.DATABASE_URL): ImageEnv | null {
+  if (env.IMAGE_ADAPTER === undefined) {
+    const stray = ["IMAGE_ENVIRONMENT", "IMAGE_CURRENCY", "IMAGE_PRICES_MINOR", "IMAGE_VENDOR_COST_MICROS"].filter((name) => env[name] !== undefined);
+    if (stray.length > 0) throw new Error(`Invalid environment: ${stray.join(", ")} needs IMAGE_ADAPTER`);
+    return null;
+  }
+  const parsed = imageEnvSchema.safeParse(env);
+  if (!parsed.success) throw new Error(formatEnvIssues(parsed.error.issues));
+  const data = parsed.data;
+  const prices = jsonVariable("IMAGE_PRICES_MINOR", data.IMAGE_PRICES_MINOR, perPresetSchema(1));
+  const vendorCostMicros = jsonVariable("IMAGE_VENDOR_COST_MICROS", data.IMAGE_VENDOR_COST_MICROS, perPresetSchema(0));
+  let config: ImageConfig;
+  try {
+    config = parseImageConfig({
+      environment: data.IMAGE_ENVIRONMENT, adapter: data.IMAGE_ADAPTER,
+      ...(data.IMAGE_CURRENCY === undefined ? {} : { currency: data.IMAGE_CURRENCY }),
+      ...(prices === undefined ? {} : { prices }),
+    });
+  } catch (error) {
+    throw new Error(`Invalid environment: ${(error as Error).message}`);
+  }
+  // IM-21: as createImageWorkflowPort, so the API and the worker refuse the same configs.
+  if (config.adapter === "higgsfield" || config.adapter === "comfyui")
+    throw new Error(`Invalid environment: the ${config.adapter} image adapter is not built`);
+  if (config.adapter === "fake") {
+    try {
+      assertLocalDatabaseUrl(databaseUrl ?? "");
+    } catch {
+      throw new Error("Invalid environment: IMAGE_ADAPTER=fake needs a loopback database URL");
+    }
+  }
+  const keyName = config.adapter === "kie" || config.adapter === "fal" ? IMAGE_KEYS[config.adapter] : undefined;
+  const apiKey = keyName === undefined ? undefined : data[keyName];
+  if (keyName !== undefined && apiKey === undefined) throw new Error(`Invalid environment: IMAGE_ADAPTER=${config.adapter} needs ${keyName}`);
+  if (keyName !== undefined && vendorCostMicros === undefined)
+    throw new Error(`Invalid environment: IMAGE_ADAPTER=${config.adapter} needs IMAGE_VENDOR_COST_MICROS`);
+  return { config, apiKey, vendorCostMicros };
 }
 
 function parseSites(data: z.infer<typeof envSchema>): SitesEnv | null {

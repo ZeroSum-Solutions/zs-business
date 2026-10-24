@@ -1,4 +1,4 @@
-// Image actions (image-port.md IM-3, IM-4, IM-10, IM-12). They run inside the shared dispatcher
+// Image actions (image-port.md IM-3, IM-4, IM-10, IM-12, IM-23). They run inside the shared dispatcher
 // transaction and touch only the database, except the upload check, which asks the store whether
 // the bytes the edge wrote are there. The model, the vendor and the wallet are the worker's job.
 import {
@@ -8,6 +8,7 @@ import {
   generateVariantCommandSchema,
   MEDIA_LIMITS,
   NotFound,
+  rejectVariantCommandSchema,
   stageVariantCommandSchema,
   uploadAssetCommandSchema,
   ValidationFailed,
@@ -133,6 +134,33 @@ export const approveVariantHandler: ActionHandler = {
   },
 };
 
+/**
+ * IM-23: the owner turns a staged variant down. A direct action: rejecting publishes nothing. The
+ * hold was captured at staging and stays captured; the expiry sweep deletes the staging file.
+ */
+export const rejectVariantHandler: ActionHandler = {
+  resolveTarget: targetResolver("media_variant", "image_variants", true),
+  async handle({ tx, command, binding, clock }) {
+    const { payload } = parseOrFail(rejectVariantCommandSchema, command);
+    const tenantId = binding.tenantId;
+    const row = await loadVariant(tx, tenantId, payload.variantId);
+    if (row.status === "rejected") {
+      if (row.sha256 !== payload.sha256) throw new Conflict("The image changed since it was shown", { reason: "variant_changed" });
+      return { result: json(variantRecord(row)) };
+    }
+    if (row.status !== "staged") throw new Conflict("The image is not waiting for a decision", { reason: "variant_not_staged", status: row.status });
+    if (row.sha256 !== payload.sha256) throw new Conflict("The image changed since it was shown", { reason: "variant_changed" });
+    // As in approve: the row lock may have waited, so the decision is stamped when it is made.
+    await tx.query(
+      "UPDATE image_variants SET status='rejected', rejected_at=$3 WHERE tenant_id=$1 AND id=$2", [tenantId, payload.variantId, clock()]);
+    const updated = (await findVariant(tx, tenantId, payload.variantId))!;
+    return {
+      result: json(variantRecord(updated)),
+      event: { type: "media.variant.rejected", payload: { variantId: payload.variantId, sha256: payload.sha256 } },
+    };
+  },
+};
+
 /** IM-10, IM-15: the worker principal records the verified output and every provenance field, once. */
 export const stageVariantHandler: ActionHandler = {
   resolveTarget: targetResolver("media_variant", "image_variants", true),
@@ -190,6 +218,7 @@ export const imageHandlers: Readonly<Record<string, ActionHandler>> = Object.fre
   "media.asset.upload": uploadAssetHandler,
   "media.variant.generate": generateVariantHandler,
   "media.variant.approve": approveVariantHandler,
+  "media.variant.reject": rejectVariantHandler,
   "media.variant.stage": stageVariantHandler,
   "media.variant.fail": failVariantHandler,
 });

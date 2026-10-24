@@ -10,6 +10,8 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import {
   createFakeImageWorkflowPort,
   createImageWorker,
+  createImageWorkflowPort,
+  imagePrice,
   createMemorySiteStore,
   createSession,
   creditWallet,
@@ -20,6 +22,7 @@ import {
   memberDispatch,
   NON_COMMERCIAL_LICENSE,
   parseImageConfig,
+  sha256Hex,
   type EdgeDependencies,
   type FakeImageWorkflowPort,
   type ImageReport,
@@ -46,6 +49,8 @@ let reports: ImageReport[];
 const store = createMemorySiteStore();
 const siteStore = createMemorySiteStore();
 const config = parseImageConfig({ environment: "test", adapter: "fake" });
+/** TODO verify: placeholder prices for config tests only. */
+const prices = { background_remove: 10, studio_background_swap: 25, upscale_2k: 30 };
 
 /** A fake compiler: the spec lists base64 image files and the page that links them. */
 const compiler: SiteCompiler = {
@@ -402,6 +407,22 @@ describe("review fixes", () => {
     expect((await variant(queued.id)).status).toBe("staged");
     expect(port.calls).toHaveLength(1);
   });
+
+  it("fails an upscale whose file is only a header, and releases its hold", async () => {
+    const headerOnly = {
+      ...port,
+      runPreset: async (input: Parameters<typeof port.runPreset>[0]) => {
+        const output = await port.runPreset(input);
+        const bytes = output.bytes.slice(0, 33); // signature and IHDR, no image data
+        return { ...output, bytes, sha256: sha256Hex(bytes) };
+      },
+    } as typeof port;
+    const source = await upload();
+    const queued = await generate({ sourceAssetId: source.id, preset: "upscale_2k", params: {} });
+    await createImageWorker({ service, db: database.db, store, port: headerOnly, config, clock, generateId: randomUUID, report: (event) => reports.push(event) }).runOnce();
+    expect(await variant(queued.id)).toMatchObject({ status: "failed", failure_reason: "output_invalid" });
+    expect((await reservation(queued.id))?.status).toBe("released");
+  });
 });
 
 describe("edge rules", () => {
@@ -460,15 +481,175 @@ describe("allowlist, config and keys (IM-6, IM-8, IM-16)", () => {
   it("refuses a production config that names higgsfield or the fake", () => {
     for (const adapter of ["higgsfield", "fake", "comfyui"])
       expect(() => parseImageConfig({ environment: "production", adapter })).toThrow();
-    expect(parseImageConfig({ environment: "production", adapter: "kie" }).adapter).toBe("kie");
-    expect(parseImageConfig({ environment: "production", adapter: "fal" }).adapter).toBe("fal");
-    expect(() => parseImageConfig({ environment: "test", adapter: "kie" })).toThrow();
-    expect(() => parseImageConfig({ environment: "production", adapter: "kie", extra: 1 })).toThrow();
+    expect(parseImageConfig({ environment: "production", adapter: "kie", prices }).adapter).toBe("kie");
+    expect(parseImageConfig({ environment: "production", adapter: "fal", prices }).adapter).toBe("fal");
+    expect(() => parseImageConfig({ environment: "test", adapter: "kie", prices })).toThrow();
+    expect(() => parseImageConfig({ environment: "production", adapter: "kie", prices, extra: 1 })).toThrow();
+  });
+
+  it("reads prices from config: only the fake in tests may omit them (IM-20)", () => {
+    expect(() => parseImageConfig({ environment: "production", adapter: "kie" })).toThrow(/prices/);
+    expect(() => parseImageConfig({ environment: "development", adapter: "fake" })).toThrow(/prices/);
+    expect(() => parseImageConfig({ environment: "production", adapter: "fal", prices: { ...prices, upscale_2k: 0 } })).toThrow();
+    expect(parseImageConfig({ environment: "production", adapter: "fal", prices }).prices).toEqual(prices);
+    expect(imagePrice(parseImageConfig({ environment: "production", adapter: "kie", prices, currency: "eur" }), "upscale_2k"))
+      .toEqual({ priceMinor: 30, currency: "eur" });
+  });
+
+  it("selects the configured adapter and fails closed without a key (IM-21)", () => {
+    const portDeps = { fetch: (() => { throw new Error("no network in tests"); }) as unknown as typeof fetch, clock, sleep: async () => undefined };
+    const kie = parseImageConfig({ environment: "production", adapter: "kie", prices });
+    const fal = parseImageConfig({ environment: "production", adapter: "fal", prices });
+    expect(() => createImageWorkflowPort(kie, portDeps)).toThrow(/API key/);
+    expect(() => createImageWorkflowPort(fal, { ...portDeps, apiKey: "" })).toThrow(/API key/);
+    expect(() => createImageWorkflowPort(fal, { ...portDeps, apiKey: "k" })).toThrow(/vendor costs/);
+    expect(createImageWorkflowPort(config, portDeps).adapter).toBe("fake");
+  });
+
+  it("runs nothing on an unverified allowlist entry (IM-19)", () => {
+    for (const entry of IMAGE_MODEL_ALLOWLIST.filter((candidate) => !candidate.verified))
+      expect(findAllowedModel(entry.adapter, entry.modelId)).toBeNull();
   });
 
   it("reserves the image-job: key prefix for the worker", () => {
     expect(idempotencyKeySchema.safeParse("image-job:abc:stage").success).toBe(false);
     expect(idempotencyKeySchema.safeParse("IMAGE-JOB:abc").success).toBe(false);
     expect(idempotencyKeySchema.safeParse("image-jobs-are-fine").success).toBe(true);
+  });
+});
+
+describe("rejection and content reads (IM-22, IM-23)", () => {
+  async function stagedVariant(preset: "background_remove" | "studio_background_swap" = "background_remove") {
+    const source = await upload();
+    const queued = await generate(preset === "background_remove"
+      ? { sourceAssetId: source.id, preset, params: {} } : swap(source.id, `staged ${photoSeed}`));
+    await worker().runOnce();
+    const row = await variant(queued.id);
+    expect(row.status).toBe("staged");
+    return { source, row };
+  }
+
+  it("rejects a staged variant once, keeps the capture and sweeps its staging file", async () => {
+    const { row } = await stagedVariant();
+    const owner = sessionFor(tenantA, ownerA);
+    await expect(owner.rejectImageVariant(row.id, { sha256: "0".repeat(64) }, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_changed" } });
+    now = START + 60_000;
+    const rejected = (await owner.rejectImageVariant(row.id, { sha256: row.sha256 }, randomUUID())).result;
+    expect(rejected).toMatchObject({ status: "rejected", rejectedAt: new Date(START + 60_000).toISOString(), sha256: row.sha256 });
+    expect(await rows("SELECT payload FROM outbox WHERE tenant_id=$1 AND event_type='media.variant.rejected' AND payload->>'variantId'=$2",
+      [tenantA, row.id])).toEqual([{ payload: { variantId: row.id, sha256: row.sha256 } }]);
+    // A repeat under a new key returns it unchanged.
+    now = START + 120_000;
+    const again = (await owner.rejectImageVariant(row.id, { sha256: row.sha256 }, randomUUID())).result;
+    expect(again).toEqual(rejected);
+    // The vendor ran: the hold stays captured.
+    expect((await reservation(row.id))?.status).toBe("captured");
+    await worker().runOnce();
+    expect(await store.head(mediaObjectKeys.staging(tenantA, row.id, row.sha256))).toBeNull();
+    expect((await variant(row.id)).status).toBe("rejected");
+    await expect(approve(row.id, row.sha256)).rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_not_staged" } });
+    await expect(owner.readImageVariantContent(row.id)).rejects.toMatchObject({ code: "NotFound" });
+  });
+
+  it("sweeps every rejected staging file in the window, past the first hundred", async () => {
+    const source = await upload();
+    const keys: string[] = [];
+    const STAGE = `status='staged', staged_at=$3, expires_at=$4, adapter='fake', model_id='fake-matte-v1', model_license='apache-2.0', workflow_hash='w1'`;
+    for (let i = 0; i < 101; i += 1) {
+      const id = randomUUID();
+      const sha = sha256Hex(new TextEncoder().encode(`rejected ${id}`));
+      const rejectedAt = new Date(START - (i + 1) * 60_000);
+      await service(async (tx) => {
+        await tx.query(`INSERT INTO image_variants (tenant_id,id,source_asset_id,source_sha256,preset,params,price_minor,currency,created_by,created_at)
+          VALUES ($1,$2,$3,$4,'background_remove','{}',10,'usd',$5,$6)`, [tenantA, id, source.id, source.sha256, ownerA, new Date(START - DAY)]);
+        await tx.query("UPDATE image_variants SET status='running' WHERE tenant_id=$1 AND id=$2", [tenantA, id]);
+        await tx.query(`UPDATE image_variants SET ${STAGE}, sha256='${sha}' WHERE tenant_id=$1 AND id=$2`, [tenantA, id, new Date(START - DAY), new Date(START + 13 * DAY)]);
+        await tx.query("UPDATE image_variants SET status='rejected', rejected_at=$3 WHERE tenant_id=$1 AND id=$2", [tenantA, id, rejectedAt]);
+      });
+      const key = mediaObjectKeys.staging(tenantA, id, sha);
+      await store.put(key, new Uint8Array([i & 0xff]), { contentType: "image/png" });
+      keys.push(key);
+    }
+    // One long-lived worker, as apps/api runs it: each pass takes the next part of the backlog.
+    const sweeper = worker();
+    await sweeper.runOnce();
+    await sweeper.runOnce();
+    const left = [];
+    for (const key of keys) if (await store.head(key)) left.push(key);
+    expect(left).toEqual([]);
+  });
+
+  it("refuses to reject a variant that is not staged, another tenant's, or without publish", async () => {
+    const source = await upload();
+    const queued = await generate({ sourceAssetId: source.id, preset: "background_remove", params: {} });
+    await expect(sessionFor(tenantA, ownerA).rejectImageVariant(queued.id, { sha256: "a".repeat(64) }, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_not_staged" } });
+    await worker().runOnce();
+    const row = await variant(queued.id);
+    await expect(sessionFor(tenantB, ownerB).rejectImageVariant(queued.id, { sha256: row.sha256 }, randomUUID()))
+      .rejects.toMatchObject({ code: "NotFound" });
+    await expect(sessionFor(tenantA, memberA).rejectImageVariant(queued.id, { sha256: row.sha256 }, randomUUID()))
+      .rejects.toMatchObject({ code: "TenantDenied" });
+    await expect(sessionFor(tenantA, ownerA).rejectImageVariant(queued.id, { sha256: row.sha256, note: "x" }, randomUUID()))
+      .rejects.toMatchObject({ code: "ValidationFailed" });
+    expect((await variant(queued.id)).status).toBe("staged");
+  });
+
+  it("never runs a rejection through an approval", async () => {
+    const { row } = await stagedVariant();
+    await expect(sessionFor(tenantA, ownerA).requestApproval({
+      action: { actionType: "media.variant.reject", target: { type: "media_variant", id: row.id }, payload: { variantId: row.id, sha256: row.sha256 } },
+      summary: "Reject it",
+    }, randomUUID())).rejects.toMatchObject({ code: "ValidationFailed" });
+  });
+
+  it("reads an asset's and a staged variant's bytes for the session tenant only", async () => {
+    const owner = sessionFor(tenantA, ownerA);
+    const photo = ringPhoto(500);
+    const asset = (await owner.uploadMediaAsset(photo, "image/png", randomUUID())).result;
+    const content = await owner.readMediaAssetContent(asset.id);
+    expect(content.contentType).toBe("image/png");
+    expect(Buffer.from(content.bytes).equals(Buffer.from(photo))).toBe(true);
+    await expect(sessionFor(tenantB, ownerB).readMediaAssetContent(asset.id)).rejects.toMatchObject({ code: "NotFound" });
+    await expect(sessionFor(tenantA, memberA).readMediaAssetContent(asset.id)).rejects.toMatchObject({ code: "TenantDenied" });
+    await expect(owner.readMediaAssetContent(randomUUID())).rejects.toMatchObject({ code: "NotFound" });
+
+    const queued = await generate({ sourceAssetId: asset.id, preset: "background_remove", params: {} });
+    await expect(owner.readImageVariantContent(queued.id)).rejects.toMatchObject({ code: "NotFound" });
+    await worker().runOnce();
+    const row = await variant(queued.id);
+    const staged = await owner.readImageVariantContent(queued.id);
+    expect(staged.contentType).toBe("image/png");
+    expect(Buffer.from(staged.bytes).equals(Buffer.from(await stagedBytes(row)))).toBe(true);
+    await expect(sessionFor(tenantB, ownerB).readImageVariantContent(queued.id)).rejects.toMatchObject({ code: "NotFound" });
+
+    // A stored object that no longer matches its row is an error, never served.
+    await store.delete(mediaObjectKeys.staging(tenantA, row.id, row.sha256));
+    await store.put(mediaObjectKeys.staging(tenantA, row.id, row.sha256), ringPhoto(501), { contentType: "image/png" });
+    await expect(owner.readImageVariantContent(queued.id)).rejects.toThrow(/digest/);
+  });
+
+  it("requests the approval of a staged variant through the approvals path", async () => {
+    const { row } = await stagedVariant("studio_background_swap");
+    const owner = sessionFor(tenantA, ownerA);
+    await expect(owner.requestImageVariantApproval(row.id, { sha256: "b".repeat(64) }, randomUUID()))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "variant_changed" } });
+    await expect(sessionFor(tenantB, ownerB).requestImageVariantApproval(row.id, { sha256: row.sha256 }, randomUUID()))
+      .rejects.toMatchObject({ code: "NotFound" });
+    const key = randomUUID();
+    const proposal = await owner.requestImageVariantApproval(row.id, { sha256: row.sha256 }, key);
+    expect(proposal.result).toMatchObject({
+      status: "pending", actionType: "media.variant.approve", target: { tenantId: tenantA, type: "media_variant", id: row.id },
+      payload: { variantId: row.id, sha256: row.sha256 },
+    });
+    expect((await owner.requestImageVariantApproval(row.id, { sha256: row.sha256 }, key)).result.id).toBe(proposal.result.id);
+    const decided = await owner.approveApproval(proposal.result.id, {}, randomUUID());
+    expect(decided.execution.result).toMatchObject({ status: "approved" });
+    // A retry of the request after the approval replays it.
+    expect((await owner.requestImageVariantApproval(row.id, { sha256: row.sha256 }, key)).result.id).toBe(proposal.result.id);
+    await worker().runOnce();
+    expect((await variant(row.id)).status).toBe("promoted");
+    expect((await owner.readImageVariantContent(row.id)).contentType).toBe("image/png");
   });
 });

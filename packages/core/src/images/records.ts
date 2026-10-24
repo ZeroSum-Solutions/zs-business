@@ -48,11 +48,12 @@ export interface VariantRow {
   expires_at: Date | null;
   approved_at: Date | null;
   promoted_at: Date | null;
+  rejected_at: Date | null;
 }
 export const variantColumns =
   `id, source_asset_id, source_sha256, preset, params, status, failure_reason, sha256, matte_sha256, background_sha256,
    adapter, model_id, model_license, workflow_hash, prompt_text, provider_job_id, price_minor, currency,
-   vendor_cost_micros::text AS vendor_cost_micros, created_by, created_at, staged_at, expires_at, approved_at, promoted_at`;
+   vendor_cost_micros::text AS vendor_cost_micros, created_by, created_at, staged_at, expires_at, approved_at, promoted_at, rejected_at`;
 
 const iso = (value: Date | null) => value?.toISOString() ?? null;
 
@@ -65,6 +66,7 @@ export const variantRecord = (row: VariantRow): ImageVariant => ({
   vendorCostMicros: row.vendor_cost_micros === null ? null : Number(row.vendor_cost_micros),
   createdBy: row.created_by, createdAt: row.created_at.toISOString(), stagedAt: iso(row.staged_at),
   expiresAt: iso(row.expires_at), approvedAt: iso(row.approved_at), promotedAt: iso(row.promoted_at),
+  rejectedAt: iso(row.rejected_at),
 });
 
 export async function findVariant(tx: Transaction, tenantId: string, id: string, lock = false): Promise<VariantRow | null> {
