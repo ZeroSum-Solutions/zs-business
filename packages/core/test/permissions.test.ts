@@ -11,7 +11,7 @@ import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type Edg
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
   AGENT_ACTIONS, agentHandlers, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
-  crmHandlers, dealDetailsHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
+  crmHandlers, dealDetailsHandlers, documentIntakeHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
 } from "../src/index.js";
@@ -55,6 +55,9 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "wallet.topup.create": "billing",
   "calendar.google.connect": "publish",
   "calendar.google.disconnect": "publish",
+  "catalog.intake.apply": "publish",
+  "catalog.intake.discard": "publish",
+  "catalog.intake.upload": "publish",
   "agent.settings.update": "agents",
   "agent.kill": "inbox.drafts",
   "agent.resume": "agents",
@@ -414,10 +417,11 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
     })
-      // M6: the agent's own run actions belong to the agent principal only (agents.md G-1).
-      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action) && !IMAGE_WORKER_ACTIONS.includes(action))
+      // M6: the agent's own run actions belong to the agent principal only (agents.md G-1); the intake worker's result and fail actions
+      // belong to its server-side principal (document-intake.md DL-5); the image worker's to its own.
+      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action) && !IMAGE_WORKER_ACTIONS.includes(action) && action !== "catalog.intake.result" && action !== "catalog.intake.fail")
       .sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);

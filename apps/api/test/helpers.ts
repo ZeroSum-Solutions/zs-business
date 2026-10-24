@@ -8,7 +8,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
+import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryIntakeFileStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
 import {
   createApp,
@@ -44,6 +44,8 @@ export const TWILIO_ACCOUNT_SID = `AC${"a1".repeat(16)}`;
 export const TWILIO_WEBHOOK_BASE_URL = "https://api.example.test";
 /** Synthetic transcription worker bearer token, built at runtime like SECRET. */
 export const WORKER_TOKEN = ["test", "worker", "w".repeat(32)].join("-");
+/** Synthetic document-intake worker bearer token, built at runtime like SECRET. */
+export const INTAKE_WORKER_TOKEN = ["test", "intake", "i".repeat(32)].join("-");
 export const ACTIVEPIECES_KEY_SECRET = ["test", "activepieces", "a".repeat(32)].join("-");
 export const PREVIOUS_RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "r".repeat(32)].join("-")).toString("base64");
 
@@ -70,6 +72,8 @@ export interface ApiHarness {
   b: TenantSetup;
   /** The transcription fakes, when the harness turned the routes on. */
   transcription?: { audio: InMemoryAudioStore; voicemails: InMemoryVoicemails };
+  /** The document-intake PDF store, when the harness turned the routes on. */
+  documentIntake?: { store: InMemoryIntakeFileStore };
   close(): Promise<void>;
 }
 
@@ -138,6 +142,8 @@ export interface HarnessOptions {
   enrichment?: EnrichmentConfigInput;
   /** Turns the /v1/transcriptions and /worker/v1 routes on over in-memory audio and voicemails. */
   transcription?: boolean;
+  /** Turns the /v1/document-intake and /v1/workers/document-intake routes on over an in-memory PDF store. */
+  documentIntake?: boolean;
   clock?: { now(): Date };
   /** Turns the /v1/sites routes on over this store and compiler. */
   sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
@@ -150,6 +156,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
   // As in the server: one shared limiter for the booking and unsubscribe routes.
   const shared = options.limiterStore === "postgres" ? { limiter: createPostgresRateLimiter(database.db, appClock) } : {};
   const transcription = options.transcription ? { audio: new InMemoryAudioStore(), voicemails: new InMemoryVoicemails() } : undefined;
+  const documentIntake = options.documentIntake ? { store: new InMemoryIntakeFileStore() } : undefined;
   const app = createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
     // The loopback auth stub stands in for Supabase Auth; core's tests cover the Supabase check.
@@ -184,6 +191,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
       ? { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET }, ...options.activepieces } }
       : {}),
     ...(transcription ? { transcription: { ...transcription, workerToken: WORKER_TOKEN } } : {}),
+    ...(documentIntake ? { documentIntake: { ...documentIntake, workerToken: INTAKE_WORKER_TOKEN } } : {}),
   });
   return {
     database,
@@ -192,6 +200,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     a: await provision(database, fixture, fixture.a.tenantId),
     b: await provision(database, fixture, fixture.b.tenantId),
     ...(transcription ? { transcription } : {}),
+    ...(documentIntake ? { documentIntake } : {}),
     close: () => database.close(),
   };
 }

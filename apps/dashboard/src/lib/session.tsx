@@ -252,6 +252,8 @@ export const READ_RESULTS: Permission = "reports";
 export const STOP_AGENTS: Permission = "inbox.drafts";
 /** Changes the follow-up agent's settings, resumes it and runs it now (G-2, G-3): owners only. */
 export const MANAGE_AGENTS: Permission = "agents";
+/** Reads, applies and discards price-list intake jobs (document-intake.md DL-3, DL-13): owners only. */
+export const MANAGE_CATALOG: Permission = "publish";
 /** Changes the business profile (business-profile.md BP-6): owners only; every member reads it. */
 export const MANAGE_BUSINESS: Permission = "business";
 
