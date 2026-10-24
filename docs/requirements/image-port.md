@@ -233,4 +233,11 @@ site screen is unchanged. Differences from the text above:
   This is an open risk for site specs that carry vector art.
 - A worker crash between the hold and the vendor call is an unknown outcome and is never resent:
   after `outcomeWaitMs` the variant fails `outcome_unknown` and the hold stays for an operator.
+- Uploads check the PNG is whole (chunks, image data, IEND) but a JPEG or WebP is checked by its
+  header only: there is no decoder for either yet. Matte presets decode 8-bit non-interlaced
+  grey, RGB, grey+alpha and RGBA PNG; other legal PNGs upload but fail `source_undecodable`.
+- Two variants with identical output bytes share one asset (IM-1 keys assets by content), so the
+  `media_asset` source record names the first variant that was promoted.
+- Expiry deletes the staging file and retries recent expiries (7 days) on each pass; an older
+  failed delete stays an orphan until the sweep named below exists.
 - Acceptance step 8 checks `business_profiles` unchanged: no `catalog_items` table exists yet.

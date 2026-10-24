@@ -92,6 +92,25 @@ export interface DecodedPng extends RgbaImage {
 }
 
 /** Decodes a non-interlaced 8-bit PNG. Anything else throws UnsupportedImage. */
+/**
+ * A PNG that is whole: every chunk fits, there is image data, and it ends with IEND. This is the
+ * upload check; it accepts every legal PNG (indexed, 16-bit, interlaced), unlike decodePng.
+ */
+export function pngIsComplete(bytes: Uint8Array): boolean {
+  if (!startsWith(bytes, PNG_SIGNATURE)) return false;
+  let i = 8;
+  let sawData = false;
+  while (i + 12 <= bytes.length) {
+    const length = u32be(bytes, i);
+    const type = ascii(bytes, i + 4, 4);
+    if (i + 12 + length > bytes.length) return false;
+    if (type === "IDAT" && length > 0) sawData = true;
+    if (type === "IEND") return sawData;
+    i += 12 + length;
+  }
+  return false;
+}
+
 export function decodePng(bytes: Uint8Array): DecodedPng {
   if (!startsWith(bytes, PNG_SIGNATURE)) throw new UnsupportedImage("Not a PNG");
   let width = 0;

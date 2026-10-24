@@ -147,7 +147,7 @@ import {
 } from "../sites/index.js";
 import { assertImagesApproved } from "../images/gate.js";
 import { imageHandlers, type ImageDependencies } from "../images/handlers.js";
-import { decodePng, readImageInfo, sizeAllowed } from "../images/png.js";
+import { pngIsComplete, readImageInfo, sizeAllowed } from "../images/png.js";
 import { sha256Hex } from "../images/port.js";
 import { findVariant, listAssets, listVariants, variantRecord } from "../images/records.js";
 import { getWallet } from "../wallet/index.js";
@@ -840,8 +840,8 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       if (bytes.byteLength < 1 || bytes.byteLength > MEDIA_LIMITS.fileBytes) throw new ValidationFailed("Image size is not allowed");
       const info = readImageInfo(bytes);
       if (!info || info.contentType !== type || !sizeAllowed(info.width, info.height)) throw new ValidationFailed("Not a supported image");
-      // A PNG must decode, not only carry a header: a forged header would give the worker nothing to read.
-      if (type === "image/png") { try { decodePng(bytes); } catch { throw new ValidationFailed("Not a supported image"); } }
+      // A PNG must be whole, not only carry a header. (Full decoding is the worker's job and needs a narrower format.)
+      if (type === "image/png" && !pngIsComplete(bytes)) throw new ValidationFailed("Not a supported image");
       const sha256 = sha256Hex(bytes);
       const objectKey = mediaObjectKeys.asset(tenantId, sha256);
       const written = await images.store.put(objectKey, bytes, { contentType: type, onlyIf: { absent: true } });
