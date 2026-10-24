@@ -88,7 +88,8 @@ export const DEMO_PIPELINE: PipelineSummary = {
   ],
 };
 
-const contactId = (n: number) => `5e0c1a2b-7d3f-4c8a-9b1e-${String(n).padStart(12, "0")}`;
+/** The seeded customer at 1-based position `n` of CONTACTS. */
+export const contactId = (n: number) => `5e0c1a2b-7d3f-4c8a-9b1e-${String(n).padStart(12, "0")}`;
 const dealId = (n: number) => `d3a17b5c-2e4f-4a6b-8c9d-${String(n).padStart(12, "0")}`;
 const bookingId = (n: number) => `b8c2d4e6-1a3f-4b5c-9d7e-${String(n).padStart(12, "0")}`;
 

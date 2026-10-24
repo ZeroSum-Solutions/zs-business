@@ -11,7 +11,6 @@ import {
   TenantDenied,
   unblockEnrichmentCommandSchema,
   ValidationFailed,
-  type EnrichmentField,
   type Target,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
@@ -20,6 +19,7 @@ import { clockInstant, parseOrFail, pgCode, pgConstraint, tenantVisible } from "
 import { getWallet } from "../wallet/index.js";
 import { enrichmentConfigSchema, enrichmentEnabled, type EnrichmentConfig } from "./config.js";
 import {
+  FIELD_COLUMNS,
   loadProfile,
   loadRequest,
   PROFILE_COLUMNS,
@@ -153,18 +153,6 @@ export const attestRegionHandler: ActionHandler = {
     return profileResult(row, "contact.region.attested", payload.contactId);
   },
 };
-
-/** E-14: the profile column each field lands in. */
-const FIELD_COLUMNS: Readonly<Record<EnrichmentField, { column: string; integer: boolean }>> = Object.freeze({
-  name: { column: "company_name", integer: false },
-  domain: { column: "company_domain", integer: false },
-  industry: { column: "company_industry", integer: false },
-  description: { column: "company_description", integer: false },
-  employees: { column: "company_employees", integer: true },
-  founded: { column: "company_founded", integer: true },
-  location: { column: "company_location", integer: false },
-  linkedin_url: { column: "company_linkedin_url", integer: false },
-});
 
 /** F-4 for the source this slice owns: one record per contact and source, kept at the newest observation. */
 async function observeEnrichmentSource(

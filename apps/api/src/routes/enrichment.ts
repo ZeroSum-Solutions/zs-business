@@ -9,6 +9,7 @@ export function enrichmentRoutes(sessionFor: (c: Context<AppEnv>) => EnrichmentS
   return new Hono<AppEnv>()
     .post("/enrichment/requests", async (c) =>
       c.json(await sessionFor(c).requestEnrichment(await jsonBody(c), idempotencyKey(c)), 201))
+    .get("/enrichment/proposals", async (c) => c.json(await sessionFor(c).listProposals()))
     .get("/enrichment/requests/:id", async (c) => c.json(await sessionFor(c).getRequest(c.req.param("id"))))
     .get("/contacts/:id/enrichment", async (c) => c.json(await sessionFor(c).getContactEnrichment(c.req.param("id"))))
     .post("/contacts/:id/enrichment/block", async (c) =>

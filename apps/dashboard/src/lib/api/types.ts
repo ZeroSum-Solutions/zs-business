@@ -1,6 +1,7 @@
 import type {
   BusinessProfile,
   ContactEnrichment,
+  EnrichmentProposal,
   EnrichmentRequestRecord,
   BookingContactResult,
   BookingPageSummary,
@@ -60,6 +61,7 @@ import type { WorkspaceApi } from "./workspace-types";
 export type {
   BusinessProfile,
   ContactEnrichment,
+  EnrichmentProposal,
   EnrichmentRequestRecord,
   BookingContactResult,
   BookingPageSummary,
@@ -418,7 +420,21 @@ export interface EnrichmentApi {
    * says why not (no company domain, a customer who opted out, low funds, ...).
    */
   requestEnrichment(contactId: string, options: WriteOptions): Promise<EnrichmentRequestRecord>;
+  /**
+   * The business's undecided company-detail proposals, oldest first: each field with its current
+   * value, the value found and its source (`GET /v1/enrichment/proposals`).
+   */
+  listEnrichmentProposals(options?: ReadOptions): Promise<EnrichmentProposal[]>;
+  /**
+   * An owner approves (the field is written to the customer's company details) or rejects one
+   * proposal (`POST /v1/approvals/:id/approve` or `/reject`). Throws `forbidden` for an unknown or
+   * foreign proposal (the API answers both alike), `not_found` for a malformed id, and a conflict
+   * for one already decided or expired. Approving an `approved` proposal retries its apply (A-7).
+   */
+  decideEnrichmentProposal(approvalId: string, decision: EnrichmentDecision, options: WriteOptions): Promise<void>;
 }
+
+export type EnrichmentDecision = "approve" | "reject";
 
 /** Runs per page of the Agents page's run list. */
 export const RUN_PAGE_SIZE = 20;

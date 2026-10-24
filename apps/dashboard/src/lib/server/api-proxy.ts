@@ -3,10 +3,11 @@
  * server reads the person's Supabase session from httpOnly cookies, refreshes it when it is
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
- * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source, inbox, home, agent, business, site, calendar and website-task (/v1/browser) routes and /v1/me are
- * forwarded (for example /v1/approvals/:id/approve, /v1/inbox/threads, PUT /v1/business, PUT /v1/agents/followup/settings
- * and a run's file download, GET /v1/browser/runs/:id/artifacts/:artifactId); never the runner's /browser-runner/v1. Only
+ * A caller's own Authorization header is ignored. Only the booking, CRM, contact, enrichment, intake,
+ * member, approval, source, inbox, home, agent, business, site, calendar and website-task (/v1/browser) routes and
+ * /v1/me are forwarded (for example /v1/approvals/:id/approve, /v1/contacts/:id/enrichment, /v1/enrichment/proposals,
+ * /v1/inbox/threads, PUT /v1/business, PUT /v1/agents/followup/settings and a run's file download,
+ * GET /v1/browser/runs/:id/artifacts/:artifactId); never the runner's /browser-runner/v1. Only
  * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
  * Google Calendar connection also binds the flow to this browser, and reading or confirming a
  * staged grant sends the API the grant this browser holds (calendar-connect.ts).
@@ -24,7 +25,7 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "document-intake", "browser"]);
+const AREAS = new Set(["booking", "crm", "contacts", "enrichment", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "document-intake", "browser"]);
 const SINGLE = new Set(["me", "members", "approvals", "sources", "sites", "business", "transcriptions", "browser"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
