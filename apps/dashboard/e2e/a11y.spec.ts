@@ -7,6 +7,7 @@ const PAGES = [
   { path: "/calendar", heading: "Calendar" },
   { path: "/customers", heading: "Customers" },
   { path: "/customers?view=pipeline", heading: "Customers" },
+  { path: "/customers/enrichment", heading: "Company details to review" },
   { path: "/site", heading: "Site" },
   { path: "/agents", heading: "Agents" },
   { path: "/account/settings", heading: "Settings" },

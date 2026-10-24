@@ -3,9 +3,11 @@
  * server reads the person's Supabase session from httpOnly cookies, refreshes it when it is
  * about to expire, and sends that person's own access token upstream. The API then checks
  * the token, that its session is still live and that the person is a member of the business.
- * A caller's own Authorization header is ignored. Only the booking, CRM, intake, member,
- * approval, source, inbox, home, agent, business, site, media and calendar routes and /v1/me are forwarded (for
- * example /v1/approvals/:id/approve, /v1/inbox/threads, PUT /v1/business and PUT /v1/agents/followup/settings), only
+ * A caller's own Authorization header is ignored. Only the booking, CRM, contact, enrichment, intake,
+ * member, approval, source, inbox, home, agent, business, site, media, calendar and website-task (/v1/browser) routes and
+ * /v1/me are forwarded (for example /v1/approvals/:id/approve, /v1/contacts/:id/enrichment, /v1/enrichment/proposals,
+ * /v1/inbox/threads, PUT /v1/business, PUT /v1/agents/followup/settings and a run's file download,
+ * GET /v1/browser/runs/:id/artifacts/:artifactId); never the runner's /browser-runner/v1. Only
  * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
  * Google Calendar connection also binds the flow to this browser, and reading or confirming a
  * staged grant sends the API the grant this browser holds (calendar-connect.ts).
@@ -23,12 +25,14 @@ export { liveSetupFromEnv } from "./live-config";
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 /** Areas with sub-paths, and the single-segment routes. */
-const AREAS = new Set(["booking", "crm", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "document-intake", "media"]);
-const SINGLE = new Set(["me", "members", "approvals", "sources", "sites", "business", "transcriptions"]);
+const AREAS = new Set(["booking", "crm", "contacts", "enrichment", "intake", "members", "approvals", "sources", "inbox", "home", "agents", "sites", "calendar", "transcriptions", "document-intake", "browser", "media"]);
+const SINGLE = new Set(["me", "members", "approvals", "sources", "sites", "business", "transcriptions", "browser"]);
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 /** Methods that carry a JSON body. */
 const WITH_BODY = new Set(["POST", "PUT"]);
 const REQUEST_HEADERS = ["accept", "content-type", "idempotency-key"];
+/** Passed back as the API set them: a website-task file is a download, never rendered here. */
+const RESPONSE_HEADERS = ["content-type", "content-disposition", "x-content-type-options"];
 const MAX_BODY_BYTES = 64 * 1024;
 /** How long a request body may take to arrive. */
 const BODY_DEADLINE_MS = 15_000;
@@ -130,10 +134,12 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
 async function relay(upstream: Response, auth: AuthContext): Promise<Response> {
   // The API refused the session (signed out elsewhere, expired, revoked): drop its cookies.
   if (upstream.status === 401) auth.clearAll();
-  // Image bytes are relayed too (IM-22): the browser takes the API's type as it is, never a guess.
+  // Image bytes and file downloads are relayed with the API's own type, never a guess (IM-22).
   const responseHeaders = new Headers({ "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
-  const contentType = upstream.headers.get("content-type");
-  if (contentType) responseHeaders.set("Content-Type", contentType);
+  for (const name of RESPONSE_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders.set(name, value);
+  }
   const empty = [204, 205, 304].includes(upstream.status);
   return auth.finish(new Response(empty ? null : await upstream.arrayBuffer(), { status: upstream.status, headers: responseHeaders }));
 }

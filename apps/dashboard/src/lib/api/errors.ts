@@ -121,6 +121,8 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   variant_changed: "This image changed since you looked at it. Look at it again before you decide.",
   variant_not_staged: "This image is no longer waiting for a decision. Someone may have decided already.",
   variant_expired: "This image waited too long and was removed. Make it again if you still want it.",
+  approval_not_pending: "Someone already decided this. The list now shows what is left.",
+  approval_expired: "This expired before anyone decided it. Look up the company again for fresh details.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -233,6 +235,11 @@ export function contactNotFound(): ApiError {
  */
 export function isSettingsChanged(error: unknown): error is ApiError {
   return isDealChanged(error);
+}
+
+/** Both clients raise this for an unknown, foreign or malformed company-detail proposal (enrichment.md E-14). */
+export function proposalNotFound(): ApiError {
+  return new ApiError("not_found", "We could not find that suggested detail. It may have been decided already.", 404, "NotFound");
 }
 
 /** Both clients raise this for an unknown or malformed agent run ID. */

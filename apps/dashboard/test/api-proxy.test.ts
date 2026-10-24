@@ -138,12 +138,13 @@ describe("api proxy", () => {
     expect((await proxyApiRequest(request(behindProxy), contacts, trusted)).status).toBe(200);
   });
 
-  it("forwards only the booking, CRM, intake, member, approval, source, inbox, home, agent, business, site, calendar and /me routes, with GET, POST, PUT and DELETE", async () => {
+  it("forwards only the booking, CRM, contact, enrichment, intake, member, approval, source, inbox, home, agent, business, site, calendar and /me routes, with GET, POST, PUT and DELETE", async () => {
     const { harness, jar, get, post } = await signedIn();
     for (const path of [
       ["healthz"], ["v1", "admin", "users"], ["v1", "crm"], ["v1", "crm", ".."], ["v2", "crm", "deals"], ["v1", "me", "x"],
       ["v1", "approvals", ".."], ["v1", "approval"], ["v1", "inbox"], ["v1", "home"], ["v1", "agents"], ["v1", "agent", "followup"],
       ["v1", "calendar"], ["v1", "business", "x"], ["v1", "businesses"], ["oauth", "google", "callback"],
+      ["v1", "enrichment"], ["v1", "contacts"], ["v1", "enrichment", ".."], ["v1", "contact", "c-1", "enrichment"],
     ]) {
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(404);
     }
@@ -157,15 +158,18 @@ describe("api proxy", () => {
       ["v1", "inbox", "threads"], ["v1", "inbox", "threads", "c_x"], ["v1", "home", "results"],
       ["v1", "agents", "followup"], ["v1", "agents", "followup", "runs"], ["v1", "agents", "followup", "runs", "r-1"],
       ["v1", "sites"], ["v1", "sites", "s-1", "releases"], ["v1", "transcriptions"], ["v1", "transcriptions", "j-1"], ["v1", "document-intake", "jobs"], ["v1", "document-intake", "jobs", "j-1"], ["v1", "calendar", "connections"], ["v1", "business"],
+      // enrichment.md E-17: a customer's company details and the proposals waiting for an owner.
+      ["v1", "contacts", "c-1", "enrichment"], ["v1", "enrichment", "proposals"], ["v1", "enrichment", "requests", "r-1"],
     ])
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
     const approve = await proxyApiRequest(post("v1/approvals/a-1/approve", {}, { "Idempotency-Key": "k-a", Origin: ORIGIN }), ["v1", "approvals", "a-1", "approve"], harness.setup);
     expect(approve.status).toBe(200);
     expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/approvals/a-1/approve");
-    for (const path of [["v1", "approvals"], ["v1", "sources"]]) {
+    for (const path of [["v1", "approvals"], ["v1", "sources"], ["v1", "enrichment", "requests"], ["v1", "contacts", "c-1", "enrichment", "block"]]) {
       const response = await proxyApiRequest(post(path.join("/"), {}, { "Idempotency-Key": `k-${path[1]}`, Origin: ORIGIN }), path, harness.setup);
       expect(response.status, path.join("/")).toBe(200);
       expect(harness.apiCalls.at(-1)!.init.method).toBe("POST");
+      expect(harness.apiCalls.at(-1)!.url).toBe(`http://api.internal:8787/${path.join("/")}`);
     }
     // business-profile.md BP-6: the profile is saved with PUT, which carries a JSON body like a POST.
     const savedBusiness = new Request(`${ORIGIN}/api/v1/business`, {
@@ -200,6 +204,55 @@ describe("api proxy", () => {
     const remove = new Request(`${ORIGIN}/api/v1/members/m-1`, { method: "DELETE", headers: { Cookie: jar.header(), "Idempotency-Key": "k" } });
     expect((await proxyApiRequest(remove, ["v1", "members", "m-1"], harness.setup)).status).toBe(200);
     expect(harness.apiCalls.at(-1)!.init.method).toBe("DELETE");
+  });
+
+  it("forwards the owner's website-task routes under /v1/browser, never the runner's", async () => {
+    const { harness, jar, get, post } = await signedIn();
+    for (const path of [
+      ["v1", "browser-runner", "claim"], ["v1", "browser-runner", "runs", "r-1", "finish"], ["browser-runner", "v1", "claim"],
+      ["v1", "browsers"], ["v1", "browser", ".."], ["v1", "browser", "runs", "r-1", ".."],
+    ]) {
+      expect((await proxyApiRequest(post(path.join("/"), {}, { Origin: ORIGIN }), path, harness.setup)).status, path.join("/")).toBe(404);
+    }
+    expect(harness.apiCalls).toHaveLength(0);
+    for (const path of [["v1", "browser"], ["v1", "browser", "runs"], ["v1", "browser", "runs", "r-1"]]) {
+      expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
+      expect(harness.apiCalls.at(-1)!.url).toBe(`http://api.internal:8787/${path.join("/")}`);
+      expect(harness.apiCalls.at(-1)!.init.method).toBe("GET");
+    }
+    for (const path of [["v1", "browser", "kill"], ["v1", "browser", "resume"], ["v1", "browser", "targets"], ["v1", "browser", "runs"]]) {
+      const response = await proxyApiRequest(post(path.join("/"), { x: 1 }, { "Idempotency-Key": `k-${path.at(-1)}`, Origin: ORIGIN }), path, harness.setup);
+      expect(response.status, path.join("/")).toBe(200);
+      const sent = harness.apiCalls.at(-1)!;
+      expect(sent.url).toBe(`http://api.internal:8787/${path.join("/")}`);
+      expect(sent.init.method).toBe("POST");
+      expect(new Headers(sent.init.headers).get("idempotency-key")).toBe(`k-${path.at(-1)}`);
+    }
+    const settings = new Request(`${ORIGIN}/api/v1/browser/settings`, {
+      method: "PUT", body: JSON.stringify({ enabled: true }), headers: { Cookie: jar.header(), Origin: ORIGIN, "Content-Type": "application/json", "Idempotency-Key": "k-settings" },
+    });
+    expect((await proxyApiRequest(settings, ["v1", "browser", "settings"], harness.setup)).status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/browser/settings");
+    expect(harness.apiCalls.at(-1)!.init.method).toBe("PUT");
+    // A run's file is a download: its bytes, type and attachment disposition pass through untouched.
+    const pdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x00, 0xff, 0x80, 0x0a]);
+    const api = harness.api;
+    harness.api = async (call) => {
+      const refused = await api(call);
+      if (refused.status === 401) return refused;
+      return new Response(new Blob([pdf], { type: "application/pdf" }), {
+        headers: { "Content-Type": "application/pdf", "Content-Disposition": 'attachment; filename="2026-09-001.pdf"', "X-Content-Type-Options": "nosniff" },
+      });
+    };
+    const file = ["v1", "browser", "runs", "r-1", "artifacts", "a-1"];
+    const download = await proxyApiRequest(get(file.join("/")), file, harness.setup);
+    expect(download.status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/browser/runs/r-1/artifacts/a-1");
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(pdf);
+    expect(download.headers.get("content-type")).toBe("application/pdf");
+    expect(download.headers.get("content-disposition")).toBe('attachment; filename="2026-09-001.pdf"');
+    expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(download.headers.get("cache-control")).toBe("no-store");
   });
 
   it("answers 503 in demo mode or without the Supabase settings, and 502 when the API is unreachable", async () => {

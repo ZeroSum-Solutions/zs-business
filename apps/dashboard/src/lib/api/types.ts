@@ -6,6 +6,7 @@ import type {
   ImageVariant,
   MediaAsset,
   ContactEnrichment,
+  EnrichmentProposal,
   EnrichmentRequestRecord,
   BookingContactResult,
   BookingPageSummary,
@@ -70,6 +71,7 @@ export type {
   ImageVariant,
   MediaAsset,
   ContactEnrichment,
+  EnrichmentProposal,
   EnrichmentRequestRecord,
   BookingContactResult,
   BookingPageSummary,
@@ -345,6 +347,16 @@ export interface HomeApi {
   getResults(query: HomeResultsQuery, options?: ReadOptions): Promise<HomeResults>;
 }
 
+import type {
+  BrowserRun,
+  BrowserRunDetail,
+  BrowserStatus,
+  RequestBrowserRunRequest,
+  SaveBrowserTargetRequest,
+  UpdateBrowserSettingsRequest,
+  BrowserTarget,
+} from "@zs/contracts";
+
 export interface FollowUpRunQuery {
   /** The previous page's `nextCursor`. */
   cursor?: string;
@@ -373,6 +385,29 @@ export interface AgentsApi {
 }
 
 /**
+ * Website tasks (browser-tasks.md BT-3, BT-9, BT-12): read-only browser tasks on a supplier site.
+ * Members with `inbox.drafts` read the tasks and may stop them; owners (`agents`) change the
+ * settings, targets, resume and request a run. A task only reads and downloads: it submits nothing.
+ */
+export interface BrowserApi {
+  getBrowserStatus(options?: ReadOptions): Promise<BrowserStatus>;
+  /** Owners only. A conflict with reason `stale_revision` when someone saved since `expectedRevision`. */
+  updateBrowserSettings(input: UpdateBrowserSettingsRequest, options: WriteOptions): Promise<BrowserStatus>;
+  /** Stops new runs at once and stops a run between steps. */
+  killBrowser(input: { note?: string }, options: WriteOptions): Promise<BrowserStatus>;
+  /** Owners only. */
+  resumeBrowser(options: WriteOptions): Promise<BrowserStatus>;
+  /** Owners only. */
+  saveBrowserTarget(input: SaveBrowserTargetRequest, options: WriteOptions): Promise<BrowserTarget>;
+  /** Owners only. A conflict (reason `blocked`, `daily_cap`, ...) when a run cannot start now. */
+  requestBrowserRun(input: Pick<RequestBrowserRunRequest, "targetId" | "month">, options: WriteOptions): Promise<BrowserRun>;
+  /** Newest first. */
+  listBrowserRuns(options?: ReadOptions): Promise<BrowserRun[]>;
+  /** One run with its steps and files. Throws `not_found` for an unknown or malformed ID. */
+  getBrowserRun(id: string, options?: ReadOptions): Promise<BrowserRunDetail>;
+}
+
+/**
  * The business profile (business-profile.md BP-5..BP-7): who the business is. Any member reads it;
  * owners (`business`) change it.
  */
@@ -395,7 +430,21 @@ export interface EnrichmentApi {
    * says why not (no company domain, a customer who opted out, low funds, ...).
    */
   requestEnrichment(contactId: string, options: WriteOptions): Promise<EnrichmentRequestRecord>;
+  /**
+   * The business's undecided company-detail proposals, oldest first: each field with its current
+   * value, the value found and its source (`GET /v1/enrichment/proposals`).
+   */
+  listEnrichmentProposals(options?: ReadOptions): Promise<EnrichmentProposal[]>;
+  /**
+   * An owner approves (the field is written to the customer's company details) or rejects one
+   * proposal (`POST /v1/approvals/:id/approve` or `/reject`). Throws `forbidden` for an unknown or
+   * foreign proposal (the API answers both alike), `not_found` for a malformed id, and a conflict
+   * for one already decided or expired. Approving an `approved` proposal retries its apply (A-7).
+   */
+  decideEnrichmentProposal(approvalId: string, decision: EnrichmentDecision, options: WriteOptions): Promise<void>;
 }
+
+export type EnrichmentDecision = "approve" | "reject";
 
 /** Runs per page of the Agents page's run list. */
 export const RUN_PAGE_SIZE = 20;
@@ -531,7 +580,7 @@ export interface DocumentIntakeApi {
   discardIntakeJob(id: string, options: WriteOptions): Promise<void>;
 }
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
 
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */

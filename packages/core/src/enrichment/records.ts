@@ -116,3 +116,15 @@ export const resultRecord = (row: ResultRow): EnrichmentResultRecord => ({
   expiresAt: row.expires_at.toISOString(),
   approvalId: row.approval_id,
 });
+
+/** E-14: the profile column each result field lands in. */
+export const FIELD_COLUMNS: Readonly<Record<EnrichmentField, { column: string; integer: boolean }>> = Object.freeze({
+  name: { column: "company_name", integer: false },
+  domain: { column: "company_domain", integer: false },
+  industry: { column: "company_industry", integer: false },
+  description: { column: "company_description", integer: false },
+  employees: { column: "company_employees", integer: true },
+  founded: { column: "company_founded", integer: true },
+  location: { column: "company_location", integer: false },
+  linkedin_url: { column: "company_linkedin_url", integer: false },
+});

@@ -58,6 +58,10 @@ export const keys = {
   /** Pages of the agent's runs, newest first. */
   followUpRuns: ["agents", "followup", "runs"] as const,
   followUpRun: (id: string) => ["agents", "followup", "run", id] as const,
+  /** Website tasks (browser-tasks.md): status, runs and one run's steps and files. */
+  browser: ["agents", "browser", "status"] as const,
+  browserRuns: ["agents", "browser", "runs"] as const,
+  browserRun: (id: string) => ["agents", "browser", "run", id] as const,
   /** The agent's actor ID, derived from the tenant (agents.md G-1). */
   agentActor: ["agents", "actor"] as const,
   agentsAll: ["agents"] as const,
@@ -65,6 +69,8 @@ export const keys = {
   business: ["business"] as const,
   /** One customer's company details and lookups (enrichment.md E-17). */
   contactEnrichment: (id: string) => ["crm", "contact", id, "enrichment"] as const,
+  /** The business's company-detail proposals waiting for an owner (enrichment.md E-14, E-17). */
+  enrichmentProposals: ["crm", "enrichment", "proposals"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
@@ -373,6 +379,37 @@ export function useFollowUpStatus() {
   });
 }
 
+/** Website tasks: switches, caps and targets. Read afresh each visit and each minute: someone may stop it. */
+export function useBrowserStatus() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.browser, queryFn: ({ signal }) => api.getBrowserStatus({ signal }), staleTime: 0, refetchInterval: 60_000, retry: false,
+  });
+}
+
+/** Recent website task runs, newest first. A run in progress is read again every few seconds. */
+export function useBrowserRuns() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled, queryKey: keys.browserRuns, queryFn: ({ signal }) => api.listBrowserRuns({ signal }),
+    refetchInterval: (query) => (query.state.data?.some((run) => run.status === "queued" || run.status === "running") ? 5_000 : false),
+  });
+}
+
+/** One run with its steps and files; null reads nothing. */
+export function useBrowserRun(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    queryKey: keys.browserRun(id ?? "none"),
+    queryFn: ({ signal }) => api.getBrowserRun(id!, { signal }),
+    enabled: enabled && id !== null,
+    refetchInterval: (query) => (query.state.data && (query.state.data.run.status === "queued" || query.state.data.run.status === "running") ? 5_000 : false),
+  });
+}
+
 /**
  * The business profile (business-profile.md BP-5). An API older than the profile answers 404; the
  * caller shows that as "not available yet" (BP-10), so a 404 is not retried.
@@ -389,6 +426,19 @@ export function useContactEnrichment(contactId: string) {
     queryKey: keys.contactEnrichment(contactId),
     queryFn: ({ signal }) => api.getContactEnrichment(contactId, { signal }),
     refetchInterval: (query) => (query.state.data?.requests.some((r) => r.status === "pending" || r.status === "leased" || r.status === "uncertain") ? 4_000 : false),
+  });
+}
+
+/** The company details found for customers that wait for an owner's decision, oldest first (E-14). */
+export function useEnrichmentProposals() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled,
+    queryKey: keys.enrichmentProposals,
+    queryFn: ({ signal }) => api.listEnrichmentProposals({ signal }),
+    // A lookup can finish, or another owner decide, while the screen is open.
+    refetchInterval: 60_000,
   });
 }
 

@@ -8,11 +8,18 @@ import {
   mediaAssetOutputSchema,
   mediaAssetSchema,
   bookingContactOutputSchema,
+  browserRunDetailSchema,
+  browserRunListSchema,
+  browserRunOutputSchema,
+  browserStatusOutputSchema,
+  browserStatusSchema,
+  browserTargetOutputSchema,
   bookingDetailSchema,
   bookingPageSchema,
   bookingPageSummarySchema,
   businessProfileReadSchema,
   contactEnrichmentSchema,
+  enrichmentProposalListSchema,
   enrichmentRequestRecordSchema,
   calendarConnectionListSchema,
   calendarConnectionSchema,
@@ -62,13 +69,14 @@ import {
   type SetDealDetailsRequest,
   type UpdateFollowUpSettingsRequest,
 } from "@zs/contracts";
-import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, runNotFound, threadNotFound } from "./errors";
+import { ApiError, contactNotFound, defaultMessage, errorFromBody, isApiError, proposalNotFound, runNotFound, threadNotFound } from "./errors";
 import {
   CONTACT_PAGE_SIZE,
   RUN_PAGE_SIZE,
   THREAD_PAGE_SIZE,
   toUpsertContactRequest,
   type AgentsApi,
+  type BrowserApi,
   type BusinessApi,
   type EnrichmentApi,
   type BookingApi,
@@ -137,7 +145,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -247,6 +255,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
   const FOLLOW_UP = "/v1/agents/followup";
   const variantPath = (id: string, rest = "") => `/v1/media/variants/${encodeURIComponent(id)}${rest}`;
+  const BROWSER = "/v1/browser";
 
   return {
     async listResources(options = {}) {
@@ -513,6 +522,44 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       return (await write(path, {}, disconnectCalendarOutputSchema, options)).result;
     },
 
+    getBrowserStatus(options = {}) {
+      return request({ method: "GET", path: BROWSER, schema: browserStatusSchema, signal: options.signal });
+    },
+
+    async updateBrowserSettings(input, options) {
+      return (await write(`${BROWSER}/settings`, input, browserStatusOutputSchema, options, "PUT")).result;
+    },
+
+    async killBrowser(input, options) {
+      const body = input.note === undefined ? {} : { note: input.note };
+      return (await write(`${BROWSER}/kill`, body, browserStatusOutputSchema, options)).result;
+    },
+
+    async resumeBrowser(options) {
+      return (await write(`${BROWSER}/resume`, {}, browserStatusOutputSchema, options)).result;
+    },
+
+    async saveBrowserTarget(input, options) {
+      return (await write(`${BROWSER}/targets`, input, browserTargetOutputSchema, options)).result;
+    },
+
+    async requestBrowserRun(input, options) {
+      return (await write(`${BROWSER}/runs`, input, browserRunOutputSchema, options)).result;
+    },
+
+    async listBrowserRuns(options = {}) {
+      return (await request({ method: "GET", path: `${BROWSER}/runs`, schema: browserRunListSchema, signal: options.signal })).items;
+    },
+
+    async getBrowserRun(id, options = {}) {
+      if (!uuidSchema.safeParse(id).success) throw runNotFound();
+      try {
+        return await request({ method: "GET", path: `${BROWSER}/runs/${encodeURIComponent(id)}`, schema: browserRunDetailSchema, signal: options.signal });
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? runNotFound() : error;
+      }
+    },
+
     getBusiness(options = {}) {
       return request({ method: "GET", path: "/v1/business", schema: businessProfileReadSchema, signal: options.signal });
     },
@@ -577,6 +624,21 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     approveApproval(approvalId, options) {
       // No note: the owner's press is the decision (approvals.md A-7).
       return write(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, {}, approveApprovalResponseSchema, options);
+    },
+
+    async listEnrichmentProposals(options = {}) {
+      return (await request({ method: "GET", path: "/v1/enrichment/proposals", schema: enrichmentProposalListSchema, signal: options.signal })).items;
+    },
+
+    async decideEnrichmentProposal(approvalId, decision, options) {
+      if (!uuidSchema.safeParse(approvalId).success) throw proposalNotFound();
+      // Approve answers the approval and the apply it ran; reject answers the approval alone.
+      const schema = decision === "approve" ? approveApprovalResponseSchema : approvalOutputSchema;
+      try {
+        await write(`/v1/approvals/${encodeURIComponent(approvalId)}/${decision}`, {}, schema, options);
+      } catch (error) {
+        throw isApiError(error) && error.kind === "not_found" ? proposalNotFound() : error;
+      }
     },
 
     getFollowUpStatus(options = {}) {
