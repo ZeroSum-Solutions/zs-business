@@ -25,6 +25,7 @@ import {
   ImageOutcomeUnknown,
   sha256Hex,
   type ImageWorkflowPort,
+  type PresetInput,
   type PresetOutput,
 } from "./port.js";
 import { decodePng, encodeRgbaPng, readImageInfo, sizeAllowed } from "./png.js";
@@ -219,10 +220,20 @@ export function createImageWorker(deps: ImageWorkerDeps) {
       [tenantId, variantId, providerJobId]));
   }
 
+  type SourceInfo = { content_type: string; width: number; height: number };
+  async function sourceInfo(tenantId: string, variant: VariantRow): Promise<SourceInfo | undefined> {
+    return (await deps.service((tx) => tx.query<SourceInfo>(
+      "SELECT content_type, width, height FROM media_assets WHERE tenant_id=$1 AND id=$2", [tenantId, variant.source_asset_id]))).rows[0];
+  }
+  const presetInput = (tenantId: string, variant: VariantRow, source: { bytes: Uint8Array; sha256: string }, info: SourceInfo): PresetInput => ({
+    tenantId, variantId: variant.id, preset: variant.preset, params: variant.params,
+    source: { bytes: source.bytes, contentType: info.content_type, sha256: source.sha256, width: info.width, height: info.height },
+    idempotencyKey: variant.id,
+  });
+
   /** The vendor call for one claimed job; the outcome is staged, failed or left running (unknown). */
   async function execute(variant: VariantRow, tenantId: string): Promise<"staged" | "failed" | "unknown"> {
-    const info = (await deps.service((tx) => tx.query<{ content_type: string; width: number; height: number }>(
-      "SELECT content_type, width, height FROM media_assets WHERE tenant_id=$1 AND id=$2", [tenantId, variant.source_asset_id]))).rows[0];
+    const info = await sourceInfo(tenantId, variant);
     const source = info ? await loadSource(tenantId, variant) : null;
     if (!info || !source) { await fail(tenantId, variant.id, "digest_mismatch"); return "failed"; }
     if (MATTE_PRESETS.has(variant.preset)) {
@@ -230,11 +241,7 @@ export function createImageWorker(deps: ImageWorkerDeps) {
     } else if (!readImageInfo(source.bytes)) { await fail(tenantId, variant.id, "source_undecodable"); return "failed"; }
     let output: PresetOutput;
     try {
-      output = await deps.port.runPreset({
-        tenantId, variantId: variant.id, preset: variant.preset, params: variant.params,
-        source: { bytes: source.bytes, contentType: info.content_type, sha256: source.sha256, width: info.width, height: info.height },
-        idempotencyKey: variant.id,
-      });
+      output = await deps.port.runPreset(presetInput(tenantId, variant, source, info));
     } catch (error) {
       if (error instanceof ImageAdapterRefused) { await fail(tenantId, variant.id, "adapter_error"); return "failed"; }
       // Any other error may have left a job running at the vendor: never send it again.
@@ -258,14 +265,16 @@ export function createImageWorker(deps: ImageWorkerDeps) {
         const variant = row as VariantRow;
         const waited = row.held_at ? now().getTime() - row.held_at.getTime() : Infinity;
         if (row.provider_job_id) {
+          // IM-18: the lookup gets the job's input again, so a vendor adapter can rebuild the composite.
+          const info = await sourceInfo(tenantId, variant);
+          const source = info ? await loadSource(tenantId, variant) : null;
+          if (!info || !source) { await fail(tenantId, row.id, "digest_mismatch", row.provider_job_id); summary.failed += 1; continue; }
           // A lookup that throws is no answer: report it and let the wait below still run out.
           let answer: Awaited<ReturnType<ImageWorkflowPort["lookup"]>> = { state: "pending" };
-          try { answer = await deps.port.lookup(row.provider_job_id); } catch (error) {
+          try { answer = await deps.port.lookup(row.provider_job_id, presetInput(tenantId, variant, source, info)); } catch (error) {
             report({ kind: "error", tenantId, variantId: row.id, error: error instanceof Error ? error.message.slice(0, 300) : "lookup failed" });
           }
           if (answer.state === "done") {
-            const source = await loadSource(tenantId, variant);
-            if (!source) { await fail(tenantId, row.id, "digest_mismatch", row.provider_job_id); summary.failed += 1; continue; }
             if ((await finish(variant, tenantId, source, answer.output, row.provider_job_id)) === "staged") summary.staged += 1; else summary.failed += 1;
             continue;
           }

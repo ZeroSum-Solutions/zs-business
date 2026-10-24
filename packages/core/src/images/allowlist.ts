@@ -1,6 +1,5 @@
 // Commercial-safe weights only (image-port.md IM-8). Each entry records the licence of the
-// weights it runs. Nothing runs that is not listed. No vendor model is listed yet: the hosted
-// model IDs and their terms are settled when the first vendor adapter is written (Known limits).
+// weights it runs. Nothing runs that is not listed and verified (IM-19).
 import type { ImageAdapter } from "@zs/contracts";
 
 export interface ModelEntry {
@@ -10,11 +9,17 @@ export interface ModelEntry {
   readonly license: string;
   /** Self-hosted weights only: the SHA-256 of the `.safetensors` file. */
   readonly weightsSha256?: string;
+  /**
+   * IM-19: false until the owner has checked the vendor's hosted-use terms for this model. An
+   * unverified entry is listed so the adapter and its tests can name it, but nothing runs on it.
+   */
+  readonly verified: boolean;
 }
 
 export const IMAGE_MODEL_ALLOWLIST: readonly ModelEntry[] = Object.freeze([
-  { adapter: "fake", modelId: "fake-matte-v1", license: "none: test double with no weights" },
-  { adapter: "fake", modelId: "fake-upscale-v1", license: "none: test double with no weights" },
+  { adapter: "fake", modelId: "fake-matte-v1", license: "none: test double with no weights", verified: true },
+  { adapter: "fake", modelId: "fake-upscale-v1", license: "none: test double with no weights", verified: true },
+  // Vendor entries (IM-19) are added by each adapter below this line. TODO verify each licence before setting verified.
 ]);
 
 /**
@@ -32,7 +37,7 @@ export const isForbiddenModel = (modelId: string): boolean => FORBIDDEN_MODEL_PA
 
 export function findAllowedModel(adapter: ImageAdapter, modelId: string): ModelEntry | null {
   const entry = IMAGE_MODEL_ALLOWLIST.find((candidate) => candidate.adapter === adapter && candidate.modelId === modelId);
-  return entry && !isForbiddenModel(entry.modelId) && !NON_COMMERCIAL_LICENSE.test(entry.license) ? entry : null;
+  return entry && entry.verified && !isForbiddenModel(entry.modelId) && !NON_COMMERCIAL_LICENSE.test(entry.license) ? entry : null;
 }
 
 /** IM-8: self-hosted weights load only from `.safetensors`; `.ckpt`, `.pt` and other pickle formats are refused. */

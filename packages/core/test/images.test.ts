@@ -10,6 +10,8 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import {
   createFakeImageWorkflowPort,
   createImageWorker,
+  createImageWorkflowPort,
+  imagePrice,
   createMemorySiteStore,
   createSession,
   creditWallet,
@@ -46,6 +48,8 @@ let reports: ImageReport[];
 const store = createMemorySiteStore();
 const siteStore = createMemorySiteStore();
 const config = parseImageConfig({ environment: "test", adapter: "fake" });
+/** TODO verify: placeholder prices for config tests only. */
+const prices = { background_remove: 10, studio_background_swap: 25, upscale_2k: 30 };
 
 /** A fake compiler: the spec lists base64 image files and the page that links them. */
 const compiler: SiteCompiler = {
@@ -460,10 +464,34 @@ describe("allowlist, config and keys (IM-6, IM-8, IM-16)", () => {
   it("refuses a production config that names higgsfield or the fake", () => {
     for (const adapter of ["higgsfield", "fake", "comfyui"])
       expect(() => parseImageConfig({ environment: "production", adapter })).toThrow();
-    expect(parseImageConfig({ environment: "production", adapter: "kie" }).adapter).toBe("kie");
-    expect(parseImageConfig({ environment: "production", adapter: "fal" }).adapter).toBe("fal");
-    expect(() => parseImageConfig({ environment: "test", adapter: "kie" })).toThrow();
-    expect(() => parseImageConfig({ environment: "production", adapter: "kie", extra: 1 })).toThrow();
+    expect(parseImageConfig({ environment: "production", adapter: "kie", prices }).adapter).toBe("kie");
+    expect(parseImageConfig({ environment: "production", adapter: "fal", prices }).adapter).toBe("fal");
+    expect(() => parseImageConfig({ environment: "test", adapter: "kie", prices })).toThrow();
+    expect(() => parseImageConfig({ environment: "production", adapter: "kie", prices, extra: 1 })).toThrow();
+  });
+
+  it("reads prices from config: only the fake in tests may omit them (IM-20)", () => {
+    expect(() => parseImageConfig({ environment: "production", adapter: "kie" })).toThrow(/prices/);
+    expect(() => parseImageConfig({ environment: "development", adapter: "fake" })).toThrow(/prices/);
+    expect(() => parseImageConfig({ environment: "production", adapter: "fal", prices: { ...prices, upscale_2k: 0 } })).toThrow();
+    expect(parseImageConfig({ environment: "production", adapter: "fal", prices }).prices).toEqual(prices);
+    expect(imagePrice(parseImageConfig({ environment: "production", adapter: "kie", prices, currency: "eur" }), "upscale_2k"))
+      .toEqual({ priceMinor: 30, currency: "eur" });
+  });
+
+  it("selects the configured adapter and fails closed without a key (IM-21)", () => {
+    const portDeps = { fetch: (() => { throw new Error("no network in tests"); }) as unknown as typeof fetch, clock, sleep: async () => undefined };
+    const kie = parseImageConfig({ environment: "production", adapter: "kie", prices });
+    const fal = parseImageConfig({ environment: "production", adapter: "fal", prices });
+    expect(() => createImageWorkflowPort(kie, portDeps)).toThrow(/API key/);
+    expect(() => createImageWorkflowPort(fal, { ...portDeps, apiKey: "" })).toThrow(/API key/);
+    expect(() => createImageWorkflowPort(fal, { ...portDeps, apiKey: "k" })).toThrow(/vendor costs/);
+    expect(createImageWorkflowPort(config, portDeps).adapter).toBe("fake");
+  });
+
+  it("runs nothing on an unverified allowlist entry (IM-19)", () => {
+    for (const entry of IMAGE_MODEL_ALLOWLIST.filter((candidate) => !candidate.verified))
+      expect(findAllowedModel(entry.adapter, entry.modelId)).toBeNull();
   });
 
   it("reserves the image-job: key prefix for the worker", () => {
