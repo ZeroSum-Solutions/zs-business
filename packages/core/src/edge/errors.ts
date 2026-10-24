@@ -68,6 +68,9 @@ const CONFLICT_REASONS = new Set([
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
   "stale_release", "host_in_use", "grant_changed", "invalid_currency",
+  // agents.md G-15, G-19, G-21 and approvals.md A-15.
+  "cost_cap", "model_error", "model_invalid", "kind_not_available",
+  "template_changed", "template_superseded", "template_not_approved",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
