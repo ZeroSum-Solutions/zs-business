@@ -86,6 +86,11 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);
       }
+      // Document intake (document-intake.md DL-1): a job needs a real hash, and its rows need a page count.
+      // A row is written only into a job in review, which holds a page count, a parser and a digest.
+      if (name === "document_intake_jobs") {
+        Object.assign(row, { file_sha256: "a".repeat(64), page_count: 1, status: "review", parser_version: "fixture-1", diff_digest: "b".repeat(64) });
+      }
       const keys = (await tx.query<{ columns: string[]; references: string[]; table: string }>(`
         SELECT array(SELECT a.attname::text FROM unnest(k.conkey) WITH ORDINALITY key(num,ord) JOIN pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=key.num ORDER BY key.ord) AS columns,
           array(SELECT a.attname::text FROM unnest(k.confkey) WITH ORDINALITY key(num,ord) JOIN pg_attribute a ON a.attrelid=k.confrelid AND a.attnum=key.num ORDER BY key.ord) AS references,

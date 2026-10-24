@@ -111,6 +111,7 @@ export * from "./members.js";
 export * from "./sites.js";
 export * from "./sources.js";
 export * from "./transcription.js";
+export * from "./document-intake.js";
 export * from "./delivery.js";
 export * from "./agents.js";
 export * from "./templates.js";
