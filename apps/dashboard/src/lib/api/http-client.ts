@@ -34,6 +34,8 @@ import {
   siteReleaseResponseSchema,
   siteSyncResponseSchema,
   slotsResponseSchema,
+  transcriptionDetailSchema,
+  transcriptionListSchema,
   threadDetailSchema,
   threadIdSchema,
   threadPageSchema,
@@ -62,6 +64,7 @@ import {
   type IntakeApi,
   type ListResult,
   type SitesApi,
+  type TranscriptionApi,
   type WriteOptions,
 } from "./types";
 
@@ -108,7 +111,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & SitesApi & CalendarSyncApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & SitesApi & CalendarSyncApi & TranscriptionApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -354,6 +357,14 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
         schema: homeResultsSchema,
         signal: options.signal,
       });
+    },
+
+    async listTranscriptions(options = {}) {
+      return (await request({ method: "GET", path: "/v1/transcriptions", schema: transcriptionListSchema, signal: options.signal })).items;
+    },
+
+    getTranscription(id, options = {}) {
+      return request({ method: "GET", path: `/v1/transcriptions/${encodeURIComponent(id)}`, schema: transcriptionDetailSchema, signal: options.signal });
     },
 
     async listSites(options = {}) {

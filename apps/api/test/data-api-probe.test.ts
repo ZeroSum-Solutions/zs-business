@@ -63,7 +63,7 @@ describe("tables to probe", () => {
       "public.inbox_replies", "public.intake_item_consent", "public.intake_items", "public.message_deliveries",
       "public.message_delivery_attempts", "public.outbox", "public.rate_limit_buckets", "public.site_activations", "public.site_hosts",
       "public.site_pointers", "public.site_release_files", "public.site_releases", "public.sites", "public.sms_numbers", "public.sms_status_events", "public.source_records",
-      "public.stripe_events", "public.suppressions", "public.tenant_members", "public.tenants", "public.wallet_billing_events",
+      "public.stripe_events", "public.suppressions", "public.tenant_members", "public.tenants", "public.transcription_jobs", "public.transcripts", "public.wallet_billing_events",
       "public.wallet_ledger", "public.wallet_reservations", "public.wallet_topups", "public.wallets", "public.webhook_deliveries",
       "public.webhook_delivery_attempts", "public.webhook_endpoints", "public.webhook_ingest_marks",
     ]);
