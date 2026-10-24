@@ -1,6 +1,7 @@
 import { createDemoAdapter, type DemoControls } from "./demo/adapter";
 import { createDemoMedia, type DemoMediaControls } from "./demo/media";
 import { createDemoSites, type DemoSiteControls } from "./demo/sites";
+import { createDemoDocumentIntake } from "./demo/document-intake";
 import { createDemoTranscripts } from "./demo/transcripts";
 import { createDemoWorkspace } from "./demo/workspace";
 import { createHttpClient } from "./http-client";
@@ -37,7 +38,7 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
     const sites = createDemoSites({ latencyMs: 180 });
     const media = createDemoMedia({ latencyMs: 180 });
     return {
-      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }) },
+      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoDocumentIntake({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }) },
       mode: "demo",
       demo: { ...demo, ...sites.controls, ...media.controls },
     };

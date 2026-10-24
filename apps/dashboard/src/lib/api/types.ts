@@ -28,6 +28,9 @@ import type {
   FollowUpStopReason,
   HomeResults,
   KillFollowUpRequest,
+  IntakeApplyRequest,
+  IntakeJob,
+  IntakeJobDetail,
   IntakeItemRecord,
   IntakeStatus,
   LeadSource,
@@ -86,7 +89,10 @@ export type {
   FollowUpStatus,
   FollowUpStopReason,
   HomeResults,
+  IntakeApplyRequest,
   IntakeItemRecord,
+  IntakeJob,
+  IntakeJobDetail,
   IntakeStatus,
   LeadSource,
   PendingGoogleConnect,
@@ -506,7 +512,27 @@ export interface ApprovalsApi {
   approveApproval(approvalId: string, options: WriteOptions): Promise<ApproveApprovalResponse>;
 }
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & MediaApi & ApprovalsApi;
+
+/**
+ * Document intake (document-intake.md DL-12..DL-14): price lists the owner uploaded, read into rows
+ * and shown as one diff. Only owners (`publish`) read and decide them. Nothing reaches the catalog
+ * until an approval is decided: `proposeIntakeApply` asks, `approveIntakeApply` decides.
+ */
+export interface DocumentIntakeApi {
+  /** Newest first. */
+  listIntakeJobs(options?: ReadOptions): Promise<IntakeJob[]>;
+  /** One job with every row, its page and its snippet. Throws `not_found` for an unknown job. */
+  getIntakeJob(id: string, options?: ReadOptions): Promise<IntakeJobDetail>;
+  /** Asks to apply the chosen rows. A conflict with reason `intake_not_in_review` or `intake_changed`. */
+  proposeIntakeApply(id: string, input: IntakeApplyRequest, options: WriteOptions): Promise<{ approvalId: string }>;
+  /** Decides the approval. A conflict with reason `intake_target_changed` when an item moved since the review. */
+  approveIntakeApply(approvalId: string, options: WriteOptions): Promise<void>;
+  /** Drops a job that waits for review. */
+  discardIntakeJob(id: string, options: WriteOptions): Promise<void>;
+}
+
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
+
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

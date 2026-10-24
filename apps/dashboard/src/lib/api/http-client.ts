@@ -43,6 +43,9 @@ import {
   siteReleaseResponseSchema,
   siteSyncResponseSchema,
   slotsResponseSchema,
+  intakeDiscardResultSchema,
+  intakeJobDetailSchema,
+  intakeJobListSchema,
   transcriptionDetailSchema,
   transcriptionListSchema,
   threadDetailSchema,
@@ -71,6 +74,7 @@ import {
   type BookingApi,
   type CalendarSyncApi,
   type CrmApi,
+  type DocumentIntakeApi,
   type HomeApi,
   type InboxApi,
   type IntakeApi,
@@ -133,7 +137,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & MediaApi & ApprovalsApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -413,6 +417,27 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     getTranscription(id, options = {}) {
       return request({ method: "GET", path: `/v1/transcriptions/${encodeURIComponent(id)}`, schema: transcriptionDetailSchema, signal: options.signal });
+    },
+
+    async listIntakeJobs(options = {}) {
+      return (await request({ method: "GET", path: "/v1/document-intake/jobs", schema: intakeJobListSchema, signal: options.signal })).items;
+    },
+
+    getIntakeJob(id, options = {}) {
+      return request({ method: "GET", path: `/v1/document-intake/jobs/${encodeURIComponent(id)}`, schema: intakeJobDetailSchema, signal: options.signal });
+    },
+
+    async proposeIntakeApply(id, input, options) {
+      const output = await write(`/v1/document-intake/jobs/${encodeURIComponent(id)}/apply`, input, approvalOutputSchema, options);
+      return { approvalId: output.result.id };
+    },
+
+    async approveIntakeApply(approvalId, options) {
+      await write(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, {}, approveApprovalResponseSchema, options);
+    },
+
+    async discardIntakeJob(id, options) {
+      await write(`/v1/document-intake/jobs/${encodeURIComponent(id)}/discard`, {}, intakeDiscardResultSchema, options);
     },
 
     async listSites(options = {}) {
