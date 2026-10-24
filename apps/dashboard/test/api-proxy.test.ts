@@ -239,6 +239,18 @@ describe("api proxy body limits", () => {
     expect((harness.apiCalls[0]!.init.body as Uint8Array).byteLength).toBe(64 * 1024);
   });
 
+  it("lets the intake apply request carry up to 5,000 row IDs (256 KiB) and holds every other route to 64 KiB", async () => {
+    const { harness, jar } = await signedIn();
+    const apply = ["v1", "document-intake", "jobs", "j-1", "apply"];
+    const request = (path: string[], total: number) => new Request(`${ORIGIN}/api/${path.join("/")}`, {
+      method: "POST", body: chunkedBody(chunks(total / 4096, 4096)).stream, duplex: "half",
+      headers: { Cookie: jar.header(), "Content-Type": "application/json", "Idempotency-Key": "k-apply", Origin: ORIGIN },
+    } as RequestInit);
+    expect((await proxyApiRequest(request(apply, 128 * 1024), apply, harness.setup)).status).toBe(200);
+    expect((await proxyApiRequest(request(apply, 320 * 1024), apply, harness.setup)).status).toBe(413);
+    expect((await proxyApiRequest(request(["v1", "document-intake", "jobs", "j-1", "discard"], 128 * 1024), ["v1", "document-intake", "jobs", "j-1", "discard"], harness.setup)).status).toBe(413);
+  });
+
   it("still writes refreshed session cookies on a refused body", async () => {
     // A 60-second token is refreshed on the way in; the 413 must carry the new cookies.
     const { harness, jar } = await signedIn({ ttlSeconds: 60 });

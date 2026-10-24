@@ -56,19 +56,22 @@ interface JobState {
   status: string;
   attempts: number;
   lease_token: string | null;
+  lease_expires_at: Date | null;
   diff_digest: string | null;
 }
 async function lockJob(tx: Transaction, tenantId: string, jobId: string): Promise<JobState> {
   const job = (await tx.query<JobState>(
-    "SELECT status::text AS status, attempts, lease_token, diff_digest FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+    "SELECT status::text AS status, attempts, lease_token, lease_expires_at, diff_digest FROM document_intake_jobs WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
     [tenantId, jobId],
   )).rows[0];
   if (!job) throw new NotFound();
   return job;
 }
 const leaseLost = () => new Conflict("The lease is no longer held", { reason: "lease_lost" });
-function requireLease(job: JobState, token: string, attempt: number): void {
+/** DL-5: the lease is live while the job is claimed under this token and attempt and `at` is before its expiry. */
+function requireLease(job: JobState, token: string, attempt: number, at: string): void {
   if (job.status !== "claimed" || job.lease_token !== token || job.attempts !== attempt) throw leaseLost();
+  if (job.lease_expires_at === null || job.lease_expires_at.getTime() <= new Date(at).getTime()) throw leaseLost();
 }
 const notInReview = () => new Conflict("The job is not waiting for review", { reason: "intake_not_in_review" });
 
@@ -113,9 +116,10 @@ export const failIntakeHandler: ActionHandler = {
     if (binding.actorId !== intakeWorkerActorId(binding.tenantId)) throw new TenantDenied();
     const { payload } = parseOrFail(intakeFailCommandSchema, command);
     if (command.target.id !== payload.jobId) throw new ValidationFailed("The job ID does not match the request");
+    const at = clockInstant(now);
     const job = await lockJob(tx, binding.tenantId, payload.jobId);
-    requireLease(job, payload.leaseToken, payload.attempt);
-    const outcome = await markFailed({ tx, tenantId: binding.tenantId, jobId: payload.jobId, reason: payload.reason, at: clockInstant(now) });
+    requireLease(job, payload.leaseToken, payload.attempt, at);
+    const outcome = await markFailed({ tx, tenantId: binding.tenantId, jobId: payload.jobId, reason: payload.reason, at });
     return { result: outcome as unknown as JsonValue, event: { type: "catalog.intake.failed", payload: { jobId: payload.jobId, reason: payload.reason } } };
   },
 };
@@ -139,9 +143,9 @@ export const resultIntakeHandler: ActionHandler = {
     if (resultDigest(result) !== payload.resultDigest || result.pageCount !== payload.pageCount || result.parserVersion !== payload.parserVersion)
       throw new ValidationFailed("The result does not match its digest");
     if (result.pageCount > INTAKE_MAX_PAGES) throw new ValidationFailed("The document has too many pages");
-    clockInstant(now);
+    const at = clockInstant(now);
     const job = await lockJob(tx, binding.tenantId, payload.jobId);
-    requireLease(job, payload.leaseToken, payload.attempt);
+    requireLease(job, payload.leaseToken, payload.attempt, at);
 
     const profile = await getBusinessProfile(tx, binding.tenantId);
     const mapped = mapResult(result, profile.currency);
@@ -233,7 +237,7 @@ export const applyIntakeHandler: ActionHandler = {
          ON CONFLICT (tenant_id,subject_type,subject_id,source) DO UPDATE
            SET source_ref=EXCLUDED.source_ref, observed_at=EXCLUDED.observed_at, fresh_until=NULL,
                revision=source_records.revision+1, updated_at=EXCLUDED.updated_at`,
-        [binding.tenantId, generateId(), itemId, INTAKE_SOURCE, `${payload.jobId}:p${row.page_no}#r${row.row_index}`, at, binding.actorId],
+        [binding.tenantId, derivedId(binding.tenantId, "catalog_item", itemId, INTAKE_SOURCE, "source-record"), itemId, INTAKE_SOURCE, `${payload.jobId}:p${row.page_no}#r${row.row_index}`, at, binding.actorId],
       );
     }
     await tx.query("UPDATE document_intake_rows SET included=false WHERE tenant_id=$1 AND job_id=$2 AND included", [binding.tenantId, payload.jobId]);

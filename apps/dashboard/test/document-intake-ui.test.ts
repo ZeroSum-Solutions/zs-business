@@ -84,12 +84,40 @@ describe("price lists card", () => {
     const html = renderScreen(h(ReviewBody, { detail })).replaceAll("<!-- -->", "");
     expect(html).toContain("Page 1");
     expect(html).toContain("HR-2002 | Wool scarf | Hand finished | $42.00 | Grey");
-    expect(html).toContain("Now $38.50, from the list $42.00. Changes: price.");
+    expect(html).toContain("Price: now $38.50, list says $42.00");
     expect(html).toContain("No item number");
     expect(html.match(/type="checkbox"[^>]*checked/g)).toHaveLength(2);
     expect(html.match(/type="checkbox"/g)).toHaveLength(2);
     expect(html).toContain("Ask to add 2 rows");
     expect(html).toContain("Discard this list");
+  });
+
+  it("shows every changed value, current beside proposed, the box on the page, and prices in the currency's own units", async () => {
+    const detail = await fresh().getIntakeJob(DEMO_REVIEW_JOB_ID);
+    const update = detail.rows.find((row) => row.diffOp === "update")!;
+    const insert = detail.rows.find((row) => row.diffOp === "insert")!;
+    const yen = { ...update.current!, currency: "JPY", priceMinor: 1500, description: "Old note", attributes: { Color: "Grey" } };
+    const rows = detail.rows.map((row) => {
+      if (row.id === update.id) {
+        return { ...row, current: yen, proposed: { ...yen, priceMinor: 1800, description: "New note", attributes: { Color: "Sand", Fit: "Slim" } },
+          changedFields: ["priceMinor", "description", "attributes"], bbox: [0.1, 0.25, 0.9, 0.3] as [number, number, number, number] };
+      }
+      if (row.id === insert.id) {
+        return { ...row, proposed: { ...row.proposed!, description: "Relaxed fit", currency: "KWD", priceMinor: 12500, attributes: { Color: "Sand" } } };
+      }
+      return row;
+    });
+    const html = renderScreen(h(ReviewBody, { detail: { ...detail, rows } })).replaceAll("<!-- -->", "").replaceAll("\u00a0", " ");
+    expect(html).toContain("Price: now ¥1,500, list says ¥1,800");
+    expect(html).not.toContain("¥15.00");
+    expect(html).toContain("Description: now Old note, list says New note");
+    expect(html).toContain("Details: now Color: Grey, list says Color: Sand, Fit: Slim");
+    // A new item lists everything it will add; a three-decimal currency keeps its digits.
+    expect(html).toContain("Description: Relaxed fit");
+    expect(html).toContain("Price: KWD 12.500");
+    expect(html).toContain("Details: Color: Sand");
+    // DL-12: the box sits with the page and the snippet.
+    expect(html).toContain("Page 1, box 0.1, 0.25 to 0.9, 0.3");
   });
 
   it("describes a job's counts in words", () => {

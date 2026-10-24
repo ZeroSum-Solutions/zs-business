@@ -47,6 +47,12 @@ export const INTAKE_LEASE_HEADER = "X-Lease-Token";
 /** The upload route takes the raw PDF body, so it sits outside the 64 KiB JSON limit. */
 export const DOCUMENT_INTAKE_UPLOAD_PATH = "/v1/document-intake/uploads";
 export const INTAKE_FILENAME_HEADER = "X-Filename";
+/**
+ * The apply request lists up to 5,000 row IDs (about 195 KB of JSON), so it gets a larger JSON limit than the
+ * 64 KiB every other request has. Both HTTP layers, the API and the dashboard proxy, use this one rule.
+ */
+export const DOCUMENT_INTAKE_APPLY_PATH = /^\/v1\/document-intake\/jobs\/[A-Za-z0-9_-]+\/apply$/;
+export const INTAKE_APPLY_BODY_LIMIT = 256 * 1024;
 
 export const intakeTargetKindSchema = z.enum(["catalog", "knowledge"]);
 export type IntakeTargetKind = z.infer<typeof intakeTargetKindSchema>;

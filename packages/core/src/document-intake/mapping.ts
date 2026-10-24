@@ -154,14 +154,17 @@ export function mapResult(result: DoclingResult, defaultCurrency: string): Mappe
     const title = cell("title");
     const currencyCell = cell("currency").toUpperCase();
     const currency = currencyCell === "" ? defaultCurrency : currencyCell;
-    const attributes: Record<string, string> = {};
+    // A Map, not an object literal: a column called `constructor` or `__proto__` must not collide with an inherited property.
+    const found = new Map<string, string>();
     let tooLong = sku.length > SKU_MAX || title.length > TITLE_MAX;
     for (const attribute of columns.attributes) {
       const value = (row.cells[attribute.index] ?? "").trim();
       if (value === "") continue;
-      if (value.length > ATTRIBUTE_VALUE_MAX || Object.keys(attributes).length >= CATALOG_MAX_ATTRIBUTES) tooLong = true;
-      else attributes[attribute.key] ??= value;
+      if (value.length > ATTRIBUTE_VALUE_MAX || found.size >= CATALOG_MAX_ATTRIBUTES) tooLong = true;
+      else if (!found.has(attribute.key)) found.set(attribute.key, value);
     }
+    // fromEntries defines own properties, so even `__proto__` stays a plain key.
+    const attributes: Record<string, string> = Object.fromEntries(found);
     const priceMinor = parsePrice(cell("price"), isActiveCurrencyCode(currency) ? currency : defaultCurrency);
     let invalid: IntakeInvalidReason | null = null;
     if (sku === "") invalid = "missing_key";

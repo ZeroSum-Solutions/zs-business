@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  ActionError, CATALOG_INTAKE_APPLY_ACTION, Conflict, DOCUMENT_INTAKE_JOB_TARGET, INTAKE_LEASE_MS, INTAKE_MAX_BYTES,
+  ActionError, CATALOG_INTAKE_APPLY_ACTION, CATALOG_INTAKE_UPLOAD_ACTION, Conflict, DOCUMENT_INTAKE_JOB_TARGET, INTAKE_LEASE_MS, INTAKE_MAX_BYTES,
   NotFound, Refused, TenantDenied, idempotencyKeySchema, type IntakeJobDetail, type MemberRole,
 } from "@zs/contracts";
 import { asService, type Transaction } from "@zs/db";
@@ -165,7 +165,7 @@ describe("DL-5, DL-10..DL-12 the worker posts tables; the server builds the diff
     expect(first.counts).toEqual({ insert: 1, update: 1, unchanged: 0, invalid: 1 });
     expect(await rows("SELECT 1 FROM document_intake_rows WHERE tenant_id=$1 AND job_id=$2", [tenantA, reviewJob])).toHaveLength(3);
     // A file fetch needs a live claim: after review the token no longer opens the PDF.
-    expect(await rejection(intake().worker.file(reviewJob, claimed!.lease_token))).toBeInstanceOf(NotFound);
+    expect(reason(await rejection(intake().worker.file(reviewJob, claimed!.lease_token)))).toBe("lease_lost");
   });
 });
 
@@ -236,6 +236,47 @@ describe("DL-4 leases", () => {
   });
 });
 
+describe("DL-5 a lease is live only until it expires", () => {
+  it("an expired, unreclaimed token fetches no file and posts neither a result nor a failure; the job is still claimable", async () => {
+    const queued = await member(ownerA).upload({ bytes: pdfVariant(70), filename: "late.pdf", contentType: "application/pdf" }, randomUUID());
+    const worker = intake().worker;
+    const held = (await worker.claim())!;
+    expect(held.id).toBe(queued.jobId);
+    expect((await worker.file(held.id, held.leaseToken)).byteLength).toBeGreaterThan(0);
+    now += INTAKE_LEASE_MS + 1000;
+    expect(reason(await rejection(worker.file(held.id, held.leaseToken)))).toBe("lease_lost");
+    expect(reason(await rejection(worker.result(held.id, held.leaseToken, FAKE_PRICE_LIST)))).toBe("lease_lost");
+    expect(reason(await rejection(worker.fail(held.id, held.leaseToken, { reason: "worker_error" })))).toBe("lease_lost");
+    expect(await rows("SELECT 1 FROM document_intake_rows WHERE tenant_id=$1 AND job_id=$2", [tenantA, queued.jobId])).toHaveLength(0);
+    expect((await detail(queued.jobId)).status).toBe("claimed");
+    const again = (await worker.claim())!;
+    expect(again).toMatchObject({ id: queued.jobId, attempt: 2 });
+    // The new holder finishes; a replay of its posted result after the lease lapsed still returns the first outcome.
+    const first = await worker.result(again.id, again.leaseToken, FAKE_PRICE_LIST);
+    expect(first.status).toBe("review");
+    now += INTAKE_LEASE_MS + 1000;
+    expect(await worker.result(again.id, again.leaseToken, FAKE_PRICE_LIST)).toEqual(first);
+    await member(ownerA).discard(queued.jobId, randomUUID());
+  });
+});
+
+describe("DL-3, DL-14 the upload never runs through a generic approval; intake sources are observable", () => {
+  it("refuses to propose catalog.intake.upload as an approval", async () => {
+    const jobId = randomUUID();
+    const sha = "a".repeat(64);
+    const error = await rejection(createSession(deps(), { tenantId: tenantA, actorId: ownerA }).requestApproval({
+      action: {
+        actionType: CATALOG_INTAKE_UPLOAD_ACTION, target: { type: DOCUMENT_INTAKE_JOB_TARGET, id: jobId },
+        payload: { jobId, targetKind: "catalog", source: "upload", filename: "x.pdf", fileSha256: sha, byteLength: 100 },
+      },
+      summary: "Upload without bytes", expiresInMinutes: 60,
+    }, randomUUID()));
+    expect(error).toBeDefined();
+    expect(await rows("SELECT 1 FROM document_intake_jobs WHERE id=$1", [jobId])).toHaveLength(0);
+    expect(await rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND action_type=$2", [tenantA, CATALOG_INTAKE_UPLOAD_ACTION])).toHaveLength(0);
+  });
+});
+
 describe("DL-13, DL-14 no row goes live without one owner approval of the whole diff", () => {
   it("refuses a direct apply, then applies exactly the rows the owner left in", async () => {
     const job = await detail(reviewJob);
@@ -282,6 +323,12 @@ describe("DL-13, DL-14 no row goes live without one owner approval of the whole 
     const records = await rows<{ source: string; source_ref: string; subject_type: string }>(
       "SELECT source, source_ref, subject_type::text FROM source_records WHERE tenant_id=$1 AND subject_id=$2", [tenantA, live[0]!.id]);
     expect(records).toEqual([{ source: "document_intake", source_ref: `${reviewJob}:p${insert.pageNo}#r${insert.rowIndex}`, subject_type: "catalog_item" }]);
+
+    // The record has the identity source.observe derives, so the public path can refresh it (approvals.md F-4).
+    const observed = await createSession(deps(), { tenantId: tenantA, actorId: ownerA }).observeSource(
+      { subject: { type: "catalog_item", id: live[0]!.id }, source: "document_intake", sourceRef: "recheck" }, randomUUID());
+    expect(observed).toBeDefined();
+    expect(await rows("SELECT 1 FROM source_records WHERE tenant_id=$1 AND subject_id=$2", [tenantA, live[0]!.id])).toHaveLength(1);
 
     // The job is spent: a second apply or a discard is refused.
     expect(reason(await rejection(member(ownerA).discard(reviewJob, randomUUID())))).toBe("intake_not_in_review");
@@ -339,8 +386,9 @@ describe("DL-16 files and two tenants", () => {
     expect(claimA.tenantId).toBe(tenantA);
     // A token opens its own job's file and no other job's.
     expect((await worker.file(claimA.id, claimA.leaseToken)).byteLength).toBeGreaterThan(0);
-    expect(await rejection(worker.file(claimB.id, claimA.leaseToken))).toBeInstanceOf(NotFound);
-    expect(await rejection(worker.file(claimA.id, claimB.leaseToken))).toBeInstanceOf(NotFound);
+    // DL-5: a token that does not hold the job, in any tenant, is `Conflict` `lease_lost`.
+    expect(reason(await rejection(worker.file(claimB.id, claimA.leaseToken)))).toBe("lease_lost");
+    expect(reason(await rejection(worker.file(claimA.id, claimB.leaseToken)))).toBe("lease_lost");
     expect(await rejection(worker.result(claimB.id, claimA.leaseToken, FAKE_PRICE_LIST))).toBeInstanceOf(ActionError);
     // B's own owner reaches B's job and A's owner does not.
     expect((await member(ownerB, tenantB).list()).items.map((job) => job.id)).toEqual([bJob.jobId]);

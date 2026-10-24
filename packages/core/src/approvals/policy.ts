@@ -34,9 +34,11 @@ export const isSiteAction = (actionType: string) => actionType.startsWith("site.
  * Member actions that never run through an approval. google-calendar.md G-2: the connect action
  * runs only from the OAuth callback, with the grant it sealed, under its reserved key. stripe.md
  * S-1: a top-up runs only from the member's top-up route, with the server's terms, and asks Stripe
- * for a Checkout Session after.
+ * for a Checkout Session after. document-intake.md DL-3: an upload runs only from the upload route,
+ * which checks the type, the signature and the size and stores the bytes first; an approved copy
+ * would queue a job for a file that was never stored.
  */
-export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect", "wallet.topup.create"]);
+export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect", "wallet.topup.create", "catalog.intake.upload"]);
 export const cannotBeApproved = (actionType: string) =>
   isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);
 

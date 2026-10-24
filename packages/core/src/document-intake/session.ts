@@ -71,6 +71,8 @@ interface Lease {
   readonly attempt: number;
   readonly status: string;
   readonly fileSha256: string;
+  /** True once the injected clock has reached the lease's expiry. */
+  readonly expired: boolean;
 }
 
 const only = (...actionTypes: string[]): Authorize => async (_tx, binding) => {
@@ -128,17 +130,26 @@ interface StoredRowView {
 export function createDocumentIntakeSession(deps: EdgeDependencies, config: DocumentIntakeConfig) {
   const now = () => new Date(deps.clock.now());
 
-  /** The lease for this job and token, if the token is the one the job holds. */
+  /** The lease for this job and token, if the token is the one the job holds (live or lapsed: see `expired`). */
   async function lease(jobId: string, token: string): Promise<Lease | null> {
     const ids = uuidSchema.safeParse(jobId);
     const secret = uuidSchema.safeParse(token);
     if (!ids.success || !secret.success) return null;
     if (!deps.db.platform) throw new Error("The document intake worker needs the platform transaction");
-    const row = await deps.db.platform(async (tx) => (await tx.query<{ tenant_id: string; attempts: number; status: string; file_sha256: string }>(
-      "SELECT tenant_id, attempts, status::text AS status, file_sha256 FROM document_intake_jobs WHERE id=$1 AND lease_token=$2",
+    const row = await deps.db.platform(async (tx) => (await tx.query<{ tenant_id: string; attempts: number; status: string; file_sha256: string; lease_expires_at: Date | null }>(
+      "SELECT tenant_id, attempts, status::text AS status, file_sha256, lease_expires_at FROM document_intake_jobs WHERE id=$1 AND lease_token=$2",
       [ids.data, secret.data])).rows[0]);
-    return row ? { tenantId: row.tenant_id, jobId: ids.data, attempt: row.attempts, status: row.status, fileSha256: row.file_sha256 } : null;
+    if (!row) return null;
+    const expired = row.lease_expires_at === null || row.lease_expires_at.getTime() <= now().getTime();
+    return { tenantId: row.tenant_id, jobId: ids.data, attempt: row.attempts, status: row.status, fileSha256: row.file_sha256, expired };
   }
+  const leaseLost = () => new Conflict("The lease is no longer held", { reason: "lease_lost" });
+  /** DL-5: file, fail and a first result need a claim that is still live. */
+  const liveLease = async (jobId: string, token: string): Promise<Lease> => {
+    const held = await lease(jobId, token);
+    if (!held || held.status !== "claimed" || held.expired) throw leaseLost();
+    return held;
+  };
 
   async function workerDispatch(
     held: Lease, actionType: string, key: string, payload: unknown, dispatchConfig: IntakeDispatchConfig = {},
@@ -323,8 +334,7 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
 
       /** DL-5: the job's PDF, for the holder of a live claim on that exact job. */
       async file(jobId: string, token: string): Promise<Uint8Array> {
-        const held = await lease(jobId, token);
-        if (!held || held.status !== "claimed") throw new NotFound();
+        const held = await liveLease(jobId, token);
         const found = await config.store.read(intakeFilePath(held.tenantId, held.jobId, held.fileSha256));
         if (!found || createHash("sha256").update(found).digest("hex") !== held.fileSha256) throw new NotFound();
         return found;
@@ -332,11 +342,17 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
 
       /**
        * DL-5, DL-8, DL-10, DL-15: validate the tables, then record them as one diff. A bad result fails
-       * the job `invalid_result`; a long one fails it `too_many_pages`. A replay returns the first outcome.
+       * the job `invalid_result`; a long one fails it `too_many_pages`. A replay returns the first outcome,
+       * even after the lease lapsed. A body of the form `{ reason }` is the worker reporting a limit it hit or
+       * a crash: DL-5 gives the worker three routes, so a failure travels on this one.
        */
       async result(jobId: string, token: string, body: unknown): Promise<IntakeWorkerOutcome> {
         const held = await lease(jobId, token);
-        if (!held) throw new Conflict("The lease is no longer held", { reason: "lease_lost" });
+        if (!held) throw leaseLost();
+        // A claimed job needs a live lease; any other state is a replay of an outcome already stored.
+        if (held.status === "claimed" && held.expired) throw leaseLost();
+        const failure = intakeFailRequestSchema.safeParse(body);
+        if (failure.success) return failJob(held, token, failure.data.reason);
         const parsed = doclingResultSchema.safeParse(body);
         if (!parsed.success) {
           if (held.status === "claimed") await failJob(held, token, "invalid_result");
@@ -356,7 +372,8 @@ export function createDocumentIntakeSession(deps: EdgeDependencies, config: Docu
       async fail(jobId: string, token: string, body: unknown): Promise<IntakeWorkerOutcome> {
         const { reason } = parseInput(intakeFailRequestSchema, body);
         const held = await lease(jobId, token);
-        if (!held) throw new Conflict("The lease is no longer held", { reason: "lease_lost" });
+        if (!held) throw leaseLost();
+        if (held.status === "claimed" && held.expired) throw leaseLost();
         return failJob(held, token, reason);
       },
     },

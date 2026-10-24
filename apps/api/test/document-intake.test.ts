@@ -13,7 +13,7 @@ import {
   type ClaimedIntakeJob,
 } from "@zs/contracts";
 import { FAKE_PRICE_LIST, createFakeDoclingPort, runDocumentIntakeWorker, type IntakeWorkerApi } from "@zs/core";
-import { call, createApiHarness, INTAKE_WORKER_TOKEN, signedInMember, type ApiHarness, type MemberSetup, type TenantSetup } from "./helpers.js";
+import { call, createApiHarness, INTAKE_WORKER_TOKEN, ORIGIN, signedInMember, type ApiHarness, type MemberSetup, type TenantSetup } from "./helpers.js";
 
 let h: ApiHarness;
 let staff: MemberSetup;
@@ -72,7 +72,8 @@ const httpWorker: IntakeWorkerApi = {
     return response.body;
   },
   async fail(jobId, leaseToken, body) {
-    const response = await worker(`/jobs/${jobId}/fail`, { lease: leaseToken, body });
+    // DL-5: the worker has three routes; a failure is a result body of its own.
+    const response = await worker(`/jobs/${jobId}/result`, { lease: leaseToken, body });
     if (response.status !== 200) throw new Error(`fail ${response.status}`);
     return response.body;
   },
@@ -168,6 +169,53 @@ describe("document intake over HTTP", () => {
     const bList = intakeJobListSchema.parse((await call(h.app, "GET", "/v1/document-intake/jobs", { token: h.b.token })).body);
     expect(bList.items.map((item) => item.id)).not.toContain(jobId);
     expect((await call(h.app, "GET", "/v1/document-intake/jobs", { token: staff.token })).status).toBe(403);
+  });
+
+  it("offers the worker exactly three routes (DL-5) and takes a failure on the result route", async () => {
+    while (await httpWorker.claim()) { /* drain */ }
+    const { jobId } = intakeUploadResultSchema.parse((await upload(h.a.token, pdf())).body);
+    const claimed = (await httpWorker.claim())!;
+    expect(claimed.id).toBe(jobId);
+    // The old /fail route is gone: the worker token is no member's, so the request falls through to member auth.
+    expect((await worker(`/jobs/${jobId}/fail`, { lease: claimed.leaseToken, body: { reason: "timeout" } })).status).toBe(401);
+    expect((await detail(h.a, jobId)).status).toBe("claimed");
+    const failed = await worker(`/jobs/${jobId}/result`, { lease: claimed.leaseToken, body: { reason: "timeout" } });
+    expect(failed.status, JSON.stringify(failed.body)).toBe(200);
+    expect(failed.body).toMatchObject({ status: "failed", failureReason: "timeout" });
+    const after = await detail(h.a, jobId);
+    expect(after).toMatchObject({ status: "failed", failureReason: "timeout" });
+    // A replay returns the stored outcome.
+    expect((await worker(`/jobs/${jobId}/result`, { lease: claimed.leaseToken, body: { reason: "timeout" } })).body).toMatchObject({ status: "failed" });
+  });
+
+  it("takes an apply request that lists the most rows a job can hold, and a result far over 64 KiB", async () => {
+    // 2000 row IDs are 78 KB of JSON; the job is unknown, so the answer is 404, not 413 (DL-8, DL-13).
+    const ids = Array.from({ length: 2000 }, () => randomUUID());
+    const apply = await call(h.app, "POST", `/v1/document-intake/jobs/${randomUUID()}/apply`, {
+      token: h.a.token, key: randomUUID(), body: { includedRowIds: ids, diffDigest: "0".repeat(64) },
+    });
+    expect(apply.status, JSON.stringify(apply.body)).toBe(404);
+    const most = Array.from({ length: 5000 }, () => randomUUID());
+    const largest = await call(h.app, "POST", `/v1/document-intake/jobs/${randomUUID()}/apply`, {
+      token: h.a.token, key: randomUUID(), body: { includedRowIds: most, diffDigest: "0".repeat(64) },
+    });
+    expect(largest.status, JSON.stringify(largest.body)).toBe(404);
+    // Other member routes keep the 64 KiB limit.
+    const other = await call(h.app, "POST", `/v1/document-intake/jobs/${randomUUID()}/discard`, {
+      token: h.a.token, key: randomUUID(), body: { padding: "x".repeat(70 * 1024) },
+    });
+    expect(other.status).toBe(413);
+    // A 9 MB result body is not cut off by the worker limit: the unknown lease answers instead.
+    const big = await worker(`/jobs/${randomUUID()}/result`, { lease: randomUUID(), body: { padding: "x".repeat(9 * 1024 * 1024) } });
+    expect(big.status).toBe(409);
+  });
+
+  it("lets a browser on an allowed origin send the upload's filename header", async () => {
+    const response = await h.app.request("/v1/document-intake/uploads", {
+      method: "OPTIONS",
+      headers: { Origin: ORIGIN, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type,idempotency-key,x-filename" },
+    });
+    expect(response.headers.get("Access-Control-Allow-Headers")?.toLowerCase()).toContain("x-filename");
   });
 
   it("discards a job in review", async () => {

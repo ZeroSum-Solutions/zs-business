@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type { IntakeJob, IntakeJobDetail, IntakeRow } from "@zs/contracts";
+import type { CatalogFields, IntakeJob, IntakeJobDetail, IntakeRow } from "@zs/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,7 +14,7 @@ import { useDisplayZone, useIntakeJob, useIntakeJobs, useKeys } from "@/lib/quer
 import { MANAGE_CATALOG, useCan } from "@/lib/session";
 import { singleFlight } from "@/lib/single-flight";
 import { formatDay, formatTime } from "@/lib/time";
-import { cn, formatMoney } from "@/lib/utils";
+import { cn, currencyDigits, formatMoney } from "@/lib/utils";
 
 /** Job states as the owner reads them (document-intake.md DL-4). */
 export const INTAKE_STATUS: Record<IntakeJob["status"], { label: string; tone: "neutral" | "info" | "success" | "danger" | "warn" }> = {
@@ -49,10 +49,6 @@ const INVALID_TEXT: Record<NonNullable<IntakeRow["invalidReason"]>, string> = {
   field_too_long: "A value is too long",
 };
 
-const FIELD_LABEL: Record<string, string> = {
-  title: "name", description: "description", priceMinor: "price", currency: "currency", attributes: "details", active: "availability",
-};
-
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 /** "2 new, 1 changed" for a job's counts. */
@@ -62,7 +58,51 @@ export function countsLine(job: Pick<IntakeJob, "counts">): string {
   return parts.length > 0 ? parts.join(", ") : "No rows";
 }
 
-const price = (fields: { priceMinor: number; currency: string } | null) => (fields ? formatMoney(fields.priceMinor / 100, fields.currency, 2) : "");
+/** A price in its currency's own minor units: 1500 JPY is ¥1,500, 12500 KWD is KWD 12.500, 4200 USD is $42.00. */
+function price(fields: Pick<CatalogFields, "priceMinor" | "currency">): string {
+  const digits = currencyDigits(fields.currency);
+  try {
+    return formatMoney(fields.priceMinor / 10 ** digits, fields.currency, digits);
+  } catch {
+    return `${(fields.priceMinor / 10 ** digits).toFixed(digits)} ${fields.currency}`;
+  }
+}
+
+const FIELD_TITLE: Record<string, string> = {
+  title: "Name", description: "Description", priceMinor: "Price", currency: "Currency", attributes: "Details", active: "Availability",
+};
+const FIELD_ORDER = ["title", "description", "priceMinor", "currency", "attributes", "active"] as const;
+
+function showField(fields: CatalogFields, name: string): string {
+  switch (name) {
+    case "title": return fields.title;
+    case "description": return fields.description.trim() === "" ? "none" : fields.description;
+    case "priceMinor": return price(fields);
+    case "currency": return fields.currency;
+    case "attributes": {
+      const entries = Object.entries(fields.attributes);
+      return entries.length === 0 ? "none" : entries.map(([key, value]) => `${key}: ${value}`).join(", ");
+    }
+    case "active": return fields.active ? "available" : "hidden";
+    default: return "";
+  }
+}
+
+/**
+ * DL-13: what the approver reads for one row. A changed item lists each changed field, the current value beside the
+ * one the list proposes; a new item lists everything it will add.
+ */
+export function valueLines(row: Pick<IntakeRow, "diffOp" | "proposed" | "current" | "changedFields">): string[] {
+  const proposed = row.proposed;
+  if (!proposed) return [];
+  if (row.diffOp === "update" && row.current) {
+    const current = row.current;
+    return FIELD_ORDER.filter((name) => row.changedFields.includes(name))
+      .map((name) => `${FIELD_TITLE[name]}: now ${showField(current, name)}, list says ${showField(proposed, name)}`);
+  }
+  return FIELD_ORDER.filter((name) => name !== "currency" && !(name === "description" && proposed.description.trim() === "") && !(name === "attributes" && Object.keys(proposed.attributes).length === 0))
+    .map((name) => `${FIELD_TITLE[name]}: ${showField(proposed, name)}`);
+}
 
 /** The rows that can be applied start selected, as the server defaulted them (DL-13). */
 function chosenIds(detail: IntakeJobDetail): string[] {
@@ -216,15 +256,13 @@ export function ReviewBody({ detail }: { detail: IntakeJobDetail }) {
                 {row.invalidReason ? <span className="text-sm text-danger">{INVALID_TEXT[row.invalidReason]}</span> : null}
               </div>
               {row.proposed ? (
-                <p className="mt-1 text-sm text-fg-2" data-testid="row-values">
-                  {row.diffOp === "update" && row.current
-                    ? <>Now {price(row.current)}, from the list {price(row.proposed)}. Changes: {row.changedFields.map((field) => FIELD_LABEL[field] ?? field).join(", ")}.</>
-                    : <>{row.proposed.title}, {price(row.proposed)}.</>}
-                </p>
+                <ul className="mt-1 space-y-0.5 text-sm text-fg-2" data-testid="row-values">
+                  {valueLines(row).map((line) => <li key={line} className="break-words">{line}</li>)}
+                </ul>
               ) : null}
-              {/* DL-12: the page and the words the row was read from sit beside it. */}
+              {/* DL-12: the page, the box on it and the words the row was read from sit beside it. */}
               <p className="mt-1 text-xs text-meta" data-testid="row-source">
-                Page {row.pageNo}: <q className="break-words">{row.sourceSnippet.trim()}</q>
+                Page {row.pageNo}, box {row.bbox[0]}, {row.bbox[1]} to {row.bbox[2]}, {row.bbox[3]}: <q className="break-words">{row.sourceSnippet.trim()}</q>
               </p>
             </li>
           );

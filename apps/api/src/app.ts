@@ -2,7 +2,7 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
-import { DOCUMENT_INTAKE_UPLOAD_PATH, DOCUMENT_INTAKE_WORKER_PREFIX, type ApiErrorCode } from "@zs/contracts";
+import { DOCUMENT_INTAKE_APPLY_PATH, DOCUMENT_INTAKE_UPLOAD_PATH, DOCUMENT_INTAKE_WORKER_PREFIX, INTAKE_APPLY_BODY_LIMIT, INTAKE_FILENAME_HEADER, type ApiErrorCode } from "@zs/contracts";
 import {
   apiErrorBody,
   AuthUnavailable,
@@ -156,7 +156,7 @@ export function createApp(deps: AppDependencies) {
   const origins = new Set(deps.config.allowedOrigins);
   app.use("*", cors({
     origin: (origin) => (origins.has(origin) ? origin : null),
-    allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key"],
+    allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", INTAKE_FILENAME_HEADER],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     maxAge: 600,
   }));
@@ -248,12 +248,15 @@ export function createApp(deps: AppDependencies) {
     app.route(DOCUMENT_INTAKE_WORKER_PREFIX, intakeWorkerRoutes(intakeFor));
   }
 
-  const jsonLimit = bodyLimit({
-    maxSize: 64 * 1024,
-    onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413),
-  });
+  const tooLarge = (c: Context<AppEnv>) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413);
+  const jsonLimit = bodyLimit({ maxSize: 64 * 1024, onError: tooLarge });
+  // document-intake.md DL-13: an apply request lists up to 5,000 row IDs, about 195 KB of JSON.
+  const intakeApplyLimit = bodyLimit({ maxSize: INTAKE_APPLY_BODY_LIMIT, onError: tooLarge });
   // The PDF upload carries its own 20 MiB limit (routes/document-intake.ts).
-  app.use("/v1/*", (c, next) => (c.req.path === DOCUMENT_INTAKE_UPLOAD_PATH ? next() : jsonLimit(c, next)));
+  app.use("/v1/*", (c, next) => {
+    if (c.req.path === DOCUMENT_INTAKE_UPLOAD_PATH) return next();
+    return (DOCUMENT_INTAKE_APPLY_PATH.test(c.req.path) ? intakeApplyLimit : jsonLimit)(c, next);
+  });
   app.use("/v1/*", async (c, next) => {
     const header = c.req.header("Authorization") ?? "";
     const match = /^Bearer ([A-Za-z0-9_\-.]+)$/.exec(header);

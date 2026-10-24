@@ -35,8 +35,11 @@ export function intakeWorkerAuth(config: DocumentIntakeApiConfig): MiddlewareHan
   };
 }
 
-/** A 50-page price list can hold thousands of rows; DL-8 caps them at 5000 and each cell at 2000 characters. */
-const WORKER_BODY_LIMIT = 8 * 1024 * 1024;
+/**
+ * DL-8 caps a result at 5000 rows and each cell at 2000 characters, and the PDF it came from at 20 MiB, so
+ * the text cannot outgrow a few times the file; the schema judges the rest.
+ */
+const WORKER_BODY_LIMIT = 32 * 1024 * 1024;
 
 export function intakeWorkerRoutes(sessionFor: (c: Context<AppEnv>) => DocumentIntakeSession) {
   const worker = (c: Context<AppEnv>) => sessionFor(c).worker;
@@ -56,8 +59,8 @@ export function intakeWorkerRoutes(sessionFor: (c: Context<AppEnv>) => DocumentI
         "Cache-Control": "no-store",
       });
     })
-    .post("/jobs/:id/result", async (c) => c.json(await worker(c).result(c.req.param("id"), lease(c), await jsonBody(c))))
-    .post("/jobs/:id/fail", async (c) => c.json(await worker(c).fail(c.req.param("id"), lease(c), await jsonBody(c))));
+    // DL-5: three routes and nothing else. A failure (`{ "reason": "timeout" }`) is posted here too.
+    .post("/jobs/:id/result", async (c) => c.json(await worker(c).result(c.req.param("id"), lease(c), await jsonBody(c))));
 }
 
 /** A filename header may arrive percent-encoded; a bad escape is kept as sent and the schema judges it. */

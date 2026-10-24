@@ -196,6 +196,10 @@ role cannot delete a `catalog_items` row.
 
 ## Known limits
 
+- The first slice takes uploaded bytes only (`source` `upload`). The `{ browserRunId, artifactId }` input
+  of DL-3 waits for `browser-tasks.md` BT-13: no browser run or artifact store exists yet to copy from.
+- `sweepFiles()` implements the 30-day deletion of DL-16 and is tested, but no scheduler calls it yet;
+  the daily runner that does so ships with the first deploy of the intake routes.
 - `catalog_items` and `knowledge_entries` are minimal and new. They will need a revision when
   store sync, variants, stock or images arrive.
 - Header mapping uses a fixed synonym list; a PDF with other headings yields `invalid` rows.

@@ -28,6 +28,19 @@ describe("parsePrice", () => {
 });
 
 describe("mapResult", () => {
+  it("keeps extra columns named like inherited object properties (a prototype-free attribute map)", () => {
+    const names = ["constructor", "toString", "__proto__", "hasOwnProperty"];
+    const [row] = mapResult(table(["SKU", "Name", "Price", ...names], ["A-1", "Thing", "$1.00", "c", "t", "p", "h"]), "USD");
+    expect(row!.invalid).toBeNull();
+    const attributes = row!.fields!.attributes;
+    expect(Object.keys(attributes).sort()).toEqual([...names].sort());
+    expect(Object.getPrototypeOf(attributes)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(attributes, "__proto__")?.value).toBe("p");
+    expect(attributes.constructor).toBe("c");
+    // The stored copy (JSON) keeps all four.
+    expect(Object.keys(JSON.parse(JSON.stringify(attributes)) as object).sort()).toEqual([...names].sort());
+  });
+
   it("maps synonym headers and keeps the other columns as attributes", () => {
     const rows = mapResult(FAKE_PRICE_LIST, "USD");
     expect(rows.map((row) => row.rowIndex)).toEqual([1, 2, 3]);
