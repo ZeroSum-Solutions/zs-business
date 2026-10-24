@@ -87,3 +87,4 @@ export {
   type FollowUpRunReport,
 } from "./agents/index.js";
 export { agentAuthorize, createFollowUpAgent, type FollowUpAgent, type FollowUpAgentConfig } from "./edge/agent-session.js";
+export * from "./enrichment/index.js";
