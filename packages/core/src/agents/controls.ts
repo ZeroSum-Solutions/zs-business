@@ -1,20 +1,35 @@
-// M6 agent controls (agents.md G-2..G-5): settings, the two kill switches, quiet hours and the
-// caps. Original code. Every check reads time from the caller's injected clock.
+// M6 agent controls (agents.md G-2..G-5, G-14, G-15): settings, the two kill switches, quiet hours,
+// the caps and the daily cost cap. Original code. Every check reads time from the caller's
+// injected clock. Each kind has its own settings row (G-14); the global switch stops them all.
 import {
   DEFAULT_FOLLOW_UP_SETTINGS,
+  DEFAULT_MAX_COST_MICROS_PER_DAY,
+  agentKindConfigSchemas,
   ValidationFailed,
+  type AgentKind,
+  type AgentKindSettings,
+  type AgentKindStatus,
   type FollowUpSettings,
   type FollowUpStatus,
   type FollowUpStopReason,
+  type FollowUpSwitchReason,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { offsetAt } from "../booking/time-zone.js";
 import { derivedId } from "../edge/ids.js";
+import { atWarningLine, costSpent } from "./cost.js";
 
-/** G-1: the one actor every agent action runs as, per tenant. No member has this ID. */
-export const agentActorId = (tenantId: string) => derivedId(tenantId, "followup-agent", "actor");
+/**
+ * G-1, G-14: the actor every action of one kind runs as, per tenant. No member has this ID.
+ * `inquiry_followup` keeps G-1's `followup-agent` ID; every other kind derives its own.
+ */
+export const agentActorId = (tenantId: string, kind: AgentKind = "inquiry_followup") =>
+  derivedId(tenantId, kind === "inquiry_followup" ? "followup-agent" : `${kind}-agent`, "actor");
 
 export interface SettingsRow {
+  agent_kind: AgentKind;
+  config: AgentKindSettings["config"];
+  max_cost_micros_per_day: number;
   enabled: boolean;
   max_drafts_per_day: number;
   max_drafts_per_contact: number;
@@ -36,13 +51,24 @@ export interface AgentControls {
   readonly revision: number;
   readonly updatedAt: Date | null;
   readonly killed: { readonly at: Date; readonly by: string; readonly note: string | null } | null;
+  /** G-14: the kind's own settings (`agentKindConfigSchemas`), defaults filled in. */
+  readonly config: AgentKindSettings["config"];
+  /** G-15: USD millionths the kind may spend on model calls in 24 hours. */
+  readonly maxCostMicrosPerDay: number;
 }
 
-export const SETTINGS_COLUMNS = `enabled, max_drafts_per_day, max_drafts_per_contact, contact_window_hours, wait_hours,
-  lookback_days, quiet_start_minute, quiet_end_minute, time_zone, killed_at, killed_by, kill_note, revision, updated_at`;
+export const SETTINGS_COLUMNS = `agent_kind, config, max_cost_micros_per_day, enabled, max_drafts_per_day, max_drafts_per_contact,
+  contact_window_hours, wait_hours, lookback_days, quiet_start_minute, quiet_end_minute, time_zone, killed_at, killed_by,
+  kill_note, revision, updated_at`;
 
-export function controlsFromRow(row: SettingsRow | undefined): AgentControls {
-  if (!row) return { settings: DEFAULT_FOLLOW_UP_SETTINGS, revision: 0, updatedAt: null, killed: null };
+export function controlsFromRow(row: SettingsRow | undefined, kind: AgentKind = "inquiry_followup"): AgentControls {
+  if (!row) {
+    return {
+      settings: DEFAULT_FOLLOW_UP_SETTINGS, revision: 0, updatedAt: null, killed: null,
+      config: agentKindConfigSchemas[kind].parse({}) as AgentKindSettings["config"],
+      maxCostMicrosPerDay: DEFAULT_MAX_COST_MICROS_PER_DAY,
+    };
+  }
   return {
     settings: {
       enabled: row.enabled,
@@ -58,18 +84,23 @@ export function controlsFromRow(row: SettingsRow | undefined): AgentControls {
     revision: row.revision,
     updatedAt: row.updated_at,
     killed: row.killed_at && row.killed_by ? { at: row.killed_at, by: row.killed_by, note: row.kill_note } : null,
+    config: row.config,
+    maxCostMicrosPerDay: row.max_cost_micros_per_day,
   };
 }
 
 /**
- * The tenant's settings. `lock` takes the row FOR UPDATE: every agent draft and every kill,
- * resume or settings write for the tenant then serializes on it (G-3, G-4).
+ * The kind's settings for the tenant. `lock` takes the row FOR UPDATE: every agent draft and
+ * every kill, resume or settings write for the kind then serializes on it (G-3, G-4).
  */
-export async function loadControls(tx: Transaction, tenantId: string, lock: boolean): Promise<AgentControls> {
+export async function loadControls(
+  tx: Transaction, tenantId: string, lock: boolean, kind: AgentKind = "inquiry_followup",
+): Promise<AgentControls> {
   const row = (await tx.query<SettingsRow>(
-    `SELECT ${SETTINGS_COLUMNS} FROM agent_settings WHERE tenant_id=$1${lock ? " FOR UPDATE" : ""}`, [tenantId],
+    `SELECT ${SETTINGS_COLUMNS} FROM agent_settings WHERE tenant_id=$1 AND agent_kind=$2${lock ? " FOR UPDATE" : ""}`,
+    [tenantId, kind],
   )).rows[0];
-  return controlsFromRow(row);
+  return controlsFromRow(row, kind);
 }
 
 /**
@@ -108,7 +139,7 @@ export function inQuietHours(settings: FollowUpSettings, now: Date): boolean {
 }
 
 /** G-3, G-5: the first reason the agent may not draft now, or null. */
-export function gate(controls: AgentControls, globalKilled: boolean, now: Date): FollowUpStopReason | null {
+export function gate(controls: AgentControls, globalKilled: boolean, now: Date): FollowUpSwitchReason | null {
   if (globalKilled) return "global_killed";
   if (!controls.settings.enabled) return "disabled";
   if (controls.killed) return "tenant_killed";
@@ -138,16 +169,32 @@ export async function contactDrafts(tx: Transaction, tenantId: string, contactId
   )).rows[0]!.n);
 }
 
+/** G-15: a kind's cost against its cap. */
+export interface CostFigures {
+  readonly spent: number;
+  readonly cap: number;
+  /** At 80% of the cap or more. */
+  readonly warning: boolean;
+}
+export async function costFigures(tx: Transaction, tenantId: string, kind: AgentKind, controls: AgentControls, now: Date): Promise<CostFigures> {
+  const spent = await costSpent(tx, tenantId, kind, now);
+  return { spent, cap: controls.maxCostMicrosPerDay, warning: atWarningLine(spent, controls.maxCostMicrosPerDay) };
+}
+
 /** G-11: the status a member reads. */
 export async function followUpStatus(tx: Transaction, tenantId: string, now: Date): Promise<FollowUpStatus> {
   const controls = await loadControls(tx, tenantId, false);
   const globalKilled = await readGlobalKilled(tx, false);
-  let blockedBy = gate(controls, globalKilled, now);
+  let blockedBy: FollowUpStopReason | null = gate(controls, globalKilled, now);
   if (!blockedBy && (await draftsToday(tx, tenantId, now)) >= controls.settings.maxDraftsPerDay) blockedBy = "daily_cap";
-  return statusRecord(controls, globalKilled, blockedBy);
+  const cost = await costFigures(tx, tenantId, "inquiry_followup", controls, now);
+  if (!blockedBy && cost.spent >= cost.cap) blockedBy = "cost_cap";
+  return statusRecord(controls, globalKilled, blockedBy, cost);
 }
 
-export function statusRecord(controls: AgentControls, globalKilled: boolean, blockedBy: FollowUpStopReason | null): FollowUpStatus {
+export function statusRecord(
+  controls: AgentControls, globalKilled: boolean, blockedBy: FollowUpStopReason | null, cost: CostFigures,
+): FollowUpStatus {
   return {
     settings: { ...controls.settings },
     revision: controls.revision,
@@ -158,5 +205,50 @@ export function statusRecord(controls: AgentControls, globalKilled: boolean, blo
     globalKilled,
     canDraft: blockedBy === null,
     blockedBy,
+    costSpentMicros: cost.spent,
+    costCapMicros: cost.cap,
+    costWarning: cost.warning,
+  };
+}
+
+/** G-14: a kind's settings as the generic routes show them. */
+export function kindSettings(controls: AgentControls): AgentKindSettings {
+  return {
+    enabled: controls.settings.enabled,
+    quietStartMinute: controls.settings.quietStartMinute,
+    quietEndMinute: controls.settings.quietEndMinute,
+    timeZone: controls.settings.timeZone,
+    maxCostMicrosPerDay: controls.maxCostMicrosPerDay,
+    config: controls.config,
+  };
+}
+
+/** G-11, G-14: the status of any kind, with the first reason it may not act now. */
+export async function agentKindStatus(tx: Transaction, tenantId: string, kind: AgentKind, now: Date): Promise<AgentKindStatus> {
+  const controls = await loadControls(tx, tenantId, false, kind);
+  const globalKilled = await readGlobalKilled(tx, false);
+  let blockedBy: FollowUpStopReason | null = gate(controls, globalKilled, now);
+  const cost = await costFigures(tx, tenantId, kind, controls, now);
+  if (!blockedBy && cost.spent >= cost.cap) blockedBy = "cost_cap";
+  return kindStatusRecord(kind, controls, globalKilled, blockedBy, cost);
+}
+
+export function kindStatusRecord(
+  kind: AgentKind, controls: AgentControls, globalKilled: boolean, blockedBy: FollowUpStopReason | null, cost: CostFigures,
+): AgentKindStatus {
+  return {
+    agentKind: kind,
+    settings: kindSettings(controls),
+    revision: controls.revision,
+    updatedAt: controls.updatedAt?.toISOString() ?? null,
+    killed: controls.killed
+      ? { at: controls.killed.at.toISOString(), by: controls.killed.by, note: controls.killed.note }
+      : null,
+    globalKilled,
+    canRun: blockedBy === null,
+    blockedBy,
+    costSpentMicros: cost.spent,
+    costCapMicros: cost.cap,
+    costWarning: cost.warning,
   };
 }

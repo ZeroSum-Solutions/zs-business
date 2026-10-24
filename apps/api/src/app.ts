@@ -21,7 +21,7 @@ import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import type { SiteCompiler } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
-import { followUpRoutes } from "./routes/agents.js";
+import { agentKindRoutes, followUpRoutes } from "./routes/agents.js";
 import { businessRoutes } from "./routes/business.js";
 import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
@@ -236,6 +236,7 @@ export function createApp(deps: AppDependencies) {
   if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
+  app.route("/v1/agents", agentKindRoutes());
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
 

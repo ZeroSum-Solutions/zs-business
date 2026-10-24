@@ -12,6 +12,8 @@ export const STOP_REASONS: Record<FollowUpStopReason, string> = {
   tenant_killed: "the team stopped the agent",
   quiet_hours: "it was quiet hours",
   daily_cap: "it reached the daily draft limit",
+  cost_cap: "it reached the daily cost limit for the writing service",
+  stalled: "the run stopped answering, so it was closed",
 };
 
 /** Why it did not draft for one customer. */
@@ -114,7 +116,23 @@ export function blockedSentence(status: FollowUpStatus, reach: AgentReach = { ru
       return `It is quiet hours (${quietHoursLabel(status.settings)}). It drafts again when they end.`;
     case "daily_cap":
       return `It drafted ${status.settings.maxDraftsPerDay} follow-ups in the last 24 hours, its daily limit. It drafts again as that count drops.`;
+    case "cost_cap":
+      return `The writing service cost ${dollars(status.costSpentMicros)} in the last 24 hours, its daily limit of ${dollars(status.costCapMicros)}. It drafts again as that cost drops.`;
+    case "stalled":
+      return "A run stopped answering and was closed. The next run starts fresh.";
   }
+}
+
+/** "$0.04" for USD millionths: whole cents, rounded up so a small spend never reads as free. */
+export function dollars(micros: number): string {
+  const cents = Math.ceil(micros / 10_000);
+  return `$${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+}
+
+/** G-15: the writing service's cost in the last 24 hours against its daily limit, and whether it is near it. */
+export function costLine(status: Pick<FollowUpStatus, "costSpentMicros" | "costCapMicros" | "costWarning">): { text: string; warning: boolean } {
+  const text = `Writing service cost in the last 24 hours: ${dollars(status.costSpentMicros)} of ${dollars(status.costCapMicros)}.`;
+  return { text: status.costWarning ? `${text} That is over 80% of the limit.` : text, warning: status.costWarning };
 }
 
 /** The settings form: numbers and times as typed, so a half-typed field is not lost. */

@@ -22,3 +22,16 @@ export function followUpRoutes(agentFor?: (c: Context<AppEnv>) => FollowUpAgent)
       c.json(await agentFor(c).runForMember(c.var.session.principal, await jsonBody(c), idempotencyKey(c)), 201));
   return routes;
 }
+
+// agents.md G-14: the other agent kinds' status, settings and switches. The follow-up kind keeps
+// its own routes above (`/v1/agents/followup`), so its ID is refused here. Mounted after them.
+export function agentKindRoutes() {
+  return new Hono<AppEnv>()
+    .get("/:agentKind", async (c) => c.json(await c.var.session.getAgentKindStatus(c.req.param("agentKind"))))
+    .put("/:agentKind/settings", async (c) =>
+      c.json(await c.var.session.updateAgentKindSettings(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))))
+    .post("/:agentKind/kill", async (c) =>
+      c.json(await c.var.session.killAgentKind(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))))
+    .post("/:agentKind/resume", async (c) =>
+      c.json(await c.var.session.resumeAgentKind(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))));
+}

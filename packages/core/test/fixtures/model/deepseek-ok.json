@@ -1,0 +1,13 @@
+{
+  "status": 200,
+  "body": {
+    "id": "a8e3c1d2-7b40-4c55-9f0e-2d6b1a9c3e11",
+    "object": "chat.completion",
+    "created": 1792800000,
+    "model": "deepseek-flash",
+    "choices": [
+      { "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": "{\"subject\":\"Opening hours\",\"body\":\"We are open nine to five on weekdays.\"}" } }
+    ],
+    "usage": { "prompt_tokens": 233, "completion_tokens": 41, "total_tokens": 274, "prompt_cache_hit_tokens": 0 }
+  }
+}

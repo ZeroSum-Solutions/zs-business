@@ -92,6 +92,15 @@ describe("demo adapter: follow-up agent", () => {
     expect(await api.startFollowUpRun(key())).toMatchObject({ status: "stopped", stopReason: "daily_cap" });
   });
 
+  it("reports the 24-hour cost, priced per draft (G-15)", async () => {
+    const api = adapter();
+    expect(await api.getFollowUpStatus()).toMatchObject({ costSpentMicros: 0, costCapMicros: 1_000_000, costWarning: false });
+    await api.startFollowUpRun(key());
+    const after = followUpStatusSchema.parse(await api.getFollowUpStatus());
+    expect(after.costSpentMicros).toBeGreaterThan(0);
+    expect(after.costSpentMicros % 87).toBe(0);
+  });
+
   it("lets staff read and stop the agent, but not resume, run or change it (403)", async () => {
     const api = adapter();
     api.actAs("staff");
