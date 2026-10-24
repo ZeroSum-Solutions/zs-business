@@ -12,10 +12,11 @@ export interface SecretRedactor {
   text(value: string): string;
   /** `text`, and a URL that changed is re-serialized, so a resolved link and a recorded step compare equal. */
   url(value: string): string;
-  /** `text` applied to every string inside a JSON-like value. */
+  /** `text` applied to every string value inside a JSON-like value. Keys are structure and are never changed. */
   deep<T>(value: T): T;
 }
 
+const PLACEHOLDERS = ["{{username}}", "{{password}}"];
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** The forms a value takes in page text and URLs: as is, `encodeURIComponent`, form-encoded and `encodeURI`. */
@@ -34,9 +35,13 @@ export function createSecretRedactor(secrets: SecretValues | null | undefined): 
   entries.sort((a, b) => b.form.length - a.form.length);
   const placeholderOf = new Map<string, string>();
   for (const entry of entries) if (!placeholderOf.has(entry.form.toLowerCase())) placeholderOf.set(entry.form.toLowerCase(), entry.placeholder);
-  const pattern = entries.length > 0 ? new RegExp(entries.map((entry) => escape(entry.form)).join("|"), "gi") : null;
+  // The placeholders come first in the pattern and match as themselves, so a second pass changes nothing
+  // (a user name such as `name` also occurs inside `{{username}}`).
+  const pattern = entries.length > 0 ? new RegExp([...PLACEHOLDERS.map(escape), ...entries.map((entry) => escape(entry.form))].join("|"), "gi") : null;
 
-  const text = (value: string) => (pattern ? value.replace(pattern, (match) => placeholderOf.get(match.toLowerCase()) ?? "{{password}}") : value);
+  const text = (value: string) => (pattern
+    ? value.replace(pattern, (match) => (PLACEHOLDERS.includes(match) ? match : placeholderOf.get(match.toLowerCase()) ?? "{{password}}"))
+    : value);
   const url = (value: string) => {
     const redacted = text(value);
     if (redacted === value) return value;
@@ -46,7 +51,7 @@ export function createSecretRedactor(secrets: SecretValues | null | undefined): 
     if (typeof value === "string") return text(value) as T;
     if (Array.isArray(value)) return value.map((item) => deep(item)) as T;
     if (value && typeof value === "object")
-      return Object.fromEntries(Object.entries(value).map(([key, item]) => [text(key), deep(item)])) as T;
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, deep(item)])) as T;
     return value;
   };
   return { text, url, deep };

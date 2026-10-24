@@ -16,6 +16,9 @@ def _variants(value: str) -> list[str]:
     return [form for form in forms if form]
 
 
+_PLACEHOLDERS = ("{{username}}", "{{password}}")
+
+
 class Redactor:
     def __init__(self, credentials: dict[str, Any] | None):
         entries: list[tuple[str, str]] = []
@@ -27,12 +30,16 @@ class Redactor:
         self._placeholder: dict[str, str] = {}
         for form, placeholder in entries:
             self._placeholder.setdefault(form.lower(), placeholder)
-        self._pattern = re.compile("|".join(re.escape(form) for form, _ in entries), re.IGNORECASE) if entries else None
+        # The placeholders come first and match as themselves, so a second pass changes nothing (a user name
+        # such as "name" also occurs inside "{{username}}").
+        forms = [*_PLACEHOLDERS, *(form for form, _ in entries)]
+        self._pattern = re.compile("|".join(re.escape(form) for form in forms), re.IGNORECASE) if entries else None
 
     def text(self, value: str) -> str:
         if self._pattern is None:
             return value
-        return self._pattern.sub(lambda match: self._placeholder.get(match.group(0).lower(), "{{password}}"), value)
+        return self._pattern.sub(
+            lambda match: match.group(0) if match.group(0) in _PLACEHOLDERS else self._placeholder.get(match.group(0).lower(), "{{password}}"), value)
 
     def event(self, event: dict[str, Any]) -> dict[str, Any]:
         url = event.get("url")

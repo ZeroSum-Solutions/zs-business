@@ -160,7 +160,8 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
       for (;;) {
         const stop = await hooks.beforeStep();
         if (stop) return stopped(stop);
-        const input = redact.deep({ goal: { month: claim.month, startUrl }, page, history, placeholders: ["{{username}}", "{{password}}"] });
+        // The goal is the server's own text; only what came from the page (and the steps recorded from it) is scrubbed.
+        const input = { goal: { month: claim.month, startUrl }, page: redact.deep(page), history: redact.deep(history), placeholders: ["{{username}}", "{{password}}"] };
         const asked: TextModelRequest = {
           system: BROWSER_PLANNER_SYSTEM, input, schema: plannerActionSchema, maxOutputTokens: 300,
         };
@@ -196,10 +197,15 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
         let eventAction: "sign_in" | "open" | "click_link" | "set_date_filter" | "download" = "open";
         const resolve = (href: string) => new URL(href, page?.url ?? startUrl).href;
         // The planner saw redacted hrefs; map one back to the page's real href. Placeholders are never filled in here.
+        // The planner may also hand back a redacted link already resolved to an absolute URL, which serializes the
+        // placeholder's braces; both sides are compared in resolved form, so the match is by link, not by spelling.
         const real = (href: string) => {
           const current = page as Page | null;
+          const base = current?.url ?? startUrl;
+          const resolved = (value: string) => { try { return new URL(value, base).href; } catch { return value; } };
           const known = [current?.url, ...(current?.elements.map((entry) => entry.href) ?? []), ...(current?.forms.map((entry) => entry.action) ?? [])];
-          return known.find((candidate): candidate is string => typeof candidate === "string" && redact.text(candidate) === href) ?? href;
+          return known.find((candidate): candidate is string => typeof candidate === "string"
+            && (redact.text(candidate) === href || resolved(redact.text(candidate)) === resolved(href))) ?? href;
         };
         if (act.action === "sign_in") {
           if (!credentials) return stopped("needs_owner");
@@ -219,7 +225,7 @@ export function createFakeBrowserRunner(options: FakeRunnerOptions): FakeBrowser
         } else if (act.action === "click_link" || act.action === "click_button") {
           eventAction = "click_link";
           const element = act.action === "click_link"
-            ? (page as Page | null)?.elements.find((entry) => entry.href !== null && redact.text(entry.href) === act.href)
+            ? (page as Page | null)?.elements.find((entry) => entry.href !== null && real(act.href) === entry.href)
             : (page as Page | null)?.elements.filter((entry) => entry.kind === "button")[act.index];
           if (!element) return stopped("runner_error");
           eventUrl = element.href ? resolve(element.href) : (page as Page | null)?.url;

@@ -77,7 +77,11 @@ async function world(options: { maxCostMicrosPerDay?: number } = {}) {
   };
   const run = (runId: string) => runner.getRun(tenantId, runId);
   const wallet = () => service((tx) => getWallet(tx, tenantId));
-  return { tenantId, owner, staff, site, runner, sessionFor, requestRun, claim, run, wallet };
+  const runnerWith = (override: BrowserConfig) => createBrowserRunnerService({
+    service, clock, generateId: randomUUID, newToken: () => `${randomUUID()}${randomUUID()}`, config: override,
+    credentials: createStaticCredentialResolver({ [secretRef]: { username: USERNAME, password: PASSWORD } }), artifacts: store,
+  });
+  return { tenantId, owner, staff, site, runner, runnerWith, sessionFor, requestRun, claim, run, wallet };
 }
 
 const step = (site: FixtureSite) => ({ action: "open" as const, url: `${site.origin}/invoices`, usage: USAGE });
@@ -209,5 +213,88 @@ describe("reservations are cleared on close", () => {
     const [row] = await rows<{ steps_inflight: number; reserved_cost_micros: string }>(
       "SELECT steps_inflight, reserved_cost_micros::text FROM browser_runs WHERE tenant_id=$1 AND id=$2", [w.tenantId, requested.result.id]);
     expect(row).toEqual({ steps_inflight: 0, reserved_cost_micros: "0" });
+  });
+});
+
+// Round 2 of the Sol review.
+describe("an admitted call that never reports keeps its worst case (BT-9, G-15)", () => {
+  it("records the reservation as cost when the run is closed with a step in flight", async () => {
+    const w = await world({ maxCostMicrosPerDay: RESERVE + 50 });
+    const requested = await w.requestRun();
+    const lease = await w.claim();
+    expect((await w.runner.control(lease)).stop).toBeNull();
+    // The model call timed out: the runner reports the failure and no usage.
+    await w.runner.finish(lease, { outcome: "stopped", reason: "model_error" });
+    expect((await w.run(requested.result.id))!.costMicros).toBe(RESERVE);
+    expect(await w.sessionFor(w.owner).getStatus()).toMatchObject({ costTodayMicros: RESERVE });
+    // The failure did not make room for another call under the daily cap.
+    await w.requestRun();
+    const next = await w.runner.claim();
+    expect(next).toBeNull();
+    const [second] = await rows<{ status: string; stop_reason: string }>(
+      "SELECT status, stop_reason FROM browser_runs WHERE tenant_id=$1 AND id<>$2", [w.tenantId, requested.result.id]);
+    expect(second).toEqual({ status: "stopped", stop_reason: "cost_cap" });
+  });
+
+  it("records the reservation as cost when the lease runs out and the run is claimed again", async () => {
+    const w = await world();
+    const requested = await w.requestRun();
+    const lease = await w.claim();
+    expect((await w.runner.control(lease)).stop).toBeNull();
+    now += config.leaseMs + 1000;
+    const again = await w.runner.claim();
+    expect(again).not.toBeNull();
+    expect((await w.run(requested.result.id))!.costMicros).toBe(RESERVE);
+    const [row] = await rows<{ steps_inflight: number; reserved_cost_micros: string }>(
+      "SELECT steps_inflight, reserved_cost_micros::text FROM browser_runs WHERE tenant_id=$1 AND id=$2", [w.tenantId, requested.result.id]);
+    expect(row).toEqual({ steps_inflight: 0, reserved_cost_micros: "0" });
+  });
+
+  it("records it when a stalled run is closed", async () => {
+    const w = await world();
+    const requested = await w.requestRun({ deadlineMs: 1000 });
+    const lease = await w.claim();
+    expect((await w.runner.control(lease)).stop).toBeNull();
+    now += 1000 + config.stallGraceMs + 1000;
+    expect(await w.runner.closeStalledRuns()).toBe(1);
+    expect(await w.run(requested.result.id)).toMatchObject({ status: "stopped", stopReason: "stalled", costMicros: RESERVE });
+  });
+});
+
+describe("time is read after the lock is held (BT-9)", () => {
+  it("refuses an event that waited on the run lock past its lease", async () => {
+    const w = await world();
+    const requested = await w.requestRun({ deadlineMs: 600_000 });
+    const lease = await w.claim();
+    let release!: () => void;
+    let locked!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { locked = resolve; });
+    const holder = service(async (tx) => {
+      await tx.query("SELECT 1 FROM browser_runs WHERE id=$1 FOR UPDATE", [requested.result.id]);
+      locked();
+      await held;
+    });
+    await ready;
+    const waiting = w.runner.appendEvent(lease, step(w.site)).then(() => "accepted", (error: Error) => error.constructor.name);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    now += config.leaseMs + 5000;
+    release();
+    await holder;
+    expect(await waiting).toBe("TenantDenied");
+  });
+});
+
+describe("a hold settles at the price that funded it (BT-9)", () => {
+  it("charges the original step price when the configured price changes while a run is leased", async () => {
+    const w = await world();
+    await w.requestRun();
+    const lease = await w.claim();
+    expect(await w.wallet()).toMatchObject({ reserved: STEP_PRICE * 25 });
+    expect((await w.runner.control(lease)).stop).toBeNull();
+    await w.runner.appendEvent(lease, step(w.site));
+    const changed = w.runnerWith(browserConfig({ stepPrice: 100, modelPrices: FAKE_MODEL_PRICES, allowLoopback: true, stepModelReserveMicros: RESERVE }));
+    await changed.finish(lease, { outcome: "read_done" });
+    expect(await w.wallet()).toMatchObject({ reserved: 0, balance: 100_000 - STEP_PRICE });
   });
 });

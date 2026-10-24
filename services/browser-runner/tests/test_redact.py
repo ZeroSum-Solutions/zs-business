@@ -11,7 +11,7 @@ from browser_runner.config import RunnerConfig
 from browser_runner.loop import Outcome, run_once
 from browser_runner.redact import Redactor
 
-from test_runner import TOKEN, FakeApi, claim
+from tests.test_runner import TOKEN, FakeApi, claim
 
 USERNAME = "alice.planted@clinic.example"
 PASSWORD = "Zq-PLANTED-pw-4417"
@@ -27,6 +27,13 @@ class RedactorTests(unittest.TestCase):
         redact = Redactor({"username": USERNAME, "password": PASSWORD})
         text = f"Hi {USERNAME.upper()} {urllib.parse.quote(USERNAME, safe='')} {PASSWORD.lower()} /users/{USERNAME}"
         self.assertEqual(redact.text(text), "Hi {{username}} {{username}} {{password}} /users/{{username}}")
+
+    def test_a_second_pass_changes_nothing(self):
+        for credentials in ({"username": "name", "password": "word"}, {"username": "a", "password": "user"}):
+            redact = Redactor(credentials)
+            once = redact.text(f"x {credentials['username']} {credentials['password']} y")
+            self.assertEqual(redact.text(once), once)
+            self.assertIn("{{username}}", once)
 
     def test_no_credentials_changes_nothing(self):
         self.assertEqual(Redactor(None).text("anything"), "anything")

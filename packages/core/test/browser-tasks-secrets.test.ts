@@ -10,6 +10,7 @@ import {
   createMemoryArtifactStore, createStaticCredentialResolver, creditWallet, fixturePdf, invoicePlannerAnswer, runBrowserJob,
   startFixtureSite, type BrowserConfig, type EdgeDependencies, type FixtureSite, type MemoryArtifactStore, type TextModelRequest,
 } from "../src/index.js";
+import { createSecretRedactor } from "../src/browser/redact.js";
 
 let now = Date.parse("2026-10-20T12:00:00.000Z");
 const clock = { now: () => new Date(now) };
@@ -56,13 +57,13 @@ interface World {
   session: ReturnType<typeof createBrowserSession>;
 }
 
-async function world(): Promise<World> {
+async function world(credentials = { username: USERNAME, password: PASSWORD }): Promise<World> {
   const tenantId = randomUUID();
   await service((tx) => tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,$2)", [tenantId, "Clinic"]));
   const owner = await member(tenantId, "owner");
   await service((tx) => creditWallet(tx, { tenantId, ledgerId: randomUUID(), amount: 100_000, idempotencyKey: `credit:${randomUUID()}`, now: clock.now() }));
   const site = await startFixtureSite({
-    username: USERNAME, password: PASSWORD,
+    ...credentials,
     // The sign-in lands on a page whose path is the user name, and two invoice files are named after the values.
     signInRedirect: `/users/${USERNAME}`,
     invoices: [
@@ -77,7 +78,7 @@ async function world(): Promise<World> {
   const secretRef = `browser/${tenantId}/supplier`;
   const runner = createBrowserRunnerService({
     service, clock, generateId: randomUUID, newToken: () => `${randomUUID()}${randomUUID()}`, config,
-    credentials: createStaticCredentialResolver({ [secretRef]: { username: USERNAME, password: PASSWORD } }), artifacts: store,
+    credentials: createStaticCredentialResolver({ [secretRef]: credentials }), artifacts: store,
   });
   const session = createBrowserSession(deps(), { tenantId, actorId: owner }, { config, artifacts: store });
   await session.updateSettings({ expectedRevision: 0, enabled: true, maxRunsPerDay: 50, maxCostMicrosPerDay: 5_000_000 }, randomUUID());
@@ -181,5 +182,45 @@ describe("a rejected planner answer is still paid for (BT-9)", () => {
     expect(stored[1]!.model).not.toBeNull();
     expect(Number(stored[1]!.cost_micros)).toBe(CALL_COST);
     expect(done?.run.costMicros).toBe(2 * CALL_COST);
+  });
+});
+
+describe("redaction keeps the planner protocol intact (BT-8)", () => {
+  it("never rewrites object keys or placeholders it already wrote", () => {
+    for (const secrets of [{ username: "a", password: "page" }, { username: "name", password: "goal" }, { username: "user", password: "{{" }]) {
+      const redact = createSecretRedactor(secrets);
+      const value = { goal: { month: "2026-09" }, page: { text: `hello ${secrets.username} ${secrets.password}` }, placeholders: ["{{username}}", "{{password}}"] };
+      const once = redact.deep(value);
+      expect(Object.keys(once)).toEqual(["goal", "page", "placeholders"]);
+      expect(Object.keys(once.page)).toEqual(["text"]);
+      expect(once.placeholders).toEqual(["{{username}}", "{{password}}"]);
+      expect(redact.deep(once)).toEqual(once);
+      expect(redact.text(redact.text(`x ${secrets.username} y`))).toBe(redact.text(`x ${secrets.username} y`));
+    }
+  });
+
+  it("still signs in and downloads when the user name is a word the planner protocol uses", async () => {
+    const w = await world({ username: "page", password: "Zq-PLANTED-pw-4417" });
+    await requestRun(w);
+    const runner = createFakeBrowserRunner({ model: createFakeTextModel("personal_data", invoicePlannerAnswer) });
+    const done = await runBrowserJob({ service: w.runner, runner, browserRoot: "/var/zs-browser" });
+    expect(done?.run.status).toBe("completed");
+    expect(done?.run.artifactCount).toBeGreaterThan(0);
+  });
+
+  it("downloads a redacted link the planner resolved to an absolute URL", async () => {
+    const w = await world();
+    await requestRun(w);
+    const answer = (request: TextModelRequest) => {
+      const planned = invoicePlannerAnswer(request) as { action: string; href?: string };
+      const page = (request.input as { page: { url: string } | null }).page;
+      return planned.action === "download" && planned.href && page ? { ...planned, href: new URL(planned.href, page.url).href } : planned;
+    };
+    const runner = createFakeBrowserRunner({ model: createFakeTextModel("personal_data", answer) });
+    const done = await runBrowserJob({ service: w.runner, runner, browserRoot: "/var/zs-browser" });
+    expect(done?.run.status).toBe("completed");
+    expect(done?.run.artifactCount).toBe(3);
+    expect(w.site.requests.some((request) => request.path === `/invoices/${USERNAME}-2026-09.pdf`)).toBe(true);
+    expect(w.site.requests.some((request) => request.path.includes("%7B%7B"))).toBe(false);
   });
 });

@@ -54,10 +54,33 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
   const now = () => deps.clock.now();
   const reserve = config.stepModelReserveMicros;
 
+  /**
+   * BT-9, G-15: a step that was admitted but never reported (the model call timed out, the runner died)
+   * keeps its worst case: the reservation becomes a recorded `stop` event with that cost, so the run's
+   * cap and the day's cap still count it. Settled steps leave nothing in flight, so this does nothing.
+   * The caller holds the run's row lock.
+   */
+  async function abandonInflight(tx: Transaction, row: RunRow, at: Date): Promise<void> {
+    const unresolved = Number(row.reserved_cost_micros);
+    if (row.steps_inflight <= 0 && unresolved <= 0) return;
+    const seq = Number((await tx.query<{ next: number }>(
+      "SELECT coalesce(max(seq), 0) + 1 AS next FROM browser_run_events WHERE tenant_id=$1 AND run_id=$2", [row.tenant_id, row.id])).rows[0]!.next);
+    await tx.query(
+      "INSERT INTO browser_run_events (tenant_id, run_id, seq, action, cost_micros, created_at) VALUES ($1,$2,$3,'stop',$4,$5)",
+      [row.tenant_id, row.id, seq, unresolved, at]);
+    await tx.query(
+      "UPDATE browser_runs SET cost_micros = cost_micros + $3, steps_inflight=0, reserved_cost_micros=0 WHERE tenant_id=$1 AND id=$2",
+      [row.tenant_id, row.id, unresolved]);
+    row.cost_micros = Number(row.cost_micros) + unresolved;
+    row.steps_inflight = 0;
+    row.reserved_cost_micros = 0;
+  }
+
   /** BT-9: close a run once. Captures what the steps cost and releases the rest of the hold (D-11). */
   async function closeRun(
     tx: Transaction, row: RunRow, outcome: { status: "completed" } | { status: "stopped"; reason: BrowserStopReason }, at: Date,
   ): Promise<RunRow> {
+    if (row.status === "queued" || row.status === "running") await abandonInflight(tx, row, at);
     const closed = (await tx.query<RunRow>(
       `UPDATE browser_runs SET status=$3, stop_reason=$4, finished_at=$5, steps_inflight=0, reserved_cost_micros=0
         WHERE tenant_id=$1 AND id=$2 AND status IN ('queued','running') RETURNING ${RUN_COLUMNS}`,
@@ -65,7 +88,10 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
     if (!closed) return row;
     const held = await heldReservationForJob(tx, row.tenant_id, "browser_run", row.id);
     if (held) {
-      const cost = Math.min(held.amount, closed.steps * config.stepPrice);
+      // The hold was sized as max_steps times the price at claim time, so that price is held.amount / max_steps,
+      // whatever the configured price is now.
+      const stepPrice = Math.floor(held.amount / closed.max_steps);
+      const cost = Math.min(held.amount, closed.steps * stepPrice);
       if (cost > 0)
         await captureReservation(tx, {
           tenantId: row.tenant_id, reservationId: held.id, ledgerId: derivedId(row.tenant_id, row.id, "browser-capture"), amount: cost, now: at,
@@ -96,8 +122,10 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
    * per-tenant advisory lock serializes admissions of one tenant's runs, so two cannot both pass the
    * daily cap (the run's own caps are already serialized by its row lock).
    */
-  async function admissionReason(tx: Transaction, row: RunRow, at: Date): Promise<BrowserStopReason | null> {
+  async function admissionReason(tx: Transaction, row: RunRow): Promise<BrowserStopReason | null> {
     await tx.query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))", [`browser-day:${row.tenant_id}`]);
+    // The clock is read after the locks: waiting for them can take any amount of time.
+    const at = now();
     const { reason, settings } = await switchReason(tx, row);
     if (reason) return reason;
     if (pastDeadline(row, at)) return "deadline";
@@ -109,28 +137,28 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
   }
 
   /** The run a lease holds, locked. A wrong token, another run or an expired lease is TenantDenied. */
-  async function leasedRun(tx: Transaction, lease: Lease, at: Date, requireOpen: boolean): Promise<RunRow> {
+  async function leasedRun(tx: Transaction, lease: Lease, requireOpen: boolean): Promise<{ row: RunRow; at: Date }> {
     const row = (await tx.query<RunRow>(`SELECT ${RUN_COLUMNS} FROM browser_runs WHERE id=$1 FOR UPDATE`, [lease.runId])).rows[0];
+    // The clock is read once the row lock is held: the wait for it can outlast the lease or the deadline.
+    const at = now();
     if (!row?.lease_hash || !row.lease_until || !sameHash(sha256(lease.token), row.lease_hash)) throw new TenantDenied();
     if (requireOpen && (row.status !== "running" || row.lease_until.getTime() <= at.getTime())) throw new TenantDenied();
-    return row;
+    return { row, at };
   }
 
   async function claimOne(): Promise<BrowserClaim | "closed" | null> {
     return deps.service(async (tx) => {
-      const at = now();
+      let at = now();
       const row = (await tx.query<RunRow>(
         `SELECT ${RUN_COLUMNS} FROM browser_runs WHERE status='queued' OR (status='running' AND lease_until < $1)
           ORDER BY requested_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [at])).rows[0];
       if (!row) return null;
       // A re-claim after an expired lease starts a new attempt; the same gates apply as to a first claim.
       // The dead lease's admitted steps can no longer report, so their reservations end here.
-      if (row.steps_inflight > 0 || Number(row.reserved_cost_micros) > 0) {
-        await tx.query("UPDATE browser_runs SET steps_inflight=0, reserved_cost_micros=0 WHERE tenant_id=$1 AND id=$2", [row.tenant_id, row.id]);
-        row.steps_inflight = 0;
-        row.reserved_cost_micros = 0;
-      }
-      const reason = await admissionReason(tx, row, at);
+      // They keep their worst case as recorded cost (abandonInflight).
+      await abandonInflight(tx, row, at);
+      const reason = await admissionReason(tx, row);
+      at = now(); // the admission lock may have made this wait
       if (reason) { await closeRun(tx, row, { status: "stopped", reason }, at); return "closed"; }
       let held = await heldReservationForJob(tx, row.tenant_id, "browser_run", row.id);
       if (!held) {
@@ -183,22 +211,22 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
     /** BT-12: the stop callback. A reason closes the run on the server before the runner reports it. */
     async control(lease: Lease): Promise<{ readonly stop: BrowserStopReason | null }> {
       return deps.service(async (tx) => {
-        const at = now();
-        const row = await leasedRun(tx, lease, at, false);
+        const { row, at } = await leasedRun(tx, lease, false);
         if (row.status === "stopped") return { stop: row.stop_reason };
         if (row.status === "completed") return { stop: null };
         if (row.lease_until!.getTime() <= at.getTime()) throw new TenantDenied();
         // Reserve first, then admit: the step slot and its model cost are taken under the row lock.
-        const reason = await admissionReason(tx, row, at);
+        const reason = await admissionReason(tx, row);
+        const admittedAt = now(); // the admission lock may have made this wait
         if (reason) {
           // A step still in flight closes the run when its event arrives (or the runner finishes), so its usage is kept.
-          if (row.steps_inflight === 0) await closeRun(tx, row, { status: "stopped", reason }, at);
+          if (row.steps_inflight === 0) await closeRun(tx, row, { status: "stopped", reason }, admittedAt);
           return { stop: reason };
         }
         await tx.query(
           `UPDATE browser_runs SET lease_until=$3, steps_inflight=steps_inflight+1, reserved_cost_micros=reserved_cost_micros+$4
             WHERE tenant_id=$1 AND id=$2`,
-          [row.tenant_id, row.id, new Date(at.getTime() + config.leaseMs), reserve]);
+          [row.tenant_id, row.id, new Date(admittedAt.getTime() + config.leaseMs), reserve]);
         return { stop: null };
       });
     },
@@ -206,8 +234,7 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
     /** BT-9: append one numbered event. Origin and path are kept; the query string and fragment never are. */
     async appendEvent(lease: Lease, input: BrowserEventInput): Promise<{ readonly seq: number; readonly stop: BrowserStopReason | null }> {
       return deps.service(async (tx) => {
-        const at = now();
-        const row = await leasedRun(tx, lease, at, true);
+        const { row, at } = await leasedRun(tx, lease, true);
         const location = input.url === undefined ? null : eventLocation(input.url);
         if (input.url !== undefined && !location) throw new ValidationFailed("The event URL is not an http(s) URL");
         let cost = 0;
@@ -272,8 +299,7 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
       if (!startsWith(input.bytes, pdf ? PDF_MAGIC : PNG_MAGIC)) throw new ValidationFailed(pdf ? "Only PDF files are kept" : "Only PNG screenshots are kept");
       const digest = sha256(input.bytes);
       return deps.service(async (tx) => {
-        const at = now();
-        const row = await leasedRun(tx, lease, at, true);
+        const { row, at } = await leasedRun(tx, lease, true);
         const existing = (await tx.query<{ id: string }>(
           "SELECT id FROM browser_run_artifacts WHERE tenant_id=$1 AND run_id=$2 AND sha256=$3", [row.tenant_id, row.id, digest])).rows[0];
         if (existing) return { id: existing.id, duplicate: true };
@@ -296,8 +322,7 @@ export function createBrowserRunnerService(deps: BrowserRunnerServiceDeps) {
     /** BT-9: report the result. A run the server already closed answers with that close. */
     async finish(lease: Lease, input: BrowserFinishInput): Promise<BrowserRun> {
       return deps.service(async (tx) => {
-        const at = now();
-        const row = await leasedRun(tx, lease, at, false);
+        const { row, at } = await leasedRun(tx, lease, false);
         if (row.status === "running" && row.lease_until!.getTime() <= at.getTime()) throw new TenantDenied();
         // BT-9: a result reported past the deadline or the caps is not a completed run.
         const capped: BrowserStopReason | null = pastDeadline(row, at) ? "deadline"
