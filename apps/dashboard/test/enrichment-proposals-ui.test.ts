@@ -4,7 +4,7 @@
 import { createElement as h } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { EnrichmentProposal } from "@zs/contracts";
-import { EnrichmentProposals, FIELD_LABEL, decideProposals } from "../src/components/customers/enrichment-proposals";
+import { EnrichmentProposals, FIELD_LABEL, decideProposals, decisionToast } from "../src/components/customers/enrichment-proposals";
 import { ApiError } from "../src/lib/api";
 import { createIntentKeys } from "../src/lib/intent-key";
 import { keys, renderScreen } from "./helpers/render";
@@ -15,12 +15,18 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/customers/enrichment",
 }));
 
+// Noon local time, so "2 h ago" stays on the same day whenever the suite runs.
+vi.hoisted(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(2026, 9, 21, 12, 0));
+});
+
 const uuid = (n: number) => `3b5d7f91-2c4e-4a6b-8d0f-${String(n).padStart(12, "0")}`;
 const COLM = uuid(1);
 const CELESTE = uuid(2);
 const fetchedAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
 const proposal = (n: number, patch: Partial<EnrichmentProposal>): EnrichmentProposal => ({
-  approvalId: uuid(100 + n), contactId: COLM, contactName: "Colm Brennan", resultId: uuid(200 + n), field: "name",
+  approvalId: uuid(100 + n), status: "pending", contactId: COLM, contactName: "Colm Brennan", resultId: uuid(200 + n), field: "name",
   currentValue: null, proposedValue: "Brennan Studio", provider: "treg", callId: `call_${n}`, fetchedAt,
   requestedAt: fetchedAt, expiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString(), ...patch,
 });
@@ -86,8 +92,47 @@ describe("company details to review", () => {
     expect(html).not.toContain('type="checkbox"');
   });
 
+  it("names a customer saved without a name", () => {
+    const text = textOf(render([proposal(5, { contactName: null })]));
+    expect(text).toContain("Unnamed customer");
+    expect(render([proposal(5, { contactName: null })])).toContain('aria-label="Approve Company for this customer"');
+  });
+
+  it("keeps an approved detail that was not added, with a way to try again and nothing else", () => {
+    const html = render([proposal(6, { status: "approved" }), PROPOSALS[2]!]);
+    expect(textOf(html)).toContain("Approved, but not added yet.");
+    expect(html).toContain('aria-label="Add Company for Colm Brennan again"');
+    expect(html).not.toContain('aria-label="Reject Company for Colm Brennan"');
+    expect(html).not.toContain('aria-label="Select Company for Colm Brennan"');
+    expect(html).toContain('aria-label="Select Industry for Celeste Vandermeer"');
+  });
+
   it("says when there is nothing to review", () => {
     expect(textOf(render([]))).toContain("Nothing to review. New company details appear here after a lookup.");
+  });
+});
+
+describe("the toast after a decision", () => {
+  const [colm, , celeste, founded] = PROPOSALS as [EnrichmentProposal, EnrichmentProposal, EnrichmentProposal, EnrichmentProposal];
+  const outcome = (done: string[], failed: [string, unknown][] = []) => ({ done, failed: new Map(failed) });
+  const decided = new ApiError("conflict", "Someone already decided this.", 409);
+
+  it("confirms one approve or reject", () => {
+    expect(decisionToast([colm], outcome([colm.approvalId]), "approve")).toEqual({ message: "Added Company to Colm Brennan's company details.", tone: "success" });
+    expect(decisionToast([celeste], outcome([celeste.approvalId]), "reject")).toEqual({ message: "Rejected Industry for Celeste Vandermeer.", tone: "success" });
+  });
+
+  it("says why one decision failed, since the row may leave the list with the refresh", () => {
+    expect(decisionToast([colm], outcome([], [[colm.approvalId, decided]]), "approve"))
+      .toEqual({ message: "Company for Colm Brennan: Someone already decided this.", tone: "danger" });
+  });
+
+  it("counts a batch, and names the first failure", () => {
+    expect(decisionToast([colm, founded], outcome([colm.approvalId, founded.approvalId]), "approve")).toEqual({ message: "Approved 2 details.", tone: "success" });
+    expect(decisionToast([colm, celeste, founded], outcome([colm.approvalId], [[celeste.approvalId, decided], [founded.approvalId, decided]]), "reject"))
+      .toEqual({ message: "Rejected 1 of 3 details. 2 were not decided: Someone already decided this.", tone: "info" });
+    expect(decisionToast([colm, founded], outcome([], [[colm.approvalId, decided], [founded.approvalId, new Error("x")]]), "approve"))
+      .toEqual({ message: "None of the 2 details were decided: Someone already decided this.", tone: "danger" });
   });
 });
 

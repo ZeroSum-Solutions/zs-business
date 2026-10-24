@@ -39,14 +39,15 @@ export function CustomersView() {
   );
 }
 
-/** The way into the company details waiting for review (enrichment.md E-14), counted when any wait. */
+/** The way into the company details waiting for review (enrichment.md E-14), shown while any wait. */
 function EnrichmentLink() {
   const proposals = useEnrichmentProposals();
   const count = proposals.data?.length ?? 0;
+  if (count === 0) return null;
   return (
     <Link href="/customers/enrichment" className="-ml-2 mb-3 inline-flex min-h-11 items-center gap-2 rounded-sm px-2 text-sm font-medium text-fg-2 hover:text-fg">
       Company details to review
-      {count > 0 ? <Badge tone="warn">{count}<span className="sr-only"> waiting</span></Badge> : null}
+      <Badge tone="warn">{count}<span className="sr-only"> waiting</span></Badge>
       <CaretRight size={14} aria-hidden />
     </Link>
   );

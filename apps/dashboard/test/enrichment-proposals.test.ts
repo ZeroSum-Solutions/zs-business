@@ -62,7 +62,8 @@ describe("demo adapter: company-detail proposals", () => {
     await api.decideEnrichmentProposal(name.approvalId, "approve", key());
     const read = contactEnrichmentSchema.parse(await api.getContactEnrichment(VANDERMEER_ID));
     expect(read.profile).toMatchObject({ companyName: "Vandermeer & Co.", companyIndustry: "Art dealer", companyFounded: 2009, revision: 3 });
-    expect(read.results.find((result) => result.field === "founded")?.approvalId).toBeNull();
+    // Like the API, a result keeps its approval id after the decision.
+    expect(read.results.find((result) => result.field === "founded")?.approvalId).toBe(founded.approvalId);
     const left = await api.listEnrichmentProposals();
     expect(left.map((item) => item.approvalId)).not.toContain(founded.approvalId);
     expect(left).toHaveLength(6);
@@ -89,7 +90,9 @@ describe("demo adapter: company-detail proposals", () => {
     expect(await failure(api.decideEnrichmentProposal(name.approvalId, "approve", key()))).toMatchObject({ kind: "forbidden", status: 403 });
     expect(await api.listEnrichmentProposals()).toHaveLength(8);
     api.actAs("owner");
-    expect(await failure(api.decideEnrichmentProposal("00000000-0000-4000-8000-000000000000", "approve", key()))).toMatchObject({ kind: "not_found" });
+    expect((await api.listEnrichmentProposals()).every((item) => item.status === "pending")).toBe(true);
+    // The API answers an unknown approval like a foreign one: 403.
+    expect(await failure(api.decideEnrichmentProposal("00000000-0000-4000-8000-000000000000", "approve", key()))).toMatchObject({ kind: "forbidden", status: 403 });
     expect(await failure(api.decideEnrichmentProposal("not-an-id", "reject", key()))).toMatchObject({ kind: "not_found" });
     await api.decideEnrichmentProposal(name.approvalId, "reject", key());
     const again = await failure(api.decideEnrichmentProposal(name.approvalId, "approve", key()));
@@ -124,7 +127,7 @@ describe("http client: company-detail proposals", () => {
   const TENANT = "a1b2c3d4-1a3f-4b5c-9d7e-000000000002";
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   const item = {
-    approvalId: APPROVAL, contactId: CONTACT, contactName: "Sam", resultId: "a1b2c3d4-1a3f-4b5c-9d7e-000000000040", field: "industry",
+    approvalId: APPROVAL, status: "pending", contactId: CONTACT, contactName: "Sam", resultId: "a1b2c3d4-1a3f-4b5c-9d7e-000000000040", field: "industry",
     currentValue: null, proposedValue: "Jewelry", provider: "treg", callId: "call_1", fetchedAt: NOW.toISOString(),
     requestedAt: NOW.toISOString(), expiresAt: "2026-11-22T10:00:00.000Z",
   };

@@ -85,7 +85,7 @@ export function createEnrichmentSession(deps: EdgeDependencies, principal: Princ
     /** E-14: the pending proposals, each with the current and the found value. */
     async listProposals(): Promise<EnrichmentProposalList> {
       const now = new Date(readClock(deps.clock));
-      const items = await readEnrichment((tx) => listEnrichmentProposals(tx, tenantId, now));
+      const items = await readEnrichment((tx) => listEnrichmentProposals(tx, tenantId, actorId, now));
       return parseInput(enrichmentProposalListSchema, { items }, "result");
     },
     /** E-6: staff and owners may stop enrichment of a contact. */

@@ -99,14 +99,18 @@ export const contactEnrichmentSchema = z.strictObject({
 export type ContactEnrichment = z.infer<typeof contactEnrichmentSchema>;
 
 /**
- * One pending `contact.profile.apply` approval with the field it would change (E-14): the value the
- * profile holds now (null when empty) and the value found, with its source. An owner decides it
- * through `POST /v1/approvals/:id/approve` or `/reject`.
+ * One `contact.profile.apply` approval with the field it would change (E-14): the value the
+ * profile holds now (null when empty) and the value found, with its source. An owner decides a
+ * `pending` one through `POST /v1/approvals/:id/approve` or `/reject`. An `approved` one is the
+ * caller's own approval whose apply did not run (A-7, for example the contact was blocked); a
+ * repeated approve retries the apply.
  */
 export const enrichmentProposalSchema = z.strictObject({
   approvalId: idSchema,
+  status: z.enum(["pending", "approved"]),
   contactId: idSchema,
-  contactName: z.string(),
+  /** Null for a contact saved without a name. */
+  contactName: z.string().nullable(),
   resultId: idSchema,
   field: enrichmentFieldSchema,
   currentValue: z.string().nullable(),
@@ -122,7 +126,7 @@ export type EnrichmentProposal = z.infer<typeof enrichmentProposalSchema>;
 /** The most proposals one read returns, oldest first. */
 export const ENRICHMENT_PROPOSALS_LIMIT = 200;
 
-/** `GET /v1/enrichment/proposals`: the tenant's undecided, unexpired proposals. */
+/** `GET /v1/enrichment/proposals`: the tenant's undecided, unexpired proposals, and the caller's approved ones not yet applied. */
 export const enrichmentProposalListSchema = z.strictObject({ items: z.array(enrichmentProposalSchema) });
 export type EnrichmentProposalList = z.infer<typeof enrichmentProposalListSchema>;
 

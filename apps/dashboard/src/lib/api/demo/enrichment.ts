@@ -147,7 +147,8 @@ export function createDemoEnrichment(ctx: DemoEnrichmentContext): EnrichmentApi 
       if (!ctx.hasContact(contactId)) throw contactNotFound();
       const results = proposals
         .filter((proposal) => proposal.result.contactId === contactId && live(proposal))
-        .map((proposal) => ({ ...proposal.result, approvalId: proposal.status === "pending" ? proposal.approvalId : null }));
+        // A result keeps its approval id after the decision, as the API's immutable rows do.
+        .map((proposal) => proposal.result);
       const answer: ContactEnrichment = { profile: clone(profiles.get(contactId) ?? null), requests: clone(requests.get(contactId) ?? []), results: clone(results) };
       return answer;
     },
@@ -178,8 +179,10 @@ export function createDemoEnrichment(ctx: DemoEnrichmentContext): EnrichmentApi 
         .filter((proposal) => proposal.status === "pending" && live(proposal) && ctx.hasContact(proposal.result.contactId))
         .map((proposal) => ({
           approvalId: proposal.approvalId,
+          // The demo decides and applies in one step, so an approval is never left unapplied.
+          status: "pending" as const,
           contactId: proposal.result.contactId,
-          contactName: ctx.contactName(proposal.result.contactId) ?? "",
+          contactName: ctx.contactName(proposal.result.contactId),
           resultId: proposal.result.id,
           field: proposal.result.field,
           currentValue: currentValue(proposal),
@@ -191,7 +194,7 @@ export function createDemoEnrichment(ctx: DemoEnrichmentContext): EnrichmentApi 
           expiresAt: proposal.result.expiresAt,
         }))
         // Oldest first, as the API orders them.
-        .sort((a, b) => a.requestedAt.localeCompare(b.requestedAt) || a.contactName.localeCompare(b.contactName) || a.field.localeCompare(b.field));
+        .sort((a, b) => a.requestedAt.localeCompare(b.requestedAt) || (a.contactName ?? "").localeCompare(b.contactName ?? "") || a.contactId.localeCompare(b.contactId) || a.field.localeCompare(b.field));
       return clone(items);
     },
 
@@ -206,7 +209,8 @@ export function createDemoEnrichment(ctx: DemoEnrichmentContext): EnrichmentApi 
       }
       await ctx.idempotent(`enrichment.proposal.${decision}`, { approvalId }, options, () => {
         const proposal = proposals.find((candidate) => candidate.approvalId === approvalId);
-        if (!proposal) throw proposalNotFound();
+        // The API answers an unknown approval like a foreign one (TenantDenied).
+        if (!proposal) throw demoError("Forbidden");
         // The API's approval conflicts (packages/core/src/approvals/handlers.ts).
         if (proposal.status !== "pending") throw demoError("Conflict", { reason: "approval_not_pending" });
         if (!live(proposal)) throw demoError("Conflict", { reason: "approval_expired" });

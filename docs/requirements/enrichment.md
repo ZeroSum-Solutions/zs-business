@@ -211,7 +211,10 @@ Nothing tops up; calls go on until Treg answers `insufficient_balance` (E-11).
 `GET /v1/enrichment/requests/:id`, `GET /v1/contacts/:id/enrichment` (requests, results and
 their approval ids) and `GET /v1/enrichment/proposals` (pending, unexpired `contact.profile.apply`
 approvals, oldest first, at most 200, each with the field, the profile's current value, the found
-value, provider and call id). An owner approves or rejects each through `POST /v1/approvals/:id/approve`
+value, provider and call id; the contact name is null for an unnamed contact). The list also keeps
+the caller's own `approved` proposals whose apply has not run (A-7: for example the contact was
+blocked after the lookup), marked `approved`, because only that owner can retry the run by
+approving again. An owner approves or rejects each through `POST /v1/approvals/:id/approve`
 or `/reject`; there is no batch route, so a batch is one decision per approval. Reads need `enrich` or `customers`. Tenants see only the codes in
 `ENRICHMENT_ERROR_CODES` (`packages/contracts`). Treg bodies, headers, balance and team-level
 errors never reach a tenant: they map to `enrichment_unavailable`, and the worker reports the

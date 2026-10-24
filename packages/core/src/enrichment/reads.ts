@@ -39,8 +39,9 @@ export async function getContactEnrichment(tx: Transaction, tenantId: string, co
 
 interface ProposalRow {
   approval_id: string;
+  status: "pending" | "approved";
   contact_id: string;
-  display_name: string;
+  display_name: string | null;
   result_id: string;
   field: EnrichmentField;
   value: string;
@@ -59,23 +60,29 @@ const CURRENT_VALUE = `CASE r.field ${Object.entries(FIELD_COLUMNS)
 /**
  * E-14: the undecided `contact.profile.apply` approvals whose approval and result are both unexpired,
  * oldest first, each with the profile's current value for its field. Expired ones cannot be approved
- * (A-3), so they are left out.
+ * (A-3), so they are left out. The caller's own approvals whose apply has not run stay in the list
+ * as `approved`: only that caller can retry the run (A-6, A-7).
  */
-export async function listEnrichmentProposals(tx: Transaction, tenantId: string, now: Date): Promise<EnrichmentProposal[]> {
+export async function listEnrichmentProposals(tx: Transaction, tenantId: string, actorId: string, now: Date): Promise<EnrichmentProposal[]> {
   const rows = (await tx.query<ProposalRow>(
-    `SELECT a.id AS approval_id, r.contact_id, c.display_name, r.id AS result_id, r.field, r.value, r.provider, r.treg_call_id,
+    `SELECT a.id AS approval_id, a.status, r.contact_id, c.display_name, r.id AS result_id, r.field, r.value, r.provider, r.treg_call_id,
             r.fetched_at, a.requested_at, LEAST(a.expires_at, r.expires_at) AS expires_at, ${CURRENT_VALUE} AS current_value
        FROM approvals a
        JOIN enrichment_results r ON r.tenant_id=a.tenant_id AND r.approval_id=a.id
        JOIN crm_contacts c ON c.tenant_id=r.tenant_id AND c.id=r.contact_id
        LEFT JOIN crm_contact_profile p ON p.tenant_id=r.tenant_id AND p.contact_id=r.contact_id
-      WHERE a.tenant_id=$1 AND a.action_type='contact.profile.apply' AND a.status='pending'
+      WHERE a.tenant_id=$1 AND a.action_type='contact.profile.apply'
+        AND (a.status='pending' OR (a.status='approved' AND a.decided_by=$4 AND NOT EXISTS (
+              -- The apply that ran under the approval, through the actions_tenant_approval index (approvals/records.ts).
+              SELECT 1 FROM actions x WHERE x.tenant_id=a.tenant_id AND x.approval_reference IS NOT NULL
+                 AND ((x.approval_reference->>'id')::uuid)=a.id)))
         AND a.expires_at > $2 AND r.expires_at > $2
       ORDER BY a.requested_at, c.display_name, r.contact_id, r.field
       LIMIT $3`,
-    [tenantId, now, ENRICHMENT_PROPOSALS_LIMIT])).rows;
+    [tenantId, now, ENRICHMENT_PROPOSALS_LIMIT, actorId])).rows;
   return rows.map((row) => ({
     approvalId: row.approval_id,
+    status: row.status,
     contactId: row.contact_id,
     contactName: row.display_name,
     resultId: row.result_id,

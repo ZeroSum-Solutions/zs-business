@@ -18,13 +18,13 @@ beforeAll(async () => {
 afterAll(async () => { await h?.close(); });
 
 let serial = 0;
-async function contact(tenantId: string, email: string | null = null): Promise<string> {
+async function contact(tenantId: string, email: string | null = null, displayName: string | null = "Sam Buyer"): Promise<string> {
   const id = randomUUID();
   serial += 1;
   await h.fixture.service((tx) => tx.query(
     `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,e164_phone,created_at,updated_at)
-     VALUES ($1,$2,'Sam Buyer',$3,$4,$5,$5)`,
-    [tenantId, id, email ?? `sam${serial}@acme.example`, `+1415556${String(serial).padStart(4, "0")}`, NOW]));
+     VALUES ($1,$2,$6,$3,$4,$5,$5)`,
+    [tenantId, id, email ?? `sam${serial}@acme.example`, `+1415556${String(serial).padStart(4, "0")}`, NOW, displayName]));
   return id;
 }
 
@@ -168,6 +168,34 @@ describe("enrichment proposals", () => {
     expect(left.map((p) => p.field)).toEqual(["employees"]);
     const read = contactEnrichmentSchema.parse((await call(h.app, "GET", `/v1/contacts/${contactId}/enrichment`, { token: h.a.token })).body);
     expect(read.profile).toMatchObject({ companyName: "Acme Widgets", companyIndustry: null, companyEmployees: null });
+  });
+
+  it("lists a proposal for a contact without a name", async () => {
+    const contactId = await contact(h.a.tenantId, null, null);
+    await proposals(h.a.tenantId, contactId, { name: "Nameless Co" });
+    const mine = (await listProposals(h.a.token)).filter((p) => p.contactId === contactId);
+    expect(mine).toMatchObject([{ contactName: null, proposedValue: "Nameless Co", status: "pending" }]);
+  });
+
+  it("keeps an approved proposal whose apply failed for the owner who approved it, until a retry applies it (A-7)", async () => {
+    const contactId = await contact(h.a.tenantId);
+    await proposals(h.a.tenantId, contactId, { industry: "Robotics" });
+    const [pending] = (await listProposals(h.a.token)).filter((p) => p.contactId === contactId);
+    await call(h.app, "POST", `/v1/contacts/${contactId}/enrichment/block`, { token: staff.token, key: randomUUID(), body: { reason: "asked us not to" } });
+
+    const refused = await call(h.app, "POST", `/v1/approvals/${pending!.approvalId}/approve`, { token: h.a.token, key: randomUUID(), body: {} });
+    expect(apiErrorBodySchema.parse(refused.body).error.details).toMatchObject({ reason: "enrichment_blocked" });
+    expect((await listProposals(h.a.token)).filter((p) => p.contactId === contactId))
+      .toMatchObject([{ approvalId: pending!.approvalId, status: "approved" }]);
+    // Only the owner who approved can retry the run, so staff do not see it.
+    expect((await listProposals(staff.token)).some((p) => p.contactId === contactId)).toBe(false);
+
+    await call(h.app, "POST", `/v1/contacts/${contactId}/enrichment/unblock`, { token: h.a.token, key: randomUUID() });
+    const retried = await call(h.app, "POST", `/v1/approvals/${pending!.approvalId}/approve`, { token: h.a.token, key: randomUUID(), body: {} });
+    expect(retried.status).toBe(200);
+    expect((await listProposals(h.a.token)).some((p) => p.contactId === contactId)).toBe(false);
+    const read = contactEnrichmentSchema.parse((await call(h.app, "GET", `/v1/contacts/${contactId}/enrichment`, { token: h.a.token })).body);
+    expect(read.profile).toMatchObject({ companyIndustry: "Robotics" });
   });
 
   it("leaves out expired proposals", async () => {

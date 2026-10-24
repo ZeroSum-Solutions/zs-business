@@ -391,6 +391,8 @@ export function useEnrichmentProposals() {
     enabled,
     queryKey: keys.enrichmentProposals,
     queryFn: ({ signal }) => api.listEnrichmentProposals({ signal }),
+    // A lookup can finish, or another owner decide, while the screen is open.
+    refetchInterval: 60_000,
   });
 }
 

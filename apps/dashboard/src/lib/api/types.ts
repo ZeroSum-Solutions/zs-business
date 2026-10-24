@@ -388,8 +388,9 @@ export interface EnrichmentApi {
   listEnrichmentProposals(options?: ReadOptions): Promise<EnrichmentProposal[]>;
   /**
    * An owner approves (the field is written to the customer's company details) or rejects one
-   * proposal (`POST /v1/approvals/:id/approve` or `/reject`). Throws `not_found` for an unknown or
-   * foreign proposal, and a conflict for one already decided or expired.
+   * proposal (`POST /v1/approvals/:id/approve` or `/reject`). Throws `forbidden` for an unknown or
+   * foreign proposal (the API answers both alike), `not_found` for a malformed id, and a conflict
+   * for one already decided or expired. Approving an `approved` proposal retries its apply (A-7).
    */
   decideEnrichmentProposal(approvalId: string, decision: EnrichmentDecision, options: WriteOptions): Promise<void>;
 }
