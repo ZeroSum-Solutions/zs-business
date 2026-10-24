@@ -156,7 +156,7 @@ describe("api proxy", () => {
       ["v1", "me"], ["v1", "members"], ["v1", "approvals"], ["v1", "approvals", "a-1"], ["v1", "sources"],
       ["v1", "inbox", "threads"], ["v1", "inbox", "threads", "c_x"], ["v1", "home", "results"],
       ["v1", "agents", "followup"], ["v1", "agents", "followup", "runs"], ["v1", "agents", "followup", "runs", "r-1"],
-      ["v1", "sites"], ["v1", "sites", "s-1", "releases"], ["v1", "transcriptions"], ["v1", "transcriptions", "j-1"], ["v1", "calendar", "connections"], ["v1", "business"],
+      ["v1", "sites"], ["v1", "sites", "s-1", "releases"], ["v1", "transcriptions"], ["v1", "transcriptions", "j-1"], ["v1", "document-intake", "jobs"], ["v1", "document-intake", "jobs", "j-1"], ["v1", "calendar", "connections"], ["v1", "business"],
     ])
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
     const approve = await proxyApiRequest(post("v1/approvals/a-1/approve", {}, { "Idempotency-Key": "k-a", Origin: ORIGIN }), ["v1", "approvals", "a-1", "approve"], harness.setup);

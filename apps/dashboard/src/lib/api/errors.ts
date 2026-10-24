@@ -105,6 +105,9 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   no_email: "This customer has no email address yet. Add one in Customers, then approve the reply.",
   approved_by_other: "Another owner already approved this reply. They finish sending it, or revoke their approval first.",
   stale_release: "Another version went live since you opened this page.",
+  intake_not_in_review: "This price list is no longer waiting for review.",
+  intake_changed: "The proposed changes were updated. Review them again.",
+  intake_target_changed: "An item changed since you reviewed this list. Nothing was applied. Open the list and review it again.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
