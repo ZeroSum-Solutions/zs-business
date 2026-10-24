@@ -83,7 +83,7 @@ export type Reservation =
 /**
  * G-16: share-lock the run's row and say whether it is still running. A close (finish, stall) takes
  * the same row for update, so a model call reserved or settled here either lands before the close
- * counts it, or finds the run closed and writes nothing. Always taken before the settings lock.
+ * counts it, or finds the run closed and writes nothing. Taken after the settings lock, the order the draft decision uses.
  */
 async function runIsOpen(tx: Transaction, tenantId: string, runId: string | null): Promise<boolean> {
   if (runId === null) return true;
@@ -101,10 +101,11 @@ async function runIsOpen(tx: Transaction, tenantId: string, runId: string | null
 export async function reserveModelCall(
   tx: Transaction, tenantId: string, call: ModelCallRef, worst: WorstCase, now: Date,
 ): Promise<Reservation> {
-  if (!(await runIsOpen(tx, tenantId, call.runId))) return { status: "run_closed" };
   const settings = (await tx.query<{ max_cost_micros_per_day: number }>(
     "SELECT max_cost_micros_per_day FROM agent_settings WHERE tenant_id=$1 AND agent_kind=$2 FOR UPDATE", [tenantId, call.kind],
   )).rows[0];
+  // The run's row second, as the draft decision does (settings, then run): one lock order, no deadlock.
+  if (!(await runIsOpen(tx, tenantId, call.runId))) return { status: "run_closed" };
   // A kind that reaches a model call has a row (the gate stops a kind that is off); no row reads as the default cap.
   const capMicros = settings?.max_cost_micros_per_day ?? 1_000_000;
   // A call for this step still out (or cut off by a crash) blocks another: never pay twice at once.
