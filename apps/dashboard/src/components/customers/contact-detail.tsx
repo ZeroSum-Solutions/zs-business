@@ -11,6 +11,7 @@ import { browserZone, useContact, useDeals, usePipelines } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatPhone, relativeTime } from "@/lib/utils";
 import { Avatar } from "@/components/ui/avatar";
+import { CompanyDetails } from "./company-details";
 
 // No business time zone exists yet, so dates show in the viewer's own zone.
 function ConsentLine({ label, evidence }: { label: string; evidence: ConsentEvidence | null }) {
@@ -79,6 +80,7 @@ export function ContactDetail({ id }: { id: string }) {
               )}
             </Card>
             <div className="space-y-4">
+              <CompanyDetails contactId={id} />
               <Card aria-labelledby="reach-title">
                 <CardHeader><CardTitle id="reach-title">Contact</CardTitle></CardHeader>
                 <ul className="space-y-1">

@@ -59,6 +59,8 @@ export const keys = {
   agentsAll: ["agents"] as const,
   /** The business profile (business-profile.md BP-5). */
   business: ["business"] as const,
+  /** One customer's company details and lookups (enrichment.md E-17). */
+  contactEnrichment: (id: string) => ["crm", "contact", id, "enrichment"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
@@ -334,6 +336,21 @@ export function useFollowUpStatus() {
  * The business profile (business-profile.md BP-5). An API older than the profile answers 404; the
  * caller shows that as "not available yet" (BP-10), so a 404 is not retried.
  */
+/**
+ * One customer's company details. While a request is still running the page asks again every few
+ * seconds, so the answer needs no reload.
+ */
+export function useContactEnrichment(contactId: string) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled,
+    queryKey: keys.contactEnrichment(contactId),
+    queryFn: ({ signal }) => api.getContactEnrichment(contactId, { signal }),
+    refetchInterval: (query) => (query.state.data?.requests.some((r) => r.status === "pending" || r.status === "leased" || r.status === "uncertain") ? 4_000 : false),
+  });
+}
+
 export function useBusinessProfile() {
   const api = useApi();
   const { keys, enabled } = useKeys();
