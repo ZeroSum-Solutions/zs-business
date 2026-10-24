@@ -42,7 +42,7 @@ export const FAILURE_MESSAGES: Readonly<Record<ImageFailureReason, string>> = Ob
 const STATUS: Readonly<Record<Exclude<ImageStatus, "failed">, VariantStatusView>> = Object.freeze({
   queued: { label: "Waiting", tone: "info", working: true, summary: "Waiting for its turn." },
   running: { label: "Working", tone: "info", working: true, summary: "Making your image. This usually takes under a minute." },
-  staged: { label: "Ready to review", tone: "accent", working: false, summary: "Compare it with the original, then approve or reject it." },
+  staged: { label: "Ready to review", tone: "warn", working: false, summary: "Compare it with the original, then approve or reject it." },
   approved: { label: "Approved", tone: "success", working: true, summary: "Approved. Adding it to your images." },
   promoted: { label: "Approved", tone: "success", working: false, summary: "In your images, ready to use on your site." },
   expired: { label: "Expired", tone: "neutral", working: false, summary: `Nobody decided within 14 days, so it was removed. Make it again if you still want it.` },

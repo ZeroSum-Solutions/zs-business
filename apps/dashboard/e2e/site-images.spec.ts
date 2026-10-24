@@ -33,6 +33,8 @@ test("uploads a photo, approves one edit and rejects another (image-port.md IM-2
   const removal = edits(page).first();
   await expect(removal.getByTestId("image-variant-status")).toHaveText(/Waiting|Working/);
   await expect(removal.getByTestId("image-variant-status")).toHaveText("Ready to review", WORKER);
+  // The "Making your image" note is out of date once the edit is ready, so it goes (it would cover the images).
+  await expect(page.getByRole("status").getByText("Making your image.", { exact: false })).toHaveCount(0);
   await expect(removal.getByRole("img", { name: "Original photo" })).toBeVisible();
   await expect(removal.getByRole("img", { name: "Edited image: Remove background" })).toBeVisible();
   const provenance = removal.getByTestId("image-variant-provenance");
@@ -46,6 +48,8 @@ test("uploads a photo, approves one edit and rejects another (image-port.md IM-2
   await expect(removal.getByTestId("image-variant-status")).toHaveText("Approved");
   await expect(page.getByRole("status").getByText("Approved. It is being added to your images.")).toBeVisible();
   await expect(removal.getByRole("button", { name: /^Approve/ })).toHaveCount(0);
+  // The buttons are gone, so focus moves to the edit's title, not to the page body.
+  await expect(removal.getByRole("heading", { level: 3, name: "Remove background" })).toBeFocused();
   await expect(removal.getByTestId("image-variant-summary")).toHaveText("In your images, ready to use on your site.", WORKER);
 
   // A studio background needs a description; this one is turned down.
@@ -64,6 +68,7 @@ test("uploads a photo, approves one edit and rejects another (image-port.md IM-2
   await expect(swap.getByTestId("image-variant-summary")).toHaveText("You turned this one down. It will not be used.");
   await expect(swap.getByRole("img", { name: /^Edited image/ })).toHaveCount(0);
   await expect(swap.getByRole("button", { name: /^(Approve|Reject)/ })).toHaveCount(0);
+  await expect(swap.getByRole("heading", { level: 3, name: "Studio background: Slate with soft light" })).toBeFocused();
   // The approved one stays approved.
   await expect(edits(page).filter({ hasText: "Remove background" }).getByTestId("image-variant-status")).toHaveText("Approved");
   await shot(page, "25-site-images-decided", info.project.name);

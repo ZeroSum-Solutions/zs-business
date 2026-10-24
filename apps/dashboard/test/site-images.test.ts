@@ -51,7 +51,8 @@ describe("image variant status", () => {
   });
 
   it("asks for a decision on a staged variant, and calls approved and promoted both Approved", () => {
-    expect(variantStatus({ status: "staged", failureReason: null })).toMatchObject({ label: "Ready to review", working: false });
+    // The one state that waits on the owner stands apart from Approved and Live (warn, not accent or success).
+    expect(variantStatus({ status: "staged", failureReason: null })).toMatchObject({ label: "Ready to review", tone: "warn", working: false });
     expect(variantStatus({ status: "approved", failureReason: null })).toMatchObject({ label: "Approved", tone: "success", working: true });
     expect(variantStatus({ status: "promoted", failureReason: null })).toEqual({
       label: "Approved", tone: "success", working: false, summary: "In your images, ready to use on your site.",

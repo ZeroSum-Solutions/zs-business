@@ -3,7 +3,7 @@
 import { Check, MagicWand, UploadSimple, X } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { imageVariantSchema, IMAGE_PRESETS, MEDIA_CONTENT_TYPES, MEDIA_LIMITS, type ImagePreset, type ImageVariant, type MediaAsset } from "@zs/contracts";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, TrayHeader, TrayTitle } from "@/components/ui/card";
@@ -109,7 +109,7 @@ function PhotoPicker({ photos, picked, onPick }: { photos: MediaAsset[]; picked:
     <div role="group" aria-label="Your photos" className="flex flex-wrap gap-2">
       {photos.map((photo, index) => (
         <button key={photo.id} type="button" aria-pressed={photo.id === picked} onClick={() => onPick(photo.id)} data-testid="image-photo"
-          className={cn("w-20 rounded-md p-1 transition-quick", photo.id === picked ? "bg-accent-tint shadow-[inset_0_0_0_2px_var(--accent)]" : "bg-surface shadow-[inset_0_0_0_1px_var(--border-strong)] hover:bg-inset")}>
+          className={cn("press w-20 rounded-md p-1 transition-quick", photo.id === picked ? "bg-accent-tint shadow-[inset_0_0_0_2px_var(--accent)]" : "bg-surface shadow-[inset_0_0_0_1px_var(--border-strong)] hover:bg-inset")}>
           <ImageView kind="asset" id={photo.id} alt="" size={photo} />
           <span className="sr-only">Photo {photos.length - index}, uploaded {relativeTime(photo.createdAt).toLowerCase()}</span>
         </button>
@@ -182,6 +182,16 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
   const actions = variantActions(variant);
   const title = variantTitle(variant);
   const decision = { variantId: variant.id, sha256: variant.sha256 ?? "" };
+  // After Approve or Reject the buttons go, so focus moves to the edit's title rather than the page body.
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const focusTitle = () => requestAnimationFrame(() => headingRef.current?.focus());
+  // "Making your image" is out of date once the edit has an answer: clear it, so it never covers the review.
+  const wasWorking = useRef(variant.status === "queued" || variant.status === "running");
+  useEffect(() => {
+    const working = variant.status === "queued" || variant.status === "running";
+    if (wasWorking.current && !working) clearToasts(IMAGES.topic);
+    wasWorking.current = working;
+  }, [variant.status, clearToasts]);
   const put = (next: ImageVariant) =>
     queryClient.setQueryData<ImageVariant[]>(keys.imageVariants, (list) => list?.map((item) => (item.id === next.id ? next : item)));
   const refresh = (error: unknown) => {
@@ -207,6 +217,7 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
       const executed = imageVariantSchema.safeParse(answer.execution.result);
       if (executed.success) put(executed.data);
       toast("Approved. It is being added to your images.", "success", IMAGES);
+      focusTitle();
     },
   });
   const reject = useMutation({
@@ -218,6 +229,7 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
     onSuccess: (next) => {
       put(next);
       toast("Rejected. This image will not be used.", "info", IMAGES);
+      focusTitle();
     },
   });
   const run = (which: typeof approve | typeof reject) => flight.run((done) => {
@@ -231,20 +243,22 @@ function VariantCard({ variant, source }: { variant: ImageVariant; source: Media
 
   return (
     <Card className="space-y-3" aria-labelledby={titleId} data-status={variant.status}>
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 id={titleId} className="min-w-0 flex-1 font-medium break-words">{title}</h3>
-        <Badge tone={status.tone} live={status.working} data-testid="image-variant-status">{status.label}</Badge>
+      <div className="space-y-0.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 id={titleId} ref={headingRef} tabIndex={-1} className="focus-inset min-w-0 flex-1 rounded-sm font-medium break-words">{title}</h3>
+          <Badge tone={status.tone} live={status.working} data-testid="image-variant-status">{status.label}</Badge>
+        </div>
+        <p className="text-xs text-meta">Started {relativeTime(variant.createdAt).toLowerCase()}</p>
       </div>
-      <p className="text-xs text-meta">Started {relativeTime(variant.createdAt).toLowerCase()}</p>
       <p className="text-sm text-fg-2" data-testid="image-variant-summary">{status.summary}</p>
       {actions.showResult ? (
         <div className="grid grid-cols-2 gap-2 sm:gap-3">
           <figure className="min-w-0 space-y-1">
-            <ImageView kind="asset" id={source.id} alt="Original photo" size={source} />
+            <ImageView kind="asset" id={source.id} alt="Original photo" size={source} className="lg:max-h-[360px]" />
             <figcaption className="text-xs text-muted">Original</figcaption>
           </figure>
           <figure className="min-w-0 space-y-1">
-            <ImageView kind="variant" id={variant.id} alt={`Edited image: ${title}`} size={source} />
+            <ImageView kind="variant" id={variant.id} alt={`Edited image: ${title}`} size={source} className="lg:max-h-[360px]" />
             <figcaption className="text-xs text-muted">Edited</figcaption>
           </figure>
         </div>
