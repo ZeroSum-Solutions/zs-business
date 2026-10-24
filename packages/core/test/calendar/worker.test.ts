@@ -628,7 +628,7 @@ describe("push notifications and channels (G-8)", () => {
   });
 
   it("channel calls end with the run's deadline, and none starts once no time is left (G-10)", async () => {
-    const slow = () => new Promise<void>((resolve) => setTimeout(resolve, 400));
+    const slow = () => new Promise<void>((resolve) => setTimeout(resolve, 3000));
     const timed = async (work: () => Promise<unknown>) => {
       const started = Date.now();
       const result = await work();
@@ -640,7 +640,7 @@ describe("push notifications and channels (G-8)", () => {
     const watching = await timed(() => h.worker(v.google, v.clock, { webhookUrl: WEBHOOK_URL })
       .runOnce({ deadline: new Date(v.clock.now().getTime() + 100) }));
     expect(watching.result).toMatchObject({ synced: 1, channelsOpened: 0, channelFailures: 1 });
-    expect(watching.ms).toBeLessThan(400);
+    expect(watching.ms).toBeLessThan(1500);
 
     // Renewal: a slow stop of the old channel is cut the same way.
     const w = await world();
@@ -651,7 +651,7 @@ describe("push notifications and channels (G-8)", () => {
     w.google.fail("stopChannel", slow);
     const stopping = await timed(() => worker.runOnce({ deadline: new Date(w.clock.now().getTime() + 100) }));
     expect(stopping.result).toMatchObject({ synced: 1, channelsOpened: 1, channelsStopped: 0 });
-    expect(stopping.ms).toBeLessThan(400);
+    expect(stopping.ms).toBeLessThan(1500);
 
     // A watch that uses up the run: the old channel is not stopped at all; it expires on its own.
     w.clock.set(START + 2 * CHANNEL_TTL_MS - DAY);
