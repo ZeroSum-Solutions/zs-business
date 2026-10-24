@@ -8,7 +8,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createLocalStubSessionCheck, signBookingKey, type AutomationEdgeConfig, type SiteCompiler } from "@zs/core";
+import { createLocalStubSessionCheck, signBookingKey, type AutomationEdgeConfig, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
 import {
   createApp,
@@ -130,6 +130,8 @@ export interface HarnessOptions {
   twilioWebhook?: Partial<TwilioWebhookConfig>;
   /** Turns the Activepieces routes on; the key defaults to ACTIVEPIECES_KEY_SECRET. */
   activepieces?: Partial<AutomationEdgeConfig>;
+  /** Enrichment gates and prices (enrichment.md E-5); absent, the routes answer enrichment_unavailable. */
+  enrichment?: EnrichmentConfigInput;
   clock?: { now(): Date };
   /** Turns the /v1/sites routes on over this store and compiler. */
   sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
@@ -149,6 +151,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     db: database.db,
     generateId: randomUUID,
     config: { allowedOrigins: [ORIGIN] },
+    ...(options.enrichment ? { enrichment: options.enrichment } : {}),
     ...(options.publicIntake
       ? { publicIntake: {
         keySecrets: { current: KEY_SECRET },

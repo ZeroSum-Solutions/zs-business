@@ -7,10 +7,12 @@ import {
   apiErrorBody,
   AuthUnavailable,
   authenticate,
+  createEnrichmentSession,
   createFollowUpAgent,
   DatabaseUnavailable,
   mapError,
   type AutomationEdgeConfig,
+  type EnrichmentConfigInput,
   type FollowUpAgentConfig,
   type Session,
   type SessionCheck,
@@ -28,6 +30,7 @@ import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
+import { enrichmentRoutes } from "./routes/enrichment.js";
 import { homeRoutes } from "./routes/home.js";
 import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
@@ -91,6 +94,11 @@ export interface AppDependencies {
    * under /v1/integrations/activepieces and the flow routes under /integrations/activepieces are off.
    */
   readonly activepieces?: AutomationEdgeConfig;
+  /**
+   * Company enrichment (enrichment.md E-5, E-8, E-9): the gates, price and caps the request action
+   * reads. Absent means every request is refused `enrichment_unavailable`; reads still work.
+   */
+  readonly enrichment?: EnrichmentConfigInput;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -238,6 +246,8 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
+  const enrichment = deps.enrichment;
+  app.route("/v1", enrichmentRoutes((c) => createEnrichmentSession(requestEdge(c), c.var.session.principal, enrichment)));
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   app.onError((error, c) => {
