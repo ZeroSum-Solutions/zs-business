@@ -54,6 +54,7 @@ const expectedPath: Record<string, string> = {
   "booking_resources_time_zone_known()": "pg_catalog, pg_temp",
   "booking_weekly_valid(jsonb)": "pg_catalog, public, pg_temp",
   "booking_windows_valid(jsonb)": "pg_catalog, pg_temp",
+  "image_variants_guard()": "pg_catalog, pg_temp",
   // Business profile (20261023100000_business_profiles.sql): the row that comes with a tenant, the definer
   // that keeps tenants.name in step with the display name (BP-9), and the zone check.
   "business_profiles_create()": "pg_catalog, pg_temp",

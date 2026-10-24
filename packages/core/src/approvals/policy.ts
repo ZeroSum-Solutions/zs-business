@@ -17,6 +17,8 @@ export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Objec
   "inbox.reply.send": Object.freeze({ request: "inbox.drafts", required: true }),
   // document-intake.md DL-13: no row goes live until an owner approves the whole diff.
   "catalog.intake.apply": Object.freeze({ request: "publish", required: true }),
+  // image-port.md IM-12: only an owner's approval promotes a staged image.
+  "media.variant.approve": Object.freeze({ request: "publish", required: true }),
   // enrichment.md E-14: a looked-up field reaches the profile only once an owner approves it.
   "contact.profile.apply": Object.freeze({ request: "enrich", required: true }),
 });
@@ -38,7 +40,13 @@ export const isSiteAction = (actionType: string) => actionType.startsWith("site.
  * which checks the type, the signature and the size and stores the bytes first; an approved copy
  * would queue a job for a file that was never stored.
  */
-export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set(["calendar.google.connect", "wallet.topup.create", "catalog.intake.upload"]);
+export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set([
+  "calendar.google.connect", "wallet.topup.create",
+  // document-intake.md DL-3: the upload route checks and stores the bytes first; an approved copy would queue a job for no file.
+  "catalog.intake.upload",
+  // image-port.md: these need the deploy's image config or the worker principal, which an approved run lacks.
+  "media.asset.upload", "media.variant.generate", "media.variant.stage", "media.variant.fail",
+]);
 export const cannotBeApproved = (actionType: string) =>
   isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);
 

@@ -211,3 +211,33 @@ start-up; a key starting `image-job:` is refused by `idempotencyKeySchema`.
   such as prongs and hallmarks.
 - Uploads are owner-only (`publish`). Staff uploads need a new permission.
 - An object stored by IM-3 whose row never commits stays as an orphan until a sweep exists.
+
+## First slice: what was built (2026-10-23)
+
+Built: IM-1 to IM-5 and IM-7 to IM-16 with the fake adapter, and the IM-6 start-up check
+(`parseImageConfig`). No vendor adapter, HTTP route or dashboard screen is in this slice, so the
+site screen is unchanged. Differences from the text above:
+
+- `image_variants` gains `background_sha256` (the generated background, kept so the composite can
+  be rebuilt and compared).
+- The runtime role holds column grants to update provenance on `image_variants`; the guard
+  trigger makes each provenance column set-once and fixes the state moves (IM-15).
+- `aspectRatio` accepts only `source` in this slice.
+- Prices in `IMAGE_PRICES` are provisional (see Known limits).
+- The matte presets decode PNG only; JPEG and WebP uploads are stored but a matte job on them
+  fails `source_undecodable`.
+- `upscale_2k` has no pixel lock, as it is not matte-based; the output header and size are
+  checked (`output_invalid`, `size_changed`).
+- The IM-14 publish gate refuses any `image/*` file that is not a tenant media asset. That also
+  covers SVG and ICO files, so a release with a favicon needs it uploaded first or must drop it.
+  This is an open risk for site specs that carry vector art.
+- A worker crash between the hold and the vendor call is an unknown outcome and is never resent:
+  after `outcomeWaitMs` the variant fails `outcome_unknown` and the hold stays for an operator.
+- Uploads check the PNG is whole (chunks, image data, IEND) but a JPEG or WebP is checked by its
+  header only: there is no decoder for either yet. Matte presets decode 8-bit non-interlaced
+  grey, RGB, grey+alpha and RGBA PNG; other legal PNGs upload but fail `source_undecodable`.
+- Two variants with identical output bytes share one asset (IM-1 keys assets by content), so the
+  `media_asset` source record names the first variant that was promoted.
+- Expiry deletes the staging file and retries recent expiries (7 days) on each pass; an older
+  failed delete stays an orphan until the sweep named below exists.
+- Acceptance step 8 checks `business_profiles` unchanged: no `catalog_items` table exists yet.
