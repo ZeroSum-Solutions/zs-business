@@ -1,6 +1,7 @@
 // Row loaders and mappers shared by the actions and the reads. Run in a tenant transaction (runtime
 // role) or a service transaction; every statement names tenant_id.
 import {
+  ENRICHMENT_ERROR_CODES,
   type ContactProfileRecord,
   type EnrichmentField,
   type EnrichmentRequestRecord,
@@ -71,13 +72,18 @@ export const REQUEST_COLUMNS = "id, contact_id, op, status, final_reason, last_e
 export const loadRequest = async (tx: Transaction, tenantId: string, id: string): Promise<RequestRow | null> =>
   (await tx.query<RequestRow>(`SELECT ${REQUEST_COLUMNS} FROM enrichment_requests WHERE tenant_id=$1 AND id=$2`, [tenantId, id])).rows[0] ?? null;
 
+const TENANT_REASONS: ReadonlySet<string> = new Set([...ENRICHMENT_ERROR_CODES, "no_match", "rejected"]);
+/** E-17: only the listed codes reach a tenant; an internal reason reads as unavailable. */
+const tenantReason = (reason: string | null): string | null =>
+  reason === null ? null : TENANT_REASONS.has(reason) ? reason : "enrichment_unavailable";
+
 /** E-17: a tenant sees a stable reason code, never a provider's text. */
 export const requestRecord = (row: RequestRow): EnrichmentRequestRecord => ({
   id: row.id,
   contactId: row.contact_id,
   op: row.op,
   status: row.status,
-  reason: row.final_reason,
+  reason: tenantReason(row.final_reason),
   domain: row.domain,
   priceCents: row.price_cents,
   createdAt: row.created_at.toISOString(),

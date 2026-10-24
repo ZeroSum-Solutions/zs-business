@@ -358,3 +358,41 @@ describe("outcomes (E-11, E-12, E-13, E-16)", () => {
     expect(after.profile).toMatchObject({ companyName: "Acme Inc" });
   });
 });
+
+describe("review fixes (E-6, E-7, E-10, E-14, E-17)", () => {
+  it("a queued request is stopped when the company domain has since moved into the refused region", async () => {
+    await fund(tenantA, 1000);
+    const contactId = await contact(tenantA);
+    const { fake, worker } = harness({ script: [HIT] });
+    const requested = await enrichmentFor(tenantA, ownerA).requestEnrichment({ op: "company.enrich", contactId }, randomUUID());
+    await fixture.service((tx) => tx.query(
+      "INSERT INTO crm_contact_profile (tenant_id, contact_id, company_domain, updated_at) VALUES ($1,$2,'firma.de',$3)", [tenantA, contactId, new Date(now)]));
+    await worker.runOnce();
+    expect(fake.calls).toHaveLength(0);
+    expect(await enrichmentFor(tenantA, ownerA).getRequest(requested.result.id)).toMatchObject({ status: "blocked", reason: "enrichment_region_blocked" });
+  });
+
+  it("an approval cannot write a field after the contact's address is suppressed", async () => {
+    await fund(tenantA, 1000);
+    const contactId = await contact(tenantA, { email: "ann@later-suppressed.example" });
+    const { worker } = harness({ script: [HIT] });
+    await enrichmentFor(tenantA, ownerA).requestEnrichment({ op: "company.enrich", contactId }, randomUUID());
+    await worker.runOnce();
+    const detail = await enrichmentFor(tenantA, ownerA).getContactEnrichment(contactId);
+    await fixture.service((tx) => tx.query(
+      "INSERT INTO suppressions (tenant_id,channel,address,reason,source,created_at) VALUES ($1,'email',$2,'unsubscribe','test',$3)",
+      [tenantA, "ann@later-suppressed.example", new Date(now)]));
+    const owner = createSession(deps(), { tenantId: tenantA, actorId: ownerA });
+    await owner.approveApproval(detail.results.find((result) => result.field === "name")!.approvalId, {}, randomUUID()).catch(() => undefined);
+    expect((await enrichmentFor(tenantA, ownerA).getContactEnrichment(contactId)).profile?.companyName ?? null).toBeNull();
+  });
+
+  it("a tenant reads an internal reason as unavailable", async () => {
+    await fund(tenantA, 1000);
+    const contactId = await contact(tenantA);
+    const requested = await enrichmentFor(tenantA, ownerA).requestEnrichment({ op: "company.enrich", contactId }, randomUUID());
+    await fixture.service((tx) => tx.query(
+      "UPDATE enrichment_requests SET status='dead', final_reason='outcome_unknown' WHERE tenant_id=$1 AND id=$2", [tenantA, requested.result.id]));
+    expect(await enrichmentFor(tenantA, ownerA).getRequest(requested.result.id)).toMatchObject({ status: "dead", reason: "enrichment_unavailable" });
+  });
+});

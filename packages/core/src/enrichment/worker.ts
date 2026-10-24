@@ -126,7 +126,7 @@ export function createEnrichmentWorker(deps: EnrichmentWorkerDeps) {
     const t = now().getTime();
     if (role.value !== null && t - role.at < config.whoamiEveryMs) return role.value;
     const result = await withDeadline<{ role: string } | null>((signal) => port.whoami({ signal }), () => null);
-    if (result === null) { report({ code: "treg_whoami_failed" }); return role.value; }
+    if (result === null) { report({ code: "treg_whoami_failed" }); return null; }
     role = { value: result.role, at: t };
     if (result.role === "owner") report({ code: "treg_token_is_owner" });
     return result.role;
@@ -222,7 +222,7 @@ export function createEnrichmentWorker(deps: EnrichmentWorkerDeps) {
       const checkedAt = now();
       const windowEnd = row.first_attempt_at ? row.first_attempt_at.getTime() + port.dedupeWindowMs - config.dedupeMarginMs : Number.POSITIVE_INFINITY;
       const windowOpen = checkedAt.getTime() + config.providerTimeoutMs <= windowEnd;
-      if (!windowOpen || row.attempts >= config.maxAttempts) {
+      if (!windowOpen || (row.attempts >= config.maxAttempts && !row.outcome_unknown)) {
         const ending: Terminal = { status: "failed", reason: windowOpen ? "max_attempts" : "dedupe_window_expired" };
         if (row.outcome_unknown) return { kind: "lookup", onNotFound: ending };
         return { kind: "done", result: await endWithRelease(tx, row, ending, at) };

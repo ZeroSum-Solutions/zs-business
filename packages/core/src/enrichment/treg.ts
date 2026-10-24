@@ -41,23 +41,33 @@ const microHeader = (response: Response): number => {
   return Number.isSafeInteger(n) ? n : 0;
 };
 
-async function readJson(response: Response): Promise<Record<string, unknown>> {
+/** The JSON object of a reply, `{}` for a valid non-object, and `null` when the body cannot be read. */
+async function readJson(response: Response): Promise<Record<string, unknown> | null> {
   try {
     const body: unknown = await response.json();
     return typeof body === "object" && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : {};
-  } catch { return {}; }
+  } catch { return null; }
 }
 
 export function createTregEnrichment(config: TregConfig): EnrichmentPort {
   if (!config.token) throw new ValidationFailed("A Treg token is required");
   const base = (config.baseUrl ?? TREG_DEFAULT_BASE_URL).replace(/\/+$/, "");
+  // The token is sent in a header: only over HTTPS (a loopback address is allowed for local tests).
+  const baseUrl = new URL(base);
+  if (baseUrl.protocol !== "https:" && !(baseUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(baseUrl.hostname)))
+    throw new ValidationFailed("The Treg base URL must use HTTPS");
+  /** Provider text, bounded and with the token blanked out. */
+  const safe = (text: unknown, fallback: string) => {
+    const bounded = short(text, fallback);
+    return config.token && bounded.includes(config.token) ? fallback : bounded;
+  };
   const paths = { ...DEFAULT_PATHS, ...config.paths };
   const doFetch = config.fetch ?? fetch;
   const timeoutMs = config.timeoutMs ?? 15_000;
 
   async function request(path: string, init: RequestInit, options?: EnrichmentCallOptions, extra: Record<string, string> = {}) {
     const signal = options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-    return doFetch(`${base}${path}`, { ...init, headers: { "X-Treg-Token": config.token, accept: "application/json", ...extra }, signal });
+    return doFetch(`${base}${path}`, { ...init, redirect: "error", headers: { "X-Treg-Token": config.token, accept: "application/json", ...extra }, signal });
   }
 
   return {
@@ -86,10 +96,13 @@ export function createTregEnrichment(config: TregConfig): EnrichmentPort {
       const status = response.status;
       if (status === 409) return { status: "uncertain", code: "in_flight" };
       if (status === 410) return { status: "key_expired", callId };
-      const body = await readJson(response);
+      const parsedBody = await readJson(response);
+      // A 200 whose body never arrived may still have been charged: that is not a miss.
+      if (parsedBody === null && response.ok) return { status: "uncertain", code: "unreadable_response" };
+      const body = parsedBody ?? {};
       const refused = response.headers.get("x-treg-error") === "1";
       const errorBody = typeof body.error === "object" && body.error !== null ? body.error as Record<string, unknown> : {};
-      const code = short(errorBody.code ?? body.error ?? response.headers.get("x-treg-error-code"), `http_${status}`);
+      const code = safe(errorBody.code ?? body.error ?? response.headers.get("x-treg-error-code"), `http_${status}`);
       if (response.ok) {
         const fields = minimizeOutput(body.output, config.clock.now());
         const provider = short(response.headers.get("x-treg-provider") ?? body.provider, "treg");
@@ -120,7 +133,7 @@ export function createTregEnrichment(config: TregConfig): EnrichmentPort {
         const response = await request(path, { method: "GET" }, options);
         if (response.status === 404) return { status: "not_found" };
         if (!response.ok) return { status: "unknown", code: `http_${response.status}` };
-        const body = await readJson(response);
+        const body = (await readJson(response)) ?? {};
         const calls = Array.isArray(body.calls) ? body.calls : [body];
         const first = calls.find((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && (typeof (entry as Record<string, unknown>).id === "string" || typeof (entry as Record<string, unknown>).call_id === "string"));
         if (!first) return { status: "not_found" };
@@ -131,7 +144,7 @@ export function createTregEnrichment(config: TregConfig): EnrichmentPort {
     async balance(options) {
       const response = await request(paths.balance, { method: "GET" }, options);
       if (!response.ok) throw new Error(`balance_http_${response.status}`);
-      const body = await readJson(response);
+      const body = (await readJson(response)) ?? {};
       const micro = Number(body.balance_micro ?? body.balanceMicro);
       if (!Number.isSafeInteger(micro)) throw new Error("balance_unreadable");
       return { balanceMicro: micro };
@@ -140,7 +153,7 @@ export function createTregEnrichment(config: TregConfig): EnrichmentPort {
     async whoami(options) {
       const response = await request(paths.whoami, { method: "GET" }, options);
       if (!response.ok) throw new Error(`whoami_http_${response.status}`);
-      const body = await readJson(response);
+      const body = (await readJson(response)) ?? {};
       return { role: short(body.role, "unknown") };
     },
   };

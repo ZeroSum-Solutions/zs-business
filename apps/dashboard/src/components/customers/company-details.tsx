@@ -30,7 +30,7 @@ const OUTCOME: Readonly<Record<string, string>> = {
   daily_cap: "You reached today's limit on lookups.",
   answer_lost: "The answer was lost. You were not charged. Try again.",
   region_blocked_after_call: "This customer turned out to be in the EU or UK, so nothing was kept. You were not charged.",
-  dead: "The lookup could not finish. You were not charged.",
+  dead: "The lookup could not finish. The few cents for it stay held until it is sorted out.",
 };
 
 export function CompanyDetails({ contactId }: { contactId: string }) {
@@ -43,7 +43,8 @@ export function CompanyDetails({ contactId }: { contactId: string }) {
   const ask = useMutation({
     mutationFn: () => api.requestEnrichment(contactId, { idempotencyKey: intents.keyFor({ contactId, run: read.data?.requests[0]?.id ?? null }) }),
     onSettled: (_result, error) => intents.settle({ contactId, run: read.data?.requests[0]?.id ?? null }, error),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.contactEnrichment(contactId) }),
+    // Returned, so the button stays busy until the refreshed list shows the new request.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.contactEnrichment(contactId) }),
   });
 
   const latest: EnrichmentRequestRecord | undefined = read.data?.requests[0];

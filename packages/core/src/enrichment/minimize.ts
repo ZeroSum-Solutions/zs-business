@@ -8,6 +8,14 @@ const TEXT_MAX: Readonly<Record<EnrichmentField, number>> = {
 };
 const LINKEDIN = /^https:\/\/([a-z0-9-]+\.)?linkedin\.com\/company\/[^\s]+$/i;
 
+/** The URL as parsed must still be a company page: `/company/../in/x` normalizes elsewhere. */
+function linkedinCompanyPath(text: string): boolean {
+  try {
+    const url = new URL(text);
+    return url.protocol === "https:" && /^\/company\/[^/]+/.test(url.pathname) && !url.pathname.split("/").includes("..");
+  } catch { return false; }
+}
+
 function clean(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   const text = value.replaceAll("\u0000", "").trim();
@@ -27,7 +35,7 @@ export function minimizeField(field: EnrichmentField, value: unknown, now: Date)
     }
     case "linkedin_url": {
       const text = clean(value, TEXT_MAX.linkedin_url);
-      return text !== null && LINKEDIN.test(text) ? text : null;
+      return text !== null && LINKEDIN.test(text) && linkedinCompanyPath(text) ? text : null;
     }
     default:
       return clean(value, TEXT_MAX[field]);

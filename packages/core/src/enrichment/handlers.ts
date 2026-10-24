@@ -29,7 +29,7 @@ import {
   type ProfileRow,
   type ResultRow,
 } from "./records.js";
-import { enrichmentVerdict } from "./rules.js";
+import { enrichmentBlockedNow, enrichmentVerdict, lockContactEnrichment } from "./rules.js";
 
 export const ENRICHMENT_REQUEST_ACTION = "enrichment.request";
 export const ENRICHMENT_BLOCK_ACTION = "contact.enrichment.block";
@@ -111,6 +111,7 @@ export const blockEnrichmentHandler: ActionHandler = {
   async handle({ tx, command, binding, now }) {
     const { payload } = parseOrFail(blockEnrichmentCommandSchema, command);
     const at = clockInstant(now);
+    await lockContactEnrichment(tx, binding.tenantId, payload.contactId);
     const row = (await tx.query<ProfileRow>(
       `INSERT INTO crm_contact_profile (tenant_id, contact_id, do_not_enrich_at, do_not_enrich_reason, updated_at)
        VALUES ($1,$2,$3,$4,$3)
@@ -202,8 +203,9 @@ export const applyProfileHandler: ActionHandler = {
     if (!result || result.expires_at.getTime() <= now.getTime()) throw refuse("enrichment_result_expired");
     if (result.contact_id !== payload.contactId) throw new TenantDenied();
     // E-6: a later block stops the write even though an owner approved it.
-    const profile = await loadProfile(tx, tenantId, payload.contactId, true);
-    if (profile?.do_not_enrich_at) throw refuse("enrichment_blocked");
+    await lockContactEnrichment(tx, tenantId, payload.contactId);
+    await loadProfile(tx, tenantId, payload.contactId, true);
+    if (await enrichmentBlockedNow(tx, tenantId, payload.contactId)) throw refuse("enrichment_blocked");
     const { column, integer } = FIELD_COLUMNS[result.field];
     const value = integer ? Number(result.value) : result.value;
     // `column` comes from the fixed map above, never from input.

@@ -30,7 +30,7 @@ export function parseEnrichmentEnv(env: Readonly<Record<string, string | undefin
   return enrichmentConfigSchema.parse({
     provider,
     archiveConfirmedOff: env.TREG_ARCHIVE_CONFIRMED_OFF === "true",
-    disabled: env.ENRICHMENT_DISABLED !== undefined && env.ENRICHMENT_DISABLED !== "",
+    disabled: env.ENRICHMENT_DISABLED !== undefined,
     ...(price ? { prices: { "company.enrich": price } } : {}),
     ...(positive(env.ENRICHMENT_TENANT_DAILY_CAP) ? { tenantDailyCap: positive(env.ENRICHMENT_TENANT_DAILY_CAP) } : {}),
     ...(positive(env.ENRICHMENT_GLOBAL_DAILY_CAP) ? { globalDailyCap: positive(env.ENRICHMENT_GLOBAL_DAILY_CAP) } : {}),

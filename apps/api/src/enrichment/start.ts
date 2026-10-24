@@ -41,6 +41,7 @@ export function startEnrichmentWorker(env: EnrichmentRunnerEnv, deps: {
     config: {
       workerId: env.workerId,
       providerTimeoutMs: env.providerTimeoutMs,
+      maxAttempts: env.maxAttempts,
       leaseMs: Math.max(60_000, env.providerTimeoutMs * 4),
       enrichment: env.enrichment,
     },

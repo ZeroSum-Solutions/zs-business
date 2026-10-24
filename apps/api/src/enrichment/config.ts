@@ -15,6 +15,7 @@ const onSchema = z.object({
   DATABASE_CA_CERT: z.string().includes("BEGIN CERTIFICATE").optional(),
   ENRICHMENT_WORKER_ID: z.string().min(1).max(200).default("enrichment"),
   ENRICHMENT_CLAIM_LIMIT: int(1, 50).default(5),
+  ENRICHMENT_MAX_ATTEMPTS: int(1, 50).default(6),
   ENRICHMENT_PROVIDER_TIMEOUT_MS: int(1_000, 60_000).default(15_000),
   ENRICHMENT_INTERVAL_MS: int(1_000, 3_600_000).default(15_000),
   TREG_TOKEN: z.string().min(8).optional(),
@@ -26,6 +27,7 @@ export interface EnrichmentRunnerEnv {
   readonly databaseCaCert: string | undefined;
   readonly workerId: string;
   readonly claimLimit: number;
+  readonly maxAttempts: number;
   readonly providerTimeoutMs: number;
   readonly intervalMs: number;
   readonly enrichment: EnrichmentConfig;
@@ -61,6 +63,7 @@ export function parseEnrichmentRunnerEnv(env: Readonly<Record<string, string | u
     databaseCaCert: data.DATABASE_CA_CERT,
     workerId: data.ENRICHMENT_WORKER_ID,
     claimLimit: data.ENRICHMENT_CLAIM_LIMIT,
+    maxAttempts: data.ENRICHMENT_MAX_ATTEMPTS,
     providerTimeoutMs: data.ENRICHMENT_PROVIDER_TIMEOUT_MS,
     intervalMs: data.ENRICHMENT_INTERVAL_MS,
     enrichment,

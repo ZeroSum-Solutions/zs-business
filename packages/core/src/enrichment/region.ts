@@ -22,7 +22,8 @@ export const ENRICHMENT_REFUSED_REGION: readonly RefusedCountry[] = Object.freez
   c("CZ", "Czechia", ["+420"], ["cz"], ["czech republic"]),
   c("DK", "Denmark", ["+45"], ["dk"], ["danmark"]),
   c("EE", "Estonia", ["+372"], ["ee"], ["eesti"]),
-  c("FI", "Finland", ["+358"], ["fi"], ["suomi", "aland islands", "åland islands"]),
+  c("FI", "Finland", ["+358"], ["fi"], ["suomi"]),
+  c("AX", "Aland Islands", [], ["ax"], ["åland islands", "aland", "åland"]),
   c("FR", "France", ["+33"], ["fr"]),
   c("DE", "Germany", ["+49"], ["de"], ["deutschland"]),
   c("GR", "Greece", ["+30"], ["gr"], ["hellas"]),
@@ -87,11 +88,14 @@ const NAMES: ReadonlyMap<string, string> = new Map(ENRICHMENT_REFUSED_REGION.fla
  * with a refused country (Delaware is DE) is read as the country: refusing too much is the safe error.
  */
 export function refusedCountryInLocation(location: string): string | null {
-  const parts = location.split(/[,;|\n]/).map(norm).filter(Boolean);
+  const parts = location.split(/[,;|\n/\\()\[\]]/).map(norm).filter(Boolean);
   for (const part of parts) {
     const byName = NAMES.get(part);
     if (byName) return byName;
   }
+  // A name inside a longer part ("Paris France", "Paris - France"): whole words only.
+  const words = ` ${norm(location).replace(/[^\p{L}\p{N}]+/gu, " ")} `;
+  for (const [name, code] of NAMES) if (words.includes(` ${name.replace(/[^\p{L}\p{N}]+/gu, " ")} `)) return code;
   const last = parts[parts.length - 1]?.toUpperCase();
   return last && REFUSED_COUNTRY_CODES.has(last) ? last : null;
 }
