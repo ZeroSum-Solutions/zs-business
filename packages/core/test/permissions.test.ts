@@ -9,6 +9,8 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import { createPublicSession } from "../src/edge/public-session.js";
 import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type EdgeDependencies, type Session } from "../src/edge/session.js";
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
+import { templateHandlers } from "../src/templates/handlers.js";
+import { templatedKindHandlers } from "../src/templates/send.js";
 import {
   AGENT_ACTIONS, agentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
@@ -54,6 +56,8 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "agent.kind.settings.update": "agents",
   "agent.kind.kill": "inbox.drafts",
   "agent.kind.resume": "agents",
+  "template.revision.create": "agents",
+  "template.standing.grant": "agents",
   "business.profile.update": "business",
 };
 
@@ -385,7 +389,7 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...businessHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1).
       .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action))

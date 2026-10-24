@@ -6,6 +6,7 @@ import {
   DEFAULT_MAX_COST_MICROS_PER_DAY,
   agentKindConfigSchemas,
   ValidationFailed,
+  isTemplatedKind,
   type AgentKind,
   type AgentKindSettings,
   type AgentKindStatus,
@@ -229,7 +230,8 @@ export async function agentKindStatus(tx: Transaction, tenantId: string, kind: A
   const globalKilled = await readGlobalKilled(tx, false);
   let blockedBy: FollowUpStopReason | null = gate(controls, globalKilled, now);
   const cost = await costFigures(tx, tenantId, kind, controls, now);
-  if (!blockedBy && cost.spent >= cost.cap) blockedBy = "cost_cap";
+  // G-19: a templated kind runs without a model, so its suggestion spend never blocks a run.
+  if (!blockedBy && !isTemplatedKind(kind) && cost.spent >= cost.cap) blockedBy = "cost_cap";
   return kindStatusRecord(kind, controls, globalKilled, blockedBy, cost);
 }
 

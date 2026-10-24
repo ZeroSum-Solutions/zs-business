@@ -387,11 +387,12 @@ describe("agent kinds (G-14)", () => {
     // Turn one on; the others stay off, and so does the follow-up agent's own row.
     const review = await owners.getAgentKindStatus("review_request");
     const enabled = (await owners.updateAgentKindSettings("review_request", {
-      ...review.settings, enabled: true, quietStartMinute: 0, quietEndMinute: 0, config: { timingHours: 48 }, expectedRevision: review.revision,
+      ...review.settings, enabled: true, quietStartMinute: 0, quietEndMinute: 0,
+      config: { timingHours: 48, reviewUrl: "https://reviews.example.test/halden" }, expectedRevision: review.revision,
     }, randomUUID())).result;
     expect(enabled).toMatchObject({
       canRun: true, blockedBy: null, revision: 1,
-      settings: { enabled: true, config: { timingHours: 48, lookbackDays: 7, contactWindowDays: 180, maxSendsPerDay: 20 } },
+      settings: { enabled: true, config: { timingHours: 48, lookbackDays: 7, contactWindowDays: 180, maxSendsPerDay: 20, reviewUrl: "https://reviews.example.test/halden" } },
     });
     expect((await owners.getAgentKindStatus("appointment_reminder")).canRun).toBe(false);
 
@@ -417,7 +418,9 @@ describe("agent kinds (G-14)", () => {
     await expect(update({ config: { maxPagesPerDocument: 10 } }, "inquiry_followup")).rejects.toBeInstanceOf(ValidationFailed);
     expect((await rejection(update({}, "not_a_kind"))).code).toBe("ValidationFailed");
     await expect(owners.killAgentKind("inquiry_followup", {}, randomUUID())).rejects.toBeInstanceOf(ValidationFailed);
-    await update({ enabled: true, config: { maxPagesPerDocument: 10 } });
+    // G-21: document intake has no built path yet, so it cannot be turned on.
+    expect((await rejection(update({ enabled: true, config: { maxPagesPerDocument: 10 } }))).details).toMatchObject({ reason: "kind_not_available" });
+    await update({ enabled: false, config: { maxPagesPerDocument: 10 } });
     expect((await rejection(update({ config: {} }))).details).toMatchObject({ reason: "stale_revision", currentRevision: 1 });
   });
 

@@ -24,4 +24,4 @@ export {
   followUpRunId, ModelTimedOut, runFollowUps,
   type FollowUpRunConfig, type FollowUpRunReport, type RunTimers,
 } from "./runner.js";
-export { dueFollowUpTenants, scheduledRunKey, scheduleSlot, stalledRuns, type DueFollowUpTenants, type StalledRun } from "./schedule.js";
+export { dueFollowUpTenants, dueKindTenants, scheduledKindRunKey, scheduledRunKey, scheduleSlot, stalledRuns, type DueFollowUpTenants, type StalledRun } from "./schedule.js";

@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import type { FollowUpAgent } from "@zs/core";
+import type { FollowUpAgent, TemplateSession, TemplatedAgents } from "@zs/core";
 import type { AppEnv } from "../app.js";
 import { idempotencyKey, jsonBody } from "./request.js";
 
@@ -23,10 +23,18 @@ export function followUpRoutes(agentFor?: (c: Context<AppEnv>) => FollowUpAgent)
   return routes;
 }
 
+/** G-19, A-15: how the routes get one request's template session and templated agents. */
+export interface TemplateRouteFactories {
+  readonly session: (c: Context<AppEnv>) => TemplateSession;
+  readonly agents: (c: Context<AppEnv>) => TemplatedAgents;
+}
+
 // agents.md G-14: the other agent kinds' status, settings and switches. The follow-up kind keeps
 // its own routes above (`/v1/agents/followup`), so its ID is refused here. Mounted after them.
-export function agentKindRoutes() {
-  return new Hono<AppEnv>()
+// G-19, G-20, A-15: a templated kind also has its template, revisions, standing approval, wording
+// suggestion and runs. `template-suggestion` is a 404 when the server has no suggestion model.
+export function agentKindRoutes(templates?: TemplateRouteFactories) {
+  const routes = new Hono<AppEnv>()
     .get("/:agentKind", async (c) => c.json(await c.var.session.getAgentKindStatus(c.req.param("agentKind"))))
     .put("/:agentKind/settings", async (c) =>
       c.json(await c.var.session.updateAgentKindSettings(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))))
@@ -34,4 +42,16 @@ export function agentKindRoutes() {
       c.json(await c.var.session.killAgentKind(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))))
     .post("/:agentKind/resume", async (c) =>
       c.json(await c.var.session.resumeAgentKind(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))));
+  if (templates)
+    routes
+      .get("/:agentKind/template", async (c) => c.json(await templates.session(c).getTemplate(c.req.param("agentKind"))))
+      .post("/:agentKind/template/revisions", async (c) =>
+        c.json(await templates.session(c).createRevision(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c)), 201))
+      .post("/:agentKind/template/approve", async (c) =>
+        c.json(await templates.session(c).approveTemplate(c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))))
+      .post("/:agentKind/template-suggestion", async (c) =>
+        c.json(await templates.agents(c).suggest(c.var.session.principal, c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c))))
+      .post("/:agentKind/runs", async (c) =>
+        c.json(await templates.agents(c).runForMember(c.var.session.principal, c.req.param("agentKind"), await jsonBody(c), idempotencyKey(c)), 201));
+  return routes;
 }

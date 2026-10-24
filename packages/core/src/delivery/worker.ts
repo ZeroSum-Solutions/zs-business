@@ -325,10 +325,12 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     const suppressed = (await tx.query(
       "SELECT 1 FROM suppressions WHERE tenant_id=$1 AND channel=$2::crm_consent_channel AND address=$3",
       [row.tenant_id, row.channel, address])).rowCount === 1;
-    const consent = (await tx.query<{ status: ConsentStatus }>(
-      "SELECT status FROM crm_contact_consent WHERE tenant_id=$1 AND contact_id=$2 AND channel=$3::crm_consent_channel",
-      [row.tenant_id, row.contact_id, row.channel])).rows[0]?.status ?? null;
-    const blocked = consentBlock({ channel: row.channel, purpose: row.purpose, consent, suppressed });
+    const grant = (await tx.query<{ status: ConsentStatus; source: string }>(
+      "SELECT status, source FROM crm_contact_consent WHERE tenant_id=$1 AND contact_id=$2 AND channel=$3::crm_consent_channel",
+      [row.tenant_id, row.contact_id, row.channel])).rows[0];
+    const blocked = consentBlock({
+      channel: row.channel, purpose: row.purpose, consent: grant?.status ?? null, consentSource: grant?.source ?? null, suppressed,
+    });
     if (blocked) return { reason: blocked, address };
     const standing = await deps.approvals.check(tx, {
       tenantId: row.tenant_id,

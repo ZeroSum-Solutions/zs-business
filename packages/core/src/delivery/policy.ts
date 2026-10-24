@@ -70,13 +70,22 @@ export function consentBlock(input: {
   readonly channel: DeliveryChannel;
   readonly purpose: DeliveryPurpose;
   readonly consent: ConsentStatus;
+  /** Where the recorded grant came from (`crm_contact_consent.source`), when the caller has it. */
+  readonly consentSource?: string | null;
   readonly suppressed: boolean;
 }): DeliveryFinalReason | null {
   if (input.suppressed) return "suppressed";
   if (input.consent === "denied") return "consent_denied";
-  if ((input.purpose === "marketing" || input.channel === "sms") && input.consent !== "granted") return "consent_missing";
+  // agents.md G-20, twilio.md T-12: a grant given by pressing 1 on a call was for one booking-link
+  // text. It never stands for marketing, so it reads as no grant.
+  const consent = input.purpose === "marketing" && input.consent === "granted" && isVoiceGrant(input.consentSource) ? null : input.consent;
+  if ((input.purpose === "marketing" || input.channel === "sms") && consent !== "granted") return "consent_missing";
   return null;
 }
+
+/** twilio.md T-12: the source of a grant a caller gave on a call. */
+export const VOICE_CONSENT_SOURCE_PREFIX = "twilio-voice:";
+export const isVoiceGrant = (source: string | null | undefined) => typeof source === "string" && source.startsWith(VOICE_CONSENT_SOURCE_PREFIX);
 
 /**
  * Placeholder addresses (crm.md) are never a real recipient: any address under the reserved

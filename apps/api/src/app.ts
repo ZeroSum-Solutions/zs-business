@@ -18,7 +18,7 @@ import {
 } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
 import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
-import type { SiteCompiler } from "@zs/core";
+import { createBookingLinkProvider, createTemplateSession, createTemplatedAgents, type SiteCompiler, type TemplatedAgentsConfig } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
 import { agentKindRoutes, followUpRoutes } from "./routes/agents.js";
@@ -72,6 +72,11 @@ export interface AppDependencies {
    * `POST /v1/agents/followup/runs` is off (404). The other agent routes are always on.
    */
   readonly followUp?: FollowUpAgentConfig;
+  /**
+   * The templated agent kinds' limits and wording-suggestion model (agents.md G-19, G-20); absent
+   * means runs use the defaults and `POST /v1/agents/:kind/template-suggestion` is off (404).
+   */
+  readonly templated?: Omit<TemplatedAgentsConfig, "bookingLink">;
   /** Resend email events, bounces and complaints feeding suppression (resend.md R-7, R-8); absent means off. */
   readonly resendWebhook?: ResendWebhookConfig;
   /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means POST /v1/wallet/top-ups is 404. */
@@ -101,6 +106,8 @@ export interface AppEnv {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+/** G-7: bookings one run of a templated kind may decide when the server sets no limit. */
+const DEFAULT_TEMPLATED_CANDIDATES = 20;
 
 /**
  * The same database, with every transaction tied to one request's deadline: it sends no
@@ -236,7 +243,15 @@ export function createApp(deps: AppDependencies) {
   if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
-  app.route("/v1/agents", agentKindRoutes());
+  const templated = deps.templated ?? { maxCandidatesPerRun: DEFAULT_TEMPLATED_CANDIDATES };
+  app.route("/v1/agents", agentKindRoutes({
+    session: (c) => createTemplateSession(requestEdge(c), c.var.session.principal),
+    agents: (c) => createTemplatedAgents(requestEdge(c), {
+      ...templated,
+      ...(deps.publicIntake ? { bookingLink: createBookingLinkProvider({
+        secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl }) } : {}),
+    }),
+  }));
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
 

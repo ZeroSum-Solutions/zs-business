@@ -3,11 +3,14 @@
 // until none is left or starting another could outlast the time budget. Every switch and cap is
 // checked again inside the agent's own actions (G-3..G-5). Before the tenants, it closes runs that
 // stayed `running` past the stall limit (G-16). Time comes in as a dependency.
+import { TEMPLATED_KINDS, isTemplatedKind, type TemplatedKind } from "@zs/contracts";
 import {
   dueFollowUpTenants,
+  dueKindTenants,
   scheduleSlot,
   stalledRuns,
   type FollowUpAgent,
+  type TemplatedAgents,
 } from "@zs/core";
 import type { Transaction } from "@zs/db";
 
@@ -27,6 +30,18 @@ export interface ScheduledFollowUpSummary {
   readonly budgetSpent: boolean;
   /** G-16: runs this call closed because they stayed `running` past the stall limit. */
   readonly stalled: number;
+  /** G-19, G-20: the templated kinds' scheduled runs; empty when none is wired. */
+  readonly templated?: Readonly<Partial<Record<TemplatedKind, TemplatedKindSummary>>>;
+}
+
+export interface TemplatedKindSummary {
+  readonly due: number;
+  readonly finished: number;
+  /** Messages queued by the runs this call reached the end of. */
+  readonly queued: number;
+  readonly skipped: number;
+  readonly stopped: number;
+  readonly errors: number;
 }
 
 export interface ScheduledFollowUpReport {
@@ -39,6 +54,8 @@ export function createScheduledFollowUps(input: {
   /** A transaction as the service role, for the due-tenant read only. */
   readonly service: <T>(work: (tx: Transaction) => Promise<T>) => Promise<T>;
   readonly agent: Pick<FollowUpAgent, "runScheduled" | "stallRun">;
+  /** G-19, G-20: the templated kinds, run after the follow-up agent in the same slot; unset, they do not run. */
+  readonly templated?: Pick<TemplatedAgents, "runScheduled" | "stallRun">;
   readonly clock: { now(): Date };
   readonly slotMinutes: number;
   readonly budgetMs: number;
@@ -48,7 +65,7 @@ export function createScheduledFollowUps(input: {
   readonly perTenantMs: number;
   readonly report?: (event: ScheduledFollowUpReport) => void;
 }) {
-  const { service, agent, clock, slotMinutes, budgetMs, perTenantMs, stallAfterMs } = input;
+  const { service, agent, templated, clock, slotMinutes, budgetMs, perTenantMs, stallAfterMs } = input;
   return {
     async run(): Promise<ScheduledFollowUpSummary> {
       const startedAt = clock.now();
@@ -56,11 +73,12 @@ export function createScheduledFollowUps(input: {
       const slot = scheduleSlot(startedAt, slotMinutes);
       const totals = { finished: 0, drafted: 0, skipped: 0, stopped: 0, errors: 0, budgetSpent: false, stalled: 0 };
       // G-16: close what stayed open first, so its late steps are refused and its counts are final.
-      // Only the follow-up kind runs here; another kind's runs are closed by its own runner.
+      // The follow-up kind and the templated kinds run here; another kind's runs are closed by its own runner.
       for (const stuck of await service((tx) => stalledRuns(tx, startedAt, stallAfterMs))) {
-        if (stuck.agentKind !== "inquiry_followup") continue;
         try {
-          await agent.stallRun(stuck.tenantId, stuck.runId);
+          if (stuck.agentKind === "inquiry_followup") await agent.stallRun(stuck.tenantId, stuck.runId);
+          else if (templated && isTemplatedKind(stuck.agentKind)) await templated.stallRun(stuck.agentKind, stuck.tenantId, stuck.runId);
+          else continue;
           totals.stalled += 1;
         } catch (error) {
           totals.errors += 1;
@@ -86,7 +104,30 @@ export function createScheduledFollowUps(input: {
           input.report?.({ tenantId, slot, error });
         }
       }
-      return { slot, globalKilled: due.globalKilled, due: due.tenantIds.length, ...totals };
+      const byKind: Partial<Record<TemplatedKind, TemplatedKindSummary>> = {};
+      for (const kind of templated ? TEMPLATED_KINDS : []) {
+        const kindDue = await service((tx) => dueKindTenants(tx, kind, startedAt, slot));
+        const counts = { finished: 0, queued: 0, skipped: 0, stopped: 0, errors: 0 };
+        for (const tenantId of kindDue.tenantIds) {
+          if (clock.now().getTime() - started + perTenantMs > budgetMs) {
+            totals.budgetSpent = true;
+            break;
+          }
+          try {
+            const run = await templated!.runScheduled(kind, tenantId, slot);
+            if (run.status === "running") continue;
+            counts.finished += 1;
+            counts.queued += run.drafted;
+            counts.skipped += run.skipped;
+            if (run.stopReason) counts.stopped += 1;
+          } catch (error) {
+            counts.errors += 1;
+            input.report?.({ tenantId, slot, error });
+          }
+        }
+        byKind[kind] = { due: kindDue.tenantIds.length, ...counts };
+      }
+      return { slot, globalKilled: due.globalKilled, due: due.tenantIds.length, ...totals, templated: byKind };
     },
   };
 }
