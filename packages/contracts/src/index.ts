@@ -106,6 +106,7 @@ export * from "./http.js";
 export * from "./instant.js";
 export * from "./inbox.js";
 export * from "./intake.js";
+export * from "./media.js";
 export * from "./members.js";
 export * from "./sites.js";
 export * from "./sources.js";

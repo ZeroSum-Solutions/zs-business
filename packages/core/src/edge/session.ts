@@ -103,6 +103,16 @@ import {
   type ReplyRecord,
   type RemoveMemberOutput,
   activateSiteReleaseRequestSchema,
+  generateVariantRequestSchema,
+  imageVariantOutputSchema,
+  MEDIA_LIMITS,
+  mediaAssetOutputSchema,
+  mediaContentTypeSchema,
+  mediaObjectKeys,
+  type ImageVariant,
+  type ImageVariantOutput,
+  type MediaAsset,
+  type MediaAssetOutput,
   createSiteRequestSchema,
   publishSiteRequestSchema,
   type SiteList,
@@ -144,6 +154,11 @@ import {
   activateSiteRelease, createSite, getRelease, getSite, listReleases, listSites, publishSiteRelease, siteHandlers,
   storeReleaseFiles, syncSiteEdge, verifyCompiledSite, type ProjectOptions, type SiteCompiler,
 } from "../sites/index.js";
+import { assertImagesApproved } from "../images/gate.js";
+import { imageHandlers, type ImageDependencies } from "../images/handlers.js";
+import { pngIsComplete, readImageInfo, sizeAllowed } from "../images/png.js";
+import { sha256Hex } from "../images/port.js";
+import { findVariant, listAssets, listVariants, variantRecord } from "../images/records.js";
 import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
 import { getTopUpForCheckout, listTopUps, rememberCheckoutUrl, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
@@ -179,6 +194,8 @@ export interface EdgeDependencies {
    * `syncTimeoutMs` caps the edge projection after a committed write (default 5 s).
    */
   readonly sites?: { readonly store: SiteObjectStore; readonly compiler: SiteCompiler; readonly syncTimeoutMs?: number };
+  /** Image jobs (image-port.md): the object store uploads go to and the adapter and prices; absent means off. */
+  readonly images?: ImageDependencies;
   /** Milliseconds left before the request's deadline, when it has one. */
   readonly timeLeft?: () => number;
 }
@@ -212,7 +229,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers,
+  ...agentHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers,
 });
 
 /**
@@ -244,6 +261,10 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "site.create": "publish",
   "site.release.publish": "publish",
   "site.release.activate": "publish",
+  // image-port.md IM-3, IM-4, IM-12: approve is also `required` in APPROVAL_POLICIES.
+  "media.asset.upload": "publish",
+  "media.variant.generate": "publish",
+  "media.variant.approve": "publish",
   "approval.approve": "approve",
   "approval.reject": "approve",
   // stripe.md S-1: only owners add money.
@@ -450,7 +471,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "calendar_connection" | "site";
+  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "calendar_connection" | "site" | "media_asset" | "media_variant";
   const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
     keyedEnvelope(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
   /** The envelope for a key the server built itself, such as a reserved `inbox:` step key. */
@@ -525,6 +546,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const requireSites = () => {
     if (!deps.sites) throw new NotFound();
     return deps.sites;
+  };
+
+  /** Image jobs are off without their dependencies: every image route is then unknown. */
+  const requireImages = () => {
+    if (!deps.images) throw new NotFound();
+    return deps.images;
   };
 
   return {
@@ -768,6 +795,8 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         return replay;
       });
       const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      // image-port.md IM-14: no unapproved image is stored; the handler checks again under the site lock.
+      if (!recorded) await read("publish", (tx) => assertImagesApproved(tx, tenantId, release.files));
       // A recorded key replays (or is refused as reused) in dispatch; its files were stored then.
       const verifiedBlobs = recorded ? undefined : await storeReleaseFiles(sites.store, tenantId, release).catch((cause: unknown) => {
         throw new SiteStoreUnavailable({ cause });
@@ -814,6 +843,61 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const id = parseInput(uuidSchema, siteId, "site ID");
       const site = await read("publish", (tx) => getSite(tx, tenantId, id));
       return { site, edge: await syncSite(sites, id) };
+    },
+
+    /**
+     * image-port.md IM-3: store an uploaded image under its SHA-256 and record it as a media asset.
+     * The server checks the type, size and the header's dimensions; the same bytes give the same asset.
+     */
+    async uploadMediaAsset(bytes: Uint8Array, contentType: unknown, key: unknown): Promise<MediaAssetOutput> {
+      const images = requireImages();
+      const type = parseInput(mediaContentTypeSchema, contentType, "content type");
+      await read("publish", async () => undefined);
+      if (bytes.byteLength < 1 || bytes.byteLength > MEDIA_LIMITS.fileBytes) throw new ValidationFailed("Image size is not allowed");
+      const info = readImageInfo(bytes);
+      if (!info || info.contentType !== type || !sizeAllowed(info.width, info.height)) throw new ValidationFailed("Not a supported image");
+      // A PNG must be whole, not only carry a header. (Full decoding is the worker's job and needs a narrower format.)
+      if (type === "image/png" && !pngIsComplete(bytes)) throw new ValidationFailed("Not a supported image");
+      const sha256 = sha256Hex(bytes);
+      const objectKey = mediaObjectKeys.asset(tenantId, sha256);
+      const written = await images.store.put(objectKey, bytes, { contentType: type, onlyIf: { absent: true } });
+      if (!written) {
+        const existing = await images.store.get(objectKey);
+        if (!existing || sha256Hex(existing.body) !== sha256) throw new Error("A stored image does not match its digest");
+      }
+      const { id, ...rest } = envelope(key, "media_asset");
+      const dispatchImage = directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), { images });
+      return parseInput(mediaAssetOutputSchema, await dispatchImage({
+        actionType: "media.asset.upload", ...rest,
+        payload: { assetId: id, sha256, contentType: type, byteLength: bytes.byteLength, width: info.width, height: info.height },
+      } as ActionCommand), "result");
+    },
+    /** IM-4: queue one image job from a preset. A caller never names a model or a workflow. */
+    async generateImageVariant(body: unknown, key: unknown): Promise<ImageVariantOutput> {
+      const images = requireImages();
+      const request = parseInput(generateVariantRequestSchema, body);
+      const { id, ...rest } = envelope(key, "media_variant");
+      const dispatchImage = directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), { images });
+      return parseInput(imageVariantOutputSchema, await dispatchImage({
+        actionType: "media.variant.generate", ...rest, payload: { variantId: id, ...request },
+      } as ActionCommand), "result");
+    },
+    async listMediaAssets(): Promise<{ items: MediaAsset[] }> {
+      requireImages();
+      return { items: await read("publish", (tx) => listAssets(tx, tenantId)) };
+    },
+    async listImageVariants(): Promise<{ items: ImageVariant[] }> {
+      requireImages();
+      return { items: await read("publish", (tx) => listVariants(tx, tenantId)) };
+    },
+    async getImageVariant(variantId: unknown): Promise<ImageVariant> {
+      requireImages();
+      const id = parseInput(uuidSchema, variantId, "variant ID");
+      return read("publish", async (tx) => {
+        const row = await findVariant(tx, tenantId, id);
+        if (!row) throw new NotFound();
+        return variantRecord(row);
+      });
     },
 
     /** business-profile.md BP-5: who the business is; any member reads it. */

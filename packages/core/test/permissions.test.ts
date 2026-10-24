@@ -11,19 +11,26 @@ import { ACTION_PERMISSIONS, PAYLOAD_PERMISSION_ACTIONS, createSession, type Edg
 import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import {
   AGENT_ACTIONS, agentHandlers, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, createDispatcher, createMemorySiteStore,
-  crmHandlers, dealDetailsHandlers, generateSealKeyPair, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
-  pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
+  crmHandlers, dealDetailsHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
+  parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
 } from "../src/index.js";
+import { encodeRgbaPng } from "../src/images/png.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
 const clock = { now: () => new Date(NOW) };
 /** Synthetic booking key secret, built at runtime so secret scanners do not flag a literal. */
 const bookingKeys = { secret: ["test", "booking", "k".repeat(32)].join("-"), publicBaseUrl: "http://book.test" };
 
+/** The image worker's own steps: its principal runs them, no member does (image-port.md IM-10). */
+const IMAGE_WORKER_ACTIONS = ["media.variant.stage", "media.variant.fail"];
+
 /** What each action needs, written out so a change to the map has to change this test too. */
 const EXPECTED_ACTIONS: Record<string, Permission> = {
   "booking.create": "calendar",
+  "media.asset.upload": "publish",
+  "media.variant.generate": "publish",
+  "media.variant.approve": "publish",
   // booking-customer.md BC-3: the handler also needs `customers`; staff and owners hold both.
   "booking.contact.link": "calendar",
   "booking.contact.unlink": "calendar",
@@ -109,7 +116,8 @@ const tokenPublicKey = parseSealPublicKey(generateSealKeyPair().publicKey);
 /** Synthetic OAuth state secret, built at runtime like the booking key secret. */
 const calendar = { google, stateSecrets: { current: ["test", "oauth", "s".repeat(32)].join("-") }, tokenPublicKey };
 const sites = { store: createMemorySiteStore(), compiler: plainSiteCompiler };
-const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, billing: { stripe }, calendar, sites });
+const images = { store: createMemorySiteStore(), config: parseImageConfig({ environment: "test", adapter: "fake" }) };
+const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, billing: { stripe }, calendar, sites, images });
 const siteSpec = { kind: "plain", title: "Halden & Rowe" };
 const sessionFor = (actorId: string, tenantId = tenant.tenantId): Session => createSession(deps(), { tenantId, actorId });
 
@@ -183,6 +191,7 @@ afterAll(async () => { await database?.close(); });
 
 /** Monday 09:00-17:00 UTC: each booking takes the next free hour. */
 let hour = 9;
+let shade = 1;
 
 /** A draft by the owner, for steps any caller may then try on it. */
 async function ownerDraft(): Promise<string> {
@@ -266,6 +275,21 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     listDeals: { permission: "customers", run: () => session.listDeals({}) },
     listPipelines: { permission: "customers", run: () => session.listPipelines() },
     listMembers: { permission: "members", run: () => session.listMembers() },
+    uploadMediaAsset: { permission: "publish", run: () => session.uploadMediaAsset(
+      encodeRgbaPng({ width: 2, height: 2, rgba: new Uint8Array(16).fill(shade++ % 250 + 1) }), "image/png", randomUUID()) },
+    generateImageVariant: { permission: "publish", run: async () => {
+      const source = await sessionFor(tenant.ownerId).uploadMediaAsset(
+        encodeRgbaPng({ width: 2, height: 2, rgba: new Uint8Array(16).fill(shade++ % 250 + 1) }), "image/png", randomUUID());
+      return session.generateImageVariant({ sourceAssetId: source.result.id, preset: "background_remove", params: {} }, randomUUID());
+    } },
+    listMediaAssets: { permission: "publish", run: () => session.listMediaAssets() },
+    listImageVariants: { permission: "publish", run: () => session.listImageVariants() },
+    getImageVariant: { permission: "publish", run: async () => {
+      const source = await sessionFor(tenant.ownerId).uploadMediaAsset(
+        encodeRgbaPng({ width: 2, height: 2, rgba: new Uint8Array(16).fill(shade++ % 250 + 1) }), "image/png", randomUUID());
+      const queued = await sessionFor(tenant.ownerId).generateImageVariant({ sourceAssetId: source.result.id, preset: "background_remove", params: {} }, randomUUID());
+      return session.getImageVariant(queued.result.id);
+    } },
     getWallet: { permission: "billing", run: () => session.getWallet() },
     // stripe.md S-1: only owners add money.
     listTopUps: { permission: "billing", run: () => session.listTopUps() },
@@ -390,10 +414,10 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...enrichmentHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...siteHandlers, ...agentHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1).
-      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action))
+      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action) && !IMAGE_WORKER_ACTIONS.includes(action))
       .sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);
