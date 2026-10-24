@@ -70,6 +70,11 @@ describe("the booking customer link over HTTP", () => {
     expect(stale.status).toBe(409);
     expect(errorOf(stale)).toMatchObject({ code: "Conflict", details: { reason: "stale_revision", currentRevision: 1 } });
 
+    // An unlink that read the booking before anyone linked it (revision 0) is stale, not malformed.
+    const staleUnlink = await unlink(id, { expectedRevision: 0 });
+    expect(staleUnlink.status).toBe(409);
+    expect(errorOf(staleUnlink)).toMatchObject({ code: "Conflict", details: { reason: "stale_revision", currentRevision: 1 } });
+
     const cleared = await unlink(id, { expectedRevision: 1 });
     expect(cleared.status, JSON.stringify(cleared.body)).toBe(200);
     expect(bookingContactOutputSchema.parse(cleared.body).result).toEqual({ bookingId: id, customer: null, revision: 2 });
@@ -96,7 +101,7 @@ describe("the booking customer link over HTTP", () => {
     expect((await link(id, { contactId: ana, expectedRevision: 0 }, h.a, null)).status).toBe(400);
     expect((await link(id, { contactId: ana }, h.a)).status).toBe(400);
     expect((await link(id, { contactId: ana, expectedRevision: 0, bookingId: id }, h.a)).status).toBe(400);
-    expect((await unlink(id, { expectedRevision: 0 }, h.a)).status).toBe(400);
+    expect((await unlink(id, { expectedRevision: -1 }, h.a)).status).toBe(400);
     expect((await link("not-an-id", { contactId: ana, expectedRevision: 0 }, h.a)).status).toBe(400);
   });
 

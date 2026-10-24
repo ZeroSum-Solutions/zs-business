@@ -48,9 +48,10 @@ describe("booking.contact.link (BC-3)", () => {
 });
 
 describe("booking.contact.unlink (BC-4)", () => {
-  it("needs a revision of at least 1: a booking with no row has nothing to clear", () => {
+  it("takes any revision, so a stale 0 reaches the compare and answers 409 rather than 400", () => {
     expect(unlinkBookingContactCommandSchema.safeParse(command("booking.contact.unlink", { bookingId, expectedRevision: 1 })).success).toBe(true);
-    expect(unlinkBookingContactRequestSchema.safeParse({ expectedRevision: 0 }).success).toBe(false);
+    expect(unlinkBookingContactRequestSchema.safeParse({ expectedRevision: 0 }).success).toBe(true);
+    expect(unlinkBookingContactRequestSchema.safeParse({ expectedRevision: -1 }).success).toBe(false);
     expect(unlinkBookingContactRequestSchema.safeParse({ expectedRevision: 2, contactId }).success).toBe(false);
   });
 

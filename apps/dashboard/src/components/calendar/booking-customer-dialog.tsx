@@ -51,15 +51,17 @@ export function BookingCustomerDialog({
   const intents = useIntentKey();
   const generation = useDialogGeneration(open, booking.id);
 
+  // The key covers the booking too: a lost answer for one booking must not tag another's request.
+  const intentOf = (input: Change) => ({ bookingId: booking.id, ...input });
   const change = useMutation({
     mutationFn: (attempt: { change: Change; generation: number }) => {
       const input = attempt.change;
-      const options = { idempotencyKey: intents.keyFor(input) };
+      const options = { idempotencyKey: intents.keyFor(intentOf(input)) };
       return input.kind === "link"
         ? api.linkBookingContact({ bookingId: booking.id, contactId: input.customer.id, expectedRevision: input.expectedRevision }, options)
         : api.unlinkBookingContact({ bookingId: booking.id, expectedRevision: input.expectedRevision }, options);
     },
-    onSettled: (_result, error, attempt) => intents.settle(attempt.change, error),
+    onSettled: (_result, error, attempt) => intents.settle(intentOf(attempt.change), error),
     onSuccess: async (result, attempt) => {
       // Calendar, Home and the customer page read the same bookings; refetch them before closing.
       await refreshBookingCustomer(queryClient, keys);

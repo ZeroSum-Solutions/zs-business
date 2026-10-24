@@ -256,6 +256,31 @@ describe("the contact page filter and contact deletion (BC-6, BC-7)", () => {
     expect(await rejection(a.unlinkBookingContact(id, { expectedRevision: 1 }, randomUUID())))
       .toMatchObject({ code: "Conflict", details: { reason: "stale_revision", currentRevision: 2 } });
   });
+
+  it("a change that read the old revision cannot win over a contact deletion that commits first (BC-4, BC-7)", async () => {
+    for (const change of ["link", "unlink"] as const) {
+      const id = await book();
+      const [nan, ben] = [await contact(a, `Nan ${change}`), await contact(a, `Ben ${change}`)];
+      await a.linkBookingContact(id, { contactId: nan, expectedRevision: 0 }, randomUUID());
+      let attempt: Promise<unknown> = Promise.resolve();
+      // The delete holds the link row (revision 1 -> 2, uncommitted) while the action reads revision 1
+      // and reaches its UPDATE, which must wait for the delete and then find the revision moved on.
+      await fixture.service(async (tx) => {
+        await tx.query("DELETE FROM crm_contacts WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, nan]);
+        attempt = change === "link"
+          ? a.linkBookingContact(id, { contactId: ben, expectedRevision: 1 }, randomUUID()).catch((error: unknown) => error)
+          : a.unlinkBookingContact(id, { expectedRevision: 1 }, randomUUID()).catch((error: unknown) => error);
+        for (let tries = 0; tries < 200; tries += 1) {
+          // pg_locks is readable by every role; pg_stat_activity hides other roles' waits.
+          const waiting = await tx.query("SELECT 1 FROM pg_locks WHERE NOT granted AND locktype='transactionid'");
+          if (waiting.rowCount) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      });
+      expect(await attempt).toMatchObject({ code: "Conflict", details: { reason: "stale_revision", currentRevision: 2 } });
+      expect(await a.getBooking(id)).toMatchObject({ customer: null, customerRevision: 2 });
+    }
+  });
 });
 
 describe("tenancy (BC-3, BC-10)", () => {

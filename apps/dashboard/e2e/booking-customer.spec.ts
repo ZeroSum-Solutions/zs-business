@@ -129,6 +129,23 @@ test("keeps the booking when the link fails and offers Link again", async ({ pag
   expect((await writes(page, "booking.contact.link")).map((write) => write.outcome)).toEqual(["applied"]);
 });
 
+test("Link again after someone else linked first reads the booking and links with its revision", async ({ page }) => {
+  await openRepairDay(page);
+  await page.getByRole("region", { name: "Open times" }).getByRole("button", { name: "Book 10:00 AM" }).click();
+  const dialog = page.getByRole("dialog", { name: "Book an appointment" });
+  await pickCustomer(dialog, CUSTOMER);
+  await page.evaluate(() => window.__zsDemo!.raceNextBookingLink());
+  await dialog.getByRole("button", { name: /^Book 10:00 AM for / }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Someone else changed this booking's customer");
+
+  await dialog.getByRole("button", { name: "Link again" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("region", { name: "Booked" }).getByRole("listitem").filter({ hasText: CUSTOMER })).toHaveCount(1);
+  // The first try was stale at revision 0; the retry carried the revision it read (1).
+  const links = (await writes(page, "booking.contact.link")).map((write) => [write.outcome, (write.payload as { expectedRevision: number }).expectedRevision]);
+  expect(links).toEqual([["rejected", 0], ["applied", 1]]);
+});
+
 test("a website booking has no link control", async ({ page }) => {
   await page.clock.setFixedTime(MONDAY_MORNING);
   await page.goto("/calendar");

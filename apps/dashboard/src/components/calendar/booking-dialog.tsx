@@ -8,7 +8,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import type { CreateBookingRequest } from "@zs/contracts";
-import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, type BookingRecord, type ResourceSummary } from "@/lib/api";
+import { CALENDAR_UNAVAILABLE, isApiError, isSlotTaken, isStaleRevision, type BookingRecord, type ResourceSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { dropBookedTime, refreshBookingCustomer, useKeys, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay, zonedDateKey } from "@/lib/time";
@@ -71,13 +71,29 @@ export function BookingDialog({
   // link leaves the booking in place and offers "Link again" with the same key, so a lost answer
   // cannot link twice.
   const linkIntents = useIntentKey();
+  /**
+   * One link attempt. The first time the booking has no row (revision 0). After a stale answer
+   * someone else changed it meanwhile, so read the booking again: when it already names this
+   * customer the link is done, otherwise the retry carries the revision just read.
+   */
+  const sendLink = async (target: Booked, afterStale: boolean) => {
+    let expectedRevision = 0;
+    if (afterStale) {
+      const current = await api.getBooking(target.record.id);
+      if (current.customer?.contactId === target.customer.id) return;
+      expectedRevision = current.customerRevision;
+    }
+    const input = { bookingId: target.record.id, contactId: target.customer.id, expectedRevision };
+    try {
+      await api.linkBookingContact(input, { idempotencyKey: linkIntents.keyFor(input) });
+      linkIntents.settle(input);
+    } catch (error) {
+      linkIntents.settle(input, error);
+      throw error;
+    }
+  };
   const link = useMutation({
-    mutationFn: ({ target }: { target: Booked; generation: number }) => {
-      const input = { bookingId: target.record.id, contactId: target.customer.id, expectedRevision: 0 };
-      return api.linkBookingContact(input, { idempotencyKey: linkIntents.keyFor(input) });
-    },
-    onSettled: (_result, error, { target }) =>
-      linkIntents.settle({ bookingId: target.record.id, contactId: target.customer.id, expectedRevision: 0 }, error),
+    mutationFn: ({ target, afterStale }: { target: Booked; afterStale: boolean; generation: number }) => sendLink(target, afterStale),
     onSuccess: async (_result, { target, generation: tag }) => {
       await refreshBookingCustomer(queryClient, keys);
       const current = generation.isCurrent(tag);
@@ -90,6 +106,17 @@ export function BookingDialog({
     },
   });
   const { reset: resetLink } = link;
+  // An answer for a sheet that has moved on must not take over the panel of the one on screen
+  // (the mutation observer follows the latest call), so it links on its own and only reports.
+  const linkDetached = (target: Booked) => {
+    void sendLink(target, false).then(
+      async () => {
+        await refreshBookingCustomer(queryClient, keys);
+        if (generation.isClosed()) toast(`Booked ${bookedAt(target.record)} for ${target.customer.name ?? "the customer"}.`);
+      },
+      () => toast(`Booked ${bookedAt(target.record)}, but the customer was not linked. Open the booking to link them.`),
+    );
+  };
 
   const book = useMutation({
     mutationFn: ({ request }: Attempt) => api.createBooking(request, { idempotencyKey: intents.keyFor(request) }),
@@ -104,8 +131,12 @@ export function BookingDialog({
       if (attempt.customer) {
         // Booked; the customer is a second step that may fail without undoing the booking.
         const target = { record, customer: attempt.customer };
-        if (current) setBooked(target);
-        link.mutate({ target, generation: attempt.generation });
+        if (current) {
+          setBooked(target);
+          link.mutate({ target, afterStale: false, generation: attempt.generation });
+        } else {
+          linkDetached(target);
+        }
         return;
       }
       // A late answer for a dialog that is now closed can still confirm the booking it made.
@@ -174,16 +205,16 @@ export function BookingDialog({
               <>
                 <ErrorNote
                   error={link.error}
-                  message={customerChangeMessage(link.error) ?? `The booking is saved, but we could not add ${booked.customer.name ?? "the customer"} to it.`}
+                  message={isStaleRevision(link.error) ? `Someone else changed this booking's customer. Link again to set it to ${booked.customer.name ?? "the customer"}.` : customerChangeMessage(link.error) ?? `The booking is saved, but we could not add ${booked.customer.name ?? "the customer"} to it.`}
                 />
                 <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                   <Button
                     variant="ghost"
-                    onClick={() => { toast(`Booked ${bookedAt(booked.record)} without a customer.`); onOpenChange(false); }}
+                    onClick={() => { toast(`Booked ${bookedAt(booked.record)}. ${booked.customer.name ?? "The customer"} may not be linked: open the booking to check.`); onOpenChange(false); }}
                   >
-                    Keep without a customer
+                    Close for now
                   </Button>
-                  <Button onClick={() => link.mutate({ target: booked, generation: generation.current() })}>Link again</Button>
+                  <Button onClick={() => link.mutate({ target: booked, afterStale: isStaleRevision(link.error), generation: generation.current() })}>Link again</Button>
                 </div>
               </>
             ) : null}

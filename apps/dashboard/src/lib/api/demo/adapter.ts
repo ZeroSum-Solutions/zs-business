@@ -110,6 +110,8 @@ export interface DemoControls extends DemoAgentControls, DemoBusinessControls, D
   setOffline(offline: boolean): void;
   /** The next booking customer link fails with a network error before it saves; later ones work. */
   failNextBookingLink(): void;
+  /** Just before the next booking customer link is checked, another member links a different customer to that booking. */
+  raceNextBookingLink(): void;
   /** Every write that reached the adapter, oldest first, with the key it carried. */
   writeLog(): DemoWrite[];
   /** From now on every call fails as a 401, like an API token that ran out. */
@@ -175,6 +177,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   let dealReadsFail = false;
   let bookingReadsFail = false;
   let nextLinkFails = false;
+  let nextLinkRaced = false;
   let pipelines = clone(options.pipelines ?? [DEMO_PIPELINE]);
   // A copy per adapter: setOpenHours changes this business's calendars only.
   const resources = clone(DEMO_RESOURCES);
@@ -495,6 +498,11 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         if (booking.source !== "owner") throw demoError("Conflict", { reason: "intake_booking" });
         // BC-3: a customer of another business reads as missing, then the revision is compared.
         if (!contacts.has(request.contactId)) throw demoError("NotFound");
+        if (nextLinkRaced) {
+          nextLinkRaced = false;
+          const other = [...contacts.keys()].find((id) => id !== request.contactId);
+          if (other) links.set(booking.id, { contactId: other, revision: (links.get(booking.id)?.revision ?? 0) + 1 });
+        }
         const link = links.get(booking.id);
         const revision = link?.revision ?? 0;
         if (revision !== request.expectedRevision) throw demoError("Conflict", { reason: "stale_revision", currentRevision: revision });
@@ -822,6 +830,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
     failNextBookingLink() {
       nextLinkFails = true;
+    },
+
+    raceNextBookingLink() {
+      nextLinkRaced = true;
     },
 
     writeLog() {

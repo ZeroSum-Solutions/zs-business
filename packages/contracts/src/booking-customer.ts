@@ -17,10 +17,13 @@ export const linkBookingContactInputSchema = z.strictObject({
   expectedRevision: bookingContactRevisionSchema,
 });
 export type LinkBookingContactInput = z.infer<typeof linkBookingContactInputSchema>;
-/** BC-4: clear. A booking with no link row has nothing to clear, so the revision is at least 1. */
+/**
+ * BC-4: clear. A revision of 0 is valid input: a caller that read the booking before anyone linked
+ * it holds a stale revision and gets the 409 with the current one, not a 400.
+ */
 export const unlinkBookingContactInputSchema = z.strictObject({
   bookingId: idSchema,
-  expectedRevision: z.number().int().min(1).max(MAX_REVISION),
+  expectedRevision: bookingContactRevisionSchema,
 });
 export type UnlinkBookingContactInput = z.infer<typeof unlinkBookingContactInputSchema>;
 

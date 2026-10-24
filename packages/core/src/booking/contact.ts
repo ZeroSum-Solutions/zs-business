@@ -64,6 +64,28 @@ async function lockedState(tx: Transaction, tenantId: string, bookingId: string)
 const staleRevision = (currentRevision: number) =>
   new Conflict("The booking's customer changed", { reason: "stale_revision", currentRevision });
 
+/**
+ * Change the link row only if it still holds the revision this action read. The advisory lock
+ * serializes actions on one booking, but a contact deletion (BC-7) bumps the row without it, so the
+ * compare-and-set is part of the UPDATE. Returns the revision the row now holds.
+ */
+async function changeLink(
+  tx: Transaction, tenantId: string, bookingId: string, expected: number,
+  contactId: string | null, actorId: string, at: string,
+): Promise<number> {
+  const updated = await tx.query<{ revision: number }>(
+    `UPDATE booking_contacts SET contact_id=$3, linked_by=$4, linked_at=$5::timestamptz, revision=revision+1
+      WHERE tenant_id=$1 AND booking_id=$2 AND revision=$6
+      RETURNING revision`,
+    [tenantId, bookingId, contactId, actorId, at, expected],
+  );
+  if (updated.rowCount === 1) return updated.rows[0]!.revision;
+  const now = await tx.query<{ revision: number }>(
+    "SELECT revision FROM booking_contacts WHERE tenant_id=$1 AND booking_id=$2", [tenantId, bookingId],
+  );
+  throw staleRevision(now.rows[0]?.revision ?? 0);
+}
+
 const resultOf = (bookingId: string, state: Pick<LinkState, "contactId" | "name">, revision: number): JsonValue => {
   const result: BookingContactResult = {
     bookingId,
@@ -98,12 +120,9 @@ export const linkBookingContactHandler: ActionHandler = {
     // Naming the customer it already has is not a change, so the revision stays.
     if (state.contactId === payload.contactId) return { result: resultOf(payload.bookingId, state, state.revision) };
 
+    let revision = 1;
     if (state.hasRow) {
-      await tx.query(
-        `UPDATE booking_contacts SET contact_id=$3, linked_by=$4, linked_at=$5::timestamptz, revision=revision+1
-          WHERE tenant_id=$1 AND booking_id=$2`,
-        [tenantId, payload.bookingId, payload.contactId, binding.actorId, at],
-      );
+      revision = await changeLink(tx, tenantId, payload.bookingId, state.revision, payload.contactId, binding.actorId, at);
     } else {
       await tx.query(
         `INSERT INTO booking_contacts (tenant_id, booking_id, contact_id, linked_by, linked_at, revision)
@@ -111,7 +130,7 @@ export const linkBookingContactHandler: ActionHandler = {
         [tenantId, payload.bookingId, payload.contactId, binding.actorId, at],
       );
     }
-    return { result: resultOf(payload.bookingId, { contactId: payload.contactId, name: contact.display_name }, state.revision + 1) };
+    return { result: resultOf(payload.bookingId, { contactId: payload.contactId, name: contact.display_name }, revision) };
   },
 };
 
@@ -126,12 +145,8 @@ export const unlinkBookingContactHandler: ActionHandler = {
     if (state.revision !== payload.expectedRevision) throw staleRevision(state.revision);
     // BC-4: the row stays, so the revision only grows. Clearing no customer changes nothing.
     if (state.contactId === null) return { result: resultOf(payload.bookingId, { contactId: null, name: null }, state.revision) };
-    await tx.query(
-      `UPDATE booking_contacts SET contact_id=NULL, linked_by=$3, linked_at=$4::timestamptz, revision=revision+1
-        WHERE tenant_id=$1 AND booking_id=$2`,
-      [tenantId, payload.bookingId, binding.actorId, at],
-    );
-    return { result: resultOf(payload.bookingId, { contactId: null, name: null }, state.revision + 1) };
+    const revision = await changeLink(tx, tenantId, payload.bookingId, state.revision, null, binding.actorId, at);
+    return { result: resultOf(payload.bookingId, { contactId: null, name: null }, revision) };
   },
 };
 

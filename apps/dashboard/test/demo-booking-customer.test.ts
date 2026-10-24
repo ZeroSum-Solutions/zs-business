@@ -125,4 +125,17 @@ describe("demo adapter: the booking customer link", () => {
     // Only the one call failed.
     expect((await api.unlinkBookingContact({ bookingId: booking.id, expectedRevision: 1 }, key())).revision).toBe(2);
   });
+
+  it("raceNextBookingLink lets someone else link first: the link is stale, and a read gives the revision to retry with", async () => {
+    const api = adapter();
+    const booking = await bookFree(api);
+    const ana = (await api.listContacts({})).items[0]!;
+    const input = { bookingId: booking.id, contactId: ana.id, expectedRevision: 0 };
+    api.raceNextBookingLink();
+    expect(await failure(api.linkBookingContact(input, key()))).toMatchObject({ details: { reason: "stale_revision", currentRevision: 1 } });
+    const now = await api.getBooking(booking.id);
+    expect(now.customerRevision).toBe(1);
+    expect(now.customer?.contactId).not.toBe(ana.id);
+    expect((await api.linkBookingContact({ ...input, expectedRevision: now.customerRevision }, key())).revision).toBe(2);
+  });
 });
