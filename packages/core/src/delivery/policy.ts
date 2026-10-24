@@ -70,16 +70,14 @@ export function consentBlock(input: {
   readonly channel: DeliveryChannel;
   readonly purpose: DeliveryPurpose;
   readonly consent: ConsentStatus;
-  /** Where the recorded grant came from (`crm_contact_consent.source`), when the caller has it. */
-  readonly consentSource?: string | null;
   readonly suppressed: boolean;
+  /** Where the recorded consent came from (D-6 rev 5); a voice opt-in never counts for marketing. */
+  readonly source?: string | null;
 }): DeliveryFinalReason | null {
   if (input.suppressed) return "suppressed";
   if (input.consent === "denied") return "consent_denied";
-  // agents.md G-20, twilio.md T-12: a grant given by pressing 1 on a call was for one booking-link
-  // text. It never stands for marketing, so it reads as no grant.
-  const consent = input.purpose === "marketing" && input.consent === "granted" && isVoiceGrant(input.consentSource) ? null : input.consent;
-  if ((input.purpose === "marketing" || input.channel === "sms") && consent !== "granted") return "consent_missing";
+  if (input.purpose === "marketing" && input.consent === "granted" && isVoiceGrant(input.source)) return "consent_missing";
+  if ((input.purpose === "marketing" || input.channel === "sms") && input.consent !== "granted") return "consent_missing";
   return null;
 }
 

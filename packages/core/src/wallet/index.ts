@@ -97,6 +97,8 @@ export function jobRowLock(table: string): JobLock {
  */
 export const DEFAULT_JOB_REGISTRY: JobRegistry = Object.freeze({
   message_delivery: jobRowLock("message_deliveries"),
+  image_job: jobRowLock("image_variants"),
+  enrichment: jobRowLock("enrichment_requests"),
 });
 
 export interface ReserveForJobInput {

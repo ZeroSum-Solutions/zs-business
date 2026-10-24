@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createGoogleClient, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, plainSiteCompiler, type SiteCompiler } from "@zs/core";
+import { createGoogleClient, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
@@ -15,6 +15,8 @@ import { createR2SiteStore } from "./sites/r2-s3.js";
 export async function createServer(env: ServerEnv, clock: { now(): Date }, options: {
   /** Replaces the compiler SITE_COMPILER names, such as an adapter over @mish/publisher. */
   readonly siteCompiler?: SiteCompiler;
+  /** enrichment.md E-5: the service gates and prices the enrichment routes use. */
+  readonly enrichment?: EnrichmentConfigInput;
 } = {}) {
   const pool = createRuntimePool({
     connectionString: env.databaseUrl,
@@ -68,6 +70,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
     clock,
     db,
     generateId: randomUUID,
+    ...(options.enrichment === undefined ? {} : { enrichment: options.enrichment }),
     config: { allowedOrigins: env.allowedOrigins, requestTimeoutMs: env.requestTimeoutMs },
     ...(publicIntake === undefined ? {} : { publicIntake }),
     ...(sites === undefined ? {} : { sites }),
@@ -106,6 +109,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
     ...(env.twilioWebhook === null ? {} : {
       twilioWebhook: {
         ...env.twilioWebhook,
+        ...shared,
         report: (event) => {
           if (!event.outcome.handled && event.outcome.reason !== "not_a_keyword")
             console.warn("Twilio webhook not applied", { kind: event.kind, messageSid: event.messageSid, reason: event.outcome.reason });

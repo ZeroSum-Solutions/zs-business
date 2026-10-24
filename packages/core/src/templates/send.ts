@@ -427,7 +427,7 @@ function queueHandler(kind: TemplatedKind, schema: typeof reminderQueueCommandSc
       const blocked = consentBlock({
         channel: revision.channel, purpose: revision.purpose,
         consent: email ? contact.consent_email : contact.consent_sms,
-        consentSource: email ? contact.source_email : contact.source_sms,
+        source: email ? contact.source_email : contact.source_sms,
         suppressed: email ? contact.suppressed_email : contact.suppressed_sms,
       });
       if (blocked === "suppressed" || blocked === "consent_denied" || blocked === "consent_missing")

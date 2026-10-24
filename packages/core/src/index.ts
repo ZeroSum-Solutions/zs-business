@@ -29,6 +29,7 @@ export {
 } from "./intake/index.js";
 export { listBookingPages, listIntakeItems } from "./reads/intake.js";
 export * from "./sites/index.js";
+export * from "./images/index.js";
 export { findMembership, listMembers, lockMembership, memberHandlers, requireMember, type MemberAccess } from "./members/index.js";
 export {
   APPROVAL_POLICIES,
@@ -45,6 +46,7 @@ export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandle
 export * from "./delivery/index.js";
 export * from "./billing/index.js";
 export * from "./business/index.js";
+export * from "./transcription/index.js";
 export * from "./calendar/index.js";
 export * from "./automation/index.js";
 export {
@@ -123,3 +125,4 @@ export {
 export { TEMPLATE_SUGGESTION_LANE } from "./templates/suggest.js";
 export type { BookingLinkProvider } from "./templates/send.js";
 export { createBookingLinkProvider } from "./templates/booking-link.js";
+export * from "./enrichment/index.js";

@@ -7,14 +7,18 @@ import {
   apiErrorBody,
   AuthUnavailable,
   authenticate,
+  createEnrichmentSession,
   createFollowUpAgent,
+  createTranscriptionSession,
   DatabaseUnavailable,
   mapError,
   type AutomationEdgeConfig,
+  type EnrichmentConfigInput,
   type FollowUpAgentConfig,
   type Session,
   type SessionCheck,
   type StripeClient,
+  type TranscriptionConfig,
 } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
 import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
@@ -28,6 +32,7 @@ import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
+import { enrichmentRoutes } from "./routes/enrichment.js";
 import { homeRoutes } from "./routes/home.js";
 import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
@@ -41,6 +46,7 @@ import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-w
 import { googleCalendarRoutes, type GoogleCalendarConfig } from "./public/google-calendar.js";
 import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
+import { transcriptionRoutes, workerAuth, workerRoutes, type TranscriptionApiConfig } from "./routes/transcription.js";
 
 export interface AppConfig {
   /** Exact origins allowed to call the API from a browser; empty means no CORS. */
@@ -96,6 +102,16 @@ export interface AppDependencies {
    * under /v1/integrations/activepieces and the flow routes under /integrations/activepieces are off.
    */
   readonly activepieces?: AutomationEdgeConfig;
+  /**
+   * Company enrichment (enrichment.md E-5, E-8, E-9): the gates, price and caps the request action
+   * reads. Absent means every request is refused `enrichment_unavailable`; reads still work.
+   */
+  readonly enrichment?: EnrichmentConfigInput;
+  /**
+   * Transcription (transcription.md X-1..X-4): the audio store, the optional voicemail source and
+   * the pilot Mac worker's bearer token. Absent means /v1/transcriptions and /worker/v1 are off.
+   */
+  readonly transcription?: TranscriptionConfig & TranscriptionApiConfig;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -179,6 +195,7 @@ export function createApp(deps: AppDependencies) {
   app.use("/webhooks/*", deadline);
   app.use("/oauth/*", deadline);
   app.use(`${ACTIVEPIECES_INBOUND_PREFIX}/*`, deadline);
+  app.use("/worker/v1/*", deadline);
 
   const edge = {
     db: deps.db,
@@ -214,6 +231,14 @@ export function createApp(deps: AppDependencies) {
   if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
+
+  // The worker has its own bearer token and no member session, so it sits outside /v1 auth.
+  const transcription = deps.transcription;
+  const transcriptionFor = (c: Context<AppEnv>) => createTranscriptionSession(requestEdge(c), transcription!);
+  if (transcription) {
+    app.use("/worker/v1/*", workerAuth(transcription));
+    app.route("/worker/v1/transcription", workerRoutes(transcriptionFor));
+  }
 
   app.use("/v1/*", bodyLimit({
     maxSize: 64 * 1024,
@@ -254,6 +279,9 @@ export function createApp(deps: AppDependencies) {
   }));
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
+  const enrichment = deps.enrichment;
+  app.route("/v1", enrichmentRoutes((c) => createEnrichmentSession(requestEdge(c), c.var.session.principal, enrichment)));
+  if (transcription) app.route("/v1/transcriptions", transcriptionRoutes(transcriptionFor));
 
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   app.onError((error, c) => {
@@ -291,6 +319,7 @@ export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
 export type { GoogleCalendarConfig } from "./public/google-calendar.js";
 export type { TwilioWebhookConfig } from "./public/twilio-webhook.js";
+export type { TranscriptionApiConfig } from "./routes/transcription.js";
 export { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./public/limiter.js";
 export { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 export { createHs256Verifier, createJwksVerifier, Unauthenticated, type TokenVerifier, type VerifiedToken } from "./auth.js";

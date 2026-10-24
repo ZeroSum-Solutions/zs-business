@@ -16,6 +16,11 @@ result an earlier release stored outside it still replays unchanged. Server time
 must also lie in the range; outside it the write fails with `ValidationFailed`, nothing written.
 This slice covers contact identity, consent storage, deal creation and stage moves.
 It provides no messaging, contact merge, general contact edit or pipeline editor.
+Revision 3 (2026-10-23, enrichment.md E-7, E-14): a contact has one optional profile row
+(`crm_contact_profile`): eight company fields filled only by an approved `contact.profile.apply`,
+a country, the do-not-enrich flag with its reason, and the owner's region mark. Enrichment never
+writes the contact's identity columns or consent (C-9). A change to a contact's email or phone
+clears the region mark, so the mark never outlives the facts it was made on.
 Revision 2 (2026-10-22 audit, B5-06): C-14 refuses to move a deal whose stored currency
 is not an ISO 4217 code, with `details.reason="invalid_currency"`; `inbox-home.md` H-1
 (revision 4) defines the deal value and the stored codes that rule applies to.

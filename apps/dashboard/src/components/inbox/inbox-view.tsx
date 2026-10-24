@@ -550,7 +550,11 @@ export function InboxView({ selectedId }: { selectedId: string | null }) {
   return (
     <>
       {/* One visible h1 at every width, also with a conversation open on a phone; there the description gives way to the thread. */}
-      <PageHeader title="Inbox" description={selectedId ? <span className="hidden lg:inline">{DESCRIPTION}</span> : DESCRIPTION} />
+      <PageHeader
+        title="Inbox"
+        description={selectedId ? <span className="hidden lg:inline">{DESCRIPTION}</span> : DESCRIPTION}
+        actions={<Link href="/inbox/transcripts" className="inline-flex min-h-11 items-center rounded-pill px-3 text-sm font-bold text-muted hover:bg-tray hover:text-fg">Transcripts</Link>}
+      />
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)]">
         <div className={cn(selectedId && "hidden lg:block")}><ThreadList selectedId={selectedId} /></div>
         <div className={cn(!selectedId && "hidden lg:block")}>

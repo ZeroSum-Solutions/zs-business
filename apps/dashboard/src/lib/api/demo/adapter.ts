@@ -41,6 +41,7 @@ import { newId as defaultNewId } from "../../id";
 import { ApiError, contactNotFound, defaultMessage, demoError, demoValidationError, threadNotFound } from "../errors";
 import { createDemoAgents, type DemoActor, type DemoAgentControls, type DemoRole } from "./agents";
 import { createDemoBusiness, type DemoBusinessControls } from "./business";
+import { createDemoEnrichment } from "./enrichment";
 import { createDemoCalendar, type DemoCalendarControls } from "./calendar";
 import { createDemoTemplates, type DemoTemplateControls } from "./templates";
 import {
@@ -52,6 +53,7 @@ import {
   toUpsertContactRequest,
   type AgentsApi,
   type BusinessApi,
+  type EnrichmentApi,
   type BookingApi,
   type BookingView,
   type CalendarSyncApi,
@@ -134,7 +136,7 @@ export interface DemoControls extends DemoAgentControls, DemoTemplateControls, D
   approveReplyElsewhere(replyId: string): ReplyRecord;
 }
 
-export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & CalendarSyncApi & DemoControls;
+export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & EnrichmentApi & CalendarSyncApi & DemoControls;
 
 export interface DemoWrite {
   operation: string;
@@ -422,12 +424,19 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
   const business = createDemoBusiness({ now: () => clock.now(), wait, idempotent, parse, actor: () => actor });
 
+  const enrichment = createDemoEnrichment({
+    now: () => clock.now(), newId, wait, idempotent, actor: () => actor,
+    hasContact: (id) => contacts.has(id),
+    contactDomain: (id) => contacts.get(id)?.email?.split("@")[1] ?? null,
+  });
+
   const calendar = createDemoCalendar({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor, resources });
 
   return {
     ...agents,
     ...templates,
     ...business,
+    ...enrichment,
     ...calendar,
 
     async listResources() {

@@ -192,7 +192,11 @@ describe("delivery semantics (W-7, W-8)", () => {
     const [lease] = await crashed.claim(1);
     const hanging: WebhookTransport = { post: () => new Promise(() => undefined) };
     void h.worker({}, { transport: hanging }).step(lease!).catch(() => undefined);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Wait until the hanging send has opened its attempt (a fixed sleep raced a slow runner).
+    for (let waited = 0; waited < 5_000; waited += 50) {
+      if ((await h.rows("SELECT 1 FROM webhook_delivery_attempts WHERE delivery_id=$1", [lease!.deliveryId])).length > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     expect((await h.worker().claim(5))).toHaveLength(0);
     h.clock.advance(31_000);
     const rescuer = h.worker();

@@ -66,12 +66,17 @@ export const keys = {
   template: (kind: TemplatedKind) => ["agents", "template", kind] as const,
   /** The business profile (business-profile.md BP-5). */
   business: ["business"] as const,
+  /** One customer's company details and lookups (enrichment.md E-17). */
+  contactEnrichment: (id: string) => ["crm", "contact", id, "enrichment"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
   siteReleases: (siteId: string) => ["sites", "releases", siteId] as const,
   siteRelease: (siteId: string, releaseId: string) => ["sites", "release", siteId, releaseId] as const,
   sitesAll: ["sites"] as const,
+  /** Transcripts of uploaded audio and voicemails (transcription.md X-7). */
+  transcriptions: ["transcriptions", "list"] as const,
+  transcription: (id: string) => ["transcriptions", "detail", id] as const,
   /**
    * Whether the site shows the release live at one pointer version. Outside "sites", so
    * refreshing the lists does not re-sync; per version, so an answer about an older version
@@ -384,6 +389,21 @@ export function useTemplate(kind: TemplatedKind, allowed: boolean) {
  * The business profile (business-profile.md BP-5). An API older than the profile answers 404; the
  * caller shows that as "not available yet" (BP-10), so a 404 is not retried.
  */
+/**
+ * One customer's company details. While a request is still running the page asks again every few
+ * seconds, so the answer needs no reload.
+ */
+export function useContactEnrichment(contactId: string) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled,
+    queryKey: keys.contactEnrichment(contactId),
+    queryFn: ({ signal }) => api.getContactEnrichment(contactId, { signal }),
+    refetchInterval: (query) => (query.state.data?.requests.some((r) => r.status === "pending" || r.status === "leased" || r.status === "uncertain") ? 4_000 : false),
+  });
+}
+
 export function useBusinessProfile() {
   const api = useApi();
   const { keys, enabled } = useKeys();
@@ -432,6 +452,29 @@ export function useAgentActorId(): string | null {
   const tenantId = useTenantId();
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.agentActor, queryFn: () => agentActorId(tenantId!), staleTime: Infinity, gcTime: Infinity }).data ?? null;
+}
+
+export function useTranscriptions() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled,
+    queryKey: keys.transcriptions,
+    queryFn: ({ signal }) => api.listTranscriptions({ signal }),
+    // The worker finishes jobs on its own clock: look again while any recording is still in flight.
+    refetchInterval: (query) => (query.state.data?.some((job) => job.status === "queued" || job.status === "running" || job.status === "failed") ? 5000 : false),
+  });
+}
+
+export function useTranscription(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && id !== null,
+    queryKey: keys.transcription(id ?? "none"),
+    queryFn: ({ signal }) => api.getTranscription(id!, { signal }),
+    refetchInterval: (query) => (query.state.data && ["queued", "running", "failed"].includes(query.state.data.status) ? 5000 : false),
+  });
 }
 
 export function useSites() {
