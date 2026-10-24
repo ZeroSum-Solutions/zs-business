@@ -164,7 +164,9 @@ GRANT SELECT, INSERT ON public.browser_runs TO authenticated;
 GRANT SELECT ON public.browser_run_artifacts, public.browser_run_events TO authenticated;
 
 -- BT-7: the runner's service (service role) reads the target and credential reference, moves the run
--- through its states, and appends events and artifacts. It never changes settings or targets.
-GRANT SELECT ON public.browser_task_settings, public.browser_targets, public.browser_credentials TO service_role;
-GRANT SELECT, UPDATE ON public.browser_runs TO service_role;
+-- through its states, and appends events and artifacts. It never updates settings or targets. INSERT
+-- is granted too, like every other tenant table, so the catalog fixtures can seed them as the
+-- privileged role; no core code inserts through it.
+GRANT SELECT, INSERT ON public.browser_task_settings, public.browser_targets, public.browser_credentials TO service_role;
+GRANT SELECT, INSERT, UPDATE ON public.browser_runs TO service_role;
 GRANT SELECT, INSERT ON public.browser_run_artifacts, public.browser_run_events TO service_role;

@@ -117,7 +117,7 @@ export async function getBrowserRunDetail(tx: Transaction, tenantId: string, run
     inputTokens: row.input_tokens, outputTokens: row.output_tokens, costMicros: Number(row.cost_micros), createdAt: row.created_at.toISOString(),
   }));
   const artifacts = (await tx.query<{ id: string; kind: BrowserArtifact["kind"]; name: string; bytes: number; sha256: string; created_at: Date }>(
-    `SELECT id, kind, name, bytes, sha256, created_at FROM browser_run_artifacts WHERE tenant_id=$1 AND run_id=$2 ORDER BY created_at, id`,
+    `SELECT id, kind, name, bytes, sha256, created_at FROM browser_run_artifacts WHERE tenant_id=$1 AND run_id=$2 ORDER BY created_at, name, id`,
     [tenantId, runId])).rows.map((row): BrowserArtifact => ({
     id: row.id, kind: row.kind, name: row.name, bytes: row.bytes, sha256: row.sha256, createdAt: row.created_at.toISOString(),
   }));
