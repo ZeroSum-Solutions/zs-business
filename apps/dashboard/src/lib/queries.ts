@@ -65,6 +65,9 @@ export const keys = {
   siteReleases: (siteId: string) => ["sites", "releases", siteId] as const,
   siteRelease: (siteId: string, releaseId: string) => ["sites", "release", siteId, releaseId] as const,
   sitesAll: ["sites"] as const,
+  /** Transcripts of uploaded audio and voicemails (transcription.md X-7). */
+  transcriptions: ["transcriptions", "list"] as const,
+  transcription: (id: string) => ["transcriptions", "detail", id] as const,
   /**
    * Whether the site shows the release live at one pointer version. Outside "sites", so
    * refreshing the lists does not re-sync; per version, so an answer about an older version
@@ -382,6 +385,22 @@ export function useAgentActorId(): string | null {
   const tenantId = useTenantId();
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.agentActor, queryFn: () => agentActorId(tenantId!), staleTime: Infinity, gcTime: Infinity }).data ?? null;
+}
+
+export function useTranscriptions() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.transcriptions, queryFn: ({ signal }) => api.listTranscriptions({ signal }) });
+}
+
+export function useTranscription(id: string | null) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && id !== null,
+    queryKey: keys.transcription(id ?? "none"),
+    queryFn: ({ signal }) => api.getTranscription(id!, { signal }),
+  });
 }
 
 export function useSites() {

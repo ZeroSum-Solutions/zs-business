@@ -2,6 +2,12 @@ Copyright (c) 2026 Zero Sum Solutions. All rights reserved.
 
 Third-party notices for ported MIT code are listed below as ports land.
 
+Transcription worker (apps/transcription-worker), models used at run time and not stored in this repo:
+
+- pyannote "speaker-diarization-community-1" (https://huggingface.co/pyannote/speaker-diarization-community-1)
+  Copyright (c) pyannote contributors. Licensed under CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/).
+  Used without changes for speaker labels. The repo owner accepts the model gate; see docs/licenses.md.
+
 Dashboard UI components (apps/dashboard), adapted under the MIT License below:
 
 - Cult UI (https://www.cult-ui.com, github.com/nolly-studio/cult-ui)

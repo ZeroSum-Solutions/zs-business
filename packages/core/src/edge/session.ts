@@ -109,6 +109,7 @@ import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
 import { AGENT_MEMBER_PERMISSIONS, agentHandlers, followUpStatus, getRun, listRuns } from "../agents/index.js";
 import { businessHandlers, getBusinessProfile } from "../business/index.js";
+import { transcriptionHandlers } from "../transcription/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
@@ -197,7 +198,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers, ...businessHandlers,
+  ...agentHandlers, ...businessHandlers, ...transcriptionHandlers,
 });
 
 /**
