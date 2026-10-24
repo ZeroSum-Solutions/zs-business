@@ -41,6 +41,11 @@ interface SessionValue {
    */
   signOut(reason: "expired" | "signed_out"): void;
   retry(): void;
+  /**
+   * The business changed its display name (business-profile.md BP-9), so the shell and Home show
+   * it at once. It applies to the signed-in business only, and a new sign-in starts from the server's name.
+   */
+  setBusinessName(name: string): void;
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
@@ -122,6 +127,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [session, setSession] = useState<Session>(mode === "demo" ? demoSession(demo) : { status: "loading" });
   const [attempt, setAttempt] = useState(0);
+  const [renamed, setRenamed] = useState<{ tenantId: string; name: string } | null>(null);
 
   // Demo mode: tests switch between the owner and a staff member (`__zsDemo.actAs`).
   useEffect(() => {
@@ -194,7 +200,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setAttempt((count) => count + 1);
   }, []);
 
-  const value = useMemo(() => ({ session, signOut, retry }), [session, signOut, retry]);
+  const setBusinessName = useCallback((name: string) => {
+    setSession((current) => {
+      if (current.status === "signed_in") setRenamed({ tenantId: current.tenantId, name });
+      return current;
+    });
+  }, []);
+
+  // The new name sits over the session's own; it belongs to the business that was renamed.
+  const shown = useMemo<Session>(
+    () => (session.status === "signed_in" && renamed?.tenantId === session.tenantId ? { ...session, businessName: renamed.name } : session),
+    [session, renamed],
+  );
+  const value = useMemo(() => ({ session: shown, signOut, retry, setBusinessName }), [shown, signOut, retry, setBusinessName]);
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 
@@ -234,6 +252,8 @@ export const READ_RESULTS: Permission = "reports";
 export const STOP_AGENTS: Permission = "inbox.drafts";
 /** Changes the follow-up agent's settings, resumes it and runs it now (G-2, G-3): owners only. */
 export const MANAGE_AGENTS: Permission = "agents";
+/** Changes the business profile (business-profile.md BP-6): owners only; every member reads it. */
+export const MANAGE_BUSINESS: Permission = "business";
 
 /**
  * Whether the signed-in member's role allows `permission` (M2a `ROLE_PERMISSIONS`). The API

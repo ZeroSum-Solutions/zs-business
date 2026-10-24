@@ -446,11 +446,12 @@ test("labels sample areas and turns off writes that would not reach the API", as
   await expect(header("Connections").getByTestId("sample-badge")).toHaveCount(0);
   await expect(page.getByTestId("gcal-card").getByTestId("sample-badge")).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Other accounts" }).getByTestId("sample-badge")).toBeVisible();
+  // Settings holds the live business profile (business-profile.md); only Plan is still a sample.
+  await page.goto("/account/settings");
+  await expect(header("Settings").getByTestId("sample-badge")).toHaveCount(0);
   // Plan comes last: the checks below run on it.
-  for (const [path, name] of [["/account/settings", "Settings"], ["/account/plan", "Plan"]] as const) {
-    await page.goto(path);
-    await expect(header(name).getByTestId("sample-badge"), name).toBeVisible();
-  }
+  await page.goto("/account/plan");
+  await expect(header("Plan").getByTestId("sample-badge")).toBeVisible();
 
   // Plan: no cancel that only changes the sample, and the reason is on screen.
   const cancel = page.getByRole("button", { name: "Cancel plan" });
@@ -467,7 +468,11 @@ test("labels sample areas and turns off writes that would not reach the API", as
   await expect(followUp.getByRole("button", { name: /^(Stop the agent|Resume)$/ })).toBeEnabled();
 
   await page.goto("/account/settings");
-  await expect(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  // The business form is live for the owner: filled from the API, nothing to save until edited.
+  const business = page.getByRole("region", { name: "Business" });
+  await expect(business.getByLabel("Business name")).toBeEnabled();
+  await expect(business.getByLabel("Business name")).not.toHaveValue("");
+  await expect(business.getByRole("button", { name: "Save changes" })).toBeDisabled();
   for (const toggle of await page.getByRole("switch").all()) await expect(toggle).toBeDisabled();
 });
 

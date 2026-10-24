@@ -1,4 +1,5 @@
 import type {
+  BusinessProfile,
   BookingPageSummary,
   BookingRecord,
   BookingSummary,
@@ -41,6 +42,7 @@ import type {
   ThreadDetail,
   ThreadEntry,
   ThreadSummary,
+  UpdateBusinessProfileRequest,
   UpdateFollowUpSettingsRequest,
   UpsertContactRequest,
   WeekStart,
@@ -48,6 +50,7 @@ import type {
 import type { WorkspaceApi } from "./workspace-types";
 
 export type {
+  BusinessProfile,
   BookingPageSummary,
   BookingRecord,
   CalendarConnection,
@@ -317,6 +320,17 @@ export interface AgentsApi {
   getFollowUpRun(id: string, options?: ReadOptions): Promise<FollowUpRunDetail>;
 }
 
+/**
+ * The business profile (business-profile.md BP-5..BP-7): who the business is. Any member reads it;
+ * owners (`business`) change it.
+ */
+export interface BusinessApi {
+  /** Throws `not_found` on an API older than the profile (BP-10). */
+  getBusiness(options?: ReadOptions): Promise<BusinessProfile>;
+  /** Only the fields in `changes`. A conflict with reason `stale_revision` when someone saved since `expectedRevision`. */
+  updateBusiness(input: UpdateBusinessProfileRequest, options: WriteOptions): Promise<BusinessProfile>;
+}
+
 /** Runs per page of the Agents page's run list. */
 export const RUN_PAGE_SIZE = 20;
 
@@ -390,7 +404,7 @@ export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
 export const CONTACT_IDS_PER_CALL = 100;
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & SitesApi & CalendarSyncApi & WorkspaceApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BusinessApi & SitesApi & CalendarSyncApi & WorkspaceApi;
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */
 export function normalizePhone(phone: string): string {

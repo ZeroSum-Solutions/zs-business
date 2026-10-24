@@ -5,10 +5,10 @@ import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { cancelTerms, cancelledNote, PLAN_BADGE, planDateLine, PlanView } from "../src/components/account/plan-view";
-import { DEMO_SAVE_NOTE, SettingsView } from "../src/components/account/settings-view";
+import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
-import { NOT_AVAILABLE } from "../src/components/ui/sample";
-import { createApi } from "../src/lib/api";
+import type { BusinessProfile } from "@zs/contracts";
+import { ApiError, createApi } from "../src/lib/api";
 import { DEMO_BUSINESS, DEMO_TENANT_ID } from "../src/lib/api/demo/seed";
 import { createDemoWorkspace } from "../src/lib/api/demo/workspace";
 import { ApiProvider } from "../src/lib/api/react";
@@ -22,12 +22,14 @@ const plan = (change: Partial<Plan> = {}): Plan => ({
   includes: ["Six areas"], caps: [], ...change,
 });
 
-function render(node: ReactNode, mode: "demo" | "live", seed?: (client: QueryClient) => void): string {
+function render(node: ReactNode, mode: "demo" | "live", seed?: (client: QueryClient) => void, prepare?: (runtime: ReturnType<typeof createApi>) => void): string {
   const client = new QueryClient();
   seed?.(client);
+  const runtime = createApi({ mode });
+  prepare?.(runtime);
   const toasts = h(ToastProvider, { children: node });
   const tree = h(ApiProvider, {
-    runtime: createApi({ mode }),
+    runtime,
     children: h(QueryClientProvider, { client, children: h(SessionProvider, { children: toasts }) }),
   });
   return renderToString(tree).replaceAll("<!-- -->", "");
@@ -66,13 +68,55 @@ describe("plan", () => {
   });
 });
 
+const BUSINESS: BusinessProfile = {
+  displayName: DEMO_BUSINESS, legalName: "Halden & Rowe Ltd", phoneE164: "+442079460000", timeZone: "Europe/London", currency: "EUR",
+  postalAddress: { line1: "12 Mill Lane", city: "Leeds", country: "GB" }, revision: 2, updatedAt: "2026-10-23T10:00:00.000Z",
+};
+const seedBusiness = (client: QueryClient) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).business, BUSINESS);
+const escaped = (text: string) => text.replaceAll("&", "&amp;");
+
 describe("settings", () => {
-  it("shows the session's business and says plainly that the demo does not save", () => {
+  it("fills the business form from the profile and says in demo mode that a save is sample data", () => {
+    const html = render(h(SettingsView), "demo", seedBusiness);
+    expect(html).toContain(`value="${escaped(DEMO_BUSINESS)}"`);
+    expect(html).toContain(`value="${escaped("Halden & Rowe Ltd")}"`);
+    expect(html).toContain('value="+442079460000"');
+    expect(html).toContain('value="12 Mill Lane"');
+    expect(html).toMatch(/<option value="EUR" selected="">EUR · Euro<\/option>/);
+    expect(html).toMatch(/<option value="GB" selected="">United Kingdom<\/option>/);
+    expect(html).toContain(BUSINESS_DEMO_NOTE);
+    expect(html).not.toContain("saved to your business");
+    expect(html).not.toContain("+1 212 555 0142</");
+    expect(html).not.toContain(BUSINESS_OWNER_ONLY);
+    // Nothing is edited yet, so there is nothing to save.
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""[^>]*>Save changes/);
+  });
+
+  it("shows the form loading until the profile arrives, never an empty form that looks saved", () => {
     const html = render(h(SettingsView), "demo");
-    expect(html).toContain(`value="${DEMO_BUSINESS.replaceAll("&", "&amp;")}"`);
-    expect(html).toContain(DEMO_SAVE_NOTE);
+    expect(html).toContain('aria-label="Loading business details"');
+    expect(html).not.toContain("Save changes");
+  });
+
+  it("keeps the form read-only for staff, with the reason", () => {
+    const html = render(h(SettingsView), "demo", seedBusiness, (runtime) => runtime.demo!.actAs("staff"));
+    expect(html).toContain(BUSINESS_OWNER_ONLY);
+    expect(html).toMatch(/<fieldset[^>]*disabled=""/);
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""[^>]*aria-describedby="business-locked"/);
+    expect(html).not.toContain(BUSINESS_DEMO_NOTE);
+  });
+
+  it("keeps the form read-only with a reason when the API has no profile yet (BP-10)", () => {
+    const html = render(h(SettingsView), "demo", (client) => {
+      // A failed query is retried on mount by default, which would show the loading rows instead.
+      client.setDefaultOptions({ queries: { retryOnMount: false } });
+      const query = client.getQueryCache().build(client, { queryKey: scopeKeys(DEMO_TENANT_ID).business });
+      query.setState({ status: "error", error: new ApiError("not_found", "We could not find that.", 404), fetchStatus: "idle", errorUpdateCount: 1 });
+    });
+    expect(html).toContain(BUSINESS_NOT_AVAILABLE);
+    expect(html).toContain(`value="${escaped(DEMO_BUSINESS)}"`);
+    expect(html).toMatch(/<fieldset[^>]*disabled=""/);
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
-    expect(html).not.toContain("+1 212");
   });
 
   it("offers no notification it cannot send", () => {
@@ -83,11 +127,5 @@ describe("settings", () => {
       expect(html.match(/role="switch"[^>]*disabled=""/g)?.length).toBe(3);
       expect(html).not.toMatch(/aria-checked="true"/);
     }
-  });
-
-  it("keeps the save off in live mode with the not-available reason", () => {
-    const html = render(h(SettingsView), "live");
-    expect(html).toContain(NOT_AVAILABLE);
-    expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
   });
 });

@@ -56,6 +56,8 @@ export const keys = {
   /** The agent's actor ID, derived from the tenant (agents.md G-1). */
   agentActor: ["agents", "actor"] as const,
   agentsAll: ["agents"] as const,
+  /** The business profile (business-profile.md BP-5). */
+  business: ["business"] as const,
   usage: ["ws", "usage"] as const,
   checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
@@ -325,6 +327,16 @@ export function useFollowUpStatus() {
   return useQuery({
     enabled, queryKey: keys.followUp, queryFn: ({ signal }) => api.getFollowUpStatus({ signal }), staleTime: 0, refetchInterval: 60_000,
   });
+}
+
+/**
+ * The business profile (business-profile.md BP-5). An API older than the profile answers 404; the
+ * caller shows that as "not available yet" (BP-10), so a 404 is not retried.
+ */
+export function useBusinessProfile() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.business, queryFn: ({ signal }) => api.getBusiness({ signal }), staleTime: 60_000 });
 }
 
 /** The agent's runs, newest first, a page at a time by keyset cursor. */

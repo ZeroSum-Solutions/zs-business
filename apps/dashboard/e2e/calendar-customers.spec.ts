@@ -94,7 +94,7 @@ test.describe("customers", () => {
     await page.goto("/customers?view=pipeline");
     await page.getByRole("button", { name: /^Edit details of / }).first().click();
     const dialog = page.getByRole("dialog", { name: "Deal details" });
-    await dialog.getByLabel("Currency").fill("JPY");
+    await dialog.getByLabel("Currency").selectOption("JPY");
     await dialog.getByLabel("Value").fill("12,500.50");
     await dialog.getByRole("button", { name: "Save details" }).click();
     const alert = dialog.getByRole("alert");
