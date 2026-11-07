@@ -44,6 +44,9 @@ const expectedPath: Record<string, string> = {
   "agent_model_calls_guard()": "pg_catalog, pg_temp",
   "agent_runs_guard()": "pg_catalog, pg_temp",
   "approvals_transition()": "pg_catalog, pg_temp",
+  // Hub access (20261106100000, H-8): usage counters only grow; the retention prune the API runs as the runtime role.
+  "automation_token_usage_grow_only()": "pg_catalog, pg_temp",
+  "prune_automation_token_usage(timestamp with time zone,integer)": "pg_catalog, pg_temp",
   // Booking customer link (20261023200000_booking_contacts.sql): the revision and owner-made guard, and the
   // trigger that clears a deleted contact's links (BC-7).
   "booking_contacts_contact_deleted()": "pg_catalog, pg_temp",
@@ -133,9 +136,10 @@ it("skips only planted logins: any other login that can reach an owner is caught
     await client.query(`CREATE ROLE ${planted} LOGIN; GRANT authenticated, zs_dispatcher TO ${planted}`);
     expect(await assumable()).toEqual([]);
     await client.query("CREATE ROLE zs_probe_login LOGIN; GRANT authenticated, zs_dispatcher TO zs_probe_login");
-    // The two functions that run as zs_dispatcher.
+    // The three functions that run as zs_dispatcher.
     expect(await assumable()).toEqual([
-      expect.stringMatching(/^business_profiles_sync_name\(/), expect.stringMatching(/^record_action_and_event\(/),
+      expect.stringMatching(/^business_profiles_sync_name\(/), expect.stringMatching(/^prune_automation_token_usage\(/),
+      expect.stringMatching(/^record_action_and_event\(/),
     ]);
   } finally {
     await client.query("ROLLBACK");

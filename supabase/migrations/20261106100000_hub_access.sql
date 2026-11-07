@@ -45,7 +45,7 @@ CREATE INDEX automation_token_usage_hour ON public.automation_token_usage (hour)
 
 -- Counters only grow (H-8): a decrease is refused, so a bug or a replayed write cannot erase use.
 CREATE FUNCTION public.automation_token_usage_grow_only() RETURNS trigger
-  LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+  LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
   IF NEW.requests < OLD.requests OR NEW.reads < OLD.reads
      OR NEW.proposals < OLD.proposals OR NEW.refusals < OLD.refusals THEN
@@ -79,7 +79,7 @@ GRANT DELETE ON public.automation_token_usage TO service_role;
 -- on, without a service credential; the cutoff can never be nearer than 30 days, whatever the
 -- caller passes, so it can only remove rows that are out of retention anyway.
 CREATE FUNCTION public.prune_automation_token_usage(p_before timestamptz, p_limit integer) RETURNS integer
-  LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
   WITH doomed AS (
     SELECT tenant_id, token_id, hour FROM public.automation_token_usage
      WHERE hour < least(p_before, pg_catalog.now() - interval '30 days')
@@ -88,5 +88,17 @@ CREATE FUNCTION public.prune_automation_token_usage(p_before timestamptz, p_limi
     DELETE FROM public.automation_token_usage u USING doomed d
      WHERE u.tenant_id = d.tenant_id AND u.token_id = d.token_id AND u.hour = d.hour RETURNING 1)
   SELECT count(*)::integer FROM gone $$;
+-- The definer runs as zs_dispatcher (20261017160000), the narrow definer role, as the business-profile
+-- name sync does (20261023100000): it may read and delete usage rows, and mark them for the
+-- SKIP LOCKED scan, nothing else. The trigger function is an invoker function like every other.
+GRANT SELECT, DELETE ON public.automation_token_usage TO zs_dispatcher;
+GRANT UPDATE (requests) ON public.automation_token_usage TO zs_dispatcher;
+CREATE POLICY usage_retention ON public.automation_token_usage TO zs_dispatcher USING (true) WITH CHECK (true);
+GRANT CREATE ON SCHEMA public TO zs_function_owner;
+ALTER FUNCTION public.automation_token_usage_grow_only() OWNER TO zs_function_owner;
+REVOKE CREATE ON SCHEMA public FROM zs_function_owner;
+GRANT CREATE ON SCHEMA public TO zs_dispatcher;
+ALTER FUNCTION public.prune_automation_token_usage(timestamptz, integer) OWNER TO zs_dispatcher;
+REVOKE CREATE ON SCHEMA public FROM zs_dispatcher;
 REVOKE ALL ON FUNCTION public.prune_automation_token_usage(timestamptz, integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.prune_automation_token_usage(timestamptz, integer) TO authenticated, service_role;
