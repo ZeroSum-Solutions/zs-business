@@ -5,10 +5,10 @@ import { CEREBRAS_DEFAULT_MODEL, DEEPSEEK_DEFAULT_MODEL, VENDOR_MODEL_PRICES, tr
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { bookingKeySecretSchema, publicBaseUrlSchema } from "../config.js";
+import { PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-/** Vercel's cron requests carry `Authorization: Bearer <CRON_SECRET>`. */
-export const PLACEHOLDER_CRON_SECRET = "replace-with-a-cron-secret-of-32-or-more-chars";
+export { PLACEHOLDER_CRON_SECRET };
 
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
 const switchSchema = z.enum(["on", "off"]).default("off");

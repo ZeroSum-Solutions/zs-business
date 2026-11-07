@@ -201,7 +201,10 @@ export function createResendProvider(deps: { readonly config: ResendConfig; read
   };
 }
 
-/** Builds the adapter config from the variables the Mac sets for the sender (R-6; the cloud never holds their values), passed in by an entry point. */
+/**
+ * Builds the adapter config from the sender's variables (R-6), passed in by an entry point. Only the
+ * workers Vercel project (or the Mac's Node worker) sets them; the API project never does.
+ */
 export function parseResendEnv(env: Readonly<Record<string, string | undefined>>): ResendConfig {
   // Declared here, not at module level, so a bundle that never calls this function (the API's) drops
   // the sender's variable names with it (test/worker-split.test.ts).

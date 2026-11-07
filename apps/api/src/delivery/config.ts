@@ -5,10 +5,10 @@ import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { parseResendEnv, parseTwilioEnv, type ResendConfig, type TwilioConfig } from "@zs/core";
 import { PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../config.js";
+import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-/** Vercel's cron requests carry `Authorization: Bearer <CRON_SECRET>`. */
-export const PLACEHOLDER_CRON_SECRET = "replace-with-a-cron-secret-of-32-or-more-chars";
+export { PLACEHOLDER_CRON_SECRET, DELIVERY_CRON_BUDGET_LIMIT_MS };
 
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
 const switchSchema = z.enum(["on", "off"]).default("off");
@@ -69,11 +69,9 @@ export const DELIVERY_PASS_DB_MS = 1_000;
 /** The longest a pass of `claimLimit` deliveries is assumed to take before one has been measured. */
 export const deliveryPassEstimateMs = (claimLimit: number, providerTimeoutMs: number) =>
   claimLimit * (providerTimeoutMs + DELIVERY_STEP_DB_MS) + DELIVERY_PASS_DB_MS;
-/**
- * R-9: the cron function's budget limit. Vercel stops the function at 30 s (build-vercel.mjs
- * `maxDuration`); the rest is room for a pass that runs past its estimate.
- */
-export const DELIVERY_CRON_BUDGET_LIMIT_MS = 20_000;
+// R-9: DELIVERY_CRON_BUDGET_LIMIT_MS (cron-common.ts) is the cron function's budget limit. Vercel
+// stops the function at 30 s (build-vercel.mjs `maxDuration`); the rest is room for a pass that
+// runs past its estimate.
 
 /** R-9: the cron entry refuses a budget its Vercel function could not finish. */
 export function assertDeliveryCronFits(runner: DeliveryRunnerEnv | null): void {
