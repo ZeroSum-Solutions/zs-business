@@ -11,6 +11,7 @@ import { readClock } from "../booking/slots.js";
 import { backoffMs } from "../delivery/policy.js";
 import { derivedId } from "../edge/ids.js";
 import { businessEvents, SOURCE_EVENT_TYPES, type OutboxRow } from "./events.js";
+import { USAGE_RETENTION_DAYS } from "./hub.js";
 import { signingSecrets, webhookSignatureHeader, type AutomationKeySecrets } from "./keys.js";
 import { ENDPOINT_COLUMNS, previousVersion, webhookEventId, type EndpointRow } from "./records.js";
 import { webhookUrlProblem, type UrlPolicy, type WebhookResponse, type WebhookTransport } from "./transport.js";
@@ -39,7 +40,8 @@ type Config = z.infer<typeof webhookWorkerConfigSchema>;
 export type WebhookReport =
   | { readonly kind: "lost_lease"; readonly tenantId: string; readonly deliveryId: string }
   | { readonly kind: "step_failed"; readonly tenantId: string; readonly deliveryId: string; readonly error: string }
-  | { readonly kind: "ingest_failed"; readonly tenantId: string; readonly endpointId: string; readonly error: string };
+  | { readonly kind: "ingest_failed"; readonly tenantId: string; readonly endpointId: string; readonly error: string }
+  | { readonly kind: "prune_failed"; readonly error: string };
 
 export interface WebhookWorkerDeps {
   /** A service-role transaction: `(work) => asService(servicePool, work)`. */
@@ -82,6 +84,9 @@ type Plan =
 
 /** Transport errors that are the URL policy's refusal, not a network failure: `address_refused`, `url_…`. */
 const URL_REFUSALS = /^(address_refused$|url_)/;
+
+/** hub-access.md H-8: rows older than USAGE_RETENTION_DAYS go in batches of this size. */
+const USAGE_PRUNE_BATCH = 1000;
 
 const errorText = (code: string) => (code.replaceAll("\u0000", "").trim() || "unknown").slice(0, 200);
 
@@ -356,15 +361,34 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
     return { outcome: "error", error: text };
   }
 
-  /** One pass: ingest new events, claim due deliveries, send each in turn. */
+  /**
+   * hub-access.md H-8: deletes token usage rows older than 30 days, a bounded batch per pass so
+   * a long backlog drains over several passes without holding one long statement.
+   */
+  async function pruneUsage(limit = USAGE_PRUNE_BATCH): Promise<number> {
+    return deps.service(async (tx) => {
+      const before = new Date(Math.floor(now().getTime() / 3_600_000) * 3_600_000 - USAGE_RETENTION_DAYS * 86_400_000);
+      const result = await tx.query(
+        `DELETE FROM automation_token_usage WHERE (tenant_id, token_id, hour) IN (
+           SELECT tenant_id, token_id, hour FROM automation_token_usage WHERE hour < $1 ORDER BY hour LIMIT $2)`,
+        [before, limit]);
+      return result.rowCount ?? 0;
+    });
+  }
+
+  /** One pass: ingest new events, claim due deliveries, send each in turn, then prune old usage rows. */
   async function runOnce(options: { claimLimit?: number } = {}) {
     const ingested = await ingest();
     const leases = await claim(options.claimLimit ?? 10);
     const results: WebhookStepResult[] = [];
     for (const lease of leases) results.push(await step(lease).catch((error: unknown) => noteStepError(lease, error)));
-    return { ingested: ingested.events, claimed: leases.length, results };
+    const usagePruned = await pruneUsage().catch((error: unknown) => {
+      deps.report?.({ kind: "prune_failed", error: errorText(error instanceof Error ? error.message : "prune_failed") });
+      return 0;
+    });
+    return { ingested: ingested.events, claimed: leases.length, results, usagePruned };
   }
 
-  return { ingest, ingestEndpoint, claim, step, runOnce, config };
+  return { ingest, ingestEndpoint, claim, step, pruneUsage, runOnce, config };
 }
 export type WebhookWorker = ReturnType<typeof createWebhookWorker>;

@@ -5,6 +5,7 @@
 import {
   automationTokenListSchema,
   automationTokenSchema,
+  automationUsageSchema,
   automationTokenWithSecretSchema,
   createAutomationTokenRequestSchema,
   createWebhookEndpointRequestSchema,
@@ -22,6 +23,7 @@ import {
   webhookEndpointSchema,
   webhookEndpointWithSecretSchema,
   type AutomationToken,
+  type AutomationUsage,
   type JsonValue,
   type AutomationTokenList,
   type AutomationTokenWithSecret,
@@ -37,6 +39,7 @@ import { derivedId } from "../edge/ids.js";
 import { validationError } from "../edge/errors.js";
 import { directDispatch, parseInput, type Authorize, type EdgeDependencies, type Principal } from "../edge/session.js";
 import { requireMember } from "../members/access.js";
+import { readTokenUsage } from "./hub.js";
 import {
   CREATE_ENDPOINT_ACTION,
   CREATE_TOKEN_ACTION,
@@ -178,6 +181,15 @@ export function createAutomationAdmin(deps: EdgeDependencies, config: Automation
         `SELECT ${TOKEN_COLUMNS} FROM automation_tokens WHERE tenant_id=$1 ORDER BY created_at, id`, [tenantId])).rows;
       return parseInput(automationTokenListSchema, { items: rows.map(tokenRecord) }, "result");
     }),
+    /** hub-access.md H-8: one token's requests, reads, proposals and refusals per hour over the last 7 days. */
+    tokenUsage: (tokenId: unknown): Promise<AutomationUsage> => {
+      const id = parseInput(uuidSchema, tokenId, "token ID");
+      return read(async (tx) => {
+        const usage = await readTokenUsage(tx, tenantId, id, now());
+        if (!usage) throw new NotFound();
+        return parseInput(automationUsageSchema, usage, "result");
+      });
+    },
     async revokeToken(tokenId: unknown, body: unknown, key: unknown): Promise<AutomationToken> {
       const id = parseInput(uuidSchema, tokenId, "token ID");
       parseInput(revokeAutomationTokenRequestSchema, body);

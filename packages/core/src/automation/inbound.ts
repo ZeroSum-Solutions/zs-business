@@ -44,14 +44,14 @@ const proposalOnly: Authorize = async (_tx, binding) => {
 const INVALID_TOKEN = "Invalid or missing automation token";
 
 /** A one-line description of the proposed action, for the owner's approval list (approvals.md A-12). */
-function describe(action: string, input: Record<string, unknown>, tokenName: string): string {
+function describe(action: string, input: Record<string, unknown>, tokenName: string, via: string): string {
   const what = {
     "contact.upsert": `add or find the customer ${String(input.email ?? input.phone ?? "")}`,
     "deal.create": `create the deal "${String(input.title ?? "")}"`,
     "deal.move_stage": "move a deal to another stage",
     "booking.create": `book ${String(input.startsAt ?? "")}`,
   }[action] ?? action;
-  return `Activepieces (${tokenName}) proposes to ${what}`.slice(0, 500);
+  return `${via} (${tokenName}) proposes to ${what}`.slice(0, 500);
 }
 
 export function createAutomationInbound(deps: EdgeDependencies, config: { readonly keySecrets: AutomationKeySecrets }) {
@@ -81,8 +81,10 @@ export function createAutomationInbound(deps: EdgeDependencies, config: { readon
     /**
      * W-12: one proposal per flow key. The target and approval IDs derive from the token and the
      * key, so a flow that retries gets the same proposal back, and two tokens never collide.
+     * `via` names the client in the owner's summary when the body gives none (hub-access.md H-4:
+     * the remote MCP edge proposes through this same derivation).
      */
-    async propose(principal: AutomationPrincipal, body: unknown, rawKey: unknown): Promise<ProposalRecord> {
+    async propose(principal: AutomationPrincipal, body: unknown, rawKey: unknown, via = "Activepieces"): Promise<ProposalRecord> {
       const request = parseInput(proposalRequestSchema, body);
       const flowKey = parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key");
       const { tenantId, tokenId, actorId } = principal;
@@ -121,7 +123,7 @@ export function createAutomationInbound(deps: EdgeDependencies, config: { readon
         payload: {
           proposalId, tokenId,
           action: { actionType, ...action },
-          summary: request.summary ?? describe(request.action, input, principal.name),
+          summary: request.summary ?? describe(request.action, input, principal.name, via),
           expiresInMinutes: request.expiresInMinutes,
         },
       });

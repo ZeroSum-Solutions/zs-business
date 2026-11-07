@@ -1,4 +1,13 @@
 export { createAutomationAdmin, integrationsAuthorize, type AutomationAdmin, type AutomationEdgeConfig } from "./admin.js";
+export {
+  createTokenReads,
+  readTokenUsage,
+  recordTokenUsage,
+  USAGE_READ_DAYS,
+  USAGE_RETENTION_DAYS,
+  type TokenReads,
+  type UsageDelta,
+} from "./hub.js";
 export { businessEvents, SOURCE_EVENT_TYPES, type BusinessEvent } from "./events.js";
 export {
   AUTOMATION_LIMITS,
