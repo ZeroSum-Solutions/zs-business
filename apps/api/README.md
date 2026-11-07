@@ -541,6 +541,30 @@ Inbox for an owner's approval.
 `pnpm followup:global-switch off "reason"` stops new drafts for every tenant at once (G-3);
 `on` lets them draft again. It uses `FOLLOWUP_SERVICE_DATABASE_URL`.
 
+## Connections worker (`GET /cron/connections`, `POST /internal/connections/<operation>`)
+
+docs/requirements/connections.md C-3, C-7, C-9. The workers project holds the Composio key and the
+service database login; the API project holds neither and reaches Composio only through five signed
+internal calls (`link`, `complete`, `cancel`, `run`, `disconnect`). The worker is on when any
+`CONNECTIONS_` variable is set, and then every required one must be (all or none); with none set, the
+internal routes and the pass are off (404, and 200 `ran:false` for the cron). Each call is signed over the
+environment, host, method, path, timestamp, a one-use ID and the body hash; the worker allows 60 seconds of
+skew, keeps IDs for 5 minutes and accepts the previous secret during a rotation. The cron makes one bounded
+pass (40 seconds, 200 Composio calls) that sweeps abandoned and expired attempts, finishes disconnects and
+checks the health of live connections.
+
+| Variable | Meaning |
+|---|---|
+| `CONNECTIONS_ENV` | `production` or `preview`. Both projects must agree: it is in every signature and picks the org-wide call budget. |
+| `CONNECTIONS_INTERNAL_SECRET` | 32+ characters, shared by the API and the worker (the signing key). |
+| `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` | Optional, during a rotation; must differ from the current one. |
+| `COMPOSIO_API_KEY` | Worker only: the Composio project key. |
+| `CONNECTIONS_DATABASE_URL` | A login that may `SET ROLE service_role` (like `CALENDAR_DATABASE_URL`). Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID` | The Shopify auth config created once in the Composio project. |
+| `CONNECTIONS_CALLBACK_URL` | The one dashboard URL Composio redirects to (https; plain http only on loopback). |
+| `CRON_SECRET` | Bearer secret Vercel Cron sends, 32+ characters. Unset: the cron route is 404. |
+| `CONNECTIONS_CRON_SCHEDULE` | Build time, workers project: adds the Vercel cron, for example `*/5 * * * *`. Unset: no cron. |
+
 ## Database pool and request limits
 
 `createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from
@@ -678,7 +702,7 @@ against the pinned Supabase Root 2021 CA.
    | Project | Build command | Output |
    |---|---|---|
    | API (`prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ`) | `pnpm build:vercel` | One Node 24 function from `src/vercel.ts` for every path. No cron functions, no crons. **The build fails while any `*_CRON_SCHEDULE` is set**, so a deploy cannot drop a live cron unnoticed. |
-   | Workers (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`) | `pnpm build:vercel:worker` | Five functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces` and `/cron/followup`, each reached only by its exact path (anchored routes, `^/cron/<name>$`), and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
+   | Workers (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`) | `pnpm build:vercel:worker` | Eleven functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces`, `/cron/followup`, `/cron/connections` and the five `/internal/connections/<operation>` routes, each reached only by its exact path (anchored routes, `^/cron/<name>$`), and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
 
    `build-vercel.mjs <api|worker> [dir]` cleans only its default `.vercel/output`; a directory
    given as `dir` must not exist or be empty, or the script stops before writing anything.
@@ -724,7 +748,9 @@ against the pinned Supabase Root 2021 CA.
    | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `FOLLOWUP_MODEL`, `FOLLOWUP_SLOT_MINUTES`, `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS`, `FOLLOWUP_INTERVAL_MS`, `AGENT_MODEL_PERSONAL_DATA`, `AGENT_MODEL_NO_PERSONAL_DATA`, `AGENT_TEMPLATED`, `AGENT_TEMPLATED_MAX_CANDIDATES`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `COMPOSIO_API_KEY` | **no** | yes |
    | `ENRICHMENT_WORKER`, `ENRICHMENT_DATABASE_URL`, `ENRICHMENT_WORKER_ID`, `ENRICHMENT_CLAIM_LIMIT`, `ENRICHMENT_MAX_ATTEMPTS`, `ENRICHMENT_PROVIDER_TIMEOUT_MS`, `ENRICHMENT_INTERVAL_MS`, `TREG_TOKEN`, `TREG_BASE_URL` | **no** | no (the Mac's enrichment worker) |
    | `IMAGE_WORKER`, `IMAGE_DATABASE_URL`, `IMAGE_SERVICE_DATABASE_URL`, `IMAGE_INTERVAL_MS` | **no** | no (the Mac's image worker) |
-   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
+   | `CONNECTIONS_DATABASE_URL`, `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL` (with `COMPOSIO_API_KEY`, listed above) | **no** | yes |
+   | `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`, `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (the signing secrets and environment; the same values in both projects) | yes (the API signs with them) | yes |
+   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
 
    `CEREBRAS_*`, `DEEPSEEK_*` and `AGENT_MODEL_*` are worker-only because `POST /v1/agents/followup/runs`
    and the template-suggestion route are not wired in `createServer` today. Wiring them into the API
