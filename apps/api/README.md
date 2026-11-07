@@ -706,12 +706,16 @@ against the pinned Supabase Root 2021 CA.
    # Workers first, always (see "Moving the crons out of a single project"). Vercel Cron runs only
    # on a production deployment, so the workers' cron fires after --prod.
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl \
-     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # cron workers
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--environment preview | --prod]   # cron workers
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ \
-     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # API
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--environment preview | --prod]   # API
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_uTGH5yuyXfr6w9lAihGj1HcDxSdp \
-     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # dashboard
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--environment preview | --prod]   # dashboard
    ```
+   A preview deploy does not move the fixed preview hosts. Point each one at its new deploy with
+   `pnpm dlx vercel@latest alias set <deploy host> <alias> --scope team_ZovXSbiQdKR8CvRpDYfAzbAr`:
+   `zs-business-workers-preview.vercel.app` (the API's `CONNECTIONS_WORKER_URL`),
+   `zs-business-api-preview.vercel.app` and `zs-business-dashboard-preview.vercel.app`.
    **Two Vercel projects from `apps/api`.** A project's environment variables are visible to every
    function in it, so the cron workers are their own project: the API project never holds
    `DELIVERY_DATABASE_URL`, `RESEND_API_KEY`, `GOOGLE_TOKEN_PRIVATE_KEY` or any other worker
@@ -792,7 +796,7 @@ against the pinned Supabase Root 2021 CA.
    times and never starts the API deploy while a worker name is still set. It is workers first,
    because the next API deploy (`pnpm build:vercel`) has no crons, and refuses to build while any
    `*_CRON_SCHEDULE` is still set on the project.
-   1. **Deploy the workers project** (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`): `--target preview` first, then
+   1. **Deploy the workers project** (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`): `--environment preview` first, then
       `--prod`. Its env is set for production and preview. Cron runs only on the production
       deployment.
    2. **Check it.** Call `GET /cron/activepieces` on the workers production deployment with
