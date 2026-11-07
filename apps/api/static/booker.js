@@ -84,7 +84,8 @@
     // An unconfirmed attempt may hold the slot, so its recovery panel wins over any step.
     const view = !state.page ? h("p", { class: "booker-status" }, state.notice || "Loading…")
       : state.attempt && state.attempt.uncertain ? unconfirmedView() : viewFor(state.step);
-    root.replaceChildren(...(Array.isArray(view) ? view : [view]));
+    // Views are arrays with optional parts (null when absent); replaceChildren would print "null".
+    root.replaceChildren(...(Array.isArray(view) ? view : [view]).filter((node) => node !== null && node !== undefined && node !== false));
     const focus = root.querySelector("[data-focus]");
     if (focus) focus.focus({ preventScroll: true });
     postHeight();
