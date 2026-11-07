@@ -14,7 +14,12 @@ export interface FakeAccount {
   deleted: boolean;
   revoked: boolean;
 }
-export interface FakeCall { readonly method: string; readonly path: string; readonly body: unknown; readonly apiKey: string | null }
+export interface FakeCall { readonly method: string; readonly path: string; readonly query: URLSearchParams; readonly body: unknown; readonly apiKey: string | null }
+/**
+ * One tool in the fake registry. `versions` is every version the tool has; `listed` is the recent part the
+ * registry lists in `available_versions` (all of them when absent), since the real list is capped.
+ */
+export interface FakeTool { toolkit: string; versions: string[]; listed?: string[]; deprecated?: boolean }
 export interface FakeShop { id: string; name: string; domain: string }
 
 type Override = { status?: number; json?: unknown; hang?: boolean; bytes?: number; times?: number };
@@ -41,11 +46,11 @@ export class FakeComposio {
   private counter = 0;
   /** Drops the answer of the next `complete_auth` after it took effect (a lost response). */
   loseNextCompleteAuth = false;
-  /** The tool registry `GET /tools/:slug` answers from (A-8): slug to its toolkit and versions. */
-  readonly tools = new Map<string, { toolkit: string; versions: string[] }>([
-    ["SHOPIFY_GET_SHOP_DETAILS", { toolkit: "shopify", versions: ["20251201_00"] }],
-    ["SHOPIFY_GET_ORDERS_WITH_FILTERS", { toolkit: "shopify", versions: ["20251201_00"] }],
-    ["SHOPIFY_GET_ORDER_BY_ID", { toolkit: "shopify", versions: ["20251201_00"] }],
+  /** The tool registry `GET /tools/:slug` answers from (A-8): slug to its toolkit and versions, newest first. */
+  readonly tools = new Map<string, FakeTool>([
+    ["SHOPIFY_QUERY_SHOP", { toolkit: "shopify", versions: ["20261104_00"] }],
+    ["SHOPIFY_GET_ORDERS_WITH_FILTERS", { toolkit: "shopify", versions: ["20261104_00"] }],
+    ["SHOPIFY_GET_ORDER", { toolkit: "shopify", versions: ["20261104_00"] }],
   ]);
   /** Runs before a request is answered; a test uses it to interleave another writer. */
   gate: ((call: FakeCall) => Promise<void>) | null = null;
@@ -77,7 +82,7 @@ export class FakeComposio {
     const path = url.pathname.replace(/^\/api\/v3\.1/, "");
     const headers = new Headers(init?.headers);
     const body = typeof init?.body === "string" && init.body.length > 0 ? JSON.parse(init.body) as unknown : undefined;
-    const call: FakeCall = { method, path, body, apiKey: headers.get("x-api-key") };
+    const call: FakeCall = { method, path, query: url.searchParams, body, apiKey: headers.get("x-api-key") };
     this.calls.push(call);
     await this.gate?.(call);
     const signal = init?.signal ?? undefined;
@@ -97,7 +102,7 @@ export class FakeComposio {
       }
       return json(override.value.status ?? 200, override.value.json ?? {});
     }
-    const r = this.route(method, path, body);
+    const r = this.route(method, path, body, url.searchParams);
     if (this.loseNextCompleteAuth && path === "/connected_accounts/complete_auth" && r.status === 200) {
       this.loseNextCompleteAuth = false;
       throw new TypeError("fetch failed");
@@ -105,7 +110,7 @@ export class FakeComposio {
     return json(r.status, r.body);
   };
 
-  private route(method: string, path: string, body: unknown): { status: number; body: unknown } {
+  private route(method: string, path: string, body: unknown, query: URLSearchParams): { status: number; body: unknown } {
     const b = (body ?? {}) as Record<string, unknown>;
     if (method === "POST" && path === "/connected_accounts/link") {
       const id = `ca_${++this.counter}`;
@@ -141,8 +146,14 @@ export class FakeComposio {
     const tool = /^\/tools\/([A-Z0-9_]+)$/.exec(path);
     if (method === "GET" && tool) {
       const entry = this.tools.get(tool[1]!);
-      if (!entry) return { status: 404, body: { error: { message: "no such tool" } } };
-      return { status: 200, body: { slug: tool[1], name: "x", toolkit: { slug: entry.toolkit, name: "Shopify" }, version: entry.versions.at(-1), available_versions: entry.versions } };
+      // `toolkit_versions` asks for the tool at one version: unknown versions answer 404, like an unknown slug.
+      const asked = query.get("toolkit_versions");
+      const version = asked === null || asked === "latest" ? entry?.versions[0] : entry?.versions.find((v) => v === asked);
+      if (!entry || version === undefined) return { status: 404, body: { error: { message: "no such tool" } } };
+      return {
+        status: 200,
+        body: { slug: tool[1], name: "x", toolkit: { slug: entry.toolkit, name: "Shopify" }, version, available_versions: entry.listed ?? entry.versions, is_deprecated: entry.deprecated ?? false },
+      };
     }
     const exec = /^\/tools\/execute\/([A-Z0-9_]+)$/.exec(path);
     if (method === "POST" && exec) {
@@ -152,14 +163,14 @@ export class FakeComposio {
       if (!account || account.deleted || account.userId !== b["user_id"]) return { status: 404, body: { error: { message: "no account" } } };
       if (typeof b["version"] !== "string" || b["version"] === "") return { status: 400, body: { error: { message: "version" } } };
       const slug = exec[1]!;
-      if (slug === "SHOPIFY_GET_SHOP_DETAILS") {
+      if (slug === "SHOPIFY_QUERY_SHOP") {
         const shop = this.shops.get(account.id)!;
-        return { status: 200, body: { successful: true, error: null, data: { shop: { id: shop.id, name: shop.name, myshopify_domain: shop.domain, email: "owner@example.com" } } } };
+        return { status: 200, body: { successful: true, error: null, data: { shop: { id: `gid://shopify/Shop/${shop.id}`, name: shop.name, myshopifyDomain: shop.domain, email: "owner@example.com" } } } };
       }
       if (slug === "SHOPIFY_GET_ORDERS_WITH_FILTERS") return { status: 200, body: { successful: true, error: null, data: { orders: this.orders } } };
-      if (slug === "SHOPIFY_GET_ORDER_BY_ID") {
+      if (slug === "SHOPIFY_GET_ORDER") {
         const id = (b["arguments"] as Record<string, unknown>)["order_id"];
-        return { status: 200, body: { successful: true, error: null, data: { order: fakeOrder(String(id)) } } };
+        return { status: 200, body: { successful: true, error: null, data: fakeOrder(String(id)) } };
       }
     }
     return { status: 404, body: { error: { message: "unknown route" } } };

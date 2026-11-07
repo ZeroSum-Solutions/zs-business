@@ -220,6 +220,7 @@ describe("complete (C-5, C-8, C-14)", () => {
     expect(out).toEqual({ outcome: "verified", composioAccountId: accountId, externalAccountId: "8812345", accountDomain: "testshop.myshopify.com", accountLabel: "Test Shop" });
     expect(fake.callsTo(/complete_auth/)[0]!.body).toEqual({ session_uri: session, user_id: composioUserId(ENV, a.tenantId) });
     expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "verified", external_account_id: "8812345" });
+    expect((fake.callsTo(/tools\/execute\/SHOPIFY_QUERY_SHOP/)[0]!.body as { arguments: unknown }).arguments).toEqual({ fields: "id name myshopifyDomain" });
   });
 
   it("A-3: a verified attempt (a reload) is checked again without a second redemption", async () => {
@@ -300,7 +301,7 @@ describe("complete (C-5, C-8, C-14)", () => {
   it("B-3: a rate-limited identity read opens the organization cooldown", async () => {
     const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     const session = fake.consent(accountId);
-    fake.override(/POST \/tools\/execute\/SHOPIFY_GET_SHOP_DETAILS/, { status: 200, json: { successful: false, error: "slow down", data: { status_code: 429 } }, times: 1 });
+    fake.override(/POST \/tools\/execute\/SHOPIFY_QUERY_SHOP/, { status: 200, json: { successful: false, error: "slow down", data: { status_code: 429 } }, times: 1 });
     expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "rate_limited" });
     expect(reports.some((r) => r.kind === "cooldown")).toBe(true);
     const calls = fake.calls.length;
@@ -335,11 +336,11 @@ describe("complete (C-5, C-8, C-14)", () => {
     const session = fake.consent(accountId);
     let cancelled: unknown;
     // The identity answer is already on its way when the cancel deletes the account.
-    fake.override(/POST \/tools\/execute\/SHOPIFY_GET_SHOP_DETAILS/, {
-      status: 200, times: 1, json: { successful: true, error: null, data: { shop: { id: "8812345", name: "Test Shop", myshopify_domain: "testshop.myshopify.com" } } },
+    fake.override(/POST \/tools\/execute\/SHOPIFY_QUERY_SHOP/, {
+      status: 200, times: 1, json: { successful: true, error: null, data: { shop: { id: "gid://shopify/Shop/8812345", name: "Test Shop", myshopifyDomain: "testshop.myshopify.com" } } },
     });
     fake.gate = async (call) => {
-      if (call.path === "/tools/execute/SHOPIFY_GET_SHOP_DETAILS" && cancelled === undefined) {
+      if (call.path === "/tools/execute/SHOPIFY_QUERY_SHOP" && cancelled === undefined) {
         cancelled = null;
         cancelled = await worker.cancel({ tenantId: a.tenantId, attemptId });
       }
@@ -469,7 +470,7 @@ describe("run (C-6, C-10, C-12)", () => {
     expect(out.outcome).toBe("ok");
     const exec = fake.callsTo(/tools\/execute\/SHOPIFY_GET_ORDERS_WITH_FILTERS/)[0]!;
     expect(Object.keys(exec.body as object).sort()).toEqual(["arguments", "connected_account_id", "user_id", "version"]);
-    expect(exec.body).toMatchObject({ connected_account_id: accountId, user_id: composioUserId(ENV, a.tenantId), version: "20251201_00" });
+    expect(exec.body).toMatchObject({ connected_account_id: accountId, user_id: composioUserId(ENV, a.tenantId), version: "20261104_00" });
     const text = JSON.stringify(out);
     for (const leaked of ["should-not-leak", "SKU-1", "secret-vendor", "+15555550100", "note_attributes", "default_address"]) expect(text).not.toContain(leaked);
     expect(out).toMatchObject({ outcome: "ok", truncated: false, data: { orders: [{ id: "1001" }, { id: "1002" }] } });

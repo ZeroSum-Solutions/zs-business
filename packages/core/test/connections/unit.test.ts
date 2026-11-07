@@ -187,7 +187,7 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     const fake = new FakeComposio();
     fake.seed({ id: "ca_1", userId: "u" });
     const client = make(fake);
-    const call = () => client.execute({ slug: "SHOPIFY_GET_SHOP_DETAILS", version: "v", userId: "u", connectedAccountId: "ca_1", arguments: {} });
+    const call = () => client.execute({ slug: "SHOPIFY_QUERY_SHOP", version: "v", userId: "u", connectedAccountId: "ca_1", arguments: {} });
     // A-5: the class comes from a structured status only; words in the text never make an auth error.
     fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: "Token has expired; please reauthorize" } });
     expect(await call()).toEqual({ kind: "failed", reason: "unavailable" });
@@ -271,7 +271,7 @@ describe("catalog and output projection (C-6, C-10, C-14)", () => {
     expect(toolkit.identity.version).not.toBe("");
     expect(toolkit.tools.map((tool) => tool.name)).toEqual(["shopify_list_orders", "shopify_get_order"]);
     for (const tool of toolkit.tools) expect(tool.version).not.toBe("");
-    expect(catalogTool("shopify", "SHOPIFY_GET_ORDER_BY_ID")).toBeUndefined();
+    expect(catalogTool("shopify", "SHOPIFY_GET_ORDER")).toBeUndefined();
     expect(catalogTool("other", "shopify_list_orders")).toBeUndefined();
   });
 
@@ -297,8 +297,19 @@ describe("catalog and output projection (C-6, C-10, C-14)", () => {
     });
     expect(list.project({ orders: "no" })).toBeUndefined();
     expect(list.project({ orders: [{ name: "#1" }] })).toEqual({ orders: [] });
-    expect(get.project({ order: fakeOrder(5) })).toMatchObject({ order: { id: "5" } });
+    expect(get.project(fakeOrder(5))).toMatchObject({ order: { id: "5" } });
+    expect(get.project({ order: fakeOrder(5) })).toBeUndefined();
     expect(get.project(null)).toBeUndefined();
+  });
+
+  it("reads the shop's numeric id out of its global id and refuses any other id (C-14)", () => {
+    const identity = catalogToolkit("shopify")!.identity;
+    const shop = (id: string) => ({ shop: { id, name: "Test Shop", myshopifyDomain: "TestShop.myshopify.com", email: "x@example.com" } });
+    expect(identity.arguments).toEqual({ fields: "id name myshopifyDomain" });
+    expect(identity.project(shop("gid://shopify/Shop/8812345"))).toEqual({ externalAccountId: "8812345", name: "Test Shop", domain: "testshop.myshopify.com" });
+    for (const id of ["8812345", "gid://shopify/Order/8812345", "gid://shopify/Shop/", "gid://shopify/Shop/12a"]) expect(identity.project(shop(id))).toBeUndefined();
+    expect(identity.project({ shop: { id: "gid://shopify/Shop/1", name: "x", myshopify_domain: "x.myshopify.com" } })).toBeUndefined();
+    expect(identity.project(shop("gid://shopify/Shop/1").shop)).toBeUndefined();
   });
 
   it("C-9: projects each order on its own, keeps at most 50 orders and 250 line items", () => {
@@ -352,18 +363,36 @@ describe("the owner-run catalog check (A-8, C-6)", () => {
 
   it("fails on a missing slug, a version that is gone, another toolkit, and a refused key, and names no secret", async () => {
     const fake = new FakeComposio();
-    fake.tools.delete("SHOPIFY_GET_ORDER_BY_ID");
-    fake.tools.set("SHOPIFY_GET_ORDERS_WITH_FILTERS", { toolkit: "shopify", versions: ["20260101_00"] });
-    fake.tools.set("SHOPIFY_GET_SHOP_DETAILS", { toolkit: "gmail", versions: ["20251201_00"] });
+    fake.tools.delete("SHOPIFY_GET_ORDER");
+    fake.tools.set("SHOPIFY_GET_ORDERS_WITH_FILTERS", { toolkit: "shopify", versions: ["20261201_00", "20260101_00"] });
+    fake.tools.set("SHOPIFY_QUERY_SHOP", { toolkit: "gmail", versions: ["20261104_00"] });
     const report = await checkComposioCatalog(client(fake));
     expect(report.ok).toBe(false);
     expect(Object.fromEntries(report.results.map((result) => [result.slug, result.problem]))).toEqual({
-      SHOPIFY_GET_SHOP_DETAILS: "wrong_toolkit", SHOPIFY_GET_ORDERS_WITH_FILTERS: "version_missing", SHOPIFY_GET_ORDER_BY_ID: "slug_missing",
+      SHOPIFY_QUERY_SHOP: "wrong_toolkit", SHOPIFY_GET_ORDERS_WITH_FILTERS: "version_missing", SHOPIFY_GET_ORDER: "slug_missing",
     });
+    // The version miss was asked for directly before it counted.
+    expect(fake.callsTo(/GET \/tools\/SHOPIFY_GET_ORDERS_WITH_FILTERS/).map((call) => call.query.get("toolkit_versions"))).toEqual([null, "20261104_00"]);
     fake.override(/GET \/tools\//, { status: 401 });
     const refused = await checkComposioCatalog(client(fake));
     expect(refused.ok).toBe(false);
     expect(refused.results.every((result) => result.problem === "key_refused")).toBe(true);
     expect(JSON.stringify([report, refused])).not.toContain("ck_test_secret");
+  });
+
+  it("accepts a pin the capped version list no longer shows when the registry still has it", async () => {
+    const fake = new FakeComposio();
+    fake.tools.set("SHOPIFY_GET_ORDER", { toolkit: "shopify", versions: ["20270101_00", "20261104_00"], listed: ["20270101_00"] });
+    const report = await checkComposioCatalog(client(fake));
+    expect(report.ok).toBe(true);
+    expect(fake.callsTo(/GET \/tools\/SHOPIFY_GET_ORDER$/).map((call) => call.query.get("toolkit_versions"))).toEqual([null, "20261104_00"]);
+  });
+
+  it("fails a deprecated tool even at a pinned version it still serves", async () => {
+    const fake = new FakeComposio();
+    fake.tools.set("SHOPIFY_QUERY_SHOP", { toolkit: "shopify", versions: ["20261104_00"], deprecated: true });
+    const report = await checkComposioCatalog(client(fake));
+    expect(report.ok).toBe(false);
+    expect(report.results.find((result) => result.slug === "SHOPIFY_QUERY_SHOP")!.problem).toBe("deprecated");
   });
 });
