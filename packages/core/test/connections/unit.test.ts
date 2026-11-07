@@ -208,11 +208,11 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     await expect(call()).rejects.toMatchObject({ kind: "unavailable", detail: "malformed" });
   });
 
-  it("maps HTTP statuses without provider text: 429 and 402 rate, 401 and 403 our key refused, 410 gone, 5xx unavailable", async () => {
+  it("maps HTTP statuses without provider text: 429 and 402 rate, 401, 403 and 410 our key refused, 404 gone, 5xx unavailable", async () => {
     const fake = new FakeComposio();
     const client = make(fake);
-    // A-5: a 401 or 403 on our own call is about our key or project, never the store's grant.
-    const kinds: Record<number, string> = { 429: "rate_limited", 402: "rate_limited", 401: "key_refused", 403: "key_refused", 410: "not_found", 400: "bad_request", 500: "unavailable", 503: "unavailable" };
+    // A-5: a 401, 403 or 410 on our own call is about our key or project, never the store's grant.
+    const kinds: Record<number, string> = { 429: "rate_limited", 402: "rate_limited", 401: "key_refused", 403: "key_refused", 410: "key_refused", 404: "not_found", 400: "bad_request", 500: "unavailable", 503: "unavailable" };
     for (const [status, kind] of Object.entries(kinds)) {
       fake.clearOverrides();
       fake.override(/connected_accounts\/ca_x(\/revoke)?$/, { status: Number(status), json: { error: { message: "provider words" } } });

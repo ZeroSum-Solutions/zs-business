@@ -177,8 +177,9 @@ export interface ComposioClientConfig {
 
 function kindOf(status: number): ComposioErrorKind {
   if (status === 429 || status === 402) return "rate_limited";
-  if (status === 401 || status === 403) return "key_refused";
-  if (status === 404 || status === 410) return "not_found";
+  // A-5: 401, 403 and 410 on our own call are about our key or project, never the store's grant.
+  if (status === 401 || status === 403 || status === 410) return "key_refused";
+  if (status === 404) return "not_found";
   if (status >= 400 && status < 500) return "bad_request";
   return "unavailable";
 }

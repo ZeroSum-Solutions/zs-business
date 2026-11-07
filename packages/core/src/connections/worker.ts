@@ -274,13 +274,13 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
 
   // ---- removing an account -----------------------------------------------------------------
   /**
-   * C-3, C-9, C-13: reads the account and, only when it is this tenant's (user, toolkit and, when one
-   * is known, auth config), revokes it once (`recordRevoke` stores the outcome at once, so a retry never
+   * C-3, C-9, C-13: reads the account and, only when it is this tenant's (user, toolkit and auth config,
+   * all required: A-2 fails closed), revokes it once (`recordRevoke` stores the outcome at once, so a retry never
    * repeats a success or loses a failure) and deletes it. A 404 at any step counts as done. Budget and
    * pass limits propagate; nothing else does.
    */
   async function removeAccount(
-    target: { accountId: string; tenantId: string; toolkit: string; authConfigId: string | null; revoke: RevokeOutcome },
+    target: { accountId: string; tenantId: string; toolkit: string; authConfigId: string; revoke: RevokeOutcome },
     recordRevoke: (outcome: "revoked" | "failed") => Promise<void>,
     pass: PassContext | undefined,
     signal?: AbortSignal,
@@ -291,7 +291,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       if (account === null) return { outcome: "removed", revokeFailed: revoke === "failed" };
       if (account.userId === null) return { outcome: "unverified" };
       if (account.id !== target.accountId || account.userId !== userIdOf(target.tenantId) || account.toolkit !== target.toolkit
-        || (target.authConfigId !== null && account.authConfigId !== target.authConfigId)) return { outcome: "foreign" };
+        || account.authConfigId !== target.authConfigId) return { outcome: "foreign" };
       if (revoke === null) {
         try {
           await spend(pass, () => composio.revoke(target.accountId, signal));
@@ -376,12 +376,15 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     // A-3, A-4: the attempt is locked while it is checked, and a callback that carries a session marks
     // the attempt before the redemption. A status call (no session) for an attempt no callback reached
     // is refused: a consent in another browser can never be picked up by polling.
+    // Whether an earlier callback had presented a session: only then can a "used" answer be our own lost call.
+    let presentedBefore = false;
     const gate = await service(async (tx): Promise<AttemptRow | Refused> => {
       const attempt = await loadAttempt(tx, input.tenantId, input.attemptId, true);
       if (!attempt || attempt.status === "cancelling" || attempt.status === "cancelled" || attempt.status === "swept") return refused("invalid_attempt");
       if (attempt.status === "confirmed") return refused("conflict");
       if (attempt.expires_at.getTime() <= now().getTime()) return refused("expired");
       if (attempt.status === "started") {
+        presentedBefore = attempt.session_presented_at !== null;
         if (input.sessionUri !== null) {
           await tx.query("UPDATE connection_attempts SET session_presented_at=coalesce(session_presented_at, $3), updated_at=$3 WHERE tenant_id=$1 AND id=$2",
             [input.tenantId, input.attemptId, now()]);
@@ -396,6 +399,16 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     const toolkit = catalogToolkit(attempt.toolkit);
     if (!toolkit) return refused("not_connected");
     const userId = userIdOf(input.tenantId);
+    /**
+     * A-4: a redemption that failed for good ends what the session marker allowed: the marker goes, so no
+     * status call can pick up an account this browser never redeemed. Only a `started` attempt holds one.
+     */
+    const definitive = async (): Promise<Refused> => {
+      await service((tx) => tx.query(
+        "UPDATE connection_attempts SET session_presented_at=NULL, updated_at=$3 WHERE tenant_id=$1 AND id=$2 AND status='started'",
+        [input.tenantId, input.attemptId, now()]));
+      return refused("not_connected");
+    };
     try {
       // Only a `started` attempt redeems; a `verified` one (a reload) goes to the account check.
       if (input.sessionUri !== null && attempt.status === "started") {
@@ -403,13 +416,18 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
         try {
           const redeemed = await spend(undefined, () => composio.completeAuth({ sessionUri, userId }, signal));
           // Another account than the attempt's never connects (C-5).
-          if (redeemed.connectedAccountId !== attempt.composio_account_id) return refused("not_connected");
+          if (redeemed.connectedAccountId !== attempt.composio_account_id) return await definitive();
         } catch (error) {
-          // 404 or 410: the session was used or has expired. Only this browser held it, so an account that
-          // is ACTIVE for this user by the read below was redeemed by our earlier, lost call (C-5).
           // 400: Composio checked `user_id` and it is not the session's.
-          if (error instanceof ComposioError && error.kind === "bad_request") return refused("not_connected");
-          if (!(error instanceof ComposioError && error.kind === "not_found")) throw error;
+          if (error instanceof ComposioError && error.kind === "bad_request") return await definitive();
+          // 404: the session is unknown or used. It can be our own earlier call, whose answer was lost, only
+          // when an earlier callback presented a session; then the account read below decides (C-5). On the
+          // first presentation it is a session nobody redeemed for us: final.
+          if (error instanceof ComposioError && error.kind === "not_found") {
+            if (!presentedBefore) return await definitive();
+          } else {
+            throw error;
+          }
         }
       }
       const account = await spend(undefined, () => composio.getAccount(attempt.composio_account_id, signal));
@@ -588,8 +606,18 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
    * `account_mismatch` and an operator hears of it.
    */
   async function finishDisconnect(row: ConnectionRow, pass: PassContext | undefined, signal?: AbortSignal): Promise<"disconnected" | "pending"> {
+    const authConfigId = config.authConfigIds[row.toolkit];
+    if (!authConfigId) {
+      // A-2: without the auth config the account cannot be proved ours, so nothing is revoked or deleted;
+      // the row stays disconnecting until the config is back, and an operator hears of it.
+      const code = "not_configured";
+      await service((tx) => tx.query("UPDATE connections SET last_error_code=$3, updated_at=$4 WHERE tenant_id=$1 AND id=$2 AND status='disconnecting'",
+        [row.tenant_id, row.id, code, now()]));
+      report({ kind: "disconnect_retry", tenantId: row.tenant_id, connectionId: row.id, code });
+      return "pending";
+    }
     const removal = await removeAccount(
-      { accountId: row.composio_account_id, tenantId: row.tenant_id, toolkit: row.toolkit, authConfigId: config.authConfigIds[row.toolkit] ?? null, revoke: row.revoke_outcome },
+      { accountId: row.composio_account_id, tenantId: row.tenant_id, toolkit: row.toolkit, authConfigId, revoke: row.revoke_outcome },
       (outcome) => service((tx) => tx.query(
         "UPDATE connections SET revoke_outcome=$3, updated_at=$4 WHERE tenant_id=$1 AND id=$2 AND status='disconnecting' AND revoke_outcome IS NULL",
         [row.tenant_id, row.id, outcome, now()])).then(() => undefined),

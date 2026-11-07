@@ -180,6 +180,37 @@ describe("complete (C-5, C-8, C-14)", () => {
     expect(fake.callsTo(/complete_auth/)).toHaveLength(1);
   });
 
+  it("A-4: a first session Composio does not know (404) is final: nothing verifies, and no status call picks the account up", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    fake.consent(accountId);
+    fake.accounts.get(accountId)!.status = "ACTIVE"; // finished somewhere else; this browser holds no real session
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: "session-made-up" })).toEqual({ outcome: "refused", reason: "not_connected" });
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
+    expect(fake.callsTo(/GET \/connected_accounts/)).toHaveLength(0);
+  });
+
+  it("A-4: a definitive 400 or a redemption of another account clears the marker, so a later status call is refused", async () => {
+    for (const answer of [{ status: 400, json: { error: { message: "user mismatch" } } }, { status: 200, json: { connected_account_id: "ca_someone_else", toolkit_slug: "shopify" } }]) {
+      const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+      const session = fake.consent(accountId);
+      fake.accounts.get(accountId)!.status = "ACTIVE";
+      fake.override(/POST \/connected_accounts\/complete_auth/, { ...answer, times: 1 });
+      expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "not_connected" });
+      expect((await attemptRow(a.tenantId, attemptId)).session_presented_at).toBeNull();
+      expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
+    }
+  });
+
+  it("A-4: a used session is read as our lost call only when an earlier callback presented one", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
+    fake.loseNextCompleteAuth = true;
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "provider_unavailable" });
+    // The reload carries the same session, which Composio now calls used (404): the earlier call redeemed it.
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toMatchObject({ outcome: "verified", composioAccountId: accountId });
+  });
+
   it("verifies after the session is redeemed for the tenant's user and reads the store identity through the envelope", async () => {
     const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     const session = fake.consent(accountId);
@@ -208,11 +239,12 @@ describe("complete (C-5, C-8, C-14)", () => {
     expect((await attemptOf(fixture, b.tenantId, other.attemptId))?.status).toBe("started");
   });
 
-  it("a used session cannot be replayed to take the account over: the account stays pending", async () => {
+  it("a used session cannot be replayed to take the account over: the first presentation of it is refused", async () => {
     const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     const session = fake.consent(accountId);
     fake.sessions.get(session)!.used = true; // someone else used it first
-    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "pending" });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "not_connected" });
+    expect(fake.accounts.get(accountId)?.status).toBe("INITIATED");
   });
 
   it("refuses an account whose user, toolkit or auth config differs from the attempt", async () => {
@@ -236,11 +268,12 @@ describe("complete (C-5, C-8, C-14)", () => {
     const outcomes: Record<string, string> = {};
     for (const status of ["INITIATED", "INITIALIZING", "ACTIVE", "INACTIVE", "FAILED", "EXPIRED", "SOMETHING_NEW"]) {
       const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
-      // A session that was already used (404) leaves the decision to the account read.
+      // A callback whose redemption answer was lost, then a status call: the account read decides.
       const session = fake.consent(accountId);
-      fake.sessions.get(session)!.used = true;
+      fake.loseNextCompleteAuth = true;
+      await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session });
       fake.accounts.get(accountId)!.status = status;
-      const out = await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session });
+      const out = await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null });
       outcomes[status] = out.outcome === "refused" ? `refused:${out.reason}` : out.outcome;
     }
     expect(outcomes).toEqual({
@@ -249,14 +282,17 @@ describe("complete (C-5, C-8, C-14)", () => {
     });
   });
 
-  it("B-11: a 401 or 403 on complete_auth is our key, never the store: provider_unavailable and a key_refused report", async () => {
-    for (const status of [401, 403]) {
+  it("B-11: a 401, 403 or 410 on complete_auth is our key, never the store: provider_unavailable and a key_refused report", async () => {
+    for (const status of [401, 403, 410]) {
       const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
       const session = fake.consent(accountId);
+      // Even with the account ACTIVE, a 410 never takes the used-session path.
+      fake.accounts.get(accountId)!.status = "ACTIVE";
       fake.override(/POST \/connected_accounts\/complete_auth/, { status, json: {}, times: 1 });
       expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "provider_unavailable" });
+      expect((await attemptRow(a.tenantId, attemptId)).status).toBe("started");
     }
-    expect(reports.filter((r) => r.kind === "key_refused")).toHaveLength(2);
+    expect(reports.filter((r) => r.kind === "key_refused")).toHaveLength(3);
   });
 
   it("B-3: a rate-limited identity read opens the organization cooldown", async () => {
@@ -601,6 +637,21 @@ describe("disconnect (C-13)", () => {
       expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "account_mismatch" });
     }
     expect(reports.filter((r) => r.kind === "account_mismatch")).toHaveLength(3);
+  });
+
+  it("A-2: without the toolkit's auth config the account's owner cannot be proved: nothing is revoked or deleted until it is back", async () => {
+    const { id, accountId } = await disconnecting();
+    const unconfigured = makeWorker(database, fake, clock, { authConfigIds: {} }, reports);
+    const calls = fake.calls.length;
+    expect(await unconfigured.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
+    expect((await unconfigured.pass()).disconnected).toBe(0);
+    expect(fake.calls).toHaveLength(calls);
+    expect(fake.accounts.get(accountId)).toMatchObject({ revoked: false, deleted: false });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnecting", last_error_code: "not_configured" });
+    expect(reports.some((r) => r.kind === "disconnect_retry" && r.code === "not_configured")).toBe(true);
+    // The configured worker finishes it.
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+    expect(fake.accounts.get(accountId)).toMatchObject({ revoked: true, deleted: true });
   });
 
   it("a delete failure leaves the row disconnecting; the pass finishes it later", async () => {

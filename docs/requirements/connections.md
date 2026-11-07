@@ -192,10 +192,15 @@ role for workers (all workers share one pattern today; Known limits).
     `session_uri`) on an attempt that never had one is `not_connected`. It redeems only a
     `started` attempt, and it moves the attempt to `verified` with a conditional update that
     fails (`invalid_attempt`) if a cancel or the sweep moved it meanwhile:
-    - redeem `session_uri` with the tenant's `user_id`. If Composio says the session was
-      already used, read the account instead: only this browser held that `session_uri`, so
-      an account that is now `ACTIVE` for this `user_id` was redeemed by our earlier, lost
-      call;
+    - redeem `session_uri` with the tenant's `user_id`. If Composio says the session is
+      unknown or used (404) and an earlier callback for this attempt had presented a session,
+      read the account instead: only this browser held that `session_uri`, so an account that
+      is now `ACTIVE` for this `user_id` was redeemed by our earlier, lost call. On the first
+      presentation a 404 is final, as are a 400 (Composio checked `user_id`) and a redemption
+      that names another account: the answer is `not_connected` and `session_presented_at` is
+      cleared, so no status call can verify the attempt afterwards. A 401, 403 or 410 is our key
+      or project (`provider_unavailable`, reported as `key_refused`), never the used-session
+      path;
     - read the account once and refuse it unless its ID, `user_id`, toolkit and auth config
       are the attempt's and its status is `ACTIVE` (`not_connected`). `INITIATED` or
       `INITIALIZING` answers `pending`; the page then calls the dashboard's
@@ -396,7 +401,10 @@ role for workers (all workers share one pattern today; Known limits).
     (a 404 counts as done), then marks the row `disconnected` and clears the label. An account
     that is not the tenant's, or whose read names no user, is left alone: the row ends
     `disconnected` with `account_mismatch` and the operator is told. A failed read or delete
-    keeps the row `disconnecting` with `delete_failed` for the next pass.
+    keeps the row `disconnecting` with `delete_failed` for the next pass. A worker that has no
+    auth config for the row's toolkit cannot prove the account is the tenant's, so it calls
+    nothing: the row stays `disconnecting` with `not_configured` until the config is back, and
+    the operator is told.
   - A revoke that fails is recorded as `last_error_code = revoke_failed`; the delete still
     runs. The screen then tells the owner to remove the Composio app in Shopify admin. The
     screen says in every case that disconnect stops our access and asks Shopify to remove
