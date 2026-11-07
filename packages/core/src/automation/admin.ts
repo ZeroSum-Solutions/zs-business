@@ -5,6 +5,8 @@
 import {
   automationTokenListSchema,
   automationTokenSchema,
+  AUTOMATION_SCOPE_INFO,
+  automationScopeListSchema,
   automationUsageSchema,
   automationTokenWithSecretSchema,
   createAutomationTokenRequestSchema,
@@ -23,6 +25,7 @@ import {
   webhookEndpointSchema,
   webhookEndpointWithSecretSchema,
   type AutomationToken,
+  type AutomationScopeList,
   type AutomationUsage,
   type JsonValue,
   type AutomationTokenList,
@@ -78,6 +81,9 @@ export function integrationsAuthorize(tenantId: string, actorId: string): Author
     await requireMember(tx, tenantId, actorId, "integrations");
   };
 }
+
+/** hub-access.md H-5 bounded work: the owner's token list returns at most this many (the newest). */
+export const TOKEN_LIST_LIMIT = 1_000;
 
 export function createAutomationAdmin(deps: EdgeDependencies, config: AutomationEdgeConfig, principal: Principal) {
   const tenantId = uuidSchema.parse(principal.tenantId);
@@ -177,11 +183,15 @@ export function createAutomationAdmin(deps: EdgeDependencies, config: Automation
       }, "result");
     },
     listTokens: (): Promise<AutomationTokenList> => read(async (tx) => {
+      // H-5 bounded work: the newest TOKEN_LIST_LIMIT tokens (revoked ones stay on file), oldest first.
       const rows = (await tx.query<TokenRow>(
-        `SELECT ${TOKEN_COLUMNS} FROM automation_tokens WHERE tenant_id=$1 ORDER BY created_at, id`, [tenantId])).rows;
+        `SELECT * FROM (SELECT ${TOKEN_COLUMNS} FROM automation_tokens WHERE tenant_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2) newest
+          ORDER BY created_at, id`, [tenantId, TOKEN_LIST_LIMIT])).rows;
       return parseInput(automationTokenListSchema, { items: rows.map(tokenRecord) }, "result");
     }),
     /** hub-access.md H-8: one token's requests, reads, proposals and refusals per hour over the last 7 days. */
+    /** hub-access.md H-9: every scope with the text an owner sees when choosing scopes. */
+    listScopes: (): Promise<AutomationScopeList> => read(async () => parseInput(automationScopeListSchema, AUTOMATION_SCOPE_INFO, "result")),
     tokenUsage: (tokenId: unknown): Promise<AutomationUsage> => {
       const id = parseInput(uuidSchema, tokenId, "token ID");
       return read(async (tx) => {

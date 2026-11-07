@@ -106,7 +106,7 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
     expect(created.token).toMatchObject({ name: "Lead flow", scopes: ["contacts:propose"], actorId: automationActorId(h.a.tenantId, created.token.id) });
     const inbound = h.inbound();
     const principal = await inbound.authenticate(`Bearer ${created.secret}`);
-    expect(inbound.whoAmI(principal)).toMatchObject({ tokenId: created.token.id, scopes: ["contacts:propose"] });
+    expect(await inbound.whoAmI(principal)).toMatchObject({ tokenId: created.token.id, scopes: ["contacts:propose"] });
     // A key rotation keeps the token working through `previous`; a token signed by another key does not.
     expect((await h.inbound({ current: OTHER_KEY, previous: KEY }).authenticate(`Bearer ${created.secret}`)).tokenId).toBe(created.token.id);
     expect(await h.inbound({ current: OTHER_KEY }).authenticate(`Bearer ${created.secret}`).catch(code)).toBe("Unauthenticated");
@@ -143,7 +143,7 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
       actionType: "crm.contact.create-or-find", requestedBy: principal.actorId,
       payload: { email, consent: { email: null, sms: null }, mode: "interactive" },
     });
-    expect(approval.summary).toContain("Activepieces (Lead flow)");
+    expect(approval.summary).toContain("Automation token (Lead flow)");
     // Staff cannot see or decide it (approvals.md A-11, A-6).
     expect(await h.session(h.a, h.a.staffId).getApproval(proposal.id).catch(code)).toBe("NotFound");
 
@@ -203,8 +203,36 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
       [h.a.tenantId, principal.actorId]);
     expect(standings).toHaveLength(made.length);
     expect(new Set(standings.map((row) => row.status))).toEqual(new Set(["revoked"]));
-    // A principal built before the revocation is stopped inside the proposal's transaction.
-    expect(await h.inbound().propose(principal, contactProposal(), randomUUID()).catch(code)).toBe("TenantDenied");
+    // A principal built before the revocation is stopped inside the proposal's transaction: a 401 (H-3).
+    expect(await h.inbound().propose(principal, contactProposal(), randomUUID()).catch(code)).toBe("Unauthenticated");
+  });
+
+  it("runs the token guard for a replayed proposal, whoami and get_proposal: a revoked token is a 401 on all of them (H-3)", async () => {
+    const { token, secret } = await h.admin(h.a).createToken({ name: "Guarded", scopes: ["contacts:propose"] }, randomUUID());
+    const principal = await h.inbound().authenticate(`Bearer ${secret}`);
+    const key = randomUUID();
+    const body = contactProposal();
+    const first = await h.inbound().propose(principal, body, key);
+    expect((await h.inbound().propose(principal, body, key)).id).toBe(first.id);
+    expect(await h.inbound().whoAmI(principal)).toMatchObject({ tokenId: token.id });
+    expect((await h.inbound().getProposal(principal, first.id)).id).toBe(first.id);
+    await h.admin(h.a).revokeToken(token.id, {}, randomUUID());
+    // The same key and body would replay; a revoked token does not get the stored answer.
+    expect(await h.inbound().propose(principal, body, key).catch(code)).toBe("Unauthenticated");
+    expect(await h.inbound().whoAmI(principal).catch(code)).toBe("Unauthenticated");
+    expect(await h.inbound().getProposal(principal, first.id).catch(code)).toBe("Unauthenticated");
+  });
+
+  it("gives the same proposal for one key and input whichever transport sent it (one canonical summary)", async () => {
+    const { secret } = await h.admin(h.a).createToken({ name: "Both", scopes: ["contacts:propose"] }, randomUUID());
+    const principal = await h.inbound().authenticate(`Bearer ${secret}`);
+    const key = randomUUID();
+    const body = contactProposal();
+    const one = await h.inbound().propose(principal, body, key);
+    const two = await h.inbound().propose(principal, { ...body }, key);
+    expect(two).toEqual(one);
+    const [stored] = await h.rows<{ summary: string }>("SELECT summary FROM approvals WHERE tenant_id=$1 AND id=$2", [h.a.tenantId, one.id]);
+    expect(stored!.summary).toBe(`Automation token (Both) proposes to add or find the customer ${(body.input as { email: string }).email}`);
   });
 
   it("serializes a revocation with concurrent proposals: none commits after it", async () => {
@@ -217,7 +245,7 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
       "SELECT requested_at FROM approvals WHERE tenant_id=$1 AND requested_by=$2 AND status <> 'revoked'", [h.a.tenantId, principal.actorId]);
     expect(after).toHaveLength(0);
     expect(revoked.revokedAt).not.toBeNull();
-    for (const result of proposals) if (result.status === "rejected") expect(result.reason).toBeInstanceOf(TenantDenied);
+    for (const result of proposals) if (result.status === "rejected") expect(result.reason).toBeInstanceOf(Unauthenticated);
   });
 
   it("checks token expiry against the clock read after the token lock: a wait past expiry is refused", async () => {
@@ -245,7 +273,7 @@ describe("automation tokens and proposals (W-9..W-13)", () => {
       }
       h.clock.set(START + 86_400_000);
       await release();
-      expect(await outcome).toBeInstanceOf(TenantDenied);
+      expect(await outcome).toBeInstanceOf(Unauthenticated);
       expect(await h.rows("SELECT 1 FROM approvals WHERE tenant_id=$1 AND requested_by=$2", [h.a.tenantId, principal.actorId])).toHaveLength(0);
     } finally {
       await release();

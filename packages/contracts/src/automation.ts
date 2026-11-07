@@ -151,6 +151,26 @@ export const READ_SCOPE_DISCLOSURES: Readonly<Record<ReadScope, string>> = Objec
   "business:read": "The business profile (name, contact details, address, currency, zone).",
 });
 
+/** One-line meaning of each propose scope, beside the read disclosures (hub-access.md H-9). */
+export const PROPOSE_SCOPE_DESCRIPTIONS: Readonly<Record<(typeof PROPOSE_SCOPES)[number], string>> = Object.freeze({
+  "contacts:propose": "Propose adding a customer; an owner approves before anything is created. Reads nothing.",
+  "deals:propose": "Propose creating a deal or moving it to another stage; an owner approves. Reads nothing.",
+  "bookings:propose": "Propose a booking on a resource; an owner approves. Reads nothing.",
+});
+/** H-9: every scope with the text an owner sees when choosing scopes. */
+export const automationScopeInfoSchema = z.strictObject({
+  scope: automationScopeSchema,
+  kind: z.enum(["propose", "read"]),
+  disclosure: z.string().min(1).max(500),
+});
+export const automationScopeListSchema = z.strictObject({ items: z.array(automationScopeInfoSchema) });
+export type AutomationScopeList = z.infer<typeof automationScopeListSchema>;
+export const AUTOMATION_SCOPE_INFO: AutomationScopeList = Object.freeze({
+  items: AUTOMATION_SCOPES.map((scope) => (scope.endsWith(":read")
+    ? { scope, kind: "read" as const, disclosure: READ_SCOPE_DISCLOSURES[scope as ReadScope] }
+    : { scope, kind: "propose" as const, disclosure: PROPOSE_SCOPE_DESCRIPTIONS[scope as (typeof PROPOSE_SCOPES)[number]] })),
+});
+
 /** H-1: a token with a read scope expires in 1 to 365 days; the request default is 90. */
 export const READ_TOKEN_DEFAULT_DAYS = 90;
 const expiryDaysSchema = z.number().int().min(1).max(365);
@@ -220,9 +240,10 @@ const contactInputSchema = z.strictObject({
   email: contactEmailInputSchema.nullable().default(null),
   phone: contactPhoneSchema.nullable().default(null),
 }).refine((value) => value.email !== null || value.phone !== null, "At least one identity is required");
+/** Shown to the owner beside the exact action (approvals.md A-12); the MCP tools reuse it. */
+export const proposalSummarySchema = postgresText(1, 500);
 const proposalMeta = {
-  /** Shown to the owner beside the exact action (approvals.md A-12). */
-  summary: postgresText(1, 500).optional(),
+  summary: proposalSummarySchema.optional(),
   expiresInMinutes: z.number().int().min(1).max(43_200).default(10_080),
 };
 /** The `input` of each proposal: the member request body of the action (hub-access.md H-6 reuses these). */
@@ -287,7 +308,7 @@ export const automationWhoAmISchema = z.strictObject({
 export type AutomationWhoAmI = z.infer<typeof automationWhoAmISchema>;
 
 /**
- * hub-access.md H-8: what an owner reads of one token's use over the last 7 days. One entry per
+ * hub-access.md H-8: what an owner reads of one token's use over the last 168 hours. One entry per
  * hour that saw a request, oldest first; `totals` adds them up.
  */
 export const automationUsageHourSchema = z.strictObject({

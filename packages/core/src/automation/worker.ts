@@ -11,7 +11,7 @@ import { readClock } from "../booking/slots.js";
 import { backoffMs } from "../delivery/policy.js";
 import { derivedId } from "../edge/ids.js";
 import { businessEvents, SOURCE_EVENT_TYPES, type OutboxRow } from "./events.js";
-import { USAGE_RETENTION_DAYS } from "./hub.js";
+import { pruneUsageRows, USAGE_PRUNE_BATCH } from "./hub.js";
 import { signingSecrets, webhookSignatureHeader, type AutomationKeySecrets } from "./keys.js";
 import { ENDPOINT_COLUMNS, previousVersion, webhookEventId, type EndpointRow } from "./records.js";
 import { webhookUrlProblem, type UrlPolicy, type WebhookResponse, type WebhookTransport } from "./transport.js";
@@ -85,8 +85,6 @@ type Plan =
 /** Transport errors that are the URL policy's refusal, not a network failure: `address_refused`, `url_…`. */
 const URL_REFUSALS = /^(address_refused$|url_)/;
 
-/** hub-access.md H-8: rows older than USAGE_RETENTION_DAYS go in batches of this size. */
-const USAGE_PRUNE_BATCH = 1000;
 
 const errorText = (code: string) => (code.replaceAll("\u0000", "").trim() || "unknown").slice(0, 200);
 
@@ -362,18 +360,14 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
   }
 
   /**
-   * hub-access.md H-8: deletes token usage rows older than 30 days, a bounded batch per pass so
-   * a long backlog drains over several passes without holding one long statement.
+   * hub-access.md H-8: deletes token usage rows older than 30 days in batches that skip rows other
+   * sessions hold, at most a few full batches per pass, so a long backlog drains over several
+   * passes without holding one long statement.
    */
   async function pruneUsage(limit = USAGE_PRUNE_BATCH): Promise<number> {
-    return deps.service(async (tx) => {
-      const before = new Date(Math.floor(now().getTime() / 3_600_000) * 3_600_000 - USAGE_RETENTION_DAYS * 86_400_000);
-      const result = await tx.query(
-        `DELETE FROM automation_token_usage WHERE (tenant_id, token_id, hour) IN (
-           SELECT tenant_id, token_id, hour FROM automation_token_usage WHERE hour < $1 ORDER BY hour LIMIT $2)`,
-        [before, limit]);
-      return result.rowCount ?? 0;
-    });
+    return pruneUsageRows(now(), (before, size) => deps.service(async (tx) =>
+      (await tx.query<{ count: number }>("SELECT public.prune_automation_token_usage($1,$2) AS count", [before, size])).rows[0]!.count),
+    limit);
   }
 
   /** One pass: ingest new events, claim due deliveries, send each in turn, then prune old usage rows. */

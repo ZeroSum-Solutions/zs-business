@@ -73,3 +73,20 @@ GRANT INSERT ON public.automation_token_usage TO authenticated, service_role;
 GRANT UPDATE (requests, reads, proposals, refusals) ON public.automation_token_usage TO authenticated;
 -- The worker prunes old rows as the service role.
 GRANT DELETE ON public.automation_token_usage TO service_role;
+
+-- H-8 retention: delete rows older than 30 days, a bounded batch at a time, skipping rows other
+-- sessions hold. SECURITY DEFINER so the API can prune with its own runtime login whenever /mcp is
+-- on, without a service credential; the cutoff can never be nearer than 30 days, whatever the
+-- caller passes, so it can only remove rows that are out of retention anyway.
+CREATE FUNCTION public.prune_automation_token_usage(p_before timestamptz, p_limit integer) RETURNS integer
+  LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  WITH doomed AS (
+    SELECT tenant_id, token_id, hour FROM public.automation_token_usage
+     WHERE hour < least(p_before, pg_catalog.now() - interval '30 days')
+     ORDER BY hour LIMIT least(greatest(p_limit, 1), 1000) FOR UPDATE SKIP LOCKED),
+  gone AS (
+    DELETE FROM public.automation_token_usage u USING doomed d
+     WHERE u.tenant_id = d.tenant_id AND u.token_id = d.token_id AND u.hour = d.hour RETURNING 1)
+  SELECT count(*)::integer FROM gone $$;
+REVOKE ALL ON FUNCTION public.prune_automation_token_usage(timestamptz, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.prune_automation_token_usage(timestamptz, integer) TO authenticated, service_role;
