@@ -114,7 +114,7 @@ export const connectionSchema = z.strictObject({
    * True while the store's app permissions block the catalog reads (the provider answered 403 to the last run). The
    * connection stays `active`: reconnecting cannot fix it (C-8, C-10); the owner changes the app's permissions in the store.
    */
-  readBlocked: z.boolean(),
+  readBlocked: z.boolean().default(false), // a result stored before this field existed replays as not blocked
   lastCheckedAt: instantSchema,
   createdAt: instantSchema,
 });

@@ -148,8 +148,11 @@ describe("link (C-3, C-5)", () => {
     expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelling" });
     const accountId = [...fake.accounts.keys()][0]!; // the one account the link made
     expect(fake.accounts.get(accountId)!.deleted).toBe(false);
+    // The compensation only deletes: no uninstall without a leased, recorded row (C-13).
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(0);
     expect((await worker.pass()).swept).toBe(1);
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(1);
     expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelled" });
   });
 
@@ -587,6 +590,24 @@ describe("run (C-6, C-10, C-12)", () => {
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
   });
 
+  it("C-8: a failed health read or an unusable answer does not end the permission notice; a 401 clears it with the move", async () => {
+    const { id, accountId } = await liveConnection();
+    const denied = () => fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "x", data: { status_code: 403 } }, times: 1 });
+    denied();
+    await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} });
+    await database.pool.query("UPDATE connections SET last_checked_at=$1 WHERE id=$2", [new Date(T0 - 2 * DAY), id]);
+    fake.override(new RegExp(`GET /connected_accounts/${accountId}`), { status: 500, times: 1 });
+    await worker.pass();
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", last_error_code: "provider_permission_denied" });
+    // A 200 whose data cannot be projected is provider_unavailable and leaves the notice.
+    fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: true, data: { unrelated: "x" } }, times: 1 });
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "provider_unavailable" });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", last_error_code: "provider_permission_denied" });
+    fake.override(/POST \/tools\/execute/, AUTH_ENVELOPE);
+    await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error", last_error_code: null });
+  });
+
   it("A-5: auth words in the provider text alone are not an authorization failure", async () => {
     const { id } = await liveConnection();
     fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "401 Unauthorized: forbidden", data: null } });
@@ -726,6 +747,40 @@ describe("disconnect (C-13)", () => {
       expect(fake.accounts.get(accountId)!.deleted).toBe(true);
       expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "failed" });
       expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "revoke_failed" });
+    }
+  });
+
+  it("C-13: an uninstall is skipped, and nothing recorded, while another live connection holds the same store; the account is still deleted", async () => {
+    await seedConnection(fixture, { tenantId: b.tenantId, memberId: b.memberId, accountId: seedAccount(b.tenantId) }); // another tenant's live connection to the same store
+    const { id, accountId } = await disconnecting();
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(0);
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: null });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: null });
+  });
+
+  it("C-13: cancelling an unconsented attempt does not uninstall an app another live connection uses", async () => {
+    await seedConnection(fixture, { tenantId: b.tenantId, memberId: b.memberId, accountId: seedAccount(b.tenantId) });
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: false });
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(0);
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+  });
+
+  it("C-12, C-13: a Composio or relayed provider 429 on the uninstall records nothing, opens the cooldown, and the retry uninstalls", async () => {
+    for (const limit of ["composio", "relayed"] as const) {
+      fake.clearOverrides();
+      await restoreBudget();
+      const { id } = await disconnecting();
+      if (limit === "composio") fake.override(/POST \/tools\/execute\/proxy/, { status: 429, times: 1 });
+      else fake.override(/POST \/tools\/execute\/proxy/, { status: 200, json: { status: 429, data: {} }, times: 1 });
+      expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
+      expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: null });
+      expect(reports.some((r) => r.kind === "cooldown")).toBe(true);
+      await restoreBudget();
+      expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+      expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "revoked" });
     }
   });
 

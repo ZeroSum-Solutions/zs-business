@@ -273,7 +273,7 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
       connected_account_id: "ca_1", user_id: "u", method: "POST", endpoint: "/graphql.json",
       body: { query: "mutation { appUninstall { app { id } userErrors { field message } } }" },
     });
-    for (const endpoint of ["https://evil.test/x", "//evil.test/x", "graphql.json", "/a://b"])
+    for (const endpoint of ["https://evil.test/x", "//evil.test/x", "graphql.json", "/a://b", "/\\evil.test", "/admin/../x"])
       await expect(client.proxy({ connectedAccountId: "ca_1", userId: "u", request: { method: "POST", endpoint } })).rejects.toThrow(/relative/);
     expect(fake.callsTo(/tools\/execute\/proxy$/)).toHaveLength(1);
   });
@@ -301,6 +301,7 @@ describe("catalog and output projection (C-6, C-10, C-14)", () => {
     expect(confirms({ status: 200, data: { data: { appUninstall: { app: null, userErrors: [{ field: null, message: "x" }] } } } })).toBe(false);
     expect(confirms({ status: 200, data: { data: { appUninstall: { app: { id: "1" } } } } })).toBe(false);
     expect(confirms({ status: 200, data: { data: { appUninstall: null } } })).toBe(false);
+    expect(confirms({ status: 200, data: { data: { appUninstall: { app: null, userErrors: [] } } } })).toBe(false); // a success names the app
     expect(confirms({ status: 200, data: "ok" })).toBe(false);
     expect(confirms({ status: 200, data: undefined })).toBe(false);
   });

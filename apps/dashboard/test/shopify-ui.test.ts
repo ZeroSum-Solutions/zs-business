@@ -139,7 +139,7 @@ describe("Shopify card: rows", () => {
     expect(text(html)).toContain("Disconnect Halden Rowe");
     expect(testid(card({ items: [connection()] }), "shopify-warning")).toBe("");
     // A store that is no longer active shows its own state, not this notice.
-    expect(testid(card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error", readBlocked: true })] }), "shopify-warning")).not.toContain("permissions");
+    expect(text(card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error", readBlocked: true })] }))).not.toContain("permissions");
   });
 
   it("shows a store being removed without a button that acts on it", () => {

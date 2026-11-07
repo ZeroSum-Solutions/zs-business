@@ -336,7 +336,7 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
     },
     async proxy(input, signal) {
       const { endpoint, method, body } = input.request;
-      if (!endpoint.startsWith("/") || endpoint.startsWith("//") || endpoint.includes("://")) throw new Error("A proxy request needs a path relative to the base URL");
+      if (!/^\/[A-Za-z0-9._/-]*$/.test(endpoint) || endpoint.startsWith("//") || endpoint.includes("..")) throw new Error("A proxy request needs a path relative to the base URL");
       const { json } = await call("POST", "/tools/execute/proxy", {
         connected_account_id: input.connectedAccountId,
         user_id: input.userId,

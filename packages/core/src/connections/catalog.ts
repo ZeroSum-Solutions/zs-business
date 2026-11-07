@@ -171,7 +171,8 @@ const shopify: CatalogToolkit = {
       if (root === undefined || root["errors"] !== undefined) return false;
       const payload = record(record(root["data"])?.["appUninstall"]);
       const userErrors = payload?.["userErrors"];
-      return payload !== undefined && Array.isArray(userErrors) && userErrors.length === 0;
+      // The mutation asks for the app's ID: a success names it, so a payload without one is not trusted.
+      return payload !== undefined && Array.isArray(userErrors) && userErrors.length === 0 && typeof record(payload["app"])?.["id"] === "string";
     },
   },
   tools: [

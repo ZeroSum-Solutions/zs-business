@@ -454,7 +454,12 @@ role for workers (all workers share one pattern today; Known limits).
     `revoked`: HTTP 200 from the provider, no top-level `errors` and an empty `userErrors`.
     A stale token (401), any other answer, a Composio error or a toolkit with no uninstall
     request is `failed`. The outcome is kept in `revoke_outcome`, so a retry never revokes
-    again; a Composio 404 counts as revoked. Then `DELETE` (a 404 counts as done), then marks the
+    again; a Composio 404 counts as revoked. A Composio or relayed provider 429 opens the
+    cooldown and records nothing, so the retry uninstalls. The uninstall is skipped, with nothing
+    recorded, while another live connection of any tenant holds the same store (same typed domain or
+    verified store ID): the app is installed once per store, so removing it would cut that
+    connection off, and only this Composio account is deleted. Link compensation (B-7) never
+    uninstalls: it only deletes an account nobody has consented to. Then `DELETE` (a 404 counts as done), then marks the
     row `disconnected` and clears the label. Composio's own `revoke` is not called.
   - Why the worker makes this one write to the provider: deleting the Composio account drops
     Composio's copy of the token but leaves the app installed on the store, with its token valid
