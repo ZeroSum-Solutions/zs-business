@@ -100,7 +100,7 @@ export interface ConnectionsPassResult {
 export type ConnectorCancelOutcome =
   | { readonly outcome: "cancelled"; readonly revokeFailed: boolean }
   | { readonly outcome: "not_found" }
-  | { readonly outcome: "refused"; readonly code: "account_mismatch" | "provider_rate_limited"; readonly retryAfterSeconds?: number };
+  | { readonly outcome: "refused"; readonly code: "account_mismatch" | "provider_rate_limited" | "in_progress"; readonly retryAfterSeconds?: number };
 
 type RevokeOutcome = "revoked" | "failed" | null;
 interface ConnectionRow {
@@ -487,8 +487,12 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
         `UPDATE connection_attempts SET status='cancelling', updated_at=$3${leased ? "" : ", claimed_until=$4"}
           WHERE tenant_id=$1 AND id=$2 AND status IN ('started','verified','cancelling')`,
         [input.tenantId, input.attemptId, now(), ...(leased ? [] : [until])]);
-      // Another cancel or the sweep is removing the account: the attempt can no longer connect.
-      if (leased) return { kind: "answer", answer: { outcome: "cancelled", revokeFailed } };
+      // B-10: another cancel or the sweep is removing the account. The attempt can no longer connect, but
+      // the removal's outcome is not known yet: the caller asks again once that lease has run out at most.
+      if (leased) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((attempt.claimed_until!.getTime() - now().getTime()) / 1000));
+        return { kind: "answer", answer: { outcome: "refused", code: "in_progress", retryAfterSeconds } };
+      }
       return { kind: "work", attempt: { ...attempt, status: "cancelling", claimed_until: until } };
     });
     if (gate.kind === "answer") return gate.answer;

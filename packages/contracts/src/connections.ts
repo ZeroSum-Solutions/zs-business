@@ -249,14 +249,16 @@ export const connectorCancelRequestSchema = z.strictObject({ tenantId: idSchema,
 /**
  * C-5: `cancelled` once the attempt can no longer connect and its account is gone (`revokeFailed`: the
  * revoke call failed, so the owner should check Shopify admin); `refused` when the account is not ours
- * to remove or the budget is spent (the attempt stays cancelling, for a retry or the sweep).
+ * to remove or the budget is spent (the attempt stays cancelling, for a retry or the sweep), or
+ * `in_progress` while another cancel or the sweep is removing it (B-10: ask again after
+ * `retryAfterSeconds`; the outcome is not known yet).
  */
 export const connectorCancelResponseSchema = z.discriminatedUnion("outcome", [
   z.strictObject({ outcome: z.literal("cancelled"), revokeFailed: z.boolean() }),
   z.strictObject({ outcome: z.literal("not_found") }),
   z.strictObject({
     outcome: z.literal("refused"),
-    code: z.enum(["account_mismatch", "provider_rate_limited"]),
+    code: z.enum(["account_mismatch", "provider_rate_limited", "in_progress"]),
     retryAfterSeconds: z.number().int().positive().max(86_400).optional(),
   }),
 ]);

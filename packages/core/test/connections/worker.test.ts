@@ -373,6 +373,26 @@ describe("cancel (C-5, C-9)", () => {
     expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
   });
 
+  it("B-10: a cancel that overlaps another's removal answers in_progress; a retry once it ended answers the final outcome", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    let overlapping: Awaited<ReturnType<typeof worker.cancel>> | null | undefined;
+    fake.gate = async (call) => {
+      // The first cancel's revoke is held here while a second cancel arrives.
+      if (call.path.endsWith("/revoke") && overlapping === undefined) {
+        overlapping = null;
+        overlapping = await worker.cancel({ tenantId: a.tenantId, attemptId });
+      }
+    };
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
+    expect(overlapping).toMatchObject({ outcome: "refused", code: "in_progress" });
+    expect(overlapping?.outcome === "refused" && overlapping.retryAfterSeconds).toBeGreaterThan(0);
+    fake.gate = null;
+    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
+  });
+
   it("A-2, B-10: never touches an account another user owns; the attempt ends and the answer says so", async () => {
     const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     fake.accounts.get(accountId)!.userId = composioUserId(ENV, b.tenantId);

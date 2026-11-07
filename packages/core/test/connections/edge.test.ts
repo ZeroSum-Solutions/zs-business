@@ -25,6 +25,7 @@ import {
   createLocalConnectorPort,
   derivedId,
   handleConnectorOperation,
+  mapError,
   memberDispatch,
   signConnectAttempt,
   signConnectGrant,
@@ -463,6 +464,28 @@ describe("cancel and disconnect (C-5, C-13)", () => {
     const three = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
     fake.override(/GET \/connected_accounts\//, { status: 429, json: {}, times: 1 });
     expect(await s.cancel({ attempt: three.attempt }).catch((e: unknown) => e)).toMatchObject({ kind: "rate_limited", retryAfterSeconds: 60 });
+  });
+
+  it("B-10: a cancel that overlaps another's removal is 409 cancel_in_progress, never a cancelled answer before the outcome is known", async () => {
+    const s = session(a.tenantId, a.owner.userId);
+    const started = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    let overlapping: unknown;
+    fake.gate = async (call) => {
+      if (call.path.endsWith("/revoke") && overlapping === undefined) {
+        overlapping = null;
+        overlapping = await s.cancel({ attempt: started.attempt }).catch((e: unknown) => e);
+      }
+    };
+    try {
+      expect(await s.cancel({ attempt: started.attempt })).toEqual({ cancelled: true, revokeFailed: true });
+    } finally {
+      fake.gate = null;
+    }
+    expect(overlapping).toBeInstanceOf(Conflict);
+    expect(overlapping).toMatchObject({ details: { reason: "cancel_in_progress" } });
+    expect(mapError(overlapping).status).toBe(409);
+    expect(await s.cancel({ attempt: started.attempt })).toEqual({ cancelled: true, revokeFailed: true });
   });
 
   it("disconnect runs the action, finishes at once and replays under the same key", async () => {

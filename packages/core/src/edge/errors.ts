@@ -80,7 +80,7 @@ const CONFLICT_REASONS = new Set([
   "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other", "topup_closed", "wallet_currency",
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
-  "stale_release", "host_in_use", "grant_changed", "invalid_currency", "already_connected", "attempt_changed", "account_mismatch",
+  "stale_release", "host_in_use", "grant_changed", "invalid_currency", "already_connected", "attempt_changed", "account_mismatch", "cancel_in_progress",
   // agents.md G-15, G-19, G-21 and approvals.md A-15.
   "cost_cap", "model_error", "model_invalid", "kind_not_available",
   "template_changed", "template_superseded", "template_not_approved",

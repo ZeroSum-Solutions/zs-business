@@ -241,8 +241,10 @@ role for workers (all workers share one pattern today; Known limits).
     account is owned by a connection row, which is never removed); 409 `account_mismatch` when
     the account is not this tenant's (left alone, the attempt ends, the operator is told); 429
     with `Retry-After` when the budget is spent or Composio answers 429 (the attempt stays
-    `cancelling` for a retry or the sweep); 503 when Composio is unavailable. The dashboard
-    drops the two cookies after a 2xx or 404.
+    `cancelling` for a retry or the sweep); 409 `cancel_in_progress` while another cancel or
+    the sweep holds the attempt's lease (the removal has no outcome yet; ask again); 503 when
+    Composio is unavailable. The dashboard drops the two cookies after a 2xx or 404 only, so
+    every other answer leaves them for a retry.
   - Cookies. The dashboard drops the grant after a confirm that names it answered 2xx, 403,
     404 or 409, and after a 404 read. Sign-out, and any API 401, drop all three connect
     cookies.

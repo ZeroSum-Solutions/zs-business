@@ -211,6 +211,8 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
         case "not_found": throw new NotFound("Nothing is waiting to be cancelled");
         case "refused":
           if (answer.code === "provider_rate_limited") throw new ConnectionsRefused("rate_limited", answer.retryAfterSeconds ?? 60);
+          // B-10: the removal another cancel runs has no outcome yet; the page keeps its cookies and asks again.
+          if (answer.code === "in_progress") throw new Conflict("A cancel is already removing this account; try again shortly", { reason: "cancel_in_progress" });
           throw new Conflict("The account is not this business's; nothing was removed", { reason: "account_mismatch" });
       }
     },
