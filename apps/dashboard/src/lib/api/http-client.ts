@@ -31,7 +31,12 @@ import {
   intakeItemPageSchema,
   contactPageSchema,
   contactRecordSchema,
+  applyTemplateResponseSchema,
   createBookingOutputSchema,
+  createDealOutputSchema,
+  setBookingPagePublishedResponseSchema,
+  setupReadSchema,
+  type CreateDealRequest,
   createOrFindContactOutputSchema,
   dealPageSchema,
   followUpRunDetailSchema,
@@ -98,6 +103,7 @@ import {
   type ListResult,
   type ApprovalsApi,
   type MediaApi,
+  type SetupApi,
   type SitesApi,
   type TranscriptionApi,
   type WriteOptions,
@@ -156,7 +162,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -367,6 +373,27 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       const body: SetDealDetailsRequest = { expectedRevision: input.expectedRevision, value: input.value, leadSource: input.leadSource };
       const path = `/v1/crm/deals/${encodeURIComponent(input.dealId)}/details`;
       return (await write(path, body, setDealDetailsOutputSchema, options)).result;
+    },
+
+    async createDeal(input, options) {
+      const body: CreateDealRequest = { contactId: input.contactId, pipelineId: input.pipelineId, stageId: input.stageId, title: input.title };
+      return (await write("/v1/crm/deals", body, createDealOutputSchema, options)).result;
+    },
+
+    getSetup(options = {}) {
+      return request({ method: "GET", path: "/v1/setup", schema: setupReadSchema, signal: options.signal });
+    },
+
+    applyTemplate(input) {
+      // One setup per business: the server keys the apply by the business, so a retry of the same
+      // template replays it (`replayed: true`) and a key from here would add nothing.
+      const body = { templateId: input.templateId, timeZone: input.timeZone };
+      return request({ method: "POST", path: "/v1/setup/apply", body, keyless: "server_keyed", schema: applyTemplateResponseSchema });
+    },
+
+    async setBookingPagePublished(pageId, published, options) {
+      const path = `/v1/setup/booking-pages/${encodeURIComponent(pageId)}/published`;
+      return (await write(path, { published }, setBookingPagePublishedResponseSchema, options)).result;
     },
 
     listIntakeItems(query = {}, options = {}) {

@@ -106,6 +106,8 @@ export const keys = {
   mediaAll: ["media"] as const,
   /** An image's bytes. Outside "media", so refreshing the lists never reloads an image that cannot change. */
   mediaContent: (kind: "asset" | "variant", id: string) => ["mediaContent", kind, id] as const,
+  /** First-run setup: the applied template, the zone and the previews (industry-templates.md IT-6). */
+  setup: ["setup"] as const,
 };
 
 type Keys = typeof keys;
@@ -218,6 +220,13 @@ export function useBookingPages() {
   const api = useApi();
   const { keys, enabled } = useKeys();
   return useQuery({ enabled, queryKey: keys.bookingPages, queryFn: () => api.listBookingPages(), staleTime: 5 * 60_000 });
+}
+
+/** The applied template (or null), the business's zone and the four previews (IT-6). Any member reads it. */
+export function useSetup() {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({ enabled, queryKey: keys.setup, queryFn: ({ signal }) => api.getSetup({ signal }), staleTime: 60_000 });
 }
 
 /** Every pipeline with its stages, in name order. A business may have none yet. */
