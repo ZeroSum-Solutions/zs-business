@@ -558,17 +558,30 @@ role for workers (all workers share one pattern today; Known limits).
 - **C-17 Pilot gate.** The managed tier stays on preview, for Zero Sum's own test store, until
   all of these hold:
   - deferred verification is on for the Composio project, and a callback without
-    `session_uri` connects nothing (checked on preview 2026-11-07). If Composio cannot turn it on, the tier does not open,
-    and this contract is revised;
-  - the Shopify consent screen, the granted scopes and the one-click path are recorded;
-  - revoke and delete were seen to remove the app from the test store (preview run 3 showed the app
-    stayed installed because Composio's `revoke` is unavailable for Shopify; the uninstall in C-13
-    replaces it and still has to be seen to work on the test store, with Proxy Execute enabled on
-    the preview key);
+    `session_uri` connects nothing. If Composio cannot turn it on, the tier does not open,
+    and this contract is revised. **Met:** checked on preview, runs 2 and 3 (2026-11-07);
+  - the Shopify consent screen, the granted scopes and the click path are recorded. **Met:**
+    `read_orders` only, shown by Shopify as "View customer data" plus "View store data:
+    Orders"; 3 clicks, and the owner types the store name twice (Known limits). Recorded on
+    preview, runs 3 and 4 (2026-11-07);
+  - revoke and delete were seen to remove the app from the test store. **Met:** run 3 showed
+    that Composio's `revoke` leaves the app installed, so the C-13 uninstall replaced it. In
+    run 4 (2026-11-07, Proxy Execute on the preview key) the row ended `disconnected` with
+    `revoke_outcome = revoked`, Composio held no account, and the app was gone from the
+    store's installed apps;
+  - Devin approved C-14's retention terms for client data. **Met:** approved 2026-11-07. The
+    preview Composio project is on the Pro plan with Zero Data Retention on;
   - latency, the grant failure rate over two weeks and cost per tenant per month are
-    measured;
-  - Devin approved C-14's retention terms for client data.
-  Production then needs the production Composio project, key and auth config.
+    measured. **Open.** Latency is measured (run 4: connect click to the Composio page 2.2 s,
+    Composio to our confirm screen 6.7 s, confirm to connected about 5 s, an order list 1.5 s).
+    The two-week window runs from 2026-11-07 to about 2026-11-21. It measures the grant
+    failure rate (attempts that end `cancelled` or `swept` against attempts that end
+    `confirmed`, from the preview database's `connection_attempts`) and the cost per tenant
+    per month (the Composio project's usage and plan charge, divided by the connected tenants).
+  Production then needs its own Composio project (Pro, Zero Data Retention on), a production
+  API key with the same permissions as the preview key, Proxy Execute included, a Shopify auth
+  config with `read_orders` only, and the Shopify app's protected customer data access. The
+  connections env is set on the production workers and API only after this gate is met.
 
 ## Acceptance
 
@@ -611,15 +624,15 @@ role for workers (all workers share one pattern today; Known limits).
   which does not fit a multi-tenant app). Revisit if Composio fixes the form.
 - Unconfirmed attempts are swept one hour after they expire (ten minutes after the start), so
   a Composio account that Composio itself marks `EXPIRED` earlier stays until that pass.
-- C-17 stays open: the provider scopes in the catalog are recorded (`read_orders`, from the auth
-  config and the preview consent screen, 2026-11-07), but the vendor gates are not passed yet:
-  the Shopify app still needs protected customer data approval before `shopify_list_orders`
-  returns orders (it answers `provider_permission_denied` until then), and the uninstall on
-  disconnect is built but not yet seen to remove the app from the test store.
+- C-17 stays open only for the two-week measurement. The provider scopes are recorded
+  (`read_orders`). The Shopify app has protected customer data access (Level 1), so
+  `shopify_list_orders` and `shopify_get_order` return orders (run 4, 2026-11-07; the test
+  order had no customer, so customer fields on an order are not yet seen). The uninstall on
+  disconnect was seen to remove the app from the test store.
 - The uninstall's success check reads Composio's relayed provider answer
   (`data.data.appUninstall.userErrors`). Its exact relayed shape is taken from Composio's
-  reference, not yet from a live call; a different shape fails closed as `revoke_failed`, never
-  as a false success.
+  reference and matched the live call in run 4 (2026-11-07); a different shape fails closed as
+  `revoke_failed`, never as a false success.
 - `pnpm connections:check-catalog` (owner-run, `zsvault run --env COMPOSIO_API_KEY=<id>`)
   reads `GET /tools/<slug>` for each pinned slug and checks the toolkit, the deprecation flag
   and the version. That route lists only the most recent versions, so a pin missing from the
