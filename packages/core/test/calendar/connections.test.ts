@@ -441,6 +441,26 @@ describe("the runtime role on calendar tables (G-4, G-8, G-11)", () => {
     for (const status of ["reauthorize", "disconnecting"]) await expect(insertAs(status), status).rejects.toMatchObject({ code: "42501" });
   });
 
+  it("holds the status limits for the runtime login itself, not only the role name authenticated", async () => {
+    const { tenantId } = tenants.a;
+    const id = await connection("a");
+    // The API's login inherits `authenticated`; a session that drops its SET LOCAL ROLE runs as
+    // zs_runtime. The trigger must refuse it exactly as it refuses `authenticated`.
+    const client = await database.runtimePool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.tenant_id',$1,true)", [tenantId]);
+      expect((await client.query<{ current_user: string }>("SELECT current_user")).rows[0]!.current_user).toBe("zs_runtime");
+      expect((await client.query("UPDATE calendar_connections SET status='disconnecting' WHERE tenant_id=$1 AND id=$2", [tenantId, id])).rowCount).toBe(1);
+      await expect(client.query("UPDATE calendar_connections SET status='active' WHERE tenant_id=$1 AND id=$2", [tenantId, id]))
+        .rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+    expect((await storedRow(tenantId, id))!.status).toBe("active");
+  });
+
   it("refuses the runtime role the sealed token, the sync state and the channel", async () => {
     const { tenantId } = tenants.a;
     const id = await connection("a");
