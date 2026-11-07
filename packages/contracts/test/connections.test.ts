@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  AUTOMATION_SCOPES, CONNECTION_TOOLKITS, READ_SCOPES, SERVER_IDEMPOTENCY_PREFIXES, connectConnectionRequestSchema,
+  AUTOMATION_SCOPES, CONNECTION_TOOLKITS, CONNECTION_TOOL_ERROR_CODES, READ_SCOPES, SERVER_IDEMPOTENCY_PREFIXES, connectConnectionRequestSchema,
   connectionToolErrorSchema, idempotencyKeySchema, normalizeAccountLabel, runConnectionToolInputSchema,
   shopifyGetOrderInputSchema, shopifyListOrdersInputSchema, shopDomainSchema, toolkitSchema,
   accountLabelSchema, connectConnectionInputSchema, connectorCancelResponseSchema, connectorLinkResponseSchema,
@@ -50,6 +50,9 @@ describe("connections contracts (C-4, C-6, C-10, C-14, C-16)", () => {
 
   it("shapes tool errors without provider text", () => {
     expect(connectionToolErrorSchema.safeParse({ error: { code: "provider_rate_limited", retryAfterSeconds: 30 } }).success).toBe(true);
+    // C-10: the app's permissions blocking a read is its own code, apart from the reconnect one.
+    expect(connectionToolErrorSchema.safeParse({ error: { code: "provider_permission_denied" } }).success).toBe(true);
+    expect(CONNECTION_TOOL_ERROR_CODES).toContain("connection_needs_reconnect");
     expect(connectionToolErrorSchema.safeParse({ error: { code: "boom", message: "x" } }).success).toBe(false);
     expect(runConnectionToolInputSchema.parse({ connectionId: "7b3f1a52-1111-4222-8333-444455556666", tool: "t" }).arguments).toEqual({});
   });

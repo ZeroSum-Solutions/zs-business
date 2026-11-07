@@ -2,7 +2,7 @@
 // database. Signing, tokens, the catalog, the Composio client against the in-process fake, the size trim.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CONNECTION_RESULT_MAX_BYTES } from "@zs/contracts";
+import { CONNECTION_RESULT_MAX_BYTES, connectionToolkit } from "@zs/contracts";
 import {
   COMPOSIO_STATUSES, ComposioError, OVERRIDE_KEYS, buildExecuteEnvelope, catalogTool, catalogToolkit, classifyExecuteFailure, completeDecision,
   connectGrantId, connectIdempotencyKey, createComposioClient, liveDecision, normalizeStatus, signConnectAttempt, signConnectGrant,
@@ -198,6 +198,10 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: { status_code: 429, message: "slow down" } } });
     expect(await call()).toEqual({ kind: "failed", reason: "rate_limited" });
     fake.clearOverrides();
+    // C-8, C-10: a 403 is the app's permissions (Shopify's protected customer data gate), not a refused credential.
+    fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: "This app is not approved to access REST endpoints with protected customer data", data: { status_code: 403 } } });
+    expect(await call()).toEqual({ kind: "failed", reason: "forbidden" });
+    fake.clearOverrides();
     fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: { message: "boom" } } });
     expect(await call()).toEqual({ kind: "failed", reason: "unavailable" });
     fake.clearOverrides();
@@ -215,8 +219,8 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     const kinds: Record<number, string> = { 429: "rate_limited", 402: "rate_limited", 401: "key_refused", 403: "key_refused", 410: "key_refused", 404: "not_found", 400: "bad_request", 500: "unavailable", 503: "unavailable" };
     for (const [status, kind] of Object.entries(kinds)) {
       fake.clearOverrides();
-      fake.override(/connected_accounts\/ca_x(\/revoke)?$/, { status: Number(status), json: { error: { message: "provider words" } } });
-      const error = await client.revoke("ca_x").catch((e: unknown) => e);
+      fake.override(/tools\/execute\/proxy$/, { status: Number(status), json: { error: { message: "provider words" } } });
+      const error = await client.proxy({ connectedAccountId: "ca_x", userId: "u", request: catalogToolkit("shopify")!.uninstall.request }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(ComposioError);
       expect((error as ComposioError).kind).toBe(kind);
       expect((error as Error).message).not.toMatch(/provider words/);
@@ -246,7 +250,12 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
   it("classifies a 200 failure from structured status fields only and keeps none of its text", () => {
     expect(classifyExecuteFailure({ error: "Invalid access token" })).toBe("unavailable");
     expect(classifyExecuteFailure({ error: { message: "HTTP 429 Too Many Requests" } })).toBe("unavailable");
-    expect(classifyExecuteFailure({ error: "x", data: { status_code: 403 } })).toBe("auth");
+    expect(classifyExecuteFailure({ error: "x", data: { status_code: 403 } })).toBe("forbidden");
+    expect(classifyExecuteFailure({ error: { status: 403 } })).toBe("forbidden");
+    // A refused credential outranks a permission answer; a provider limit outranks both.
+    expect(classifyExecuteFailure({ error: { status_code: 403 }, data: { status_code: 401 } })).toBe("auth");
+    expect(classifyExecuteFailure({ error: { status_code: 403 }, data: { status_code: 429 } })).toBe("rate_limited");
+    expect(classifyExecuteFailure({ error: "403 Forbidden" })).toBe("unavailable");
     expect(classifyExecuteFailure({ error: { statusCode: 401 } })).toBe("auth");
     expect(classifyExecuteFailure({ data: { http_status: 429 } })).toBe("rate_limited");
     expect(classifyExecuteFailure({ data: { status_code: "401" } })).toBe("unavailable");
@@ -254,15 +263,48 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     expect(classifyExecuteFailure({})).toBe("unavailable");
   });
 
+  it("C-13: the proxy sends exactly the catalog's request for the row's account and user, and refuses an absolute or foreign endpoint", async () => {
+    const fake = new FakeComposio();
+    fake.seed({ id: "ca_1", userId: "u" });
+    const client = make(fake);
+    const uninstall = catalogToolkit("shopify")!.uninstall;
+    expect(await client.proxy({ connectedAccountId: "ca_1", userId: "u", request: uninstall.request })).toMatchObject({ status: 200 });
+    expect(fake.callsTo(/tools\/execute\/proxy$/)[0]!.body).toEqual({
+      connected_account_id: "ca_1", user_id: "u", method: "POST", endpoint: "/graphql.json",
+      body: { query: "mutation { appUninstall { app { id } userErrors { field message } } }" },
+    });
+    for (const endpoint of ["https://evil.test/x", "//evil.test/x", "graphql.json", "/a://b"])
+      await expect(client.proxy({ connectedAccountId: "ca_1", userId: "u", request: { method: "POST", endpoint } })).rejects.toThrow(/relative/);
+    expect(fake.callsTo(/tools\/execute\/proxy$/)).toHaveLength(1);
+  });
+
   it("keeps the account ID of a link answer it cannot parse, so the worker can remove it (B-7)", async () => {
     const fake = new FakeComposio();
     fake.override(/connected_accounts\/link/, { status: 201, json: { connected_account_id: "ca_orphan", redirect_url: "http://not-https.example" } });
-    const error = await make(fake).link({ authConfigId: "ac", userId: "u", callbackUrl: "https://x.test/cb", connectionData: {} }).catch((e: unknown) => e);
+    const error = await make(fake).link({ authConfigId: "ac", userId: "u", callbackUrl: "https://x.test/cb" }).catch((e: unknown) => e);
     expect(error).toMatchObject({ kind: "unavailable", detail: "malformed", accountId: "ca_orphan" });
   });
 });
 
 describe("catalog and output projection (C-6, C-10, C-14)", () => {
+  it("C-6, C-17: the recorded provider scopes are exactly what the auth config holds, with no invented customer scope", () => {
+    expect(connectionToolkit("shopify")!.providerScopes).toEqual(["read_orders"]);
+  });
+
+  it("C-13: the uninstall counts only a clean 200 GraphQL answer", () => {
+    const { confirms, request } = catalogToolkit("shopify")!.uninstall;
+    expect(request).toMatchObject({ method: "POST", endpoint: "/graphql.json" });
+    const ok = { status: 200, data: { data: { appUninstall: { app: { id: "gid://shopify/App/1" }, userErrors: [] } } } };
+    expect(confirms(ok)).toBe(true);
+    expect(confirms({ ...ok, status: 401 })).toBe(false);
+    expect(confirms({ status: 200, data: { errors: [{ message: "x" }], data: ok.data.data } })).toBe(false);
+    expect(confirms({ status: 200, data: { data: { appUninstall: { app: null, userErrors: [{ field: null, message: "x" }] } } } })).toBe(false);
+    expect(confirms({ status: 200, data: { data: { appUninstall: { app: { id: "1" } } } } })).toBe(false);
+    expect(confirms({ status: 200, data: { data: { appUninstall: null } } })).toBe(false);
+    expect(confirms({ status: 200, data: "ok" })).toBe(false);
+    expect(confirms({ status: 200, data: undefined })).toBe(false);
+  });
+
   const list = catalogTool("shopify", "shopify_list_orders")!;
   const get = catalogTool("shopify", "shopify_get_order")!;
 

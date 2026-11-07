@@ -23,7 +23,8 @@ Revision 2 covers connect, confirm, cancel, list, health, reconnect, disconnect 
 wait for the pilot gate (end of file).
 
 Out of scope for this revision: other toolkits (the catalog shape admits them; each needs a
-revision that names its tools and passes the pilot checks), writes into outside accounts,
+revision that names its tools and passes the pilot checks), writes into outside accounts (the one
+exception is the app uninstalling itself on disconnect, C-13),
 Composio webhooks and triggers, Tool Router sessions, moving Google Calendar onto the port, our
 own OAuth apps for new providers, white-label consent, more than one live account per toolkit,
 per-token toolkit limits, a usage table and screen for connection runs, a dedicated database
@@ -40,9 +41,11 @@ role for workers (all workers share one pattern today; Known limits).
   `https://backend.composio.dev/api/v3.1`, header `x-api-key`.
   - Connected accounts belong to a `user_id` the application chooses. One Composio project per
     environment; the tenant boundary stays in the application.
-  - `POST /connected_accounts/link` (`auth_config_id`, `user_id`, `callback_url`, and for
-    Shopify `connection_data.subdomain`, the bare store name) returns `redirect_url` and `connected_account_id` before
-    the person signs in. The pre-issued account ID is not proof of who consented.
+  - `POST /connected_accounts/link` (`auth_config_id`, `user_id`, `callback_url`) returns
+    `redirect_url` and `connected_account_id` before the person signs in. The pre-issued account ID
+    is not proof of who consented. The reference also lists an optional `connection_data` object
+    "to pre-fill connection fields"; the hosted form did not honor it for Shopify (Known limits),
+    so the worker does not send it.
   - Deferred verification: when it is on for the project, the callback carries an opaque
     `session_uri`, and the account is finished only by
     `POST /connected_accounts/complete_auth { session_uri, user_id }`. That call is single use
@@ -56,7 +59,15 @@ role for workers (all workers share one pattern today; Known limits).
     `arguments`. It also accepts `custom_auth_params`, `custom_connection_data` and `text`,
     which this contract forbids. A failed call can answer HTTP 200 with `successful: false`.
   - `DELETE /connected_accounts/:id` removes the record; `revoke_on_delete` defaults to false.
-    `POST /connected_accounts/:id/revoke` asks the provider to revoke.
+    `POST /connected_accounts/:id/revoke` asks the provider to revoke, but answers 400 for a toolkit
+    with no revoke configuration, and the Shopify toolkit has none (its metadata names no
+    revocation endpoint). That is why a Shopify disconnect ended `revoke_outcome=failed` and the app
+    stayed installed (preview run 3, 2026-11-07).
+  - `POST /tools/execute/proxy` (Proxy Execute) sends one HTTP request to the provider with the
+    connected account's credential: `connected_account_id`, `user_id`, `endpoint` (a path relative
+    to the toolkit's base URL, or an absolute URL), `method`, `body`. It answers the provider's
+    own `status`, `data` and `headers`. The Shopify toolkit's base URL is
+    `https://<store>.myshopify.com/admin/api/<version>`.
   - Project API key permissions are by area: connected-accounts write covers link, delete and
     revoke together; tool execution, Proxy Execute, sessions and auth configs are separate.
     So the key cannot limit tools to our catalog: the worker does (C-3).
@@ -93,8 +104,10 @@ role for workers (all workers share one pattern today; Known limits).
   `preview`). A tenant's Composio `user_id` is `zsb:<env>:<tenantId>`. Only the worker builds
   it, from its own `CONNECTIONS_ENV` and the tenant of a verified request (C-3); a request
   whose `env` differs is refused. We store Composio account IDs; we never receive, store or
-  log a provider token. The key has the areas connected accounts (read and write) and tool
-  execution; no Proxy Execute, no sessions, no auth-config write. The Shopify auth config is
+  log a provider token. The key has the areas connected accounts (read and write), tool
+  execution and Proxy Execute (added for the uninstall in C-13; it lets the holder send any request as
+  the account, so only the worker holds the key and only the catalog's fixed request goes through it);
+  no sessions, no auth-config write. The Shopify auth config is
   made once per project in the Composio dashboard and named in worker config
   (`CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`).
 - **C-3 Worker boundary.** `COMPOSIO_API_KEY` lives only in the worker project, which serves
@@ -275,8 +288,14 @@ role for workers (all workers share one pattern today; Known limits).
   (every call sends it; a missing version is an error), a strict input schema in our
   contracts (unknown fields are refused, at the API and again at the worker), an output
   schema that keeps only named fields, and a disclosure line (C-11). Revision 2 catalog:
-  - Shopify, identity: shop details (numeric ID, name, `myshopify` domain). The link
-    prefills the store with the auth config's `subdomain` field, the bare store name.
+  - Shopify, identity: shop details (numeric ID, name, `myshopify` domain). The owner types the
+    store name on Composio's hosted form (the auth config's `subdomain` field); our consent step
+    then refuses any other store than the one named (C-5, C-14).
+  - Shopify, provider scopes: `read_orders`, exactly what the auth config holds (read from
+    Composio's API, 2026-11-07). Shopify's consent screen words it as "View customer data" and
+    "View store data: Orders"; no `read_customers` scope is requested or granted.
+  - Shopify, uninstall (C-13): `POST /graphql.json` with the mutation `appUninstall`, one fixed
+    request in the catalog, through Proxy Execute.
   - `shopify_list_orders { createdAfter?, createdBefore?, status?, limit? }`: at most 50
     orders, a range of at most 92 days (also when only `createdAfter` is given). Each order is
     projected on its own: an order that does not fit the output schema is left out, and so is
@@ -292,7 +311,7 @@ role for workers (all workers share one pattern today; Known limits).
   `external_account_id`, `account_label` (null once `disconnected`), `status` (`active`,
   `reauthorize`, `disconnecting`, `disconnected`), `reauthorize_reason` (`provider_status`,
   `auth_error`, null), `connected_by` (member, `ON DELETE RESTRICT`), `last_checked_at`,
-  `last_error_code` (our code, cleared on recovery), `revoke_outcome` (`revoked`, `failed`,
+  `last_error_code` (our code, cleared on recovery; includes `provider_permission_denied` on an `active` row, C-8), `revoke_outcome` (`revoked`, `failed`,
   null; only on a row leaving, C-13), `claimed_until` (the worker's lease, C-9), `created_at`,
   `updated_at`; every column but the nullable five is `NOT NULL`.
   - At most one row per tenant and toolkit in `active`, `reauthorize` or `disconnecting`
@@ -334,10 +353,18 @@ role for workers (all workers share one pattern today; Known limits).
     are `not_connected`.
   - For a live row: `ACTIVE` keeps or restores `active`; every other value and a 404 moves
     `active` to `reauthorize` with `reauthorize_reason = provider_status`.
-  - A tool run that fails with a provider auth error moves the row to `reauthorize` with
+  - A tool run that fails with a provider auth error (the provider's 401, in a structured status
+    field of Composio's answer) moves the row to `reauthorize` with
     `reauthorize_reason = auth_error`. Such a row returns to `active` only through
     Reconnect, never because a later read says `ACTIVE`: a cached status does not prove the
     credential works.
+  - A tool run that fails with a provider 403 and no 401 (Shopify answers it when the app lacks
+    protected customer data approval; recorded in preview run 3, 2026-11-07) is
+    `provider_permission_denied`, not an auth error: the credential works and reconnecting cannot
+    fix it. The row stays `active`; the worker sets `last_error_code = provider_permission_denied`
+    (the list shows `readBlocked` and the card says the store's app permissions block the reads).
+    A run that succeeds clears it; a health read does not. A 401 beside a 403, or a 401 later,
+    still moves the row to `reauthorize`. A 429 outranks both.
   - The worker restores `active` only from `reauthorize` with `provider_status`, only while
     no other live row exists for that tenant and toolkit, and never touches a
     `disconnecting` or `disconnected` row.
@@ -394,8 +421,8 @@ role for workers (all workers share one pattern today; Known limits).
     are.
   - Errors are tool results with `isError: true` and
     `{ error: { code, retryAfterSeconds? } }`. Codes: `not_found`, `invalid_arguments`,
-    `connection_needs_reconnect`, `provider_rate_limited`, `provider_unavailable`. They are
-    never provider text. Composio's envelope is checked: `successful: false`, a missing
+    `connection_needs_reconnect`, `provider_rate_limited`, `provider_unavailable`,
+    `provider_permission_denied` (C-8). They are never provider text. Composio's envelope is checked: `successful: false`, a missing
     `data` or a body that fails the output schema is an error, never data.
   - H-8: every call counts as a request. Every error code counts as a refusal except
     `provider_unavailable`.
@@ -421,9 +448,23 @@ role for workers (all workers share one pattern today; Known limits).
   as they are. The API then asks the worker to `disconnect` at once (best effort); the pass
   (C-9) finishes any it missed.
   - The worker first reads the account and removes it only when its ID, `user_id`, toolkit
-    and auth config are the row's. It calls `revoke` once (the outcome is kept in
-    `revoke_outcome`, so a retry never revokes again; a 404 counts as revoked), then `DELETE`
-    (a 404 counts as done), then marks the row `disconnected` and clears the label. An account
+    and auth config are the row's. It then revokes once: it uninstalls the app on the merchant's
+    side with the toolkit's fixed catalog request through Proxy Execute (for Shopify,
+    `appUninstall`, C-6), as the account's own credential. Only a clean answer counts as
+    `revoked`: HTTP 200 from the provider, no top-level `errors` and an empty `userErrors`.
+    A stale token (401), any other answer, a Composio error or a toolkit with no uninstall
+    request is `failed`. The outcome is kept in `revoke_outcome`, so a retry never revokes
+    again; a Composio 404 counts as revoked. Then `DELETE` (a 404 counts as done), then marks the
+    row `disconnected` and clears the label. Composio's own `revoke` is not called.
+  - Why the worker makes this one write to the provider: deleting the Composio account drops
+    Composio's copy of the token but leaves the app installed on the store, with its token valid
+    (observed on preview, run 3). Only the app itself can remove its install, and the token is
+    held at Composio, so the worker asks through Proxy Execute. The request is a constant in the
+    catalog: no caller, tenant, store name or tool argument reaches it, and it needs no access
+    scope. The older REST call, `DELETE /admin/api_permissions/current.json`, sits outside the
+    toolkit's versioned base URL and is legacy; GraphQL `appUninstall` is the current equivalent.
+    It is irreversible, so it runs only from a leased `disconnecting` row, a cancel or a sweep,
+    after the account proves to be the tenant's. An account
     that is not the tenant's, or whose read names no user, is left alone: the row ends
     `disconnected` with `account_mismatch` and the operator is told. A failed read or delete
     keeps the row `disconnecting` with `delete_failed` for the next pass. A worker that has no
@@ -431,7 +472,7 @@ role for workers (all workers share one pattern today; Known limits).
     nothing: the row stays `disconnecting` with `not_configured` until the config is back, and
     the operator is told.
   - A revoke that fails is recorded as `last_error_code = revoke_failed`; the delete still
-    runs. The screen then tells the owner to remove the Composio app in Shopify admin. The
+    runs. The screen then tells the owner to remove the app in Shopify admin. The
     screen says in every case that disconnect stops our access and asks Shopify to remove
     the app's access.
   - Runs stop at `disconnecting`.
@@ -479,7 +520,11 @@ role for workers (all workers share one pattern today; Known limits).
   - the status map, including `INACTIVE` and an unknown value; health never restores an
     `auth_error` row or touches a `disconnecting` one (both race orders);
   - the sweep deletes only attempt-named accounts past expiry plus one hour;
-  - disconnect revokes, deletes, ends `disconnected` and clears the label;
+  - disconnect uninstalls the app through Proxy Execute (one fixed request, the row's account and
+    derived user, before the delete), deletes, ends `disconnected` and clears the label; a stale
+    token, GraphQL `errors` or `userErrors`, or a Composio error is `revoke_failed` and the delete
+    still runs; a provider 403 on a run is `provider_permission_denied` with the row `active`
+    (and a 401 still `reauthorize`);
   - the runtime role cannot set any status but `disconnecting` or any other column
     (`42501`), cannot insert a non-`active` row or one without a matching verified attempt,
     and cannot read `connection_attempts`; the same holds for its raw login without
@@ -509,7 +554,10 @@ role for workers (all workers share one pattern today; Known limits).
     `session_uri` connects nothing (checked on preview 2026-11-07). If Composio cannot turn it on, the tier does not open,
     and this contract is revised;
   - the Shopify consent screen, the granted scopes and the one-click path are recorded;
-  - revoke and delete were seen to remove the app from the test store;
+  - revoke and delete were seen to remove the app from the test store (preview run 3 showed the app
+    stayed installed because Composio's `revoke` is unavailable for Shopify; the uninstall in C-13
+    replaces it and still has to be seen to work on the test store, with Proxy Execute enabled on
+    the preview key);
   - latency, the grant failure rate over two weeks and cost per tenant per month are
     measured;
   - Devin approved C-14's retention terms for client data.
@@ -544,13 +592,27 @@ role for workers (all workers share one pattern today; Known limits).
 - Observed on preview, 2026-11-07: after consent, Composio sends the browser to our callback
   with `session_uri` only. The first design expected an account ID too and so refused every
   real connect as `attempt_changed`; C-5 now treats the account ID as optional and takes the
-  account from the redemption answer. The store form on Composio's link page is prefilled
-  only when the link names the auth config's own field, `subdomain` (the bare store name,
-  not the full domain; C-6).
+  account from the redemption answer.
+- Composio's hosted form does not prefill the store. The link accepts `connection_data`
+  (documented as "pre-fill connection fields", top level of the request, with `subdomain` and
+  `shop` among the listed keys), but the form stayed empty with `shop` (run 2) and with the
+  auth config's own field name `subdomain` (run 3, 2026-11-07), so the field was removed rather
+  than kept dead. The owner types the store name twice; the consent step still refuses a store
+  other than the one named. Two other routes exist and are not built: initiate the account
+  directly with the store name (skipping the hosted form; a bigger flow change that would need
+  its own callback check), or shared credentials on the auth config (one store for every user,
+  which does not fit a multi-tenant app). Revisit if Composio fixes the form.
 - Unconfirmed attempts are swept one hour after they expire (ten minutes after the start), so
   a Composio account that Composio itself marks `EXPIRED` earlier stays until that pass.
-- C-17 stays open: the provider scopes in the catalog are placeholders until the preview
-  consent screen is recorded, and the vendor gates are not passed yet.
+- C-17 stays open: the provider scopes in the catalog are recorded (`read_orders`, from the auth
+  config and the preview consent screen, 2026-11-07), but the vendor gates are not passed yet:
+  the Shopify app still needs protected customer data approval before `shopify_list_orders`
+  returns orders (it answers `provider_permission_denied` until then), and the uninstall on
+  disconnect is built but not yet seen to remove the app from the test store.
+- The uninstall's success check reads Composio's relayed provider answer
+  (`data.data.appUninstall.userErrors`). Its exact relayed shape is taken from Composio's
+  reference, not yet from a live call; a different shape fails closed as `revoke_failed`, never
+  as a false success.
 - `pnpm connections:check-catalog` (owner-run, `zsvault run --env COMPOSIO_API_KEY=<id>`)
   reads `GET /tools/<slug>` for each pinned slug and checks the toolkit, the deprecation flag
   and the version. That route lists only the most recent versions, so a pin missing from the
@@ -562,7 +624,7 @@ role for workers (all workers share one pattern today; Known limits).
 
 - Composio dashboard, preview project: a Shopify auth config with read-only scopes and the
   exact `CONNECTIONS_CALLBACK_URL`; deferred verification on; the shortest log retention; a
-  spend cap; a scoped key (C-2), into ZS Vault as `zs_business_preview_composio_key`. The
+  spend cap; a scoped key (C-2, with Proxy Execute enabled for the uninstall in C-13), into ZS Vault as `zs_business_preview_composio_key`. The
   existing vault entry `composio` is not this key.
 - Worker project: `COMPOSIO_API_KEY`, `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`,
   `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (optional), `CONNECTIONS_DATABASE_URL`,

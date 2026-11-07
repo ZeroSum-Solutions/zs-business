@@ -51,6 +51,8 @@ export const managedConnectionFromRow = (row: ConnectionRow): Connection => conn
   // C-13: the screen then tells the owner to remove the app in the store's admin. An account that
   // was not this tenant's was never touched, so it too may still hold access.
   revokeFailed: row.revoke_outcome === "failed" || row.last_error_code === "revoke_failed" || row.last_error_code === "account_mismatch",
+  // C-8, C-10: the store's app permissions block the reads. The row stays `active`; only the owner can change that in the store.
+  readBlocked: row.status === "active" && row.last_error_code === "provider_permission_denied",
   lastCheckedAt: row.last_checked_at.toISOString(),
   createdAt: row.created_at.toISOString(),
 });

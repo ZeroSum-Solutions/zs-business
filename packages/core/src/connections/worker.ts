@@ -14,8 +14,9 @@
 //     (`claimed_until`, one short UPDATE … FOR UPDATE SKIP LOCKED) on the row they work on, and each
 //     write after a call is its own short conditional statement (C-9). So no work ever holds one pool
 //     client while it waits for another: the worker runs on a pool of one.
-//   - An account is revoked or deleted only after a fresh read shows it is this tenant's (its
-//     `user_id`, toolkit and auth config), whatever path asks (C-3, C-9, C-13).
+//   - An account is uninstalled at the provider or deleted only after a fresh read shows it is this
+//     tenant's (its `user_id`, toolkit and auth config), whatever path asks (C-3, C-9, C-13). The
+//     uninstall is the worker's one write to the provider: the catalog's fixed request (C-13).
 //   - Nothing in a log or report carries arguments, output, labels, link URLs or provider text.
 import { z } from "zod";
 import {
@@ -296,9 +297,11 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   // ---- removing an account -----------------------------------------------------------------
   /**
    * C-3, C-9, C-13: reads the account and, only when it is this tenant's (user, toolkit and auth config,
-   * all required: A-2 fails closed), revokes it once (`recordRevoke` stores the outcome at once, so a retry never
-   * repeats a success or loses a failure) and deletes it. A 404 at any step counts as done. Budget and
-   * pass limits propagate; nothing else does.
+   * all required: A-2 fails closed), uninstalls the app on the provider's side once (the catalog's fixed request
+   * through Composio's proxy; `recordRevoke` stores the outcome at once, so a retry never repeats a success or
+   * loses a failure) and deletes the account. A 404 at any step counts as done. Only a clean provider answer is
+   * `revoked`: anything else, a toolkit with no uninstall request included, is `failed`, and the delete still runs.
+   * Budget and pass limits propagate; nothing else does.
    */
   async function removeAccount(
     target: { accountId: string; tenantId: string; toolkit: string; authConfigId: string; revoke: RevokeOutcome },
@@ -315,8 +318,12 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
         || account.authConfigId !== target.authConfigId) return { outcome: "foreign" };
       if (revoke === null) {
         try {
-          await spend(pass, () => composio.revoke(target.accountId, signal));
-          revoke = "revoked";
+          const uninstall = catalogToolkit(target.toolkit)?.uninstall;
+          if (uninstall === undefined) revoke = "failed";
+          else {
+            const answer = await spend(pass, () => composio.proxy({ connectedAccountId: target.accountId, userId: userIdOf(target.tenantId), request: uninstall.request }, signal));
+            revoke = uninstall.confirms(answer) ? "revoked" : "failed";
+          }
         } catch (error) {
           if (!(error instanceof ComposioError)) throw error;
           // An account already gone has nothing left to revoke.
@@ -373,7 +380,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     let made;
     try {
       made = await spend(undefined, () => composio.link({
-        authConfigId, userId: userIdOf(input.tenantId), callbackUrl: config.callbackUrl, connectionData: toolkit.linkData(input.shopDomain),
+        authConfigId, userId: userIdOf(input.tenantId), callbackUrl: config.callbackUrl,
       }, signal));
     } catch (error) {
       if (error instanceof ComposioError && error.accountId !== undefined) await compensate(error.accountId);
@@ -487,7 +494,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
           await cooldown();
           return refused("rate_limited");
         }
-        return refused(identity.reason === "auth" ? "not_connected" : "provider_unavailable");
+        return refused(identity.reason === "auth" || identity.reason === "forbidden" ? "not_connected" : "provider_unavailable");
       }
       const shop = toolkit.identity.project(identity.data);
       if (!shop) return refused("provider_unavailable");
@@ -613,6 +620,14 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
           await markReauthorize(input.tenantId, row.id, "auth_error");
           return fail("connection_needs_reconnect");
         }
+        // C-8, C-10: the credential works but the store's app permissions block this read (Shopify's protected
+        // customer data gate). The row stays `active`: reconnecting cannot fix it. The owner sees why (`readBlocked`).
+        if (outcome.reason === "forbidden") {
+          await service((tx) => tx.query(
+            `UPDATE connections SET last_error_code='provider_permission_denied', updated_at=$3
+              WHERE tenant_id=$1 AND id=$2 AND status='active' AND composio_account_id=$4`, [input.tenantId, row.id, now(), row.composio_account_id]));
+          return fail("provider_permission_denied");
+        }
         if (outcome.reason === "rate_limited") {
           await cooldown();
           return fail("provider_rate_limited", COOLDOWN_SECONDS);
@@ -623,6 +638,10 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       const after = await service((tx) => loadConnection(tx, input.tenantId, input.connectionId));
       if (!after || after.composio_account_id !== row.composio_account_id || after.status === "disconnecting" || after.status === "disconnected") return fail("not_found");
       if (after.status !== "active") return fail("connection_needs_reconnect");
+      // A read that works again ends the owner's "permissions block this" notice.
+      if (after.last_error_code === "provider_permission_denied") await service((tx) => tx.query(
+        `UPDATE connections SET last_error_code=NULL, updated_at=$3
+          WHERE tenant_id=$1 AND id=$2 AND status='active' AND last_error_code='provider_permission_denied'`, [input.tenantId, row.id, now()]));
       const projected = tool.project(outcome.data);
       if (projected === undefined) return fail("provider_unavailable");
       const trimmed = trimToSize(projected, tool.listPath, CONNECTION_RESULT_MAX_BYTES);

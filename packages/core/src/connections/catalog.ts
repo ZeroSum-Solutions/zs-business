@@ -9,6 +9,7 @@
 // owner-run `pnpm connections:check-catalog` (vault key) re-checks each slug and version. A version
 // change is a code change with a new recorded response.
 import { z } from "zod";
+import type { ProxyAnswer, ProxyRequest } from "./composio.js";
 import {
   SHOPIFY_GET_ORDER_TOOL,
   SHOPIFY_LIST_ORDERS_TOOL,
@@ -41,11 +42,19 @@ export interface CatalogIdentity {
   readonly arguments: Readonly<Record<string, unknown>>;
   readonly project: (data: unknown) => { readonly externalAccountId: string; readonly name: string; readonly domain: string } | undefined;
 }
+/**
+ * C-13: how the app removes itself from the merchant's side before the Composio account is deleted. One fixed
+ * request, written here, sent through Composio's proxy with the account's own credential; no caller, tenant or
+ * store value reaches it. `confirms` reads the provider's answer and keeps only a yes or no.
+ */
+export interface CatalogUninstall {
+  readonly request: ProxyRequest;
+  readonly confirms: (answer: ProxyAnswer) => boolean;
+}
 export interface CatalogToolkit {
   readonly toolkit: string;
   readonly identity: CatalogIdentity;
-  /** What the link call sends beside the auth config: the shop the member named. */
-  readonly linkData: (shopDomain: string) => Record<string, string>;
+  readonly uninstall: CatalogUninstall;
   readonly tools: readonly CatalogTool[];
 }
 
@@ -145,9 +154,26 @@ const shopify: CatalogToolkit = {
       return { externalAccountId: id, name: parsed.data.name, domain: parsed.data.myshopifyDomain.toLowerCase() };
     },
   },
-  // The auth config's connection field is `subdomain`: the bare store name, not the full domain (checked
-  // against the toolkit's field metadata on 2026-11-07; `shop` is only its legacy template name).
-  linkData: (shopDomain) => ({ subdomain: shopDomain.replace(/\.myshopify\.com$/, "") }),
+  // C-13, C-17: Shopify's `appUninstall` mutation, "can only be used by apps to uninstall themselves", needs no access
+  // scope and removes the app's installation and its tokens. Composio's base URL for the toolkit is
+  // `https://<store>.myshopify.com/admin/api/<version>`, so the path below is the store's GraphQL endpoint. The older REST
+  // call (`DELETE /admin/api_permissions/current.json`) sits outside that versioned base and is legacy; Composio's own
+  // `revoke` is unavailable for this toolkit. Only a clean answer counts: HTTP 200, no top-level `errors`, no `userErrors`.
+  uninstall: {
+    request: Object.freeze({
+      method: "POST",
+      endpoint: "/graphql.json",
+      body: Object.freeze({ query: "mutation { appUninstall { app { id } userErrors { field message } } }" }),
+    }),
+    confirms(answer) {
+      if (answer.status !== 200) return false;
+      const root = record(answer.data);
+      if (root === undefined || root["errors"] !== undefined) return false;
+      const payload = record(record(root["data"])?.["appUninstall"]);
+      const userErrors = payload?.["userErrors"];
+      return payload !== undefined && Array.isArray(userErrors) && userErrors.length === 0;
+    },
+  },
   tools: [
     {
       name: SHOPIFY_LIST_ORDERS_TOOL,

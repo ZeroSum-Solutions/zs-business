@@ -34,7 +34,7 @@ const key = (n: number) => ({ idempotencyKey: `00000000-0000-4000-8000-${String(
 
 const connection = {
   id: CONNECTION, toolkit: "shopify", accountLabel: "Halden Rowe", accountDomain: "halden-rowe.myshopify.com", status: "active",
-  reauthorizeReason: null, revokeFailed: false, lastCheckedAt: "2026-11-06T12:00:00.000Z", createdAt: "2026-11-05T12:00:00.000Z",
+  reauthorizeReason: null, revokeFailed: false, readBlocked: false, lastCheckedAt: "2026-11-06T12:00:00.000Z", createdAt: "2026-11-05T12:00:00.000Z",
 };
 const pending = { grantId: GRANT_ID, toolkit: "shopify", shopDomain: "halden-rowe.myshopify.com", accountLabel: "Halden Rowe", expiresAt: "2026-11-06T12:10:00.000Z", tokensWithAccess: 2 };
 

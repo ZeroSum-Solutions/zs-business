@@ -79,9 +79,8 @@ describe("link (C-3, C-5)", () => {
     const { attemptId, accountId, linked } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     expect(linked.outcome).toBe("linked");
     const call = fake.callsTo(/connected_accounts\/link/)[0]!;
-    expect(call.body).toMatchObject({ auth_config_id: AUTH_CONFIG, user_id: `zsb:${ENV}:${a.tenantId}`, callback_url: CALLBACK_URL, connection_data: { subdomain: "testshop" } });
-    // The Shopify auth config's field is `subdomain` and takes the bare store name; the old `shop` key prefilled nothing.
-    expect(call.body).not.toHaveProperty("connection_data.shop");
+    // C-17: Composio's hosted form ignored `connection_data` (both `shop` and `subdomain`, preview runs 2 and 3), so the link names no store.
+    expect(call.body).toEqual({ auth_config_id: AUTH_CONFIG, user_id: `zsb:${ENV}:${a.tenantId}`, callback_url: CALLBACK_URL });
     expect(call.apiKey).toBe("test-key");
     expect(fake.accounts.get(accountId)?.userId).toBe(composioUserId(ENV, a.tenantId));
     expect(await attemptOf(fixture, a.tenantId, attemptId)).toEqual({ status: "started" });
@@ -419,7 +418,7 @@ describe("cancel (C-5, C-9)", () => {
 
   it("B-10: a revoke failure is recorded and surfaced, also on a repeat", async () => {
     const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
-    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500 });
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 500 });
     expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
     expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
@@ -427,11 +426,11 @@ describe("cancel (C-5, C-9)", () => {
 
   it("B-10: a cancel that overlaps another's removal answers in_progress; a retry once it ended answers the final outcome", async () => {
     const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
-    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 500, times: 1 });
     let overlapping: Awaited<ReturnType<typeof worker.cancel>> | null | undefined;
     fake.gate = async (call) => {
       // The first cancel's revoke is held here while a second cancel arrives.
-      if (call.path.endsWith("/revoke") && overlapping === undefined) {
+      if (call.path.endsWith("/tools/execute/proxy") && overlapping === undefined) {
         overlapping = null;
         overlapping = await worker.cancel({ tenantId: a.tenantId, attemptId });
       }
@@ -440,7 +439,7 @@ describe("cancel (C-5, C-9)", () => {
     expect(overlapping).toMatchObject({ outcome: "refused", code: "in_progress" });
     expect(overlapping?.outcome === "refused" && overlapping.retryAfterSeconds).toBeGreaterThan(0);
     fake.gate = null;
-    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(1);
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
     expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
   });
@@ -496,7 +495,7 @@ describe("cancel (C-5, C-9)", () => {
     expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelling", last_error_code: "delete_failed", claimed_until: null });
     expect((await worker.pass()).swept).toBe(1);
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
-    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1); // the recorded revoke is not repeated
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(1); // the recorded revoke is not repeated
     expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("cancelled");
   });
 
@@ -561,6 +560,31 @@ describe("run (C-6, C-10, C-12)", () => {
     const before = fake.calls.length;
     expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "connection_needs_reconnect" });
     expect(fake.calls).toHaveLength(before);
+  });
+
+  it("C-8, C-10: a provider 403 (the app's permissions) is provider_permission_denied; the row stays active and no reconnect is asked", async () => {
+    const { id } = await liveConnection();
+    // The shape recorded in preview run 3: a 200 envelope, successful:false, the provider's 403 in a structured field.
+    fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "This app is not approved to access REST endpoints with protected customer data", data: { status_code: 403 } }, times: 1 });
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "provider_permission_denied" });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", reauthorize_reason: null, last_error_code: "provider_permission_denied" });
+    expect(reports.some((r) => (r as { kind?: string }).kind === "reauthorize")).toBe(false);
+    expect(JSON.stringify(reports)).not.toContain("protected customer data");
+    // The next run goes to Composio again (the row is not refused as `connection_needs_reconnect`), and a read that works clears the notice.
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toMatchObject({ outcome: "ok" });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", last_error_code: null });
+  });
+
+  it("C-8: a health read does not clear the permission notice, and a later 401 still sends the row to reauthorize", async () => {
+    const { id } = await liveConnection();
+    fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "x", data: { status_code: 403 } }, times: 1 });
+    await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} });
+    await database.pool.query("UPDATE connections SET last_checked_at=$1 WHERE id=$2", [new Date(T0 - 2 * DAY), id]);
+    expect(await worker.pass()).toMatchObject({ checked: 1 });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", last_error_code: "provider_permission_denied" });
+    fake.override(/POST \/tools\/execute/, AUTH_ENVELOPE);
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "connection_needs_reconnect" });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
   });
 
   it("A-5: auth words in the provider text alone are not an authorization failure", async () => {
@@ -670,6 +694,49 @@ describe("disconnect (C-13)", () => {
     return { id, accountId };
   };
 
+  it("C-13, C-17: uninstalls the app through the proxy with the catalog's one fixed request, then deletes the account", async () => {
+    const { id, accountId } = await disconnecting();
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+    const proxied = fake.callsTo(/POST \/tools\/execute\/proxy$/);
+    expect(proxied).toHaveLength(1);
+    expect(proxied[0]!.body).toEqual({
+      connected_account_id: accountId, user_id: composioUserId(ENV, a.tenantId), method: "POST", endpoint: "/graphql.json",
+      body: { query: "mutation { appUninstall { app { id } userErrors { field message } } }" },
+    });
+    // Order: read, uninstall, delete. Composio's own revoke is never called.
+    expect(fake.calls.map((call) => `${call.method} ${call.path}`).filter((entry) => !entry.includes("/tools/execute/SHOPIFY")))
+      .toEqual([`GET /connected_accounts/${accountId}`, "POST /tools/execute/proxy", `DELETE /connected_accounts/${accountId}`]);
+    expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "revoked" });
+  });
+
+  it("C-13: a provider answer that is not a clean uninstall (a stale token, GraphQL errors, userErrors) is a failed revoke, and the delete still runs", async () => {
+    const answers: unknown[] = [
+      { status: 200, body: { status: 401, data: { errors: "[API] Invalid API key or access token" } } },
+      { status: 200, body: { status: 200, data: { errors: [{ message: "Access denied" }] } } },
+      { status: 200, body: { status: 200, data: { data: { appUninstall: { app: null, userErrors: [{ field: null, message: "nope" }] } } } } },
+      { status: 200, body: { status: 200 } },
+      { status: 200, body: { nonsense: true } },
+    ];
+    for (const answer of answers) {
+      fake.clearOverrides();
+      const { id, accountId } = await disconnecting();
+      const { status, body } = answer as { status: number; body: unknown };
+      fake.override(/POST \/tools\/execute\/proxy/, { status, json: body, times: 1 });
+      expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+      expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+      expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "failed" });
+      expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "revoke_failed" });
+    }
+  });
+
+  it("C-13: a Composio 404 on the uninstall counts as revoked (the account is already gone)", async () => {
+    const { id, accountId } = await disconnecting();
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 404, times: 1 });
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "revoked" });
+  });
+
   it("revokes, deletes and clears the label", async () => {
     const { id, accountId } = await disconnecting();
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
@@ -681,7 +748,7 @@ describe("disconnect (C-13)", () => {
 
   it("a revoke failure is recorded and the delete still runs", async () => {
     const { id, accountId } = await disconnecting();
-    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500 });
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 500 });
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "revoke_failed" });
@@ -689,12 +756,12 @@ describe("disconnect (C-13)", () => {
 
   it("B-1: a revoke failure survives a failed delete and the retry, which never revokes again", async () => {
     const { id, accountId } = await disconnecting();
-    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 500, times: 1 });
     fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
     expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "failed", claimed_until: null });
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
-    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(1);
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "revoke_failed" });
   });
@@ -708,7 +775,7 @@ describe("disconnect (C-13)", () => {
     expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "revoked", claimed_until: null });
     await restoreBudget();
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
-    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(1);
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
   });
 
@@ -985,7 +1052,7 @@ describe("the pass (C-8, C-9, C-12)", () => {
     };
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
     expect(passed).toMatchObject({ checked: 0, disconnected: 0 });
-    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.callsTo(/\/execute\/proxy$/)).toHaveLength(1);
     expect(fake.callsTo(/^DELETE /)).toHaveLength(1);
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", reauthorize_reason: null, last_error_code: null });
   });

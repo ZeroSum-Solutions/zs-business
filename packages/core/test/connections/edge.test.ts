@@ -531,7 +531,7 @@ describe("cancel and disconnect (C-5, C-13)", () => {
   it("B-10: cancel shows a failed revoke, refuses a foreign account with 409 and a spent budget with 429", async () => {
     const s = session(a.tenantId, a.owner.userId);
     const one = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
-    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 500, times: 1 });
     expect(await s.cancel({ attempt: one.attempt })).toEqual({ cancelled: true, revokeFailed: true });
     const two = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
     fake.accounts.get(verifyConnectAttempt({ current: STATE }, two.attempt, clock.now())!.composioAccountId)!.userId = composioUserId(ENV, b.tenantId);
@@ -544,10 +544,10 @@ describe("cancel and disconnect (C-5, C-13)", () => {
   it("B-10: a cancel that overlaps another's removal is 409 cancel_in_progress, never a cancelled answer before the outcome is known", async () => {
     const s = session(a.tenantId, a.owner.userId);
     const started = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
-    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 500, times: 1 });
     let overlapping: unknown;
     fake.gate = async (call) => {
-      if (call.path.endsWith("/revoke") && overlapping === undefined) {
+      if (call.path.endsWith("/tools/execute/proxy") && overlapping === undefined) {
         overlapping = null;
         overlapping = await s.cancel({ attempt: started.attempt }).catch((e: unknown) => e);
       }
@@ -583,7 +583,7 @@ describe("cancel and disconnect (C-5, C-13)", () => {
     const down: ConnectorPort = { ...port, disconnect: async () => { throw new ConnectorUnavailable("network"); } };
     const s = createConnectionsSession({ ...deps(), connections: { connector: down, stateSecrets: { current: STATE }, limiter } }, { tenantId: a.tenantId, actorId: a.owner.userId });
     expect((await s.disconnect(id, `k-${randomUUID()}`)).result.status).toBe("disconnecting");
-    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500 });
+    fake.override(/POST \/tools\/execute\/proxy/, { status: 500 });
     expect((await worker.pass()).disconnected).toBe(1);
     expect((await session(a.tenantId, a.owner.userId).list()).items[0]).toMatchObject({ status: "disconnected", revokeFailed: true });
   });

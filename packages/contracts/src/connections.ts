@@ -110,6 +110,11 @@ export const connectionSchema = z.strictObject({
   reauthorizeReason: connectionReauthorizeReasonSchema.nullable(),
   /** True when the last revoke failed: the screen then tells the owner to remove the app in Shopify admin. */
   revokeFailed: z.boolean(),
+  /**
+   * True while the store's app permissions block the catalog reads (the provider answered 403 to the last run). The
+   * connection stays `active`: reconnecting cannot fix it (C-8, C-10); the owner changes the app's permissions in the store.
+   */
+  readBlocked: z.boolean(),
   lastCheckedAt: instantSchema,
   createdAt: instantSchema,
 });
@@ -152,8 +157,10 @@ export interface ConnectionToolkitInfo {
 export const CONNECTION_TOOLKITS: readonly ConnectionToolkitInfo[] = Object.freeze([Object.freeze({
   toolkit: SHOPIFY_TOOLKIT,
   displayName: "Shopify",
-  // Pilot placeholder until the preview consent screen is recorded (C-17).
-  providerScopes: Object.freeze(["read_orders", "read_customers"]),
+  // Recorded on preview, 2026-11-07 (C-17): the auth config `zs-business-preview-shopify` holds exactly `read_orders` (read
+  // from Composio's API), and Shopify's consent screen worded it as "View customer data" and "View store data: Orders". An
+  // earlier placeholder also listed `read_customers`; nothing granted it. Never list a scope the auth config does not hold.
+  providerScopes: Object.freeze(["read_orders"]),
   tools: Object.freeze([
     Object.freeze({
       name: SHOPIFY_LIST_ORDERS_TOOL,
@@ -175,7 +182,7 @@ export const CONNECTION_RETENTION_LINE =
 
 /** C-10: the error codes a tool result can carry; never provider text. */
 export const CONNECTION_TOOL_ERROR_CODES = Object.freeze([
-  "not_found", "invalid_arguments", "connection_needs_reconnect", "provider_rate_limited", "provider_unavailable",
+  "not_found", "invalid_arguments", "connection_needs_reconnect", "provider_rate_limited", "provider_unavailable", "provider_permission_denied",
 ] as const);
 export const connectionToolErrorCodeSchema = z.enum(CONNECTION_TOOL_ERROR_CODES);
 export type ConnectionToolErrorCode = z.infer<typeof connectionToolErrorCodeSchema>;

@@ -26,6 +26,7 @@ import {
   PENDING_TIMEOUT_MESSAGE,
   RECONNECT_TITLE,
   RECONNECT_WHAT,
+  READ_BLOCKED_MESSAGE,
   REVOKE_FAILED_MESSAGE,
   SHOP_DOMAIN_HELP,
   STAFF_ERROR,
@@ -435,6 +436,7 @@ function ShopRow({ connection, onAction }: { connection: ManagedConnection; onAc
         <p className="text-sm break-words text-fg-2" data-testid="shopify-domain">{connection.accountDomain}</p>
         <p className="text-xs text-meta">Checked {relativeTime(connection.lastCheckedAt).toLowerCase()}</p>
         {connection.status === "reauthorize" ? <Warning>{reauthorizeMessage(connection.reauthorizeReason)}</Warning> : null}
+        {connection.status === "active" && connection.readBlocked ? <Warning>{READ_BLOCKED_MESSAGE}</Warning> : null}
         {connection.status === "disconnecting" ? <p className="text-xs text-meta">Removing our access and asking Shopify to remove the app&apos;s access.</p> : null}
         {connection.revokeFailed ? <Warning>{REVOKE_FAILED_MESSAGE}</Warning> : null}
       </div>

@@ -8,7 +8,7 @@ import { ShopifyCard } from "../src/components/account/shopify-card";
 import { ReconnectNotice } from "../src/components/home/reconnect-notice";
 import { ApiError } from "../src/lib/api/errors";
 import type { ManagedConnection, PendingManagedConnection } from "../src/lib/api";
-import { REAUTHORIZE_HOME_LINE, REVOKE_FAILED_MESSAGE, STAFF_ERROR } from "../src/lib/managed-connections";
+import { READ_BLOCKED_MESSAGE, REAUTHORIZE_HOME_LINE, REVOKE_FAILED_MESSAGE, STAFF_ERROR } from "../src/lib/managed-connections";
 import { failQuery, keys, renderScreen } from "./helpers/render";
 
 vi.mock("next/navigation", () => ({
@@ -19,7 +19,7 @@ vi.mock("next/navigation", () => ({
 
 const connection = (patch: Partial<ManagedConnection> = {}): ManagedConnection => ({
   id: "b7d9f1a3-5c7e-4a9b-8d1f-000000000001", toolkit: "shopify", accountLabel: "Halden Rowe", accountDomain: "halden-rowe.myshopify.com",
-  status: "active", reauthorizeReason: null, revokeFailed: false, lastCheckedAt: "2026-11-06T12:00:00.000Z", createdAt: "2026-11-05T12:00:00.000Z", ...patch,
+  status: "active", reauthorizeReason: null, revokeFailed: false, readBlocked: false, lastCheckedAt: "2026-11-06T12:00:00.000Z", createdAt: "2026-11-05T12:00:00.000Z", ...patch,
 });
 const pending: PendingManagedConnection = {
   grantId: "g".repeat(43), toolkit: "shopify", shopDomain: "halden-rowe.myshopify.com", accountLabel: "Halden Rowe",
@@ -80,7 +80,7 @@ describe("Shopify card: confirm screen (C-5, C-11)", () => {
     expect(testid(page, "shopify-confirm-question")).toBe("Connect Halden Rowe (halden-rowe.myshopify.com)?");
     expect(testid(page, "shopify-confirm-domain")).toBe("halden-rowe.myshopify.com");
     expect(testid(page, "shopify-confirm-label-value")).toBe("Halden Rowe");
-    expect(testid(page, "shopify-confirm-scopes")).toBe("read_orders, read_customers");
+    expect(testid(page, "shopify-confirm-scopes")).toBe("read_orders");
     expect(testid(page, "shopify-confirm-tokens")).toBe("2 tokens can read this store's orders.");
   });
 
@@ -128,6 +128,18 @@ describe("Shopify card: rows", () => {
     expect(text(html)).toContain("Reconnect Halden Rowe");
     expect(text(html)).toContain("Disconnect Halden Rowe");
     expect(testid(html, "shopify-warning")).toContain("Agents cannot read this store's orders until you reconnect or disconnect it.");
+  });
+
+  it("says the store's app permissions block the reads, keeps the store connected and offers no Reconnect for it (C-8, C-10)", () => {
+    const html = card({ items: [connection({ readBlocked: true })] });
+    expect(testid(html, "shopify-status")).toBe("Connected");
+    expect(testid(html, "shopify-warning")).toBe(READ_BLOCKED_MESSAGE);
+    expect(READ_BLOCKED_MESSAGE).toContain("app's permissions");
+    expect(text(html)).not.toContain("Reconnect Halden Rowe");
+    expect(text(html)).toContain("Disconnect Halden Rowe");
+    expect(testid(card({ items: [connection()] }), "shopify-warning")).toBe("");
+    // A store that is no longer active shows its own state, not this notice.
+    expect(testid(card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error", readBlocked: true })] }), "shopify-warning")).not.toContain("permissions");
   });
 
   it("shows a store being removed without a button that acts on it", () => {

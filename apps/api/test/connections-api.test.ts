@@ -523,6 +523,24 @@ describe("the /mcp connection tools (C-10, C-11, H-8)", () => {
     await client.close();
   });
 
+  it("C-8, C-10: a provider 403 is provider_permission_denied over /mcp; the connection stays active and the owner's list says reads are blocked", async () => {
+    const id = await seedLive({ tenantId: h.a.tenantId, memberId: h.a.memberId });
+    const { secret } = await mint(on, h.a, ["connections:read"]);
+    const client = await connect(on, secret);
+    fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "This app is not approved to access REST endpoints with protected customer data", data: { status_code: 403 } }, times: 1 });
+    const out = await run(client, id, "shopify_list_orders");
+    expect(out.isError).toBe(true);
+    expect(errorCode(out)).toEqual({ code: "provider_permission_denied" });
+    expect(JSON.stringify(out)).not.toContain("protected customer data");
+    expect(text(await client.callTool({ name: "list_connections", arguments: {} }) as ToolReply).items.map((i: { status: string }) => i.status)).toEqual(["active"]);
+    const listed = await call(on, "GET", "/v1/connections", { token: h.a.token });
+    expect(listed.body.items).toEqual([expect.objectContaining({ id, status: "active", reauthorizeReason: null, readBlocked: true })]);
+    // A read that works again clears the notice.
+    expect((await run(client, id, "shopify_list_orders")).isError).toBeFalsy();
+    expect((await call(on, "GET", "/v1/connections", { token: h.a.token })).body.items[0]).toMatchObject({ status: "active", readBlocked: false });
+    await client.close();
+  });
+
   it("an unreachable worker is provider_unavailable, and so is the 7 s abort (here a short one) of the signed port", async () => {
     const id = await seedLive({ tenantId: h.a.tenantId, memberId: h.a.memberId });
     const { secret } = await mint(on, h.a, ["connections:read"]);
