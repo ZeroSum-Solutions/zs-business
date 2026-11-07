@@ -84,6 +84,10 @@ loopback host (`localhost`, `127.x.x.x`, or `::1`), an explicit port other than
 5432/54322, and optional admin credentials. It requires `/postgres` and rejects URL
 options. Run this task's tests on the default cluster only. The harness creates a
 unique `zs_test_<uuid>` database and drops it after success or failure.
+On a machine with many CPUs, vitest runs many test files at once and each one migrates its
+own database, which can overflow the default lock table (`out of shared memory` at setup).
+Start the local cluster with `-c max_locks_per_transaction=256`, or run
+`ALTER SYSTEM SET max_locks_per_transaction = 256` on it and restart it.
 
 Migrations support PostgreSQL 15 and 16+ (some hosted Supabase projects still run 15).
 CI also runs `pnpm -r test` against `postgres:15` on port 55433. Locally:
