@@ -1,7 +1,7 @@
 /**
  * The demo adapter's managed-tier connections (connections.md C-4, C-5, C-13). It keeps the rules the API
  * enforces: only owners (`integrations`) list, connect and disconnect; a shop domain must be a
- * `.myshopify.com` address; a store connects once; and the owner confirms the account before anything
+ * `.myshopify.com` address; a toolkit has one live connection; and the owner confirms the account before anything
  * connects. There is no Shopify here: a connect stages a grant at once, as if the owner had approved the app
  * with a made-up store, and the answer sends the page straight back to the Connections page. The staged
  * grant stands in for the dashboard's grant cookie: one per adapter, as one per browser. The "worker" runs
@@ -37,6 +37,8 @@ export interface DemoManagedConnectionsContext {
 
 /** How long the demo worker takes to finish a disconnect. */
 export const DEMO_CONNECTIONS_WORKER_MS = 1500;
+/** The list keeps this many retired connections, the newest (C-13). */
+export const DEMO_RETIRED_KEPT = 20;
 /** How long a staged grant waits for the owner to confirm it. */
 export const DEMO_MANAGED_GRANT_MS = 10 * 60_000;
 
@@ -85,15 +87,26 @@ export function createDemoManagedConnections(ctx: DemoManagedConnectionsContext)
     changedAt.set(connection.id, ctx.now().getTime());
   };
 
-  /** The worker's pass, run lazily: a disconnect whose delay passed finishes (C-13). */
+  /** The worker's pass, run lazily: a disconnect whose delay passed finishes, and the label goes with it (C-7, C-13). */
   function runWorker() {
     const now = ctx.now().getTime();
     for (const connection of connections.values()) {
       if (connection.status !== "disconnecting" || now - (changedAt.get(connection.id) ?? now) < DEMO_CONNECTIONS_WORKER_MS) continue;
       touch(connection, "disconnected");
+      connection.accountLabel = null;
       connection.revokeFailed = revokeFails;
     }
+    // The list shows the newest retired rows only; older ones are history the owner no longer sees.
+    const retired = [...connections.values()].filter((item) => item.status === "disconnected")
+      .sort((a, b) => (changedAt.get(b.id) ?? 0) - (changedAt.get(a.id) ?? 0) || b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+    for (const old of retired.slice(DEMO_RETIRED_KEPT)) {
+      connections.delete(old.id);
+      changedAt.delete(old.id);
+    }
   }
+
+  /** The toolkit's live connection, if any: one per toolkit (C-7). */
+  const liveOf = (toolkit: string) => [...connections.values()].find((item) => item.toolkit === toolkit && item.status !== "disconnected");
 
   const stagedForActor = () => {
     if (staged && ctx.now().getTime() >= staged.expiresAtMs) staged = null;
@@ -118,8 +131,7 @@ export function createDemoManagedConnections(ctx: DemoManagedConnectionsContext)
       if (!connectionToolkit(name)) throw demoError("NotFound");
       const shop = ctx.parse(shopDomainSchema, shopDomain);
       runWorker();
-      const live = [...connections.values()].find((item) => item.accountDomain === shop && item.status !== "disconnected");
-      if (live) throw demoError("Conflict", { reason: "already_connected" });
+      if (liveOf(name)) throw demoError("Conflict", { reason: "already_connected" });
       // What the callback does once the provider answers (C-5): it stages the grant for this browser,
       // replacing any older one, and connects nothing until the owner confirms the store.
       staged = {
@@ -156,8 +168,7 @@ export function createDemoManagedConnections(ctx: DemoManagedConnectionsContext)
       requireOwner();
       if (!grant) throw demoError("NotFound");
       runWorker();
-      if ([...connections.values()].some((item) => item.accountDomain === grant.shopDomain && item.status !== "disconnected"))
-        throw demoError("Conflict", { reason: "already_connected" });
+      if (liveOf(grant.toolkit)) throw demoError("Conflict", { reason: "already_connected" });
       const now = ctx.now().toISOString();
       const connection: Connection = {
         id: ctx.newId(), toolkit: grant.toolkit, accountLabel: grant.accountLabel, accountDomain: grant.shopDomain,
@@ -170,7 +181,10 @@ export function createDemoManagedConnections(ctx: DemoManagedConnectionsContext)
 
     async cancelManagedConnect() {
       await ctx.wait();
+      const cancelled = staged !== null;
       staged = null;
+      // Cancelling removes the provider account, which can fail to revoke like a disconnect (C-5).
+      return { cancelled, revokeFailed: cancelled && revokeFails };
     },
 
     async checkManagedConnectStatus() {

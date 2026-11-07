@@ -1,9 +1,11 @@
 // The words and rules the Shopify card uses (connections.md C-5, C-11, C-13): which store address is
 // accepted, what each return from Shopify says, what a refused confirm says, and the disconnect copy.
 import { ApiError } from "../src/lib/api/errors";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  CANCELLED_MESSAGE,
   CONFIRM_EXPIRED_MESSAGE,
+  DisconnectPendingError,
   CONNECTED_MESSAGE,
   DISCONNECT_AGENTS,
   DISCONNECT_WHAT,
@@ -11,6 +13,15 @@ import {
   RETURN_REASONS,
   REVOKE_FAILED_MESSAGE,
   SHOP_DOMAIN_HELP,
+  STATUS_POLLS,
+  STATUS_POLL_MS,
+  forgetPending,
+  pendingRemembered,
+  pollConnectStatus,
+  reconnectStore,
+  rememberPending,
+  waitUntilDisconnected,
+  cancelNotice,
   confirmErrorNotice,
   connectErrorMessage,
   currentConnections,
@@ -20,7 +31,7 @@ import {
   returnNotice,
 } from "../src/lib/managed-connections";
 import { connectErrorReasonSchema } from "@zs/contracts";
-import type { ManagedConnection } from "../src/lib/api";
+import type { ManagedConnection, ManagedConnectOutcome } from "../src/lib/api";
 
 const connection = (status: ManagedConnection["status"]): ManagedConnection => ({
   id: "b7d9f1a3-5c7e-4a9b-8d1f-000000000001", toolkit: "shopify", accountLabel: "Halden Rowe", accountDomain: "halden-rowe.myshopify.com", status,
@@ -97,6 +108,16 @@ describe("a confirm the server refused", () => {
   });
 });
 
+describe("a cancel the server answered", () => {
+  it("says nothing was connected, and adds the Shopify admin warning when the revoke failed", () => {
+    expect(cancelNotice({ cancelled: true, revokeFailed: false })).toEqual({ tone: "info", message: CANCELLED_MESSAGE });
+    const failed = cancelNotice({ cancelled: true, revokeFailed: true });
+    expect(failed.tone).toBe("error");
+    expect(failed.message).toContain(CANCELLED_MESSAGE);
+    expect(failed.message).toContain(REVOKE_FAILED_MESSAGE);
+  });
+});
+
 describe("the list", () => {
   it("hides retired stores and flags the ones that need the owner", () => {
     const items = [connection("active"), connection("disconnected"), connection("disconnecting"), connection("reauthorize")];
@@ -105,6 +126,11 @@ describe("the list", () => {
     expect(needsReauthorize([connection("active"), connection("disconnecting")])).toBe(false);
     expect(needsReauthorize([])).toBe(false);
     expect(needsReauthorize(undefined)).toBe(false);
+  });
+
+  it("keeps a retired store in view while Shopify has not confirmed it removed the app (C-13)", () => {
+    const failed = { ...connection("disconnected"), revokeFailed: true };
+    expect(currentConnections([failed, connection("disconnected")])).toEqual([failed]);
   });
 
   it("tells the owner why a store needs them, and that agents are cut off until then", () => {
@@ -126,5 +152,126 @@ describe("disconnect wording (C-13)", () => {
     expect(REVOKE_FAILED_MESSAGE).toMatch(/did not confirm/);
     expect(REVOKE_FAILED_MESSAGE).toMatch(/Shopify admin/);
     expect(REVOKE_FAILED_MESSAGE).toMatch(/Settings, then Apps/);
+  });
+});
+
+describe("asking again while Shopify has not finished (C-5)", () => {
+  const sleepLog = () => {
+    const waits: number[] = [];
+    return { waits, sleep: async (ms: number) => { waits.push(ms); } };
+  };
+
+  it("asks at most five times, two seconds apart, then gives up", async () => {
+    const { waits, sleep } = sleepLog();
+    const check = vi.fn(async (): Promise<ManagedConnectOutcome> => ({ connection: "pending" }));
+    const result = await pollConnectStatus(check, { sleep });
+    expect(result).toBe("timeout");
+    expect(check).toHaveBeenCalledTimes(5);
+    expect(STATUS_POLLS).toBe(5);
+    expect(waits).toEqual([STATUS_POLL_MS, STATUS_POLL_MS, STATUS_POLL_MS, STATUS_POLL_MS]);
+    expect(STATUS_POLL_MS).toBe(2_000);
+  });
+
+  it("stops at the first answer that is not pending", async () => {
+    const { waits, sleep } = sleepLog();
+    const answers: ManagedConnectOutcome[] = [{ connection: "pending" }, { connection: "pending" }, { connection: "confirm" }];
+    const check = vi.fn(async () => answers.shift()!);
+    expect(await pollConnectStatus(check, { sleep })).toEqual({ connection: "confirm" });
+    expect(check).toHaveBeenCalledTimes(3);
+    expect(waits).toHaveLength(2);
+  });
+
+  it("stops asking once the page says it is done with the answer", async () => {
+    let stop = false;
+    const check = vi.fn(async (): Promise<ManagedConnectOutcome> => ({ connection: "pending" }));
+    const result = await pollConnectStatus(check, { sleep: async () => { stop = true; }, stopped: () => stop });
+    expect(result).toBe("stopped");
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a failed ask reach the caller", async () => {
+    await expect(pollConnectStatus(async () => { throw new Error("down"); }, { sleep: async () => undefined })).rejects.toThrow("down");
+  });
+});
+
+describe("a pending connect survives a reload", () => {
+  const store = () => {
+    const data = new Map<string, string>();
+    return { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => void data.set(key, value), removeItem: (key: string) => void data.delete(key) };
+  };
+
+  it("is remembered for the ten minutes the attempt lives, and forgotten when the connect settles", () => {
+    const storage = store();
+    expect(pendingRemembered(storage, 1_000)).toBe(false);
+    rememberPending(storage, 1_000);
+    expect(pendingRemembered(storage, 1_000 + 9 * 60_000)).toBe(true);
+    expect(pendingRemembered(storage, 1_000 + 10 * 60_000)).toBe(false);
+    forgetPending(storage);
+    expect(pendingRemembered(storage, 1_000)).toBe(false);
+  });
+
+  it("ignores a value it did not write, and works without storage", () => {
+    const storage = store();
+    storage.setItem("zs-managed-pending", "soon");
+    expect(pendingRemembered(storage, 1_000)).toBe(false);
+    expect(() => { rememberPending(undefined, 1); forgetPending(undefined); }).not.toThrow();
+    expect(pendingRemembered(undefined, 1)).toBe(false);
+    const broken = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => { throw new Error("blocked"); } };
+    expect(() => { rememberPending(broken, 1); forgetPending(broken); }).not.toThrow();
+    expect(pendingRemembered(broken, 1)).toBe(false);
+  });
+});
+
+describe("reconnect waits for the old link to go (C-4, C-13)", () => {
+  const row = (status: ManagedConnection["status"]) => connection(status);
+  const instant = { sleep: async () => undefined, polls: 4, delayMs: 1 };
+
+  it("reads the list until the store is disconnected, and starts the connect only then", async () => {
+    const log: string[] = [];
+    const reads = [[row("disconnecting")], [row("disconnecting")], [row("disconnected")]];
+    const api = {
+      disconnectManagedConnection: vi.fn(async () => { log.push("disconnect"); return row("disconnecting"); }),
+      listManagedConnections: vi.fn(async () => { log.push(`list:${reads[0]![0]!.status}`); return reads.shift()!; }),
+      startManagedConnect: vi.fn(async () => { log.push("start"); return { authorizeUrl: "https://connect.example/x" }; }),
+    };
+    const result = await reconnectStore(api, row("reauthorize"), "key-1", instant);
+    expect(result).toEqual({ authorizeUrl: "https://connect.example/x" });
+    expect(log).toEqual(["disconnect", "list:disconnecting", "list:disconnecting", "list:disconnected", "start"]);
+    expect(api.disconnectManagedConnection).toHaveBeenCalledWith(row("reauthorize").id, { idempotencyKey: "key-1" });
+    expect(api.startManagedConnect).toHaveBeenCalledWith("shopify", "halden-rowe.myshopify.com");
+  });
+
+  it("does not wait when the disconnect already answers disconnected", async () => {
+    const api = {
+      disconnectManagedConnection: vi.fn(async () => row("disconnected")),
+      listManagedConnections: vi.fn(async () => []),
+      startManagedConnect: vi.fn(async () => ({ authorizeUrl: "https://connect.example/x" })),
+    };
+    await reconnectStore(api, row("reauthorize"), "key-1", instant);
+    expect(api.listManagedConnections).not.toHaveBeenCalled();
+    expect(api.startManagedConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("never starts the connect when the old link is still going after the wait, and says so", async () => {
+    const api = {
+      disconnectManagedConnection: vi.fn(async () => row("disconnecting")),
+      listManagedConnections: vi.fn(async () => [row("disconnecting")]),
+      startManagedConnect: vi.fn(async () => ({ authorizeUrl: "https://connect.example/x" })),
+    };
+    await expect(reconnectStore(api, row("reauthorize"), "key-1", instant)).rejects.toBeInstanceOf(DisconnectPendingError);
+    expect(api.listManagedConnections).toHaveBeenCalledTimes(4);
+    expect(api.startManagedConnect).not.toHaveBeenCalled();
+    expect(connectErrorMessage(new DisconnectPendingError())).toMatch(/still disconnecting/i);
+  });
+
+  it("does not start the connect when the disconnect itself fails, and counts a store gone from the list as disconnected", async () => {
+    const failing = {
+      disconnectManagedConnection: vi.fn(async () => { throw apiError(403, "Forbidden"); }),
+      listManagedConnections: vi.fn(async () => []),
+      startManagedConnect: vi.fn(async () => ({ authorizeUrl: "https://connect.example/x" })),
+    };
+    await expect(reconnectStore(failing, row("reauthorize"), "key-1", instant)).rejects.toMatchObject({ kind: "forbidden" });
+    expect(failing.startManagedConnect).not.toHaveBeenCalled();
+    await expect(waitUntilDisconnected(row("active").id, async () => [], instant)).resolves.toBeUndefined();
   });
 });

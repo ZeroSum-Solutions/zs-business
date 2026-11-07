@@ -55,10 +55,20 @@ describe("Shopify card: connect form", () => {
     expect(body).toContain("Let your agents read orders from your Shopify store. They can read only; nothing in your store is changed.");
   });
 
-  it("offers to connect another store when one is already connected", () => {
-    const html = card({ items: [connection()] });
-    expect(text(html)).toContain("Connect another store");
-    expect(html).toContain('data-testid="shopify-row"');
+  it("offers no second store while one is live: a business has one Shopify connection (C-7)", () => {
+    for (const status of ["active", "reauthorize", "disconnecting"] as const) {
+      const html = card({ items: [connection({ status })] });
+      expect(html, status).toContain('data-testid="shopify-row"');
+      expect(html, status).not.toContain('data-testid="shopify-connect-form"');
+      expect(text(html), status).not.toContain("Connect another store");
+    }
+  });
+
+  it("offers the form again once the store is retired, even while its warning stays", () => {
+    const html = card({ items: [connection({ status: "disconnected", revokeFailed: true })] });
+    expect(html).toContain('data-testid="shopify-connect-form"');
+    expect(text(html)).toContain("Store address");
+    expect(text(html)).not.toContain("Connect another store");
   });
 });
 
@@ -127,11 +137,16 @@ describe("Shopify card: rows", () => {
     expect(text(html)).not.toMatch(/Disconnect Halden Rowe|Reconnect Halden Rowe/);
   });
 
-  it("hides a retired store, and tells the owner to remove the app when Shopify did not confirm (C-13)", () => {
-    const retired = card({ items: [connection({ status: "disconnected", revokeFailed: true })] });
+  it("hides a retired store, but keeps one Shopify did not confirm in view with the Shopify admin warning (C-13)", () => {
+    const retired = card({ items: [connection({ status: "disconnected" })] });
     expect(retired).not.toContain('data-testid="shopify-row"');
     const failed = card({ items: [connection({ status: "disconnecting", revokeFailed: true })] });
     expect(testid(failed, "shopify-warning")).toBe(REVOKE_FAILED_MESSAGE);
+    const unconfirmed = card({ items: [connection({ status: "disconnected", accountLabel: null, revokeFailed: true })] });
+    expect(testid(unconfirmed, "shopify-status")).toBe("Disconnected");
+    expect(testid(unconfirmed, "shopify-warning")).toBe(REVOKE_FAILED_MESSAGE);
+    expect(testid(unconfirmed, "shopify-domain")).toBe("halden-rowe.myshopify.com");
+    expect(text(unconfirmed)).not.toMatch(/Disconnect Halden Rowe|Reconnect Halden Rowe|Disconnect halden-rowe/);
   });
 
   it("keeps the disconnect and reconnect words behind their dialogs until asked for", () => {
@@ -166,6 +181,13 @@ describe("Shopify card: who sees what", () => {
     expect(text(html)).toContain("Only an owner can connect or disconnect Shopify.");
     expect(html).not.toContain('data-testid="shopify-connect-form"');
     expect(html).not.toContain('data-testid="shopify-row"');
+  });
+
+  it("shows staff no cached confirm panel or waiting line, whatever an earlier owner session left in the cache", () => {
+    const html = card({ staff: true, pending, waiting: true });
+    expect(html).not.toContain('data-testid="shopify-confirm"');
+    expect(html).not.toContain('data-testid="shopify-waiting"');
+    expect(html).not.toContain("Connect store");
   });
 
   it("asks staff to get an owner, not to try again", () => {

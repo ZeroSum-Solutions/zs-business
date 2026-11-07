@@ -16,19 +16,23 @@ export interface RenderOptions {
   fill?: (client: QueryClient) => void;
   /** Sign the demo in as staff instead of the owner. */
   staff?: boolean;
+  /** Render as the live app does: the areas without an API show a sample badge or are left out. */
+  live?: boolean;
 }
 
 export function newRuntime(): ApiRuntime {
   return createApi({ mode: "demo" });
 }
 
-export function renderScreen(node: ReactNode, { fill = () => undefined, staff = false }: RenderOptions = {}): string {
+export function renderScreen(node: ReactNode, { fill = () => undefined, staff = false, live = false }: RenderOptions = {}): string {
   // A query that failed stays failed on this paint instead of starting a new read.
   const client = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retryOnMount: false } } });
   fill(client);
   const runtime = newRuntime();
   if (staff) runtime.demo!.actAs("staff");
-  return renderToString(h(ApiProvider, { runtime, children: null },
+  // Only the mode differs: the demo adapter still answers, as a live server would.
+  const shown: ApiRuntime = live ? { ...runtime, mode: "live" } : runtime;
+  return renderToString(h(ApiProvider, { runtime: shown, children: null },
     h(QueryClientProvider, { client }, h(SessionProvider, null, h(ToastProvider, null, node)))));
 }
 

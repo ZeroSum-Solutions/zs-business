@@ -93,11 +93,27 @@ describe("http client: managed connections", () => {
     await expect(api.confirmManagedConnect(GRANT_ID)).rejects.toMatchObject({ kind: "not_found" });
   });
 
-  it("cancels with DELETE /api/connections/pending, which answers 204", async () => {
-    const { api, calls } = client([new Response(null, { status: 204 })]);
-    await expect(api.cancelManagedConnect()).resolves.toBeUndefined();
+  it("cancels with DELETE /api/connections/pending and answers what the server did", async () => {
+    const { api, calls } = client([json(200, { cancelled: true, revokeFailed: false }), json(200, { cancelled: true, revokeFailed: true })]);
+    expect(await api.cancelManagedConnect()).toEqual({ cancelled: true, revokeFailed: false });
     expect(calls[0]!.url.pathname).toBe("/api/connections/pending");
     expect(calls[0]!.init.method).toBe("DELETE");
+    expect(await api.cancelManagedConnect()).toEqual({ cancelled: true, revokeFailed: true });
+  });
+
+  it("treats a cancel with nothing left to cancel (204, 404) as done, and a body it cannot read as invalid", async () => {
+    const { api } = client([new Response(null, { status: 204 }), apiError(404, "NotFound"), json(200, { cancelled: "yes" })]);
+    expect(await api.cancelManagedConnect()).toEqual({ cancelled: false, revokeFailed: false });
+    expect(await api.cancelManagedConnect()).toEqual({ cancelled: false, revokeFailed: false });
+    await expect(api.cancelManagedConnect()).rejects.toMatchObject({ kind: "invalid_response" });
+  });
+
+  it("passes on a refused cancel (429, 409, 503, 502) so the owner can try again", async () => {
+    const { api } = client([apiError(429, "RateLimited"), apiError(409, "Conflict", { reason: "conflict" }), apiError(503, "Internal"), apiError(502, "Internal")]);
+    await expect(api.cancelManagedConnect()).rejects.toMatchObject({ kind: "rate_limited", status: 429 });
+    await expect(api.cancelManagedConnect()).rejects.toMatchObject({ kind: "conflict", status: 409 });
+    await expect(api.cancelManagedConnect()).rejects.toMatchObject({ status: 503 });
+    await expect(api.cancelManagedConnect()).rejects.toMatchObject({ status: 502 });
   });
 
   it("asks the status route how a pending connect ended, and refuses an outcome it does not know", async () => {

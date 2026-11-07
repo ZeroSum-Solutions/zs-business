@@ -183,7 +183,7 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   names the mismatch, and logs it once at start (`src/instrumentation.ts`). Rebuild with
   the same `ZS_API_URL` setting the server runs with.
 - Live mode labels every area that still reads the demo workspace with a "Sample data"
-  badge, and disables its writes (cancel plan, settings, connections) with the reason shown as visible text
+  badge, and disables its writes (cancel plan, settings) with the reason shown as visible text
   (`src/components/ui/sample.tsx`). Nothing pretends to save.
 - Errors: the demo adapter parses requests with the same `@zs/contracts` schemas and throws
   the error the HTTP client would build from the API's body: the fixed message per code,
@@ -300,8 +300,30 @@ page in the browser and exposes `rollBackElsewhere()`, `setSiteEdgeDown()`,
 `delayNextSiteWrite()` and `loseNextSiteAnswer()` on `window.__zsDemo` for tests.
 `e2e:live` runs the API with `SITES_STORE=memory`.
 
-`TODO(api)`: usage, the connections checklist, connections and plan have no API yet.
-Live mode still reads them from the demo workspace.
+`TODO(api)`: usage, the connections checklist and plan have no API yet. Live mode still
+reads them from the demo workspace. Connections do have one, for two toolkits: Google
+Calendar (`google-calendar.md`) and Shopify (`connections.md`, the managed tier). The
+Connections page shows those two in live mode and no sample accounts; the demo adapter
+(`src/lib/api/demo/managed-connections.ts`) keeps the Shopify rules, one live store per
+toolkit included.
+
+Managed connections (Shopify). The list and the disconnect go through the generic
+`/api/v1` proxy. The connect flow has its own routes under `/api/connections`
+(`src/lib/server/connections-connect.ts`), because it keeps three httpOnly cookies there
+(`connections-cookies.ts`): `zs-connect-browser` (a random key; the API sees only its hash),
+`zs-connect-attempt` (the API's signed attempt) and `zs-connect-grant` (the grant the callback
+staged). `POST /:toolkit/connect` starts it and expires a stale grant; `GET /callback` is
+Shopify's redirect back and needs no session; `GET /callback/status` (same origin, signed in)
+is asked up to five times, two seconds apart, while the answer is `pending`, and the page
+remembers a pending wait in `sessionStorage` so a reload goes on; `GET /pending` reads the
+grant for the confirm screen; `POST /confirm` spends the grant only, so a reload of the callback
+still answers `connected`; `DELETE /pending` sends the grant and the attempt to the API and drops
+the cookies only on a 2xx or 404, so a refused or lost cancel can be tried again. The attempt
+cookie stays through `attempt_changed` and transient failures (`rate_limited`,
+`provider_unavailable`, an outage). Reconnect disconnects, waits for the list to say
+`disconnected` (the API answers 409 `already_connected` until then), and only then connects.
+A retired store whose revoke failed (`revokeFailed`) stays on the card with the Shopify admin
+warning.
 
 ## Notes
 

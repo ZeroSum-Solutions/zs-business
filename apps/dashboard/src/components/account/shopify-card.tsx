@@ -18,7 +18,6 @@ import { useApi } from "@/lib/api/react";
 import type { ReturnNotice } from "@/lib/calendar-sync";
 import { useIntentKey } from "@/lib/intent-key";
 import {
-  CANCELLED_MESSAGE,
   CONNECTED_MESSAGE,
   DISCONNECT_AGENTS,
   DISCONNECT_TITLE,
@@ -30,15 +29,17 @@ import {
   REVOKE_FAILED_MESSAGE,
   SHOP_DOMAIN_HELP,
   STAFF_ERROR,
-  STATUS_POLLS,
-  STATUS_POLL_MS,
   STILL_WAITING_MESSAGE,
+  DisconnectPendingError,
+  cancelNotice,
   confirmErrorNotice,
   connectErrorMessage,
   currentConnections,
   isGrantChanged,
   parseShopDomain,
+  pollConnectStatus,
   reauthorizeMessage,
+  reconnectStore,
   returnNotice,
 } from "@/lib/managed-connections";
 import { useKeys, useManagedConnections, usePendingManagedConnect } from "@/lib/queries";
@@ -109,6 +110,7 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
   useStatusPolling(waiting && canManage, onNotice, onSettled);
 
   const items = connections.data ? currentConnections(connections.data) : [];
+  const hasLive = items.some((item) => item.status !== "disconnected");
   // A server without connections settings answers 404 for the list: Shopify is not offered at all.
   const notSetUp = connections.isError && isApiError(connections.error, "not_found");
 
@@ -125,8 +127,8 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
           </CardDescription>
         </div>
       </CardHeader>
-      {pending.data ? <ConfirmShop key={pending.data.grantId} pending={pending.data} onDone={finish} /> : null}
-      {pending.isError && !notSetUp ? <div className="mb-4"><ErrorNote error={pending.error} retry={() => pending.refetch()} /></div> : null}
+      {canManage && pending.data ? <ConfirmShop key={pending.data.grantId} pending={pending.data} onDone={finish} /> : null}
+      {canManage && pending.isError && !notSetUp ? <div className="mb-4"><ErrorNote error={pending.error} retry={() => pending.refetch()} /></div> : null}
       {waiting && canManage ? (
         <p role="status" className="mb-4 flex items-center gap-2 text-sm text-fg-2" data-testid="shopify-waiting">
           <Clock size={16} aria-hidden className="shrink-0 text-muted" />{STILL_WAITING_MESSAGE}
@@ -169,7 +171,8 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
                 {items.map((connection) => <ShopRow key={connection.id} connection={connection} onAction={clearNotice} />)}
               </ul>
             ) : null}
-            <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />
+            {/* One live connection per toolkit (C-7): a retired store left in view for its warning does not count. */}
+            {hasLive ? null : <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />}
           </>
         )
       ) : (
@@ -180,48 +183,48 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
 }
 
 /**
- * While the provider has not finished (the callback said "pending"), asks how the connect ended: up to
- * STATUS_POLLS times, STATUS_POLL_MS apart (connections.md C-5). The first ask is at once.
+ * While the provider has not finished (the callback said "pending"), asks how the connect ended: at most
+ * STATUS_POLLS times, STATUS_POLL_MS apart (connections.md C-5), the first ask at once. The whole wait is one
+ * `pollConnectStatus` call started when `active` turns on, and the effect depends on `active` alone: what it
+ * needs besides (the API, the cache, the callbacks) is read from a ref, so a rerender, which makes new `keys`
+ * every time, cannot restart the wait or give it a new count.
  */
 function useStatusPolling(active: boolean, onNotice: (notice: ReturnNotice | null) => void, onSettled: () => void) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
+  const latest = useRef({ api, queryClient, keys, onNotice, onSettled });
+  latest.current = { api, queryClient, keys, onNotice, onSettled };
   useEffect(() => {
     if (!active) return undefined;
     let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let polls = 0;
     const settle = (notice: ReturnNotice | null) => {
       if (stopped) return;
-      onNotice(notice);
-      onSettled();
+      latest.current.onNotice(notice);
+      latest.current.onSettled();
     };
-    const poll = async () => {
-      polls += 1;
+    void (async () => {
       try {
-        const outcome = await api.checkManagedConnectStatus();
-        if (stopped) return;
-        if (outcome.connection === "pending") {
-          if (polls >= STATUS_POLLS) settle({ tone: "info", message: PENDING_TIMEOUT_MESSAGE });
-          else timer = setTimeout(() => void poll(), STATUS_POLL_MS);
+        const result = await pollConnectStatus(() => latest.current.api.checkManagedConnectStatus(), { stopped: () => stopped });
+        if (result === "stopped") return;
+        if (result === "timeout") {
+          settle({ tone: "info", message: PENDING_TIMEOUT_MESSAGE });
           return;
         }
+        const { queryClient: client, keys: scoped } = latest.current;
         await Promise.all([
-          queryClient.invalidateQueries({ queryKey: keys.managedPending }),
-          queryClient.invalidateQueries({ queryKey: keys.managedConnections }),
+          client.invalidateQueries({ queryKey: scoped.managedPending }),
+          client.invalidateQueries({ queryKey: scoped.managedConnections }),
         ]);
-        settle(returnNotice(outcome.connection, outcome.reason ?? null));
+        settle(returnNotice(result.connection, result.reason ?? null));
       } catch {
         settle(returnNotice("error", "unavailable"));
       }
-    };
-    void poll();
+    })();
     return () => {
       stopped = true;
-      clearTimeout(timer);
     };
-  }, [active, api, queryClient, keys, onNotice, onSettled]);
+  }, [active]);
 }
 
 /**
@@ -263,7 +266,8 @@ function ConfirmShop({ pending, onDone }: { pending: PendingManagedConnection; o
 
   const cancel = useMutation({
     mutationFn: () => api.cancelManagedConnect(),
-    onSuccess: () => settled({ tone: "info", message: CANCELLED_MESSAGE }),
+    // The account is removed at Shopify too; when that failed, the notice sends the owner to Shopify admin (C-5).
+    onSuccess: (result) => settled(cancelNotice(result)),
   });
 
   const busy = confirm.isPending || cancel.isPending;
@@ -337,7 +341,7 @@ function ConnectForm({ hasStores, onAction }: { hasStores: boolean; onAction: ()
 
   return (
     <form onSubmit={submit} noValidate className={cn("space-y-2", hasStores ? "mt-4" : "")} data-testid="shopify-connect-form">
-      <Label htmlFor="shopify-domain">{hasStores ? "Connect another store" : "Store address"}</Label>
+      <Label htmlFor="shopify-domain">Store address</Label>
       <div className="flex flex-col gap-2 sm:flex-row">
         <Input
           id="shopify-domain"
@@ -400,11 +404,13 @@ function ShopRow({ connection, onAction }: { connection: ManagedConnection; onAc
     },
   });
 
-  // Reconnect is a disconnect, then a connect to the same store (C-13).
+  // Reconnect is a disconnect, then a connect to the same store (C-13). The connect waits until the list says
+  // the old link is disconnected: while it is disconnecting the API answers 409 already_connected (C-4).
   const reconnect = useMutation({
-    mutationFn: async () => {
-      await api.disconnectManagedConnection(connection.id, { idempotencyKey: intentKeys.keyFor(payload) });
-      return api.startManagedConnect(connection.toolkit, connection.accountDomain);
+    mutationFn: () => reconnectStore(api, connection, intentKeys.keyFor(payload)),
+    onError: (error) => {
+      // The row has moved on to "Disconnecting" and closed the dialog, so the reason goes to a toast.
+      if (error instanceof DisconnectPendingError) toast(error.message, "info");
     },
     onSettled: async (_result, error) => {
       intentKeys.settle(payload, error);

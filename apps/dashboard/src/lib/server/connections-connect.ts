@@ -170,6 +170,8 @@ export async function startManagedConnect(request: Request, setup: LiveSetup | n
   const response = Response.json({ authorizeUrl: answer.data.authorizeUrl }, { status: 200, headers: NO_STORE });
   response.headers.append("Set-Cookie", connectCookie(BROWSER_COOKIE, key, ctx.secure));
   response.headers.append("Set-Cookie", connectCookie(ATTEMPT_COOKIE, attempt, ctx.secure));
+  // Last start wins: a grant an earlier flow staged belongs to an attempt this one replaced.
+  response.headers.append("Set-Cookie", expiredConnectCookie(GRANT_COOKIE, ctx.secure));
   return ctx.auth.finish(response);
 }
 
@@ -219,11 +221,23 @@ async function askCallback(config: LiveConfig, request: Request, route: "callbac
   }
 }
 
-/** The cookies an outcome leaves: a staged grant for the owner to confirm; a finished flow drops the attempt. */
+/**
+ * Reasons that leave the attempt standing (C-5). `attempt_changed`: the cookie holds a newer attempt that
+ * this answer says nothing about. The others are failures to reach or finish the check, so the same attempt
+ * may still succeed. `unavailable` is this server's own word for an answer it could not read or get.
+ */
+const ATTEMPT_STANDS = new Set(["attempt_changed", "rate_limited", "provider_unavailable", UNAVAILABLE]);
+
+/**
+ * The cookies an outcome leaves. A staged grant is kept for the owner to confirm; a pending answer changes
+ * nothing; a flow that is over (connected, or refused for good) drops its attempt and any grant left over from
+ * an earlier flow. An answer that says nothing about this attempt leaves both cookies as they are.
+ */
 function outcomeCookies(outcome: CallbackOutcome, secure: boolean): string[] {
   if (outcome.connection === "confirm") return [connectCookie(GRANT_COOKIE, outcome.grant, secure)];
   if (outcome.connection === "pending") return [];
-  return [expiredConnectCookie(ATTEMPT_COOKIE, secure)];
+  if (outcome.connection === "error" && ATTEMPT_STANDS.has(outcome.reason)) return [];
+  return [expiredConnectCookie(ATTEMPT_COOKIE, secure), expiredConnectCookie(GRANT_COOKIE, secure)];
 }
 
 function landing(outcome: CallbackOutcome, cookies: readonly string[]): Response {
@@ -258,26 +272,20 @@ export async function completeManagedConnect(request: Request, setup: LiveSetup 
 
 /**
  * GET /api/connections/callback/status: the page asks again while the provider has not finished (the callback
- * answered "pending"). Same-origin only; answers `{ connection, reason? }` as JSON and stages a grant the same
- * way the callback does.
+ * answered "pending"). Same-origin and signed in, like the other routes the page calls; answers
+ * `{ connection, reason? }` as JSON and stages a grant the same way the callback does.
  */
 export async function managedConnectStatus(request: Request, setup: LiveSetup | null): Promise<Response> {
-  if (!setup) return notFound();
-  if (!setup.ok) {
-    reportSetupProblem(setup.problem);
-    return reply(503, "Internal");
-  }
-  if (request.method !== "GET") return reply(405, "NotFound", { Allow: "GET" });
-  if (!isSameOrigin(request, setup.config.trustProxy)) return reply(403, "Forbidden");
-  const secure = isHttps(request, setup.config.trustProxy);
+  const ctx = await ready(request, setup, "GET");
+  if (ctx instanceof Response) return ctx;
   const attempt = attemptOf(request);
-  const upstream = attempt === undefined ? null : await askCallback(setup.config, request, "callback/status", attempt);
+  const upstream = attempt === undefined ? null : await askCallback(ctx.config, request, "callback/status", attempt);
   const outcome: CallbackOutcome = attempt === undefined
     ? { connection: "error", reason: "invalid_attempt" }
     : upstream ? outcomeOf(upstream) : { connection: "error", reason: UNAVAILABLE };
   const response = Response.json(outcome.connection === "error" ? outcome : { connection: outcome.connection }, { status: 200, headers: NO_STORE });
-  for (const cookie of outcomeCookies(outcome, secure)) response.headers.append("Set-Cookie", cookie);
-  return response;
+  for (const cookie of outcomeCookies(outcome, ctx.secure)) response.headers.append("Set-Cookie", cookie);
+  return ctx.auth.finish(response);
 }
 
 /**
@@ -295,9 +303,11 @@ export async function readPendingConnection(request: Request, setup: LiveSetup |
 }
 
 /**
- * DELETE /api/connections/pending: the owner declines. Same origin only. The grant and the attempt are dropped
- * whatever the API says; telling the API (so it can forget the attempt) is best effort, and repeating this
- * changes nothing.
+ * DELETE /api/connections/pending: the owner declines. Same origin and signed in. Both cookies go upstream (the
+ * grant names the attempt that staged it, which the API prefers over the attempt cookie). The cookies are
+ * dropped only once the API has answered 2xx, or 404 (nothing left to cancel), so any other refusal or a lost
+ * answer reaches the page with the cookies still there to try again. Answers the API's body
+ * (`{ cancelled, revokeFailed }`). With nothing to send, or no live settings, it only drops what is here.
  */
 export async function cancelPendingConnection(request: Request, setup: LiveSetup | null): Promise<Response> {
   if (!setup) return notFound();
@@ -307,27 +317,26 @@ export async function cancelPendingConnection(request: Request, setup: LiveSetup
   const secure = isHttps(request, trustProxy);
   const drop = [expiredConnectCookie(GRANT_COOKIE, secure), expiredConnectCookie(ATTEMPT_COOKIE, secure)];
   const attempt = attemptOf(request);
-  if (!setup.ok || attempt === undefined) {
+  const grant = grantOf(request);
+  if (!setup.ok || (attempt === undefined && grant === undefined)) {
     const response = new Response(null, { status: 204, headers: NO_STORE });
     for (const cookie of drop) response.headers.append("Set-Cookie", cookie);
     return response;
   }
-  const auth = authFor(request, setup.config);
-  const lookup = await lookupSession(auth);
-  if (lookup.status === "signed_in") {
-    const ctx: Ready = { config: setup.config, auth, bearer: lookup.session.access_token, secure };
-    const upstream = await callApi(ctx, "/v1/connections/pending", { method: "DELETE", headers: { [CONNECT_ATTEMPT_HEADER]: attempt } });
-    if (upstream?.status === 401) auth.clearAll();
-  }
-  const response = new Response(null, { status: 204, headers: NO_STORE });
-  for (const cookie of drop) response.headers.append("Set-Cookie", cookie);
-  return auth.finish(response);
+  const ctx = await ready(request, setup, "DELETE");
+  if (ctx instanceof Response) return ctx;
+  const headers: Record<string, string> = {};
+  if (grant !== undefined) headers[CONNECT_GRANT_HEADER] = grant;
+  if (attempt !== undefined) headers[CONNECT_ATTEMPT_HEADER] = attempt;
+  const upstream = await callApi(ctx, "/v1/connections/pending", { method: "DELETE", headers });
+  if (!upstream) return ctx.auth.finish(reply(502, "Internal"));
+  return relay(upstream, ctx, upstream.ok || upstream.status === 404 ? drop : []);
 }
 
 /**
  * POST /api/connections/confirm: the owner confirms the staged grant. The grant goes upstream only from this
  * browser's cookie. It is spent when it connected, or when the API says it is gone, foreign or no longer
- * usable (2xx, 403, 404, 409) and the body names it. An outage or a lost answer keeps it, so the owner can try
+ * usable (2xx, 403, 404, 409) and the body names it. The attempt cookie is left for the callback to finish. An outage or a lost answer keeps it, so the owner can try
  * again, and so does a confirm of a grant this one replaced: the page shows this one next.
  */
 export async function confirmManagedConnect(request: Request, setup: LiveSetup | null, timing: BodyTiming = {}): Promise<Response> {
@@ -343,6 +352,6 @@ export async function confirmManagedConnect(request: Request, setup: LiveSetup |
   const upstream = await callApi(ctx, "/v1/connections/confirm", { method: "POST", headers, body: bytes });
   if (!upstream) return ctx.auth.finish(reply(502, "Internal"));
   const spent = namesGrant(bytes, grant) && (upstream.ok || [403, 404, 409].includes(upstream.status));
-  const cookies = spent ? [expiredConnectCookie(GRANT_COOKIE, ctx.secure), ...(upstream.ok ? [expiredConnectCookie(ATTEMPT_COOKIE, ctx.secure)] : [])] : [];
-  return relay(upstream, ctx, cookies);
+  // Only the grant: the attempt stays so that a reload of the callback still answers "connected" (C-5).
+  return relay(upstream, ctx, spent ? [expiredConnectCookie(GRANT_COOKIE, ctx.secure)] : []);
 }

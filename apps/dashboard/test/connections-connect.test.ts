@@ -74,8 +74,9 @@ describe("starting a connection", () => {
     expect(cookies.get(ATTEMPT_COOKIE)!.value).toBe(ATTEMPT);
     const key = cookies.get(BROWSER_COOKIE)!.value!;
     expect(key).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    // No grant yet; the body above is the address alone, so it carries no token.
-    expect(cookies.has(GRANT_COOKIE)).toBe(false);
+    // A new flow ends any grant an earlier one staged (C-5); the body above is the address alone, so it carries no token.
+    expect(cookies.get(GRANT_COOKIE)!.value).toBeNull();
+    expect(cookies.get(GRANT_COOKIE)!.header).toMatch(/; Path=\/api\/connections(;|$)/);
 
     const sent = harness.apiCalls.at(-1)!;
     expect(sent.url).toBe(`${API_URL}/v1/connections/shopify/connect`);
@@ -114,6 +115,8 @@ describe("starting a connection", () => {
       expect(refused.status).toBe(status);
       expect(setCookies(refused).has(BROWSER_COOKIE), String(status)).toBe(false);
       expect(setCookies(refused).has(ATTEMPT_COOKIE), String(status)).toBe(false);
+      // A refused start leaves the grant of the flow that is still open.
+      expect(setCookies(refused).has(GRANT_COOKIE), String(status)).toBe(false);
     }
     // The refusal passes its Retry-After on, still with no cookie.
     harness.api = async () => apiError(429, "RateLimited", { "Retry-After": "120" });
@@ -207,7 +210,8 @@ describe("the callback route", () => {
     // Needs no session: the provider's redirect arrives with only the connect cookies. A finished flow drops the attempt.
     expect(setCookies(response).get(ATTEMPT_COOKIE)?.value).toBeNull();
     expect(setCookies(response).get(ATTEMPT_COOKIE)?.header).toMatch(/; Path=\/api\/connections(;|$)/);
-    expect(setCookies(response).has(GRANT_COOKIE)).toBe(false);
+    // The flow is done, so a grant left from an earlier one goes too.
+    expect(setCookies(response).get(GRANT_COOKIE)?.value).toBeNull();
   });
 
   it("caps an overlong id, sends no key without a well-formed cookie, and never calls the API without an attempt", async () => {
@@ -264,13 +268,57 @@ describe("the callback route", () => {
     expect(setCookies(response).size).toBe(0);
   });
 
+  it("drops the attempt on an outcome that ends the flow, and keeps it on attempt_changed and on a transient failure (C-5)", async () => {
+    const harness = createLiveHarness();
+    // The flow is over for this attempt: the attempt cookie goes.
+    for (const reason of ["invalid_attempt", "browser_mismatch", "forbidden", "not_connected", "expired", "conflict"]) {
+      harness.api = redirectTo(`connection=error&reason=${reason}`);
+      const response = await completeManagedConnect(callbackRequest("?session_uri=s"), harness.setup);
+      expect(setCookies(response).get(ATTEMPT_COOKIE)?.value, reason).toBeNull();
+    }
+    harness.api = async () => apiError(400, "ValidationFailed");
+    expect(setCookies(await completeManagedConnect(callbackRequest("?session_uri=s"), harness.setup)).get(ATTEMPT_COOKIE)?.value).toBeNull();
+    harness.api = redirectTo("connection=connected");
+    expect(setCookies(await completeManagedConnect(callbackRequest("?session_uri=s"), harness.setup)).get(ATTEMPT_COOKIE)?.value).toBeNull();
+
+    // The cookie holds a newer attempt (attempt_changed), or the answer says nothing about this one: it stays.
+    const keeps: Array<[string, () => Promise<Response>]> = [
+      ["attempt_changed", redirectTo("connection=error&reason=attempt_changed")],
+      ["rate_limited", redirectTo("connection=error&reason=rate_limited")],
+      ["provider_unavailable", redirectTo("connection=error&reason=provider_unavailable")],
+      ["pending", redirectTo("connection=pending")],
+      ["a 404", async () => apiError(404, "NotFound")],
+      ["a 5xx", async () => apiError(503, "Internal")],
+      ["an odd answer", redirectTo("connection=whatever")],
+      ["a network failure", async () => { throw new Error("down"); }],
+    ];
+    for (const [name, respond] of keeps) {
+      harness.api = respond;
+      const response = await completeManagedConnect(callbackRequest("?session_uri=s"), harness.setup);
+      expect(setCookies(response).has(ATTEMPT_COOKIE), name).toBe(false);
+      expect(setCookies(response).has(GRANT_COOKIE), name).toBe(false);
+    }
+  });
+
+  it("expires a stale grant when the flow connects or ends, and stages the new one when it confirms (C-5)", async () => {
+    const harness = createLiveHarness();
+    const withGrant = `${ATTEMPT_COOKIE}=${ATTEMPT}; ${BROWSER_COOKIE}=${KEY}; ${GRANT_COOKIE}=${OTHER_GRANT}`;
+    harness.api = redirectTo("connection=connected");
+    const connected = await completeManagedConnect(callbackRequest("?session_uri=s", withGrant), harness.setup);
+    expect(setCookies(connected).get(GRANT_COOKIE)?.value).toBeNull();
+    expect(setCookies(connected).get(GRANT_COOKIE)?.header).toMatch(/; Path=\/api\/connections(;|$)/);
+    harness.api = redirectTo("connection=error&reason=expired");
+    expect(setCookies(await completeManagedConnect(callbackRequest("?session_uri=s", withGrant), harness.setup)).get(GRANT_COOKIE)?.value).toBeNull();
+    harness.api = redirectTo("connection=confirm", { "x-zs-connect-grant": GRANT });
+    expect(setCookies(await completeManagedConnect(callbackRequest("?session_uri=s", withGrant), harness.setup)).get(GRANT_COOKIE)?.value).toBe(GRANT);
+  });
+
   it("relays only a reason it knows, maps 400 to invalid_attempt and treats anything else as unavailable", async () => {
     const harness = createLiveHarness();
     for (const reason of ["invalid_attempt", "browser_mismatch", "attempt_changed", "forbidden", "rate_limited", "conflict", "not_connected", "expired", "provider_unavailable"]) {
       harness.api = redirectTo(`connection=error&reason=${reason}`);
       const response = await completeManagedConnect(callbackRequest("?session_uri=s"), harness.setup);
       expect(landsOn(response), reason).toEqual({ connection: "error", reason });
-      expect(setCookies(response).get(ATTEMPT_COOKIE)?.value, reason).toBeNull();
     }
     harness.api = redirectTo("connection=error&reason=%3Cscript%3E");
     expect(landsOn(await completeManagedConnect(callbackRequest("?session_uri=s"), harness.setup))).toEqual({ connection: "error", reason: "unavailable" });
@@ -291,53 +339,83 @@ describe("the callback route", () => {
 });
 
 describe("the status route", () => {
-  const statusRequest = (headers: Record<string, string> = {}) => new Request(`${ORIGIN}/api/connections/callback/status`, {
-    headers: { Cookie: `${ATTEMPT_COOKIE}=${ATTEMPT}; ${BROWSER_COOKIE}=${KEY}`, ...sameOrigin(), ...headers },
-  });
+  const statusRequest = (jar: Jar, headers: Record<string, string> = {}, cookie = `${ATTEMPT_COOKIE}=${ATTEMPT}; ${BROWSER_COOKIE}=${KEY}`) =>
+    new Request(`${ORIGIN}/api/connections/callback/status`, { headers: { Cookie: cookieHeader(jar, Object.fromEntries(cookie.split("; ").filter(Boolean).map((pair) => pair.split("=") as [string, string]))), ...sameOrigin(), ...headers } });
 
   it("asks the API's status route with the attempt and key, and answers JSON", async () => {
-    const harness = createLiveHarness();
+    const { harness, jar } = await owner();
     harness.api = redirectTo("connection=pending");
-    const pending = await managedConnectStatus(statusRequest(), harness.setup);
+    const pending = await managedConnectStatus(statusRequest(jar), harness.setup);
     expect(await pending.json()).toEqual({ connection: "pending" });
     expect(pending.headers.get("cache-control")).toBe("no-store");
     const sent = harness.apiCalls.at(-1)!;
     expect(sent.url).toBe(`${API_URL}/oauth/connections/callback/status?`);
     expect(sentHeaders(sent).get("x-zs-connect-attempt")).toBe(ATTEMPT);
     expect(sentHeaders(sent).get("x-zs-browser-key")).toBe(KEY);
-    expect(setCookies(pending).size).toBe(0);
+    expect(sentHeaders(sent).get("authorization")).toBeNull();
+    expect(setCookies(pending).has(ATTEMPT_COOKIE)).toBe(false);
+    expect(setCookies(pending).has(GRANT_COOKIE)).toBe(false);
 
     harness.api = redirectTo("connection=connected");
-    const connected = await managedConnectStatus(statusRequest(), harness.setup);
+    const connected = await managedConnectStatus(statusRequest(jar), harness.setup);
     expect(await connected.json()).toEqual({ connection: "connected" });
     expect(setCookies(connected).get(ATTEMPT_COOKIE)?.value).toBeNull();
+    expect(setCookies(connected).get(GRANT_COOKIE)?.value).toBeNull();
 
     harness.api = redirectTo("connection=error&reason=expired");
-    const expired = await managedConnectStatus(statusRequest(), harness.setup);
+    const expired = await managedConnectStatus(statusRequest(jar), harness.setup);
     expect(await expired.json()).toEqual({ connection: "error", reason: "expired" });
     expect(setCookies(expired).get(ATTEMPT_COOKIE)?.value).toBeNull();
+    expect(setCookies(expired).get(GRANT_COOKIE)?.value).toBeNull();
+  });
+
+  it("keeps the attempt on attempt_changed and on a transient failure, as the callback does", async () => {
+    const { harness, jar } = await owner();
+    for (const respond of [
+      redirectTo("connection=error&reason=attempt_changed"),
+      redirectTo("connection=error&reason=rate_limited"),
+      redirectTo("connection=error&reason=provider_unavailable"),
+      async () => apiError(503, "Internal"),
+      async (): Promise<Response> => { throw new Error("down"); },
+    ]) {
+      harness.api = respond;
+      const response = await managedConnectStatus(statusRequest(jar), harness.setup);
+      expect((await response.json() as { connection: string }).connection).toBe("error");
+      expect(setCookies(response).has(ATTEMPT_COOKIE)).toBe(false);
+      expect(setCookies(response).has(GRANT_COOKIE)).toBe(false);
+    }
+    harness.api = redirectTo("connection=error&reason=forbidden");
+    expect(setCookies(await managedConnectStatus(statusRequest(jar), harness.setup)).get(ATTEMPT_COOKIE)?.value).toBeNull();
   });
 
   it("stages a grant the way the callback does, without putting it in the body", async () => {
-    const harness = createLiveHarness();
+    const { harness, jar } = await owner();
     harness.api = redirectTo("connection=confirm", { "x-zs-connect-grant": GRANT });
-    const response = await managedConnectStatus(statusRequest(), harness.setup);
+    const response = await managedConnectStatus(statusRequest(jar), harness.setup);
     expect(await response.json()).toEqual({ connection: "confirm" });
     expect(setCookies(response).get(GRANT_COOKIE)!.value).toBe(GRANT);
     expect(setCookies(response).get(GRANT_COOKIE)!.header).toMatch(/; SameSite=Strict/);
   });
 
-  it("refuses a cross-site call, a missing attempt and a wrong method without bothering the API", async () => {
+  it("needs the dashboard session like the other routes: signed out is 401, and the API is not asked", async () => {
     const harness = createLiveHarness();
     harness.api = redirectTo("connection=pending");
-    const cross = await managedConnectStatus(statusRequest({ "Sec-Fetch-Site": "cross-site" }), harness.setup);
+    const response = await managedConnectStatus(statusRequest(new Jar()), harness.setup);
+    expect(response.status).toBe(401);
+    expect(harness.apiCalls).toHaveLength(0);
+  });
+
+  it("refuses a cross-site call, a missing attempt and a wrong method without bothering the API", async () => {
+    const { harness, jar } = await owner();
+    harness.api = redirectTo("connection=pending");
+    const cross = await managedConnectStatus(statusRequest(jar, { "Sec-Fetch-Site": "cross-site" }), harness.setup);
     expect(cross.status).toBe(403);
-    const none = await managedConnectStatus(new Request(`${ORIGIN}/api/connections/callback/status`, { headers: sameOrigin() }), harness.setup);
+    const none = await managedConnectStatus(statusRequest(jar, {}, ""), harness.setup);
     expect(await none.json()).toEqual({ connection: "error", reason: "invalid_attempt" });
-    const post = await managedConnectStatus(new Request(`${ORIGIN}/api/connections/callback/status`, { method: "POST", headers: sameOrigin() }), harness.setup);
+    const post = await managedConnectStatus(new Request(`${ORIGIN}/api/connections/callback/status`, { method: "POST", headers: { Cookie: cookieHeader(jar), ...sameOrigin() } }), harness.setup);
     expect(post.status).toBe(405);
     expect(harness.apiCalls).toHaveLength(0);
-    expect((await managedConnectStatus(statusRequest(), null)).status).toBe(404);
+    expect((await managedConnectStatus(statusRequest(jar), null)).status).toBe(404);
   });
 });
 
@@ -389,7 +467,7 @@ describe("the staged grant", () => {
     expect(cross.status).toBe(403);
   });
 
-  it("confirms with the cookie's grant and spends it, with the attempt, once the API connected it", async () => {
+  it("confirms with the cookie's grant and spends the grant, not the attempt, once the API connected it", async () => {
     const { harness, jar } = await owner();
     harness.api = async () => Response.json({ actionId: "a-1", result: {} });
     const response = await confirmManagedConnect(confirmRequest(jar, { grantId: sha256(GRANT) }), harness.setup);
@@ -400,7 +478,8 @@ describe("the staged grant", () => {
     expect(sentHeaders(sent).get("idempotency-key")).toBe("c-1");
     expect(sentBody(sent)).toEqual({ grantId: sha256(GRANT) });
     expect(setCookies(response).get(GRANT_COOKIE)?.value).toBeNull();
-    expect(setCookies(response).get(ATTEMPT_COOKIE)?.value).toBeNull();
+    // The attempt stays, so a reload of the callback still answers "connected" (C-5).
+    expect(setCookies(response).has(ATTEMPT_COOKIE)).toBe(false);
   });
 
   it("spends the grant on 403, 404 and 409, keeps it on an outage or a grant it has replaced, and never on a 5xx", async () => {
@@ -457,48 +536,105 @@ describe("the staged grant", () => {
     }
   });
 
-  it("cancels: drops the grant and the attempt, tells the API best effort, and answers 204 whatever it says", async () => {
+  it("cancels with the grant and the attempt both, answers the API's body and drops both cookies on a 2xx", async () => {
     const { harness, jar } = await owner();
-    harness.api = async () => Response.json({ cancelled: true });
+    harness.api = async () => Response.json({ cancelled: true, revokeFailed: false });
     const response = await cancelPendingConnection(pendingRequest(jar, "DELETE"), harness.setup);
-    expect(response.status).toBe(204);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ cancelled: true, revokeFailed: false });
+    expect(response.headers.get("cache-control")).toBe("no-store");
     expect(setCookies(response).get(GRANT_COOKIE)?.value).toBeNull();
     expect(setCookies(response).get(ATTEMPT_COOKIE)?.value).toBeNull();
     expect(setCookies(response).get(GRANT_COOKIE)?.header).toMatch(/; Path=\/api\/connections(;|$)/);
+    expect(setCookies(response).get(ATTEMPT_COOKIE)?.header).toMatch(/; Path=\/api\/connections(;|$)/);
+    // The browser key is not part of a cancel.
+    expect(setCookies(response).has(BROWSER_COOKIE)).toBe(false);
     const sent = harness.apiCalls.at(-1)!;
     expect(sent.url).toBe(`${API_URL}/v1/connections/pending`);
     expect(sent.init.method).toBe("DELETE");
     expect(sentHeaders(sent).get("x-zs-connect-attempt")).toBe(ATTEMPT);
-    expect(sentHeaders(sent).get("x-zs-connect-grant")).toBeNull();
+    expect(sentHeaders(sent).get("x-zs-connect-grant")).toBe(GRANT);
+    expect(sentHeaders(sent).get("authorization")).toMatch(/^Bearer /);
+    expect(sentHeaders(sent).get("cookie")).toBeNull();
 
-    for (const respond of [async () => apiError(404, "NotFound"), async () => apiError(503, "Internal"), async () => { throw new Error("down"); }]) {
-      harness.api = respond;
-      const again = await cancelPendingConnection(pendingRequest(jar, "DELETE"), harness.setup);
-      expect(again.status).toBe(204);
-      expect(setCookies(again).get(GRANT_COOKIE)?.value).toBeNull();
+    // The revoke failed: the page is told, so it can send the owner to Shopify admin.
+    harness.api = async () => Response.json({ cancelled: true, revokeFailed: true });
+    const revoke = await cancelPendingConnection(pendingRequest(jar, "DELETE"), harness.setup);
+    expect(await revoke.json()).toEqual({ cancelled: true, revokeFailed: true });
+    expect(setCookies(revoke).get(GRANT_COOKIE)?.value).toBeNull();
+  });
+
+  it("sends what it has: the grant alone, or the attempt alone", async () => {
+    const { harness, jar } = await owner();
+    harness.api = async () => Response.json({ cancelled: true, revokeFailed: false });
+    await cancelPendingConnection(pendingRequest(jar, "DELETE", {}, { [GRANT_COOKIE]: GRANT }), harness.setup);
+    expect(sentHeaders(harness.apiCalls.at(-1)!).get("x-zs-connect-grant")).toBe(GRANT);
+    expect(sentHeaders(harness.apiCalls.at(-1)!).get("x-zs-connect-attempt")).toBeNull();
+    await cancelPendingConnection(pendingRequest(jar, "DELETE", {}, { [ATTEMPT_COOKIE]: ATTEMPT }), harness.setup);
+    expect(sentHeaders(harness.apiCalls.at(-1)!).get("x-zs-connect-attempt")).toBe(ATTEMPT);
+    expect(sentHeaders(harness.apiCalls.at(-1)!).get("x-zs-connect-grant")).toBeNull();
+  });
+
+  it("surfaces an API refusal and keeps both cookies, so the owner can retry", async () => {
+    const { harness, jar } = await owner();
+    for (const [status, code, extra] of [
+      [429, "RateLimited", { "Retry-After": "30" }], [409, "Conflict", {}], [403, "Forbidden", {}], [500, "Internal", {}], [503, "Unavailable", {}],
+    ] as const) {
+      harness.api = async () => apiError(status, code, extra);
+      const response = await cancelPendingConnection(pendingRequest(jar, "DELETE"), harness.setup);
+      expect(response.status, String(status)).toBe(status);
+      expect((await response.json() as { error: { code: string } }).error.code).toBe(code);
+      if (status === 429) expect(response.headers.get("retry-after")).toBe("30");
+      expect(setCookies(response).has(GRANT_COOKIE), String(status)).toBe(false);
+      expect(setCookies(response).has(ATTEMPT_COOKIE), String(status)).toBe(false);
     }
-    // Repeating it, or with no cookie, changes nothing and calls nobody.
+    // A lost answer is a 502, not a silent success, and the cookies stay.
+    harness.api = async () => { throw new Error("down"); };
+    const down = await cancelPendingConnection(pendingRequest(jar, "DELETE"), harness.setup);
+    expect(down.status).toBe(502);
+    expect(setCookies(down).has(GRANT_COOKIE)).toBe(false);
+    expect(setCookies(down).has(ATTEMPT_COOKIE)).toBe(false);
+  });
+
+  it("drops both cookies when the API has nothing to cancel (404), since the goal is reached", async () => {
+    const { harness, jar } = await owner();
+    harness.api = async () => apiError(404, "NotFound");
+    const response = await cancelPendingConnection(pendingRequest(jar, "DELETE"), harness.setup);
+    expect(response.status).toBe(404);
+    expect(setCookies(response).get(GRANT_COOKIE)?.value).toBeNull();
+    expect(setCookies(response).get(ATTEMPT_COOKIE)?.value).toBeNull();
+  });
+
+  it("answers 204 and calls nobody when there is no grant and no attempt, or no live settings", async () => {
+    const { harness, jar } = await owner();
+    harness.api = async () => Response.json({ cancelled: true, revokeFailed: false });
     const before = harness.apiCalls.length;
-    const bare = await cancelPendingConnection(pendingRequest(new Jar(), "DELETE", {}, {}), harness.setup);
+    const bare = await cancelPendingConnection(pendingRequest(jar, "DELETE", {}, {}), harness.setup);
     expect(bare.status).toBe(204);
     expect(harness.apiCalls.length).toBe(before);
     // Without live settings the cookies still go.
     const unset = await cancelPendingConnection(pendingRequest(new Jar(), "DELETE"), { ok: false, problem: "unset" });
     expect(unset.status).toBe(204);
     expect(setCookies(unset).get(GRANT_COOKIE)?.value).toBeNull();
+    expect(setCookies(unset).get(ATTEMPT_COOKIE)?.value).toBeNull();
   });
 
-  it("refuses a cancel from another site or with another method, and drops everything when the API refuses the session", async () => {
+  it("refuses a cancel from another site, with another method, or signed out, and drops everything when the API refuses the session", async () => {
     const { harness, jar } = await owner();
-    harness.api = async () => Response.json({ cancelled: true });
+    harness.api = async () => Response.json({ cancelled: true, revokeFailed: false });
     const cross = await cancelPendingConnection(pendingRequest(jar, "DELETE", { "Sec-Fetch-Site": "cross-site" }), harness.setup);
     expect(cross.status).toBe(403);
     expect(setCookies(cross).size).toBe(0);
     expect((await cancelPendingConnection(pendingRequest(jar, "POST"), harness.setup)).status).toBe(405);
     expect((await cancelPendingConnection(pendingRequest(jar, "DELETE"), null)).status).toBe(404);
+    const before = harness.apiCalls.length;
+    const signedOut = await cancelPendingConnection(pendingRequest(new Jar(), "DELETE"), harness.setup);
+    expect(signedOut.status).toBe(401);
+    expect(setCookies(signedOut).has(GRANT_COOKIE)).toBe(false);
+    expect(harness.apiCalls.length).toBe(before);
     harness.api = async () => apiError(401, "Unauthorized");
     const refused = await cancelPendingConnection(pendingRequest(jar, "DELETE"), harness.setup);
-    expect(refused.status).toBe(204);
+    expect(refused.status).toBe(401);
     for (const name of [BROWSER_COOKIE, ATTEMPT_COOKIE, GRANT_COOKIE]) expect(setCookies(refused).get(name)?.value, name).toBeNull();
     expect([...setCookies(refused).keys()].some((name) => name.startsWith(AUTH_COOKIE))).toBe(true);
   });

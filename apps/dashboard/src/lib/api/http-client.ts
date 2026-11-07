@@ -150,6 +150,9 @@ const managedConnectOutcomeSchema = z.object({
   connection: z.enum(["connected", "confirm", "pending", "error"]),
   reason: z.string().max(40).optional(),
 });
+/** DELETE /api/connections/pending: what the server did (C-5); no body when there was nothing to send. */
+const cancelManagedOutputSchema = z.union([z.undefined(), z.strictObject({ cancelled: z.boolean(), revokeFailed: z.boolean() })]);
+const NOTHING_CANCELLED = { cancelled: false, revokeFailed: false };
 /** PUT /v1/business answers the action and the profile as it is now; a newer API's extra keys are dropped (BP-10). */
 /** POST /v1/enrichment/requests answers the action and the request as it is now. */
 const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
@@ -575,7 +578,13 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     },
 
     async cancelManagedConnect() {
-      await request({ method: "DELETE", path: "/connections/pending", keyless: "repeatable", schema: z.undefined() });
+      try {
+        return (await request({ method: "DELETE", path: "/connections/pending", keyless: "repeatable", schema: cancelManagedOutputSchema })) ?? NOTHING_CANCELLED;
+      } catch (error) {
+        // Nothing waits any more (the server dropped the cookies): the goal is reached.
+        if (isApiError(error, "not_found")) return NOTHING_CANCELLED;
+        throw error;
+      }
     },
 
     checkManagedConnectStatus(options = {}) {

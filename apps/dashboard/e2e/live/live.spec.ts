@@ -441,11 +441,11 @@ test("labels sample areas and turns off writes that would not reach the API", as
   }
 
   const header = (name: string) => page.getByRole("main").locator("header").filter({ has: page.getByRole("heading", { level: 1, name }) });
-  // Connections: Google Calendar is live (google-calendar.md); only the other accounts are a sample.
+  // Connections: Google Calendar and Shopify are live (google-calendar.md, connections.md); the sample accounts are left out.
   await page.goto("/account/connections");
   await expect(header("Connections").getByTestId("sample-badge")).toHaveCount(0);
   await expect(page.getByTestId("gcal-card").getByTestId("sample-badge")).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "Other accounts" }).getByTestId("sample-badge")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Other accounts" })).toHaveCount(0);
   // Settings holds the live business profile (business-profile.md); only Plan is still a sample.
   await page.goto("/account/settings");
   await expect(header("Settings").getByTestId("sample-badge")).toHaveCount(0);

@@ -579,6 +579,12 @@ export interface ManagedConnectOutcome {
   reason?: string | undefined;
 }
 
+/** What a cancel did (C-5): `cancelled` when an attempt was ended, `revokeFailed` when the provider did not confirm removing the app. */
+export interface CancelManagedConnectResult {
+  cancelled: boolean;
+  revokeFailed: boolean;
+}
+
 /**
  * Managed-tier connections (connections.md C-4, C-5, C-13), such as a Shopify store. Every call needs
  * the owner-only `integrations` permission. A connect writes nothing: it answers the provider's
@@ -602,8 +608,12 @@ export interface ManagedConnectionsApi {
    * Safe to repeat: the server keys it by the grant.
    */
   confirmManagedConnect(grantId: string): Promise<Connection>;
-  /** Drops the waiting grant and the attempt; nothing is connected. Safe to repeat. */
-  cancelManagedConnect(): Promise<void>;
+  /**
+   * Ends the waiting grant and the attempt; nothing is connected, and the provider account is removed.
+   * Safe to repeat: with nothing left to cancel it answers `cancelled: false`. Throws when the server
+   * refused it (`rate_limited`, `conflict`) or could not be reached; the grant then stays, so the owner can try again.
+   */
+  cancelManagedConnect(): Promise<CancelManagedConnectResult>;
   /** Asks again how the connect ended while the provider had not finished (the callback said `pending`). */
   checkManagedConnectStatus(options?: ReadOptions): Promise<ManagedConnectOutcome>;
   /**
