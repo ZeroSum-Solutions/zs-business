@@ -528,9 +528,11 @@ role for workers (all workers share one pattern today; Known limits).
 - C-17 stays open: the provider scopes in the catalog are placeholders until the preview
   consent screen is recorded, and the vendor gates are not passed yet.
 - `pnpm connections:check-catalog` (owner-run, `zsvault run --env COMPOSIO_API_KEY=<id>`)
-  reads `GET /tools/<slug>` for each pinned slug and checks the toolkit and version. That
-  route and its answer shape are the pilot's reading of Composio's API and are confirmed on
-  its first run (C-17).
+  reads `GET /tools/<slug>` for each pinned slug and checks the toolkit, the deprecation flag
+  and the version. That route lists only the most recent versions, so a pin missing from the
+  list is asked for with `?toolkit_versions=<pin>`. The route and its answer shape were
+  confirmed against the live registry on 2026-11-07, and the catalog was pinned to live,
+  read-only tools then (C-17).
 
 ## What the Mac sets
 

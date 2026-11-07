@@ -1,12 +1,14 @@
 // Connections A-8, C-6: the owner-run catalog check. For every slug the catalog pins (identity tool and
-// read tools) it asks Composio whether the tool exists, belongs to the catalog's toolkit and still offers
-// the pinned version. It is read-only, makes no account call, and its report holds slugs, versions and
+// read tools) it asks Composio whether the tool exists, belongs to the catalog's toolkit, is not deprecated
+// and still offers the pinned version. `GET /tools/<slug>` lists only the most recent versions, so a pin
+// that is not in that list is asked for directly (`toolkit_versions=<pin>`) before it counts as missing.
+// Checked against the live registry on 2026-11-07. It is read-only, makes no account call, and its report holds slugs, versions and
 // our problem codes only: never the key and never provider text. CI never runs it (no network in tests);
 // the owner runs `pnpm connections:check-catalog` with the preview key from the vault.
 import { COMPOSIO_CATALOG, type CatalogToolkit } from "./catalog.js";
-import { ComposioError, type ComposioClient } from "./composio.js";
+import { ComposioError, type ComposioClient, type ComposioTool } from "./composio.js";
 
-export type CatalogCheckProblem = "slug_missing" | "slug_changed" | "wrong_toolkit" | "version_missing" | "key_refused" | "rate_limited" | "unavailable";
+export type CatalogCheckProblem = "slug_missing" | "slug_changed" | "wrong_toolkit" | "deprecated" | "version_missing" | "key_refused" | "rate_limited" | "unavailable";
 export interface CatalogCheckResult {
   readonly toolkit: string;
   /** Our tool name, or `identity` for the toolkit's identity tool. */
@@ -16,6 +18,14 @@ export interface CatalogCheckResult {
   readonly problem: CatalogCheckProblem | null;
 }
 export interface CatalogCheckReport { readonly ok: boolean; readonly results: readonly CatalogCheckResult[] }
+
+/** The checks every registry answer must pass, the latest one and the one at the pinned version alike. */
+const metadataProblem = (tool: ComposioTool | null, slug: string, toolkit: string): CatalogCheckProblem | null =>
+  tool === null ? "slug_missing"
+    : tool.slug !== slug ? "slug_changed"
+    : tool.toolkit !== toolkit ? "wrong_toolkit"
+    : tool.deprecated ? "deprecated"
+    : null;
 
 export async function checkComposioCatalog(
   client: Pick<ComposioClient, "getTool">,
@@ -29,11 +39,11 @@ export async function checkComposioCatalog(
       let problem: CatalogCheckProblem | null;
       try {
         const tool = await client.getTool(entry.slug, signal);
-        problem = tool === null ? "slug_missing"
-          : tool.slug !== entry.slug ? "slug_changed"
-          : tool.toolkit !== toolkit.toolkit ? "wrong_toolkit"
-          : !tool.versions.includes(entry.version) ? "version_missing"
-          : null;
+        problem = metadataProblem(tool, entry.slug, toolkit.toolkit);
+        if (problem === null && !tool!.versions.includes(entry.version)) {
+          const pinned = await client.getTool(entry.slug, signal, entry.version);
+          problem = pinned === null || pinned.version !== entry.version ? "version_missing" : metadataProblem(pinned, entry.slug, toolkit.toolkit);
+        }
       } catch (error) {
         if (!(error instanceof ComposioError)) throw error;
         problem = error.kind === "key_refused" ? "key_refused" : error.kind === "rate_limited" ? "rate_limited" : "unavailable";

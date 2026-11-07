@@ -24,12 +24,12 @@ describe("connections:check-catalog (A-8)", () => {
     const ok = capture();
     expect(await runCatalogCheck({ env: { COMPOSIO_API_KEY: KEY, COMPOSIO_BASE_URL: "https://composio.test/api/v3.1" }, fetch: fake.fetch, write: ok.write })).toBe(0);
     expect(fake.calls.every((call) => call.apiKey === KEY)).toBe(true);
-    fake.tools.set("SHOPIFY_GET_ORDER_BY_ID", { toolkit: "shopify", versions: ["20990101_00"] });
+    fake.tools.set("SHOPIFY_GET_ORDER", { toolkit: "shopify", versions: ["20990101_00"] });
     const bad = capture();
     expect(await runCatalogCheck({ env: { COMPOSIO_API_KEY: KEY, COMPOSIO_BASE_URL: "https://composio.test/api/v3.1" }, fetch: fake.fetch, write: bad.write })).toBe(1);
     const report = JSON.parse(bad.lines.join("\n")) as { ok: boolean; results: { slug: string; problem: string | null }[] };
     expect(report.ok).toBe(false);
-    expect(report.results.find((result) => result.slug === "SHOPIFY_GET_ORDER_BY_ID")!.problem).toBe("version_missing");
+    expect(report.results.find((result) => result.slug === "SHOPIFY_GET_ORDER")!.problem).toBe("version_missing");
     expect([...ok.lines, ...bad.lines].join("\n")).not.toContain(KEY);
   });
 

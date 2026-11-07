@@ -155,16 +155,29 @@ export interface ComposioClient {
   /** A 404 counts as done. */
   deleteAccount(id: string, signal?: AbortSignal): Promise<void>;
   execute(input: ExecuteInput, signal?: AbortSignal): Promise<ExecuteOutcome>;
-  /** A-8, owner-run only: one tool's toolkit and versions; `null` for a 404. */
-  getTool(slug: string, signal?: AbortSignal): Promise<ComposioTool | null>;
+  /**
+   * A-8, owner-run only: one tool's toolkit and versions; `null` for a 404. With `version`, the tool at that
+   * one version (`toolkit_versions`), and `null` when the tool has no such version.
+   */
+  getTool(slug: string, signal?: AbortSignal, version?: string): Promise<ComposioTool | null>;
 }
-export interface ComposioTool { readonly slug: string; readonly toolkit: string | null; readonly versions: readonly string[] }
+export interface ComposioTool {
+  readonly slug: string;
+  readonly toolkit: string | null;
+  /** The version this answer describes (the latest, unless one was asked for). */
+  readonly version: string | null;
+  /** The registry's recent versions plus `version`; the registry caps this list, so it is not every version. */
+  readonly versions: readonly string[];
+  readonly deprecated: boolean;
+}
 
 const toolSchema = z.object({
   slug: z.string().min(1).max(200),
   toolkit: z.object({ slug: z.string().max(200).nullish() }).nullish(),
   version: z.string().max(100).nullish(),
   available_versions: z.array(z.string().max(100)).max(1000).nullish(),
+  // Required: an answer that does not say whether the tool is deprecated is not one the check can trust.
+  is_deprecated: z.boolean(),
 });
 
 export interface ComposioClientConfig {
@@ -310,12 +323,13 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
         throw error;
       }
     },
-    async getTool(slug, signal) {
+    async getTool(slug, signal, version) {
       try {
-        const { json } = await call("GET", `/tools/${enc(slug)}`, undefined, signal);
+        const query = version === undefined ? "" : `?toolkit_versions=${enc(version)}`;
+        const { json } = await call("GET", `/tools/${enc(slug)}${query}`, undefined, signal);
         const out = parse(toolSchema, json);
         const versions = [...new Set([...(out.available_versions ?? []), ...(out.version ? [out.version] : [])])];
-        return { slug: out.slug, toolkit: out.toolkit?.slug?.toLowerCase() ?? null, versions };
+        return { slug: out.slug, toolkit: out.toolkit?.slug?.toLowerCase() ?? null, version: out.version ?? null, versions, deprecated: out.is_deprecated };
       } catch (error) {
         if (error instanceof ComposioError && error.kind === "not_found") return null;
         throw error;

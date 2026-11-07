@@ -441,7 +441,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       if (decision === "pending") return { outcome: "pending" };
       if (decision === "refuse") return refused("not_connected");
       const identity = await spend(undefined, () => composio.execute({
-        slug: toolkit.identity.slug, version: toolkit.identity.version, userId, connectedAccountId: attempt.composio_account_id, arguments: {},
+        slug: toolkit.identity.slug, version: toolkit.identity.version, userId, connectedAccountId: attempt.composio_account_id, arguments: { ...toolkit.identity.arguments },
       }, signal));
       if (identity.kind !== "ok") {
         if (identity.reason === "rate_limited") {

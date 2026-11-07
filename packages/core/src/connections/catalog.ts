@@ -3,10 +3,11 @@
 // input schema (in contracts, the one callers see), and an output projection that keeps only named
 // fields. Callers outside the adapter never see a slug or a version (C-1).
 //
-// PILOT PLACEHOLDERS (C-6, C-17): the Composio slugs, versions and the response shapes below are
-// the pilot's best reading, recorded with fake responses in the tests. The owner-run
-// `pnpm connections:check-catalog` (vault key, preview project) must confirm each slug and version
-// before the tier opens. A version change is a code change with a new recorded response.
+// C-6, C-17: the slugs and the version below were read from Composio's tool registry on 2026-11-07
+// (`GET /tools/<slug>`): every tool is live, not deprecated and tagged read-only, and the response
+// shapes follow each tool's published output schema, recorded with fake responses in the tests. The
+// owner-run `pnpm connections:check-catalog` (vault key) re-checks each slug and version. A version
+// change is a code change with a new recorded response.
 import { z } from "zod";
 import {
   SHOPIFY_GET_ORDER_TOOL,
@@ -36,6 +37,8 @@ export interface CatalogTool {
 export interface CatalogIdentity {
   readonly slug: string;
   readonly version: string;
+  /** Fixed arguments for the identity call; never built from caller input. */
+  readonly arguments: Readonly<Record<string, unknown>>;
   readonly project: (data: unknown) => { readonly externalAccountId: string; readonly name: string; readonly domain: string } | undefined;
 }
 export interface CatalogToolkit {
@@ -118,23 +121,28 @@ const projectOrders = (data: unknown): unknown => {
   return { orders };
 };
 const projectOrder = (data: unknown): unknown => {
-  const parsed = order.safeParse(record(data)?.["order"] ?? data);
+  const parsed = order.safeParse(data);
   return parsed.success ? { order: parsed.data } : undefined;
 };
 
-const shopDetails = z.object({ id: idLike, name: z.string().min(1).max(500), myshopify_domain: z.string().min(1).max(253) });
+// The shop query answers over GraphQL: the id is a global id (`gid://shopify/Shop/<number>`), and we keep
+// only its number, the same account id the REST API gives.
+const SHOP_GID = /^gid:\/\/shopify\/Shop\/([0-9]{1,20})$/;
+const shopDetails = z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(500), myshopifyDomain: z.string().min(1).max(253) });
 
-const SHOPIFY_VERSION = "20251201_00";
+const SHOPIFY_VERSION = "20261104_00";
 
 const shopify: CatalogToolkit = {
   toolkit: SHOPIFY_TOOLKIT,
   identity: {
-    slug: "SHOPIFY_GET_SHOP_DETAILS",
+    slug: "SHOPIFY_QUERY_SHOP",
     version: SHOPIFY_VERSION,
+    arguments: Object.freeze({ fields: "id name myshopifyDomain" }),
     project(data) {
-      const parsed = shopDetails.safeParse(record(data)?.["shop"] ?? data);
-      if (!parsed.success || !/^[0-9]{1,20}$/.test(parsed.data.id)) return undefined;
-      return { externalAccountId: parsed.data.id, name: parsed.data.name, domain: parsed.data.myshopify_domain.toLowerCase() };
+      const parsed = shopDetails.safeParse(record(data)?.["shop"]);
+      const id = parsed.success ? SHOP_GID.exec(parsed.data.id)?.[1] : undefined;
+      if (!parsed.success || id === undefined) return undefined;
+      return { externalAccountId: id, name: parsed.data.name, domain: parsed.data.myshopifyDomain.toLowerCase() };
     },
   },
   linkData: (shopDomain) => ({ shop: shopDomain.replace(/\.myshopify\.com$/, "") }),
@@ -161,7 +169,7 @@ const shopify: CatalogToolkit = {
     },
     {
       name: SHOPIFY_GET_ORDER_TOOL,
-      slug: "SHOPIFY_GET_ORDER_BY_ID",
+      slug: "SHOPIFY_GET_ORDER",
       version: SHOPIFY_VERSION,
       input: shopifyGetOrderInputSchema as unknown as z.ZodType<Record<string, unknown>>,
       toArguments: (input) => ({ order_id: shopifyGetOrderInputSchema.parse(input).orderId }),
