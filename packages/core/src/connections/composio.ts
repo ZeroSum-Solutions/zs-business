@@ -208,8 +208,15 @@ async function readCapped(response: Response, max: number): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Drops trailing "/" without a backtracking regex (CodeQL js/polynomial-redos). */
+function trimTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end -= 1;
+  return url.slice(0, end);
+}
+
 export function createComposioClient(config: ComposioClientConfig): ComposioClient {
-  const base = (config.baseUrl ?? COMPOSIO_BASE_URL).replace(/\/+$/, "");
+  const base = trimTrailingSlashes(config.baseUrl ?? COMPOSIO_BASE_URL);
   const doFetch = config.fetch ?? fetch;
   const timeoutMs = config.timeoutMs ?? COMPOSIO_TIMEOUT_MS;
   const maxBody = config.maxBodyBytes ?? COMPOSIO_MAX_BODY_BYTES;

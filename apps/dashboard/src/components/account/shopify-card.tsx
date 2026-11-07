@@ -358,7 +358,7 @@ function ConnectForm({ hasStores, onAction }: { hasStores: boolean; onAction: ()
           aria-describedby={error ? "shopify-domain-error" : "shopify-domain-help"}
           disabled={connecting}
         />
-        <Button type="submit" disabled={connecting || value.trim() === ""} aria-busy={connecting} className="sm:shrink-0">
+        <Button type="submit" disabled={connecting || value.trim() === ""} aria-busy={connecting} aria-describedby={error ? "shopify-domain-error" : "shopify-domain-help"} className="sm:shrink-0">
           <Plug aria-hidden />{connecting ? "Opening Shopify…" : "Connect Shopify"}
         </Button>
       </div>
