@@ -142,3 +142,21 @@ describe("apply and publish grants (IT-4, IT-11)", () => {
       .rejects.toMatchObject({ code: "42501" });
   });
 });
+
+describe("message template grants (IT-4)", () => {
+  const template = (tx: Transaction, tenantId: string, templateId: string, revisionId: string) => tx.query(
+    `WITH t AS (INSERT INTO message_templates (tenant_id,id,agent_kind,current_revision,created_at)
+                VALUES ($1,$2,'appointment_reminder',1,now()) RETURNING id)
+     INSERT INTO message_template_revisions (tenant_id,id,template_id,revision,channel,purpose,subject,body,variables,timing_hours,
+       content_digest,created_by,created_at)
+     SELECT $1,$3,t.id,1,'email','transactional','Reminder','Hi {customer_first_name}',ARRAY['customer_first_name'],24,repeat('a',64),$4,now() FROM t`,
+    [tenantId, templateId, revisionId, randomUUID()]);
+
+  it("lets the runtime role insert its own tenant's template and first revision, and refuses another tenant's", async () => {
+    await fixture.a.run((tx) => template(tx, fixture.a.tenantId, randomUUID(), randomUUID()));
+    await expect(fixture.a.run((tx) => template(tx, fixture.b.tenantId, randomUUID(), randomUUID()))).rejects.toMatchObject({ code: "42501" });
+    const mine = await fixture.a.run((tx) => tx.query("SELECT count(*)::int AS n FROM message_template_revisions"));
+    expect(mine.rows[0]).toEqual({ n: 1 });
+    expect((await fixture.b.run((tx) => tx.query("SELECT count(*)::int AS n FROM message_templates"))).rows[0]).toEqual({ n: 0 });
+  });
+});

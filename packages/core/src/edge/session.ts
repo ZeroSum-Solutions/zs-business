@@ -1057,13 +1057,22 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
 
     /** industry-templates.md IT-6: any member reads what was applied, the zone and every template's preview. */
-    getSetup: (): Promise<SetupRead> => read(null, (tx) => readSetup(tx, tenantId)),
+    getSetup: (): Promise<SetupRead> => {
+      const keys = deps.bookingKeys;
+      // The page's public address is not a secret (it is meant for a website); staff see it so they can open the page.
+      const pageUrl = keys
+        ? (pageId: string) => bookingPageSnippets(keys.publicBaseUrl, signBookingKey(keys.secret, { tenantId, pageId })).bookingUrl
+        : undefined;
+      return read(null, (tx) => readSetup(tx, tenantId, pageUrl));
+    },
     /**
      * IT-4: apply a template once, under the server's `template:<id>` key. A concurrent apply that
      * loses (the setup row's key, or this key bound to another owner or zone) reads the winner's
      * answer: a replay of the same template, or a 409 for another.
      */
     async applyTemplate(body: unknown): Promise<ApplyTemplateResponse> {
+      // Owner first: staff get 403 whatever they send, never 404 or 422.
+      await read("business", async () => undefined);
       const request = parseInput(applyTemplateRequestSchema, body);
       const known = await appliedAnswer(request.templateId, request.timeZone);
       if (known) return known;
@@ -1083,8 +1092,9 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         throw error;
       }
     },
-    /** IT-11: an owner takes one of the tenant's pages live or off line; the same value again changes nothing. */
+    /** IT-11: an owner takes one of the tenant's pages live or off line; a value the page already has answers changed:false. */
     async setBookingPagePublished(pageId: unknown, body: unknown, key: unknown): Promise<SetBookingPagePublishedResponse> {
+      await read("business", async () => undefined);
       const page = uuidSchema.safeParse(pageId);
       if (!page.success) throw new NotFound("No such booking page");
       const request = parseInput(setBookingPagePublishedRequestSchema, body);
@@ -1092,8 +1102,9 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const { output, replayed } = await runTracked({
         actionType: BOOKING_PAGE_SET_PUBLISHED_ACTION, ...rest, payload: { pageId: page.data, published: request.published },
       } as ActionCommand);
-      const parsed = parseInput(setBookingPagePublishedResponseSchema, { ...output, replayed }, "result");
-      return { ...parsed, replayed: replayed || !parsed.result.changed };
+      // `replayed` is true only when a stored action answered (the same Idempotency-Key and request).
+      // A fresh key on a page that already has the value is a new action with changed:false.
+      return parseInput(setBookingPagePublishedResponseSchema, { ...output, replayed }, "result");
     },
 
     /** The caller's own membership; any member may ask. `profile` adds the business name and email. */

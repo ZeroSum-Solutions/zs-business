@@ -106,6 +106,9 @@ const stages = (open: readonly string[], won: string, lost: string) => [
 const STUDIO_DESCRIPTION = "In person at our studio. We confirm the details by email.";
 const DISCLOSURE =
   "We use your details to manage this appointment and email you about it. If you agree, we may also email you afterwards to ask how it went. You can opt out at any time.";
+/** For a template that sends no review request, so the page does not promise one. */
+const APPOINTMENT_DISCLOSURE =
+  "We use your details to manage this appointment and email you about it. You can opt out at any time.";
 const reminder = (what: string) => ({
   agentKind: "appointment_reminder" as const,
   channel: "email" as const,
@@ -177,7 +180,7 @@ const catalog = {
       slotLengthMinutes: 30, slotStepMinutes: 15, bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
       minimumNoticeMinutes: 12 * HOUR, bookingHorizonMinutes: 60 * DAY,
     },
-    bookingPage: { title: "Book a discovery call", description: "A video call. We confirm the details by email.", disclosureText: DISCLOSURE },
+    bookingPage: { title: "Book a discovery call", description: "A video call. We confirm the details by email.", disclosureText: APPOINTMENT_DISCLOSURE },
     messages: [reminder("discovery call")],
     recommendedConnections: ["google_calendar"],
     recommendedAgents: ["appointment_reminder"],
@@ -279,6 +282,9 @@ export const appliedSetupSchema = z.strictObject({
   pipelineId: idSchema,
   resourceId: idSchema,
   bookingPageId: idSchema,
+  /** The page's title and public address, so every member sees the link; the address is null when the server has no public base URL. */
+  bookingPageTitle: z.string(),
+  bookingUrl: z.string().nullable(),
   published: z.boolean(),
 });
 export type AppliedSetup = z.infer<typeof appliedSetupSchema>;
@@ -329,7 +335,7 @@ export type SetBookingPagePublishedRequest = z.infer<typeof setBookingPagePublis
 /** `changed` is false when the page already had the requested value. */
 export const bookingPagePublishedSchema = z.strictObject({ pageId: idSchema, published: z.boolean(), changed: z.boolean() });
 export type BookingPagePublished = z.infer<typeof bookingPagePublishedSchema>;
-/** `replayed` is true when the page already had the requested value (no change, no new action). */
+/** `replayed` is true only when a stored action answered: the same Idempotency-Key and request. A page that already has the value answers changed:false. */
 export const setBookingPagePublishedResponseSchema = z.lazy(() =>
   actionResultSchema.extend({ result: bookingPagePublishedSchema, replayed: z.boolean() }));
 export type SetBookingPagePublishedResponse = z.infer<typeof setBookingPagePublishedResponseSchema>;

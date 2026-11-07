@@ -235,9 +235,14 @@ describe("POST /v1/setup/apply status codes (acceptance 3)", () => {
       timeZone: ZONE,
       applied: {
         templateId: "jewelry", templateVersion: 1, pipelineId: applied.pipelineId, resourceId: applied.resourceId,
-        bookingPageId: applied.bookingPageId, published: false,
+        bookingPageId: applied.bookingPageId, bookingPageTitle: INDUSTRY_TEMPLATES.jewelry.bookingPage.title, published: false,
       },
     });
+    // Staff cannot list booking pages (owner-only), yet the setup read carries the page's address.
+    expect((await call(h.app, "GET", "/v1/booking/pages", { token: staff.token })).status).toBe(403);
+    expect(after.applied?.bookingUrl).toMatch(/\/book\/[^/\s]+$/);
+    const listed = (await call(h.app, "GET", "/v1/booking/pages", { token: owner.token })).body as { items: Array<{ bookingUrl: string }> };
+    expect(after.applied?.bookingUrl).toBe(listed.items[0]!.bookingUrl);
     expect((await call(h.app, "GET", "/v1/setup")).status).toBe(401);
   });
 });
@@ -255,15 +260,26 @@ describe("POST /v1/setup/booking-pages/:id/published (IT-11, acceptance 5)", () 
       replayed: false, result: { pageId: bookingPageId, published: true, changed: true },
     });
     expect((await call(h.app, "GET", path)).status).toBe(200);
+    // A new request for the value the page has answers 200 changed:false, not a replay.
     const repeat = await setPublished(owner, bookingPageId, true);
     expect(repeat.status).toBe(200);
-    expect(repeat.body).toMatchObject({ replayed: true, result: { published: true, changed: false } });
+    expect(repeat.body).toMatchObject({ replayed: false, result: { published: true, changed: false } });
+    // Only the same Idempotency-Key and request replays.
+    const keyed = randomUUID();
+    const first = await setPublished(owner, bookingPageId, true, keyed);
+    expect(first.body).toMatchObject({ replayed: false, result: { changed: false } });
+    expect((await setPublished(owner, bookingPageId, true, keyed)).body).toMatchObject({ replayed: true, result: { changed: false } });
 
     const off = await setPublished(owner, bookingPageId, false);
     expect(off.body).toMatchObject({ replayed: false, result: { published: false, changed: true } });
     expect((await call(h.app, "GET", path)).status).toBe(404);
 
     expect((await setPublished(staff, bookingPageId, true)).status).toBe(403);
+    // Staff get 403, never 404 or 422, whatever the page ID or body.
+    expect((await setPublished(staff, randomUUID(), true)).status).toBe(403);
+    expect((await setPublished(staff, "not-a-page", true)).status).toBe(403);
+    expect((await call(h.app, "POST", `/v1/setup/booking-pages/${bookingPageId}/published`, { token: staff.token, key: randomUUID(), body: { published: "yes" } })).status).toBe(403);
+    expect((await call(h.app, "POST", "/v1/setup/apply", { token: staff.token, body: { templateId: "bakery", timeZone: "Mars/Olympus" } })).status).toBe(403);
     const elsewhere = await setPublished(h.b, bookingPageId, true);
     expect(elsewhere.status).toBe(404);
     expect((await setPublished(owner, randomUUID(), true)).status).toBe(404);

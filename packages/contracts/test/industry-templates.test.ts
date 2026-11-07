@@ -77,6 +77,9 @@ describe("IT-1, IT-2 industry template catalog", () => {
     expect(template.bookingPage.title).toBe(want.page);
     expect(template.bookingPage.description).toBe(want.description);
     expect(template.bookingPage.disclosureText.length).toBeGreaterThan(0);
+    // The public page promises only mail the template sends: a follow-up email only with a review request.
+    const sendsReview = template.messages.some((message) => message.agentKind === "review_request");
+    expect(/afterwards|how it went/i.test(template.bookingPage.disclosureText), `${id} disclosure`).toBe(sendsReview);
     expect(template.recommendedAgents).toEqual(want.agents);
     expect(template.recommendedConnections).toEqual(want.connections);
     expect(template.messages.map((message) => message.agentKind)).toEqual(want.agents);

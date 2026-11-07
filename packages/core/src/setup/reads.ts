@@ -19,6 +19,7 @@ interface SetupRow {
   resource_id: string;
   booking_page_id: string;
   applied_at: Date;
+  page_title: string;
   published: boolean;
 }
 export interface StoredSetup {
@@ -26,10 +27,15 @@ export interface StoredSetup {
   readonly actionId: string;
 }
 
-/** The tenant's setup row with its page's live state, or null before any apply. */
-export async function loadSetup(tx: Transaction, tenantId: string): Promise<StoredSetup | null> {
+/**
+ * The tenant's setup row with its page's title and live state, or null before any apply.
+ * `pageUrl` builds the public address from the page ID; it is null where the server has no public base URL.
+ */
+export async function loadSetup(
+  tx: Transaction, tenantId: string, pageUrl: (pageId: string) => string | null = () => null,
+): Promise<StoredSetup | null> {
   const row = (await tx.query<SetupRow>(
-    `SELECT s.template_id, s.template_version, s.action_id, s.pipeline_id, s.resource_id, s.booking_page_id, s.applied_at, p.published
+    `SELECT s.template_id, s.template_version, s.action_id, s.pipeline_id, s.resource_id, s.booking_page_id, s.applied_at, p.title AS page_title, p.published
        FROM tenant_setups s
        JOIN booking_pages p ON p.tenant_id = s.tenant_id AND p.id = s.booking_page_id
       WHERE s.tenant_id = $1`,
@@ -44,6 +50,8 @@ export async function loadSetup(tx: Transaction, tenantId: string): Promise<Stor
       pipelineId: row.pipeline_id,
       resourceId: row.resource_id,
       bookingPageId: row.booking_page_id,
+      bookingPageTitle: row.page_title,
+      bookingUrl: pageUrl(row.booking_page_id),
       published: row.published,
     },
   };
@@ -56,8 +64,10 @@ export async function storedApplyResult(tx: Transaction, tenantId: string, actio
 }
 
 /** IT-6: the applied setup, the profile's zone and every template's resolved preview. */
-export async function readSetup(tx: Transaction, tenantId: string): Promise<SetupRead> {
-  const stored = await loadSetup(tx, tenantId);
+export async function readSetup(
+  tx: Transaction, tenantId: string, pageUrl?: (pageId: string) => string | null,
+): Promise<SetupRead> {
+  const stored = await loadSetup(tx, tenantId, pageUrl);
   const zone = (await tx.query<{ time_zone: string | null }>(
     "SELECT time_zone FROM business_profiles WHERE tenant_id=$1", [tenantId])).rows[0]?.time_zone ?? null;
   return {

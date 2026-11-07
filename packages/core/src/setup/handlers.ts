@@ -5,11 +5,13 @@ import {
   actionCommandSchema,
   applyTemplatePayloadSchema,
   BOOKING_PAGE_SET_PUBLISHED_ACTION,
+  Conflict,
   INDUSTRY_TEMPLATES,
   NotFound,
   parseTemplateDraft,
   TEMPLATE_APPLIED_EVENT,
   TEMPLATE_APPLY_ACTION,
+  templateApplyKey,
   uuidSchema,
   ValidationFailed,
   type BookingPagePublished,
@@ -23,6 +25,7 @@ import type { ActionHandler } from "../actions/dispatch.js";
 import { clockInstant, parseOrFail, tenantVisible } from "../crm/rows.js";
 import { requireMember } from "../members/access.js";
 import { templateDigest, templateIdFor } from "../templates/store.js";
+import { loadSetup } from "./reads.js";
 
 export const TENANT_SETUP_TARGET = "tenant_setup";
 export const BOOKING_PAGE_TARGET = "booking_page";
@@ -52,7 +55,8 @@ export async function zoneKnown(tx: Transaction, name: string): Promise<boolean>
  * IT-4: one transaction writes the confirmed zone, the pipeline and stages, the resource, the
  * unpublished page and its resource link, the setup row and the missing message templates. It
  * inserts only, so an existing pipeline, resource or page stays. IT-5: at most 10 queries of its
- * own, whatever the number of stages or messages (multi-row inserts).
+ * own, whatever the number of stages or messages (multi-row inserts). The IT-4 checks run here too,
+ * so a direct dispatch cannot skip them: the server's `template:<id>` key, the zone, and the setup row.
  */
 export const applyTemplateHandler: ActionHandler = {
   resolveTarget: resolveSetup,
@@ -62,6 +66,14 @@ export const applyTemplateHandler: ActionHandler = {
     await requireMember(tx, tenantId, binding.actorId, "business");
     const { payload } = parseOrFail(applyCommandSchema, command);
     if (!actionId) throw new ValidationFailed("The dispatcher did not offer an action ID");
+    // IT-4 inside the handler: the reserved key for this template, a zone PostgreSQL knows, and
+    // no setup yet (queries 3 and 4). The session reads the same facts first to answer a replay.
+    if (command.idempotencyKey !== templateApplyKey(payload.templateId))
+      throw new ValidationFailed("A template apply uses the server's template key");
+    if (!(await zoneKnown(tx, payload.timeZone))) throw new ValidationFailed("Unknown time zone");
+    const existing = await loadSetup(tx, tenantId);
+    if (existing)
+      throw new Conflict("A template is already applied", { reason: "template_already_applied" });
     const template = INDUSTRY_TEMPLATES[payload.templateId];
     const at = clockInstant(now);
     const ids = {
@@ -72,14 +84,14 @@ export const applyTemplateHandler: ActionHandler = {
       page: generateId(),
     };
 
-    // Query 3: the owner confirmed the zone on the preview. A missing profile aborts the apply.
+    // Query 5: the owner confirmed the zone on the preview. A missing profile aborts the apply.
     const profile = await tx.query(
       `UPDATE business_profiles SET time_zone=$2, revision=revision+1, updated_by=$3, updated_at=$4
         WHERE tenant_id=$1 RETURNING tenant_id`,
       [tenantId, payload.timeZone, binding.actorId, at]);
     if (profile.rowCount !== 1) throw new NotFound("The business profile is missing");
 
-    // Query 4: the pipeline and its stages in one statement.
+    // Query 6: the pipeline and its stages in one statement.
     await tx.query(
       `WITH p AS (INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,$3) RETURNING tenant_id,id)
        INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome)
@@ -89,7 +101,7 @@ export const applyTemplateHandler: ActionHandler = {
         id: ids.stages[position], name: stage.name, position, outcome: stage.outcome,
       })))]);
 
-    // Query 5: the one resource, in the confirmed zone.
+    // Query 7: the one resource, in the confirmed zone.
     const resource = template.resource;
     await tx.query(
       `INSERT INTO booking_resources (tenant_id,id,name,time_zone,weekly,overrides,slot_length_minutes,slot_step_minutes,
@@ -99,7 +111,7 @@ export const applyTemplateHandler: ActionHandler = {
         resource.slotStepMinutes, resource.bufferBeforeMinutes, resource.bufferAfterMinutes, resource.minimumNoticeMinutes,
         resource.bookingHorizonMinutes]);
 
-    // Query 6: the page, off line until IT-11, and its resource link. The disclosure trigger
+    // Query 8: the page, off line until IT-11, and its resource link. The disclosure trigger
     // records the first disclosure version.
     await tx.query(
       `WITH page AS (
@@ -109,13 +121,13 @@ export const applyTemplateHandler: ActionHandler = {
       [tenantId, ids.page, template.bookingPage.title, template.bookingPage.description, template.bookingPage.disclosureText,
         at, ids.resource]);
 
-    // Query 7: the setup row; the primary key makes a second apply lose here.
+    // Query 9: the setup row; the primary key makes a second apply lose here.
     await tx.query(
       `INSERT INTO tenant_setups (tenant_id,template_id,template_version,action_id,pipeline_id,resource_id,booking_page_id,applied_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [tenantId, template.id, template.version, ids.action, ids.pipeline, ids.resource, ids.page, at]);
 
-    // Query 8: each message template the tenant lacks, with its first revision and no standing
+    // Query 10: each message template the tenant lacks, with its first revision and no standing
     // approval. A kind the tenant already has is skipped, never overwritten.
     const messages = template.messages.map(({ agentKind, ...draft }) => {
       const checked = parseTemplateDraft(agentKind, draft);

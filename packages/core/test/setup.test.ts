@@ -101,8 +101,55 @@ describe("tenant.template.apply (IT-4)", () => {
     expect(rows.approvals.every((row) => row.standing_approval_id === null)).toBe(true);
     expect((await session.getSetup()).applied).toEqual({
       templateId, templateVersion: 1, appliedAt: NOW, pipelineId: applied.result.pipelineId,
-      resourceId: applied.result.resourceId, bookingPageId: applied.result.bookingPageId, published: false,
+      resourceId: applied.result.resourceId, bookingPageId: applied.result.bookingPageId,
+      bookingPageTitle: template.bookingPage.title, bookingUrl: null, published: false,
     });
+  });
+
+  it("gives staff the page title and public address in the setup read, and no one an address without a base URL", async () => {
+    const { tenantId, ownerId } = await freshTenant();
+    const staff = await addMember(tenantId, "staff");
+    const withKeys = (actorId: string) => createSession(
+      { ...deps(), bookingKeys: { secret: ["test", "booking", "k".repeat(32)].join("-"), publicBaseUrl: "http://book.test/" } },
+      { tenantId, actorId });
+    const applied = await withKeys(ownerId).applyTemplate({ templateId: "jewelry", timeZone: "UTC" });
+    const seen = (await withKeys(staff).getSetup()).applied;
+    expect(seen).toMatchObject({ bookingPageId: applied.result.bookingPageId, bookingPageTitle: INDUSTRY_TEMPLATES.jewelry.bookingPage.title });
+    expect(seen?.bookingUrl).toMatch(/^http:\/\/book\.test\/book\/[^/\s]+$/);
+    // The staff read matches the owner's list entry, and staff still cannot list pages.
+    const [listed] = await withKeys(ownerId).listBookingPages();
+    expect(seen?.bookingUrl).toBe(listed!.bookingUrl);
+    await expect(withKeys(staff).listBookingPages()).rejects.toBeInstanceOf(TenantDenied);
+    expect((await sessionFor(tenantId, staff).getSetup()).applied?.bookingUrl).toBeNull();
+  });
+
+  it("checks the key, the zone and the setup row in the handler, so a direct dispatch cannot skip them", async () => {
+    const { tenantId, ownerId } = await freshTenant();
+    const dispatch = createDispatcher({ [TEMPLATE_APPLY_ACTION]: applyTemplateHandler });
+    const run = (key: string, templateId: IndustryTemplateId, timeZone: string) => {
+      const command = {
+        actionType: TEMPLATE_APPLY_ACTION,
+        target: { tenantId, type: "tenant_setup", id: tenantId },
+        approvalReference: { tenantId, id: derivedId(tenantId, key, "approval") },
+        idempotencyKey: key,
+        payload: { templateId, timeZone },
+      } satisfies ActionCommand;
+      const { idempotencyKey: _key, ...fields } = command;
+      return dispatch({
+        tenantId, actor: { id: ownerId, tenantId }, db: database.db, clock, config: {}, generateId: randomUUID,
+        resolveApproval: async () => ({ ...fields, tenantId, actorId: ownerId }),
+        authorize: memberAuthorize(tenantId, ownerId),
+      }, command);
+    };
+    // A key other than the server's template key, and a zone Intl accepts but PostgreSQL does not know.
+    await expect(run("my-own-key", "agency", "UTC")).rejects.toThrow(/template key/);
+    await expect(run("template:agency", "agency", "SystemV/AST4")).rejects.toThrow(/Unknown time zone/);
+    expect(Object.values(await counts(tenantId)).every((n) => n === 0)).toBe(true);
+    await run("template:agency", "agency", "UTC");
+    // A second template under its own correct key meets the setup row before any write.
+    const before = await counts(tenantId);
+    await expect(run("template:fitness", "fitness", "UTC")).rejects.toBeInstanceOf(Conflict);
+    expect(await counts(tenantId)).toEqual(before);
   });
 
   it("replays for the same owner and for a second owner, with no new rows", async () => {
@@ -155,6 +202,9 @@ describe("tenant.template.apply (IT-4)", () => {
     const { tenantId, ownerId } = await freshTenant();
     const staff = await addMember(tenantId, "staff");
     await expect(sessionFor(tenantId, staff).applyTemplate({ templateId: "agency", timeZone: "UTC" })).rejects.toBeInstanceOf(TenantDenied);
+    // Staff get 403 whatever they send: never 404 for an unknown id, 422 for a bad zone or a malformed body.
+    for (const body of [{ templateId: "bakery", timeZone: "UTC" }, { templateId: "agency", timeZone: "Mars/Olympus" }, { nonsense: true }, null])
+      await expect(sessionFor(tenantId, staff).applyTemplate(body), JSON.stringify(body)).rejects.toBeInstanceOf(TenantDenied);
     await expect(sessionFor(tenantId, ownerId).applyTemplate({ templateId: "bakery", timeZone: "UTC" })).rejects.toBeInstanceOf(NotFound);
     for (const timeZone of ["Mars/Olympus", "EST5EDT-not", "america/los_angeles"]) {
       const error = await sessionFor(tenantId, ownerId).applyTemplate({ templateId: "agency", timeZone }).catch((e: unknown) => e);
@@ -283,11 +333,14 @@ describe("booking.page.set_published (IT-11)", () => {
     const { tenantId, ownerId } = await freshTenant();
     const session = sessionFor(tenantId, ownerId);
     const { result } = await session.applyTemplate({ templateId: "fitness", timeZone: "UTC" });
-    const on = await session.setBookingPagePublished(result.bookingPageId, { published: true }, randomUUID());
+    const onKey = randomUUID();
+    const on = await session.setBookingPagePublished(result.bookingPageId, { published: true }, onKey);
     expect(on).toMatchObject({ result: { pageId: result.bookingPageId, published: true, changed: true }, replayed: false });
     expect((await session.getSetup()).applied?.published).toBe(true);
     const repeat = await session.setBookingPagePublished(result.bookingPageId, { published: true }, randomUUID());
-    expect(repeat).toMatchObject({ result: { published: true, changed: false }, replayed: true });
+    // A fresh key on a page that already has the value is a new action with changed:false, not a replay.
+    expect(repeat).toMatchObject({ result: { published: true, changed: false }, replayed: false });
+    expect(await session.setBookingPagePublished(result.bookingPageId, { published: true }, onKey)).toEqual({ ...on, replayed: true });
     const key = randomUUID();
     const off = await session.setBookingPagePublished(result.bookingPageId, { published: false }, key);
     expect(off).toMatchObject({ result: { published: false, changed: true }, replayed: false });
@@ -304,6 +357,9 @@ describe("booking.page.set_published (IT-11)", () => {
     await expect(sessionFor(a.tenantId, a.ownerId).setBookingPagePublished("not-a-page", { published: true }, randomUUID())).rejects.toBeInstanceOf(NotFound);
     const staff = await addMember(a.tenantId, "staff");
     await expect(sessionFor(a.tenantId, staff).setBookingPagePublished(pageA, { published: true }, randomUUID())).rejects.toBeInstanceOf(TenantDenied);
+    // Staff get 403 before any 404 or 422 for the page ID or the body.
+    for (const [page, body] of [[randomUUID(), { published: true }], ["not-a-page", { published: true }], [pageA, { published: "yes" }]] as const)
+      await expect(sessionFor(a.tenantId, staff).setBookingPagePublished(page, body, randomUUID()), String(page)).rejects.toBeInstanceOf(TenantDenied);
     expect((await sessionFor(a.tenantId, staff).getSetup()).applied?.published).toBe(false);
   });
 });
