@@ -72,11 +72,15 @@ export type ConnectionsWorkerReport =
   | { readonly kind: "account_mismatch"; readonly tenantId: string; readonly connectionId?: string; readonly attemptId?: string }
   | { readonly kind: "swept"; readonly tenantId: string; readonly attemptId: string }
   | { readonly kind: "sweep_failed"; readonly tenantId: string; readonly attemptId: string; readonly code: string }
-  | { readonly kind: "link_orphan"; readonly tenantId: string; readonly attemptId: string }
+  /** No row records the account: its ID is how an operator finds and removes it. */
+  | { readonly kind: "link_orphan"; readonly tenantId: string; readonly attemptId: string; readonly composioAccountId: string }
   | { readonly kind: "health_failed"; readonly tenantId: string; readonly connectionId: string; readonly code: string }
   | { readonly kind: "pass_stopped"; readonly why: "time" | "calls" | "budget" }
   | { readonly kind: "cooldown"; readonly env: string }
   | { readonly kind: "key_refused"; readonly env: string; readonly status: number };
+
+/** Attempt codes that mean the account was left alone, not removed. */
+const UNREMOVED_CODES: ReadonlySet<string> = new Set(["account_mismatch", "account_unverified"]);
 
 export interface ConnectionsWorkerDeps {
   /** The service-role transaction (`asService(pool, work)`). */
@@ -346,7 +350,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       try {
         await row(accountId, "cancelling");
       } catch {
-        report({ kind: "link_orphan", tenantId: input.tenantId, attemptId: input.attemptId });
+        report({ kind: "link_orphan", tenantId: input.tenantId, attemptId: input.attemptId, composioAccountId: accountId });
       }
     };
     let made;
@@ -479,7 +483,9 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
         await tx.query(`UPDATE connection_attempts SET ${OWNED_END}, updated_at=$3 WHERE tenant_id=$1 AND id=$2`, [attempt.tenant_id, attempt.id, now()]);
         return { kind: "answer", answer: { outcome: "not_found" } };
       }
-      const revokeFailed = attempt.revoke_outcome === "failed";
+      // An attempt that ended without removing its account (foreign, or never verified) may leave the app
+      // installed, so a repeat never reads as a clean success.
+      const revokeFailed = attempt.revoke_outcome === "failed" || UNREMOVED_CODES.has(attempt.last_error_code ?? "");
       if (attempt.status === "cancelled" || attempt.status === "swept") return { kind: "answer", answer: { outcome: "cancelled", revokeFailed } };
       const leased = attempt.claimed_until !== null && attempt.claimed_until.getTime() > now().getTime();
       const until = new Date(now().getTime() + LEASE_MS);
@@ -518,8 +524,9 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
           report({ kind: "account_mismatch", tenantId: attempt.tenant_id, attemptId: attempt.id });
           return { outcome: "refused", code: "account_mismatch" };
         case "unverified":
-          // The read named no user: the attempt stays cancelling and the sweep retries it (C-9).
-          return { outcome: "cancelled", revokeFailed: false };
+          // The read named no user: nothing was removed, so the owner is told to check Shopify admin; the
+          // attempt stays cancelling (it can no longer connect) and the sweep retries it (C-9).
+          return { outcome: "cancelled", revokeFailed: true };
         case "failed":
           // A rate-limited read or delete is a 429 the member may retry; the attempt stays cancelling, so it can no
           // longer connect and the sweep finishes it if nobody does.

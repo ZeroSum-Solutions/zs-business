@@ -155,7 +155,9 @@ describe("link (C-3, C-5)", () => {
   it("B-7: when nothing can record the account, an operator hears of it", async () => {
     fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
     expect(await worker.link(linkInput({ tenantId: randomUUID() }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
-    expect(reports.some((r) => r.kind === "link_orphan")).toBe(true);
+    const orphan = reports.find((r) => r.kind === "link_orphan");
+    // The account ID is the only way an operator can find and remove it.
+    expect(orphan).toMatchObject({ composioAccountId: [...fake.accounts.keys()].at(-1) });
   });
 });
 
@@ -400,6 +402,18 @@ describe("cancel (C-5, C-9)", () => {
     expect(fake.accounts.get(accountId)).toMatchObject({ deleted: false, revoked: false });
     expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelled", last_error_code: "account_mismatch" });
     expect(reports.some((r) => r.kind === "account_mismatch")).toBe(true);
+    // The retry after that 409 still tells the owner the app may be installed: never a clean success.
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
+    expect(fake.accounts.get(accountId)).toMatchObject({ deleted: false, revoked: false });
+  });
+
+  it("C-9: a cancel whose account read names no user removes nothing and does not answer a clean success", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    (fake.accounts.get(accountId) as unknown as { userId: string | null }).userId = null;
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
+    expect(fake.accounts.get(accountId)).toMatchObject({ deleted: false, revoked: false });
+    // It can no longer connect, and the sweep retries it (C-9).
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelling", claimed_until: null });
   });
 
   it("B-10: a spent budget answers provider_rate_limited with a retry time and leaves the attempt cancelling", async () => {

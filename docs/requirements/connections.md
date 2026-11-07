@@ -128,8 +128,9 @@ role for workers (all workers share one pattern today; Known limits).
     choose the account, or replay a request.
   - Off: without the worker config the internal routes and the cron route answer 404, and
     `CRON_SECRET` (shared with other crons) is not checked by connections. The worker reads a
-    request body as it arrives and refuses it at 64 KiB, before the signature check, and the
-    request's abort signal stops the operation's Composio calls. Without
+    request body as it arrives and refuses it at 64 KiB, before the signature check; a body
+    that takes over 5 seconds to arrive, or whose caller goes away, is a 400. The request's
+    abort signal stops the operation's Composio calls. Without
     `CONNECTIONS_WORKER_URL` and the secret in the API, every `/v1/connections` route answers
     404 and the C-10 tools are unlisted (a call is JSON-RPC `-32601`, H-5).
 - **C-4 Connect.** The Connections screen's Shopify card asks for the store's
@@ -156,7 +157,8 @@ role for workers (all workers share one pattern today; Known limits).
     `retryAfterSeconds` (60 when it gives none). When the attempt insert fails after Composio
     made the account, the worker deletes that account at once if no attempt or connection row
     names it; if the delete fails it records the attempt as `cancelling` so the sweep removes
-    it, and only if that also fails does it report `link_orphan` to the operator.
+    it, and only if that also fails does it report `link_orphan` to the operator, with the
+    Composio account ID so the operator can remove it.
   - The API answers `{ authorizeUrl }` and an attempt token `zca1.<body>.<tag>` in the
     `X-Zs-Connect-Attempt` header, signed by `CONNECTIONS_STATE_SECRET` (domain-separated;
     `CONNECTIONS_STATE_PREVIOUS_SECRET` verifies through a rotation). It names the tenant, the
@@ -238,7 +240,8 @@ role for workers (all workers share one pattern today; Known limits).
     then reads the account, revokes once (the outcome is kept in `revoke_outcome`) and deletes
     it (revoke as C-13), and marks the attempt `cancelled`. Answers: 200
     `{ cancelled: true, revokeFailed }` (`revokeFailed`: the owner should remove the app in
-    Shopify admin); 404 when nothing is waiting (no attempt, already `confirmed`, or its
+    Shopify admin; it is also true when the account was left alone: a read that names no user,
+    which the sweep retries, or a repeat of a cancel that ended with `account_mismatch`); 404 when nothing is waiting (no attempt, already `confirmed`, or its
     account is owned by a connection row, which is never removed); 409 `account_mismatch` when
     the account is not this tenant's (left alone, the attempt ends, the operator is told); 429
     with `Retry-After` when the budget is spent or Composio answers 429 (the attempt stays

@@ -240,6 +240,30 @@ describe("POST /internal/connections/<operation>", () => {
     expect(h.calls).toEqual([]);
   });
 
+  it("B-6: stops reading a body that stalls, or whose caller went away, before the signature check", async () => {
+    const stalled = () => new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([123])); } });
+    const calls: string[] = [];
+    const app = connectionsInternalRoutes({
+      worker: { takeNonce: async () => { calls.push("nonce"); return true; } } as never,
+      env: "preview", secrets: { current: SECRET }, clock: { now: () => NOW }, readTimeoutMs: 50,
+    });
+    const url = `${ORIGIN}/internal/connections/cancel`;
+    const started = performance.now();
+    const slow = await app.request(url, { method: "POST", body: stalled(), duplex: "half" } as RequestInit);
+    expect(slow.status).toBe(400);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // The caller leaving ends the read too, long before the read budget.
+    const patient = connectionsInternalRoutes({
+      worker: { takeNonce: async () => { calls.push("nonce"); return true; } } as never,
+      env: "preview", secrets: { current: SECRET }, clock: { now: () => NOW }, readTimeoutMs: 60_000,
+    });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 20);
+    const gone = await patient.request(new Request(url, { method: "POST", body: stalled(), duplex: "half", signal: controller.signal } as RequestInit));
+    expect(gone.status).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
   it("B-6: hands the operation the request's abort signal", async () => {
     let seen: AbortSignal | undefined;
     const app = connectionsInternalRoutes({
@@ -362,7 +386,7 @@ describe("the worker's operator log (C-7, C-14)", () => {
     const report = connectionsWorkerReporter(out.log);
     const tenantId = randomUUID();
     report({ kind: "account_mismatch", tenantId, attemptId: randomUUID() });
-    report({ kind: "link_orphan", tenantId, attemptId: randomUUID() });
+    report({ kind: "link_orphan", tenantId, attemptId: randomUUID(), composioAccountId: "ca_orphan" });
     report({ kind: "key_refused", env: "preview", status: 401 });
     report({ kind: "swept", tenantId, attemptId: randomUUID() });
     report({ kind: "restored", tenantId, connectionId: randomUUID() });
