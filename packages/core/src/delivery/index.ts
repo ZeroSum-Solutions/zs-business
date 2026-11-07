@@ -46,7 +46,6 @@ export {
   RESEND_DEDUPE_WINDOW_MS,
   RESEND_DEFAULT_BASE_URL,
   resendConfigSchema,
-  resendEnvSchema,
   type ResendConfig,
 } from "./resend.js";
 export {
@@ -87,7 +86,6 @@ export {
   TWILIO_DEFAULT_BASE_URL,
   TWILIO_DEFAULT_OUTCOME_WAIT_MS,
   twilioConfigSchema,
-  twilioEnvSchema,
   type TwilioConfig,
   type TwilioSenderLookup,
   type TwilioStatusLookup,

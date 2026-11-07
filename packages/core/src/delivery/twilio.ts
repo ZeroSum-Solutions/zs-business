@@ -248,17 +248,6 @@ export function createTwilioProvider(deps: {
   };
 }
 
-/** The variables the Mac sets for the runner (T-9); the cloud never holds their values. */
-export const twilioEnvSchema = z.object({
-  TWILIO_ACCOUNT_SID: z.string().min(1),
-  TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
-  TWILIO_API_KEY_SID: z.string().min(1).optional(),
-  TWILIO_API_KEY_SECRET: z.string().min(1).optional(),
-  TWILIO_WEBHOOK_BASE_URL: z.string().min(1),
-  TWILIO_BASE_URL: z.string().min(1).optional(),
-  TWILIO_OUTCOME_WAIT_MS: z.coerce.number().int().optional(),
-});
-
 const ENV_VARIABLES: Readonly<Record<string, string>> = {
   accountSid: "TWILIO_ACCOUNT_SID",
   authToken: "TWILIO_AUTH_TOKEN",
@@ -275,6 +264,17 @@ const ENV_VARIABLES: Readonly<Record<string, string>> = {
  * come together or not at all.
  */
 export function parseTwilioEnv(env: Readonly<Record<string, string | undefined>>): TwilioConfig {
+  // The variables the Mac sets for the runner (T-9; the cloud never holds their values). Declared
+  // here so a bundle that never calls this function (the API's) drops the names with it.
+  const twilioEnvSchema = z.object({
+    TWILIO_ACCOUNT_SID: z.string().min(1),
+    TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
+    TWILIO_API_KEY_SID: z.string().min(1).optional(),
+    TWILIO_API_KEY_SECRET: z.string().min(1).optional(),
+    TWILIO_WEBHOOK_BASE_URL: z.string().min(1),
+    TWILIO_BASE_URL: z.string().min(1).optional(),
+    TWILIO_OUTCOME_WAIT_MS: z.coerce.number().int().optional(),
+  });
   const parsed = twilioEnvSchema.safeParse(env);
   if (!parsed.success) throw new Error(`Invalid environment: ${parsed.error.issues.map((issue) => issue.path.join(".")).join(", ")}`);
   const vars = parsed.data;
