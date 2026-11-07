@@ -145,8 +145,10 @@ dashboard screens beyond the token list, per-call billing, reduced output schema
     (a 4xx result). It does not count 5xx or 401.
   - Retention: rows older than 30 days are deleted in bounded batches (1,000 rows, skipping
     rows locked by other sessions, at most 5 batches per pass). The prune runs whenever
-    `/mcp` is on (the automation key is set), as its own periodic job beside the
-    server, and not only when the Activepieces webhook worker runs.
+    `/mcp` is on (the automation key is set), not only when the Activepieces webhook worker
+    runs: each API instance prunes after its first usage write and then at most hourly, as the
+    runtime role through a `SECURITY DEFINER` function, so no service credential is needed.
+    The webhook worker prunes the same way on each pass when it runs.
   - Owners read the last 168 hours per token at
     `GET /v1/integrations/activepieces/tokens/:id/usage` (permission `integrations`): exactly
     the 168 hourly slots ending with the current hour, and never a later hour.
