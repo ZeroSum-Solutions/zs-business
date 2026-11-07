@@ -13,6 +13,7 @@ const PAGES = [
   { path: "/account/settings", heading: "Settings" },
   { path: "/account/connections", heading: "Connections" },
   { path: "/account/plan", heading: "Plan" },
+  { path: "/setup", heading: "Setup" },
 ];
 
 async function open(page: Page, path: string, heading: string) {
@@ -118,6 +119,36 @@ test.describe("accessibility", () => {
       expect(await clippedFocusRings(page), "focus rings").toEqual([]);
     });
   }
+
+  // Setup's other states open only from the page: the preview, the applied view, and staff's view of it.
+  test("/setup's preview and applied views have no serious axe issues, small targets, broken labels, silent disabled buttons or clipped focus", async ({ page }) => {
+    const clean = async (state: string) => {
+      await expect(page.locator('[aria-busy="true"]')).toHaveCount(0);
+      const axe = await new AxeBuilder({ page }).analyze();
+      const serious = axe.violations
+        .filter((violation) => violation.impact === "serious" || violation.impact === "critical")
+        .map((violation) => `${violation.id}: ${violation.nodes.slice(0, 3).map((node) => node.target.join(" ")).join(", ")}`);
+      expect(serious, `${state}: serious or critical axe violations`).toEqual([]);
+      expect(await smallTargets(page), `${state}: targets under 44px`).toEqual([]);
+      expect(await brokenLabels(page), `${state}: labels without a control`).toEqual([]);
+      expect(await silentDisabled(page), `${state}: disabled buttons without a visible reason`).toEqual([]);
+      expect(await clippedFocusRings(page), `${state}: focus rings`).toEqual([]);
+    };
+    await pickTheme(page, "light");
+    await open(page, "/setup", "Setup");
+    await page.getByTestId("template-fitness").getByRole("button", { name: "See the full preview" }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Gym or personal trainer" })).toBeVisible();
+    await clean("preview");
+    await page.getByRole("button", { name: "Set up with this template" }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
+    await page.getByRole("button", { name: "Account menu" }).filter({ visible: true }).click();
+    await page.getByRole("menuitem", { name: "Setup" }).click();
+    await expect(page.getByTestId("applied-page")).toBeVisible();
+    await clean("applied");
+    await page.evaluate(() => window.__zsDemo!.actAs("staff"));
+    await expect(page.getByRole("switch", { name: "Take the booking page live" })).toBeDisabled();
+    await clean("applied, staff");
+  });
 
   // Each theme has its own colour values, so every page gets a contrast pass in both.
   for (const theme of THEMES) {
