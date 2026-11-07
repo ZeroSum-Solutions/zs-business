@@ -138,7 +138,8 @@ role for workers (all workers share one pattern today; Known limits).
   browser key as `bindConnectStart` does (G-1; cookie `zs-connect-browser`, httpOnly,
   `SameSite=Lax`, path `/api/connections`, 10 minutes, `Secure` over https) and sends
   `SHA-256(browserKey)` with the body to the API's
-  `POST /v1/connections/:toolkit/connect` (permission `integrations`; toolkit matches
+  `POST /v1/connections/:toolkit/connect` (permission `integrations`, checked before the toolkit
+  and the body, so a caller without it gets 403 even for a malformed body; toolkit matches
   `^[a-z0-9_-]{1,40}$` and is in the catalog, else 404; `shopDomain` matches
   `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`).
   - Refused with 409 `already_connected` while the tenant has a row for that toolkit in
@@ -220,8 +221,8 @@ role for workers (all workers share one pattern today; Known limits).
     `grantId` is the base64url SHA-256 of the grant. `tokensWithAccess` counts the tenant's
     live tokens with `connections:read`, which will read this store once it is confirmed
     (C-11).
-  - Confirm. `POST /v1/connections/confirm { grantId }` (permission `integrations`, no
-    `Idempotency-Key`). 409 `grant_changed` when the browser's grant has another `grantId`; it
+  - Confirm. `POST /v1/connections/confirm { grantId }` (permission `integrations`, checked
+    before the body; no `Idempotency-Key`). 409 `grant_changed` when the browser's grant has another `grantId`; it
     connects nothing and keeps the cookie. Otherwise it runs `connection.connect` through the
     dispatcher as the signed-in member, under the reserved key `connect:<connectionId>`, with
     a payload the server built from the grant, so a repeat replays. A grant that is missing,
@@ -538,5 +539,6 @@ role for workers (all workers share one pattern today; Known limits).
   `CONNECTIONS_CRON_SCHEDULE`.
 - API project: `CONNECTIONS_WORKER_URL`, `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`,
   `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (optional), `CONNECTIONS_STATE_SECRET`,
-  `CONNECTIONS_STATE_PREVIOUS_SECRET` (optional), `CONNECTIONS_RETURN_URL`.
+  `CONNECTIONS_STATE_PREVIOUS_SECRET` (optional), `CONNECTIONS_RETURN_URL`. The four secrets,
+  previous ones included, must all differ; the API refuses to start otherwise.
 - Dashboard project: nothing new beyond its existing API address.

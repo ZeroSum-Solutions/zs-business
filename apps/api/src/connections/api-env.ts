@@ -38,6 +38,9 @@ const apiSchema = z.object({
   // The dashboard page the callback sends the owner back to (https://<dashboard host>/account/connections).
   CONNECTIONS_RETURN_URL: secureUrlVariable("CONNECTIONS_RETURN_URL"),
 });
+const SECRET_VARIABLES = [
+  "CONNECTIONS_INTERNAL_SECRET", "CONNECTIONS_INTERNAL_PREVIOUS_SECRET", "CONNECTIONS_STATE_SECRET", "CONNECTIONS_STATE_PREVIOUS_SECRET",
+] as const;
 /** What sets the API's connections side. The worker project's own variables (C-3) are not among them. */
 export const CONNECTIONS_API_VARIABLES: readonly string[] = Object.freeze(Object.keys(apiSchema.shape));
 
@@ -56,12 +59,11 @@ export function parseConnectionsApiEnv(env: Readonly<Record<string, string | und
   const parsed = apiSchema.safeParse(Object.fromEntries(given.map((name) => [name, env[name]])));
   if (!parsed.success) throw new Error(formatIssues(parsed.error));
   const data = parsed.data;
-  if (data.CONNECTIONS_STATE_SECRET === data.CONNECTIONS_INTERNAL_SECRET)
-    throw new Error("Invalid environment: CONNECTIONS_STATE_SECRET must differ from CONNECTIONS_INTERNAL_SECRET");
-  if (data.CONNECTIONS_INTERNAL_PREVIOUS_SECRET !== undefined && data.CONNECTIONS_INTERNAL_PREVIOUS_SECRET === data.CONNECTIONS_INTERNAL_SECRET)
-    throw new Error("Invalid environment: CONNECTIONS_INTERNAL_PREVIOUS_SECRET must differ from CONNECTIONS_INTERNAL_SECRET");
-  if (data.CONNECTIONS_STATE_PREVIOUS_SECRET !== undefined && data.CONNECTIONS_STATE_PREVIOUS_SECRET === data.CONNECTIONS_STATE_SECRET)
-    throw new Error("Invalid environment: CONNECTIONS_STATE_PREVIOUS_SECRET must differ from CONNECTIONS_STATE_SECRET");
+  // C-6: no secret may sign in two roles or two rotation slots, previous ones included.
+  const secrets = SECRET_VARIABLES.filter((name) => data[name] !== undefined);
+  for (const [i, first] of secrets.entries())
+    for (const second of secrets.slice(i + 1))
+      if (data[first] === data[second]) throw new Error(`Invalid environment: ${second} must differ from ${first}`);
   return {
     workerUrl: data.CONNECTIONS_WORKER_URL,
     env: data.CONNECTIONS_ENV,

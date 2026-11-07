@@ -72,6 +72,19 @@ async function charge(limiter: ConnectionLimiter, charges: Parameters<Connection
   if (!taken.ok) throw new ConnectionsRefused("rate_limited", taken.retryAfterSeconds);
 }
 
+/**
+ * A request body the HTTP layer could not read (wrong Content-Type, malformed JSON). The session throws its
+ * error only after the permission check (C-2 ordering), so a caller without `integrations` gets 403 whatever
+ * it sent, and only a permitted member learns that the body was bad.
+ */
+export class UnreadBody {
+  constructor(readonly error: unknown) {}
+}
+const bodyOf = (body: unknown): unknown => {
+  if (body instanceof UnreadBody) throw body.error;
+  return body;
+};
+
 // ---- the member's calls ---------------------------------------------------------------------
 export function createConnectionsSession(deps: EdgeDependencies, principal: Principal) {
   const tenantId = uuidSchema.parse(principal.tenantId);
@@ -107,7 +120,7 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
         const member = await requireMember(tx, tenantId, actorId, "integrations");
         const named = typeof toolkitParam === "string" && toolkitSchema.safeParse(toolkitParam).success ? toolkitParam : undefined;
         if (!named || !catalogToolkit(named)) throw new NotFound();
-        const parsed = parseInput(connectConnectionRequestSchema, body);
+        const parsed = parseInput(connectConnectionRequestSchema, bodyOf(body));
         const live = await tx.query("SELECT 1 FROM connections WHERE tenant_id=$1 AND toolkit=$2 AND status IN ('active','reauthorize','disconnecting')", [tenantId, named]);
         if (live.rowCount) throw new Conflict("This app is already connected", { reason: "already_connected" });
         return { toolkit: named, request: parsed, memberId: member.memberId };
@@ -157,7 +170,7 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
      */
     async confirm(grantToken: unknown, body: unknown): Promise<Connection> {
       const grant = await read(async () => {
-        const request = parseInput(confirmConnectionRequestSchema, body);
+        const request = parseInput(confirmConnectionRequestSchema, bodyOf(body));
         const staged = stagedGrant(grantToken);
         if (request.grantId !== staged.grantId)
           throw new Conflict("Another store is waiting to be confirmed; check it again", { reason: "grant_changed" });

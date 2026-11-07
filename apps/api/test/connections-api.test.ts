@@ -178,6 +178,27 @@ describe("the member routes (C-4, C-5, C-13)", () => {
     expect(fake.calls).toHaveLength(0);
   });
 
+  it("checks the permission before reading the body: staff with a malformed body get 403, the owner 400 (C-2)", async () => {
+    const raw = (token: string, path: string, init: { type?: string; body: string }) =>
+      on.request(path, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, ...(init.type ? { "Content-Type": init.type } : {}) },
+        body: init.body,
+      });
+    const bad = [{ type: "application/json", body: "{not json" }, { type: "text/plain", body: "{}" }, { body: "{}" }];
+    for (const path of ["/v1/connections/shopify/connect", "/v1/connections/confirm"])
+      for (const init of bad) {
+        const label = `${path} ${JSON.stringify(init)}`;
+        expect((await raw(staffA.token, path, init)).status, label).toBe(403);
+        const owner = await raw(h.a.token, path, init);
+        expect(owner.status, label).toBe(400);
+        expect(apiErrorBodySchema.parse(await owner.json()).error.code, label).toBe("ValidationFailed");
+      }
+    // The toolkit is still checked before the body.
+    expect((await raw(h.a.token, "/v1/connections/gmail/connect", bad[0]!)).status).toBe(404);
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it("the limiter refusing is a 429 with Retry-After before any worker call; an unreachable worker is a 503", async () => {
     limiterRefuses = true;
     const limited = await start(on, h.a.token);
@@ -616,6 +637,22 @@ describe("the API environment (C-3)", () => {
     expect(errorOf({ ...values, CONNECTIONS_STATE_SECRET: INTERNAL })).toContain("must differ");
     expect(errorOf({ ...values, CONNECTIONS_STATE_PREVIOUS_SECRET: STATE })).toContain("must differ");
     expect(errorOf({ ...values, CONNECTIONS_ENV: "staging" })).toContain("CONNECTIONS_ENV");
+  });
+
+  it("C-6: every secret differs from every other, previous ones included, and the error names no value", () => {
+    const internalPrevious = ["conn", "internal", "p".repeat(32)].join("-");
+    const statePrevious = ["conn", "state", "p".repeat(32)].join("-");
+    const all = { ...values, CONNECTIONS_INTERNAL_PREVIOUS_SECRET: internalPrevious, CONNECTIONS_STATE_PREVIOUS_SECRET: statePrevious };
+    expect(parseConnectionsApiEnv(all)).not.toBeNull();
+    const names = ["CONNECTIONS_INTERNAL_SECRET", "CONNECTIONS_INTERNAL_PREVIOUS_SECRET", "CONNECTIONS_STATE_SECRET", "CONNECTIONS_STATE_PREVIOUS_SECRET"] as const;
+    for (const [i, first] of names.entries())
+      for (const second of names.slice(i + 1)) {
+        const message = errorOf({ ...all, [second]: all[first] });
+        expect(message, `${first} = ${second}`).toContain("must differ");
+        expect(message).toContain(first);
+        expect(message).toContain(second);
+        for (const value of Object.values(all).filter((v) => v.startsWith("conn-"))) expect(message).not.toContain(value);
+      }
   });
 
   it("C-6: accepts the optional previous internal secret (signing still uses the current one) unless it equals the current", () => {
