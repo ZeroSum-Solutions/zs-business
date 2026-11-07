@@ -1,11 +1,11 @@
 # Industry templates
 
-Status: contract, revision 3 (2026-11-07). Approved by delegation: Devin asked for an autonomous
+Status: contract, revision 4 (2026-11-07). Approved by delegation: Devin asked for an autonomous
 overnight build "suitable for all of the 4 starting industries" (2026-11-07) after naming them on
 2026-11-06; Devin confirms or revises this file on review. Code follows this file; a change to a
 numbered rule needs a new revision first. Revision 2 applies the spec review by GPT-6.1 Sol and
 Gemini 4 Argon (both returned 7 BLOCK on revision 1); revision 3 applies Grok's advisory review of
-revision 2 (see "Changes").
+revision 2; revision 4 applies the four-model escalation audit of the branch (see "Changes").
 
 Scope: a new business picks what kind of business it is, and the Hub sets up its operating system
 for that kind: a sales pipeline with the right stages, one bookable appointment type with
@@ -101,7 +101,10 @@ data), and any vertical integration beyond the connections catalog (`connections
   `template:<templateId>` reserved by the server (`template:` joins `SERVER_IDEMPOTENCY_PREFIXES`)
   and listed in `NEVER_APPROVED_ACTIONS`. Order: authorize (owner), validate the template id
   (404) and the IANA `timeZone` (422 `invalid_time_zone`), read the setup row (replay or 409), and
-  only then reserve the key, so a staff call or a bad id never stores the key. In one transaction
+  only then reserve the key, so a staff call or a bad id never stores the key. Owner first: staff
+  get 403 whatever else is wrong with the request. The handler repeats the checks that guard the
+  writes (the server's `template:<templateId>` key, a zone PostgreSQL knows, no setup row yet),
+  so a direct dispatch cannot skip them. In one transaction
   it: writes the confirmed zone to the business profile (the owner confirmed it on the preview;
   a zero-row update aborts); inserts the setup row with the created ids, the pipeline and its
   stages, the resource in that zone, the booking page unpublished with its resource link (the
@@ -123,16 +126,19 @@ data), and any vertical integration beyond the connections catalog (`connections
   answers, with no second action or outbox row.
 
 - **IT-5 Efficiency.** The apply handler issues at most 10 `tx.query` calls of its own (counted
-  inside the handler, excluding the dispatcher's calls and transaction scaffolding), whatever the
+  inside the handler, excluding the dispatcher's calls and transaction scaffolding; the handler's
+  own IT-4 checks count), whatever the
   number of stages or messages (multi-row inserts), and reads no catalog rows from the database.
   A test counts them; that count is the gate. A timing test applies all four templates to four
   fresh tenants after one warm-up apply and reports the time; it fails only above 10 seconds, so
   a slow CI runner cannot flake it.
 
 - **IT-6 Read.** `GET /v1/setup` returns `{ applied: null | { templateId, templateVersion,
-  appliedAt, pipelineId, resourceId, bookingPageId, published }, timeZone: string | null,
-  templates: [preview] }` for any member (`published` and the page fields are read from the
-  page row), where each preview is resolved: pipeline name and stages, the resource with its hours,
+  appliedAt, pipelineId, resourceId, bookingPageId, bookingPageTitle, bookingUrl | null,
+  published }, timeZone: string | null, templates: [preview] }` for any member (`published` and
+  the page fields are read from the page row; `bookingUrl` is the page's public address, so staff
+  can open it without the owner-only page list, and is null where the server has no public base
+  URL), where each preview is resolved: pipeline name and stages, the resource with its hours,
   step, buffers, notice and horizon, booking page title, description and disclosure text, message
   subjects and timing, recommended connections and agents. `POST /v1/setup/apply { templateId,
   timeZone }` runs IT-4. `setup` joins both the single-segment and multi-segment route lists in the
@@ -144,8 +150,11 @@ data), and any vertical integration beyond the connections catalog (`connections
   profile, else the browser), and confirms; on success the dashboard goes to Home. While the
   tenant has no setup row, Home shows one line linking to `/setup` for owners and "Your owner
   hasn't finished setup yet" for staff. Staff see `/setup` read-only. After apply, `/setup` shows
-  the applied template, the booking page link with its live or off-line state and the IT-11
-  toggle (disabled for staff), a note that Google Calendar is not connected yet when it is not,
+  the applied template, the booking page title, its live or off-line state and the IT-11
+  toggle (disabled for staff), the page link while the page is live (title and link come from
+  `GET /v1/setup`, so staff see them too), a note unless the template's calendar has an active
+  Google Calendar connection (a connection that needs a reconnect counts as not connected; the
+  note says to keep the page off line or watch for clashes),
   each recommended agent linked to its Agents settings with "Sending stays off until you approve
   the wording", and links to Calendar, Customers and Connections. Owners keep a permanent link to
   `/setup` in the account or settings navigation.
@@ -154,7 +163,8 @@ data), and any vertical integration beyond the connections catalog (`connections
 - **IT-8 Recommended connections.** After apply, the connections screen lists the template's
   recommended connections first, in template order, with a "Recommended for <label>" line. A
   recommended id that the catalog does not offer in this environment is left out. Nothing
-  connects automatically.
+  connects automatically. The screen waits for the setup read before it orders the cards; when
+  that read fails, the cards keep their default order with no recommended lines.
 
 - **IT-9 Owner-run tenant creation.** `pnpm --filter @zs/api tenant:create --key <slug> --name
   <name> --owner-email <email> [--time-zone <zone>] [--dry-run]` (local) and
@@ -165,18 +175,32 @@ data), and any vertical integration beyond the connections catalog (`connections
   owner does that at `/setup` after first sign-in. Each phase checks what exists, so a rerun
   resumes and replays. `--key` matches `^[a-z0-9][a-z0-9-]{2,39}$`. A rerun
   with the same key but a different name, owner email or time zone refuses before writing
-  anything; an email that owns another tenant gets a membership on the new tenant only. The
-  owner's first sign-in binds the membership (existing flow); a test binds it and then applies. `--dry-run` prints the plan and writes nothing. Agents run it locally
-  only; the hosted run is owner-run.
+  anything, including a run that stopped between phases (the intended owner email is stored with
+  the tenant in the first phase). It also refuses, before any write, when the owner email's user
+  already holds another tenant's claim or the email has a membership on another tenant (a user has
+  one tenant claim: a platform limit); `--dry-run` reports the same refusal. Two runs never
+  overlap on the same key or the same normalized owner email: one dedicated connection holds a
+  session lock on each for the whole run and releases both at the end, and the claim and the
+  memberships are read again under the locks. The owner is bound by rerunning `tenant:create` (or
+  `provision-owner`) after the owner's auth user exists, as before; no sign-in binding is added. A
+  test reruns after the user exists and then applies. `--dry-run` prints the plan and writes
+  nothing. Agents run it locally only; the hosted run is owner-run.
 
 - **IT-10 Deals from the dashboard.** A customer's page gets "New deal" (title, optional value),
   which calls the existing `crm.deal.create` path into the first stage that is neither won nor
-  lost of the template's pipeline; the button is disabled while the tenant has no pipeline.
-  Existing stage moves then take it to won or lost.
+  lost of the template's pipeline; the button is disabled while the tenant has no pipeline or no
+  open stage, with its own reason for each. The button waits for a successful setup read: while it
+  is pending the button is busy, and when it failed the dialog says so and no pipeline is guessed.
+  The business's first pipeline stands in only when setup says no template was applied. A value
+  needs the business's currency or one the owner picks. If the deal is created but its value is
+  not saved, the dialog stays open and a retry saves the value only. Existing stage moves then
+  take it to won or lost.
 
 - **IT-11 Booking page on and off.** `booking.page.set_published { pageId, published }` is an
-  owner action (permission `business`) that changes only `published` on one page of the caller's tenant: 404 when no such page, 200 replay
-  when it already has the requested value. `/setup` after apply shows the toggle.
+  owner action (permission `business`) that changes only `published` on one page of the caller's tenant: 404 when no such page (after the
+  owner check), and when the page already has the requested value, 200 with `changed: false` and
+  no change. `replayed: true` is only for an Idempotency-Key replay of the same request.
+  `/setup` after apply shows the toggle.
 
 ## Acceptance
 
@@ -196,15 +220,19 @@ data), and any vertical integration beyond the connections catalog (`connections
    does not replay tenant A's; an existing pipeline, resource and page survive apply; the IT-3
    isolation tests pass.
 4. IT-5 query-count and timing tests pass.
-5. IT-11: on makes the public page answer; off makes it 404; a repeat is a 200 replay; another
-   tenant's page id 404; staff get 403.
+5. IT-11: on makes the public page answer; off makes it 404; the same value again is a 200 with
+   `changed: false` (`replayed: true` only for the same Idempotency-Key); another tenant's page id
+   404; staff get 403 whatever the page id or body.
 6. Dashboard tests: `/setup` renders four cards, the preview shows hours and time zone, the
    confirm flow applies and lands on Home, the Home line shows only before setup, the staff view
    is read-only, recommended connections are ordered (IT-8), "New deal" creates a deal, the page
    toggle works. A Playwright demo run completes setup for each template.
 7. `tenant:create --dry-run` prints the plan; a local run creates "Zero Sum Solutions" (key
    `zero-sum`) with a pending owner; a rerun replays; a rerun with another owner email, name or
-   zone refuses; a bad key is refused; after a test sign-in bind the owner applies `agency`.
+   zone refuses, also after an interrupted run; a bad key is refused; an email whose user holds
+   another tenant's claim, or that has a membership elsewhere, is refused before any write; runs
+   with the same email and different keys, or the same key and different emails, leave one
+   tenant; after the owner's user exists, a rerun binds it and the owner applies `agency`.
 8. `pnpm -r typecheck` and every touched package's suite pass; CI is green on the PR.
 
 ## Known limits (revision 2)
@@ -220,6 +248,16 @@ data), and any vertical integration beyond the connections catalog (`connections
 - Browser coverage is the demo Playwright run per template; the live path is covered at API level.
 
 ## Changes
+
+Revision 4 (four-model escalation audit of the branch): `tenant:create` refuses an owner email
+whose user holds another tenant's claim or has a membership elsewhere, serializes on the key and
+the normalized email, and stores the intended owner email in its first phase; owner binding stays
+the rerun flow; the apply handler repeats the IT-4 guard checks and the owner check runs before
+input validation; `set_published` answers 200 `changed: false` for a value the page already has;
+`GET /v1/setup` carries the page title and address for staff; New deal waits for setup and keeps
+its dialog open on a failed value step; the Google Calendar note shows unless a connection is
+active and gives the clash advice; connections wait for setup before ordering; the agency page
+disclosure mentions only the appointment email.
 
 Revision 3 (Grok on revision 2): the confirmed zone is written and validated; the setup FK to
 `actions` is deferred and the row stores the created ids; the page starts off line and IT-11
