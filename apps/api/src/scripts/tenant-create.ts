@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { parseArgs } from "node:util";
 import { Pool } from "pg";
-import { findAuthUserByEmail, setAuthUserTenant } from "@zs/db/local-auth";
+import { findAuthUserByEmail, readAuthUserTenant, setAuthUserTenant } from "@zs/db/local-auth";
 import { assertLocalDatabaseUrl, describeDatabase } from "../config.js";
 import { redactSecrets } from "../hosted.js";
 import { createTenant, readTenantState, runTenantCreate } from "../tenant-create.js";
@@ -27,7 +27,8 @@ try {
   });
   if (!values.key || !values.name || !values["owner-email"]) throw new Error("Pass --key <slug>, --name <name> and --owner-email <addr>");
   const target = assertLocalDatabaseUrl(process.env.DATABASE_URL ?? "");
-  const service = new Pool({ connectionString: target.connectionString, max: 2 });
+  // Three connections at once: the lock holder, the open service transaction, and the auth stub's own query.
+  const service = new Pool({ connectionString: target.connectionString, max: 4 });
   pool = service;
   const clock = { now: () => new Date() };
   // The local auth stub stands in for the Supabase Auth admin API (it only exists on loopback).
@@ -41,6 +42,7 @@ try {
     target: describeDatabase(target),
     create: (input) => createTenant(deps, input),
     readState: (tenantId, email) => readTenantState(service, tenantId, email),
+    readTenantClaim: (userId) => readAuthUserTenant(service, userId),
     clock,
     log: (line) => console.log(line),
     logError: (line) => console.error(line),

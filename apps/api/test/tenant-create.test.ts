@@ -14,7 +14,7 @@ import { asService } from "@zs/db";
 import { createTestDatabase, readAuthUserTenant, startAuthSession, upsertAuthUser, type TestDatabase } from "@zs/db/testing";
 import { parseHostedTenantCreateArgs, runHostedTenantCreate } from "../src/hosted-tenant-create.js";
 import { createSupabaseAuthAdmin } from "../src/supabase-auth-admin.js";
-import { createTenant, tenantIdForKey, type TenantCreateInput } from "../src/tenant-create.js";
+import { createTenant, readTenantState, runTenantCreate, tenantIdForKey, type TenantCreateInput, type TenantCreateSummary } from "../src/tenant-create.js";
 import { FAKE_REF, FAKE_SERVICE_KEY, fakeGoTrue } from "./fake-gotrue.js";
 import { appOnDatabase, call, clock, tokenFor } from "./helpers.js";
 
@@ -41,6 +41,8 @@ const args = (key: string, name: string, email: string, zone?: string) =>
   ["--key", key, "--name", name, "--owner-email", email, ...(zone ? ["--time-zone", zone] : [])];
 
 /** Every row tenant creation touches, for one tenant. */
+const advisoryLocks = async (): Promise<number> => Number((await database.pool.query(
+  "SELECT count(*)::int AS n FROM pg_locks WHERE locktype='advisory' AND database=(SELECT oid FROM pg_database WHERE datname=current_database())")).rows[0].n);
 const rowsOf = (tenantId: string) => asService(database.servicePool, async (tx) => ({
   tenants: (await tx.query("SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows,
   profile: (await tx.query("SELECT display_name, time_zone, revision FROM business_profiles WHERE tenant_id=$1", [tenantId])).rows,
@@ -93,7 +95,7 @@ describe("tenant:create (local, acceptance 7)", () => {
       [args(key, "Zero Sum Solutions", "someone@else.example", "America/Los_Angeles"), /another owner email/],
       [args(key, "Zero Sum LLC", email, "America/Los_Angeles"), /another name/],
       [args(key, "Zero Sum Solutions", email, "Europe/Paris"), /another time zone/],
-      [args(key, "Zero Sum Solutions", email, "Mars/Olympus_Mons"), /not a time zone PostgreSQL knows/],
+      [args(key, "Zero Sum Solutions", email, "Mars/Olympus_Mons"), /IANA time zone/],
       [args("Zero_Sum", "Zero Sum Solutions", email), /--key must match/],
       [args("zs", "Zero Sum Solutions", email), /--key must match/],
       [args(`z${"a".repeat(40)}`, "Zero Sum Solutions", email), /--key must match/],
@@ -138,21 +140,128 @@ describe("createTenant", () => {
   const input = (over: Partial<TenantCreateInput> = {}): TenantCreateInput =>
     ({ key: `t-${randomUUID().slice(0, 8)}`, name: "Halden & Rowe", ownerEmail: "owner@halden.example", dryRun: false, ...over });
 
-  it("gives an email that owns another tenant a pending membership on the new tenant only", async () => {
+  it("refuses, before any write, an owner email whose user holds another tenant's claim (D2)", async () => {
     const claims = new Map<string, { id: string; tenantId: string | null }>();
     const first = await createTenant(deps(claims), input({ ownerEmail: "shared@owner.example" }));
     const userId = randomUUID();
     claims.set("shared@owner.example", { id: userId, tenantId: first.tenantId });
     const firstRows = await rowsOf(first.tenantId);
 
-    const second = await createTenant(deps(claims), input({ ownerEmail: "shared@owner.example", name: "Rowe Studio" }));
-    expect(second.owner).toMatchObject({ kind: "membership-only", created: true, otherTenantId: first.tenantId });
-    expect((await rowsOf(second.tenantId)).members).toEqual([{ email: "shared@owner.example", user_id: null, role: "owner" }]);
+    const second = input({ ownerEmail: "shared@owner.example", name: "Rowe Studio" });
+    for (const dryRun of [true, false]) {
+      await expect(createTenant(deps(claims), { ...second, dryRun })).rejects.toThrow(/already holds the tenant claim of tenant/);
+    }
+    expect((await rowsOf(tenantIdForKey(second.key))).tenants).toEqual([]);
     expect(await rowsOf(first.tenantId)).toEqual(firstRows);
     expect(claims.get("shared@owner.example")).toEqual({ id: userId, tenantId: first.tenantId });
-    const again = await createTenant(deps(claims), input({ key: second.key, ownerEmail: "shared@owner.example", name: "Rowe Studio" }));
-    expect(again.owner).toMatchObject({ kind: "membership-only", created: false });
-    expect((await rowsOf(second.tenantId)).members).toHaveLength(1);
+    await expect(advisoryLocks()).resolves.toBe(0);
+  });
+
+  it("refuses an owner email that already has a membership, of any role, on another tenant (D2)", async () => {
+    const first = await createTenant(deps(new Map()), input({ ownerEmail: "pending@owner.example" }));
+    expect((await rowsOf(first.tenantId)).members).toEqual([{ email: "pending@owner.example", user_id: null, role: "owner" }]);
+    const second = input({ ownerEmail: "pending@owner.example", name: "Rowe Studio" });
+    await expect(createTenant(deps(new Map()), second)).rejects.toThrow(/already a owner of tenant/);
+    // A staff membership elsewhere counts too: the user could not hold two claims either.
+    const staffTenant = tenantIdForKey("staff-elsewhere");
+    await asService(database.servicePool, async (tx) => {
+      await tx.query("INSERT INTO tenants (tenant_id,name) VALUES ($1,'Elsewhere')", [staffTenant]);
+      await tx.query(
+        "INSERT INTO tenant_members (tenant_id,id,email,user_id,role,created_at,updated_at) VALUES ($1,$2,'crew@owner.example',NULL,'staff',now(),now())",
+        [staffTenant, randomUUID()]);
+    });
+    await expect(createTenant(deps(new Map()), input({ ownerEmail: "crew@owner.example" }))).rejects.toThrow(/already a staff of tenant/);
+    expect((await rowsOf(tenantIdForKey(second.key))).tenants).toEqual([]);
+    // The tenant's own owner email is not "elsewhere": a rerun replays.
+    await expect(createTenant(deps(new Map()), input({ key: first.key, ownerEmail: "pending@owner.example" })))
+      .resolves.toMatchObject({ tenant: "unchanged" });
+  });
+
+  describe("concurrent runs (D3)", () => {
+    it("serializes two keys for one owner email: one wins, the other creates nothing, whether the user exists or not", async () => {
+      for (const userExists of [false, true]) {
+        const email = `race-${randomUUID().slice(0, 8)}@owner.example`;
+        const claims = new Map<string, { id: string; tenantId: string | null }>();
+        if (userExists) claims.set(email, { id: randomUUID(), tenantId: null });
+        const a = input({ ownerEmail: email, name: "Race A" });
+        const b = input({ ownerEmail: email, name: "Race B" });
+        const results = await Promise.allSettled([createTenant(deps(claims), a), createTenant(deps(claims), b)]);
+        expect(results.filter((r) => r.status === "fulfilled"), String(userExists)).toHaveLength(1);
+        const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+        expect(String(lost.reason), String(userExists)).toMatch(/one tenant claim per user/);
+        const created = (await Promise.all([a, b].map((x) => rowsOf(tenantIdForKey(x.key))))).filter((rows) => rows.tenants.length > 0);
+        expect(created, String(userExists)).toHaveLength(1);
+        expect(created[0]!.members, String(userExists)).toEqual([{ email, user_id: userExists ? claims.get(email)!.id : null, role: "owner" }]);
+        await expect(advisoryLocks()).resolves.toBe(0);
+      }
+    });
+
+    it("serializes one key for two owner emails: the second finds the first's email and refuses", async () => {
+      const base = input({ name: "Same Key" });
+      const results = await Promise.allSettled([
+        createTenant(deps(new Map()), { ...base, ownerEmail: "first@owner.example" }),
+        createTenant(deps(new Map()), { ...base, ownerEmail: "second@owner.example" }),
+      ]);
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+      expect(String(lost.reason)).toMatch(/another owner email/);
+      const winner = (results.find((r) => r.status === "fulfilled") as PromiseFulfilledResult<TenantCreateSummary>).value;
+      expect((await rowsOf(winner.tenantId)).members).toEqual([{ email: winner.ownerEmail, user_id: null, role: "owner" }]);
+      await expect(advisoryLocks()).resolves.toBe(0);
+    });
+
+    it("refuses an interrupted run resumed with another owner email, and finishes it with the same one", async () => {
+      const first = input({ ownerEmail: "intended@owner.example", name: "Interrupted" });
+      // Phase 1 commits; the owner step then fails, as a crash between the phases would.
+      const failing = { ...deps(new Map()), generateId: () => { throw new Error("simulated crash before the owner row"); } };
+      await expect(createTenant(failing, first)).rejects.toThrow(/simulated crash/);
+      const stored = await asService(database.servicePool, async (tx) => ({
+        tenant: (await tx.query("SELECT name, provisioning_owner_email FROM tenants WHERE tenant_id=$1", [tenantIdForKey(first.key)])).rows,
+        owners: (await tx.query("SELECT 1 FROM tenant_members WHERE tenant_id=$1", [tenantIdForKey(first.key)])).rowCount,
+      }));
+      expect(stored).toEqual({ tenant: [{ name: "Interrupted", provisioning_owner_email: "intended@owner.example" }], owners: 0 });
+      await expect(advisoryLocks()).resolves.toBe(0);
+
+      await expect(createTenant(deps(new Map()), { ...first, ownerEmail: "someone-else@owner.example" })).rejects.toThrow(/another owner email/);
+      expect((await rowsOf(tenantIdForKey(first.key))).members).toEqual([]);
+      await expect(createTenant(deps(new Map()), first)).resolves.toMatchObject({
+        tenant: "unchanged", owner: { kind: "provisioned", summary: { action: "created" } },
+      });
+    });
+  });
+
+  it("leaves no session lock on a pooled client after a run, a refusal or a failure", async () => {
+    await createTenant(deps(new Map()), input());
+    await expect(createTenant(deps(new Map()), input({ name: " bad " }))).rejects.toThrow();
+    await expect(createTenant({ ...deps(new Map()), auth: { findUser: async () => { throw new Error("auth is down"); }, setTenantClaim: async () => undefined } }, input()))
+      .rejects.toThrow(/auth is down/);
+    await expect(advisoryLocks()).resolves.toBe(0);
+    // The client the pool hands out next carries no lock_timeout from the run either.
+    const client = await database.servicePool.connect();
+    try {
+      expect((await client.query("SHOW lock_timeout")).rows[0].lock_timeout).toBe("0");
+    } finally {
+      client.release();
+    }
+  });
+
+  it("verifies the bound owner's tenant claim after an apply", async () => {
+    const email = "bound@owner.example";
+    const claims = new Map<string, { id: string; tenantId: string | null }>([[email, { id: randomUUID(), tenantId: null }]]);
+    const body = input({ ownerEmail: email, name: "Claim Check" });
+    const run = (readTenantClaim: (userId: string) => Promise<string | null>) => runTenantCreate({ mode: "apply" }, {
+      input: { key: body.key, name: body.name, ownerEmail: email }, target: {},
+      create: (request) => createTenant(deps(claims), request),
+      readState: (tenantId, address) => readTenantState(database.servicePool, tenantId, address),
+      readTenantClaim, clock, log: () => undefined, logError: () => undefined,
+    });
+    await expect(run(async () => null)).rejects.toThrow(/tenant claim read back/);
+    const tenantId = tenantIdForKey(body.key);
+    await expect(run(async () => tenantId)).resolves.toMatchObject({ tenant: "unchanged", owner: { summary: { action: "unchanged", tenantClaim: "present" } } });
+  });
+
+  it("refuses an explicit empty or non-IANA time zone", async () => {
+    for (const timeZone of ["", "Mars"]) await expect(createTenant(deps(new Map()), input({ timeZone }))).rejects.toThrow(/IANA time zone/);
   });
 
   it("refuses a name the tenant trigger would change", async () => {
@@ -175,6 +284,8 @@ describe("db:hosted-tenant-create", () => {
     expect(() => parseHostedTenantCreateArgs([...base, "--dry-run"], { ...ENV, SERVICE_DATABASE_URL: database.url })).toThrow();
     expect(() => parseHostedTenantCreateArgs([...base, "--dry-run"], { ...ENV, SUPABASE_SERVICE_ROLE_KEY: undefined })).toThrow(/is required/);
     expect(parseHostedTenantCreateArgs([...base, "--dry-run"], ENV)).toMatchObject({ key: "hosted-one", timeZone: "UTC", mode: { mode: "dry-run" } });
+    // An explicit empty zone is forwarded (and refused later), not read as omitted.
+    expect(parseHostedTenantCreateArgs([...base.slice(0, -2), "--time-zone", "", "--dry-run"], ENV).timeZone).toBe("");
   });
 
   it("applies after the backup check and records a receipt; the receipt path must be new", async () => {

@@ -36,6 +36,13 @@ END $$;
 -- Written once, never changed: no role may UPDATE or DELETE it.
 GRANT SELECT, INSERT ON public.tenant_setups TO authenticated, service_role;
 
+-- IT-9: tenant:create (owner-run, service_role) stores the owner email it was started for, so a run
+-- resumed after a crash with another email refuses. Nothing at runtime reads or writes it.
+ALTER TABLE public.tenants ADD COLUMN provisioning_owner_email text
+  CONSTRAINT tenants_provisioning_owner_email_shape CHECK (
+    provisioning_owner_email IS NULL
+    OR (length(provisioning_owner_email) BETWEEN 3 AND 320 AND provisioning_owner_email = lower(provisioning_owner_email)));
+
 -- IT-4: the apply action writes these as the runtime role, under each table's forced
 -- tenant_scope policy (FOR ALL, so it also scopes the column UPDATE grants).
 GRANT INSERT ON public.crm_pipelines, public.crm_stages, public.booking_resources, public.booking_pages,

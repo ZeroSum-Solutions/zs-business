@@ -51,7 +51,8 @@ export function parseHostedTenantCreateArgs(argv: readonly string[], env: Readon
     key: values.key,
     name: values.name,
     ownerEmail: values["owner-email"],
-    ...(values["time-zone"] ? { timeZone: values["time-zone"] } : {}),
+    // An explicit empty zone is passed on, so the zone check refuses it instead of reading it as omitted.
+    ...(values["time-zone"] !== undefined ? { timeZone: values["time-zone"] } : {}),
     mode: values.apply ? { mode: "apply", receiptPath: resolve(values.receipt!), backupPath: resolve(values.backup!) } : { mode: "dry-run" },
     target,
     serviceKey,
@@ -75,6 +76,7 @@ export function runHostedTenantCreate(config: HostedTenantCreateConfig, deps: Ho
     target: { ...describeHosted(config.target), authAdmin: `https://${config.target.projectRef}.supabase.co/auth/v1/admin` },
     create: (input) => createTenant(createDeps, input),
     readState: (tenantId, email) => readTenantState(deps.service, tenantId, email),
+    readTenantClaim: (userId) => deps.auth.readTenantClaim(userId),
     checkBackup: deps.checkBackup,
     clock: deps.clock,
     log: deps.log,

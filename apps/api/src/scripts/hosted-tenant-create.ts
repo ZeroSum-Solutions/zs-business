@@ -17,16 +17,21 @@ import { hostedPool, redactSecrets } from "../hosted.js";
 import { parseHostedTenantCreateArgs, runHostedTenantCreate } from "../hosted-tenant-create.js";
 import { createSupabaseAuthAdmin } from "../supabase-auth-admin.js";
 
-const config = parseHostedTenantCreateArgs(process.argv.slice(2), process.env);
-const pool = hostedPool(config.target, 2);
-const clock = { now: () => new Date() };
-
+// Hosted notes: the run holds two session advisory locks on one connection, so SERVICE_DATABASE_URL
+// must be the session pooler (port 5432), as above. Like db:hosted-provision-owner, this script has
+// no runtime-role connection check of its own; it writes only as service_role.
+let pool: ReturnType<typeof hostedPool> | undefined;
 try {
+  // Parsed inside the try, so an argument or URL error is redacted like every other error.
+  const config = parseHostedTenantCreateArgs(process.argv.slice(2), process.env);
+  const hosted = hostedPool(config.target, 3);
+  pool = hosted;
+  const clock = { now: () => new Date() };
   await runHostedTenantCreate(config, {
-    service: pool,
+    service: hosted,
     auth: createSupabaseAuthAdmin({ projectRef: config.target.projectRef, serviceKey: config.serviceKey }),
     checkBackup: async (path) => checkBackup(path, {
-      projectRef: config.target.projectRef, ledger: await readLedger(pool), tables: await currentTables(pool),
+      projectRef: config.target.projectRef, ledger: await readLedger(hosted), tables: await currentTables(hosted),
       now: clock.now(), pgRestore: process.env.PG_RESTORE,
     }),
     clock,
@@ -38,5 +43,5 @@ try {
   console.error(redactSecrets(error instanceof Error ? error.message : String(error)));
   process.exitCode = 1;
 } finally {
-  await pool.end();
+  await pool?.end();
 }
