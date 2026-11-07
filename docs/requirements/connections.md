@@ -1,9 +1,16 @@
 # Connections: one place a business connects its outside accounts
 
-Status: draft contract, revision 2 (2026-11-06). Code follows this file; a change to a
+Status: draft contract, revision 3 (2026-11-07). Code follows this file; a change to a
 numbered rule needs a new revision of this file first. Extends `hub-access.md` (H-1..H-12):
 connection reads are new `/mcp` tools behind a new scope, under the same token guard,
 limits and usage rules. Reuses the connect shapes of `google-calendar.md` (G-1, G-2, G-4).
+
+Revision 3 (2026-11-07, Devin's direction): the managed tier opens on production now, with
+Zero Sum Solutions (tenant 1) first, instead of waiting for the two-week preview measurement.
+That measurement keeps running on preview as monitoring only and gates nothing. C-17 is
+rewritten to say what opening on production needs and what was seen on the first production
+runs; the pilot is still Shopify with the same two read tools. Client tenants other than
+Zero Sum connect only after the Shopify distribution choice in C-17 is made. No other rule changed.
 
 Revision 2 (2026-11-06, four-model escalation audit of revision 1 by GPT-6.1 Sol, Gemini 4
 Argon, DeepSeek V4.1 Flash and Grok): the pilot is cut to Shopify on preview, with two read
@@ -18,9 +25,9 @@ retention text are now stated. The vertical picker, the other seven toolkits,
 
 Scope: an owner connects a Shopify store once, on the Connections screen. Agents that hold an
 automation token with `connections:read` then read that store's orders through `/mcp`.
-Revision 2 covers connect, confirm, cancel, list, health, reconnect, disconnect and two curated
-**read** tools on the managed tier (Composio), on preview only. Production and client tenants
-wait for the pilot gate (end of file).
+Revisions 2 and 3 cover connect, confirm, cancel, list, health, reconnect, disconnect and two curated
+**read** tools on the managed tier (Composio), on preview and on production for Zero Sum's own
+tenant. Other client tenants wait for the Shopify distribution choice (C-17).
 
 Out of scope for this revision: other toolkits (the catalog shape admits them; each needs a
 revision that names its tools and passes the pilot checks), writes into outside accounts (the one
@@ -555,38 +562,58 @@ role for workers (all workers share one pattern today; Known limits).
   generators for the new tables; the dashboard adds `connections` to the proxy's `AREAS` for
   the plain routes and dedicated handlers for connect, callback, callback status, pending
   `DELETE` and confirm, as `calendar-connect.ts` does.
-- **C-17 Pilot gate.** The managed tier stays on preview, for Zero Sum's own test store, until
-  all of these hold:
-  - deferred verification is on for the Composio project, and a callback without
-    `session_uri` connects nothing. If Composio cannot turn it on, the tier does not open,
-    and this contract is revised. **Met:** checked on preview, runs 2 and 3 (2026-11-07);
+- **C-17 Production opening and measurement.** Devin directed on 2026-11-07 that production
+  opens now, Zero Sum first; the preview measurement is monitoring only and gates nothing.
+  What opening needed, and where each item stands:
+  - deferred verification on for the Composio project, and a callback without `session_uri`
+    connects nothing. **Met** on preview (runs 2 and 3) and set on the production project
+    `zs_business_prod` (the OAuth user verification URL is
+    `https://app.zerosumsolutions.com/api/connections/callback`);
   - the Shopify consent screen, the granted scopes and the click path are recorded. **Met:**
     `read_orders` only, shown by Shopify as "View customer data" plus "View store data:
-    Orders"; 3 clicks, and the owner types the store name twice (Known limits). Recorded on
-    preview, runs 3 and 4 (2026-11-07);
-  - revoke and delete were seen to remove the app from the test store. **Met:** run 3 showed
-    that Composio's `revoke` leaves the app installed, so the C-13 uninstall replaced it. In
-    run 4 (2026-11-07, Proxy Execute on the preview key) the row ended `disconnected` with
-    `revoke_outcome = revoked`, Composio held no account, and the app was gone from the
-    store's installed apps;
-  - Devin approved C-14's retention terms for client data. **Met:** approved 2026-11-07. The
-    preview Composio project is on the Pro plan with Zero Data Retention on;
-  - latency, the grant failure rate over two weeks and cost per tenant per month are
-    measured. **Open.** Latency is measured (run 4: connect click to the Composio page 2.2 s,
-    Composio to our confirm screen 6.7 s, confirm to connected about 5 s, an order list 1.5 s).
-    The two-week window runs from 2026-11-07 to about 2026-11-21. It measures the grant
-    failure rate (attempts that end `cancelled` or `swept` against attempts that end
-    `confirmed`, from the preview database's `connection_attempts`) and the cost per tenant
-    per month (the Composio project's usage and plan charge, divided by the connected tenants).
-  Production then needs its own Composio project (Pro, Zero Data Retention on), a production
-  API key with the same permissions as the preview key, Proxy Execute included, a Shopify auth
-  config with `read_orders` only, and the Shopify app's protected customer data access. The
-  connections env is set on the production workers and API only after this gate is met.
+    Orders". Preview run 4: 3 clicks. Production runs P1 and P2 (2026-11-07) on a store without
+    the app: Connect Shopify, Connect Account, Shopify's account pick, Install and Connect
+    store; the owner types the store name twice (Known limits);
+  - revoke and delete remove the app from the store. **Met:** on preview run 4 and on both
+    production runs: the row ended `disconnected` with `revoke_outcome = revoked`, Composio
+    held 0 accounts, and the app was gone from the store's installed apps;
+  - Devin approved C-14's retention terms for client data. **Met** 2026-11-07. Both Composio
+    projects are on the Pro plan with Zero Data Retention on (a second project has no extra fee);
+  - a production Composio project, a production key with the same permissions as the preview
+    key (Proxy Execute included), a Shopify auth config with `read_orders` only, and the
+    Shopify app's protected customer data access. **Met** (the list below);
+  - latency, the grant failure rate and cost per tenant per month are measured. **Monitoring.**
+    Latency: preview run 4 and production P1 (connect click to the Composio page 1.5 s,
+    Composio to the Shopify install screen 7.1 s, Install to our confirm screen 5.0 s, confirm
+    to connected 0.5 s, an order list 1.8 s, an order read 1.5 s, disconnect 2.7 s). The preview
+    window runs from 2026-11-07 to about 2026-11-21: grant failure rate (attempts that end
+    `cancelled` or `swept` against attempts that end `confirmed`, from `connection_attempts`)
+    and cost per tenant per month (the Composio project's usage and plan charge, divided by the
+    connected tenants). Composio has no spend cap.
+  What production was seen to do (runs P1, test tenant 2c8cc360, and P2, Zero Sum tenant, both
+  on store `zs-hub-test-store`): connect, confirm, `active`, `/mcp` `list_connections`,
+  `list_connection_tools`, `shopify_list_orders` and `shopify_get_order`, disconnect, uninstall.
+  The catalog check passed with the production key, and `/cron/connections` answered
+  `ran: true`. Record: the C17-prod files in the goal-state proof folder.
+  - **Customer fields.** The test order had a customer. At protected customer data Level 1,
+    Shopify returns the customer with `first_name`, `last_name`, `email` and `phone` all null
+    (checked against Composio's raw answer for the same account), so the tools return
+    `customer: {id, name: null, email: null}`. Nothing fails and nothing is mapped wrong.
+    Names, emails, phones and addresses need Level 2, which is a separate Shopify request. The
+    confirm screen's sentence about "customer names and emails" is right only once Level 2 is
+    granted.
+  - **Other stores.** The production app `ZS Business Connections` is not distributed. Shopify
+    installs it today only on stores of the development organization. For any other store,
+    Shopify needs one irreversible choice that Devin makes: Public distribution (App Store
+    review, protected customer data review, the data protection details, and a one-time
+    registration fee) or Custom distribution (an install link per store, or per Plus
+    organization, no review, protected data always available, one auth config per app). Until
+    then production connects Zero Sum's own stores only.
 
 ## Acceptance
 
-- On preview, an owner connects Zero Sum's test store end to end through the real link with
-  deferred verification. The owner sees the shop name and `tokensWithAccess` before
+- On preview and on production, an owner connects Zero Sum's test store end to end through the
+  real link with deferred verification. The owner sees the shop name and `tokensWithAccess` before
   confirming. The row is `active`, and a reload of the callback answers `connected`.
 - An MCP SDK client with a `connections:read` token lists the connection and its tools and
   runs `shopify_list_orders`. A token without the scope sees none of the three tools.
@@ -624,11 +651,12 @@ role for workers (all workers share one pattern today; Known limits).
   which does not fit a multi-tenant app). Revisit if Composio fixes the form.
 - Unconfirmed attempts are swept one hour after they expire (ten minutes after the start), so
   a Composio account that Composio itself marks `EXPIRED` earlier stays until that pass.
-- C-17 stays open only for the two-week measurement. The provider scopes are recorded
-  (`read_orders`). The Shopify app has protected customer data access (Level 1), so
-  `shopify_list_orders` and `shopify_get_order` return orders (run 4, 2026-11-07; the test
-  order had no customer, so customer fields on an order are not yet seen). The uninstall on
-  disconnect was seen to remove the app from the test store.
+- C-17 stays open as monitoring only (revision 3): production is open for Zero Sum. The provider
+  scopes are recorded (`read_orders`). The Shopify app has protected customer data access
+  (Level 1), so `shopify_list_orders` and `shopify_get_order` return orders, and an order's
+  customer comes back as an id with null name and email (production run P1, 2026-11-07;
+  Level 2 would add them). The uninstall on disconnect was seen to remove the app from the
+  test store on preview and on production.
 - The uninstall's success check reads Composio's relayed provider answer
   (`data.data.appUninstall.userErrors`). Its exact relayed shape is taken from Composio's
   reference and matched the live call in run 4 (2026-11-07); a different shape fails closed as
@@ -646,7 +674,25 @@ role for workers (all workers share one pattern today; Known limits).
   exact `CONNECTIONS_CALLBACK_URL`; deferred verification on; the shortest log retention; a
   spend cap; a scoped key (C-2, with Proxy Execute enabled for the uninstall in C-13), into ZS Vault as `zs_business_preview_composio_key`. The
   existing vault entry `composio` is not this key.
-- Worker project: `COMPOSIO_API_KEY`, `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`,
+- Composio dashboard, production project `zs_business_prod` (`pr_4B7pP8iJofwR`): the same, with
+  auth config `ac_CFEhsZ6nbqs0` (the app `ZS Business Connections`, client id
+  `adc380d0312483cd9ab82a09d9f0e267`, `read_orders` only), the OAuth user verification URL
+  `https://app.zerosumsolutions.com/api/connections/callback`, Zero Data Retention on, and the
+  key `zs-business-prod-worker` in ZS Vault as `zs_business_prod_composio_key`. Other vault
+  entries: `zs_business_prod_composio_project_id`,
+  `zs_business_prod_composio_shopify_auth_config_id`, `shopify_zsbusiness_prod_client_id`,
+  `shopify_zsbusiness_prod_client_secret`, `zs_business_prod_connections_internal_secret` and
+  `zs_business_prod_connections_state_secret`.
+- Production env, target production, type encrypted, names as in the lists below. Worker:
+  `CONNECTIONS_ENV=production`, `CONNECTIONS_CALLBACK_URL=https://app.zerosumsolutions.com/api/connections/callback`,
+  `CONNECTIONS_DATABASE_URL` (the `postgres` login of project `ubzyxrflvxymikpijnto` on the
+  session pooler, port 5432, no query string), `CONNECTIONS_CRON_SCHEDULE=*/5 * * * *`. API:
+  `CONNECTIONS_WORKER_URL=https://zs-business-workers.vercel.app`,
+  `CONNECTIONS_RETURN_URL=https://app.zerosumsolutions.com/account/connections`. Then deploy the
+  workers first, then the API and the dashboard, with `--prod`. Check with
+  `zsvault run --env COMPOSIO_API_KEY=zs_business_prod_composio_key -- pnpm connections:check-catalog`
+  and `GET /cron/connections` with the production `CRON_SECRET` (`ran: true`).
+- Worker project (preview and production): `COMPOSIO_API_KEY`, `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`,
   `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (optional), `CONNECTIONS_DATABASE_URL`,
   `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL`,
   `CONNECTIONS_CRON_SCHEDULE`.
