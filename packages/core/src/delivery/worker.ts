@@ -329,7 +329,7 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       "SELECT status, source FROM crm_contact_consent WHERE tenant_id=$1 AND contact_id=$2 AND channel=$3::crm_consent_channel",
       [row.tenant_id, row.contact_id, row.channel])).rows[0];
     const consent = consentRow?.status ?? null;
-    const blocked = consentBlock({ channel: row.channel, purpose: row.purpose, consent, suppressed, source: consentRow?.source ?? null });
+    const blocked = consentBlock({ channel: row.channel, purpose: row.purpose, consent, suppressed, source: consentRow?.source ?? null, address });
     if (blocked) return { reason: blocked, address };
     const standing = await deps.approvals.check(tx, {
       tenantId: row.tenant_id,
