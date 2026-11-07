@@ -121,3 +121,4 @@ export * from "./connections.js";
 export * from "./automation.js";
 export * from "./browser.js";
 export * from "./voice.js";
+export * from "./templates/industry.js";

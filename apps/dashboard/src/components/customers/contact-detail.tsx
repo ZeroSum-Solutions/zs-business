@@ -12,6 +12,7 @@ import { formatDay, formatTime } from "@/lib/time";
 import { formatPhone, relativeTime } from "@/lib/utils";
 import { Avatar } from "@/components/ui/avatar";
 import { CompanyDetails } from "./company-details";
+import { NewDealButton } from "./new-deal-dialog";
 
 // No business time zone exists yet, so dates show in the viewer's own zone.
 function ConsentLine({ label, evidence }: { label: string; evidence: ConsentEvidence | null }) {
@@ -63,7 +64,7 @@ export function ContactDetail({ id }: { id: string }) {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
             <div className="space-y-4">
             <Card aria-labelledby="deals-title">
-              <CardHeader><CardTitle id="deals-title">Deals</CardTitle></CardHeader>
+              <CardHeader><CardTitle id="deals-title">Deals</CardTitle><NewDealButton contactId={id} /></CardHeader>
               {deals.isPending ? <LoadingRows rows={2} /> : deals.isError ? <ErrorNote error={deals.error} retry={() => deals.refetch()} /> : deals.data.items.length === 0 ? (
                 <EmptyState title="No deals yet">Deals for this customer show here.</EmptyState>
               ) : (

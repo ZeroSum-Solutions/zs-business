@@ -14,7 +14,7 @@ import { templateHandlers } from "../src/templates/handlers.js";
 import { templatedKindHandlers } from "../src/templates/send.js";
 import {
   AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
-  crmHandlers, dealDetailsHandlers, documentIntakeHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
+  crmHandlers, dealDetailsHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
 } from "../src/index.js";
@@ -79,6 +79,8 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "browser.settings.update": "agents",
   "browser.target.save": "agents",
   "business.profile.update": "business",
+  "tenant.template.apply": "business",
+  "booking.page.set_published": "business",
   "enrichment.request": "enrich",
   "contact.enrichment.block": "customers",
   "contact.enrichment.unblock": "enrich",
@@ -394,6 +396,10 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
       const { revision } = await sessionFor(tenant.ownerId).getBusiness();
       return session.updateBusiness({ expectedRevision: revision, changes: { currency: "EUR" } }, randomUUID());
     } },
+    // industry-templates.md IT-4, IT-6, IT-11: any member reads the setup; only owners apply or publish.
+    getSetup: { permission: null, run: () => session.getSetup() },
+    applyTemplate: { permission: "business", run: () => session.applyTemplate({ templateId: "agency", timeZone: "UTC" }) },
+    setBookingPagePublished: { permission: "business", run: () => session.setBookingPagePublished(tenant.pageId, { published: true }, randomUUID()) },
     getFollowUpStatus: { permission: "inbox.drafts", run: () => session.getFollowUpStatus() },
     updateFollowUpSettings: { permission: "agents", run: async () => {
       const { settings, revision } = await sessionFor(tenant.ownerId).getFollowUpStatus();
@@ -469,6 +475,7 @@ describe("permission map", () => {
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
       ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
+      ...setupHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1); the intake worker's result and fail actions
       // belong to its server-side principal (document-intake.md DL-5); the image worker's to its own.

@@ -27,14 +27,16 @@ export const DEMO_BUSINESS = "Halden & Rowe Fine Jewelry";
 
 export interface DemoResource extends ResourceSummary {
   name: string;
-  /** Demo-only: which seeded calendar this is. */
-  kind: "showroom" | "repair";
+  /** Demo-only: which seeded calendar this is, or one an applied template added. */
+  kind: "showroom" | "repair" | "template";
   /** Open hours per ISO weekday, as [startMinute, endMinute] in local time. */
   hours: Partial<Record<number, [number, number]>>;
   slotStepMinutes: number;
   bufferBeforeMinutes: number;
   bufferAfterMinutes: number;
   minimumNoticeMinutes: number;
+  /** How far ahead a slot may be booked, exclusive (B-12). The seeded calendars have no limit; a template's does. */
+  bookingHorizonMinutes?: number;
 }
 
 export const SHOWROOM_ID = "0b7e5c1a-9d2f-4a3b-8c6d-1e2f3a4b5c61";
@@ -158,7 +160,7 @@ const intakeId = (n: number) => `1f4e6a8c-3b5d-4e7f-8a9b-${String(n).padStart(12
 export const DEMO_PAGE_ID = "7c9e1b3d-5f7a-4b9c-8d1e-2f3a4b5c6d01";
 /** A key-shaped placeholder; demo mode has no signing secret and no public route. */
 const DEMO_PAGE_KEY = `zsb1_${"DemoHaldenRoweBookingPage".padEnd(64, "0")}`;
-const DEMO_BOOKING_HOST = "https://book.example.com";
+export const DEMO_BOOKING_HOST = "https://book.example.com";
 const DEMO_DISCLOSURE_TEXT = "We may send you occasional updates. You can opt out at any time.";
 
 export const DEMO_BOOKING_PAGE: BookingPageSummary = {

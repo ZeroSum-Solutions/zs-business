@@ -82,6 +82,9 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         else if (name === "image_variants" && field.name === "preset") row[field.name] = "background_remove";
         else if (name === "image_variants" && field.name === "currency") row[field.name] = "usd";
         else if (name === "enrichment_results" && field.name === "field") row[field.name] = "name";
+        // Industry templates (industry-templates.md IT-3): a listed template id. The FK to actions
+        // keeps this row waiting until the tenant's actions row is seeded.
+        else if (name === "tenant_setups" && field.name === "template_id") row[field.name] = "agency";
         else if (field.enum_value !== null) row[field.name] = field.enum_value;
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);

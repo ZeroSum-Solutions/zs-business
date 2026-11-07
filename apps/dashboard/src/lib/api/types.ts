@@ -71,6 +71,11 @@ import type {
   UpsertContactRequest,
   WeekStart,
 } from "@zs/contracts";
+import type {
+  ApplyTemplateResponse,
+  BookingPagePublished,
+  SetupRead,
+} from "@zs/contracts";
 import type { WorkspaceApi } from "./workspace-types";
 
 export type {
@@ -239,6 +244,14 @@ export interface ContactListQuery {
   limit?: number;
 }
 
+/** A new deal for one customer (industry-templates.md IT-10). Its value is saved apart, with `setDealDetails`. */
+export interface NewDeal {
+  contactId: string;
+  pipelineId: string;
+  stageId: string;
+  title: string;
+}
+
 export interface DealListQuery {
   contactId?: string;
   pipelineId?: string;
@@ -309,6 +322,8 @@ export interface CrmApi {
   moveDealStage(input: StageMove, options: WriteOptions): Promise<DealRecord>;
   /** Same revision check as a stage move; answers with the deal as lists show it. */
   setDealDetails(input: DealDetailsChange, options: WriteOptions): Promise<DealSummary>;
+  /** A new deal in the given stage (IT-10). Throws `forbidden` for an unknown customer, pipeline or stage, as the API does. */
+  createDeal(input: NewDeal, options: WriteOptions): Promise<DealRecord>;
 }
 
 export interface IntakeLink {
@@ -689,7 +704,25 @@ export interface DocumentIntakeApi {
   discardIntakeJob(id: string, options: WriteOptions): Promise<void>;
 }
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
+/**
+ * First-run setup (industry-templates.md IT-6, IT-7, IT-11). Any member reads it; owners apply a
+ * template and switch its booking page on or off.
+ */
+export interface SetupApi {
+  /** The applied template (or null), the business's time zone and the four previews. */
+  getSetup(options?: ReadOptions): Promise<SetupRead>;
+  /**
+   * Owners only. Applies one template in the given zone. Applying the same template again answers
+   * `replayed: true`; another template is a conflict with reason `template_already_applied`, and an
+   * unknown zone is `validation` with reason `invalid_time_zone`. The server keys it by the business,
+   * so it takes no key from the caller.
+   */
+  applyTemplate(input: { templateId: string; timeZone: string }): Promise<ApplyTemplateResponse>;
+  /** Owners only. `changed: false` when the page already had the value. Throws `not_found` for an unknown page. */
+  setBookingPagePublished(pageId: string, published: boolean, options: WriteOptions): Promise<BookingPagePublished>;
+}
+
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
 
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */

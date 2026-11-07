@@ -123,6 +123,12 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   variant_expired: "This image waited too long and was removed. Make it again if you still want it.",
   approval_not_pending: "Someone already decided this. The list now shows what is left.",
   approval_expired: "This expired before anyone decided it. Look up the company again for fresh details.",
+  template_already_applied: "This business already has a setup. It cannot be changed here.",
+};
+
+/** Validation errors the API names by `details.reason` rather than by a field. */
+const VALIDATION_REASON_MESSAGES: Record<string, string> = {
+  invalid_time_zone: "We do not know that time zone. Choose one from the list.",
 };
 
 /** Booking conflicts: an overlapping insert (23P01) or a slot the availability check refused. */
@@ -171,7 +177,7 @@ export function errorFromBody(status: number, body: unknown): ApiError {
   const error: ApiErrorBody["error"] | null = parsed.success ? parsed.data.error : null;
   const result = new ApiError(kind, defaultMessage(kind), status, error?.code ?? null, error?.details ?? {});
   const friendly = kind === "validation"
-    ? FIELD_MESSAGES[result.field ?? ""] ?? result.issueMessages.map((message) => ISSUE_MESSAGES[message]).find(Boolean)
+    ? VALIDATION_REASON_MESSAGES[result.reason ?? ""] ?? FIELD_MESSAGES[result.field ?? ""] ?? result.issueMessages.map((message) => ISSUE_MESSAGES[message]).find(Boolean)
     : kind === "conflict" ? CONFLICT_MESSAGES[result.reason ?? ""] : undefined;
   return friendly ? new ApiError(kind, friendly, status, result.code, result.details) : result;
 }

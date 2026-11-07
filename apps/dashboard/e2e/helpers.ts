@@ -42,7 +42,7 @@ export function mainNav(page: Page) {
   return page.getByRole("navigation", { name: "Main" }).filter({ visible: true });
 }
 
-export async function openAccountItem(page: Page, item: "Settings" | "Connections" | "Plan") {
+export async function openAccountItem(page: Page, item: "Settings" | "Connections" | "Plan" | "Setup") {
   await page.getByRole("button", { name: "Account menu" }).filter({ visible: true }).click();
   await page.getByRole("menuitem", { name: item }).click();
   await expect(page.getByRole("heading", { level: 1, name: item })).toBeVisible();

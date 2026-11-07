@@ -26,7 +26,15 @@ export interface DemoBusinessContext {
 
 const clone = <T>(value: T): T => structuredClone(value);
 
-export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & DemoBusinessControls {
+/** For the adapter's other parts only; kept off the API and the demo controls. */
+export interface DemoBusinessInternals {
+  /** The profile's zone, or null before anyone set one. */
+  profileTimeZone(): string | null;
+  /** Writes the zone an owner confirmed during setup (IT-4), as a new revision. */
+  confirmTimeZone(zone: string): void;
+}
+
+export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & DemoBusinessControls & DemoBusinessInternals {
   let profile: BusinessProfile = {
     displayName: DEMO_BUSINESS, legalName: null, phoneE164: null, timeZone: null, currency: "USD",
     postalAddress: null, revision: 1, updatedAt: ctx.now().toISOString(),
@@ -65,6 +73,14 @@ export function createDemoBusiness(ctx: DemoBusinessContext): BusinessApi & Demo
         apply(request.changes);
         return clone(profile);
       });
+    },
+
+    profileTimeZone() {
+      return profile.timeZone;
+    },
+
+    confirmTimeZone(zone) {
+      apply({ timeZone: zone });
     },
 
     editBusinessElsewhere(changes = { legalName: `${profile.displayName} Ltd` }) {

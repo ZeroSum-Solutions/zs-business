@@ -120,7 +120,16 @@ const SUGGESTIONS: Record<TemplatedKind, Record<DeliveryChannel, { subject: stri
   },
 };
 
-export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi & DemoTemplateControls {
+/** For the adapter's other parts only; kept off the API and the demo controls. */
+export interface DemoTemplateInternals {
+  /**
+   * Writes a kind's first wording, with no approval, when it has none yet (industry-templates.md
+   * IT-4). Answers the kind's template id, or null when the kind already had wording.
+   */
+  seedWording(kind: TemplatedKind, draft: { channel: DeliveryChannel; subject: string | null; body: string; timingHours: number }): string | null;
+}
+
+export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi & DemoTemplateControls & DemoTemplateInternals {
   const kinds: Record<TemplatedKind, KindState> = {
     appointment_reminder: fresh("appointment_reminder"),
     review_request: fresh("review_request"),
@@ -328,6 +337,12 @@ export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi
 
     setTemplateSuggestions(available) {
       suggestionsOn = available;
+    },
+
+    seedWording(kind, draft) {
+      if (kinds[kind].revisions.length > 0) return null;
+      writeRevision(kind, draft);
+      return TEMPLATE_IDS[kind];
     },
 
     writeTemplateElsewhere(kind, body = "Hi {customer_first_name}, see you soon at {business_name}.") {

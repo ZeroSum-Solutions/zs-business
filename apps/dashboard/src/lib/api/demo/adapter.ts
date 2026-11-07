@@ -8,6 +8,7 @@
 import type { z } from "zod";
 import {
   createBookingRequestSchema,
+  createDealRequestSchema,
   linkBookingContactInputSchema,
   unlinkBookingContactInputSchema,
   draftReplyRequestSchema,
@@ -44,6 +45,7 @@ import { createDemoAgents, type DemoActor, type DemoAgentControls, type DemoRole
 import { createDemoBusiness, type DemoBusinessControls } from "./business";
 import { createDemoEnrichment } from "./enrichment";
 import { createDemoCalendar, type DemoCalendarControls } from "./calendar";
+import { createDemoSetup, type DemoSetupControls } from "./setup";
 import { createDemoManagedConnections, type DemoManagedConnectionsControls } from "./managed-connections";
 import { createDemoTemplates, type DemoTemplateControls } from "./templates";
 import {
@@ -66,6 +68,7 @@ import {
   type HomeApi,
   type InboxApi,
   type IntakeApi,
+  type SetupApi,
   type WriteOptions,
 } from "../types";
 import {
@@ -95,7 +98,7 @@ export interface DemoAdapterOptions {
 }
 
 /** Hooks that act as a second person using the business, to show conflicts. */
-export interface DemoControls extends DemoAgentControls, DemoTemplateControls, DemoBrowserControls, DemoBusinessControls, DemoCalendarControls, DemoManagedConnectionsControls {
+export interface DemoControls extends DemoAgentControls, DemoTemplateControls, DemoBrowserControls, DemoBusinessControls, DemoCalendarControls, DemoManagedConnectionsControls, DemoSetupControls {
   /**
    * Signs the demo in as the owner or as a staff member. The screen then offers what that role
    * may do, and the agent routes refuse an owner-only step with the API's 403.
@@ -140,7 +143,7 @@ export interface DemoControls extends DemoAgentControls, DemoTemplateControls, D
   approveReplyElsewhere(replyId: string): ReplyRecord;
 }
 
-export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & CalendarSyncApi & ManagedConnectionsApi & DemoControls;
+export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & CalendarSyncApi & ManagedConnectionsApi & SetupApi & DemoControls;
 
 export interface DemoWrite {
   operation: string;
@@ -188,6 +191,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   let pipelines = clone(options.pipelines ?? [DEMO_PIPELINE]);
   // A copy per adapter: setOpenHours changes this business's calendars only.
   const resources = clone(DEMO_RESOURCES);
+  // The seed's page; an applied template adds its own beside it (IT-4).
+  const bookingPages = [clone(DEMO_BOOKING_PAGE)];
   let actor: DemoActor = { role: "owner", userId: DEMO_OWNER.userId };
   const actorListeners = new Set<() => void>();
 
@@ -422,12 +427,13 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     seed: seed.followUp,
   });
 
-  const templates = createDemoTemplates({
+  // The internals stay off the API object and the demo controls (`window.__zsDemo`).
+  const { seedWording, ...templates } = createDemoTemplates({
     now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor, globalKilled: () => agents.globalAgentKill(),
   });
   const browser = createDemoBrowser({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
 
-  const business = createDemoBusiness({ now: () => clock.now(), wait, idempotent, parse, actor: () => actor });
+  const { profileTimeZone, confirmTimeZone, ...business } = createDemoBusiness({ now: () => clock.now(), wait, idempotent, parse, actor: () => actor });
 
   const enrichment = createDemoEnrichment({
     now: () => clock.now(), newId, wait, idempotent, actor: () => actor,
@@ -438,7 +444,18 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
   const calendar = createDemoCalendar({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor, resources });
 
+  const setup = createDemoSetup({
+    now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor,
+    profileTimeZone, confirmTimeZone, seedWording, resources, bookingPages,
+    addPipeline: (pipeline) => {
+      pipelines = [...pipelines, pipeline];
+    },
+  });
   const managedConnections = createDemoManagedConnections({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
+
+  /** B-12: the first instant too far ahead to book; none for a calendar without a horizon. */
+  const horizonOf = (resource: DemoResource) =>
+    resource.bookingHorizonMinutes === undefined ? Infinity : clock.now().getTime() + resource.bookingHorizonMinutes * 60000;
 
   return {
     ...agents,
@@ -447,6 +464,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     ...business,
     ...enrichment,
     ...calendar,
+    ...setup,
     ...managedConnections,
 
     async listResources() {
@@ -462,12 +480,13 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       const toMs = Date.parse(query.to);
       const labelZone = query.zone ?? resource.timeZone;
       const earliest = clock.now().getTime() + resource.minimumNoticeMinutes * 60000;
+      const horizon = horizonOf(resource);
       const slots: { startsAt: string; endsAt: string; localStart: string }[] = [];
       const lastDay = zonedDateKey(toMs, resource.timeZone);
       for (let day = zonedDateKey(fromMs, resource.timeZone); day <= lastDay; day = addDays(day, 1)) {
         for (const start of gridStarts(resource, day)) {
           const slot = occupied(resource, start);
-          if (start < fromMs || slot.endsMs > toMs || start < earliest) continue;
+          if (start < fromMs || slot.endsMs > toMs || start < earliest || start >= horizon) continue;
           if (clashes(resource, slot.occStart, slot.occEnd)) continue;
           slots.push({ startsAt: new Date(slot.startsMs).toISOString(), endsAt: new Date(slot.endsMs).toISOString(), localStart: localIso(slot.startsMs, labelZone) });
         }
@@ -496,7 +515,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         const startsMs = Date.parse(request.startsAt);
         const onGrid = !Number.isNaN(startsMs) && gridStarts(resource, zonedDateKey(startsMs, resource.timeZone)).includes(startsMs);
         // The API refuses a start that is off the grid or too soon as a conflict, not a 400.
-        if (!onGrid || startsMs < clock.now().getTime() + resource.minimumNoticeMinutes * 60000) {
+        if (!onGrid || startsMs < clock.now().getTime() + resource.minimumNoticeMinutes * 60000 || startsMs >= horizonOf(resource)) {
           throw demoError("Conflict", { reason: "slot_unavailable" });
         }
         return toRecord(insertBooking(resource, request.startsAt, newId(), null));
@@ -637,6 +656,25 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       });
     },
 
+    createDeal(input, options) {
+      return idempotent("crm.deal.create", input, options, (): DealRecord => {
+        const request = parse(createDealRequestSchema, input);
+        // Like moveDealStage: an unknown customer, pipeline or stage is the API's 403.
+        const pipeline = pipelines.find((item) => item.id === request.pipelineId);
+        if (!contacts.has(request.contactId) || !pipeline?.stages.some((stage) => stage.id === request.stageId)) {
+          throw demoError("Forbidden");
+        }
+        const at = nowIso();
+        const won = pipeline.stages.find((stage) => stage.id === request.stageId)?.outcome === "won";
+        const deal: DealSummary = {
+          id: newId(), tenantId: DEMO_TENANT_ID, contactId: request.contactId, pipelineId: request.pipelineId, stageId: request.stageId,
+          title: request.title, revision: 1, createdAt: at, updatedAt: at, value: null, leadSource: null, wonAt: won ? at : null,
+        };
+        deals.set(deal.id, deal);
+        return toDealRecord(deal);
+      });
+    },
+
     setDealDetails(input, options) {
       return idempotent("crm.deal.set-details", input, options, () => {
         const { dealId, ...body } = input;
@@ -693,7 +731,9 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
     async listBookingPages() {
       await wait();
-      return [clone(DEMO_BOOKING_PAGE)];
+      // The API lists pages for the `publish` permission, an owner's.
+      if (actor.role !== "owner") throw demoError("Forbidden");
+      return clone(bookingPages);
     },
 
     async listThreads(query = {}) {

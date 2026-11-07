@@ -47,6 +47,7 @@ import { intakeRoutes } from "./routes/intake.js";
 import { MEDIA_UPLOAD_PATH, mediaRoutes } from "./routes/media.js";
 import { memberRoutes } from "./routes/members.js";
 import { siteRoutes } from "./routes/sites.js";
+import { setupRoutes } from "./routes/setup.js";
 import { sourceRoutes } from "./routes/sources.js";
 import { MCP_PATH, mcpRoutes } from "./mcp/routes.js";
 import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public/activepieces.js";
@@ -365,6 +366,7 @@ export function createApp(deps: AppDependencies) {
       createBrowserSession(requestEdge(c), c.var.session.principal, { config: browser.config, artifacts: browser.artifacts })));
   app.route("/v1", memberRoutes);
   app.route("/v1", businessRoutes);
+  app.route("/v1/setup", setupRoutes);
   const enrichment = deps.enrichment;
   app.route("/v1", enrichmentRoutes((c) => createEnrichmentSession(requestEdge(c), c.var.session.principal, enrichment)));
   if (transcription) app.route("/v1/transcriptions", transcriptionRoutes(transcriptionFor));
