@@ -50,6 +50,7 @@ export * from "./transcription/index.js";
 export * from "./document-intake/index.js";
 export * from "./calendar/index.js";
 export * from "./automation/index.js";
+export * from "./connections/index.js";
 export {
   captureReservation,
   creditWallet,

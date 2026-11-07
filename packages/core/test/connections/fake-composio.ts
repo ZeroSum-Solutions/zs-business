@@ -1,0 +1,159 @@
+// An in-process fake of the Composio REST API (connections.md C-15), built from the facts the
+// contract records: link returns a redirect URL and an account ID before anyone signs in; with
+// deferred verification the account stays INITIATED until `complete_auth` redeems the single-use
+// `session_uri` for the same `user_id`; GET returns the account with a `state` block of masked
+// credentials; execute can answer HTTP 200 with `successful: false`. No test calls the real
+// service, and no text of Composio's documentation is copied here.
+export interface FakeAccount {
+  id: string;
+  userId: string;
+  toolkit: string;
+  authConfigId: string;
+  status: string;
+  shopDomain: string | null;
+  deleted: boolean;
+  revoked: boolean;
+}
+export interface FakeCall { readonly method: string; readonly path: string; readonly body: unknown; readonly apiKey: string | null }
+export interface FakeShop { id: string; name: string; domain: string }
+
+type Override = { status?: number; json?: unknown; hang?: boolean; bytes?: number; times?: number };
+
+const ORDER = {
+  id: 450789469, name: "#1001", created_at: "2026-10-01T10:00:00Z", updated_at: "2026-10-02T10:00:00Z",
+  financial_status: "paid", fulfillment_status: null, currency: "USD", total_price: "59.00", subtotal_price: "54.00", total_tax: "5.00",
+  line_items: [{ title: "Mug", quantity: 2, price: "27.00", sku: "SKU-1", vendor: "secret-vendor" }],
+  customer: { id: 207119551, first_name: "Ada", last_name: "Lovelace", email: "ada@example.com", phone: "+15555550100", default_address: { city: "x" } },
+  token: "should-not-leak", note_attributes: [{ name: "secret", value: "x" }],
+};
+export const fakeOrder = (id: number | string, extra: Record<string, unknown> = {}) => ({ ...ORDER, id: Number(id), name: `#${id}`, ...extra });
+
+export class FakeComposio {
+  readonly accounts = new Map<string, FakeAccount>();
+  readonly sessions = new Map<string, { accountId: string; used: boolean }>();
+  readonly calls: FakeCall[] = [];
+  deferredVerification = true;
+  /** The shop the identity tool answers for, by account. */
+  readonly shops = new Map<string, FakeShop>();
+  orders: unknown[] = [fakeOrder(1001), fakeOrder(1002)];
+  /** Path-keyed overrides: `GET /connected_accounts/x` style regexes against "METHOD path". */
+  private readonly overrides: { match: RegExp; value: Override }[] = [];
+  private counter = 0;
+  /** Drops the answer of the next `complete_auth` after it took effect (a lost response). */
+  loseNextCompleteAuth = false;
+  /** Runs before a request is answered; a test uses it to interleave another writer. */
+  gate: ((call: FakeCall) => Promise<void>) | null = null;
+
+  override(match: RegExp, value: Override): void { this.overrides.push({ match, value }); }
+  clearOverrides(): void { this.overrides.length = 0; }
+  callsTo(pattern: RegExp): FakeCall[] { return this.calls.filter((call) => pattern.test(`${call.method} ${call.path}`)); }
+
+  /** The person signs in and consents: the account stays INITIATED when verification is deferred. */
+  consent(accountId: string): string {
+    const account = this.accounts.get(accountId);
+    if (!account) throw new Error("no such account");
+    const sessionUri = `session-${++this.counter}-${accountId}`;
+    this.sessions.set(sessionUri, { accountId, used: false });
+    if (!this.deferredVerification) account.status = "ACTIVE";
+    return sessionUri;
+  }
+  /** Seeds an ACTIVE account, as if an earlier connect had finished. */
+  seed(account: Partial<FakeAccount> & { id: string; userId: string }): FakeAccount {
+    const full: FakeAccount = { toolkit: "shopify", authConfigId: "ac_shopify", status: "ACTIVE", shopDomain: "testshop.myshopify.com", deleted: false, revoked: false, ...account };
+    this.accounts.set(full.id, full);
+    this.shops.set(full.id, { id: "8812345", name: "Test Shop", domain: full.shopDomain ?? "testshop.myshopify.com" });
+    return full;
+  }
+
+  readonly fetch: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const path = url.pathname.replace(/^\/api\/v3\.1/, "");
+    const headers = new Headers(init?.headers);
+    const body = typeof init?.body === "string" && init.body.length > 0 ? JSON.parse(init.body) as unknown : undefined;
+    const call: FakeCall = { method, path, body, apiKey: headers.get("x-api-key") };
+    this.calls.push(call);
+    await this.gate?.(call);
+    const signal = init?.signal ?? undefined;
+    const override = this.overrides.find((entry) => entry.match.test(`${method} ${path}`) && (entry.value.times === undefined || entry.value.times > 0));
+    if (override) {
+      if (override.value.times !== undefined) override.value.times -= 1;
+      if (override.value.hang) return new Promise<Response>((_, reject) => {
+        const abort = () => reject(Object.assign(new Error("aborted"), { name: signal?.reason?.name === "TimeoutError" ? "TimeoutError" : "AbortError" }));
+        if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+      });
+      if (override.value.bytes !== undefined) {
+        const total = override.value.bytes;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) { const chunk = new Uint8Array(64 * 1024).fill(97); for (let sent = 0; sent < total; sent += chunk.length) controller.enqueue(chunk); controller.close(); },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return json(override.value.status ?? 200, override.value.json ?? {});
+    }
+    const r = this.route(method, path, body);
+    if (this.loseNextCompleteAuth && path === "/connected_accounts/complete_auth" && r.status === 200) {
+      this.loseNextCompleteAuth = false;
+      throw new TypeError("fetch failed");
+    }
+    return json(r.status, r.body);
+  };
+
+  private route(method: string, path: string, body: unknown): { status: number; body: unknown } {
+    const b = (body ?? {}) as Record<string, unknown>;
+    if (method === "POST" && path === "/connected_accounts/link") {
+      const id = `ca_${++this.counter}`;
+      const data = (b["connection_data"] ?? {}) as Record<string, unknown>;
+      const shop = typeof data["shop"] === "string" ? `${data["shop"]}.myshopify.com` : null;
+      this.accounts.set(id, {
+        id, userId: String(b["user_id"]), toolkit: "shopify", authConfigId: String(b["auth_config_id"]), status: "INITIATED", shopDomain: shop, deleted: false, revoked: false,
+      });
+      this.shops.set(id, { id: "8812345", name: "Test Shop", domain: shop ?? "testshop.myshopify.com" });
+      return { status: 201, body: { link_token: `lt_${id}`, redirect_url: `https://connect.composio.test/link/${id}`, expires_at: "2026-11-06T12:00:00.000Z", connected_account_id: id } };
+    }
+    if (method === "POST" && path === "/connected_accounts/complete_auth") {
+      const session = this.sessions.get(String(b["session_uri"]));
+      if (!session || session.used) return { status: 404, body: { error: { message: "not found" } } };
+      const account = this.accounts.get(session.accountId)!;
+      if (account.userId !== b["user_id"]) return { status: 400, body: { error: { message: "user mismatch" } } };
+      session.used = true;
+      account.status = "ACTIVE";
+      return { status: 200, body: { connected_account_id: account.id, toolkit_slug: account.toolkit } };
+    }
+    const match = /^\/connected_accounts\/([^/]+)(\/revoke)?$/.exec(path);
+    if (match) {
+      const account = this.accounts.get(decodeURIComponent(match[1]!));
+      if (!account || account.deleted) return { status: 404, body: { error: { message: "gone" } } };
+      if (method === "GET" && !match[2])
+        return { status: 200, body: {
+          id: account.id, status: account.status, user_id: account.userId, toolkit: { slug: account.toolkit }, auth_config: { id: account.authConfigId },
+          state: { val: { access_token: "shpat_masked_ABCDEF", refresh_token: "r_masked" } }, data: { access_token: "should-not-leak" },
+        } };
+      if (method === "POST" && match[2]) { account.revoked = true; return { status: 200, body: { success: true } }; }
+      if (method === "DELETE" && !match[2]) { account.deleted = true; return { status: 200, body: { success: true } }; }
+    }
+    const exec = /^\/tools\/execute\/([A-Z0-9_]+)$/.exec(path);
+    if (method === "POST" && exec) {
+      const keys = Object.keys(b).sort().join(",");
+      if (keys !== "arguments,connected_account_id,user_id,version") return { status: 400, body: { error: { message: "bad envelope" } } };
+      const account = this.accounts.get(String(b["connected_account_id"]));
+      if (!account || account.deleted || account.userId !== b["user_id"]) return { status: 404, body: { error: { message: "no account" } } };
+      if (typeof b["version"] !== "string" || b["version"] === "") return { status: 400, body: { error: { message: "version" } } };
+      const slug = exec[1]!;
+      if (slug === "SHOPIFY_GET_SHOP_DETAILS") {
+        const shop = this.shops.get(account.id)!;
+        return { status: 200, body: { successful: true, error: null, data: { shop: { id: shop.id, name: shop.name, myshopify_domain: shop.domain, email: "owner@example.com" } } } };
+      }
+      if (slug === "SHOPIFY_GET_ORDERS_WITH_FILTERS") return { status: 200, body: { successful: true, error: null, data: { orders: this.orders } } };
+      if (slug === "SHOPIFY_GET_ORDER_BY_ID") {
+        const id = (b["arguments"] as Record<string, unknown>)["order_id"];
+        return { status: 200, body: { successful: true, error: null, data: { order: fakeOrder(String(id)) } } };
+      }
+    }
+    return { status: 404, body: { error: { message: "unknown route" } } };
+  }
+}
+
+function json(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
