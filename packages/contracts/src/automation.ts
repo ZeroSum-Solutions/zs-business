@@ -128,15 +128,68 @@ export const webhookDeliveryPageSchema = pageSchema(webhookDeliverySchema);
 export type WebhookDeliveryPage = z.infer<typeof webhookDeliveryPageSchema>;
 export const replayWebhookDeliveryRequestSchema = z.strictObject({});
 
-/** W-10: what a token may propose; nothing a token holds can read or act. */
-export const AUTOMATION_SCOPES = Object.freeze(["contacts:propose", "deals:propose", "bookings:propose"] as const);
+/** W-10: what a token may propose. */
+export const PROPOSE_SCOPES = Object.freeze(["contacts:propose", "deals:propose", "bookings:propose"] as const);
+/** hub-access.md H-2: what a token may read. Operation scopes, not field filters. */
+export const READ_SCOPES = Object.freeze([
+  "contacts:read", "deals:read", "bookings:read", "inbox:read", "results:read", "business:read",
+] as const);
+export const AUTOMATION_SCOPES = Object.freeze([...PROPOSE_SCOPES, ...READ_SCOPES] as const);
 export const automationScopeSchema = z.enum(AUTOMATION_SCOPES);
 export type AutomationScope = z.infer<typeof automationScopeSchema>;
+export const readScopeSchema = z.enum(READ_SCOPES);
+export type ReadScope = z.infer<typeof readScopeSchema>;
+export const hasReadScope = (scopes: readonly AutomationScope[]) => scopes.some((scope) => (READ_SCOPES as readonly string[]).includes(scope));
+
+/** hub-access.md "What each read scope discloses": the text an owner sees when choosing scopes. */
+export const READ_SCOPE_DISCLOSURES: Readonly<Record<ReadScope, string>> = Object.freeze({
+  "contacts:read": "Customer names, emails, phones, marketing consent.",
+  "deals:read": "Deal titles, values, stages, lead sources and their contacts.",
+  "bookings:read": "Bookings with times, resources and the linked customer's name and ID.",
+  "inbox:read": "Website requests and replies with customer identities and message text, and the names and emails of staff who replied.",
+  "results:read": "Lead, booking and revenue totals by source.",
+  "business:read": "The business profile (name, contact details, address, currency, zone).",
+});
+
+/** One-line meaning of each propose scope, beside the read disclosures (hub-access.md H-9). */
+export const PROPOSE_SCOPE_DESCRIPTIONS: Readonly<Record<(typeof PROPOSE_SCOPES)[number], string>> = Object.freeze({
+  "contacts:propose": "Propose adding a customer; an owner approves before anything is created. Reads nothing.",
+  "deals:propose": "Propose creating a deal or moving it to another stage; an owner approves. Reads nothing.",
+  "bookings:propose": "Propose a booking on a resource; an owner approves. Reads nothing.",
+});
+/** H-9: every scope with the text an owner sees when choosing scopes. */
+export const automationScopeInfoSchema = z.strictObject({
+  scope: automationScopeSchema,
+  kind: z.enum(["propose", "read"]),
+  disclosure: z.string().min(1).max(500),
+});
+export const automationScopeListSchema = z.strictObject({ items: z.array(automationScopeInfoSchema) });
+export type AutomationScopeList = z.infer<typeof automationScopeListSchema>;
+export const AUTOMATION_SCOPE_INFO: AutomationScopeList = Object.freeze({
+  items: AUTOMATION_SCOPES.map((scope) => (scope.endsWith(":read")
+    ? { scope, kind: "read" as const, disclosure: READ_SCOPE_DISCLOSURES[scope as ReadScope] }
+    : { scope, kind: "propose" as const, disclosure: PROPOSE_SCOPE_DESCRIPTIONS[scope as (typeof PROPOSE_SCOPES)[number]] })),
+});
+
+/** H-1: a token with a read scope expires in 1 to 365 days; the request default is 90. */
+export const READ_TOKEN_DEFAULT_DAYS = 90;
+const expiryDaysSchema = z.number().int().min(1).max(365);
+const scopeListSchema = z.array(automationScopeSchema).min(1).max(AUTOMATION_SCOPES.length).refine(unique, "Scopes must not repeat");
+const readNeedsExpiry = (value: { scopes: readonly AutomationScope[]; expiresInDays: number | null }) =>
+  !hasReadScope(value.scopes) || value.expiresInDays !== null;
+const READ_EXPIRY_MESSAGE = "A token with a read scope needs an expiry of 1 to 365 days";
 export const createAutomationTokenRequestSchema = z.strictObject({
   name: postgresText(1, 100),
-  scopes: z.array(automationScopeSchema).min(1).max(AUTOMATION_SCOPES.length).refine(unique, "Scopes must not repeat"),
-  expiresInDays: z.number().int().min(1).max(365).nullable().default(null),
-});
+  scopes: scopeListSchema,
+  /** Left out: 90 days when the token holds a read scope, else no expiry (W-9). An explicit null is refused for a read scope. */
+  expiresInDays: expiryDaysSchema.nullable().optional(),
+}).refine((value) => value.expiresInDays !== null || !hasReadScope(value.scopes), {
+  message: READ_EXPIRY_MESSAGE, path: ["expiresInDays"],
+}).transform((value) => ({
+  name: value.name,
+  scopes: value.scopes,
+  expiresInDays: value.expiresInDays ?? (hasReadScope(value.scopes) ? READ_TOKEN_DEFAULT_DAYS : null),
+}));
 export type CreateAutomationTokenRequest = z.input<typeof createAutomationTokenRequestSchema>;
 export const createAutomationTokenCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("automation.token.create"),
@@ -144,9 +197,9 @@ export const createAutomationTokenCommandSchema = z.lazy(() => actionCommandSche
   payload: z.strictObject({
     tokenId: idSchema,
     name: postgresText(1, 100),
-    scopes: z.array(automationScopeSchema).min(1).max(AUTOMATION_SCOPES.length).refine(unique, "Scopes must not repeat"),
-    expiresInDays: z.number().int().min(1).max(365).nullable(),
-  }),
+    scopes: scopeListSchema,
+    expiresInDays: expiryDaysSchema.nullable(),
+  }).refine(readNeedsExpiry, { message: READ_EXPIRY_MESSAGE, path: ["expiresInDays"] }),
 }).refine((command) => command.target.id === command.payload.tokenId, "Target must equal the token ID"));
 export const revokeAutomationTokenCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("automation.token.revoke"),
@@ -187,19 +240,24 @@ const contactInputSchema = z.strictObject({
   email: contactEmailInputSchema.nullable().default(null),
   phone: contactPhoneSchema.nullable().default(null),
 }).refine((value) => value.email !== null || value.phone !== null, "At least one identity is required");
+/** Shown to the owner beside the exact action (approvals.md A-12); the MCP tools reuse it. */
+export const proposalSummarySchema = postgresText(1, 500);
 const proposalMeta = {
-  /** Shown to the owner beside the exact action (approvals.md A-12). */
-  summary: postgresText(1, 500).optional(),
+  summary: proposalSummarySchema.optional(),
   expiresInMinutes: z.number().int().min(1).max(43_200).default(10_080),
 };
+/** The `input` of each proposal: the member request body of the action (hub-access.md H-6 reuses these). */
+const moveStageInputSchema = z.strictObject({ dealId: idSchema, ...moveDealStageRequestSchema.shape });
+export const proposalInputSchemas = {
+  "contact.upsert": contactInputSchema,
+  "deal.create": createDealRequestSchema,
+  "deal.move_stage": moveStageInputSchema,
+  "booking.create": createBookingRequestSchema,
+} as const;
 export const proposalRequestSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("contact.upsert"), input: contactInputSchema, ...proposalMeta }),
   z.strictObject({ action: z.literal("deal.create"), input: createDealRequestSchema, ...proposalMeta }),
-  z.strictObject({
-    action: z.literal("deal.move_stage"),
-    input: z.strictObject({ dealId: idSchema, ...moveDealStageRequestSchema.shape }),
-    ...proposalMeta,
-  }),
+  z.strictObject({ action: z.literal("deal.move_stage"), input: moveStageInputSchema, ...proposalMeta }),
   z.strictObject({ action: z.literal("booking.create"), input: createBookingRequestSchema, ...proposalMeta }),
 ]);
 export type ProposalRequest = z.input<typeof proposalRequestSchema>;
@@ -248,3 +306,29 @@ export const automationWhoAmISchema = z.strictObject({
   expiresAt: instantSchema.nullable(),
 });
 export type AutomationWhoAmI = z.infer<typeof automationWhoAmISchema>;
+
+/**
+ * hub-access.md H-8: what an owner reads of one token's use over the last 168 hours. One entry per
+ * hour that saw a request, oldest first; `totals` adds them up.
+ */
+export const automationUsageHourSchema = z.strictObject({
+  hour: instantSchema,
+  requests: z.number().int().min(0),
+  reads: z.number().int().min(0),
+  proposals: z.number().int().min(0),
+  refusals: z.number().int().min(0),
+});
+export type AutomationUsageHour = z.infer<typeof automationUsageHourSchema>;
+export const automationUsageSchema = z.strictObject({
+  tokenId: idSchema,
+  from: instantSchema,
+  to: instantSchema,
+  hours: z.array(automationUsageHourSchema),
+  totals: z.strictObject({
+    requests: z.number().int().min(0),
+    reads: z.number().int().min(0),
+    proposals: z.number().int().min(0),
+    refusals: z.number().int().min(0),
+  }),
+});
+export type AutomationUsage = z.infer<typeof automationUsageSchema>;

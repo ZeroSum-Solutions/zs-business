@@ -11,6 +11,7 @@ import { readClock } from "../booking/slots.js";
 import { backoffMs } from "../delivery/policy.js";
 import { derivedId } from "../edge/ids.js";
 import { businessEvents, SOURCE_EVENT_TYPES, type OutboxRow } from "./events.js";
+import { pruneUsageRows, USAGE_PRUNE_BATCH } from "./hub.js";
 import { signingSecrets, webhookSignatureHeader, type AutomationKeySecrets } from "./keys.js";
 import { ENDPOINT_COLUMNS, previousVersion, webhookEventId, type EndpointRow } from "./records.js";
 import { webhookUrlProblem, type UrlPolicy, type WebhookResponse, type WebhookTransport } from "./transport.js";
@@ -39,7 +40,8 @@ type Config = z.infer<typeof webhookWorkerConfigSchema>;
 export type WebhookReport =
   | { readonly kind: "lost_lease"; readonly tenantId: string; readonly deliveryId: string }
   | { readonly kind: "step_failed"; readonly tenantId: string; readonly deliveryId: string; readonly error: string }
-  | { readonly kind: "ingest_failed"; readonly tenantId: string; readonly endpointId: string; readonly error: string };
+  | { readonly kind: "ingest_failed"; readonly tenantId: string; readonly endpointId: string; readonly error: string }
+  | { readonly kind: "prune_failed"; readonly error: string };
 
 export interface WebhookWorkerDeps {
   /** A service-role transaction: `(work) => asService(servicePool, work)`. */
@@ -82,6 +84,7 @@ type Plan =
 
 /** Transport errors that are the URL policy's refusal, not a network failure: `address_refused`, `url_…`. */
 const URL_REFUSALS = /^(address_refused$|url_)/;
+
 
 const errorText = (code: string) => (code.replaceAll("\u0000", "").trim() || "unknown").slice(0, 200);
 
@@ -356,15 +359,30 @@ export function createWebhookWorker(deps: WebhookWorkerDeps) {
     return { outcome: "error", error: text };
   }
 
-  /** One pass: ingest new events, claim due deliveries, send each in turn. */
+  /**
+   * hub-access.md H-8: deletes token usage rows older than 30 days in batches that skip rows other
+   * sessions hold, at most a few full batches per pass, so a long backlog drains over several
+   * passes without holding one long statement.
+   */
+  async function pruneUsage(limit = USAGE_PRUNE_BATCH): Promise<number> {
+    return pruneUsageRows(now(), (before, size) => deps.service(async (tx) =>
+      (await tx.query<{ count: number }>("SELECT public.prune_automation_token_usage($1,$2) AS count", [before, size])).rows[0]!.count),
+    limit);
+  }
+
+  /** One pass: ingest new events, claim due deliveries, send each in turn, then prune old usage rows. */
   async function runOnce(options: { claimLimit?: number } = {}) {
     const ingested = await ingest();
     const leases = await claim(options.claimLimit ?? 10);
     const results: WebhookStepResult[] = [];
     for (const lease of leases) results.push(await step(lease).catch((error: unknown) => noteStepError(lease, error)));
-    return { ingested: ingested.events, claimed: leases.length, results };
+    const usagePruned = await pruneUsage().catch((error: unknown) => {
+      deps.report?.({ kind: "prune_failed", error: errorText(error instanceof Error ? error.message : "prune_failed") });
+      return 0;
+    });
+    return { ingested: ingested.events, claimed: leases.length, results, usagePruned };
   }
 
-  return { ingest, ingestEndpoint, claim, step, runOnce, config };
+  return { ingest, ingestEndpoint, claim, step, pruneUsage, runOnce, config };
 }
 export type WebhookWorker = ReturnType<typeof createWebhookWorker>;

@@ -107,16 +107,20 @@ export async function listDeals(tx: Transaction, tenantId: string, query: ListDe
   return page(rows.map(dealSummary), query, (index) => encodeCursor("deals.recent", [rows[index]!.sort_value, rows[index]!.id]));
 }
 
+/** hub-access.md H-5 bounded work: a list with no page is capped in SQL. Rows past the cap are not returned. */
+export const PIPELINE_LIMIT = 200;
+export const STAGE_ROW_LIMIT = 2_000;
+
 export async function listPipelines(tx: Transaction, tenantId: string): Promise<PipelineSummary[]> {
   const rows = (await tx.query<{
     pipeline_id: string; pipeline_name: string; id: string | null; name: string | null; position: number | null;
     outcome: StageOutcome | null;
   }>(
     `SELECT p.id AS pipeline_id, p.name AS pipeline_name, s.id, s.name, s.position, s.outcome
-       FROM crm_pipelines p
+       FROM (SELECT tenant_id, id, name FROM crm_pipelines WHERE tenant_id=$1 ORDER BY name, id LIMIT $2) p
        LEFT JOIN crm_stages s ON s.tenant_id = p.tenant_id AND s.pipeline_id = p.id
-      WHERE p.tenant_id=$1 ORDER BY p.name, p.id, s.position`,
-    [tenantId],
+      ORDER BY p.name, p.id, s.position LIMIT $3`,
+    [tenantId, PIPELINE_LIMIT, STAGE_ROW_LIMIT],
   )).rows;
   const pipelines = new Map<string, PipelineSummary>();
   for (const row of rows) {

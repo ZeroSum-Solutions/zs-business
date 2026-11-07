@@ -170,11 +170,14 @@ export async function listBookings(tx: Transaction, tenantId: string, query: Lis
   return toPage(rows);
 }
 
+/** hub-access.md H-5 bounded work: the resource list has no page, so it is capped in SQL. */
+export const RESOURCE_LIMIT = 500;
+
 export async function listResources(tx: Transaction, tenantId: string): Promise<ResourceSummary[]> {
   const rows = (await tx.query<{ id: string; name: string | null; time_zone: string; slot_length_minutes: number }>(
     `SELECT id, name, time_zone, slot_length_minutes FROM booking_resources
-      WHERE tenant_id=$1 ORDER BY name NULLS LAST, id`,
-    [tenantId],
+      WHERE tenant_id=$1 ORDER BY name NULLS LAST, id LIMIT $2`,
+    [tenantId, RESOURCE_LIMIT],
   )).rows;
   return rows.map((row) => ({
     id: row.id, name: row.name, timeZone: row.time_zone, slotLengthMinutes: row.slot_length_minutes,

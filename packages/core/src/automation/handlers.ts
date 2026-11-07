@@ -204,7 +204,9 @@ export const createTokenHandler: ActionHandler = {
 
 /**
  * W-9: revoking stops the token at once (the proposal action locks the token row) and withdraws
- * every proposal of it still pending. A token already revoked stays as it was.
+ * every proposal of it still pending. A token already revoked stays as it was. The row lock
+ * conflicts with the shared lock a token read holds (hub-access.md H-3, hub.ts), so a revoke
+ * commits only after reads in flight end, and every read that starts after it is refused.
  */
 export const revokeTokenHandler: ActionHandler = {
   resolveTarget: existingTarget("automation_token", tokenExists),

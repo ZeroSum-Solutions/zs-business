@@ -863,6 +863,32 @@ Owner routes (Bearer member token, `integrations` permission, owners only): `GET
 `zsap1_…` token): `GET /me`, `POST /proposals` (Idempotency-Key), `GET /proposals/:id`.
 `GET /cron/activepieces` answers like `/cron/delivery`, with `delivered` in place of `sent`.
 
+### Hub access (`POST /mcp`, `GET /v1/integrations/activepieces/tokens/:id/usage`)
+
+Any agent an owner trusts (Mish, Hermes, Claude, Codex, a flow) reaches one business through one
+remote MCP endpoint and one kind of token (docs/requirements/hub-access.md). It turns on with
+`ACTIVEPIECES_KEY_SECRET`; without it `/mcp` is 404. `POST /mcp` takes `Authorization: Bearer
+zsap1_…` and speaks stateless Streamable HTTP with JSON answers: no session ID is issued or
+accepted, and the checks run in a fixed order: `GET` and `DELETE` are 405; a bad tag is the usual 401
+(before any database query, so before the body is read); a body over 64 KiB is 413 (counted on the
+stream); over 120 requests a minute or 2,000 an hour on that token is 429 with `Retry-After`
+(counted in Postgres, so every instance shares it, and before the token row is read); then the
+token row (401), a session ID (404), and bad JSON, a batch or a non-request (400). A token may
+hold six read scopes beside the three propose scopes; it then needs an expiry of 1 to 365 days
+(default 90). `tools/list` shows only the tools its scopes allow, and an unlisted tool is JSON-RPC
+-32601. The only write is a pending proposal an owner decides. Owners read a token's last 168 hours
+of use by hour at `GET /tokens/:id/usage`, and the scope list with its disclosures at
+`GET /v1/integrations/activepieces/scopes`. Each API instance prunes usage rows older than 30 days
+after its first usage write and then hourly.
+
+Connect an SDK client with the token as a bearer header:
+
+```ts
+new StreamableHTTPClientTransport(new URL("https://<api>/mcp"), {
+  requestInit: { headers: { Authorization: `Bearer ${token}` } },
+});
+```
+
 ## Transcription
 
 Owner routes under `/v1/transcriptions` (Bearer member token, `inbox.drafts`): `POST /uploads`

@@ -26,7 +26,7 @@ export function activepiecesInboundRoutes(
       await next();
       c.header("Cache-Control", "no-store");
     })
-    .get("/me", async (c) => c.json(inbound(c).whoAmI(await principal(c))))
+    .get("/me", async (c) => c.json(await inbound(c).whoAmI(await principal(c))))
     .post("/proposals", async (c) => {
       const caller = await principal(c);
       return c.json(await inbound(c).propose(caller, await jsonBody(c), idempotencyKey(c)), 201);
