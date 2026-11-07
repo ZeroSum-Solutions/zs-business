@@ -395,4 +395,27 @@ describe("the owner-run catalog check (A-8, C-6)", () => {
     expect(report.ok).toBe(false);
     expect(report.results.find((result) => result.slug === "SHOPIFY_QUERY_SHOP")!.problem).toBe("deprecated");
   });
+
+  it("applies the same checks to the answer at the pinned version", async () => {
+    const older = { toolkit: "shopify", versions: ["20270101_00", "20261104_00"], listed: ["20270101_00"] };
+    const fake = new FakeComposio();
+    fake.tools.set("SHOPIFY_QUERY_SHOP", { ...older, atVersion: { "20261104_00": { deprecated: true } } });
+    fake.tools.set("SHOPIFY_GET_ORDERS_WITH_FILTERS", { ...older, atVersion: { "20261104_00": { toolkit: "gmail" } } });
+    fake.tools.set("SHOPIFY_GET_ORDER", { ...older, atVersion: { "20261104_00": { slug: "SHOPIFY_OTHER" } } });
+    const report = await checkComposioCatalog(client(fake));
+    expect(Object.fromEntries(report.results.map((result) => [result.slug, result.problem]))).toEqual({
+      SHOPIFY_QUERY_SHOP: "deprecated", SHOPIFY_GET_ORDERS_WITH_FILTERS: "wrong_toolkit", SHOPIFY_GET_ORDER: "slug_changed",
+    });
+  });
+
+  it("counts an answer that does not say whether the tool is deprecated as unavailable", async () => {
+    const fake = new FakeComposio();
+    for (const flag of [undefined, null]) {
+      fake.clearOverrides();
+      fake.override(/GET \/tools\//, { status: 200, json: { slug: "SHOPIFY_QUERY_SHOP", toolkit: { slug: "shopify" }, version: "20261104_00", available_versions: ["20261104_00"], is_deprecated: flag } });
+      const report = await checkComposioCatalog(client(fake));
+      expect(report.ok).toBe(false);
+      expect(report.results[0]!.problem).toBe("unavailable");
+    }
+  });
 });

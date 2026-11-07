@@ -176,7 +176,8 @@ const toolSchema = z.object({
   toolkit: z.object({ slug: z.string().max(200).nullish() }).nullish(),
   version: z.string().max(100).nullish(),
   available_versions: z.array(z.string().max(100)).max(1000).nullish(),
-  is_deprecated: z.boolean().nullish(),
+  // Required: an answer that does not say whether the tool is deprecated is not one the check can trust.
+  is_deprecated: z.boolean(),
 });
 
 export interface ComposioClientConfig {
@@ -328,7 +329,7 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
         const { json } = await call("GET", `/tools/${enc(slug)}${query}`, undefined, signal);
         const out = parse(toolSchema, json);
         const versions = [...new Set([...(out.available_versions ?? []), ...(out.version ? [out.version] : [])])];
-        return { slug: out.slug, toolkit: out.toolkit?.slug?.toLowerCase() ?? null, version: out.version ?? null, versions, deprecated: out.is_deprecated === true };
+        return { slug: out.slug, toolkit: out.toolkit?.slug?.toLowerCase() ?? null, version: out.version ?? null, versions, deprecated: out.is_deprecated };
       } catch (error) {
         if (error instanceof ComposioError && error.kind === "not_found") return null;
         throw error;

@@ -19,7 +19,14 @@ export interface FakeCall { readonly method: string; readonly path: string; read
  * One tool in the fake registry. `versions` is every version the tool has; `listed` is the recent part the
  * registry lists in `available_versions` (all of them when absent), since the real list is capped.
  */
-export interface FakeTool { toolkit: string; versions: string[]; listed?: string[]; deprecated?: boolean }
+export interface FakeTool {
+  toolkit: string;
+  versions: string[];
+  listed?: string[];
+  deprecated?: boolean;
+  /** What the registry answers differently when asked for one version. */
+  atVersion?: Record<string, { slug?: string; toolkit?: string; deprecated?: boolean }>;
+}
 export interface FakeShop { id: string; name: string; domain: string }
 
 type Override = { status?: number; json?: unknown; hang?: boolean; bytes?: number; times?: number };
@@ -150,9 +157,13 @@ export class FakeComposio {
       const asked = query.get("toolkit_versions");
       const version = asked === null || asked === "latest" ? entry?.versions[0] : entry?.versions.find((v) => v === asked);
       if (!entry || version === undefined) return { status: 404, body: { error: { message: "no such tool" } } };
+      const at = asked === null ? undefined : entry.atVersion?.[asked];
       return {
         status: 200,
-        body: { slug: tool[1], name: "x", toolkit: { slug: entry.toolkit, name: "Shopify" }, version, available_versions: entry.listed ?? entry.versions, is_deprecated: entry.deprecated ?? false },
+        body: {
+          slug: at?.slug ?? tool[1], name: "x", toolkit: { slug: at?.toolkit ?? entry.toolkit, name: "Shopify" }, version,
+          available_versions: entry.listed ?? entry.versions, is_deprecated: at?.deprecated ?? entry.deprecated ?? false,
+        },
       };
     }
     const exec = /^\/tools\/execute\/([A-Z0-9_]+)$/.exec(path);

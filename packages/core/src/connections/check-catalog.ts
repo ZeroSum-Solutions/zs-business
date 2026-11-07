@@ -6,7 +6,7 @@
 // our problem codes only: never the key and never provider text. CI never runs it (no network in tests);
 // the owner runs `pnpm connections:check-catalog` with the preview key from the vault.
 import { COMPOSIO_CATALOG, type CatalogToolkit } from "./catalog.js";
-import { ComposioError, type ComposioClient } from "./composio.js";
+import { ComposioError, type ComposioClient, type ComposioTool } from "./composio.js";
 
 export type CatalogCheckProblem = "slug_missing" | "slug_changed" | "wrong_toolkit" | "deprecated" | "version_missing" | "key_refused" | "rate_limited" | "unavailable";
 export interface CatalogCheckResult {
@@ -18,6 +18,14 @@ export interface CatalogCheckResult {
   readonly problem: CatalogCheckProblem | null;
 }
 export interface CatalogCheckReport { readonly ok: boolean; readonly results: readonly CatalogCheckResult[] }
+
+/** The checks every registry answer must pass, the latest one and the one at the pinned version alike. */
+const metadataProblem = (tool: ComposioTool | null, slug: string, toolkit: string): CatalogCheckProblem | null =>
+  tool === null ? "slug_missing"
+    : tool.slug !== slug ? "slug_changed"
+    : tool.toolkit !== toolkit ? "wrong_toolkit"
+    : tool.deprecated ? "deprecated"
+    : null;
 
 export async function checkComposioCatalog(
   client: Pick<ComposioClient, "getTool">,
@@ -31,14 +39,10 @@ export async function checkComposioCatalog(
       let problem: CatalogCheckProblem | null;
       try {
         const tool = await client.getTool(entry.slug, signal);
-        problem = tool === null ? "slug_missing"
-          : tool.slug !== entry.slug ? "slug_changed"
-          : tool.toolkit !== toolkit.toolkit ? "wrong_toolkit"
-          : tool.deprecated ? "deprecated"
-          : null;
-        if (problem === null && tool !== null && !tool.versions.includes(entry.version)) {
+        problem = metadataProblem(tool, entry.slug, toolkit.toolkit);
+        if (problem === null && !tool!.versions.includes(entry.version)) {
           const pinned = await client.getTool(entry.slug, signal, entry.version);
-          if (pinned === null || pinned.version !== entry.version) problem = "version_missing";
+          problem = pinned === null || pinned.version !== entry.version ? "version_missing" : metadataProblem(pinned, entry.slug, toolkit.toolkit);
         }
       } catch (error) {
         if (!(error instanceof ComposioError)) throw error;
