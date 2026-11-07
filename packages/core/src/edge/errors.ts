@@ -9,7 +9,7 @@ import {
 import { DatabaseUnavailable } from "@zs/db";
 import { StripeRequestFailed } from "../billing/stripe.js";
 
-export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 422 | 500 | 503;
+export type ApiErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 422 | 429 | 500 | 503;
 export interface MappedError {
   readonly status: ApiErrorStatus;
   readonly body: ApiErrorBody;
@@ -51,6 +51,17 @@ export class SiteStoreUnavailable extends Error {
   }
 }
 
+/**
+ * connections.md C-4, C-10: the managed tier is on but this request cannot go on. `rate_limited`
+ * maps to 429 (with `retryAfterSeconds` for the Retry-After header), `unavailable` to 503. Fixed text.
+ */
+export class ConnectionsRefused extends Error {
+  constructor(readonly kind: "rate_limited" | "unavailable", readonly retryAfterSeconds?: number) {
+    super(`connections ${kind}`);
+    this.name = "ConnectionsRefused";
+  }
+}
+
 export function apiErrorBody(code: ApiErrorCode, message: string, details: Record<string, JsonValue> = {}): ApiErrorBody {
   return { error: { code, message, details } };
 }
@@ -69,7 +80,7 @@ const CONFLICT_REASONS = new Set([
   "disclosure_changed", "already_reviewed", "not_draft", "no_email", "approved_by_other", "topup_closed", "wallet_currency",
   "approval_not_pending", "approval_expired", "approval_not_approved", "approval_not_revocable", "stale_source",
   "endpoint_limit", "token_limit", "proposal_limit", "not_dead_letter",
-  "stale_release", "host_in_use", "grant_changed", "invalid_currency",
+  "stale_release", "host_in_use", "grant_changed", "invalid_currency", "already_connected", "attempt_changed", "account_mismatch", "cancel_in_progress",
   // agents.md G-15, G-19, G-21 and approvals.md A-15.
   "cost_cap", "model_error", "model_invalid", "kind_not_available",
   "template_changed", "template_superseded", "template_not_approved",
@@ -147,6 +158,7 @@ export function mapError(error: unknown): MappedError {
   if (error instanceof StripeRequestFailed) return error.retry ? mapped(503, "Unavailable") : mapped(500, "Internal");
   // The release's files could not be stored, and the publish was not recorded: retry later.
   if (error instanceof SiteStoreUnavailable) return mapped(503, "Unavailable");
+  if (error instanceof ConnectionsRefused) return error.kind === "rate_limited" ? mapped(429, "RateLimited") : mapped(503, "Unavailable");
   // transcription.md X-1, X-9: 413 and 422 keep the ValidationFailed code and name the reason.
   if (error instanceof Refused) return mapped(error.status, "ValidationFailed", { reason: error.reason });
   if (!(error instanceof ActionError)) return mapped(500, "Internal");

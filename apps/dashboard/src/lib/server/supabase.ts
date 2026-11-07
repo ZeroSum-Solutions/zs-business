@@ -8,6 +8,7 @@
 import { createServerClient, parseCookieHeader, serializeCookieHeader, type CookieOptions } from "@supabase/ssr";
 import { isAuthRetryableFetchError, type Session, type SupabaseClient } from "@supabase/supabase-js";
 import { expiredCalendarCookies } from "./calendar-connect";
+import { expiredConnectionCookies } from "./connections-cookies";
 import { isHttps, type LiveConfig } from "./live-config";
 
 /** Cookie name of the Supabase session (chunks are `zs-auth.0`, `zs-auth.1`, ...). */
@@ -28,6 +29,7 @@ export function expiredCookies(request: Request, secure: boolean): string[] {
       .filter((cookie) => isAuthCookie(cookie.name) || cookie.name === PILOT_COOKIE)
       .map((cookie) => serializeCookieHeader(cookie.name, "", { path: "/", sameSite: "strict", httpOnly: true, secure, maxAge: 0 })),
     ...expiredCalendarCookies(request, secure),
+    ...expiredConnectionCookies(secure),
   ];
 }
 
@@ -87,7 +89,7 @@ export function authFor(request: Request, config: LiveConfig): AuthContext {
     hadSession,
     clearAll() {
       for (const name of [...jar.keys()]) expire(name);
-      for (const cookie of expiredCalendarCookies(request, forced.secure ?? false)) writes.set(cookie.slice(0, cookie.indexOf("=")), cookie);
+      for (const cookie of [...expiredCalendarCookies(request, forced.secure ?? false), ...expiredConnectionCookies(forced.secure ?? false)]) writes.set(cookie.slice(0, cookie.indexOf("=")), cookie);
     },
     checkpoint() {
       const [savedJar, savedWrites] = [new Map(jar), new Map(writes)];

@@ -132,7 +132,7 @@ export const replayWebhookDeliveryRequestSchema = z.strictObject({});
 export const PROPOSE_SCOPES = Object.freeze(["contacts:propose", "deals:propose", "bookings:propose"] as const);
 /** hub-access.md H-2: what a token may read. Operation scopes, not field filters. */
 export const READ_SCOPES = Object.freeze([
-  "contacts:read", "deals:read", "bookings:read", "inbox:read", "results:read", "business:read",
+  "contacts:read", "deals:read", "bookings:read", "inbox:read", "results:read", "business:read", "connections:read",
 ] as const);
 export const AUTOMATION_SCOPES = Object.freeze([...PROPOSE_SCOPES, ...READ_SCOPES] as const);
 export const automationScopeSchema = z.enum(AUTOMATION_SCOPES);
@@ -149,6 +149,8 @@ export const READ_SCOPE_DISCLOSURES: Readonly<Record<ReadScope, string>> = Objec
   "inbox:read": "Website requests and replies with customer identities and message text, and the names and emails of staff who replied.",
   "results:read": "Lead, booking and revenue totals by source.",
   "business:read": "The business profile (name, contact details, address, currency, zone).",
+  // connections.md C-11: every store the business connects now or later, not only the ones connected today.
+  "connections:read": "Orders from every store the business connects, now or later: customer names and emails, line items and totals.",
 });
 
 /** One-line meaning of each propose scope, beside the read disclosures (hub-access.md H-9). */

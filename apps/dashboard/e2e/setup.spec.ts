@@ -7,8 +7,8 @@ import { mainNav, openAccountItem, shot } from "./helpers";
 test.use({ timezoneId: "Europe/London" });
 
 const TEMPLATES = [
-  { id: "jewelry", label: "Jewelry: custom and bridal", stage: "Design approved", hours: "Mon–Fri 9:00 AM–5:00 PM", page: "Book a consultation", connections: ["google_calendar"] },
-  { id: "crafts", label: "Ceramics and crafts: commissions", stage: "Quote sent", hours: "Mon–Fri 9:00 AM–5:00 PM", page: "Visit the studio", connections: ["google_calendar"] },
+  { id: "jewelry", label: "Jewelry: custom and bridal", stage: "Design approved", hours: "Mon–Fri 9:00 AM–5:00 PM", page: "Book a consultation", connections: ["shopify", "google_calendar"] },
+  { id: "crafts", label: "Ceramics and crafts: commissions", stage: "Quote sent", hours: "Mon–Fri 9:00 AM–5:00 PM", page: "Visit the studio", connections: ["shopify", "google_calendar"] },
   { id: "agency", label: "AI and business agency", stage: "Proposal sent", hours: "Mon–Fri 9:00 AM–5:00 PM", page: "Book a discovery call", connections: ["google_calendar"] },
   { id: "fitness", label: "Gym or personal trainer", stage: "Intro booked", hours: "Mon–Fri 6:00 AM–8:00 PM", page: "Book a free intro", connections: ["google_calendar"] },
 ] as const;
@@ -59,6 +59,9 @@ for (const template of TEMPLATES) {
     await page.getByRole("main").getByRole("link", { name: "Connections" }).first().click();
     await expect(page.getByRole("heading", { level: 1, name: "Connections" })).toBeVisible();
     for (const id of template.connections) await expect(page.getByTestId(`recommended-${id}`)).toHaveText(`Recommended for ${template.label}`);
+    // The recommended lines come in the template's order, ahead of any card that is not recommended.
+    const order = await page.locator('[data-testid^="recommended-"]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-testid")));
+    expect(order).toEqual(template.connections.map((id) => `recommended-${id}`));
   });
 }
 

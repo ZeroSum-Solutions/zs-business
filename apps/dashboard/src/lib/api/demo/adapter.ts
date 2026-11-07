@@ -46,6 +46,7 @@ import { createDemoBusiness, type DemoBusinessControls } from "./business";
 import { createDemoEnrichment } from "./enrichment";
 import { createDemoCalendar, type DemoCalendarControls } from "./calendar";
 import { createDemoSetup, type DemoSetupControls } from "./setup";
+import { createDemoManagedConnections, type DemoManagedConnectionsControls } from "./managed-connections";
 import { createDemoTemplates, type DemoTemplateControls } from "./templates";
 import {
   byContactName,
@@ -61,6 +62,7 @@ import {
   type BookingApi,
   type BookingView,
   type CalendarSyncApi,
+  type ManagedConnectionsApi,
   type ContactWriteResult,
   type CrmApi,
   type HomeApi,
@@ -96,7 +98,7 @@ export interface DemoAdapterOptions {
 }
 
 /** Hooks that act as a second person using the business, to show conflicts. */
-export interface DemoControls extends DemoAgentControls, DemoTemplateControls, DemoBrowserControls, DemoBusinessControls, DemoCalendarControls, DemoSetupControls {
+export interface DemoControls extends DemoAgentControls, DemoTemplateControls, DemoBrowserControls, DemoBusinessControls, DemoCalendarControls, DemoManagedConnectionsControls, DemoSetupControls {
   /**
    * Signs the demo in as the owner or as a staff member. The screen then offers what that role
    * may do, and the agent routes refuse an owner-only step with the API's 403.
@@ -141,7 +143,7 @@ export interface DemoControls extends DemoAgentControls, DemoTemplateControls, D
   approveReplyElsewhere(replyId: string): ReplyRecord;
 }
 
-export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & CalendarSyncApi & SetupApi & DemoControls;
+export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & CalendarSyncApi & ManagedConnectionsApi & SetupApi & DemoControls;
 
 export interface DemoWrite {
   operation: string;
@@ -449,6 +451,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       pipelines = [...pipelines, pipeline];
     },
   });
+  const managedConnections = createDemoManagedConnections({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
 
   return {
     ...agents,
@@ -458,6 +461,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     ...enrichment,
     ...calendar,
     ...setup,
+    ...managedConnections,
 
     async listResources() {
       await wait();

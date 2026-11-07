@@ -10,7 +10,9 @@
  * GET /v1/browser/runs/:id/artifacts/:artifactId); never the runner's /browser-runner/v1. Only
  * from this origin: other sites cannot make a signed-in browser spend its session here. Starting a
  * Google Calendar connection also binds the flow to this browser, and reading or confirming a
- * staged grant sends the API the grant this browser holds (calendar-connect.ts).
+ * staged grant sends the API the grant this browser holds (calendar-connect.ts). Of the managed-tier
+ * connection routes only GET /v1/connections and POST /v1/connections/:id/disconnect are forwarded; the
+ * connect flow has its own routes (connections-connect.ts).
  */
 import { DOCUMENT_INTAKE_APPLY_PATH, INTAKE_APPLY_BODY_LIMIT, MEDIA_CONTENT_TYPES, MEDIA_LIMITS, PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
@@ -51,9 +53,20 @@ function reply(status: number, code: ApiErrorCode): Response {
   return Response.json(demoErrorBody(code), { status, headers: { "Cache-Control": "no-store" } });
 }
 
-function routeAllowed(path: readonly string[]): boolean {
+/**
+ * Managed-tier connections (connections.md C-5): only the list and a disconnect pass through here. Starting,
+ * the callback and the staged grant have their own routes under /api/connections, with cookies this proxy
+ * never sees (connections-connect.ts), so they must not be reachable as plain proxied calls.
+ */
+function connectionsRouteAllowed(method: string, rest: readonly string[]): boolean {
+  if (rest.length === 0) return method === "GET";
+  return method === "POST" && rest.length === 2 && rest[1] === "disconnect";
+}
+
+function routeAllowed(method: string, path: readonly string[]): boolean {
   const [version, area, ...rest] = path;
   if (version !== "v1" || !area || !path.every((segment) => SEGMENT.test(segment))) return false;
+  if (area === "connections") return connectionsRouteAllowed(method, rest);
   return rest.length === 0 ? SINGLE.has(area) : AREAS.has(area);
 }
 
@@ -64,7 +77,7 @@ export async function proxyApiRequest(request: Request, path: readonly string[],
     return reply(503, "Internal");
   }
   const config = setup.config;
-  if (!METHODS.has(request.method) || !routeAllowed(path)) return reply(404, "NotFound");
+  if (!METHODS.has(request.method) || !routeAllowed(request.method, path)) return reply(404, "NotFound");
   if (!isSameOrigin(request, config.trustProxy)) return reply(403, "Forbidden");
 
   const auth = authFor(request, config);

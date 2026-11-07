@@ -7,7 +7,9 @@ import {
   apiErrorBody,
   AuthUnavailable,
   authenticate,
+  ConnectionsRefused,
   createBrowserSession,
+  createConnectionsSession,
   createDocumentIntakeSession,
   createEnrichmentSession,
   createFollowUpAgent,
@@ -35,6 +37,7 @@ import { browserRoutes, browserRunnerRoutes, type BrowserApiConfig } from "./rou
 import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
+import { connectionsRoutes } from "./routes/connections.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { enrichmentRoutes } from "./routes/enrichment.js";
@@ -53,6 +56,7 @@ import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/rou
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
 import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-webhook.js";
 import { googleCalendarRoutes, type GoogleCalendarConfig } from "./public/google-calendar.js";
+import { connectionsCallbackRoutes, type ConnectionsApiConfig } from "./public/connections.js";
 import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
 import { transcriptionRoutes, workerAuth, workerRoutes, type TranscriptionApiConfig } from "./routes/transcription.js";
@@ -107,6 +111,12 @@ export interface AppDependencies {
    * routes are off.
    */
   readonly googleCalendar?: GoogleCalendarConfig;
+  /**
+   * Managed-tier connections (connections.md C-3..C-5, C-10): the signed worker client, the state secrets
+   * and the dashboard return page. Absent means /v1/connections and /oauth/connections are 404 and the
+   * three connection tools on /mcp are unlisted.
+   */
+  readonly connections?: ConnectionsApiConfig;
   /** Twilio status callbacks and inbound STOP/START/HELP texts (twilio.md T-6, T-8); absent means off. */
   readonly twilioWebhook?: TwilioWebhookConfig;
   /**
@@ -238,6 +248,13 @@ export function createApp(deps: AppDependencies) {
         tokenPublicKey: deps.googleCalendar.tokenPublicKey,
       },
     } : {}),
+    ...(deps.connections ? {
+      connections: {
+        connector: deps.connections.connector,
+        stateSecrets: deps.connections.stateSecrets,
+        limiter: deps.connections.limiter ?? createPostgresRateLimiter(deps.db, deps.clock),
+      },
+    } : {}),
     ...(deps.sites ? { sites: deps.sites } : {}),
     ...(deps.images ? { images: deps.images } : {}),
   };
@@ -256,6 +273,7 @@ export function createApp(deps: AppDependencies) {
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
   if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
   if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
+  if (deps.connections) app.route("/", connectionsCallbackRoutes(deps.connections, requestEdge));
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
   // hub-access.md H-5: the remote MCP endpoint rides on the automation key, so it is off without it (404).
@@ -327,6 +345,9 @@ export function createApp(deps: AppDependencies) {
   app.route("/v1/approvals", approvalRoutes);
   app.route("/v1/sources", sourceRoutes);
   app.route("/v1", calendarRoutes);
+  // Off without the connections config: /v1/connections is then an unknown route (404), like sites.
+  if (deps.connections)
+    app.route("/v1/connections", connectionsRoutes((c) => createConnectionsSession(requestEdge(c), c.var.session.principal)));
   if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));
@@ -355,6 +376,9 @@ export function createApp(deps: AppDependencies) {
   app.onError((error, c) => {
     if (error instanceof RateLimited)
       return c.json(apiErrorBody("RateLimited", "Too many requests"), 429, { "Retry-After": String(error.retryAfterSeconds) });
+    // C-4, C-12: a refusal by the connections limiter or the provider's own limit is a 429 with Retry-After.
+    if (error instanceof ConnectionsRefused && error.kind === "rate_limited")
+      return c.json(mapError(error).body, 429, { "Retry-After": String(error.retryAfterSeconds ?? 60), "Cache-Control": "no-store" });
     if (error instanceof Unauthenticated) {
       const mapped = mapError(error);
       return c.json(mapped.body, mapped.status, { "WWW-Authenticate": "Bearer" });
@@ -386,6 +410,7 @@ export type { UnsubscribeConfig } from "./public/unsubscribe.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
 export type { GoogleCalendarConfig } from "./public/google-calendar.js";
+export type { ConnectionsApiConfig } from "./public/connections.js";
 export type { TwilioWebhookConfig } from "./public/twilio-webhook.js";
 export type { TranscriptionApiConfig } from "./routes/transcription.js";
 export type { DocumentIntakeApiConfig } from "./routes/document-intake.js";

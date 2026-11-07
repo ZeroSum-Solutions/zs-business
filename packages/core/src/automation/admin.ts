@@ -3,6 +3,8 @@
 // Secrets are derived, never stored: the edge computes an endpoint's signing secret and a
 // token's text after the action commits, so a replay with the same key shows the same value.
 import {
+  CONNECTION_CONNECT_ACTION,
+  CONNECTION_DISCONNECT_ACTION,
   automationTokenListSchema,
   automationTokenSchema,
   AUTOMATION_SCOPE_INFO,
@@ -74,10 +76,13 @@ export interface AutomationEdgeConfig {
   readonly urlPolicy?: UrlPolicy;
 }
 
+/** connections.md C-16: the connection actions run beside the integration actions, for the same permission. */
+const CONNECTION_ACTIONS: readonly string[] = [CONNECTION_CONNECT_ACTION, CONNECTION_DISCONNECT_ACTION];
+
 /** W-1: integration actions run for a member holding `integrations`, and nothing else does. */
 export function integrationsAuthorize(tenantId: string, actorId: string): Authorize {
   return async (tx, binding) => {
-    if (!INTEGRATION_ACTIONS.includes(binding.actionType)) throw new TenantDenied();
+    if (!INTEGRATION_ACTIONS.includes(binding.actionType) && !CONNECTION_ACTIONS.includes(binding.actionType)) throw new TenantDenied();
     await requireMember(tx, tenantId, actorId, "integrations");
   };
 }

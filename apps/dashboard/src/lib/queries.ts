@@ -17,6 +17,7 @@ import {
   type HomeResultsQuery,
   type IntakeStatus,
   type ListResult,
+  type ManagedConnection,
   type Page,
   type SlotQuery,
   type ThreadSummary,
@@ -99,6 +100,10 @@ export const keys = {
   calendarConnections: ["calendarSync", "connections"] as const,
   /** The Google grant waiting in this browser for the owner to confirm (G-2). */
   calendarPending: ["calendarSync", "pending"] as const,
+  /** Managed-tier connections, such as a Shopify store (connections.md C-13). */
+  managedConnections: ["managedConnections", "list"] as const,
+  /** The grant waiting in this browser for the owner to confirm (C-5). */
+  managedPending: ["managedConnections", "pending"] as const,
   plan: ["ws", "plan"] as const,
   /** Product photos and their edits (image-port.md IM-22). */
   mediaAssets: ["media", "assets"] as const,
@@ -668,6 +673,46 @@ export function usePendingGoogleConnect(canManage: boolean) {
     queryFn: ({ signal }) => api.getPendingGoogleConnect({ signal }),
     staleTime: 0,
     gcTime: 0,
+  });
+}
+
+/** Waiting on the worker: a disconnect to finish. */
+export function managedWorkPending(items: readonly ManagedConnection[] | undefined): boolean {
+  return items?.some((item) => item.status === "disconnecting") ?? false;
+}
+
+/**
+ * Every managed-tier connection of the business, retired ones included. Owners only (the API needs
+ * `integrations`). Read again every few seconds while a disconnect is finishing, so "Disconnecting" moves
+ * on by itself.
+ */
+export function useManagedConnections(canManage: boolean) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && canManage,
+    queryKey: keys.managedConnections,
+    queryFn: ({ signal }) => api.listManagedConnections({ signal }),
+    refetchInterval: (query) => (managedWorkPending(query.state.data) ? CALENDAR_POLL_MS : false),
+    // A server without connections settings answers 404 for good; asking again would not change it.
+    retry: (count, error) => !isApiError(error, "not_found") && !isApiError(error, "forbidden") && count < 3,
+  });
+}
+
+/**
+ * The grant waiting in this browser for the owner to confirm, or null. Read afresh whenever the page
+ * opens and never kept after it closes, so an old answer never offers a grant that is gone.
+ */
+export function usePendingManagedConnect(canManage: boolean) {
+  const api = useApi();
+  const { keys, enabled } = useKeys();
+  return useQuery({
+    enabled: enabled && canManage,
+    queryKey: keys.managedPending,
+    queryFn: ({ signal }) => api.getPendingManagedConnect({ signal }),
+    staleTime: 0,
+    gcTime: 0,
+    retry: (count, error) => !isApiError(error, "not_found") && !isApiError(error, "forbidden") && count < 3,
   });
 }
 

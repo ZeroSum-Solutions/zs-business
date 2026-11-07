@@ -10,6 +10,8 @@ import {
   testAdminUrl,
 } from "../src/testing.js";
 
+/** Tenant tables only the worker's service role reads (connections.md C-7). */
+const WORKER_ONLY = new Set(["connection_attempts"]);
 let harness: TestDatabase;
 let fixture: TwoTenantFixture;
 beforeAll(async () => {
@@ -40,8 +42,18 @@ describe("tenant isolation under actual runtime and privileged roles", () => {
       expect(table.policy, table.name).toBe(true);
       expect(table.public_grants, table.name).toBe(false);
       const name = 'public."' + table.name.replaceAll('"', '""') + '"';
-      expect(await fixture.a.run(async (tx) => (await tx.query(`select * from ${name}`)).rowCount), table.name).toBeGreaterThan(0);
-      expect(await fixture.b.run(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBe(0);
+      // A worker-only table (WORKER_ONLY) is refused to the runtime role outright, for both
+      // tenants. Every other tenant table must be readable by it: a lost grant fails here.
+      const runtimeReads = (await fixture.service(async (tx) => (await tx.query<{ ok: boolean }>(
+        `select has_table_privilege('authenticated', $1, 'SELECT') as ok`, [name])).rows[0]!.ok));
+      expect(runtimeReads, `${table.name}: runtime SELECT`).toBe(!WORKER_ONLY.has(table.name));
+      if (runtimeReads) {
+        expect(await fixture.a.run(async (tx) => (await tx.query(`select * from ${name}`)).rowCount), table.name).toBeGreaterThan(0);
+        expect(await fixture.b.run(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBe(0);
+      } else {
+        await expect(fixture.a.run((tx) => tx.query(`select * from ${name}`)), table.name).rejects.toMatchObject({ code: "42501" });
+        await expect(fixture.b.run((tx) => tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])), table.name).rejects.toMatchObject({ code: "42501" });
+      }
       expect(await fixture.service(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBeGreaterThan(0);
       // Read denial must be RLS, while write denial may be RLS or deliberately absent grants.
       for (const query of [

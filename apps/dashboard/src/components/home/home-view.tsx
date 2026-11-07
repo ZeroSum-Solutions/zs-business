@@ -17,6 +17,7 @@ import { resourceLabel } from "@/lib/resources";
 import { greetingLine } from "@/lib/greeting";
 import { READ_RESULTS, useCan } from "@/lib/session";
 import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey } from "@/lib/time";
+import { ReconnectNotice } from "./reconnect-notice";
 import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
 import {
   appointmentsPhrase,
@@ -652,6 +653,7 @@ export function HomeView() {
     <>
       <HomeHeader needs={needs} reports={reports} />
       <SetupLine />
+      <ReconnectNotice />
       <div className="grid grid-cols-1 items-start gap-3 lg:grid-flow-dense lg:grid-cols-12 lg:gap-4">
         <NeedsYou needs={needs} className="lg:col-span-7" />
         <WeekStrip now={needs.clock} className="lg:hidden" />

@@ -152,14 +152,20 @@ describe("Home's setup line", () => {
 });
 
 describe("recommended connections (IT-8)", () => {
-  it("puts the template's recommended connection first with its line, and none before setup", () => {
+  it("puts the template's recommended connections first, in its order, with their line, and none before setup", () => {
     const after = render(h(ConnectionsView), (client) => client.setQueryData(keys.setup, applied("jewelry")));
-    expect(after).toContain("Recommended for Jewelry: custom and bridal");
-    // Shopify is recommended too, but this environment does not offer it.
-    expect(after).not.toContain('data-testid="recommended-shopify"');
-    const line = after.indexOf('data-testid="recommended-google_calendar"');
-    expect(line).toBeGreaterThan(after.indexOf("Connect Google Calendar here"));
-    expect(after.indexOf("Google Calendar", line + 60)).toBeGreaterThan(line);
+    const shopify = after.indexOf('data-testid="recommended-shopify"');
+    const calendar = after.indexOf('data-testid="recommended-google_calendar"');
+    expect(shopify).toBeGreaterThan(after.indexOf("Connect Google Calendar and Shopify here"));
+    expect(calendar).toBeGreaterThan(shopify);
+    expect(after.indexOf('data-testid="shopify-card"')).toBeGreaterThan(shopify);
+    expect(after.indexOf('data-testid="shopify-card"')).toBeLessThan(calendar);
+    expect(after.indexOf('data-testid="gcal-card"')).toBeGreaterThan(calendar);
+    expect(after.match(/Recommended for Jewelry: custom and bridal/g)).toHaveLength(2);
+    // Fitness recommends only Google Calendar: it comes first and Shopify follows with no line.
+    const fitness = render(h(ConnectionsView), (client) => client.setQueryData(keys.setup, applied("fitness")));
+    expect(fitness).not.toContain('data-testid="recommended-shopify"');
+    expect(fitness.indexOf('data-testid="gcal-card"')).toBeLessThan(fitness.indexOf('data-testid="shopify-card"'));
     const before = render(h(ConnectionsView), (client) => client.setQueryData(keys.setup, fresh));
     expect(before).not.toContain("Recommended for");
   });

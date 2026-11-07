@@ -23,7 +23,7 @@ import { appOnDatabase, call, contactAndDeal, createApiHarness, NOW, provisionPa
 
 const URL_BASE = "http://hub.test/mcp";
 const ALL_SCOPES: AutomationScope[] = [
-  "contacts:propose", "deals:propose", "bookings:propose", "contacts:read", "deals:read", "bookings:read", "inbox:read", "results:read", "business:read",
+  "contacts:propose", "deals:propose", "bookings:propose", "contacts:read", "deals:read", "bookings:read", "inbox:read", "results:read", "business:read", "connections:read",
 ];
 const PROPOSE_TOOLS = ["propose_booking_create", "propose_contact_upsert", "propose_deal_create", "propose_deal_move_stage"];
 const READ_TOOLS = [
@@ -276,7 +276,7 @@ describe("what a token's scopes allow (H-2, H-6)", () => {
     await client.close();
   });
 
-  it("serves an all-nine-scope token everything", async () => {
+  it("serves an all-ten-scope token everything", async () => {
     const { secret } = await mint(owner(h.a), ALL_SCOPES);
     const { client } = await connect(secret);
     expect(await names(client)).toHaveLength(2 + READ_TOOLS.length + PROPOSE_TOOLS.length);
@@ -958,7 +958,7 @@ describe("the contact proposal and the scopes route (H-6, H-9)", () => {
     expect(body).not.toContain("input.");
   });
 
-  it("lists the nine scopes with their disclosures to an owner only", async () => {
+  it("lists the ten scopes with their disclosures to an owner only", async () => {
     const path = "/v1/integrations/activepieces/scopes";
     const owned = await call(h.app, "GET", path, { token: h.a.token });
     expect(owned.status).toBe(200);
