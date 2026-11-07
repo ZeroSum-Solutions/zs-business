@@ -77,7 +77,9 @@ export type ConnectionsWorkerReport =
   | { readonly kind: "health_failed"; readonly tenantId: string; readonly connectionId: string; readonly code: string }
   | { readonly kind: "pass_stopped"; readonly why: "time" | "calls" | "budget" }
   | { readonly kind: "cooldown"; readonly env: string }
-  | { readonly kind: "key_refused"; readonly env: string; readonly status: number };
+  | { readonly kind: "key_refused"; readonly env: string; readonly status: number }
+  /** A database call the worker cannot recover from; the SQLSTATE only (`unknown` when the error has none), never the message. */
+  | { readonly kind: "database_error"; readonly op: "budget"; readonly code: string };
 
 /** Attempt codes that mean the account was left alone, not removed. */
 const UNREMOVED_CODES: ReadonlySet<string> = new Set(["account_mismatch", "account_unverified"]);
@@ -204,8 +206,16 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
 
   /** C-12: one unit of `composio-org:<env>`; the number of milliseconds to wait, or 0. */
   async function budget(op: "take" | "cool"): Promise<number> {
-    const row = (await service((tx) => tx.query<{ wait: string }>(
-      "SELECT public.connections_org_budget($1, $2, $3)::text AS wait", [now(), config.env, op]))).rows[0];
+    let row;
+    try {
+      row = (await service((tx) => tx.query<{ wait: string }>(
+        "SELECT public.connections_org_budget($1, $2, $3)::text AS wait", [now(), config.env, op]))).rows[0];
+    } catch (error) {
+      // A refused login or a missing function would otherwise look like a provider outage and leave no trace.
+      const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+      report({ kind: "database_error", op: "budget", code: typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : "unknown" });
+      throw error;
+    }
     return Number(row?.wait ?? 0);
   }
   /** C-12: a provider or Composio rate limit opens the organization cooldown, and an operator hears of it. */
