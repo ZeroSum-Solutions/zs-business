@@ -39,18 +39,28 @@ test.describe("idempotent retries", () => {
     await page.goto("/calendar");
     const calendar = (name: string) => page.getByRole("button", { name, exact: true });
 
-    // Find a start both calendars offer on the same day.
-    const showroom = await openBookingOnFirstOpenDay(page);
+    // Find a start both calendars offer on the same day. Late in the day, today's remaining
+    // starts may not overlap, so step forward day by day.
     const dayButtons = (dialog: Locator) => dialog.getByRole("group").first().getByRole("button");
-    const day = await dayButtons(showroom.dialog).evaluateAll((buttons) => buttons.findIndex((button) => button.getAttribute("aria-pressed") === "true"));
-    const showroomStarts = await slotStarts(showroom.dialog);
-    await showroom.dialog.getByRole("button", { name: "Close" }).first().click();
-    await calendar("Repair intake").click();
-    await page.getByRole("button", { name: "Book appointment" }).click();
     const dialog = page.getByRole("dialog", { name: "Book an appointment" });
-    await dayButtons(dialog).nth(day).click();
-    await expect(dialog.locator('[aria-busy="true"]')).toHaveCount(0);
-    const startsAt = (await slotStarts(dialog)).find((start) => showroomStarts.includes(start));
+    const startsOn = async (name: string, index: number) => {
+      await calendar(name).click();
+      await page.getByRole("button", { name: "Book appointment" }).click();
+      await expect(dialog).toBeVisible();
+      await dayButtons(dialog).nth(index).click();
+      await expect(dialog.locator('[aria-busy="true"]')).toHaveCount(0);
+      return slotStarts(dialog);
+    };
+    let day = -1;
+    let startsAt: string | undefined;
+    for (let index = 0; index < 7 && startsAt === undefined; index += 1) {
+      const showroomStarts = await startsOn("Showroom", index);
+      await dialog.getByRole("button", { name: "Close" }).first().click();
+      if (showroomStarts.length === 0) continue;
+      startsAt = (await startsOn("Repair intake", index)).find((start) => showroomStarts.includes(start));
+      if (startsAt === undefined) await dialog.getByRole("button", { name: "Close" }).first().click();
+      else day = index;
+    }
     expect(startsAt, "a start both calendars offer").toBeTruthy();
 
     // Repair intake: saved, but the answer is lost.
