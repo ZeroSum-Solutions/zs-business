@@ -40,8 +40,17 @@ describe("tenant isolation under actual runtime and privileged roles", () => {
       expect(table.policy, table.name).toBe(true);
       expect(table.public_grants, table.name).toBe(false);
       const name = 'public."' + table.name.replaceAll('"', '""') + '"';
-      expect(await fixture.a.run(async (tx) => (await tx.query(`select * from ${name}`)).rowCount), table.name).toBeGreaterThan(0);
-      expect(await fixture.b.run(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBe(0);
+      // A table the runtime role has no grant on (connection_attempts, connections.md C-7) is the
+      // worker's alone: the runtime role is refused outright, for both tenants.
+      const runtimeReads = (await fixture.service(async (tx) => (await tx.query<{ ok: boolean }>(
+        `select has_table_privilege('authenticated', $1, 'SELECT') as ok`, [name])).rows[0]!.ok));
+      if (runtimeReads) {
+        expect(await fixture.a.run(async (tx) => (await tx.query(`select * from ${name}`)).rowCount), table.name).toBeGreaterThan(0);
+        expect(await fixture.b.run(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBe(0);
+      } else {
+        await expect(fixture.a.run((tx) => tx.query(`select * from ${name}`)), table.name).rejects.toMatchObject({ code: "42501" });
+        await expect(fixture.b.run((tx) => tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])), table.name).rejects.toMatchObject({ code: "42501" });
+      }
       expect(await fixture.service(async (tx) => (await tx.query(`select * from ${name} where tenant_id=$1`, [fixture.a.tenantId])).rowCount), table.name).toBeGreaterThan(0);
       // Read denial must be RLS, while write denial may be RLS or deliberately absent grants.
       for (const query of [

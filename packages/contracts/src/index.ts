@@ -117,6 +117,7 @@ export * from "./agents.js";
 export * from "./templates.js";
 export * from "./billing.js";
 export * from "./calendar.js";
+export * from "./connections.js";
 export * from "./automation.js";
 export * from "./browser.js";
 export * from "./voice.js";
