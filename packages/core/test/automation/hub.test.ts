@@ -225,6 +225,26 @@ describe("usage record (H-8, H-11)", () => {
     expect(await rows(h.a.tenantId)).toHaveLength(1);
   });
 
+  it("only grows: a decrease is refused, and tenant B cannot count against tenant A's token", async () => {
+    const { token, principal } = await mint(["contacts:read"]);
+    const db = h.deps().db;
+    await recordTokenUsage(h.deps(), principal, { requests: 3, reads: 2, proposals: 1, refusals: 1 });
+    for (const column of ["requests", "reads", "proposals", "refusals"])
+      await expect(db.tenant(h.a.tenantId, (tx) => tx.query(
+        `UPDATE automation_token_usage SET ${column} = ${column} - 1 WHERE token_id=$1`, [token.id])))
+        .rejects.toMatchObject({ code: "23514" });
+    await db.tenant(h.a.tenantId, (tx) => tx.query(
+      "UPDATE automation_token_usage SET requests = requests + 4, reads = reads WHERE token_id=$1", [token.id]));
+    const [row] = await h.rows<{ requests: number; reads: number; proposals: number; refusals: number }>(
+      "SELECT requests, reads, proposals, refusals FROM automation_token_usage WHERE token_id=$1", [token.id]);
+    expect(row).toEqual({ requests: 7, reads: 2, proposals: 1, refusals: 1 });
+    // A row of tenant B that names tenant A's token breaks the composite foreign key; nothing is inserted.
+    await expect(db.tenant(h.b.tenantId, (tx) => tx.query(
+      "INSERT INTO automation_token_usage (tenant_id, token_id, hour, requests) VALUES ($1,$2,$3,1)",
+      [h.b.tenantId, token.id, new Date(Math.floor(START / HOUR) * HOUR)]))).rejects.toMatchObject({ code: "23503" });
+    expect(await h.rows("SELECT 1 FROM automation_token_usage WHERE tenant_id=$1", [h.b.tenantId])).toEqual([]);
+  });
+
   it("is pruned after 30 days by the worker pass, a bounded batch at a time", async () => {
     const { token, principal } = await mint(["contacts:read"]);
     const deps = h.deps();

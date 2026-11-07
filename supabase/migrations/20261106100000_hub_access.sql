@@ -43,6 +43,19 @@ CREATE TABLE public.automation_token_usage (
 -- The cleanup scans across tenants by age.
 CREATE INDEX automation_token_usage_hour ON public.automation_token_usage (hour);
 
+-- Counters only grow (H-8): a decrease is refused, so a bug or a replayed write cannot erase use.
+CREATE FUNCTION public.automation_token_usage_grow_only() RETURNS trigger
+  LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+  IF NEW.requests < OLD.requests OR NEW.reads < OLD.reads
+     OR NEW.proposals < OLD.proposals OR NEW.refusals < OLD.refusals THEN
+    RAISE EXCEPTION 'automation_token_usage counters only grow' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER automation_token_usage_grow_only BEFORE UPDATE ON public.automation_token_usage
+  FOR EACH ROW EXECUTE FUNCTION public.automation_token_usage_grow_only();
+
 ALTER TABLE public.automation_token_usage ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.automation_token_usage FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_scope ON public.automation_token_usage TO authenticated
