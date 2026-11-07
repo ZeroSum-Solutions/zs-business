@@ -79,7 +79,9 @@ describe("link (C-3, C-5)", () => {
     const { attemptId, accountId, linked } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     expect(linked.outcome).toBe("linked");
     const call = fake.callsTo(/connected_accounts\/link/)[0]!;
-    expect(call.body).toMatchObject({ auth_config_id: AUTH_CONFIG, user_id: `zsb:${ENV}:${a.tenantId}`, callback_url: CALLBACK_URL, connection_data: { shop: "testshop" } });
+    expect(call.body).toMatchObject({ auth_config_id: AUTH_CONFIG, user_id: `zsb:${ENV}:${a.tenantId}`, callback_url: CALLBACK_URL, connection_data: { subdomain: "testshop" } });
+    // The Shopify auth config's field is `subdomain` and takes the bare store name; the old `shop` key prefilled nothing.
+    expect(call.body).not.toHaveProperty("connection_data.shop");
     expect(call.apiKey).toBe("test-key");
     expect(fake.accounts.get(accountId)?.userId).toBe(composioUserId(ENV, a.tenantId));
     expect(await attemptOf(fixture, a.tenantId, attemptId)).toEqual({ status: "started" });
@@ -193,11 +195,14 @@ describe("complete (C-5, C-8, C-14)", () => {
   });
 
   it("A-4: a definitive 400 or a redemption of another account clears the marker, so a later status call is refused", async () => {
-    for (const answer of [{ status: 400, json: { error: { message: "user mismatch" } } }, { status: 200, json: { connected_account_id: "ca_someone_else", toolkit_slug: "shopify" } }]) {
+    for (const answer of [{ status: 400, json: { error: { message: "user mismatch" } } }, { status: 200, json: { connected_account_id: "ca_someone_else", toolkit_slug: "shopify" } },
+      // The right account but another toolkit in Composio's answer.
+      { status: 200, json: { connected_account_id: "SAME", toolkit_slug: "gmail" } }]) {
       const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
       const session = fake.consent(accountId);
       fake.accounts.get(accountId)!.status = "ACTIVE";
-      fake.override(/POST \/connected_accounts\/complete_auth/, { ...answer, times: 1 });
+      const same = (answer.json as { connected_account_id?: string }).connected_account_id === "SAME";
+      fake.override(/POST \/connected_accounts\/complete_auth/, { ...answer, json: same ? { ...answer.json, connected_account_id: accountId } : answer.json, times: 1 });
       expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "not_connected" });
       expect((await attemptRow(a.tenantId, attemptId)).session_presented_at).toBeNull();
       expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
@@ -250,6 +255,48 @@ describe("complete (C-5, C-8, C-14)", () => {
     expect(fake.accounts.get(accountId)?.status).toBe("INITIATED");
   });
 
+  it("A-4 fixation: a same-tenant swap of sessions cannot be turned into a grant by racing fabricated callbacks", async () => {
+    // Browser B finishes consent on A's link, then presents that session under B's own attempt: A's account goes ACTIVE.
+    const one = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const two = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const swapped = fake.consent(one.accountId);
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: two.attemptId, sessionUri: swapped })).toEqual({ outcome: "refused", reason: "attempt_changed" });
+    expect(fake.accounts.get(one.accountId)!.status).toBe("ACTIVE");
+    // A's browser holds no real session. Its first fabricated callback is in flight (Composio is slow) while a second arrives.
+    let second: unknown;
+    fake.gate = async (call) => {
+      if (!/complete_auth/.test(call.path)) return;
+      fake.gate = null;
+      second = await worker.complete({ tenantId: a.tenantId, attemptId: one.attemptId, sessionUri: "made-up-2" });
+    };
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: one.attemptId, sessionUri: "made-up-1" })).toEqual({ outcome: "refused", reason: "not_connected" });
+    expect(second).toEqual({ outcome: "refused", reason: "rate_limited" });
+    // Afterwards the first presentation was final: nothing verifies, and a status call is refused too.
+    expect(await attemptRow(a.tenantId, one.attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: one.attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
+  });
+
+  it("C-5: a redemption that leaves the account pending frees the attempt, so the status call polls at once", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
+    // Composio accepts the session but the account is still INITIATED when read.
+    fake.override(/POST \/connected_accounts\/complete_auth/, { json: { connected_account_id: accountId, toolkit_slug: "shopify" }, times: 1 });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "pending" });
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ claimed_until: null });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "pending" });
+  });
+
+  it("C-4: a session of the tenant's other attempt ends this link as attempt_changed; a session of an unknown account is not_connected", async () => {
+    const one = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const two = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const olderSession = fake.consent(one.accountId);
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: two.attemptId, sessionUri: olderSession })).toEqual({ outcome: "refused", reason: "attempt_changed" });
+    expect(await attemptRow(a.tenantId, two.attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+    const unknown = fake.seed({ id: "ca_not_in_any_attempt", userId: composioUserId(ENV, a.tenantId), status: "INITIATED" });
+    const strange = fake.consent(unknown.id);
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: two.attemptId, sessionUri: strange })).toEqual({ outcome: "refused", reason: "not_connected" });
+  });
+
   it("refuses an account whose user, toolkit or auth config differs from the attempt", async () => {
     for (const change of [{ userId: composioUserId(ENV, b.tenantId) }, { toolkit: "gmail" }, { authConfigId: "ac_other" }]) {
       const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
@@ -293,7 +340,9 @@ describe("complete (C-5, C-8, C-14)", () => {
       fake.accounts.get(accountId)!.status = "ACTIVE";
       fake.override(/POST \/connected_accounts\/complete_auth/, { status, json: {}, times: 1 });
       expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "provider_unavailable" });
-      expect((await attemptRow(a.tenantId, attemptId)).status).toBe("started");
+      expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+      // Nothing was redeemed, so no status call may pick up an account somebody else activated.
+      expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
     }
     expect(reports.filter((r) => r.kind === "key_refused")).toHaveLength(3);
   });

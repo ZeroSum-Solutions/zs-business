@@ -119,7 +119,8 @@ async function reachConfirm(token = h.a.token) {
   const { attempt } = await start(on, token);
   const claims = claimsOf(attempt);
   const sessionUri = fake.consent(claims.composioAccountId);
-  const response = await rawGet(on, callbackPath(claims.composioAccountId, sessionUri), {
+  // The real redirect carries `session_uri` only (observed 2026-11-07).
+  const response = await rawGet(on, callbackPath(undefined, sessionUri), {
     [CONNECT_ATTEMPT_HEADER]: attempt, [CONNECT_BROWSER_KEY_HEADER]: KEY,
   });
   return { attempt, claims, sessionUri, response, grant: response.headers.get(CONNECT_GRANT_HEADER) ?? "" };
