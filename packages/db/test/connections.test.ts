@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
+import { plantedLoginName } from "./planted-login.js";
 
 const NOW = "2026-11-06T12:00:00.000Z";
 let database: TestDatabase;
@@ -335,6 +336,42 @@ describe("connections: worker call budget (C-12)", () => {
     await expect(fixture.a.run((tx) => tx.query("SELECT public.connections_org_budget($1::timestamptz,'preview','take')", [NOW]))).rejects.toMatchObject({ code: "42501" });
     await expect(take("staging", NOW)).rejects.toMatchObject({ code: "22023" });
     await expect(take("preview", NOW, "reset")).rejects.toMatchObject({ code: "22023" });
+  });
+
+  /**
+   * Calls the budget as a login with these memberships. The login (and, when absent, `authenticator`) is created in a
+   * transaction that rolls back, so no other test file sees it, and SET SESSION AUTHORIZATION makes it the session_user.
+   */
+  async function budgetAs(login: "planted" | "authenticator", memberships: string[], claims = false) {
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const name = login === "planted" ? plantedLoginName() : "authenticator";
+      await client.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${name}') THEN CREATE ROLE ${name} LOGIN; END IF; END $$`);
+      if (memberships.length > 0) await client.query(`GRANT ${memberships.join(", ")} TO ${name}`);
+      await client.query(`SET LOCAL SESSION AUTHORIZATION ${name}`);
+      if (claims) await client.query("SELECT set_config('request.jwt.claims', '{\"role\":\"authenticated\"}', true)");
+      const user = (await client.query<{ s: string }>("SELECT session_user::text AS s")).rows[0]!.s;
+      expect(user).toBe(name);
+      return await client.query("SELECT public.connections_org_budget($1::timestamptz,'preview','take')::text AS wait", [NOW]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+  }
+
+  it("admits a login that is a member of both service_role and authenticated, as hosted postgres is", async () => {
+    expect((await budgetAs("planted", ["service_role", "authenticated"])).rows).toEqual([{ wait: "0" }]);
+  });
+
+  it("refuses PostgREST's authenticator login, which holds both roles on hosted Supabase", async () => {
+    await expect(budgetAs("authenticator", ["service_role", "authenticated"])).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("refuses a login that is not a member of service_role, and a worker login carrying request claims", async () => {
+    await expect(budgetAs("planted", ["authenticated"])).rejects.toMatchObject({ code: "42501" });
+    await expect(budgetAs("planted", [])).rejects.toMatchObject({ code: "42501" });
+    await expect(budgetAs("planted", ["service_role"], true)).rejects.toMatchObject({ code: "42501" });
   });
 
   it("allows 500 calls a minute in preview, then names the wait, and reopens next window", async () => {
