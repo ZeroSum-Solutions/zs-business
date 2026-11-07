@@ -35,7 +35,7 @@ import type { ManagedConnection, ManagedConnectOutcome } from "../src/lib/api";
 
 const connection = (status: ManagedConnection["status"]): ManagedConnection => ({
   id: "b7d9f1a3-5c7e-4a9b-8d1f-000000000001", toolkit: "shopify", accountLabel: "Halden Rowe", accountDomain: "halden-rowe.myshopify.com", status,
-  reauthorizeReason: status === "reauthorize" ? "auth_error" : null, revokeFailed: false, lastCheckedAt: "2026-11-06T12:00:00.000Z", createdAt: "2026-11-05T12:00:00.000Z",
+  reauthorizeReason: status === "reauthorize" ? "auth_error" : null, revokeFailed: false, readBlocked: false, lastCheckedAt: "2026-11-06T12:00:00.000Z", createdAt: "2026-11-05T12:00:00.000Z",
 });
 
 const KINDS: Record<number, ConstructorParameters<typeof ApiError>[0]> = { 400: "validation", 403: "forbidden", 404: "not_found", 409: "conflict", 429: "rate_limited" };

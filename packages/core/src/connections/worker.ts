@@ -14,8 +14,9 @@
 //     (`claimed_until`, one short UPDATE … FOR UPDATE SKIP LOCKED) on the row they work on, and each
 //     write after a call is its own short conditional statement (C-9). So no work ever holds one pool
 //     client while it waits for another: the worker runs on a pool of one.
-//   - An account is revoked or deleted only after a fresh read shows it is this tenant's (its
-//     `user_id`, toolkit and auth config), whatever path asks (C-3, C-9, C-13).
+//   - An account is uninstalled at the provider or deleted only after a fresh read shows it is this
+//     tenant's (its `user_id`, toolkit and auth config), whatever path asks (C-3, C-9, C-13). The
+//     uninstall is the worker's one write to the provider: the catalog's fixed request (C-13).
 //   - Nothing in a log or report carries arguments, output, labels, link URLs or provider text.
 import { z } from "zod";
 import {
@@ -296,12 +297,14 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   // ---- removing an account -----------------------------------------------------------------
   /**
    * C-3, C-9, C-13: reads the account and, only when it is this tenant's (user, toolkit and auth config,
-   * all required: A-2 fails closed), revokes it once (`recordRevoke` stores the outcome at once, so a retry never
-   * repeats a success or loses a failure) and deletes it. A 404 at any step counts as done. Budget and
-   * pass limits propagate; nothing else does.
+   * all required: A-2 fails closed), uninstalls the app on the provider's side once (the catalog's fixed request
+   * through Composio's proxy; `recordRevoke` stores the outcome at once, so a retry never repeats a success or
+   * loses a failure) and deletes the account. A 404 at any step counts as done. Only a clean provider answer is
+   * `revoked`: anything else, a toolkit with no uninstall request included, is `failed`, and the delete still runs.
+   * Budget and pass limits propagate; nothing else does.
    */
   async function removeAccount(
-    target: { accountId: string; tenantId: string; toolkit: string; authConfigId: string; revoke: RevokeOutcome },
+    target: { accountId: string; tenantId: string; toolkit: string; authConfigId: string; revoke: RevokeOutcome; installShared: () => Promise<boolean> },
     recordRevoke: (outcome: "revoked" | "failed") => Promise<void>,
     pass: PassContext | undefined,
     signal?: AbortSignal,
@@ -313,12 +316,24 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       if (account.userId === null) return { outcome: "unverified" };
       if (account.id !== target.accountId || account.userId !== userIdOf(target.tenantId) || account.toolkit !== target.toolkit
         || account.authConfigId !== target.authConfigId) return { outcome: "foreign" };
-      if (revoke === null) {
+      // An uninstall removes the app for the whole store, so it is skipped (nothing recorded) while another live
+      // connection holds the same store: only this Composio account is deleted then.
+      if (revoke === null && !(await target.installShared())) {
         try {
-          await spend(pass, () => composio.revoke(target.accountId, signal));
-          revoke = "revoked";
+          const uninstall = catalogToolkit(target.toolkit)?.uninstall;
+          if (uninstall === undefined) revoke = "failed";
+          else {
+            const answer = await spend(pass, () => composio.proxy({ connectedAccountId: target.accountId, userId: userIdOf(target.tenantId), request: uninstall.request }, signal));
+            // A relayed provider 429 is a limit, not an answer: open the cooldown and retry later, recording nothing.
+            if (answer.status === 429) {
+              await cooldown();
+              return { outcome: "failed", rateLimited: true };
+            }
+            revoke = uninstall.confirms(answer) ? "revoked" : "failed";
+          }
         } catch (error) {
-          if (!(error instanceof ComposioError)) throw error;
+          // A Composio limit is retried later with the outcome still unrecorded (the cooldown it opened blocks the delete too).
+          if (!(error instanceof ComposioError) || error.kind === "rate_limited") throw error;
           // An account already gone has nothing left to revoke.
           revoke = error.kind === "not_found" ? "revoked" : "failed";
         }
@@ -335,8 +350,14 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     await service((tx) => tx.query("UPDATE connection_attempts SET revoke_outcome=$3, updated_at=$4 WHERE tenant_id=$1 AND id=$2 AND revoke_outcome IS NULL",
       [attempt.tenant_id, attempt.id, outcome, now()]));
   };
+  /** True while another live connection (any tenant) holds the same store, matched by the typed domain or the verified store ID. */
+  const installSharedWith = (toolkit: string, composioAccountId: string, accountDomain: string, externalAccountId: string | null) => async () => (((await service((tx) => tx.query(
+    `SELECT 1 FROM connections WHERE toolkit=$1 AND composio_account_id<>$2 AND status IN ('active','reauthorize')
+        AND (account_domain=$3 OR external_account_id=$4::text) LIMIT 1`,
+    [toolkit, composioAccountId, accountDomain, externalAccountId]))).rowCount ?? 0) > 0);
   const removeAttemptAccount = (attempt: AttemptRow, pass: PassContext | undefined, signal?: AbortSignal) => removeAccount(
-    { accountId: attempt.composio_account_id, tenantId: attempt.tenant_id, toolkit: attempt.toolkit, authConfigId: attempt.auth_config_id, revoke: attempt.revoke_outcome },
+    { accountId: attempt.composio_account_id, tenantId: attempt.tenant_id, toolkit: attempt.toolkit, authConfigId: attempt.auth_config_id, revoke: attempt.revoke_outcome,
+      installShared: installSharedWith(attempt.toolkit, attempt.composio_account_id, attempt.account_domain, attempt.external_account_id) },
     recordAttemptRevoke(attempt), pass, signal);
 
   // ---- link --------------------------------------------------------------------------------
@@ -361,7 +382,8 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       const named = await service((tx) => tx.query(
         "SELECT 1 FROM connection_attempts WHERE composio_account_id=$1 UNION ALL SELECT 1 FROM connections WHERE composio_account_id=$1 LIMIT 1", [accountId]));
       if (named.rowCount) return; // another attempt or connection owns it: never ours to remove
-      const removal = await removeAccount({ accountId, tenantId: input.tenantId, toolkit: input.toolkit, authConfigId, revoke: null }, async () => undefined, undefined, signal)
+      // Delete only: the member has not consented yet, and an uninstall needs a leased, recorded row (C-13).
+      const removal = await removeAccount({ accountId, tenantId: input.tenantId, toolkit: input.toolkit, authConfigId, revoke: "revoked", installShared: async () => false }, async () => undefined, undefined, signal)
         .catch(() => ({ outcome: "failed" as const }));
       if (removal.outcome === "removed") return;
       try {
@@ -373,7 +395,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     let made;
     try {
       made = await spend(undefined, () => composio.link({
-        authConfigId, userId: userIdOf(input.tenantId), callbackUrl: config.callbackUrl, connectionData: toolkit.linkData(input.shopDomain),
+        authConfigId, userId: userIdOf(input.tenantId), callbackUrl: config.callbackUrl,
       }, signal));
     } catch (error) {
       if (error instanceof ComposioError && error.accountId !== undefined) await compensate(error.accountId);
@@ -487,7 +509,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
           await cooldown();
           return refused("rate_limited");
         }
-        return refused(identity.reason === "auth" ? "not_connected" : "provider_unavailable");
+        return refused(identity.reason === "auth" || identity.reason === "forbidden" ? "not_connected" : "provider_unavailable");
       }
       const shop = toolkit.identity.project(identity.data);
       if (!shop) return refused("provider_unavailable");
@@ -613,6 +635,14 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
           await markReauthorize(input.tenantId, row.id, "auth_error");
           return fail("connection_needs_reconnect");
         }
+        // C-8, C-10: the credential works but the store's app permissions block this read (Shopify's protected
+        // customer data gate). The row stays `active`: reconnecting cannot fix it. The owner sees why (`readBlocked`).
+        if (outcome.reason === "forbidden") {
+          await service((tx) => tx.query(
+            `UPDATE connections SET last_error_code='provider_permission_denied', updated_at=$3
+              WHERE tenant_id=$1 AND id=$2 AND status='active' AND composio_account_id=$4`, [input.tenantId, row.id, now(), row.composio_account_id]));
+          return fail("provider_permission_denied");
+        }
         if (outcome.reason === "rate_limited") {
           await cooldown();
           return fail("provider_rate_limited", COOLDOWN_SECONDS);
@@ -627,6 +657,11 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       if (projected === undefined) return fail("provider_unavailable");
       const trimmed = trimToSize(projected, tool.listPath, CONNECTION_RESULT_MAX_BYTES);
       if (!trimmed) return fail("provider_unavailable");
+      // A read that works again ends the owner's "permissions block this" notice (only a usable answer does).
+      if (after.last_error_code === "provider_permission_denied") await service((tx) => tx.query(
+        `UPDATE connections SET last_error_code=NULL, updated_at=$3
+          WHERE tenant_id=$1 AND id=$2 AND status='active' AND composio_account_id=$4 AND last_error_code='provider_permission_denied'`,
+        [input.tenantId, row.id, now(), row.composio_account_id]));
       report({ kind: "run", tenantId: input.tenantId, connectionId: input.connectionId, tool: input.tool, code: "ok", ms: now().getTime() - started });
       return { outcome: "ok", data: trimmed.data, truncated: trimmed.truncated };
     } catch (error) {
@@ -642,7 +677,8 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
    */
   async function markReauthorize(tenantId: string, id: string, reason: "provider_status" | "auth_error"): Promise<void> {
     const moved = await service((tx) => tx.query(
-      `UPDATE connections SET status='reauthorize', reauthorize_reason=$3::connection_reauthorize_reason, last_checked_at=$4, updated_at=$4
+      `UPDATE connections SET status='reauthorize', reauthorize_reason=$3::connection_reauthorize_reason, last_checked_at=$4, updated_at=$4,
+          last_error_code = CASE WHEN last_error_code='provider_permission_denied' THEN NULL ELSE last_error_code END
         WHERE tenant_id=$1 AND id=$2
           AND (status='active' OR ($3::text='auth_error' AND status='reauthorize' AND reauthorize_reason='provider_status'))`, [tenantId, id, reason, now()]));
     if (moved.rowCount === 1) report({ kind: "reauthorize", tenantId, connectionId: id, reason });
@@ -667,7 +703,8 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       return "pending";
     }
     const removal = await removeAccount(
-      { accountId: row.composio_account_id, tenantId: row.tenant_id, toolkit: row.toolkit, authConfigId, revoke: row.revoke_outcome },
+      { accountId: row.composio_account_id, tenantId: row.tenant_id, toolkit: row.toolkit, authConfigId, revoke: row.revoke_outcome,
+        installShared: installSharedWith(row.toolkit, row.composio_account_id, row.account_domain, row.external_account_id) },
       (outcome) => service((tx) => tx.query(
         "UPDATE connections SET revoke_outcome=$3, updated_at=$4 WHERE tenant_id=$1 AND id=$2 AND status='disconnecting' AND revoke_outcome IS NULL",
         [row.tenant_id, row.id, outcome, now()])).then(() => undefined),
@@ -811,7 +848,9 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     if (!authConfigId) {
       // B-2: a toolkit this worker has no auth config for is checked off, so it never starves the rest.
       await service((tx) => tx.query(
-        "UPDATE connections SET last_checked_at=$3, last_error_code='not_configured', updated_at=$3 WHERE tenant_id=$1 AND id=$2 AND status IN ('active','reauthorize')",
+        `UPDATE connections SET last_checked_at=$3, updated_at=$3,
+            last_error_code = CASE WHEN last_error_code='provider_permission_denied' THEN last_error_code ELSE 'not_configured' END
+          WHERE tenant_id=$1 AND id=$2 AND status IN ('active','reauthorize')`,
         [row.tenant_id, row.id, at()]));
       report({ kind: "health_failed", tenantId: row.tenant_id, connectionId: row.id, code: "not_configured" });
       return;
@@ -823,8 +862,10 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       if (error instanceof PassLimit || !(error instanceof ComposioError)) throw error;
       // Unknown to us: leave the state as it is and try again next pass.
       const code = error.kind === "rate_limited" ? "provider_rate_limited" : "provider_unavailable";
-      await service((tx) => tx.query("UPDATE connections SET last_error_code=$3, updated_at=$4 WHERE tenant_id=$1 AND id=$2 AND status IN ('active','reauthorize')",
-        [row.tenant_id, row.id, code, at()]));
+      // The owner's "permissions block this" notice (C-8) is only ended by a successful run, never by a health read.
+      await service((tx) => tx.query(
+        `UPDATE connections SET last_error_code = CASE WHEN last_error_code='provider_permission_denied' THEN last_error_code ELSE $3 END, updated_at=$4
+          WHERE tenant_id=$1 AND id=$2 AND status IN ('active','reauthorize')`, [row.tenant_id, row.id, code, at()]));
       report({ kind: "health_failed", tenantId: row.tenant_id, connectionId: row.id, code });
       return;
     }

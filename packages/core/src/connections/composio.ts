@@ -120,18 +120,22 @@ export function buildExecuteEnvelope(input: ExecuteInput): ExecuteEnvelope {
   };
 }
 
+export type ExecuteFailure = "auth" | "forbidden" | "rate_limited" | "unavailable";
 export type ExecuteOutcome =
   | { readonly kind: "ok"; readonly data: unknown }
-  | { readonly kind: "failed"; readonly reason: "auth" | "rate_limited" | "unavailable" };
+  | { readonly kind: "failed"; readonly reason: ExecuteFailure };
 const executeSchema = z.object({ successful: z.boolean(), data: z.unknown().optional(), error: z.unknown().optional() });
 /** The numeric fields a failed envelope may carry the provider's HTTP status in. */
 const STATUS_FIELDS = ["status_code", "statusCode", "http_status", "httpStatus", "status"] as const;
 /**
  * A 200 with `successful: false`: only our class survives (C-10, C-14). The class comes from a
- * provider HTTP status in a structured field of `error` or `data` (401 or 403 is the store's grant,
- * 429 a provider limit); text is never read, so an order titled "Forbidden" is not an auth error.
+ * provider HTTP status in a structured field of `error` or `data`; text is never read, so an order titled
+ * "Forbidden" is not an auth error. 429 is a provider limit. 401 is the store's grant (the credential is
+ * refused: reconnect). A 403 alone is `forbidden`: the credential works but the app may not read this
+ * resource (Shopify's protected customer data gate, observed on preview 2026-11-07, C-17), which
+ * reconnecting cannot fix. A 401 beside a 403 stays `auth`: a refused credential outranks.
  */
-export function classifyExecuteFailure(envelope: { readonly error?: unknown; readonly data?: unknown }): "auth" | "rate_limited" | "unavailable" {
+export function classifyExecuteFailure(envelope: { readonly error?: unknown; readonly data?: unknown }): ExecuteFailure {
   const statuses: number[] = [];
   for (const part of [envelope.error, envelope.data]) {
     if (typeof part !== "object" || part === null || Array.isArray(part)) continue;
@@ -141,17 +145,36 @@ export function classifyExecuteFailure(envelope: { readonly error?: unknown; rea
     }
   }
   if (statuses.includes(429)) return "rate_limited";
-  if (statuses.some((status) => status === 401 || status === 403)) return "auth";
+  if (statuses.includes(401)) return "auth";
+  if (statuses.includes(403)) return "forbidden";
   return "unavailable";
 }
 
+/** A fixed provider request the code builds (C-13): a path relative to the toolkit's base URL, never an absolute URL. */
+export interface ProxyRequest {
+  readonly method: "GET" | "POST" | "DELETE";
+  readonly endpoint: string;
+  readonly body?: unknown;
+}
+/** The provider's own HTTP status and body, as Composio relays them. Callers read it; it is never logged or returned. */
+export interface ProxyAnswer {
+  readonly status: number;
+  readonly data: unknown;
+}
+const proxySchema = z.object({ status: z.number().int().min(100).max(599), data: z.unknown().optional() });
+
 export interface ComposioClient {
-  link(input: { authConfigId: string; userId: string; callbackUrl: string; connectionData: Record<string, string> }, signal?: AbortSignal): Promise<ComposioLink>;
+  link(input: { authConfigId: string; userId: string; callbackUrl: string }, signal?: AbortSignal): Promise<ComposioLink>;
   /** 400 or 404 surface as `bad_request` or `not_found`; the caller decides what each means. */
   completeAuth(input: { sessionUri: string; userId: string }, signal?: AbortSignal): Promise<{ connectedAccountId: string; toolkit: string | null }>;
   /** `null` for a 404. */
   getAccount(id: string, signal?: AbortSignal): Promise<ComposioAccount | null>;
-  revoke(id: string, signal?: AbortSignal): Promise<void>;
+  /**
+   * C-13: one proxy call through the account's own credential. The request is the catalog's fixed one, never a
+   * caller's. Composio's own `revoke` is not used: it answers 400 for a toolkit without a revoke configuration,
+   * which Shopify is.
+   */
+  proxy(input: { connectedAccountId: string; userId: string; request: ProxyRequest }, signal?: AbortSignal): Promise<ProxyAnswer>;
   /** A 404 counts as done. */
   deleteAccount(id: string, signal?: AbortSignal): Promise<void>;
   execute(input: ExecuteInput, signal?: AbortSignal): Promise<ExecuteOutcome>;
@@ -280,7 +303,6 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
         auth_config_id: input.authConfigId,
         user_id: input.userId,
         callback_url: input.callbackUrl,
-        connection_data: input.connectionData,
       }, signal);
       const parsed = linkSchema.safeParse(json);
       if (!parsed.success) {
@@ -312,8 +334,18 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
         throw error;
       }
     },
-    async revoke(id, signal) {
-      await call("POST", `/connected_accounts/${enc(id)}/revoke`, {}, signal);
+    async proxy(input, signal) {
+      const { endpoint, method, body } = input.request;
+      if (!/^\/[A-Za-z0-9._/-]*$/.test(endpoint) || endpoint.startsWith("//") || endpoint.includes("..")) throw new Error("A proxy request needs a path relative to the base URL");
+      const { json } = await call("POST", "/tools/execute/proxy", {
+        connected_account_id: input.connectedAccountId,
+        user_id: input.userId,
+        endpoint,
+        method,
+        ...(body === undefined ? {} : { body }),
+      }, signal);
+      const out = parse(proxySchema, json);
+      return { status: out.status, data: out.data };
     },
     async deleteAccount(id, signal) {
       try {

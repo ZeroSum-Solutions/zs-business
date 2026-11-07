@@ -125,9 +125,8 @@ export class FakeComposio {
     const b = (body ?? {}) as Record<string, unknown>;
     if (method === "POST" && path === "/connected_accounts/link") {
       const id = `ca_${++this.counter}`;
-      const data = (b["connection_data"] ?? {}) as Record<string, unknown>;
-      // The real Shopify auth config asks for `subdomain` (the bare store name).
-      const shop = typeof data["subdomain"] === "string" ? `${data["subdomain"]}.myshopify.com` : null;
+      // The real hosted form never takes the store from the link (C-17): the owner types it there, so the fake's store is fixed.
+      const shop = null;
       this.accounts.set(id, {
         id, userId: String(b["user_id"]), toolkit: "shopify", authConfigId: String(b["auth_config_id"]), status: "INITIATED", shopDomain: shop, deleted: false, revoked: false,
       });
@@ -143,17 +142,28 @@ export class FakeComposio {
       account.status = "ACTIVE";
       return { status: 200, body: { connected_account_id: account.id, toolkit_slug: account.toolkit } };
     }
-    const match = /^\/connected_accounts\/([^/]+)(\/revoke)?$/.exec(path);
+    // C-13: the app's own uninstall through the proxy (`revoked` records it). Only the catalog's fixed request is accepted; a
+    // second uninstall finds the token dead, as Shopify answers it (401).
+    if (method === "POST" && path === "/tools/execute/proxy") {
+      const account = this.accounts.get(String(b["connected_account_id"]));
+      if (!account || account.deleted) return { status: 404, body: { error: { message: "gone" } } };
+      const query = ((b["body"] ?? {}) as Record<string, unknown>)["query"];
+      if (account.userId !== b["user_id"] || b["method"] !== "POST" || b["endpoint"] !== "/graphql.json" || typeof query !== "string" || !query.includes("appUninstall"))
+        return { status: 400, body: { error: { message: "not the uninstall request" } } };
+      if (account.revoked) return { status: 200, body: { status: 401, data: { errors: "[API] Invalid API key or access token" } } };
+      account.revoked = true;
+      return { status: 200, body: { status: 200, data: { data: { appUninstall: { app: { id: "gid://shopify/App/1" }, userErrors: [] } } }, headers: {} } };
+    }
+    const match = /^\/connected_accounts\/([^/]+)$/.exec(path);
     if (match) {
       const account = this.accounts.get(decodeURIComponent(match[1]!));
       if (!account || account.deleted) return { status: 404, body: { error: { message: "gone" } } };
-      if (method === "GET" && !match[2])
+      if (method === "GET")
         return { status: 200, body: {
           id: account.id, status: account.status, user_id: account.userId, toolkit: { slug: account.toolkit }, auth_config: { id: account.authConfigId },
           state: { val: { access_token: "shpat_masked_ABCDEF", refresh_token: "r_masked" } }, data: { access_token: "should-not-leak" },
         } };
-      if (method === "POST" && match[2]) { account.revoked = true; return { status: 200, body: { success: true } }; }
-      if (method === "DELETE" && !match[2]) { account.deleted = true; return { status: 200, body: { success: true } }; }
+      if (method === "DELETE") { account.deleted = true; return { status: 200, body: { success: true } }; }
     }
     const tool = /^\/tools\/([A-Z0-9_]+)$/.exec(path);
     if (method === "GET" && tool) {

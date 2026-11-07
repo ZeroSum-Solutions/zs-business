@@ -219,6 +219,12 @@ export const DISCONNECT_AGENTS = "Agents can no longer read this store's orders.
 /** C-13: a revoke Shopify did not confirm leaves the app installed there. */
 export const REVOKE_FAILED_MESSAGE = "Shopify did not confirm it removed the app's access. In your Shopify admin, open Settings, then Apps, and remove the app to end its access.";
 
+/**
+ * C-8, C-10: the store's app permissions block the reads (Shopify's protected customer data approval is the
+ * known cause). The connection itself is fine: reconnecting does not fix it, so the row keeps no Reconnect for it.
+ */
+export const READ_BLOCKED_MESSAGE = "Shopify is blocking agents from reading this store's orders because the app's permissions in the store do not allow it. Reconnecting will not fix this: the store's app permissions need to change.";
+
 /** What a cancel the server answered says: nothing connected, and the same warning as a disconnect when the revoke failed (C-5). */
 export function cancelNotice(result: CancelManagedConnectResult): ReturnNotice {
   return result.revokeFailed
