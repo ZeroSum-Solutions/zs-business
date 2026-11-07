@@ -17,7 +17,8 @@ Pilot data only (the invented Halden & Rowe tenant). Everything is in US East.
 | Piece | Production | Preview |
 |---|---|---|
 | Supabase project (org Zerosumsolutions-Projects, Micro, Postgres 17) | `zs-business`, ref `ubzyxrflvxymikpijnto` | `zs-business-preview`, ref `cmpnzcijdumzyddoubga` |
-| API (Vercel `zs-business-api`, root `apps/api`) | https://api.zerosumsolutions.com | https://zs-business-api-preview.vercel.app |
+| API (Vercel `zs-business-api`, root `apps/api`, build `pnpm build:vercel`) | https://api.zerosumsolutions.com | https://zs-business-api-preview.vercel.app |
+| Cron workers (Vercel `prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`, root `apps/api`, build `pnpm build:vercel:worker`) | no public domain; Vercel Cron calls `/cron/*` | same project, preview deployments (no schedule; call `/cron/*` by hand with the bearer) |
 | Dashboard (Vercel `zs-business-dashboard`, root `apps/dashboard`) | https://app.zerosumsolutions.com | https://zs-business-dashboard-preview.vercel.app (Vercel Authentication on) |
 | Auth email (Supabase custom SMTP through Resend) | `no-reply@mail.zerosumsolutions.com` | same |
 
@@ -27,6 +28,18 @@ ref, and the preview dashboard's `ZS_API_URL` is the preview API. DNS is on Clou
 Secrets live in ZS Vault (`zs_business_<prod|preview>_*`) and in Vercel env vars, never in
 the repo. The runbook (roles, migrations, seed, tokens, deploy, checks) is in
 `apps/api/README.md`, "Hosted deploy".
+
+The API and the cron workers are two Vercel projects built from the same `apps/api` source,
+because a project's environment variables are visible to every function in it. The API project
+must hold no worker secret (service database logins, the delivery secrets such as the Resend key,
+the Google token private key, `CRON_SECRET`) and builds no cron functions; the workers project
+holds them and serves only `/cron/*`. Vercel Cron fires only on a project's production
+deployment, so the `*_CRON_SCHEDULE` crons run on the workers project's production deployment
+alone; its preview `/cron/*` routes run only when called by hand with the bearer. The workers
+project has Vercel Authentication off, so the bearer is the only gate. Move the Activepieces cron
+workers-first (owner step, `apps/api/README.md`, "Moving the crons out of a single project"): the
+API build refuses to run while a `*_CRON_SCHEDULE` is set. `apps/api/README.md` lists which
+variables go on which project, and the known limits of the split.
 
 On since 2026-10-20 (both targets): Supabase Auth sessions (an owner signs in by email link;
 prod owner devszerosum@gmail.com), public booking, unsubscribe links, the Resend bounce webhook

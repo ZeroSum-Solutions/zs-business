@@ -1,5 +1,5 @@
 // Vercel Node function for GET /cron/calendar (google-calendar.md G-6..G-10), bundled by
-// scripts/build-vercel.mjs into its own function, so the API function never holds the service
+// scripts/build-vercel.mjs into its own function, in the workers Vercel project (`pnpm build:vercel:worker`), so the API project never holds the service
 // database login or the token private key. Like vercel.ts, it reads process.env and the system
 // clock; one runner and one pool per instance.
 import { randomUUID } from "node:crypto";

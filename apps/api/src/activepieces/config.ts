@@ -5,7 +5,7 @@
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { activepiecesKeySecretSchema, activepiecesLoopbackSchema, assertLoopbackOnly } from "../config.js";
-import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
+import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);

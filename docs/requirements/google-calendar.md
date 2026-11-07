@@ -205,7 +205,7 @@ platform table (one Google project), like `stripe_events`.
 `GOOGLE_REDIRECT_URL` (`https://<dashboard host>/api/calendar/google/callback`, also registered
 in Google Cloud), `GOOGLE_RETURN_URL` (`https://<dashboard host>/account/connections`), `GOOGLE_STATE_SECRET` (optional
 `GOOGLE_STATE_PREVIOUS_SECRET`), `GOOGLE_TOKEN_PUBLIC_KEY`, `GOOGLE_CHANNEL_SECRET`; all or
-none. Calendar function: `CALENDAR_WORKER=on`, `CRON_SECRET`, `CALENDAR_DATABASE_URL` (a login
+none; set on the API Vercel project. Calendar function (workers Vercel project only): `CALENDAR_WORKER=on`, `CRON_SECRET`, `CALENDAR_DATABASE_URL` (a login
 that may `SET ROLE service_role`), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_TOKEN_PRIVATE_KEY`, `GOOGLE_CHANNEL_SECRET`, optional `GOOGLE_WEBHOOK_URL`
 (`https://<api host>/webhooks/google/calendar`), `GOOGLE_EVENT_TITLE`. Build: optional
@@ -229,6 +229,8 @@ enabled, the consent screen with the three scopes, and the webhook domain verifi
   replaces it, and the page asks about the second one instead.
 - A disconnect followed by a reconnect of the same account within one worker revoke call can lose
   the new grant; the new row then shows `reauthorize` and the owner connects again.
-- Vercel environment variables are project-wide: in one project the API function can also read
-  `GOOGLE_TOKEN_PRIVATE_KEY` and `CALENDAR_DATABASE_URL`. G-3 holds at code level; a separate
-  Vercel project for the workers makes it hold at deploy level too.
+- Vercel environment variables are project-wide, so G-3 holds at deploy level only because the
+  cron functions are a separate Vercel project (`pnpm build:vercel:worker`): `GOOGLE_TOKEN_PRIVATE_KEY`
+  and `CALENDAR_DATABASE_URL` are set there and never on the API project. `apps/api/test/worker-split.test.ts`
+  fails if the API bundle names either. `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
+  `GOOGLE_CHANNEL_SECRET` are on both projects.

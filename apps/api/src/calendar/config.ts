@@ -6,7 +6,7 @@ import type { KeyObject } from "node:crypto";
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { parseSealPrivateKey, type GoogleClientConfig } from "@zs/core";
-import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../delivery/config.js";
+import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 import { formatIssues, googleClientFromVariables, googleClientVariables, signingSecretVariable } from "./google-env.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);

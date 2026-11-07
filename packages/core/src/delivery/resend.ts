@@ -201,16 +201,19 @@ export function createResendProvider(deps: { readonly config: ResendConfig; read
   };
 }
 
-/** The variables the Mac sets for the sender (R-6); the cloud never holds their values. */
-export const resendEnvSchema = z.object({
-  RESEND_API_KEY: z.string().min(1),
-  RESEND_FROM: z.string().min(1),
-  RESEND_REPLY_TO: z.string().min(1).optional(),
-  RESEND_BASE_URL: z.string().min(1).optional(),
-});
-
-/** Builds the adapter config from an environment object an entry point passes in. */
+/**
+ * Builds the adapter config from the sender's variables (R-6), passed in by an entry point. Only the
+ * workers Vercel project (or the Mac's Node worker) sets them; the API project never does.
+ */
 export function parseResendEnv(env: Readonly<Record<string, string | undefined>>): ResendConfig {
+  // Declared here, not at module level, so a bundle that never calls this function (the API's) drops
+  // the sender's variable names with it (test/worker-split.test.ts).
+  const resendEnvSchema = z.object({
+    RESEND_API_KEY: z.string().min(1),
+    RESEND_FROM: z.string().min(1),
+    RESEND_REPLY_TO: z.string().min(1).optional(),
+    RESEND_BASE_URL: z.string().min(1).optional(),
+  });
   const parsed = resendEnvSchema.safeParse(env);
   if (!parsed.success) throw new Error(`Invalid environment: ${parsed.error.issues.map((issue) => issue.path.join(".")).join(", ")}`);
   const config: ResendConfig = {

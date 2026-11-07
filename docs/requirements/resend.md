@@ -105,8 +105,8 @@ keys may not use that prefix (D-9). Database errors answer 503, so Resend retrie
 
 **R-9. The runner.** Something must run the worker, or an approved reply stays queued. Two entry
 points share one runner (`apps/api/src/delivery/`):
-- `GET /cron/delivery`, its own Vercel function (`functions/cron/delivery.func`), for Vercel
-  Cron. It needs `Authorization: Bearer <CRON_SECRET>` (constant-time compare; 401 otherwise,
+- `GET /cron/delivery`, its own Vercel function (`functions/cron/delivery.func`) in the workers
+  Vercel project (not the API's), for Vercel Cron. It needs `Authorization: Bearer <CRON_SECRET>` (constant-time compare; 401 otherwise,
   404 without `CRON_SECRET`). The build adds a `crons` entry only when `DELIVERY_CRON_SCHEDULE`
   is set at build time, so no deploy starts sending by itself.
 - `pnpm delivery:worker`, a Node loop for any other host, every `DELIVERY_INTERVAL_MS`.
@@ -128,6 +128,9 @@ as `sms_provider_not_configured`; nothing produces SMS in v1. The worker connect
 - One sender for every tenant. Per-tenant sending domains come later.
 - No lookup by key: an unknown outcome past the window waits for an operator (D-8).
 - Delivered, opened and clicked events are not stored; nothing reads them yet.
-- Vercel environment variables are project-wide, so the API function can see
-  `DELIVERY_DATABASE_URL` too; only the delivery function's code opens it.
+- Vercel environment variables are project-wide, so the cron functions live in their own Vercel
+  project (`pnpm build:vercel:worker`): `DELIVERY_DATABASE_URL`, `RESEND_API_KEY` and `CRON_SECRET`
+  are set there only, and the API project's bundle names none of them
+  (`apps/api/test/worker-split.test.ts`). `UNSUBSCRIBE_TOKEN_SECRET` is on both projects: the
+  worker signs links, the API verifies them.
 - Vercel Hobby runs crons once a day; a useful schedule needs Pro, or the Node worker.

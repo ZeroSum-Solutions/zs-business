@@ -107,7 +107,8 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
 - **W-14 Operating it.** Owners list each endpoint's deliveries (newest first) and replay a
   dead letter, which re-queues it with a fresh attempt budget under the same event ID. The
   worker runs only with `ACTIVEPIECES_WEBHOOK_WORKER=on`, from Vercel Cron
-  (`GET /cron/activepieces`, `Bearer CRON_SECRET`, its own function) or `pnpm
+  (`GET /cron/activepieces`, `Bearer CRON_SECRET`, its own function in the workers Vercel project,
+  not the API's) or `pnpm
   activepieces:worker`. Without `ACTIVEPIECES_KEY_SECRET` the API's routes are 404.
 - **W-15 Limits.** At most 10 endpoints per tenant, 20 active tokens per tenant, 50 pending
   proposals per token, bodies of 64 KiB, and one stored event body of 64 KiB.
@@ -121,11 +122,11 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
 |---|---|---|
 | API | `ACTIVEPIECES_KEY_SECRET` | 32+ random characters. Unset keeps everything off. |
 | API and worker | `ACTIVEPIECES_KEY_PREVIOUS_SECRET` | Only during a key rotation. |
-| Worker | `ACTIVEPIECES_WEBHOOK_WORKER` | `on` to send. |
-| Worker | `ACTIVEPIECES_DATABASE_URL` | The service login (may `SET ROLE service_role`), with `DATABASE_CA_CERT`. |
+| Worker | `ACTIVEPIECES_WEBHOOK_WORKER` | `on` to send. Workers Vercel project only. |
+| Worker | `ACTIVEPIECES_DATABASE_URL` | The service login (may `SET ROLE service_role`), with `DATABASE_CA_CERT`. Workers Vercel project only. |
 | Worker | `ACTIVEPIECES_KEY_SECRET` | The same key as the API. |
-| Worker | `CRON_SECRET` | Shared with `/cron/delivery`. |
-| Build | `ACTIVEPIECES_CRON_SCHEDULE` | For example `*/5 * * * *`. Unset, no cron. |
+| Worker | `CRON_SECRET` | Shared with `/cron/delivery`. Workers Vercel project only. |
+| Build (workers project) | `ACTIVEPIECES_CRON_SCHEDULE` | For example `*/5 * * * *`. Unset, no cron. |
 
 Optional tuning is in `apps/api/README.md`. The migration is `20261020640000_activepieces.sql`.
 

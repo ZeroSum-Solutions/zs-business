@@ -1,66 +1,83 @@
-// Bundles src/vercel.ts into one ESM file and writes Vercel's Build Output API layout
-// (.vercel/output): /cron/delivery, /cron/billing, /cron/calendar, /cron/activepieces and
-// /cron/followup route to their own functions, every other path to the API function. Workspace
-// packages ship TypeScript with NodeNext ".js" specifiers, which Vercel's own Node builder does not
-// map, so the bundle is made here. Run from apps/api: `pnpm build:vercel`.
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+// Bundles the Vercel functions into ESM files and writes Vercel's Build Output API layout
+// (.vercel/output). Two Vercel projects deploy from this one script, because a project's
+// environment variables are visible to every function in it:
+//   api    (`pnpm build:vercel`): src/vercel.ts only, every path routes to it. No cron functions and
+//          no crons, so worker-only secrets are never set on that project.
+//   worker (`pnpm build:vercel:worker`): /cron/delivery, /cron/billing, /cron/calendar,
+//          /cron/activepieces and /cron/followup, each its own function. No API app: every other
+//          path is a 404 (a request that matches no route).
+// The esbuild options are in bundle-options.mjs. Run from apps/api; the optional second argument
+// is the output directory. The default (.vercel/output) is cleaned before each build; an explicit
+// directory must not exist or be empty, and the script never deletes inside it (test/worker-split.test.ts
+// builds into a fresh temp dir).
+import { cp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { bundleOptions } from "./bundle-options.mjs";
+import { CRON_SCHEDULE_VARIABLES } from "./worker-env.mjs";
 
-const output = new URL("../.vercel/output/", import.meta.url);
-const fn = new URL("functions/index.func/", output);
-// Each cron is its own function, so the API's code never opens a service database login
-// (resend.md R-9, stripe.md S-8, google-calendar.md G-3, activepieces.md W-14, agents.md G-13);
-// the calendar function is also the only code that holds the token private key. No schedule
-// unless the build sets one, so a deploy never starts sending, moving money, calling Google or
-// webhooks, or drafting by itself; DELIVERY_WORKER=on, BILLING_WORKER=on, CALENDAR_WORKER=on,
-// ACTIVEPIECES_WEBHOOK_WORKER=on and FOLLOWUP_AGENT=on are the second switches, at run time.
-const crons = [
+const targets = ["api", "worker"];
+const cronEntries = [
   { path: "/cron/delivery", entry: "../src/vercel-delivery.ts", scheduleVar: "DELIVERY_CRON_SCHEDULE" },
   { path: "/cron/billing", entry: "../src/vercel-billing.ts", scheduleVar: "BILLING_CRON_SCHEDULE" },
   { path: "/cron/calendar", entry: "../src/vercel-calendar.ts", scheduleVar: "CALENDAR_CRON_SCHEDULE" },
   { path: "/cron/activepieces", entry: "../src/vercel-activepieces.ts", scheduleVar: "ACTIVEPIECES_CRON_SCHEDULE" },
   { path: "/cron/followup", entry: "../src/vercel-followup.ts", scheduleVar: "FOLLOWUP_CRON_SCHEDULE" },
-].map((cron) => ({ ...cron, fn: new URL(`functions${cron.path}.func/`, output), schedule: process.env[cron.scheduleVar] }));
+];
+const target = process.argv[2];
+if (!targets.includes(target)) throw new Error(`Usage: node scripts/build-vercel.mjs <${targets.join("|")}> [empty-output-dir]`);
+// The API project carries no crons. A schedule variable left on it would silently drop a live cron
+// at the next deploy, so the build refuses (runbook: delete the names, then deploy the API once).
+if (target === "api") {
+  const left = CRON_SCHEDULE_VARIABLES.filter((name) => process.env[name] !== undefined);
+  if (left.length > 0)
+    throw new Error(`The api build has no crons, but ${left.join(", ")} ${left.length === 1 ? "is" : "are"} set. Move the schedule to the workers project and delete the name from this project first (apps/api/README.md, "Moving the crons out of a single project").`);
+}
+const explicitOutput = process.argv[3];
+if (explicitOutput) {
+  // Never a recursive delete of a path the caller chose: `.` or a home directory would be wiped.
+  const info = await stat(resolve(explicitOutput)).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
+  if (info !== null && !info.isDirectory()) throw new Error(`${explicitOutput} exists and is not a directory`);
+  if (info !== null && (await readdir(resolve(explicitOutput))).length > 0)
+    throw new Error(`${explicitOutput} is not empty; pass a path that does not exist or an empty directory`);
+}
+const output = explicitOutput ? pathToFileURL(`${resolve(explicitOutput)}/`) : new URL("../.vercel/output/", import.meta.url);
+const fn = new URL("functions/index.func/", output);
+// The crons live in their own Vercel project, so the API project never holds a service database
+// login or any other worker secret (resend.md R-9, stripe.md S-8, google-calendar.md G-3,
+// activepieces.md W-14, agents.md G-13). Every function in the workers project sees that project's
+// whole environment (the calendar token private key included), so the split is by project, not by
+// function. No schedule unless the build sets one, so a deploy never starts sending, moving money,
+// calling Google or webhooks, or drafting by itself; DELIVERY_WORKER=on, BILLING_WORKER=on,
+// CALENDAR_WORKER=on, ACTIVEPIECES_WEBHOOK_WORKER=on and FOLLOWUP_AGENT=on are the second switches,
+// at run time.
+const crons = target === "api" ? [] : cronEntries
+  .map((cron) => ({ ...cron, fn: new URL(`functions${cron.path}.func/`, output), schedule: process.env[cron.scheduleVar] }));
 for (const cron of crons)
   if (cron.schedule !== undefined && !/^[0-9*/,-]+( [0-9*/,-]+){4}$/.test(cron.schedule))
     throw new Error(`${cron.scheduleVar} must be a five-field cron expression`);
-await rm(output, { recursive: true, force: true });
-await mkdir(fn, { recursive: true });
+// Only the default directory (this script's own build output) is cleaned.
+if (!explicitOutput) await rm(output, { recursive: true, force: true });
+if (target === "api") await mkdir(fn, { recursive: true });
 for (const cron of crons) await mkdir(cron.fn, { recursive: true });
 
 const bundle = (entry, outfile) => build({
-  entryPoints: [new URL(entry, import.meta.url).pathname],
+  ...bundleOptions(new URL(entry, import.meta.url).pathname),
   outfile: new URL("index.mjs", outfile).pathname,
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  target: "node24",
-  // pg loads pg-native only when asked to; it is not installed.
-  external: ["pg-native"],
-  // CommonJS dependencies (pg) call require() for Node built-ins.
-  banner: { js: "import { createRequire as __zsCreateRequire } from 'node:module'; const require = __zsCreateRequire(import.meta.url);" },
-  // Map NodeNext ".js" specifiers in workspace TypeScript to their ".ts" sources.
-  resolveExtensions: [".ts", ".js", ".mjs", ".json"],
-  plugins: [{
-    name: "ts-from-js",
-    setup(pluginBuild) {
-      pluginBuild.onResolve({ filter: /^\.{1,2}\/.*\.js$/ }, async (args) => {
-        if (args.importer.includes("node_modules") && !args.importer.includes("/packages/")) return undefined;
-        const result = await pluginBuild.resolve(args.path.replace(/\.js$/, ".ts"), { kind: args.kind, resolveDir: args.resolveDir });
-        return result.errors.length === 0 ? { path: result.path } : undefined;
-      });
-    },
-  }],
-  logLevel: "warning",
 });
 
-await bundle("../src/vercel.ts", fn);
+if (target === "api") {
+  await bundle("../src/vercel.ts", fn);
+  // The hosted booking page and widget read these at start-up (src/public/assets.ts).
+  await cp(new URL("../static/", import.meta.url), new URL("static/", fn), { recursive: true });
+}
 for (const cron of crons) await bundle(cron.entry, cron.fn);
-
-// The hosted booking page and widget read these at start-up (src/public/assets.ts).
-await cp(new URL("../static/", import.meta.url), new URL("static/", fn), { recursive: true });
-for (const dir of [fn, ...crons.map((cron) => cron.fn)]) {
+for (const dir of [...(target === "api" ? [fn] : []), ...crons.map((cron) => cron.fn)]) {
   await writeFile(new URL(".vc-config.json", dir), JSON.stringify({
     runtime: "nodejs24.x",
     handler: "index.mjs",
@@ -73,7 +90,8 @@ for (const dir of [fn, ...crons.map((cron) => cron.fn)]) {
 const scheduled = crons.filter((cron) => cron.schedule).map((cron) => ({ path: cron.path, schedule: cron.schedule }));
 await writeFile(new URL("config.json", output), JSON.stringify({
   version: 3,
-  routes: [...crons.map((cron) => ({ src: cron.path, dest: cron.path })), { src: "/(.*)", dest: "/index" }],
+  // Worker: only the exact cron paths are routed (anchored), so anything else matches no route and is a 404.
+  routes: target === "api" ? [{ src: "/(.*)", dest: "/index" }] : crons.map((cron) => ({ src: `^${cron.path}$`, dest: cron.path })),
   ...(scheduled.length ? { crons: scheduled } : {}),
 }, null, 2));
-console.log("Wrote apps/api/.vercel/output");
+console.log(`Wrote ${process.argv[3] ?? "apps/api/.vercel/output"} (${target})`);
