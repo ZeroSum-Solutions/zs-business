@@ -440,8 +440,9 @@ role for workers (all workers share one pattern today; Known limits).
     browser key mismatch is refused; a demoted member's callback is `forbidden`;
   - a lost `complete_auth` answer recovers; a used `session_uri` from another tenant never
     connects;
-  - a reload after confirm answers `connected` only for the same toolkit and external
-    account; a confirm replays under its key; another grant is `grant_changed`; an expired
+  - a reload after confirm answers `connected` only for the same toolkit and Composio
+    account (the row's store is the verified attempt's: the insert binds `external_account_id`
+    to the attempt, and no application role can update it afterwards); a confirm replays under its key; another grant is `grant_changed`; an expired
     attempt or grant is refused;
   - Cancel deletes the Composio account at once; sign-out and an API 401 drop the cookies;
   - tenant A's token never lists or runs tenant B's connection, also with B's IDs; a tool
