@@ -31,6 +31,8 @@ import {
   verifyConnectAttempt,
   verifyConnectorRequest,
   type ConnectionLimiter,
+  type ConnectionsCallbackOutcome,
+  type ConnectionsCallbackReport,
   type ConnectorPort,
   type EdgeDependencies,
 } from "../../src/index.js";
@@ -67,7 +69,23 @@ const deps = (connections = true): EdgeDependencies => ({
   ...(connections ? { connections: { connector: port, stateSecrets: { current: STATE }, limiter } } : {}),
 });
 const session = (tenantId: string, actorId: string, withConnections = true) => createConnectionsSession(deps(withConnections), { tenantId, actorId });
-const callback = () => createConnectionsCallback(deps());
+/**
+ * The callback as the routes see it, minus the log tags (C-14): every answer to a verified attempt names that
+ * attempt's tenant and connection, and only those; an invalid one names nothing.
+ */
+const untag = (outcome: ConnectionsCallbackReport): ConnectionsCallbackOutcome => {
+  const { tenantId, connectionId, ...rest } = outcome;
+  if (outcome.kind === "invalid") expect({ tenantId, connectionId }).toEqual({ tenantId: undefined, connectionId: undefined });
+  else expect([typeof tenantId, typeof connectionId]).toEqual(["string", "string"]);
+  return rest as ConnectionsCallbackOutcome;
+};
+const callback = () => {
+  const real = createConnectionsCallback(deps());
+  return {
+    callback: async (...args: Parameters<typeof real.callback>) => untag(await real.callback(...args)),
+    status: async (...args: Parameters<typeof real.status>) => untag(await real.status(...args)),
+  };
+};
 
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -245,7 +263,8 @@ describe("callback (C-5)", () => {
     const down: ConnectorPort = { ...port, complete: async () => { throw new ConnectorUnavailable("timeout"); } };
     const outcome = await createConnectionsCallback({ ...deps(), connections: { connector: down, stateSecrets: { current: STATE }, limiter } })
       .callback({ attempt: started.attempt, browserKey: KEY, accountId: claims.composioAccountId, sessionUri: "s" });
-    expect(outcome).toEqual({ kind: "error", reason: "provider_unavailable" });
+    // C-14: the log names the attempt's tenant and connection.
+    expect(outcome).toEqual({ kind: "error", reason: "provider_unavailable", tenantId: claims.tenantId, connectionId: claims.connectionId });
     const other = await session(b.tenantId, b.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
     const otherClaims = verifyConnectAttempt({ current: STATE }, other.attempt, clock.now())!;
     const foreignSession = fake.consent(otherClaims.composioAccountId);

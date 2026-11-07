@@ -26,7 +26,7 @@ afterAll(async () => { await database?.close(); });
 
 const accountId = () => `ca_${randomUUID()}`;
 type Tenant = TwoTenantFixture["a"];
-interface AttemptOver { status?: string; toolkit?: string; account?: string; domain?: string; external?: string; createdBy?: string | null }
+interface AttemptOver { status?: string | undefined; toolkit?: string | undefined; account?: string | undefined; domain?: string | undefined; external?: string | undefined; createdBy?: string | null | undefined }
 /** The worker's attempt for one connect (C-4, C-7): verified unless the test says otherwise. */
 async function seedAttempt(tenant: Tenant, member: string, over: AttemptOver = {}) {
   const connectionId = randomUUID();
@@ -40,7 +40,7 @@ async function seedAttempt(tenant: Tenant, member: string, over: AttemptOver = {
   return { connectionId, account };
 }
 /** The connect action's insert as the runtime role: no Composio account ID, which the attempt supplies (C-1). */
-const insertConnection = (tenant: Tenant, id: string, member: string, over: { status?: string; toolkit?: string; domain?: string; external?: string } = {}) =>
+const insertConnection = (tenant: Tenant, id: string, member: string, over: { status?: string | undefined; toolkit?: string | undefined; domain?: string | undefined; external?: string | undefined } = {}) =>
   tenant.run((tx) => tx.query(
     `INSERT INTO connections (tenant_id,id,tier,toolkit,external_account_id,account_domain,account_label,status,connected_by,last_checked_at,created_at,updated_at)
      VALUES ($1,$2,'composio',$3,$4,$5,'Shop',$6,$7,$8,$8,$8)`,
@@ -247,7 +247,7 @@ describe("connections: a runtime insert needs the worker's verified attempt (C-1
     const connectionId = over === null ? randomUUID() : (await seedAttempt(fixture.a, memberA, { toolkit: "strict", ...over })).connectionId;
     await expect(insertConnection(fixture.a, connectionId, memberA, { toolkit: "strict" }))
       .rejects.toMatchObject({ code: "23514", constraint: "connections_verified_attempt" });
-    if (over !== null) expect(await attemptStatus(fixture.a.tenantId, connectionId)).toBe(over.status ?? "verified");
+    if (over !== null) expect(await attemptStatus(fixture.a.tenantId, connectionId)).toBe("status" in over ? over.status : "verified");
   });
 
   it("does not take another tenant's attempt", async () => {
