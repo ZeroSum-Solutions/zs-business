@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { automationTokenWithSecretSchema, automationUsageSchema, apiErrorBodySchema } from "@zs/contracts";
-import { createScopedDatabase } from "@zs/db";
+import { createScopedDatabase, type ScopedDatabase } from "@zs/db";
 import { appOnDatabase, call, createApiHarness, NOW, type ApiHarness } from "./helpers.js";
 
 const MINUTE = 60_000;
@@ -105,4 +105,69 @@ describe("rate limits across two API instances (H-7)", () => {
       clockMs = Date.parse(NOW);
     }
   }, 180_000);
+});
+
+describe("the quota comes before the token row and the body (H-5, H-7)", () => {
+  const bucket = async (name: string) => (await h.database.pool.query<{ count: number }>(
+    "SELECT count FROM rate_limit_buckets WHERE key = sha256(convert_to($1,'UTF8'))", [name])).rows[0]?.count;
+  const bucketsOf = (tenantId: string, tokenId: string) => ({ minute: `mcp-minute:${tenantId}:${tokenId}`, hour: `mcp-hour:${tenantId}:${tokenId}` });
+
+  it("answers 429 over 404, 400 and a revoked row, without reading the token row, and charges nothing for refusals", async () => {
+    const { secret, token } = await mint();
+    const tokenRowReads: string[] = [];
+    const counting: ScopedDatabase = {
+      ...h.database.db,
+      tenant: (tenantId, work, options) => h.database.db.tenant(tenantId, (tx) => work({
+        query: ((sql: string, params?: unknown[]) => {
+          if (/\bautomation_tokens\b/.test(sql)) tokenRowReads.push(sql);
+          return tx.query(sql as never, params as never);
+        }) as typeof tx.query,
+      }), options),
+    };
+    const app = appOnDatabase(counting, { clock });
+    for (let sent = 0; sent < 120; sent += 20)
+      expect((await Promise.all(Array.from({ length: 20 }, () => ping(app, secret)))).map((reply) => reply.status)).toEqual(Array(20).fill(200));
+    const names = bucketsOf(h.a.tenantId, token.id);
+    expect(await bucket(names.minute)).toBe(120);
+    expect(await bucket(names.hour)).toBe(120);
+
+    // The token is revoked, and every shape of bad request is over the quota: all 429, no token row read.
+    expect((await call(h.app, "POST", `/v1/integrations/activepieces/tokens/${token.id}/revoke`, { token: h.a.token, key: randomUUID(), body: {} })).status).toBe(200);
+    tokenRowReads.length = 0;
+    const send = (body: string, extra: Record<string, string> = {}) => app.fetch(new Request("http://hub.test/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${secret}`, ...extra },
+      body,
+    }));
+    const ok = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+    const replies = await Promise.all([
+      send(ok),
+      send(ok, { "Mcp-Session-Id": randomUUID() }),
+      send(JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "ping" }])),
+      send("{not json"),
+    ]);
+    expect(replies.map((reply) => reply.status)).toEqual([429, 429, 429, 429]);
+    for (const reply of replies) expect(Number(reply.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(tokenRowReads).toEqual([]);
+    // Refused requests charged nothing: both buckets still stand at 120.
+    expect(await bucket(names.minute)).toBe(120);
+    expect(await bucket(names.hour)).toBe(120);
+  });
+
+  it("charges a request that goes on to be refused for its body, once the quota allows it", async () => {
+    const { secret, token } = await mint();
+    const app = h.app;
+    const names = bucketsOf(h.a.tenantId, token.id);
+    const batch = await app.fetch(new Request("http://hub.test/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${secret}` },
+      body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "ping" }]),
+    }));
+    expect(batch.status).toBe(400);
+    expect(await bucket(names.minute)).toBe(1);
+    // A request refused before the quota (a forged tag, a big body without a valid token) charges no bucket at all.
+    const forged = secret.slice(0, -1) + (secret.endsWith("A") ? "B" : "A");
+    expect((await ping(app, forged)).status).toBe(401);
+    expect(await bucket(names.minute)).toBe(1);
+  });
 });

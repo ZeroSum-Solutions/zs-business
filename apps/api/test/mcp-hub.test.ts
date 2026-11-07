@@ -8,15 +8,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   apiErrorBodySchema,
+  AUTOMATION_SCOPES,
+  automationScopeListSchema,
   automationTokenWithSecretSchema,
   automationUsageSchema,
   businessProfileSchema,
   proposalRecordSchema,
+  READ_SCOPE_DISCLOSURES,
   READ_SCOPES,
   type AutomationScope,
 } from "@zs/contracts";
 import { DatabaseUnavailable, type ScopedDatabase, type Transaction } from "@zs/db";
-import { appOnDatabase, call, contactAndDeal, createApiHarness, NOW, signedInMember, type ApiHarness, type MemberSetup, type TenantSetup } from "./helpers.js";
+import { appOnDatabase, call, contactAndDeal, createApiHarness, NOW, provisionPage, signedInMember, type ApiHarness, type MemberSetup, type TenantSetup } from "./helpers.js";
 
 const URL_BASE = "http://hub.test/mcp";
 const ALL_SCOPES: AutomationScope[] = [
@@ -87,6 +90,53 @@ async function seedContact(tenant: TenantSetup, name: string) {
   const { contactId } = await contactAndDeal(h, tenant, email);
   return { contactId, email };
 }
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+async function waitUntil(condition: () => Promise<boolean>, what: string, ms = 8000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await condition()) return;
+    await sleep(25);
+  }
+  throw new Error(`Timed out waiting for: ${what}`);
+}
+/** Runtime-role statements waiting on a lock whose text contains `needle`. */
+const lockWaiters = (needle: string) => queryCount(
+  `SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1`, [`%${needle}%`]);
+/** A real exclusive lock on one token row, held by an open superuser transaction until released. */
+async function holdTokenRow(tokenId: string) {
+  const client = await h.database.pool.connect();
+  await client.query("BEGIN");
+  await client.query("SELECT 1 FROM automation_tokens WHERE id=$1 FOR UPDATE", [tokenId]);
+  let done = false;
+  return {
+    async release() {
+      if (done) return;
+      done = true;
+      try { await client.query("ROLLBACK"); } finally { client.release(); }
+    },
+  };
+}
+/** The app's database with every statement logged, passed through unchanged below the scoped layer's checks. */
+function recording() {
+  const sqls: string[] = [];
+  const wrap = (tx: Transaction): Transaction => ({
+    query: ((sql: string, params?: unknown[]) => { sqls.push(sql); return tx.query(sql as never, params as never); }) as Transaction["query"],
+  });
+  const db: ScopedDatabase = {
+    ...h.database.db,
+    tenant: (tenantId, work, options) => h.database.db.tenant(tenantId, (tx) => work(wrap(tx)), options),
+    withoutTenant: (work, options) => h.database.db.withoutTenant((tx) => work(wrap(tx)), options),
+  };
+  return { db, sqls };
+}
+const revokeToken = (tenant: TenantSetup, tokenId: string) =>
+  call(h.app, "POST", `/v1/integrations/activepieces/tokens/${tokenId}/revoke`, { token: tenant.token, key: randomUUID(), body: {} });
+const usageRows = (tokenId: string) => queryCount("SELECT count(*) AS n FROM automation_token_usage WHERE token_id=$1", [tokenId]);
+const failure = (reply: ToolReply) => {
+  expect(reply.isError).toBe(true);
+  return apiErrorBodySchema.parse(text(reply)).error.code;
+};
 
 describe("an MCP SDK client against the real app (H-5, H-6)", () => {
   it("initializes, lists, reads, proposes, replays, conflicts and errors, with no session", async () => {
@@ -383,20 +433,70 @@ describe("transport answers before MCP handling (H-5)", () => {
     const { secret } = await mint(owner(h.a), ["business:read"]);
     const big = await rpc(h.app, secret, JSON.stringify({ ...method("tools/list"), pad: "x".repeat(65 * 1024) }));
     expect(big.status).toBe(413);
-    // The limit is checked before the token: an anonymous caller gets 413 too, and no database work.
-    expect((await rpc(h.app, null, JSON.stringify({ pad: "x".repeat(65 * 1024) }))).status).toBe(413);
     const batch = await rpc(h.app, secret, [method("tools/list"), method("tools/list")]);
     expect(batch.status).toBe(400);
     expect((await batch.json()).error.code).toBe(-32600);
     const broken = await rpc(h.app, secret, "{not json");
     expect(broken.status).toBe(400);
     expect((await broken.json()).error.code).toBe(-32700);
+    // JSON that is no JSON-RPC request (a response object, a bare value) is a 400 too.
+    for (const notACall of [{ jsonrpc: "2.0", id: 1, result: {} }, { hello: "world" }, 5, null]) {
+      const refused = await rpc(h.app, secret, JSON.stringify(notACall));
+      expect(refused.status, JSON.stringify(notACall)).toBe(400);
+      expect((await refused.json()).error.code).toBe(-32600);
+    }
     const session = await rpc(h.app, secret, method("tools/list"), { "Mcp-Session-Id": randomUUID() });
     expect(session.status).toBe(404);
     expect((await session.json()).error.code).toBe(-32001);
-    // An anonymous caller learns nothing else: 401 wins over a batch or a session header.
-    expect((await rpc(h.app, null, [method("tools/list")])).status).toBe(401);
-    expect((await rpc(h.app, null, method("tools/list"), { "Mcp-Session-Id": randomUUID() })).status).toBe(401);
+  });
+
+  it("checks the tag first: an anonymous or forged caller gets 401 for a huge body, a batch or a session ID, with no database work", async () => {
+    const { secret } = await mint(owner(h.a), ["business:read"]);
+    let queries = 0;
+    const counting: ScopedDatabase = {
+      tenant: (...args) => { queries += 1; return h.database.db.tenant(...args); },
+      withoutTenant: (...args) => { queries += 1; return h.database.db.withoutTenant(...args); },
+    };
+    const app = appOnDatabase(counting, { clock });
+    const forged = secret.slice(0, -1) + (secret.endsWith("A") ? "B" : "A");
+    for (const bad of [null, forged]) {
+      expect((await rpc(app, bad, JSON.stringify({ pad: "x".repeat(65 * 1024) }))).status).toBe(401);
+      expect((await rpc(app, bad, [method("tools/list")])).status).toBe(401);
+      expect((await rpc(app, bad, "{not json")).status).toBe(401);
+      expect((await rpc(app, bad, method("tools/list"), { "Mcp-Session-Id": randomUUID() })).status).toBe(401);
+    }
+    expect(queries).toBe(0);
+  });
+
+  it("counts the body's real bytes: a stream with no Content-Length, or a false one, cannot get past 64 KiB", async () => {
+    const { secret } = await mint(owner(h.a), ["business:read"]);
+    const chunk = new TextEncoder().encode("x".repeat(8 * 1024));
+    const streamed = (chunks: number) => new ReadableStream<Uint8Array>({
+      pull(controller) { if (chunks-- > 0) controller.enqueue(chunk); else controller.close(); },
+    });
+    const send = (body: ReadableStream<Uint8Array>, extra: Record<string, string> = {}) => h.app.fetch(new Request(URL_BASE, {
+      method: "POST", headers: headersFor(secret, extra), body, duplex: "half",
+    } as RequestInit));
+    expect((await send(streamed(9))).status).toBe(413);
+    // Eight chunks are exactly 64 KiB: allowed in size, then refused as bad JSON (400), not 413.
+    expect((await send(streamed(8))).status).toBe(400);
+    const lying = await send(streamed(9), { "Content-Length": "10" });
+    expect(lying.status).toBe(413);
+  });
+
+  it("answers the CORS preflight of a browser client, allowing Mcp-Protocol-Version", async () => {
+    const response = await h.app.fetch(new Request(URL_BASE, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost:3000", "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,content-type,mcp-protocol-version",
+      },
+    }));
+    expect(response.status).toBe(204);
+    const allowed = (response.headers.get("access-control-allow-headers") ?? "").toLowerCase().split(/\s*,\s*/);
+    expect(allowed).toEqual(expect.arrayContaining(["authorization", "content-type", "mcp-protocol-version"]));
+    expect(response.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+    expect(response.headers.get("access-control-allow-methods")).toMatch(/POST/);
   });
 });
 
@@ -522,7 +622,114 @@ describe("deadline, disconnect and outage (H-5)", () => {
     const app = appOnDatabase(held.db, { clock, requestTimeoutMs: 150 });
     const response = await rpc(app, secret, callTool("list_contacts"));
     expect(response.status).toBe(503);
+    // The held statement was cut by the deadline, not left to run: it ends with the abort error.
     held.release();
+    await waitUntil(async () => held.outcomes.length > 0, "the held statement to end");
+    expect(held.outcomes).toEqual(["Database unavailable (aborted)"]);
+  });
+
+  it("answers an already-aborted request at once, without a database statement", async () => {
+    const { secret } = await mint(owner(h.a), ["contacts:read"]);
+    const seen = recording();
+    const app = appOnDatabase(seen.db, { clock });
+    const gone = new AbortController();
+    gone.abort();
+    const response = await Promise.resolve(app.fetch(new Request(URL_BASE, {
+      method: "POST", headers: headersFor(secret), body: JSON.stringify(callTool("list_contacts")), signal: gone.signal,
+    }))).catch(() => null);
+    if (response) expect(response.status).toBe(503);
+    expect(seen.sqls.filter((sql) => /crm_contacts/i.test(sql))).toEqual([]);
+  });
+
+  it("cancels a request that waits on a lock when the client disconnects: the wait ends, nothing is written, the connection is free", async () => {
+    const { secret, token } = await mint(owner(h.a), ["contacts:propose"]);
+    const approvals = () => queryCount("SELECT count(*) AS n FROM approvals WHERE tenant_id=$1", [h.a.tenantId]);
+    const before = await approvals();
+    const lock = await holdTokenRow(token.id);
+    try {
+      const gone = new AbortController();
+      const pending = Promise.resolve(h.app.fetch(new Request(URL_BASE, {
+        method: "POST", headers: headersFor(secret), signal: gone.signal,
+        body: JSON.stringify(callTool("propose_contact_upsert", { idempotencyKey: randomUUID(), email: `gone-${randomUUID().slice(0, 6)}@haldenrowe.example` })),
+      }))).then((reply) => reply.status, () => 0);
+      await waitUntil(async () => (await lockWaiters("automation_tokens")) > 0, "the proposal to wait on the token row");
+      gone.abort();
+      await waitUntil(async () => (await lockWaiters("automation_tokens")) === 0, "the lock wait to be cancelled");
+      expect([0, 503]).toContain(await pending);
+      await waitUntil(async () => h.database.runtimePool.totalCount === h.database.runtimePool.idleCount, "the pool to get its connections back");
+      expect(await queryCount(
+        `SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND usename='zs_runtime' AND state LIKE 'idle in transaction%'`, [])).toBe(0);
+    } finally {
+      await lock.release();
+    }
+    expect(await approvals()).toBe(before);
+  });
+
+  it("refuses a read that waited on the token row past its expiry, before any business query runs (K8)", async () => {
+    const { secret, token } = await mint(owner(h.a), ["contacts:read"], { expiresInDays: 1 });
+    const seen = recording();
+    const app = appOnDatabase(seen.db, { clock });
+    const lock = await holdTokenRow(token.id);
+    try {
+      const pending = rpc(app, secret, callTool("list_contacts"));
+      await waitUntil(async () => (await lockWaiters("automation_tokens")) > 0, "the read to wait on the token row");
+      clockMs += 25 * 3_600_000;
+      await lock.release();
+      const response = await pending;
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toBe("Bearer");
+    } finally {
+      clockMs = Date.parse(NOW);
+      await lock.release();
+    }
+    expect(seen.sqls.filter((sql) => /FROM crm_contacts/i.test(sql))).toEqual([]);
+    // A 401 mid-request is not use: nothing was recorded.
+    expect(await usageRows(token.id)).toBe(0);
+  });
+
+  it("lets an in-flight read finish and stops the next one when an owner revokes meanwhile", async () => {
+    const { secret, token } = await mint(owner(h.a), ["contacts:read"]);
+    const seeded = await seedContact(h.a, "Inflight");
+    const held = holding(/FROM crm_contacts/i);
+    const app = appOnDatabase(held.db, { clock });
+    const pending = rpc(app, secret, callTool("list_contacts", { search: seeded.email }));
+    await held.atStatement;
+    let revoked = false;
+    const revoking = revokeToken(h.a, token.id).then((reply) => { revoked = true; return reply; });
+    await waitUntil(async () => (await lockWaiters("automation_tokens")) > 0, "the revoke to wait for the read");
+    await sleep(300);
+    expect(revoked).toBe(false);
+    held.release();
+    const read = await pending;
+    expect(read.status).toBe(200);
+    expect(text({ content: (await read.json()).result.content }).items.map((item: { id: string }) => item.id)).toEqual([seeded.contactId]);
+    expect((await revoking).status).toBe(200);
+    expect((await rpc(app, secret, callTool("list_contacts"))).status).toBe(401);
+  });
+
+  it("lets an in-flight proposal commit, then refuses its replay and any new proposal after a revoke", async () => {
+    const { secret, token } = await mint(owner(h.a), ["contacts:propose"]);
+    const held = holding(/INSERT INTO approvals/i);
+    const app = appOnDatabase(held.db, { clock });
+    const proposal = callTool("propose_contact_upsert", {
+      idempotencyKey: randomUUID(), email: `race-${randomUUID().slice(0, 6)}@haldenrowe.example`,
+    });
+    const pending = rpc(app, secret, proposal);
+    await held.atStatement;
+    let revoked = false;
+    const revoking = revokeToken(h.a, token.id).then((reply) => { revoked = true; return reply; });
+    await waitUntil(async () => (await lockWaiters("automation_tokens")) > 0, "the revoke to wait for the proposal");
+    await sleep(300);
+    expect(revoked).toBe(false);
+    held.release();
+    const made = await pending;
+    expect(made.status).toBe(200);
+    const record = proposalRecordSchema.parse(text({ content: (await made.json()).result.content }));
+    expect(record.standing).toBe("pending");
+    expect((await revoking).status).toBe(200);
+    // The same proposal again is a replay of a stored answer; a revoked token gets no stored answer.
+    expect((await rpc(app, secret, proposal)).status).toBe(401);
+    expect((await rpc(app, secret, callTool("propose_contact_upsert", { idempotencyKey: randomUUID(), email: "new@haldenrowe.example" }))).status).toBe(401);
   });
 });
 
@@ -550,5 +757,216 @@ describe("expiry (H-1)", () => {
     expect((await call(h.app, "POST", "/v1/integrations/activepieces/tokens", {
       token: h.a.token, key: randomUUID(), body: { name: "Old", scopes: ["deals:propose"] },
     })).status).toBe(201);
+  });
+});
+
+describe("tenant B's bookings and threads (K7)", () => {
+  it("shows B's token B's bookings and threads, and A's token none of them, even by B's IDs", async () => {
+    const a = await mint(owner(h.a), ALL_SCOPES);
+    const b = await mint(owner(h.b), ALL_SCOPES);
+    const theirs = await contactAndDeal(h, h.b, `k7-${randomUUID().slice(0, 6)}@haldenrowe.example`);
+    const page = await provisionPage(h, h.b);
+    const ids = { bookingA: randomUUID(), bookingB: randomUUID(), linked: randomUUID(), loose: randomUUID() };
+    await h.fixture.service(async (tx) => {
+      for (const [tenant, id, resource] of [[h.a.tenantId, ids.bookingA, h.a.resourceId], [h.b.tenantId, ids.bookingB, h.b.resourceId]] as const)
+        await tx.query(
+          `INSERT INTO bookings (tenant_id,id,resource_id,starts_at,ends_at,occupied_starts_at,occupied_ends_at,created_at)
+           VALUES ($1,$2,$3,'2026-12-01T10:00:00Z','2026-12-01T11:00:00Z','2026-12-01T10:00:00Z','2026-12-01T11:00:00Z',$4)`,
+          [tenant, id, resource, NOW]);
+      await tx.query(
+        `INSERT INTO intake_items (tenant_id,id,status,channel,page_id,submitted_name,submitted_email,notes,contact_id,created_at)
+         VALUES ($1,$2,'new_contact','booking_page',$3,'Xavier B','xb@haldenrowe.example','note for B',$4,$5)`,
+        [h.b.tenantId, ids.linked, page.pageId, theirs.contactId, NOW]);
+      await tx.query(
+        `INSERT INTO intake_items (tenant_id,id,page_id,submitted_name,submitted_email,created_at)
+         VALUES ($1,$2,$3,'Loose B','loose-b@haldenrowe.example',$4)`,
+        [h.b.tenantId, ids.loose, page.pageId, NOW]);
+    });
+    const { client: ca } = await connect(a.secret);
+    const { client: cb } = await connect(b.secret);
+    const read = async (client: Client, name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args }) as Promise<ToolReply>;
+    const dump = async (client: Client, name: string, args: Record<string, unknown> = {}) => JSON.stringify(text(await read(client, name, args)));
+
+    // B's own token reads them.
+    const bBookings = await dump(cb, "list_bookings", { resourceId: h.b.resourceId });
+    expect(bBookings).toContain(ids.bookingB);
+    const bThreads = await dump(cb, "list_threads");
+    expect(bThreads).toContain(`c_${theirs.contactId}`);
+    expect(bThreads).toContain(`v_${ids.loose}`);
+    expect(JSON.stringify(text(await read(cb, "get_thread", { threadId: `c_${theirs.contactId}` })))).toContain("note for B");
+    expect(JSON.stringify(text(await read(cb, "get_thread", { threadId: `v_${ids.loose}` })))).toContain("Loose B");
+
+    // A's token reads none of it, with or without B's IDs.
+    for (const args of [{}, { resourceId: h.b.resourceId }, { contactId: theirs.contactId }]) {
+      const seen = await dump(ca, "list_bookings", args);
+      expect(seen, JSON.stringify(args)).not.toContain(ids.bookingB);
+    }
+    expect(await dump(ca, "list_bookings")).toContain(ids.bookingA);
+    const aThreads = await dump(ca, "list_threads");
+    expect(aThreads).not.toContain(theirs.contactId);
+    expect(aThreads).not.toContain(ids.loose);
+    expect(failure(await read(ca, "get_thread", { threadId: `c_${theirs.contactId}` }))).toBe("NotFound");
+    expect(failure(await read(ca, "get_thread", { threadId: `v_${ids.loose}` }))).toBe("NotFound");
+    expect(failure(await read(ca, "get_thread", { threadId: `v_${ids.linked}` }))).toBe("NotFound");
+    expect(text(await read(ca, "list_deals", { pipelineId: h.b.pipelineId })).items).toEqual([]);
+    expect(text(await read(ca, "list_deals", { pipelineId: h.b.pipelineId, contactId: theirs.contactId })).items).toEqual([]);
+    expect(JSON.stringify(text(await read(ca, "list_pipelines")))).not.toContain(h.b.pipelineId);
+    expect(JSON.stringify(text(await read(ca, "list_resources")))).not.toContain(h.b.resourceId);
+
+    // Proposals that name B's IDs are made for A and cannot reach B's rows.
+    const dealsOfB = () => queryCount("SELECT count(*) AS n FROM crm_deals WHERE tenant_id=$1", [h.b.tenantId]);
+    const bookingsOfB = () => queryCount("SELECT count(*) AS n FROM bookings WHERE tenant_id=$1", [h.b.tenantId]);
+    const [dealsBefore, bookingsBefore] = [await dealsOfB(), await bookingsOfB()];
+    const proposals = [
+      ["propose_deal_create", { contactId: theirs.contactId, pipelineId: h.b.pipelineId, stageId: h.b.stages[0], title: "Cross" }],
+      ["propose_booking_create", { resourceId: h.b.resourceId, startsAt: "2026-12-02T10:00:00.000Z" }],
+    ] as const;
+    for (const [name, args] of proposals) {
+      const made = await read(ca, name, { idempotencyKey: randomUUID(), ...args });
+      if (made.isError) continue; // refused outright is as safe
+      const record = proposalRecordSchema.parse(text(made));
+      const approved = await call(h.app, "POST", `/v1/approvals/${record.id}/approve`, { token: h.a.token, key: randomUUID(), body: {} });
+      expect(approved.status, name).not.toBe(200);
+    }
+    expect(await dealsOfB()).toBe(dealsBefore);
+    expect(await bookingsOfB()).toBe(bookingsBefore);
+    await Promise.all([ca.close(), cb.close()]);
+  });
+});
+
+describe("home_results per token (H-6, H-11)", () => {
+  it("returns each tenant's own totals, equal to the member route's", async () => {
+    const a = await mint(owner(h.a), ["results:read"]);
+    const b = await mint(owner(h.b), ["results:read"]);
+    for (let i = 0; i < 5; i++) await seedContact(h.a, `Results${i}`);
+    await seedContact(h.b, "ResultsOnly");
+    const viaToken = async (secret: string) => text({ content: (await (await rpc(h.app, secret, callTool("home_results", { zone: "UTC" }))).json()).result.content });
+    const viaMember = async (tenant: TenantSetup) => (await call(h.app, "GET", "/v1/home/results?zone=UTC", { token: tenant.token })).body;
+    const [tokenA, tokenB] = [await viaToken(a.secret), await viaToken(b.secret)];
+    expect(tokenA).toEqual(await viaMember(h.a));
+    expect(tokenB).toEqual(await viaMember(h.b));
+    expect(tokenA).not.toEqual(tokenB);
+  });
+});
+
+describe("usage under pressure and by definition (H-8)", () => {
+  const usageOf = async (tokenId: string) =>
+    automationUsageSchema.parse((await call(h.app, "GET", `/v1/integrations/activepieces/tokens/${tokenId}/usage`, { token: h.a.token })).body).totals;
+
+  it("answers 200 within seconds when the usage row is locked by another transaction, and reports the failed write", async () => {
+    const { secret, token } = await mint(owner(h.a), ["business:read"]);
+    const reported: unknown[] = [];
+    const app = appOnDatabase(h.database.db, { clock, onError: (error) => { reported.push(error); } });
+    const holder = await h.database.pool.connect();
+    await holder.query("BEGIN");
+    try {
+      const hour = new Date(Math.floor(clockMs / 3_600_000) * 3_600_000).toISOString();
+      await holder.query("INSERT INTO automation_token_usage (tenant_id,token_id,hour,requests) VALUES ($1,$2,$3,1)", [h.a.tenantId, token.id, hour]);
+      const started = Date.now();
+      const response = await rpc(app, secret, callTool("get_business"));
+      expect(response.status).toBe(200);
+      expect(Date.now() - started).toBeLessThan(6000);
+      expect(reported).toHaveLength(1);
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
+    expect(await usageRows(token.id)).toBe(0);
+  });
+
+  it("counts SDK errors as refusals, an outage as a request only, and a 401 as nothing", async () => {
+    const { secret, token } = await mint(owner(h.a), ["contacts:read"]);
+    // The SDK answers a malformed tools/call (no tool name) with -32603 and a tool the token lacks with -32601: both are refusals.
+    expect((await (await rpc(h.app, secret, method("tools/call", {}))).json()).error.code).toBe(-32603);
+    expect(await usageOf(token.id)).toEqual({ requests: 1, reads: 0, proposals: 0, refusals: 1 });
+    expect((await (await rpc(h.app, secret, callTool("no_such_tool"))).json()).error.code).toBe(-32601);
+    expect(await usageOf(token.id)).toEqual({ requests: 2, reads: 0, proposals: 0, refusals: 2 });
+    // An outage on the business read: 503, a request, no read, no refusal.
+    const down = appOnDatabase({
+      ...h.database.db,
+      tenant: (tenantId, work, options) => h.database.db.tenant(tenantId, (tx) => work({
+        query: ((sql: string, params?: unknown[]) => /FROM crm_contacts/i.test(sql)
+          ? Promise.reject(new DatabaseUnavailable("connect"))
+          : tx.query(sql as never, params as never)) as Transaction["query"],
+      }), options),
+    }, { clock });
+    expect((await rpc(down, secret, callTool("list_contacts"))).status).toBe(503);
+    expect(await usageOf(token.id)).toEqual({ requests: 3, reads: 0, proposals: 0, refusals: 2 });
+    // A token revoked now gets 401 and no further record.
+    expect((await revokeToken(h.a, token.id)).status).toBe(200);
+    expect((await rpc(h.app, secret, callTool("list_contacts"))).status).toBe(401);
+    expect(await usageOf(token.id)).toEqual({ requests: 3, reads: 0, proposals: 0, refusals: 2 });
+  });
+
+  it("prunes old usage rows on the first write of an API instance, without the webhook worker", async () => {
+    const { secret, token } = await mint(owner(h.a), ["business:read"]);
+    await h.database.pool.query(
+      `INSERT INTO automation_token_usage (tenant_id,token_id,hour,requests)
+       SELECT $1, $2, date_trunc('hour', now()) - interval '90 days' - n * interval '1 hour', 1 FROM generate_series(0, 4) n`,
+      [h.a.tenantId, token.id]);
+    const old = () => queryCount("SELECT count(*) AS n FROM automation_token_usage WHERE token_id=$1 AND hour < now() - interval '60 days'", [token.id]);
+    expect(await old()).toBe(5);
+    const fresh = appOnDatabase(h.database.db, { clock });
+    expect((await rpc(fresh, secret, callTool("get_business"))).status).toBe(200);
+    await waitUntil(async () => (await old()) === 0, "the old usage rows to be pruned");
+    expect(await usageRows(token.id)).toBe(1);
+  });
+});
+
+describe("the REST endpoint beside /mcp (W-9, W-13, K1, K2, K9)", () => {
+  const rest = (secret: string) => ({ Authorization: `Bearer ${secret}` });
+
+  it("refuses me, a replay and a read-back at once after a revoke", async () => {
+    const { secret, token } = await mint(owner(h.a), ["contacts:propose"]);
+    const key = randomUUID();
+    const body = { action: "contact.upsert", input: { displayName: "Rest Halden", email: `rest-${randomUUID().slice(0, 6)}@haldenrowe.example` } };
+    const first = await call(h.app, "POST", "/integrations/activepieces/v1/proposals", { headers: rest(secret), key, body });
+    expect(first.status).toBe(201);
+    const id = proposalRecordSchema.parse(first.body).id;
+    expect((await revokeToken(h.a, token.id)).status).toBe(200);
+    expect((await call(h.app, "POST", "/integrations/activepieces/v1/proposals", { headers: rest(secret), key, body })).status).toBe(401);
+    expect((await call(h.app, "GET", "/integrations/activepieces/v1/me", { headers: rest(secret) })).status).toBe(401);
+    expect((await call(h.app, "GET", `/integrations/activepieces/v1/proposals/${id}`, { headers: rest(secret) })).status).toBe(401);
+  });
+
+  it("gives the same proposal for the same key and input over REST and over MCP", async () => {
+    const { secret } = await mint(owner(h.a), ["contacts:propose"]);
+    const key = randomUUID();
+    const input = { displayName: "Both Halden", email: `both-${randomUUID().slice(0, 6)}@haldenrowe.example` };
+    const viaRest = await call(h.app, "POST", "/integrations/activepieces/v1/proposals", {
+      headers: rest(secret), key, body: { action: "contact.upsert", input },
+    });
+    expect(viaRest.status).toBe(201);
+    const viaMcp = await rpc(h.app, secret, callTool("propose_contact_upsert", { idempotencyKey: key, ...input }));
+    expect(viaMcp.status).toBe(200);
+    const mcpRecord = proposalRecordSchema.parse(text({ content: (await viaMcp.json()).result.content }));
+    expect(mcpRecord.id).toBe(proposalRecordSchema.parse(viaRest.body).id);
+    // One canonical summary, whichever transport made the proposal.
+    const stored = await h.database.pool.query<{ summary: string }>("SELECT summary FROM approvals WHERE id=$1", [mcpRecord.id]);
+    expect(stored.rows[0]!.summary).toMatch(/^Automation token \(.+\) proposes to /);
+  });
+});
+
+describe("the contact proposal and the scopes route (H-6, H-9)", () => {
+  it("points a contact proposal with neither email nor phone at the email field", async () => {
+    const { secret } = await mint(owner(h.a), ["contacts:propose"]);
+    const reply = await (await rpc(h.app, secret, callTool("propose_contact_upsert", { idempotencyKey: randomUUID(), displayName: "No Way" }))).json();
+    const body = JSON.stringify(reply.result.content);
+    expect(reply.result.isError).toBe(true);
+    expect(body).toContain("ValidationFailed");
+    expect(body).toContain("email");
+    expect(body).not.toContain("input.");
+  });
+
+  it("lists the nine scopes with their disclosures to an owner only", async () => {
+    const path = "/v1/integrations/activepieces/scopes";
+    const owned = await call(h.app, "GET", path, { token: h.a.token });
+    expect(owned.status).toBe(200);
+    const list = automationScopeListSchema.parse(owned.body);
+    expect(list.items.map((item) => item.scope)).toEqual([...AUTOMATION_SCOPES]);
+    for (const item of list.items) if (item.kind === "read") expect(item.disclosure).toBe(READ_SCOPE_DISCLOSURES[item.scope as keyof typeof READ_SCOPE_DISCLOSURES]);
+    const staff = await signedInMember(h.database, h.fixture, h.a.tenantId, "staff");
+    expect((await call(h.app, "GET", path, { token: staff.token })).status).toBe(403);
+    expect((await call(h.app, "GET", path)).status).toBe(401);
   });
 });

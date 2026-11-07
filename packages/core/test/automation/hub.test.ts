@@ -259,6 +259,49 @@ describe("usage record (H-8, H-11)", () => {
     const left = await h.rows<{ hour: Date }>("SELECT hour FROM automation_token_usage WHERE token_id=$1 ORDER BY hour", [token.id]);
     expect(left.map((row) => row.hour.toISOString())).toEqual([recent.toISOString(), new Date(Math.floor(START / HOUR) * HOUR).toISOString()]);
   });
+
+  it("reads exactly 168 hours: the hour 167 hours back is in, the one 168 back is out, and a later hour is never in", async () => {
+    const { token, principal } = await mint(["contacts:read"]);
+    const deps = h.deps();
+    await recordTokenUsage(deps, principal, { requests: 1, reads: 0, proposals: 0, refusals: 0 });
+    // A row in the next hour already exists (written by a clock that ran ahead): a read now never shows it.
+    await h.service((tx) => tx.query(
+      "INSERT INTO automation_token_usage (tenant_id, token_id, hour, requests) VALUES ($1,$2,$3,7)", [principal.tenantId, token.id, new Date(START + HOUR)]));
+    try {
+      expect((await h.admin(h.a).tokenUsage(token.id)).totals.requests).toBe(1);
+      h.clock.set(START + 167 * HOUR);
+      expect((await h.admin(h.a).tokenUsage(token.id)).hours.map((row) => row.hour)).toContain(new Date(START).toISOString());
+      h.clock.set(START + 168 * HOUR);
+      const edge = await h.admin(h.a).tokenUsage(token.id);
+      expect(edge.hours.map((row) => row.hour)).not.toContain(new Date(START).toISOString());
+      expect(edge.hours.map((row) => row.hour)).toContain(new Date(START + HOUR).toISOString());
+      expect(edge.totals.requests).toBe(7);
+    } finally {
+      h.clock.set(START);
+    }
+  });
+
+  it("prunes a backlog bigger than a batch over several bounded calls, and leaves rows inside the retention", async () => {
+    const { token, principal } = await mint(["contacts:read"]);
+    const old = new Date(START - (USAGE_RETENTION_DAYS + 2) * DAY);
+    const recent = new Date(START - (USAGE_RETENTION_DAYS - 2) * DAY);
+    await h.service(async (tx) => {
+      await tx.query(
+        `INSERT INTO automation_token_usage (tenant_id, token_id, hour, requests)
+         SELECT $1, $2, $3::timestamptz - n * interval '1 hour', 1 FROM generate_series(0, 2499) n`, [principal.tenantId, token.id, old]);
+      await tx.query("INSERT INTO automation_token_usage (tenant_id, token_id, hour, requests) VALUES ($1,$2,$3,1)", [principal.tenantId, token.id, recent]);
+    });
+    const left = async () => (await h.rows<{ n: string }>("SELECT count(*) AS n FROM automation_token_usage WHERE token_id=$1", [token.id]))[0]!.n;
+    const worker = h.worker();
+    // Batches of 100, at most five a call: 500 rows go, the rest wait for the next call.
+    expect(await worker.pruneUsage(100)).toBe(500);
+    expect(await left()).toBe("2001");
+    // Batches of 1,000, five at most: the 2,000 left go in three batches (1,000, 1,000, 0).
+    expect(await worker.pruneUsage(1000)).toBe(2000);
+    expect(await left()).toBe("1");
+    expect(await worker.pruneUsage()).toBe(0);
+    expect(await left()).toBe("1");
+  });
 });
 
 describe("principals", () => {
