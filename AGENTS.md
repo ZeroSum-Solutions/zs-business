@@ -19,8 +19,13 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
 - Nothing says "booked" until a booking row commits under a constraint that rejects
   overlaps. Test it with two concurrent creates where one must lose.
 - Inject the clock and config. No ambient `Date.now()` or `process.env` in core logic.
-- Local Postgres or a Supabase branch only. No agent writes production rows; schema
-  changes ship as migrations.
+- Tests and smoke runs use local Postgres or a Supabase branch, and clean up after themselves.
+  Schema changes ship as migrations.
+- Agents on Devin's Mac may write production rows when the work needs it (Devin, 2026-11-07).
+  Prefer a repo script (for example `db:hosted-tenant-create`, `db:hosted-provision-owner`)
+  over hand-written SQL. Dry-run it, take a `db:hosted-backup` first, apply, verify the result,
+  and keep the receipt in `~/Backups/zs-business/receipts/`. Cloud sessions still never touch
+  hosted systems (below).
 - Never edit `/Users/zero-suminc./projects/mish` or `/Users/zero-suminc./projects/rise-scheduler`
   from this repo's work. Read them only.
 - Conventional commits on feature branches. No AI attribution lines in commits, PR bodies or
