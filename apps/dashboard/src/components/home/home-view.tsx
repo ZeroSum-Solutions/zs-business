@@ -34,6 +34,7 @@ import {
   weekStripDays,
   weekStripQuery,
 } from "./home-model";
+import { SetupLine } from "./setup-line";
 
 /** What a read shows when it has nothing cached and the connection is down. */
 const OFFLINE = new ApiError("network", defaultMessage("network"));
@@ -650,6 +651,7 @@ export function HomeView() {
   return (
     <>
       <HomeHeader needs={needs} reports={reports} />
+      <SetupLine />
       <div className="grid grid-cols-1 items-start gap-3 lg:grid-flow-dense lg:grid-cols-12 lg:gap-4">
         <NeedsYou needs={needs} className="lg:col-span-7" />
         <WeekStrip now={needs.clock} className="lg:hidden" />
