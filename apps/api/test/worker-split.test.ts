@@ -2,76 +2,79 @@
 // variables are visible to every function in it. These tests keep the API function from reading a
 // worker-only secret, and the two build outputs from mixing (resend.md R-9, stripe.md S-8,
 // google-calendar.md G-3, activepieces.md W-14, agents.md G-13). The env table is in README.md,
-// "Hosted deploy".
+// "Hosted deploy"; the list of worker-only names is scripts/worker-env.mjs.
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { build, transform } from "esbuild";
 import { afterAll, describe, expect, it } from "vitest";
 import { bundleOptions } from "../scripts/bundle-options.mjs";
+import { CRON_SCHEDULE_VARIABLES, WORKER_ONLY_ENV } from "../scripts/worker-env.mjs";
 
 const API_DIR = fileURLToPath(new URL("..", import.meta.url));
+const slash = (path: string) => path.replaceAll("\\", "/");
 
-/**
- * Variables only a cron function reads. None of them may be set on the API project, so none may
- * appear in the API bundle. Variables both read (DATABASE_CA_CERT, UNSUBSCRIBE_TOKEN_SECRET,
- * ACTIVEPIECES_KEY_SECRET, GOOGLE_CLIENT_*, GOOGLE_CHANNEL_SECRET, TWILIO_ACCOUNT_SID,
- * TWILIO_AUTH_TOKEN, TWILIO_WEBHOOK_BASE_URL, PUBLIC_BOOKING_KEY_SECRET, PUBLIC_BASE_URL) are not here.
- */
-const WORKER_ONLY = [
-  "CRON_SECRET",
-  // delivery (src/delivery/config.ts, @zs/core resend.ts and twilio.ts)
-  "DELIVERY_WORKER", "DELIVERY_WORKER_ID", "DELIVERY_DATABASE_URL", "DELIVERY_PRICE_EMAIL", "DELIVERY_PRICE_SMS_SEGMENT",
-  "DELIVERY_CURRENCY", "DELIVERY_UNSUBSCRIBE_BASE_URL", "DELIVERY_RUN_BUDGET_MS", "DELIVERY_CLAIM_LIMIT",
-  "DELIVERY_PROVIDER_TIMEOUT_MS", "DELIVERY_INTERVAL_MS", "SMS_PROVIDER",
-  "RESEND_API_KEY", "RESEND_FROM", "RESEND_REPLY_TO", "RESEND_BASE_URL",
-  "TWILIO_API_KEY_SID", "TWILIO_API_KEY_SECRET", "TWILIO_BASE_URL", "TWILIO_OUTCOME_WAIT_MS",
-  // billing
-  "BILLING_WORKER", "BILLING_DATABASE_URL", "BILLING_CLAIM_LIMIT", "BILLING_RUN_BUDGET_MS", "BILLING_INTERVAL_MS",
-  // calendar
-  "CALENDAR_WORKER", "CALENDAR_DATABASE_URL", "CALENDAR_RUN_BUDGET_MS", "CALENDAR_INTERVAL_MS",
-  "GOOGLE_TOKEN_PRIVATE_KEY", "GOOGLE_WEBHOOK_URL", "GOOGLE_EVENT_TITLE",
-  // activepieces
-  "ACTIVEPIECES_WEBHOOK_WORKER", "ACTIVEPIECES_DATABASE_URL", "ACTIVEPIECES_WORKER_ID", "ACTIVEPIECES_RUN_BUDGET_MS",
-  "ACTIVEPIECES_CLAIM_LIMIT", "ACTIVEPIECES_REQUEST_TIMEOUT_MS", "ACTIVEPIECES_MAX_ATTEMPTS", "ACTIVEPIECES_INTERVAL_MS",
-  // follow-up agent
-  "FOLLOWUP_AGENT", "FOLLOWUP_DATABASE_URL", "FOLLOWUP_SERVICE_DATABASE_URL", "FOLLOWUP_MODEL", "AGENT_MODEL_PERSONAL_DATA",
-  "AGENT_MODEL_NO_PERSONAL_DATA", "AGENT_TEMPLATED", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL",
-  // build variables of the worker project
-  "DELIVERY_CRON_SCHEDULE", "BILLING_CRON_SCHEDULE", "CALENDAR_CRON_SCHEDULE", "ACTIVEPIECES_CRON_SCHEDULE", "FOLLOWUP_CRON_SCHEDULE",
-];
-
-/** Source files only a cron function may bundle: the runners, their starters and the cron routes. */
+/** Source files only a cron function or a Mac worker may bundle: runners, starters, cron routes, worker configs, scripts. */
 const WORKER_ONLY_SOURCES = [
-  /\/src\/vercel-[a-z]+\.ts$/,
-  /\/src\/(delivery|billing|calendar|activepieces|followup)\/(start|config|cron)\.ts$/,
+  /\/apps\/api\/src\/vercel-[a-z]+\.ts$/,
+  /\/apps\/api\/src\/(delivery|billing|calendar|activepieces|followup|enrichment|images)\/(start|config|cron|runner)\.ts$/,
+  /\/apps\/api\/src\/scripts\//,
 ];
+
+/** Reading every variable at once would defeat the name check: the API reads declared names only. */
+const ENV_DUMPS = [/Object\s*\.\s*(keys|entries|values)\s*\(\s*process\s*\.\s*env\b/, /\.\.\.\s*process\s*\.\s*env\b/];
+
+/** Comments are not code: drop them (and legal comments) so a variable named in a doc comment is not a read. */
+async function withoutComments(code: string) {
+  return (await transform(code, { loader: "js", format: "esm", minifyWhitespace: true, legalComments: "none" })).code;
+}
 
 async function bundleEntry(entry: string) {
   const result = await build({
     ...bundleOptions(join(API_DIR, "src", entry)),
+    absWorkingDir: API_DIR,
     write: false,
     outfile: "bundle.mjs",
     metafile: true,
-    // Comments are not code: drop them so a variable named in a doc comment is not a read.
     minifyWhitespace: true,
   });
-  const inputs = Object.keys(Object.values(result.metafile.outputs)[0]!.inputs).map((path) => join(API_DIR, path));
+  const inputs = Object.keys(Object.values(result.metafile.outputs)[0]!.inputs).map((path) => slash(join(API_DIR, path)));
   return { text: result.outputFiles[0]!.text, inputs };
 }
+
+function namedIn(text: string) {
+  return WORKER_ONLY_ENV.filter((name) => new RegExp(`\\b${name}\\b`).test(text));
+}
+
+describe("the worker-only list", () => {
+  it("has no duplicates and includes every schedule variable", () => {
+    expect(new Set(WORKER_ONLY_ENV).size).toBe(WORKER_ONLY_ENV.length);
+    for (const name of CRON_SCHEDULE_VARIABLES) expect(WORKER_ONLY_ENV).toContain(name);
+  });
+
+  it("is in the README env table, marked as not for the API project", async () => {
+    const readme = await readFile(join(API_DIR, "README.md"), "utf8");
+    // A name is documented as a code span; a group row can list several in one cell.
+    expect(WORKER_ONLY_ENV.filter((name) => !readme.includes(`\`${name}\``))).toEqual([]);
+  });
+});
 
 describe("the API function (src/vercel.ts)", () => {
   it("never names a worker-only variable, so it cannot read one", async () => {
     const { text } = await bundleEntry("vercel.ts");
-    const found = WORKER_ONLY.filter((name) => new RegExp(`\\b${name}\\b`).test(text));
-    expect(found).toEqual([]);
+    expect(namedIn(text)).toEqual([]);
     // Whatever else is added to the token key's name, the private half is never in the API.
     expect(text).not.toMatch(/_TOKEN_PRIVATE_KEY/);
   }, 60_000);
 
-  it("bundles no cron route, runner or worker entry point", async () => {
+  it("does not read the whole environment (Object.keys, Object.entries, a spread)", async () => {
+    const { text } = await bundleEntry("vercel.ts");
+    expect(ENV_DUMPS.filter((pattern) => pattern.test(text)).map(String)).toEqual([]);
+  }, 60_000);
+
+  it("bundles no cron route, runner, worker config or script", async () => {
     const { inputs } = await bundleEntry("vercel.ts");
     expect(inputs.filter((path) => WORKER_ONLY_SOURCES.some((pattern) => pattern.test(path)))).toEqual([]);
   }, 60_000);
@@ -87,40 +90,74 @@ describe("build-vercel.mjs", () => {
   const dirs: string[] = [];
   afterAll(async () => { await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true }))); });
 
-  async function run(target: string) {
-    const dir = await mkdtemp(join(tmpdir(), `zs-vercel-${target}-`));
+  const noSchedules = Object.fromEntries(Object.entries(process.env).filter(([name]) => !CRON_SCHEDULE_VARIABLES.includes(name)));
+  const allSchedules = {
+    DELIVERY_CRON_SCHEDULE: "*/5 * * * *", BILLING_CRON_SCHEDULE: "*/5 * * * *", CALENDAR_CRON_SCHEDULE: "*/5 * * * *",
+    ACTIVEPIECES_CRON_SCHEDULE: "*/5 * * * *", FOLLOWUP_CRON_SCHEDULE: "0 * * * *",
+  };
+
+  /** A fresh, empty directory path: the script writes into an empty or missing directory only. */
+  async function freshDir() {
+    const dir = await mkdtemp(join(tmpdir(), "zs-vercel-"));
     dirs.push(dir);
-    const result = spawnSync(process.execPath, ["scripts/build-vercel.mjs", target, dir], {
+    return dir;
+  }
+
+  async function runScript(target: string, dir: string, schedules: Record<string, string>) {
+    return spawnSync(process.execPath, ["scripts/build-vercel.mjs", target, dir], {
       cwd: API_DIR,
       encoding: "utf8",
-      // Every schedule set: the API build must ignore them, the worker build must use them.
-      env: {
-        ...process.env,
-        DELIVERY_CRON_SCHEDULE: "*/5 * * * *", BILLING_CRON_SCHEDULE: "*/5 * * * *", CALENDAR_CRON_SCHEDULE: "*/5 * * * *",
-        ACTIVEPIECES_CRON_SCHEDULE: "*/5 * * * *", FOLLOWUP_CRON_SCHEDULE: "0 * * * *",
-      },
+      env: { ...noSchedules, ...schedules },
     });
-    expect(result.stderr).toBe("");
-    expect(result.status).toBe(0);
+  }
+
+  async function run(target: string, schedules: Record<string, string>) {
+    const dir = await freshDir();
+    const result = await runScript(target, dir, schedules);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(`Wrote ${dir} (${target})`);
     return {
+      dir,
       config: JSON.parse(await readFile(join(dir, "config.json"), "utf8")) as { routes: { src: string; dest: string }[]; crons?: unknown },
-      functions: (await readdir(join(dir, "functions"), { recursive: true })).filter((path) => path.endsWith(".func")).sort(),
+      functions: (await readdir(join(dir, "functions"), { recursive: true })).map(slash).filter((path) => path.endsWith(".func")).sort(),
     };
   }
 
-  it("api: one function, no cron functions, no crons, every path to the API", async () => {
-    const { config, functions } = await run("api");
+  it("api: one function, no cron functions, no crons, every path to the API, and its static files", async () => {
+    const { dir, config, functions } = await run("api", {});
     expect(functions).toEqual(["index.func"]);
     expect(config.crons).toBeUndefined();
     expect(config.routes).toEqual([{ src: "/(.*)", dest: "/index" }]);
+    expect((await stat(join(dir, "functions", "index.func", "static"))).isDirectory()).toBe(true);
   }, 60_000);
 
-  it("worker: only the five cron functions and their schedules, no catch-all route", async () => {
-    const { config, functions } = await run("worker");
+  it("api: the emitted function file names no worker-only variable and does not dump the environment", async () => {
+    const { dir } = await run("api", {});
+    const emitted = await withoutComments(await readFile(join(dir, "functions", "index.func", "index.mjs"), "utf8"));
+    expect(namedIn(emitted)).toEqual([]);
+    expect(ENV_DUMPS.filter((pattern) => pattern.test(emitted)).map(String)).toEqual([]);
+  }, 60_000);
+
+  it.each(CRON_SCHEDULE_VARIABLES)("api: fails when %s is set, so a deploy cannot drop a live cron", async (name) => {
+    const dir = await freshDir();
+    const result = await runScript("api", dir, { [name]: "*/5 * * * *" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(name);
+    expect(result.stderr).toContain("no crons");
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it("worker: only the five cron functions and their schedules, exact anchored routes, no static files", async () => {
+    const { dir, config, functions } = await run("worker", allSchedules);
     const names = ["activepieces", "billing", "calendar", "delivery", "followup"];
-    expect(functions).toEqual(names.map((name) => join("cron", `${name}.func`)));
-    expect(config.routes.map((route) => route.src).sort()).toEqual(names.map((name) => `/cron/${name}`));
-    expect(config.routes.every((route) => route.src === route.dest)).toBe(true);
+    expect(functions).toEqual(names.map((name) => `cron/${name}.func`));
+    expect(config.routes.map((route) => route.src).sort()).toEqual(names.map((name) => `^/cron/${name}$`));
+    expect(config.routes.map((route) => route.dest).sort()).toEqual(names.map((name) => `/cron/${name}`));
+    // The anchored pattern reaches the exact path only.
+    for (const route of config.routes) {
+      expect(new RegExp(route.src).test(route.dest)).toBe(true);
+      for (const other of [`${route.dest}/x`, `${route.dest}x`, `/api${route.dest}`, "/", "/v1/clients"]) expect(new RegExp(route.src).test(other)).toBe(false);
+    }
     expect(config.crons).toEqual([
       { path: "/cron/delivery", schedule: "*/5 * * * *" },
       { path: "/cron/billing", schedule: "*/5 * * * *" },
@@ -128,10 +165,51 @@ describe("build-vercel.mjs", () => {
       { path: "/cron/activepieces", schedule: "*/5 * * * *" },
       { path: "/cron/followup", schedule: "0 * * * *" },
     ]);
+    await expect(stat(join(dir, "functions", "index.func"))).rejects.toThrow();
+    await expect(stat(join(dir, "functions", "cron", "delivery.func", "static"))).rejects.toThrow();
   }, 120_000);
+
+  it("worker: with no schedule variables there is no crons key", async () => {
+    const { config, functions } = await run("worker", {});
+    expect(functions).toHaveLength(5);
+    expect(config.crons).toBeUndefined();
+  }, 120_000);
+
+  it("worker: an invalid schedule exits non-zero and names the variable", async () => {
+    const dir = await freshDir();
+    const result = await runScript("worker", dir, { ACTIVEPIECES_CRON_SCHEDULE: "every five minutes" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("ACTIVEPIECES_CRON_SCHEDULE");
+  });
 
   it("refuses an unknown target", () => {
     const result = spawnSync(process.execPath, ["scripts/build-vercel.mjs", "both"], { cwd: API_DIR, encoding: "utf8" });
     expect(result.status).not.toBe(0);
   });
+
+  it("refuses a non-empty output directory and leaves its files alone", async () => {
+    const dir = await freshDir();
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "keep.txt"), "mine");
+    await writeFile(join(dir, "sub", "deep.txt"), "mine too");
+    for (const target of ["api", "worker"]) {
+      const result = await runScript(target, dir, {});
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("is not empty");
+    }
+    expect(await readFile(join(dir, "keep.txt"), "utf8")).toBe("mine");
+    expect(await readFile(join(dir, "sub", "deep.txt"), "utf8")).toBe("mine too");
+  });
+
+  it("refuses an output path that is a file, and accepts a path that does not exist yet", async () => {
+    const dir = await freshDir();
+    await writeFile(join(dir, "file"), "x");
+    const asFile = await runScript("worker", join(dir, "file"), {});
+    expect(asFile.status).not.toBe(0);
+    expect(asFile.stderr).toContain("not a directory");
+    expect(await readFile(join(dir, "file"), "utf8")).toBe("x");
+    const missing = await runScript("worker", join(dir, "new", "out"), {});
+    expect(missing.status, missing.stderr).toBe(0);
+    expect((await stat(join(dir, "new", "out", "config.json"))).isFile()).toBe(true);
+  }, 120_000);
 });
