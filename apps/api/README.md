@@ -658,10 +658,12 @@ against the pinned Supabase Root 2021 CA.
 5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
    upload), with `VERCEL_TOKEN` in the environment:
    ```sh
+   # Workers first, always (see "Moving the crons out of a single project"). Vercel Cron runs only
+   # on a production deployment, so the workers' cron fires after --prod.
+   VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl \
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # cron workers
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ \
      mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # API
-   VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=<WORKER_PROJECT_ID> \
-     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # cron workers
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_uTGH5yuyXfr6w9lAihGj1HcDxSdp \
      mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # dashboard
    ```
@@ -675,50 +677,106 @@ against the pinned Supabase Root 2021 CA.
 
    | Project | Build command | Output |
    |---|---|---|
-   | API (`prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ`) | `pnpm build:vercel` | One Node 24 function from `src/vercel.ts` for every path. No cron functions, no crons. |
-   | Workers (`<WORKER_PROJECT_ID>`) | `pnpm build:vercel:worker` | Five functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces` and `/cron/followup`, and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
+   | API (`prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ`) | `pnpm build:vercel` | One Node 24 function from `src/vercel.ts` for every path. No cron functions, no crons. **The build fails while any `*_CRON_SCHEDULE` is set**, so a deploy cannot drop a live cron unnoticed. |
+   | Workers (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`) | `pnpm build:vercel:worker` | Five functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces` and `/cron/followup`, each reached only by its exact path (anchored routes, `^/cron/<name>$`), and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
+
+   `build-vercel.mjs <api|worker> [dir]` cleans only its default `.vercel/output`; a directory
+   given as `dir` must not exist or be empty, or the script stops before writing anything.
+
+   Vercel Cron fires only on a project's **production** deployment. The `*_CRON_SCHEDULE` crons
+   therefore run on the workers project's production deployment alone (`--prod`); on a preview
+   deployment the `/cron/*` routes exist but run only when called by hand with
+   `Authorization: Bearer <CRON_SECRET>`. The workers project has Vercel Authentication off
+   (`ssoProtection` null), so Vercel Cron and that bearer reach it; **the bearer is the only
+   gate**, and `CRON_SECRET` must be 32+ characters and not the `.env.example` placeholder.
 
    Environment per project (production and preview carry the same names; each target uses its own
-   database ref). `test/worker-split.test.ts` fails if the API bundle names a worker-only variable.
+   database ref). The names in the "no" rows are listed in `scripts/worker-env.mjs`;
+   `test/worker-split.test.ts` fails if the API bundle (in memory, and as written by the real
+   script) names one of them, if it reads the whole environment (`Object.keys(process.env)`,
+   `Object.entries`, a `...process.env` spread), or if a name is missing from this table.
 
    | Variable | API | Workers |
    |---|---|---|
    | `ENABLE_EXPERIMENTAL_COREPACK=1` | yes | yes |
    | `DATABASE_CA_CERT` | yes | yes |
-   | `DATABASE_URL`, `DATABASE_POOL_MAX` | yes | no |
-   | `JWT_VERIFIER`, `JWT_JWKS_URL`, `JWT_SECRET`, `JWT_ISSUER`, `SESSION_CHECK`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` | yes | no |
-   | `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BASE_URL` | yes | only with `AGENT_TEMPLATED=on` (the follow-up agent signs `{booking_link}`) |
+   | `DATABASE_URL`, `DATABASE_POOL_MAX`, `DATABASE_CONNECT_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS` | yes | no |
+   | `JWT_VERIFIER`, `JWT_JWKS_URL`, `JWT_SECRET`, `JWT_ISSUER`, `JWT_MAX_TTL_SECONDS`, `JWT_CLOCK_SKEW_SECONDS`, `SESSION_CHECK`, `SESSION_CACHE_SECONDS`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` | yes | no |
+   | `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BOOKING_KEY_PREVIOUS_SECRET`, `PUBLIC_BASE_URL` | yes | only with `AGENT_TEMPLATED=on` (the follow-up agent signs `{booking_link}`) |
    | `PUBLIC_CLIENT_IP_HEADER` and the other `PUBLIC_*` limits | yes | no |
    | `UNSUBSCRIBE_TOKEN_SECRET` | yes (verifies links) | yes (signs links, only with `DELIVERY_WORKER=on`) |
-   | `RESEND_WEBHOOK_SECRET` | yes | no |
+   | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | yes (verifies links) | yes (only with `DELIVERY_WORKER=on`, if rotating) |
+   | `RESEND_WEBHOOK_SECRET`, `RESEND_WEBHOOK_PREVIOUS_SECRET` | yes | no |
    | `ACTIVEPIECES_KEY_SECRET` (and `ACTIVEPIECES_KEY_PREVIOUS_SECRET`, `ACTIVEPIECES_ALLOW_LOOPBACK`) | yes | yes (only with `ACTIVEPIECES_WEBHOOK_WORKER=on`) |
-   | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CHANNEL_SECRET` | yes | yes (only with `CALENDAR_WORKER=on`) |
-   | `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY` | yes | no |
-   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WEBHOOK_BASE_URL` | yes (webhooks) | only with `SMS_PROVIDER=twilio` |
-   | `STRIPE_*`, `TWILIO_PREVIOUS_AUTH_TOKEN`, `TWILIO_KEYWORD_REPLIES`, `SITES_STORE`, `R2_*`, `ALLOWED_ORIGINS`, `IMAGE_*`, `ENRICHMENT_*` | yes | no |
+   | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CHANNEL_SECRET`, `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | yes | yes (only with `CALENDAR_WORKER=on`; the three `*_BASE_URL` are optional overrides read by both through `google-env.ts`) |
+   | `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_STATE_PREVIOUS_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY` | yes | no |
+   | `TWILIO_ACCOUNT_SID`, `TWILIO_WEBHOOK_BASE_URL` | yes (webhooks, with `TWILIO_AUTH_TOKEN`) | only with `SMS_PROVIDER=twilio` (both required then) |
+   | `TWILIO_AUTH_TOKEN` | yes (verifies webhooks) | only with `SMS_PROVIDER=twilio` and no `TWILIO_API_KEY_*` (an API key wins over the token) |
+   | `STRIPE_*`, `TWILIO_PREVIOUS_AUTH_TOKEN`, `TWILIO_KEYWORD_REPLIES`, `SITES_STORE`, `SITE_COMPILER`, `R2_*`, `ALLOWED_ORIGINS`, `IMAGE_ADAPTER` and the other image adapter settings (`IMAGE_ADAPTERS`, `IMAGE_ENVIRONMENT`, `IMAGE_CURRENCY`, `IMAGE_PRESETS`, `IMAGE_PRICES_MINOR`, `IMAGE_VENDOR_COST_MICROS`, `IMAGE_KEYS`), `KIE_API_KEY`, `FAL_API_KEY` (see the limit below) | yes | no |
+   | `ENRICHMENT_PROVIDER`, `TREG_ARCHIVE_CONFIRMED_OFF`, `ENRICHMENT_DISABLED`, `ENRICHMENT_PRICE_COMPANY_CENTS`, `ENRICHMENT_TENANT_DAILY_CAP`, `ENRICHMENT_GLOBAL_DAILY_CAP` | yes (the service gate; no secret) | only if the enrichment worker ever runs there (it runs on the Mac today) |
    | `CRON_SECRET` | **no** | yes |
-   | `DELIVERY_WORKER`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_*`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, the other `DELIVERY_*` tuning, `SMS_PROVIDER` | **no** | yes |
+   | `DELIVERY_WORKER`, `DELIVERY_WORKER_ID`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `SMS_PROVIDER` | **no** | yes |
    | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | **no** | yes |
-   | `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | **no** | yes |
-   | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_*` tuning | **no** | yes |
-   | `CALENDAR_WORKER`, `CALENDAR_DATABASE_URL`, `GOOGLE_TOKEN_PRIVATE_KEY`, `GOOGLE_WEBHOOK_URL`, `GOOGLE_EVENT_TITLE`, `CALENDAR_*` tuning | **no** | yes |
-   | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_*` tuning | **no** | yes |
-   | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `AGENT_MODEL_*`, `AGENT_TEMPLATED`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_*`, `DEEPSEEK_*`, `FOLLOWUP_*` tuning | **no** | yes |
-   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE` (build time) | **no** (ignored) | yes |
+   | `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | **no** | only with `SMS_PROVIDER=twilio` (`TWILIO_API_KEY_SID` and `TWILIO_API_KEY_SECRET` come together) |
+   | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS` | **no** | yes |
+   | `CALENDAR_WORKER`, `CALENDAR_DATABASE_URL`, `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS`, `GOOGLE_TOKEN_PRIVATE_KEY`, `GOOGLE_WEBHOOK_URL`, `GOOGLE_EVENT_TITLE` | **no** | yes |
+   | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_WORKER_ID`, `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS` (this row does not cover `ACTIVEPIECES_KEY_SECRET`: the API needs it for the owner routes) | **no** | yes |
+   | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `FOLLOWUP_MODEL`, `FOLLOWUP_SLOT_MINUTES`, `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS`, `FOLLOWUP_INTERVAL_MS`, `AGENT_MODEL_PERSONAL_DATA`, `AGENT_MODEL_NO_PERSONAL_DATA`, `AGENT_TEMPLATED`, `AGENT_TEMPLATED_MAX_CANDIDATES`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `COMPOSIO_API_KEY` | **no** | yes |
+   | `ENRICHMENT_WORKER`, `ENRICHMENT_DATABASE_URL`, `ENRICHMENT_WORKER_ID`, `ENRICHMENT_CLAIM_LIMIT`, `ENRICHMENT_MAX_ATTEMPTS`, `ENRICHMENT_PROVIDER_TIMEOUT_MS`, `ENRICHMENT_INTERVAL_MS`, `TREG_TOKEN`, `TREG_BASE_URL` | **no** | no (the Mac's enrichment worker) |
+   | `IMAGE_WORKER`, `IMAGE_DATABASE_URL`, `IMAGE_SERVICE_DATABASE_URL`, `IMAGE_INTERVAL_MS` | **no** | no (the Mac's image worker) |
+   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
 
-   `KIE_API_KEY` and `FAL_API_KEY` belong to the image worker, which runs on the Mac. The API's
-   config still requires the configured vendor's key to start (image-port.md IM-21), so do not set
-   `IMAGE_ADAPTER` to `kie` or `fal` on the API project until that check moves to the worker.
+   `CEREBRAS_*`, `DEEPSEEK_*` and `AGENT_MODEL_*` are worker-only because `POST /v1/agents/followup/runs`
+   and the template-suggestion route are not wired in `createServer` today. Wiring them into the API
+   needs a decision first (for example, async dispatch to the workers project); the API bundle test
+   fails if those names reach the API bundle.
 
-   **Moving the crons out of a single project.** The API build no longer carries any cron, so the
-   next API deploy stops the live Activepieces cron unless the workers project already runs it. (1) Create the workers project and set its
-   variables. (2) Deploy it and check that its cron fires (`GET /cron/<name>` with the bearer
-   answers 200). (3) Deploy the API project with `pnpm build:vercel`, which drops the cron
-   functions and the `crons` entry, so the two projects never both run a cron. (4) Delete the
-   worker-only variables from the API project: `CRON_SECRET`, `DELIVERY_DATABASE_URL`,
-   `DELIVERY_UNSUBSCRIBE_BASE_URL`, `RESEND_API_KEY`, `RESEND_FROM`, `ACTIVEPIECES_DATABASE_URL`,
-   `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_CRON_SCHEDULE`. Do (3) before (4), or the API
-   deploy still holds them.
+   **Known limits of the split.** (1) The API still requires the configured image vendor's key to
+   start (image-port.md IM-21), so `KIE_API_KEY` or `FAL_API_KEY` must be set on the API project
+   whenever `IMAGE_ADAPTER` is `kie` or `fal`, although the image worker runs on the Mac. Moving
+   that check to the worker is a separate change. (2) The cron bundles still import `src/config.ts`
+   and `src/calendar/google-env.ts` (shared parsers), so the worker functions carry the API's schemas;
+   they read only the names they declare, and the project holds only the names in the table. The test
+   covers the API side (it must not name a worker-only variable), not the reverse.
+
+   **Moving the crons out of a single project.** Before the split, the API project ran the
+   Activepieces cron and held the worker secrets. The order below keeps one cron running at all
+   times and never starts the API deploy while a worker name is still set. It is workers first,
+   because the next API deploy (`pnpm build:vercel`) has no crons, and refuses to build while any
+   `*_CRON_SCHEDULE` is still set on the project.
+   1. **Deploy the workers project** (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`): `--target preview` first, then
+      `--prod`. Its env is set for production and preview. Cron runs only on the production
+      deployment.
+   2. **Check it.** Call `GET /cron/activepieces` on the workers production deployment with
+      `Authorization: Bearer <CRON_SECRET>`. The body must show `"ran": true`; HTTP 200 alone is not
+      enough (`{"ran": false, "reason": "ACTIVEPIECES_WEBHOOK_WORKER is off"}` is also a 200). Confirm the
+      deployment's cron list shows `/cron/activepieces` at `*/5 * * * *`, then wait for one scheduled
+      run and find it in the workers project's logs.
+   3. **Delete every name the table marks "API: no" from the API project**, all targets:
+      `CRON_SECRET`, `DELIVERY_DATABASE_URL`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `RESEND_API_KEY`,
+      `RESEND_FROM`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_WEBHOOK_WORKER` and
+      `ACTIVEPIECES_CRON_SCHEDULE`. That is the whole set on 2026-11-06 (the API project's other names are
+      all "API: yes"; checked against the table). List the project's env names afterwards and confirm none
+      of the "no" names is left.
+   4. **Deploy the API once** with `pnpm build:vercel` (no crons). Each deployment keeps a copy of
+      the environment it was built with, so deleting a name changes nothing until the next deploy, and
+      older deployments keep their copy.
+   5. **Smoke test.** `GET /healthz` on the API deployment answers `{"ok": true}`, one owner route
+      answers with a real token, and the workers project still logs a scheduled `/cron/activepieces` run.
+
+   **Overlap.** Between step 1 and step 4 both projects run `/cron/activepieces` every five minutes,
+   against the same database. A double run is safe: the runner claims rows with `FOR UPDATE SKIP LOCKED`
+   under a lease token (a second runner skips a row the first holds, and a stale lease cannot settle a
+   row), ingest marks are `ON CONFLICT DO NOTHING`, and the webhook id is stable per delivery, so a
+   receiver sees a delivery at most twice only in the crash case it already sees today (at-least-once).
+   Keep the overlap short anyway.
+
+   **Rollback and cleanup.** Promoting the previous API deployment brings back its cron and its copy of
+   the worker secrets, so it then runs beside the workers project (safe for the reason above, but it
+   undoes the split). Once the new API deployment is good, remove the older production API deployments
+   that still hold the worker secrets: list them with `vercel ls` and remove each with `vercel rm <url>`,
+   on the API project (`VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ`), and keep the current
+   production deployment.
 
    API env per target: `DATABASE_URL` (zs_runtime, port 6543), `DATABASE_CA_CERT`,
    `DATABASE_POOL_MAX=3`, `JWT_VERIFIER=jwks` with `JWT_JWKS_URL`
@@ -823,7 +881,9 @@ Hosted settings that the scripts do not manage:
   the dashboard origin. GoTrue cannot set Reply-To, so the email text names
   devin@zerosumsolutions.com.
 - The API project has no Vercel Authentication (its callers are the dashboard and MCP
-  clients, which present a bearer token). Dashboard previews are protected; pass the
+  clients, which present a bearer token). The workers project has none either (`ssoProtection`
+  null), so Vercel Cron and the `CRON_SECRET` bearer reach it; the bearer is the only gate.
+  Dashboard previews are protected; pass the
   `x-vercel-protection-bypass` header for automated checks.
 - The dashboard's sign-in attempt limiter is in memory, so on Vercel each serverless
   instance counts on its own; Supabase Auth's own email rate limit still bounds the links sent.
