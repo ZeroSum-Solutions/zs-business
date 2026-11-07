@@ -863,6 +863,28 @@ Owner routes (Bearer member token, `integrations` permission, owners only): `GET
 `zsap1_…` token): `GET /me`, `POST /proposals` (Idempotency-Key), `GET /proposals/:id`.
 `GET /cron/activepieces` answers like `/cron/delivery`, with `delivered` in place of `sent`.
 
+### Hub access (`POST /mcp`, `GET /v1/integrations/activepieces/tokens/:id/usage`)
+
+Any agent an owner trusts (Mish, Hermes, Claude, Codex, a flow) reaches one business through one
+remote MCP endpoint and one kind of token (docs/requirements/hub-access.md). It turns on with
+`ACTIVEPIECES_KEY_SECRET`; without it `/mcp` is 404. `POST /mcp` takes `Authorization: Bearer
+zsap1_…` and speaks stateless Streamable HTTP with JSON answers: no session ID is issued or
+accepted, `GET` and `DELETE` are 405, a body over 64 KiB is 413, a batch is 400, a bad token is the
+usual 401 (a tampered one before any database query), and over 120 requests a minute or 2,000 an
+hour is 429 with `Retry-After` (counted in Postgres, so every instance shares it). A token may
+hold six read scopes beside the three propose scopes; it then needs an expiry of 1 to 365 days
+(default 90). `tools/list` shows only the tools its scopes allow, and an unlisted tool is JSON-RPC
+-32601. The only write is a pending proposal an owner decides. Owners read a token's last 7 days
+of use by hour at `GET /tokens/:id/usage`.
+
+Connect an SDK client with the token as a bearer header:
+
+```ts
+new StreamableHTTPClientTransport(new URL("https://<api>/mcp"), {
+  requestInit: { headers: { Authorization: `Bearer ${token}` } },
+});
+```
+
 ## Transcription
 
 Owner routes under `/v1/transcriptions` (Bearer member token, `inbox.drafts`): `POST /uploads`

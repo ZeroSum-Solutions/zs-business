@@ -26,6 +26,8 @@ export function activepiecesRoutes(config: AutomationEdgeConfig, requestEdge: (c
     .get("/tokens", async (c) => c.json(await admin(c).listTokens()))
     .post("/tokens", async (c) =>
       c.json(await admin(c).createToken(await jsonBody(c), idempotencyKey(c)), 201))
+    // hub-access.md H-8: the last 7 days of one token's use, by hour.
+    .get("/tokens/:id/usage", async (c) => c.json(await admin(c).tokenUsage(c.req.param("id"))))
     .post("/tokens/:id/revoke", async (c) =>
       c.json(await admin(c).revokeToken(c.req.param("id"), await jsonBody(c), idempotencyKey(c))));
 }

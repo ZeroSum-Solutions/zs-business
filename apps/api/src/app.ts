@@ -45,7 +45,9 @@ import { MEDIA_UPLOAD_PATH, mediaRoutes } from "./routes/media.js";
 import { memberRoutes } from "./routes/members.js";
 import { siteRoutes } from "./routes/sites.js";
 import { sourceRoutes } from "./routes/sources.js";
+import { MCP_PATH, mcpRoutes } from "./mcp/routes.js";
 import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public/activepieces.js";
+import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
 import { resendWebhookRoutes, type ResendWebhookConfig } from "./public/resend-webhook.js";
 import { stripeWebhookRoutes, type StripeWebhookConfig } from "./public/stripe-webhook.js";
@@ -251,6 +253,15 @@ export function createApp(deps: AppDependencies) {
   if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
+  // hub-access.md H-5: the remote MCP endpoint rides on the automation key, so it is off without it (404).
+  if (deps.activepieces) {
+    app.use(MCP_PATH, deadline);
+    app.route(MCP_PATH, mcpRoutes({
+      keySecrets: deps.activepieces.keySecrets,
+      limiter: createPostgresRateLimiter(deps.db, deps.clock),
+      ...(deps.onError ? { report: deps.onError } : {}),
+    }, requestEdge));
+  }
 
   // The runner's calls carry a runner token and a lease, not a member session (BT-7).
   if (deps.browser?.runner) {
