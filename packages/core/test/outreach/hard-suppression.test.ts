@@ -1,7 +1,7 @@
 // Devin's hard suppression (2026-11-07): a prospect list that includes Broken English or
 // Rise Movement, their staff or their domains must come out without them.
 import { describe, expect, it } from "vitest";
-import { consentBlock, filterHardSuppressed, hardSuppressionHit } from "../../src/index.js";
+import { consentBlock, filterHardSuppressed, hardSuppressionHit, isHardSuppressed } from "../../src/index.js";
 
 const list = [
   { company: "Iron Peak Fitness", email: "owner@ironpeakfit.com", name: "Sam Lee" },
@@ -39,5 +39,18 @@ describe("hard suppression", () => {
     expect(consentBlock({ ...base, purpose: "marketing", address: "x@brokenenglishjewelry.com" })).toBe("suppressed");
     expect(consentBlock({ ...base, purpose: "marketing", address: "x@fine.com" })).toBeNull();
     expect(consentBlock({ ...base, purpose: "transactional", address: "x@brokenenglishjewelry.com" })).toBeNull();
+  });
+});
+
+describe("hard suppression bypass cases", () => {
+  it("uses the URL hostname, not an @ in the query", () => {
+    expect(isHardSuppressed({ website: "https://risemovement.studio/contact?email=hello@example.com", email: "front@gmail.com" })).toBe(true);
+  });
+  it("strips plus tags from known-person addresses", () => {
+    expect(isHardSuppressed({ email: "jason.walsh+training@gmail.com" })).toBe(true);
+  });
+  it("blocks a marketing send by recorded contact name", async () => {
+    const { consentBlock } = await import("../../src/delivery/policy.js");
+    expect(consentBlock({ channel: "email", purpose: "marketing", consent: "granted", suppressed: false, address: "owner@somegym2.com", name: "Jason Walsh" })).toBe("suppressed");
   });
 });

@@ -32,8 +32,16 @@ export const HARD_SUPPRESSED_PEOPLE: readonly string[] = Object.freeze([
 const squash = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 export function normaliseDomain(input: string): string {
-  const at = input.lastIndexOf("@");
-  const host = (at >= 0 ? input.slice(at + 1) : input).trim().toLowerCase();
+  const raw = input.trim();
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      return new URL(raw).hostname.toLowerCase().replace(/^www\./, "").replace(/\.+$/, "");
+    } catch {
+      /* fall through to the loose parse */
+    }
+  }
+  const at = raw.lastIndexOf("@");
+  const host = (at >= 0 ? raw.slice(at + 1) : raw).toLowerCase();
   return host.replace(/^https?:\/\//, "").replace(/[/?#:].*$/, "").replace(/^www\./, "").replace(/\.+$/, "");
 }
 
@@ -63,8 +71,12 @@ const companyHit = (company: string): boolean => {
 const personHit = (name: string | null | undefined, email: string | null | undefined): boolean => {
   const people = HARD_SUPPRESSED_PEOPLE.map(squash);
   if (name && people.includes(squash(name))) return true;
-  const local = email && email.includes("@") ? squash(email.slice(0, email.lastIndexOf("@"))) : "";
-  return local !== "" && people.some((p) => local === p);
+  const at = email ? email.lastIndexOf("@") : -1;
+  const rawLocal = email && at > 0 ? email.slice(0, at) : "";
+  const local = squash(rawLocal);
+  // A plus tag is an alias on most providers: jason.walsh+x@ reaches jason.walsh@.
+  const base = squash(rawLocal.split("+")[0] ?? "");
+  return local !== "" && people.some((p) => local === p || base === p);
 };
 
 /** The first rule that matches this candidate, or null when it may be contacted. */

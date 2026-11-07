@@ -76,9 +76,11 @@ export function consentBlock(input: {
   readonly source?: string | null;
   /** Recipient address. A marketing email to a hard-suppressed domain or person is always blocked (Devin, 2026-11-07). */
   readonly address?: string | null;
+  /** The contact's recorded display name, checked against the known-people list. */
+  readonly name?: string | null;
 }): DeliveryFinalReason | null {
   if (input.suppressed) return "suppressed";
-  if (input.purpose === "marketing" && input.channel === "email" && input.address && isHardSuppressed({ email: input.address }))
+  if (input.purpose === "marketing" && input.channel === "email" && input.address && isHardSuppressed({ email: input.address, name: input.name ?? null }))
     return "suppressed";
   if (input.consent === "denied") return "consent_denied";
   if (input.purpose === "marketing" && input.consent === "granted" && isVoiceGrant(input.source)) return "consent_missing";
