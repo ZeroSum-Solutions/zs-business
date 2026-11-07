@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createGoogleClient, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
+import { createGoogleClient, createHttpConnectorPort, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
@@ -107,6 +107,22 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         report: (event) => {
           // A forged state or a refused grant may need an operator; the rest are routine.
           if (event.route === "callback" && !["connected", "staged", "denied"].includes(event.outcome)) console.warn("Google OAuth callback", event);
+        },
+      },
+    }),
+    ...(env.connections === null ? {} : {
+      connections: {
+        connector: createHttpConnectorPort({
+          workerUrl: env.connections.workerUrl,
+          env: env.connections.env,
+          secrets: { current: env.connections.internalSecret },
+          clock,
+        }),
+        stateSecrets: env.connections.stateSecrets,
+        returnUrl: env.connections.returnUrl,
+        report: (event) => {
+          // A refused callback may need an operator; the routine outcomes are not logged.
+          if (event.outcome.startsWith("error:") && !["error:browser_mismatch", "error:rate_limited"].includes(event.outcome)) console.warn("Connections callback", event);
         },
       },
     }),

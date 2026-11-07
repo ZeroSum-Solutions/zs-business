@@ -22,12 +22,14 @@ import { IMAGE_ADAPTERS, IMAGE_PRESETS, type ImagePreset } from "@zs/contracts";
 import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 import { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
+import { parseConnectionsApiEnv, type ConnectionsApiEnv } from "./connections/api-env.js";
 
 // The JWT_* variables (signing method, secret or JWKS URL, issuer, lifetime, skew) are parsed
 // by the schema in @zs/core, shared with the MCP server.
 export { jwtSecretSchema, PLACEHOLDER_JWT_SECRET } from "@zs/core";
 export { assertLocalDatabaseUrl, assertLocalPool, describeDatabase, type LocalDatabaseTarget } from "@zs/db";
 export { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
+export { parseConnectionsApiEnv, type ConnectionsApiEnv } from "./connections/api-env.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 
@@ -165,6 +167,8 @@ export interface ServerEnv {
   readonly stripe: StripeEnv | null;
   /** google-calendar.md G-12: connecting, the OAuth callback and the push webhook; null (all off) when no API GOOGLE_ variable is set. */
   readonly google: GoogleEnv | null;
+  /** connections.md C-3: the managed-tier connections routes and /mcp tools; null (all off) when no API CONNECTIONS_ variable is set. */
+  readonly connections: ConnectionsApiEnv | null;
   readonly twilioWebhook: TwilioWebhookEnv | null;
   readonly activepieces: ActivepiecesEnv | null;
   /** image-port.md IM-21: image jobs; null (every /v1/media route 404) when IMAGE_ADAPTER is unset. */
@@ -240,6 +244,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
     google: parseGoogleEnv(env),
+    connections: parseConnectionsApiEnv(env),
     twilioWebhook: parseTwilioWebhook(parsed.data),
     activepieces: parseActivepieces(parsed.data),
     images: imagesWithStore(parseImageEnv(env), parsed.data.SITES_STORE),

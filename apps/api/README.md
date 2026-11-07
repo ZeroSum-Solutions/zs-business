@@ -565,6 +565,27 @@ checks the health of live connections.
 | `CRON_SECRET` | Bearer secret Vercel Cron sends, 32+ characters. Unset: the cron route is 404. |
 | `CONNECTIONS_CRON_SCHEDULE` | Build time, workers project: adds the Vercel cron, for example `*/5 * * * *`. Unset: no cron. |
 
+### Connections on the API (`/v1/connections`, `/oauth/connections/callback`, three `/mcp` tools)
+
+docs/requirements/connections.md C-3 to C-5, C-10. The API project holds only the signing side. With none of
+the variables below set, `/v1/connections`, the callback and the three connection tools do not exist (404, and
+the tools are unlisted with -32601 on a call); any one set requires the rest (all or none). The API never
+holds `COMPOSIO_API_KEY`, an auth config ID or the service database login.
+
+| Variable | Meaning |
+|---|---|
+| `CONNECTIONS_WORKER_URL` | The workers project's origin (`https://<workers host>`, no path; plain http only on loopback). |
+| `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET` | The same values as in the workers project (the API signs each worker call with them). |
+| `CONNECTIONS_STATE_SECRET` | 32+ characters, different from the internal secret. Signs the attempt and grant tokens (10 minutes). |
+| `CONNECTIONS_STATE_PREVIOUS_SECRET` | Optional, during a rotation: tokens it signed keep verifying; must differ from the current one. |
+| `CONNECTIONS_RETURN_URL` | The dashboard page the callback sends the owner back to (`https://<dashboard host>/account/connections`). |
+
+The callback is `GET /oauth/connections/callback` (and `/status`). Like the Google one it trusts only the
+signed attempt token and the browser key, both forwarded by the dashboard in headers
+(`x-zs-connect-attempt`, `x-zs-browser-key`); the staged grant comes back in `x-zs-connect-grant`, never in a
+URL. `invalid` is a 400; everything else is a 303 to `CONNECTIONS_RETURN_URL?connection=connected|confirm|pending|error`
+(with `&reason=` on error). All answers are `Cache-Control: no-store` with `Referrer-Policy: no-referrer`.
+
 ## Database pool and request limits
 
 `createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from
@@ -750,6 +771,7 @@ against the pinned Supabase Root 2021 CA.
    | `IMAGE_WORKER`, `IMAGE_DATABASE_URL`, `IMAGE_SERVICE_DATABASE_URL`, `IMAGE_INTERVAL_MS` | **no** | no (the Mac's image worker) |
    | `CONNECTIONS_DATABASE_URL`, `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL` (with `COMPOSIO_API_KEY`, listed above) | **no** | yes |
    | `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`, `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (the signing secrets and environment; the same values in both projects) | yes (the API signs with them) | yes |
+   | `CONNECTIONS_WORKER_URL`, `CONNECTIONS_STATE_SECRET`, `CONNECTIONS_STATE_PREVIOUS_SECRET`, `CONNECTIONS_RETURN_URL` (the API side only) | yes | no |
    | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
 
    `CEREBRAS_*`, `DEEPSEEK_*` and `AGENT_MODEL_*` are worker-only because `POST /v1/agents/followup/runs`

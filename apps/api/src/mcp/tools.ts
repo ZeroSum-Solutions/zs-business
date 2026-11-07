@@ -10,16 +10,20 @@ import {
   listBookingsQuerySchema,
   listContactsQuerySchema,
   listDealsQuerySchema,
+  listConnectionsToolInputSchema,
+  listConnectionToolsInputSchema,
   listThreadsQuerySchema,
   proposalInputSchemas,
   proposalSummarySchema,
   resultsQuerySchema,
+  runConnectionToolInputSchema,
   threadIdSchema,
   uuidSchema,
   type AutomationScope,
+  type ConnectionToolErrorCode,
   type ProposalAction,
 } from "@zs/contracts";
-import type { AutomationInbound, AutomationPrincipal, TokenReads } from "@zs/core";
+import type { AutomationInbound, AutomationPrincipal, createConnectionsTools, TokenReads } from "@zs/core";
 
 /** H-10: appended to every tool that returns what people wrote. */
 export const UNTRUSTED_NOTICE =
@@ -36,6 +40,25 @@ export interface ToolContext {
   readonly principal: AutomationPrincipal;
   readonly inbound: AutomationInbound;
   readonly reads: TokenReads;
+  /** C-10: the connections side; null when the API has no connections config (the tools are then unlisted). */
+  readonly connections: ReturnType<typeof createConnectionsTools> | null;
+  /** The request's abort signal, passed on to the worker call (C-10). */
+  readonly signal: AbortSignal | undefined;
+}
+
+/**
+ * C-10: a connection tool's domain error. It is a tool result with `isError` and `{ error: { code, retryAfterSeconds? } }`,
+ * never provider text. H-8: every code counts as a refusal except `provider_unavailable`.
+ */
+export class ToolFailure extends Error {
+  readonly value: Record<string, unknown>;
+  readonly refusal: boolean;
+  constructor(code: ConnectionToolErrorCode, retryAfterSeconds?: number) {
+    super(`connection tool ${code}`);
+    this.name = "ToolFailure";
+    this.value = { error: { code, ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }) } };
+    this.refusal = code !== "provider_unavailable";
+  }
 }
 
 export type ToolKind = "read" | "proposal";
@@ -55,6 +78,9 @@ export interface ToolDefinition {
 const readHints = { readOnlyHint: true, openWorldHint: false } as const;
 const proposeHints = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false } as const;
 const nothing = z.strictObject({});
+/** C-10: all three connection tools only read; running one reaches a third party, so it is also open-world. */
+const connectionHints = { readOnlyHint: true, openWorldHint: false } as const;
+const connectionRunHints = { readOnlyHint: true, openWorldHint: true } as const;
 
 /** The JSON Schema `tools/list` shows for an input, without the `$schema` marker. */
 function jsonSchemaOf(schema: z.ZodObject): Record<string, unknown> {
@@ -73,6 +99,23 @@ function read<Input extends z.ZodObject>(
     run: run as ToolDefinition["run"],
   };
 }
+
+/** A connections tool: scope `connections:read`, listed only when the API has the connections config (C-10). */
+function connectionTool<Input extends z.ZodObject>(
+  name: string, description: string, inputSchema: Input, annotations: ToolDefinition["annotations"],
+  run: (args: z.output<Input>, context: ToolContext) => Promise<Record<string, unknown>>,
+): ToolDefinition {
+  return {
+    name, scope: "connections:read", kind: "read", inputSchema, jsonSchema: jsonSchemaOf(inputSchema), annotations,
+    description: `${description} ${UNTRUSTED_NOTICE}`,
+    run: run as ToolDefinition["run"],
+  };
+}
+const requireConnections = (connections: ToolContext["connections"]) => {
+  // Unreachable: without the config the tools are not listed and a call is -32601.
+  if (connections === null) throw new ToolFailure("not_found");
+  return connections;
+};
 
 /** The proposal fields every propose tool shares beside the action's own input. */
 const proposalMeta = {
@@ -141,6 +184,28 @@ export const TOOLS: readonly ToolDefinition[] = Object.freeze([
   read("get_business", "business:read", "Read the business profile (name, contact details, address, currency, time zone).", nothing,
     async (_args, { principal, reads }) => ({ ...(await reads.getBusiness(principal)) })),
 
+  connectionTool("list_connections", "List the business's connected apps (stores) that can be read: connectionId, app, label and status (active or reauthorize), at most 20.",
+    listConnectionsToolInputSchema, connectionHints, async (_args, { principal, reads, connections }) => {
+      await reads.guard(principal, "connections:read");
+      const items = await requireConnections(connections).list();
+      return { items: items.map((item) => ({ connectionId: item.id, toolkit: item.toolkit, label: item.accountLabel, status: item.status })) };
+    }),
+  connectionTool("list_connection_tools", "List the read-only tools of one connection's app, with each tool's name, description and input schema.",
+    listConnectionToolsInputSchema, connectionHints, async ({ connectionId }, { principal, reads, connections }) => {
+      await reads.guard(principal, "connections:read");
+      const tools = await requireConnections(connections).tools(connectionId);
+      if (tools === null) throw new ToolFailure("not_found");
+      return { tools };
+    }),
+  connectionTool("run_connection_tool", "Run one read-only tool of a connected app, such as listing a store's recent orders. "
+    + "Call list_connection_tools first for the tool names and their input schemas. The result is at most 64 KiB; `truncated` says whether items were dropped.",
+    runConnectionToolInputSchema, connectionRunHints, async ({ connectionId, tool, arguments: args }, { principal, reads, connections, signal }) => {
+      await reads.guard(principal, "connections:read");
+      const out = await requireConnections(connections).run({ connectionId, tool, arguments: args }, signal);
+      if (!out.ok) throw new ToolFailure(out.error.code, out.error.retryAfterSeconds);
+      return { data: out.data, truncated: out.truncated, notice: UNTRUSTED_NOTICE };
+    }),
+
   propose("propose_contact_upsert", "contacts:propose", "contact.upsert",
     "Propose adding a customer, or finding the one that has the same email or phone (displayName, email, phone; at least one of email or phone).",
     proposalInputSchemas["contact.upsert"].shape),
@@ -153,5 +218,6 @@ export const TOOLS: readonly ToolDefinition[] = Object.freeze([
 ]);
 
 /** The tools a token's scopes list, plus `whoami` and `get_proposal` for every token. */
-export const toolsFor = (scopes: readonly AutomationScope[]): ToolDefinition[] =>
-  TOOLS.filter((tool) => tool.scope === null || scopes.includes(tool.scope));
+export const toolsFor = (scopes: readonly AutomationScope[], options: { readonly connections?: boolean } = {}): ToolDefinition[] =>
+  TOOLS.filter((tool) => tool.scope === null
+    || (scopes.includes(tool.scope) && (tool.scope !== "connections:read" || options.connections === true)));

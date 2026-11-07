@@ -20,6 +20,7 @@ import {
 import {
   apiErrorBody,
   createAutomationInbound,
+  createConnectionsTools,
   createTokenReads,
   mapError,
   parseInput,
@@ -31,7 +32,7 @@ import {
 import type { ScopedDatabase } from "@zs/db";
 import type { AppEnv } from "../app.js";
 import type { RateLimit, RateLimiter } from "../public/limiter.js";
-import { MCP_INSTRUCTIONS, toolsFor, type ToolDefinition } from "./tools.js";
+import { MCP_INSTRUCTIONS, ToolFailure, toolsFor, type ToolDefinition } from "./tools.js";
 
 export const MCP_PATH = "/mcp";
 /** H-7: units per token, counted one per request whose tag is valid. */
@@ -139,6 +140,11 @@ function buildServer(tools: readonly ToolDefinition[], run: (tool: ToolDefinitio
       if (tool.kind === "proposal") outcome.proposals += 1; else outcome.reads += 1;
       return toolResult(output);
     } catch (error) {
+      // C-10: a connection tool's domain error is its own result shape, never provider text.
+      if (error instanceof ToolFailure) {
+        if (error.refusal) outcome.refused = true;
+        return toolResult(error.value, true);
+      }
       const mapped = mapError(error);
       if (mapped.status >= 500 || mapped.status === 401) fail(error);
       else outcome.refused = true;
@@ -261,8 +267,11 @@ export function mcpRoutes(config: McpEdgeDependencies, requestEdge: (c: Context<
     if (!isRpcCall(body)) return rpcError(c, 400, -32600, "Invalid Request: the body is not a JSON-RPC request");
 
     const reads = createTokenReads(edge);
-    const server = buildServer(toolsFor(principal.scopes), (tool, args) =>
-      tool.run(parseInput(tool.inputSchema, args ?? {}, `arguments for ${tool.name}`) as never, { principal, inbound, reads }),
+    // C-10: the connections tools exist only with the connections config.
+    const connections = edge.connections ? createConnectionsTools(edge, principal.tenantId) : null;
+    const server = buildServer(toolsFor(principal.scopes, { connections: connections !== null }), (tool, args) =>
+      tool.run(parseInput(tool.inputSchema, args ?? {}, `arguments for ${tool.name}`) as never,
+        { principal, inbound, reads, connections, signal: c.var.signal }),
     tools, fail);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
