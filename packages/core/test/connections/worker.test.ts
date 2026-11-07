@@ -802,6 +802,18 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect((await connectionRow(a.tenantId, id)).updated_at).toEqual(new Date(T0 + 2000));
   });
 
+  it("B-2: a healthy read of a row that is still reauthorize (auth_error) keeps its last code until it recovers", async () => {
+    const stale = new Date(T0 - 2 * DAY);
+    const id = await seedConnection(fixture, {
+      tenantId: a.tenantId, memberId: a.memberId, accountId: seedAccount(a.tenantId), status: "reauthorize", reason: "auth_error", lastChecked: stale, errorCode: "provider_unavailable",
+    });
+    clock.ms = T0 + 1000;
+    expect((await worker.pass()).checked).toBe(1);
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({
+      status: "reauthorize", reauthorize_reason: "auth_error", last_error_code: "provider_unavailable", last_checked_at: new Date(T0 + 1000),
+    });
+  });
+
   it("health: a healthy provider_status row stays reauthorize while the tenant has another live row for the toolkit", async () => {
     const stale = new Date(T0 - 2 * DAY);
     // The unique live-row index forbids two live rows; a disconnecting sibling is the realistic case.
@@ -871,6 +883,27 @@ describe("the pass (C-8, C-9, C-12)", () => {
     fake.gate = null;
     expect((await worker.pass()).disconnected).toBe(1);
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected" });
+  });
+
+  it("E-1 race, other order: a health pass that runs while a disconnect removes the account neither marks the row nor removes it twice", async () => {
+    const accountId = seedAccount(a.tenantId);
+    const id = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId, lastChecked: new Date(T0 - 2 * DAY) });
+    // A health read would mark this row reauthorize.
+    fake.accounts.get(accountId)!.status = "INACTIVE";
+    await fixture.service((tx) => tx.query("UPDATE connections SET status='disconnecting', updated_at=$2 WHERE id=$1", [id, new Date(T0)]));
+    let passed: unknown;
+    fake.gate = async (call) => {
+      // The disconnect's account read is held here while a whole pass runs.
+      if (call.method === "GET" && passed === undefined) {
+        passed = null;
+        passed = await worker.pass();
+      }
+    };
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+    expect(passed).toMatchObject({ checked: 0, disconnected: 0 });
+    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.callsTo(/^DELETE /)).toHaveLength(1);
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", reauthorize_reason: null, last_error_code: null });
   });
 
   it("stops at its call limit, its time limit and an exhausted budget; the nonce cleanup still runs", async () => {

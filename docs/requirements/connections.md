@@ -339,7 +339,9 @@ role for workers (all workers share one pattern today; Known limits).
     attempt row with no connection row. It never lists or deletes other accounts;
   - live rows with `last_checked_at` older than 24 hours: read the account (C-8). A row whose
     toolkit has no auth config in this worker is checked off with `not_configured`, so it never
-    blocks the rest;
+    blocks the rest. A read that succeeds clears a transient code (`provider_unavailable`,
+    `provider_rate_limited`, `not_configured`) only on an `active` row; a row still `reauthorize` keeps its last
+    code until it recovers;
   - nonces past `expires_at`: delete.
   A Reconnect button shows on a `reauthorize` row. For owners, the dashboard's Home shows one
   notice line while any connection is `reauthorize`, read from `GET /v1/connections` (not from

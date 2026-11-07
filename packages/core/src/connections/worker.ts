@@ -802,10 +802,11 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       report({ kind: "restored", tenantId: row.tenant_id, connectionId: row.id });
       return;
     }
-    // B-2: a read that succeeded clears only a transient code; a row still reauthorizing keeps its cause.
+    // B-2: a read that succeeded clears only a transient code, and only on an active row; a row still
+    // reauthorizing has not recovered, so it keeps its last code until it does.
     await service((tx) => tx.query(
       `UPDATE connections SET last_checked_at=$3, updated_at=$3,
-          last_error_code = CASE WHEN last_error_code = ANY($4::text[]) THEN NULL ELSE last_error_code END
+          last_error_code = CASE WHEN status='active' AND last_error_code = ANY($4::text[]) THEN NULL ELSE last_error_code END
         WHERE tenant_id=$1 AND id=$2 AND status IN ('active','reauthorize')`, [row.tenant_id, row.id, at(), [...TRANSIENT_CODES]]));
   }
 
