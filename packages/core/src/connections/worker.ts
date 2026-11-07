@@ -44,6 +44,13 @@ const HOUR = 60 * MINUTE;
 const LEASE_MS = MINUTE;
 /** An attempt whose account read shows no user is retried this long past the sweep, then given up (C-9). */
 const UNVERIFIED_GIVE_UP_MS = 24 * HOUR;
+/**
+ * A callback that redeems a session leases its attempt this long (the edge gives the worker 7 s) and frees it
+ * when the redemption returns. While the lease holds, no other callback or status call for the attempt may
+ * take the lost-answer path: it could only be reading an account that call, or a call from another browser,
+ * is activating.
+ */
+const REDEMPTION_LEASE_MS = 8 * SECOND;
 
 export const connectionsWorkerConfigSchema = z.strictObject({
   env: z.enum(["production", "preview"]),
@@ -392,6 +399,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     // is refused: a consent in another browser can never be picked up by polling.
     // Whether an earlier callback had presented a session: only then can a "used" answer be our own lost call.
     let presentedBefore = false;
+    let lease: Date | null = null;
     const gate = await service(async (tx): Promise<AttemptRow | Refused> => {
       const attempt = await loadAttempt(tx, input.tenantId, input.attemptId, true);
       if (!attempt || attempt.status === "cancelling" || attempt.status === "cancelled" || attempt.status === "swept") return refused("invalid_attempt");
@@ -399,9 +407,11 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       if (attempt.expires_at.getTime() <= now().getTime()) return refused("expired");
       if (attempt.status === "started") {
         presentedBefore = attempt.session_presented_at !== null;
+        if (attempt.claimed_until !== null && attempt.claimed_until.getTime() > now().getTime()) return refused("rate_limited");
         if (input.sessionUri !== null) {
-          await tx.query("UPDATE connection_attempts SET session_presented_at=coalesce(session_presented_at, $3), updated_at=$3 WHERE tenant_id=$1 AND id=$2",
-            [input.tenantId, input.attemptId, now()]);
+          lease = new Date(now().getTime() + REDEMPTION_LEASE_MS);
+          await tx.query("UPDATE connection_attempts SET session_presented_at=coalesce(session_presented_at, $3), claimed_until=$4, updated_at=$3 WHERE tenant_id=$1 AND id=$2",
+            [input.tenantId, input.attemptId, now(), lease]);
         } else if (attempt.session_presented_at === null) {
           return refused("not_connected");
         }
@@ -417,34 +427,46 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
      * A-4: a redemption that failed for good ends what the session marker allowed: the marker goes, so no
      * status call can pick up an account this browser never redeemed. Only a `started` attempt holds one.
      */
-    const definitive = async (): Promise<Refused> => {
+    const definitive = async (reason: Refused["reason"] = "not_connected"): Promise<Refused> => {
       await service((tx) => tx.query(
         "UPDATE connection_attempts SET session_presented_at=NULL, updated_at=$3 WHERE tenant_id=$1 AND id=$2 AND status='started'",
         [input.tenantId, input.attemptId, now()]));
-      return refused("not_connected");
+      return refused(reason);
     };
     try {
       // Only a `started` attempt redeems; a `verified` one (a reload) goes to the account check.
       if (input.sessionUri !== null && attempt.status === "started") {
         const sessionUri = input.sessionUri;
         try {
-          const redeemed = await spend(undefined, () => composio.completeAuth({ sessionUri, userId }, signal));
-          // Another account than the attempt's never connects (C-5).
-          // The callback names no account, so this answer is what ties the session to the attempt: its account and
-          // toolkit must be the attempt's (the account read below checks the user and auth config).
-          if (redeemed.connectedAccountId !== attempt.composio_account_id) return await definitive();
-          if (redeemed.toolkit !== null && redeemed.toolkit.toLowerCase() !== attempt.toolkit) return await definitive();
-        } catch (error) {
-          // 400: Composio checked `user_id` and it is not the session's.
-          if (error instanceof ComposioError && error.kind === "bad_request") return await definitive();
-          // 404: the session is unknown or used. It can be our own earlier call, whose answer was lost, only
-          // when an earlier callback presented a session; then the account read below decides (C-5). On the
-          // first presentation it is a session nobody redeemed for us: final.
-          if (error instanceof ComposioError && error.kind === "not_found") {
-            if (!presentedBefore) return await definitive();
-          } else {
-            throw error;
+          try {
+            const redeemed = await spend(undefined, () => composio.completeAuth({ sessionUri, userId }, signal));
+            // Another account than the attempt's never connects (C-5).
+            // The callback names no account, so this answer is what ties the session to the attempt: its account and
+            // toolkit must be the attempt's (the account read below checks the user and auth config).
+            if (redeemed.connectedAccountId !== attempt.composio_account_id) {
+              // A session of the tenant's other, newer or older attempt (two tabs): that attempt's browser keeps its
+              // cookie and this link ends as `attempt_changed` (C-4). Any other account is not ours to name.
+              const sibling = await service((tx) => tx.query(
+                "SELECT 1 FROM connection_attempts WHERE tenant_id=$1 AND composio_account_id=$2 AND id<>$3", [input.tenantId, redeemed.connectedAccountId, input.attemptId]));
+              return await definitive(sibling.rowCount === 1 ? "attempt_changed" : "not_connected");
+            }
+            if (redeemed.toolkit !== null && redeemed.toolkit.toLowerCase() !== attempt.toolkit) return await definitive();
+          } catch (error) {
+            // 400: Composio checked `user_id` and it is not the session's.
+            if (error instanceof ComposioError && error.kind === "bad_request") return await definitive();
+            // 404: the session is unknown or used. It can be our own earlier call, whose answer was lost, only
+            // when an earlier callback presented a session; then the account read below decides (C-5). On the
+            // first presentation it is a session nobody redeemed for us: final.
+            if (error instanceof ComposioError && error.kind === "not_found") {
+              if (!presentedBefore) return await definitive();
+            } else {
+              throw error;
+            }
           }
+        } finally {
+          // The redemption has an outcome (or failed): the lease ends, whatever the outcome was.
+          if (lease !== null) await service((tx) => tx.query(
+            "UPDATE connection_attempts SET claimed_until=NULL WHERE tenant_id=$1 AND id=$2 AND claimed_until=$3", [input.tenantId, input.attemptId, lease]));
         }
       }
       const account = await spend(undefined, () => composio.getAccount(attempt.composio_account_id, signal));

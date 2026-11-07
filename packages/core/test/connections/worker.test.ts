@@ -255,6 +255,48 @@ describe("complete (C-5, C-8, C-14)", () => {
     expect(fake.accounts.get(accountId)?.status).toBe("INITIATED");
   });
 
+  it("A-4 fixation: a same-tenant swap of sessions cannot be turned into a grant by racing fabricated callbacks", async () => {
+    // Browser B finishes consent on A's link, then presents that session under B's own attempt: A's account goes ACTIVE.
+    const one = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const two = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const swapped = fake.consent(one.accountId);
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: two.attemptId, sessionUri: swapped })).toEqual({ outcome: "refused", reason: "attempt_changed" });
+    expect(fake.accounts.get(one.accountId)!.status).toBe("ACTIVE");
+    // A's browser holds no real session. Its first fabricated callback is in flight (Composio is slow) while a second arrives.
+    let second: unknown;
+    fake.gate = async (call) => {
+      if (!/complete_auth/.test(call.path)) return;
+      fake.gate = null;
+      second = await worker.complete({ tenantId: a.tenantId, attemptId: one.attemptId, sessionUri: "made-up-2" });
+    };
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: one.attemptId, sessionUri: "made-up-1" })).toEqual({ outcome: "refused", reason: "not_connected" });
+    expect(second).toEqual({ outcome: "refused", reason: "rate_limited" });
+    // Afterwards the first presentation was final: nothing verifies, and a status call is refused too.
+    expect(await attemptRow(a.tenantId, one.attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: one.attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
+  });
+
+  it("C-5: a redemption that leaves the account pending frees the attempt, so the status call polls at once", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
+    // Composio accepts the session but the account is still INITIATED when read.
+    fake.override(/POST \/connected_accounts\/complete_auth/, { json: { connected_account_id: accountId, toolkit_slug: "shopify" }, times: 1 });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "pending" });
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ claimed_until: null });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "pending" });
+  });
+
+  it("C-4: a session of the tenant's other attempt ends this link as attempt_changed; a session of an unknown account is not_connected", async () => {
+    const one = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const two = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const olderSession = fake.consent(one.accountId);
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: two.attemptId, sessionUri: olderSession })).toEqual({ outcome: "refused", reason: "attempt_changed" });
+    expect(await attemptRow(a.tenantId, two.attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+    const unknown = fake.seed({ id: "ca_not_in_any_attempt", userId: composioUserId(ENV, a.tenantId), status: "INITIATED" });
+    const strange = fake.consent(unknown.id);
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId: two.attemptId, sessionUri: strange })).toEqual({ outcome: "refused", reason: "not_connected" });
+  });
+
   it("refuses an account whose user, toolkit or auth config differs from the attempt", async () => {
     for (const change of [{ userId: composioUserId(ENV, b.tenantId) }, { toolkit: "gmail" }, { authConfigId: "ac_other" }]) {
       const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });

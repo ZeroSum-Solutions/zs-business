@@ -41,7 +41,7 @@ role for workers (all workers share one pattern today; Known limits).
   - Connected accounts belong to a `user_id` the application chooses. One Composio project per
     environment; the tenant boundary stays in the application.
   - `POST /connected_accounts/link` (`auth_config_id`, `user_id`, `callback_url`, and for
-    Shopify `connection_data.shop`) returns `redirect_url` and `connected_account_id` before
+    Shopify `connection_data.subdomain`, the bare store name) returns `redirect_url` and `connected_account_id` before
     the person signs in. The pre-issued account ID is not proof of who consented.
   - Deferred verification: when it is on for the project, the callback carries an opaque
     `session_uri`, and the account is finished only by
@@ -199,8 +199,14 @@ role for workers (all workers share one pattern today; Known limits).
     - redeem `session_uri` with the tenant's `user_id`. Composio's answer names the account
       and toolkit. Because the callback names no account, this answer is what ties the session
       to the attempt: the account must equal the account ID the attempt stored at link time,
-      and a toolkit that differs from the attempt's is refused. The next step then checks the
-      user. If Composio says the session is
+      and a toolkit that differs from the attempt's is refused. A session that names the
+      tenant's other attempt's account ends this link as `attempt_changed` (two tabs, C-4); any
+      other account is `not_connected`. The next step then checks the user. While a
+      redemption may still be in flight (a callback that redeems leases the attempt for 8 seconds and frees it when the
+      redemption returns),
+      another callback or status call for the attempt answers `rate_limited` and never reads
+      the account, so a fabricated session cannot ride a racing call into the lost-answer
+      path. If Composio says the session is
       unknown or used (404) and an earlier callback for this attempt had presented a session,
       read the account instead: only this browser held that `session_uri`, so an account that
       is now `ACTIVE` for this `user_id` was redeemed by our earlier, lost call. On the first

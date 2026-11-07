@@ -272,6 +272,18 @@ describe("callback (C-5)", () => {
     expect(await callback().callback({ attempt: other.attempt, browserKey: KEY, sessionUri: foreign })).toMatchObject({ kind: "confirm" });
   });
 
+  it("C-4: with two starts, the older link's callback ends as attempt_changed and the newest attempt still finishes", async () => {
+    const older = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const newer = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const olderClaims = verifyConnectAttempt({ current: STATE }, older.attempt, clock.now())!;
+    const newerClaims = verifyConnectAttempt({ current: STATE }, newer.attempt, clock.now())!;
+    // The browser's cookie holds the newest attempt; the older link brings its own session_uri.
+    const olderSession = fake.consent(olderClaims.composioAccountId);
+    expect(await callback().callback({ attempt: newer.attempt, browserKey: KEY, sessionUri: olderSession })).toEqual({ kind: "error", reason: "attempt_changed" });
+    expect(await attemptStatus(newerClaims.attemptId)).toBe("started");
+    expect(await callback().callback({ attempt: newer.attempt, browserKey: KEY, sessionUri: fake.consent(newerClaims.composioAccountId) })).toMatchObject({ kind: "confirm" });
+  });
+
   it("a member demoted since the start is forbidden", async () => {
     const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
     const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
