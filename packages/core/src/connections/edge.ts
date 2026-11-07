@@ -51,6 +51,7 @@ import {
   signConnectGrant,
   verifyConnectAttempt,
   verifyConnectGrant,
+  type ConnectAttempt,
   type ConnectGrant,
 } from "./tokens.js";
 
@@ -264,13 +265,19 @@ export type ConnectionsCallbackOutcome =
   | { readonly kind: "confirm"; readonly grant: string }
   | { readonly kind: "pending" }
   | { readonly kind: "error"; readonly reason: Exclude<ConnectErrorReason, "invalid_attempt"> };
+/** C-7, C-14: what an operator log may name about a callback: the attempt's tenant and connection ID, never a token. */
+export type ConnectionsCallbackReport = ConnectionsCallbackOutcome & { readonly tenantId?: string; readonly connectionId?: string };
 
 export function createConnectionsCallback(deps: EdgeDependencies) {
   const now = () => new Date(readClock(deps.clock));
-  async function handle(input: ConnectionsCallbackInput, status: boolean, signal?: AbortSignal): Promise<ConnectionsCallbackOutcome> {
-    const connections = config(deps);
-    const attempt = verifyConnectAttempt(connections.stateSecrets, input.attempt, now());
+  async function handle(input: ConnectionsCallbackInput, status: boolean, signal?: AbortSignal): Promise<ConnectionsCallbackReport> {
+    const attempt = verifyConnectAttempt(config(deps).stateSecrets, input.attempt, now());
     if (!attempt) return { kind: "invalid" };
+    const outcome = await settle(attempt, input, status, signal);
+    return outcome.kind === "invalid" ? outcome : { ...outcome, tenantId: attempt.tenantId, connectionId: attempt.connectionId };
+  }
+  async function settle(attempt: ConnectAttempt, input: ConnectionsCallbackInput, status: boolean, signal?: AbortSignal): Promise<ConnectionsCallbackOutcome> {
+    const connections = config(deps);
     const fail = (reason: Exclude<ConnectErrorReason, "invalid_attempt">): ConnectionsCallbackOutcome => ({ kind: "error", reason });
     // C-5, in this order, the first failure answers.
     if (!attemptBrowserMatches(attempt, input.browserKey)) return fail("browser_mismatch");

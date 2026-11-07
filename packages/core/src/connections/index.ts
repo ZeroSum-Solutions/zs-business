@@ -7,3 +7,4 @@ export * from "./port.js";
 export * from "./signing.js";
 export * from "./tokens.js";
 export * from "./worker.js";
+export * from "./check-catalog.js";

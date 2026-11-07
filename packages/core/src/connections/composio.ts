@@ -155,7 +155,17 @@ export interface ComposioClient {
   /** A 404 counts as done. */
   deleteAccount(id: string, signal?: AbortSignal): Promise<void>;
   execute(input: ExecuteInput, signal?: AbortSignal): Promise<ExecuteOutcome>;
+  /** A-8, owner-run only: one tool's toolkit and versions; `null` for a 404. */
+  getTool(slug: string, signal?: AbortSignal): Promise<ComposioTool | null>;
 }
+export interface ComposioTool { readonly slug: string; readonly toolkit: string | null; readonly versions: readonly string[] }
+
+const toolSchema = z.object({
+  slug: z.string().min(1).max(200),
+  toolkit: z.object({ slug: z.string().max(200).nullish() }).nullish(),
+  version: z.string().max(100).nullish(),
+  available_versions: z.array(z.string().max(100)).max(1000).nullish(),
+});
 
 export interface ComposioClientConfig {
   readonly apiKey: string;
@@ -289,6 +299,17 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
         await call("DELETE", `/connected_accounts/${enc(id)}`, undefined, signal);
       } catch (error) {
         if (error instanceof ComposioError && error.kind === "not_found") return;
+        throw error;
+      }
+    },
+    async getTool(slug, signal) {
+      try {
+        const { json } = await call("GET", `/tools/${enc(slug)}`, undefined, signal);
+        const out = parse(toolSchema, json);
+        const versions = [...new Set([...(out.available_versions ?? []), ...(out.version ? [out.version] : [])])];
+        return { slug: out.slug, toolkit: out.toolkit?.slug?.toLowerCase() ?? null, versions };
+      } catch (error) {
+        if (error instanceof ComposioError && error.kind === "not_found") return null;
         throw error;
       }
     },

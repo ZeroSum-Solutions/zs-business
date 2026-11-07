@@ -52,7 +52,7 @@ let appClock: ReturnType<typeof makeClock>;
 let port: ConnectorPort;
 let limiterRefuses = false;
 let taken: string[];
-let reports: { route: string; outcome: string }[];
+let reports: { route: string; outcome: string; tenantId?: string; connectionId?: string }[];
 let on: App; // connections configured
 let off: App; // not configured
 
@@ -259,8 +259,28 @@ describe("the member routes (C-4, C-5, C-13)", () => {
     expect((await call(on, "DELETE", "/v1/connections/pending", { token: staffA.token, headers: { [CONNECT_ATTEMPT_HEADER]: attempt } })).status).toBe(403);
     const cancelled = await call(on, "DELETE", "/v1/connections/pending", { token: h.a.token, headers: { [CONNECT_ATTEMPT_HEADER]: attempt } });
     expect(cancelled.status).toBe(200);
-    expect(cancelled.body).toEqual({ cancelled: true });
+    expect(cancelled.body).toEqual({ cancelled: true, revokeFailed: false });
+    expect(cancelled.headers.get("cache-control")).toBe("no-store");
     expect(fake.accounts.get(account)).toMatchObject({ revoked: true, deleted: true });
+  });
+
+  it("B-10: a cancel Composio rate-limits is 429 with Retry-After, and the retry finishes it", async () => {
+    const { attempt } = await start(on, h.a.token);
+    const account = claimsOf(attempt).composioAccountId;
+    fake.override(/GET \/connected_accounts\//, { status: 429, json: {}, times: 1 });
+    const limited = await call(on, "DELETE", "/v1/connections/pending", { token: h.a.token, headers: { [CONNECT_ATTEMPT_HEADER]: attempt } });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(fake.accounts.get(account)!.deleted).toBe(false);
+  });
+
+  it("C-11: the list and a disconnect answer Cache-Control: no-store", async () => {
+    const id = await seedLive({ tenantId: h.a.tenantId, memberId: h.a.memberId });
+    const list = await call(on, "GET", "/v1/connections", { token: h.a.token });
+    expect(list.headers.get("cache-control")).toBe("no-store");
+    const gone = await call(on, "POST", `/v1/connections/${id}/disconnect`, { token: h.a.token, key: randomUUID(), body: {} });
+    expect(gone.status).toBe(200);
+    expect(gone.headers.get("cache-control")).toBe("no-store");
   });
 
   it("two-tenant denial: the list shows only the caller's rows, and tenant B cannot disconnect tenant A's; staff cannot either", async () => {
@@ -287,7 +307,8 @@ describe("the callback (C-5)", () => {
     expect(response.headers.get("location")).not.toContain(attempt);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
-    expect(reports).toEqual([{ route: "callback", outcome: "confirm" }]);
+    // C-7: the operator log names the attempt's tenant and connection, never a token or the account.
+    expect(reports).toEqual([{ route: "callback", outcome: "confirm", tenantId: claims.tenantId, connectionId: claims.connectionId }]);
   });
 
   it("without a valid attempt it is a 400 with no redirect and no grant, and still sends no-store", async () => {
@@ -335,20 +356,34 @@ describe("the callback (C-5)", () => {
     expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
   });
 
-  it("the status call answers pending until the account is ACTIVE, then confirm, and redeems no session", async () => {
+  it("A-4: a status call for an attempt whose callback never presented a session is not_connected, even once ACTIVE", async () => {
     const { attempt } = await start(on, h.a.token);
     const claims = claimsOf(attempt);
     const headers = { [CONNECT_ATTEMPT_HEADER]: attempt, [CONNECT_BROWSER_KEY_HEADER]: KEY };
-    const first = await rawGet(on, "/oauth/connections/callback/status", headers);
-    expect(first.status).toBe(303);
-    expect(new URL(first.headers.get("location")!).searchParams.get("connection")).toBe("pending");
-    expect(first.headers.get("cache-control")).toBe("no-store");
-    expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
     fake.accounts.get(claims.composioAccountId)!.status = "ACTIVE";
-    const second = await rawGet(on, "/oauth/connections/callback/status", headers);
-    expect(new URL(second.headers.get("location")!).searchParams.get("connection")).toBe("confirm");
-    expect(second.headers.get(CONNECT_GRANT_HEADER)).toMatch(/^zcg1\./);
+    const refused = await rawGet(on, "/oauth/connections/callback/status", headers);
+    expect(refused.status).toBe(303);
+    expect(new URL(refused.headers.get("location")!).searchParams.get("reason")).toBe("not_connected");
+    expect(refused.headers.get(CONNECT_GRANT_HEADER)).toBeNull();
+    expect(refused.headers.get("cache-control")).toBe("no-store");
+    expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
     expect((await rawGet(on, "/oauth/connections/callback/status", {})).status).toBe(400);
+  });
+
+  it("A-4: after a callback presented its session and lost the answer, the status call confirms without redeeming again", async () => {
+    const { attempt } = await start(on, h.a.token);
+    const claims = claimsOf(attempt);
+    const sessionUri = fake.consent(claims.composioAccountId);
+    const headers = { [CONNECT_ATTEMPT_HEADER]: attempt, [CONNECT_BROWSER_KEY_HEADER]: KEY };
+    fake.loseNextCompleteAuth = true;
+    const lost = await rawGet(on, callbackPath(claims.composioAccountId, sessionUri), headers);
+    expect(new URL(lost.headers.get("location")!).searchParams.get("reason")).toBe("provider_unavailable");
+    expect(fake.callsTo(/complete_auth/)).toHaveLength(1);
+    const status = await rawGet(on, "/oauth/connections/callback/status", headers);
+    expect(new URL(status.headers.get("location")!).searchParams.get("connection")).toBe("confirm");
+    expect(status.headers.get(CONNECT_GRANT_HEADER)).toMatch(/^zcg1\./);
+    expect(fake.callsTo(/complete_auth/)).toHaveLength(1);
+    expect(reports.map((report) => report.outcome)).toEqual(["error:provider_unavailable", "confirm"]);
   });
 
   it("a reload after the confirm is connected for the same account; a worker that is down is provider_unavailable", async () => {
@@ -443,6 +478,10 @@ describe("the /mcp connection tools (C-10, C-11, H-8)", () => {
     expect(errorCode(await run(client, idA, "nope"))).toEqual({ code: "not_found" });
     expect(errorCode(await run(client, idA, "shopify_list_orders", { limit: 500 }))).toEqual({ code: "invalid_arguments" });
     expect(errorCode(await run(client, idA, "shopify_list_orders", { connected_account_id: "ca_x" }))).toEqual({ code: "invalid_arguments" });
+    // C-4: the tool call's own fields (not a UUID, an unknown key) are invalid_arguments too, never ValidationFailed.
+    expect(errorCode(await client.callTool({ name: "run_connection_tool", arguments: { connectionId: "nope", tool: "shopify_list_orders", arguments: {} } }) as ToolReply)).toEqual({ code: "invalid_arguments" });
+    expect(errorCode(await client.callTool({ name: "run_connection_tool", arguments: { connectionId: idA, tool: "shopify_list_orders", arguments: {}, extra: 1 } }) as ToolReply)).toEqual({ code: "invalid_arguments" });
+    expect(errorCode(await client.callTool({ name: "list_connection_tools", arguments: {} }) as ToolReply)).toEqual({ code: "invalid_arguments" });
     expect(taken).toHaveLength(0);
     limiterRefuses = true;
     expect(errorCode(await run(client, idA, "shopify_list_orders"))).toEqual({ code: "provider_rate_limited", retryAfterSeconds: 42 });
@@ -577,6 +616,15 @@ describe("the API environment (C-3)", () => {
     expect(errorOf({ ...values, CONNECTIONS_STATE_SECRET: INTERNAL })).toContain("must differ");
     expect(errorOf({ ...values, CONNECTIONS_STATE_PREVIOUS_SECRET: STATE })).toContain("must differ");
     expect(errorOf({ ...values, CONNECTIONS_ENV: "staging" })).toContain("CONNECTIONS_ENV");
+  });
+
+  it("C-6: accepts the optional previous internal secret (signing still uses the current one) unless it equals the current", () => {
+    const previous = ["conn", "internal", "p".repeat(32)].join("-");
+    expect(parseConnectionsApiEnv({ ...values, CONNECTIONS_INTERNAL_PREVIOUS_SECRET: previous })).toMatchObject({ internalSecret: INTERNAL });
+    expect(errorOf({ ...values, CONNECTIONS_INTERNAL_PREVIOUS_SECRET: INTERNAL })).toContain("CONNECTIONS_INTERNAL_PREVIOUS_SECRET");
+    expect(errorOf({ ...values, CONNECTIONS_INTERNAL_PREVIOUS_SECRET: "short" })).toContain("CONNECTIONS_INTERNAL_PREVIOUS_SECRET");
+    // It alone switches the set on, so a half-set API is refused rather than silently off.
+    expect(errorOf({ CONNECTIONS_INTERNAL_PREVIOUS_SECRET: previous })).toContain("CONNECTIONS_WORKER_URL");
   });
 
   it("the server environment carries the parsed set, or null", () => {

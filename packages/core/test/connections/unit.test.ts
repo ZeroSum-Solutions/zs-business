@@ -7,7 +7,7 @@ import {
   COMPOSIO_STATUSES, ComposioError, OVERRIDE_KEYS, buildExecuteEnvelope, catalogTool, catalogToolkit, classifyExecuteFailure, completeDecision,
   connectGrantId, connectIdempotencyKey, createComposioClient, liveDecision, normalizeStatus, signConnectAttempt, signConnectGrant,
   signConnectorRequest, trimToSize, verifyConnectAttempt, verifyConnectGrant, verifyConnectorRequest, attemptBrowserMatches,
-  MAX_CONNECT_GRANT_LENGTH, browserBindingFor, callbackCharges, callbackStatusCharges, runCharges, connectCharges,
+  MAX_CONNECT_GRANT_LENGTH, browserBindingFor, callbackCharges, callbackStatusCharges, runCharges, connectCharges, checkComposioCatalog, COMPOSIO_CATALOG,
 } from "../../src/index.js";
 import { FakeComposio, fakeOrder } from "./fake-composio.js";
 
@@ -334,5 +334,36 @@ describe("catalog and output projection (C-6, C-10, C-14)", () => {
     expect(kept[0]!.id).toBe("0");
     expect(Buffer.byteLength(JSON.stringify(trimmed.data))).toBeLessThanOrEqual(CONNECTION_RESULT_MAX_BYTES);
     expect(trimToSize({ blob: "x".repeat(100_000) }, ["orders"], CONNECTION_RESULT_MAX_BYTES)).toBeNull();
+  });
+});
+
+describe("the owner-run catalog check (A-8, C-6)", () => {
+  const client = (fake: FakeComposio) => createComposioClient({ apiKey: "ck_test_secret", baseUrl: "https://composio.test/api/v3.1", fetch: fake.fetch });
+
+  it("passes when every slug exists in its toolkit at the pinned version", async () => {
+    const fake = new FakeComposio();
+    const report = await checkComposioCatalog(client(fake));
+    expect(report.ok).toBe(true);
+    const expected = COMPOSIO_CATALOG.flatMap((toolkit) => [toolkit.identity.slug, ...toolkit.tools.map((tool) => tool.slug)]);
+    expect(report.results.map((result) => result.slug)).toEqual(expected);
+    expect(report.results.every((result) => result.problem === null)).toBe(true);
+    expect(fake.calls.every((call) => call.method === "GET" && call.apiKey === "ck_test_secret")).toBe(true);
+  });
+
+  it("fails on a missing slug, a version that is gone, another toolkit, and a refused key, and names no secret", async () => {
+    const fake = new FakeComposio();
+    fake.tools.delete("SHOPIFY_GET_ORDER_BY_ID");
+    fake.tools.set("SHOPIFY_GET_ORDERS_WITH_FILTERS", { toolkit: "shopify", versions: ["20260101_00"] });
+    fake.tools.set("SHOPIFY_GET_SHOP_DETAILS", { toolkit: "gmail", versions: ["20251201_00"] });
+    const report = await checkComposioCatalog(client(fake));
+    expect(report.ok).toBe(false);
+    expect(Object.fromEntries(report.results.map((result) => [result.slug, result.problem]))).toEqual({
+      SHOPIFY_GET_SHOP_DETAILS: "wrong_toolkit", SHOPIFY_GET_ORDERS_WITH_FILTERS: "version_missing", SHOPIFY_GET_ORDER_BY_ID: "slug_missing",
+    });
+    fake.override(/GET \/tools\//, { status: 401 });
+    const refused = await checkComposioCatalog(client(fake));
+    expect(refused.ok).toBe(false);
+    expect(refused.results.every((result) => result.problem === "key_refused")).toBe(true);
+    expect(JSON.stringify([report, refused])).not.toContain("ck_test_secret");
   });
 });

@@ -47,18 +47,19 @@ export interface ConnectionsWorkerRuntimeEnv {
 export interface ConnectionsEnv {
   /** Null when no CONNECTIONS_ variable is set: the internal routes are 404 and the cron runs nothing. */
   readonly worker: ConnectionsWorkerRuntimeEnv | null;
-  /** Null when CRON_SECRET is unset: the cron route answers 404. */
+  /** Null when CRON_SECRET is unset or the worker is off: the cron route answers 404. */
   readonly cronSecret: string | null;
 }
 
 export function parseConnectionsEnv(env: Readonly<Record<string, string | undefined>>): ConnectionsEnv {
+  const set = (name: string) => env[name] !== undefined && env[name] !== "";
+  // C-6: off means off, cron route included; CRON_SECRET is shared with other crons and judged only when on.
+  if (!SWITCHES.some(set)) return { worker: null, cronSecret: null };
   const cron = z.string().min(32, "CRON_SECRET must be at least 32 characters")
     .refine((value) => value !== PLACEHOLDER_CRON_SECRET, "CRON_SECRET is still the .env.example placeholder")
     .optional().safeParse(env.CRON_SECRET);
   if (!cron.success) throw new Error(`Invalid environment: ${cron.error.issues.map((issue) => issue.message).join("; ")}`);
   const cronSecret = cron.data ?? null;
-  const set = (name: string) => env[name] !== undefined && env[name] !== "";
-  if (!SWITCHES.some(set)) return { worker: null, cronSecret };
 
   const given = Object.fromEntries(Object.keys(schema.shape).filter(set).map((name) => [name, env[name]]));
   const parsed = schema.safeParse(given);

@@ -352,6 +352,37 @@ describe("the connect action (C-5)", () => {
      VALUES ($1,$2,$3,'shopify',$4,'ac_shopify',$5,$6,$7,'verified','1',$8,$9,$9)`,
     [a.tenantId, randomUUID(), connectionId, accountId, SHOP, a.owner.memberId, BINDING, new Date(T0 + 600_000), new Date(T0)]));
 
+  it("B-12: a connect that loses the race for the toolkit's live slot is 409 already_connected", async () => {
+    const run = memberDispatch(deps(), { tenantId: a.tenantId, actorId: a.owner.userId });
+    const id = randomUUID();
+    await verifiedAttempt(id);
+    // Another confirm's insert is in flight: its row is not visible yet, so the handler's check passes and the
+    // insert waits on the live-per-toolkit index until the other transaction commits.
+    const other = await database.pool.connect();
+    try {
+      await other.query("BEGIN");
+      const holder = (await other.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+      await other.query(
+        `INSERT INTO connections (tenant_id,id,tier,toolkit,composio_account_id,external_account_id,account_domain,account_label,status,connected_by,last_checked_at,created_at,updated_at)
+         VALUES ($1,$2,'composio','shopify',$3,'2',$4,'Other','active',$5,$6,$6,$6)`,
+        [a.tenantId, randomUUID(), `ca_${randomUUID().slice(0, 8)}`, SHOP, a.owner.memberId, new Date(T0)]);
+      const losing = run(command(connectIdempotencyKey(id), id)).catch((e: unknown) => e);
+      for (let tries = 0; ; tries += 1) {
+        const blocked = await database.pool.query("SELECT 1 FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))", [holder]);
+        if (blocked.rowCount) break;
+        if (tries > 200) throw new Error("the second insert never waited");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await other.query("COMMIT");
+      const error = await losing;
+      expect(error).toBeInstanceOf(Conflict);
+      expect(error).toMatchObject({ details: { reason: "already_connected" } });
+    } finally {
+      await other.query("ROLLBACK").catch(() => undefined);
+      other.release();
+    }
+  });
+
   it("is refused under any key other than connect:<id>", async () => {
     const run = memberDispatch(deps(), { tenantId: a.tenantId, actorId: a.owner.userId });
     await expect(run(command("some-other-key"))).rejects.toBeInstanceOf(ValidationFailed);

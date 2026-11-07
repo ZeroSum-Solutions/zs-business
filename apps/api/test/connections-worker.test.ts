@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { CONNECTOR_SIGNATURE_HEADERS, createHttpConnectorPort, signConnectorRequest } from "@zs/core";
 import { describe, expect, it } from "vitest";
 import { parseConnectionsEnv } from "../src/connections/config.js";
+import { connectionsWorkerReporter } from "../src/connections/start.js";
 import { connectionsInternalRoutes } from "../src/connections/internal.js";
 import { createConnectionsRunner } from "../src/connections/runner.js";
 import { cronRoutes } from "../src/delivery/cron.js";
@@ -36,7 +37,9 @@ const errorOf = (env: Record<string, string | undefined>): string => {
 describe("parseConnectionsEnv", () => {
   it("is off, with no error, when no CONNECTIONS_ variable is set (COMPOSIO_API_KEY alone does not switch it on)", () => {
     expect(parseConnectionsEnv({})).toEqual({ worker: null, cronSecret: null });
-    expect(parseConnectionsEnv({ COMPOSIO_API_KEY: API_KEY, CRON_SECRET: CRON })).toEqual({ worker: null, cronSecret: CRON });
+    // C-6: off means the cron route is off too, and CRON_SECRET (shared with other crons) is not judged here.
+    expect(parseConnectionsEnv({ COMPOSIO_API_KEY: API_KEY, CRON_SECRET: CRON })).toEqual({ worker: null, cronSecret: null });
+    expect(parseConnectionsEnv({ CRON_SECRET: "short" })).toEqual({ worker: null, cronSecret: null });
     expect(parseConnectionsEnv({ CONNECTIONS_ENV: "" })).toEqual({ worker: null, cronSecret: null });
   });
 
@@ -103,7 +106,7 @@ function harness(options: { worker?: boolean; env?: "production" | "preview"; pr
     takeNonce: async (jti: string) => (seen.has(jti) ? false : (seen.add(jti), true)),
     link: async (request: unknown) => { calls.push({ operation: "link", body: request }); throw new Error("unused"); },
     complete: async (request: unknown) => { calls.push({ operation: "complete", body: request }); throw new Error("unused"); },
-    cancel: async (request: unknown) => { calls.push({ operation: "cancel", body: request }); return { outcome: "cancelled" as const }; },
+    cancel: async (request: unknown) => { calls.push({ operation: "cancel", body: request }); return { outcome: "cancelled" as const, revokeFailed: false }; },
     run: async (request: unknown) => { calls.push({ operation: "run", body: request }); throw new Error("unused"); },
     disconnect: async (request: unknown) => { calls.push({ operation: "disconnect", body: request }); throw new Error("unused"); },
   };
@@ -134,7 +137,7 @@ describe("POST /internal/connections/<operation>", () => {
     const response = await h.send({});
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toEqual({ outcome: "cancelled" });
+    expect(await response.json()).toEqual({ outcome: "cancelled", revokeFailed: false });
     expect(h.calls.map((call) => call.operation)).toEqual(["cancel"]);
   });
 
@@ -220,6 +223,43 @@ describe("POST /internal/connections/<operation>", () => {
     expect(h.calls).toEqual([]);
   });
 
+  it("B-6: refuses a chunked body at the cap without reading the rest, before the signature check", async () => {
+    const h = harness();
+    let pulled = 0;
+    const chunk = new Uint8Array(16 * 1024).fill(120);
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += chunk.byteLength;
+        if (pulled > 1024 * 1024) controller.close(); else controller.enqueue(chunk);
+      },
+    });
+    const response = await h.app.request(`${ORIGIN}/internal/connections/cancel`, { method: "POST", body: stream, duplex: "half" } as RequestInit);
+    expect(response.status).toBe(400);
+    expect(pulled).toBeLessThanOrEqual(128 * 1024);
+    expect(h.refused).toEqual([]);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("B-6: hands the operation the request's abort signal", async () => {
+    let seen: AbortSignal | undefined;
+    const app = connectionsInternalRoutes({
+      worker: {
+        takeNonce: async () => true,
+        cancel: async (_request: unknown, signal?: AbortSignal) => { seen = signal; return { outcome: "not_found" as const }; },
+      } as never,
+      env: "preview", secrets: { current: SECRET }, clock: { now: () => NOW },
+    });
+    const body = JSON.stringify({ tenantId: randomUUID(), attemptId: randomUUID() });
+    const headers = signConnectorRequest({ secret: SECRET, env: "preview", host: HOST, path: "/internal/connections/cancel", body, now: NOW });
+    const controller = new AbortController();
+    const response = await app.request(new Request(`${ORIGIN}/internal/connections/cancel`, { method: "POST", headers, body, signal: controller.signal }));
+    expect(response.status).toBe(200);
+    expect(seen).toBeDefined();
+    expect(seen!.aborted).toBe(false);
+    controller.abort();
+    expect(seen!.aborted).toBe(true);
+  });
+
   it("answers a signed body that does not fit the operation with a 400 and no worker call", async () => {
     const h = harness();
     expect((await h.send({}, { body: "not json" })).status).toBe(400);
@@ -258,7 +298,7 @@ describe("POST /internal/connections/<operation>", () => {
     });
     const tenantId = randomUUID();
     const attemptId = randomUUID();
-    await expect(port.cancel({ tenantId, attemptId })).resolves.toEqual({ outcome: "cancelled" });
+    await expect(port.cancel({ tenantId, attemptId })).resolves.toEqual({ outcome: "cancelled", revokeFailed: false });
     expect(h.calls).toEqual([{ operation: "cancel", body: { tenantId, attemptId } }]);
   });
 });
@@ -299,5 +339,35 @@ describe("GET /cron/connections", () => {
     const response = await app.request("/cron/connections", { headers: { authorization: `Bearer ${CRON}` } });
     expect(response.status).toBe(503);
     expect(await response.text()).not.toContain("secret detail");
+  });
+});
+
+describe("the worker's operator log (C-7, C-14)", () => {
+  const capture = () => {
+    const lines: { level: "info" | "warn"; message: string; event: unknown }[] = [];
+    return { lines, log: { info: (message: string, event: unknown) => lines.push({ level: "info", message, event }), warn: (message: string, event: unknown) => lines.push({ level: "warn", message, event }) } };
+  };
+
+  it("logs every run with tenant, connection, tool, our code and ms, and nothing else", () => {
+    const out = capture();
+    const report = connectionsWorkerReporter(out.log);
+    const tenantId = randomUUID();
+    const connectionId = randomUUID();
+    report({ kind: "run", tenantId, connectionId, tool: "shopify_list_orders", code: "ok", ms: 120 });
+    expect(out.lines).toEqual([{ level: "info", message: "Connections run", event: { tenantId, connectionId, tool: "shopify_list_orders", code: "ok", ms: 120 } }]);
+  });
+
+  it("warns on account_mismatch, link_orphan and key_refused, and leaves routine events out", () => {
+    const out = capture();
+    const report = connectionsWorkerReporter(out.log);
+    const tenantId = randomUUID();
+    report({ kind: "account_mismatch", tenantId, attemptId: randomUUID() });
+    report({ kind: "link_orphan", tenantId, attemptId: randomUUID() });
+    report({ kind: "key_refused", env: "preview", status: 401 });
+    report({ kind: "swept", tenantId, attemptId: randomUUID() });
+    report({ kind: "restored", tenantId, connectionId: randomUUID() });
+    expect(out.lines.map((line) => [line.level, (line.event as { kind: string }).kind])).toEqual([
+      ["warn", "account_mismatch"], ["warn", "link_orphan"], ["warn", "key_refused"],
+    ]);
   });
 });

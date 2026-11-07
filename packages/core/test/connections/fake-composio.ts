@@ -41,6 +41,12 @@ export class FakeComposio {
   private counter = 0;
   /** Drops the answer of the next `complete_auth` after it took effect (a lost response). */
   loseNextCompleteAuth = false;
+  /** The tool registry `GET /tools/:slug` answers from (A-8): slug to its toolkit and versions. */
+  readonly tools = new Map<string, { toolkit: string; versions: string[] }>([
+    ["SHOPIFY_GET_SHOP_DETAILS", { toolkit: "shopify", versions: ["20251201_00"] }],
+    ["SHOPIFY_GET_ORDERS_WITH_FILTERS", { toolkit: "shopify", versions: ["20251201_00"] }],
+    ["SHOPIFY_GET_ORDER_BY_ID", { toolkit: "shopify", versions: ["20251201_00"] }],
+  ]);
   /** Runs before a request is answered; a test uses it to interleave another writer. */
   gate: ((call: FakeCall) => Promise<void>) | null = null;
 
@@ -131,6 +137,12 @@ export class FakeComposio {
         } };
       if (method === "POST" && match[2]) { account.revoked = true; return { status: 200, body: { success: true } }; }
       if (method === "DELETE" && !match[2]) { account.deleted = true; return { status: 200, body: { success: true } }; }
+    }
+    const tool = /^\/tools\/([A-Z0-9_]+)$/.exec(path);
+    if (method === "GET" && tool) {
+      const entry = this.tools.get(tool[1]!);
+      if (!entry) return { status: 404, body: { error: { message: "no such tool" } } };
+      return { status: 200, body: { slug: tool[1], name: "x", toolkit: { slug: entry.toolkit, name: "Shopify" }, version: entry.versions.at(-1), available_versions: entry.versions } };
     }
     const exec = /^\/tools\/execute\/([A-Z0-9_]+)$/.exec(path);
     if (method === "POST" && exec) {

@@ -4,7 +4,8 @@
   "packageManager": "pnpm@10.33.2",
   "scripts": {
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "connections:check-catalog": "pnpm --filter @zs/api connections:check-catalog"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

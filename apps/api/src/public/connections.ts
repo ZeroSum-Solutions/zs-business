@@ -23,8 +23,8 @@ export interface ConnectionsApiConfig {
   readonly returnUrl: string;
   /** The shared limiter (C-4, C-5, C-12); defaults to the Postgres one on the app's database. */
   readonly limiter?: ConnectionLimiter;
-  /** Receives what each callback did, for logs; never a token or an ID. */
-  readonly report?: (event: { readonly route: "callback" | "status"; readonly outcome: string }) => void;
+  /** Receives what each callback did, for logs (C-14): the attempt's tenant and connection ID, never a token or an account ID. */
+  readonly report?: (event: { readonly route: "callback" | "status"; readonly outcome: string; readonly tenantId?: string; readonly connectionId?: string }) => void;
 }
 
 /** The callback lands in a browser: nothing may cache it, and the query must not leak as a Referer. */
@@ -48,7 +48,11 @@ export function connectionsCallbackRoutes(
       sessionUri: query("session_uri"),
     };
     const outcome = await (route === "callback" ? callback.callback(input, c.var.signal) : callback.status(input, c.var.signal));
-    config.report?.({ route, outcome: outcome.kind === "error" ? `error:${outcome.reason}` : outcome.kind });
+    config.report?.({
+      route, outcome: outcome.kind === "error" ? `error:${outcome.reason}` : outcome.kind,
+      ...(outcome.tenantId === undefined ? {} : { tenantId: outcome.tenantId }),
+      ...(outcome.connectionId === undefined ? {} : { connectionId: outcome.connectionId }),
+    });
     for (const [name, value] of Object.entries(CALLBACK_HEADERS)) c.header(name, value);
     // C-5: nothing proves where the caller came from without a valid attempt, so there is no redirect.
     if (outcome.kind === "invalid") return c.json(apiErrorBody("ValidationFailed", "Invalid connection attempt"), 400);

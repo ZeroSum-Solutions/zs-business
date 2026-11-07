@@ -13,7 +13,11 @@ import { idempotencyKey, jsonBody } from "./request.js";
 export function connectionsRoutes(session: (c: Context<AppEnv>) => ReturnType<typeof createConnectionsSession>) {
   const noStore = (c: Context<AppEnv>) => c.header("Cache-Control", "no-store");
   return new Hono<AppEnv>()
-    .get("/", async (c) => c.json(await session(c).list()))
+    // C-11: the list names the stores a business connected.
+    .get("/", async (c) => {
+      noStore(c);
+      return c.json(await session(c).list());
+    })
     // C-5: what the owner reviews before confirming the grant the callback staged.
     .get("/pending", async (c) => {
       noStore(c);
@@ -36,6 +40,8 @@ export function connectionsRoutes(session: (c: Context<AppEnv>) => ReturnType<ty
       c.header(CONNECT_ATTEMPT_HEADER, attempt);
       return c.json({ authorizeUrl }, 200);
     })
-    .post("/:id/disconnect", async (c) =>
-      c.json(await session(c).disconnect(c.req.param("id"), idempotencyKey(c), c.var.signal)));
+    .post("/:id/disconnect", async (c) => {
+      noStore(c);
+      return c.json(await session(c).disconnect(c.req.param("id"), idempotencyKey(c), c.var.signal));
+    });
 }

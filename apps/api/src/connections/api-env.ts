@@ -1,6 +1,8 @@
 // The API function's connections variables (docs/requirements/connections.md C-3, C-4, C-5), all or none.
 // Parsed from an object an entry point passes in; this module never reads process.env. The API holds the
-// worker's address, the signing secret and environment (a different value per environment), the state
+// worker's address, the signing secret and environment (a different value per environment; the API signs
+// CONNECTIONS_ENV into every internal request, so a request made for one environment never verifies in the
+// other even if a secret were shared), the state
 // secrets that sign the attempt and grant tokens, and the dashboard page the callback returns to. It never
 // holds the Composio key, an auth config ID or the service database login. Errors name variables, never values.
 import { secureUrlProblem } from "@zs/core";
@@ -28,6 +30,8 @@ const apiSchema = z.object({
   }, "must be an origin with no path, query, fragment or credentials"),
   CONNECTIONS_ENV: z.enum(["production", "preview"], { error: "must be production or preview" }),
   CONNECTIONS_INTERNAL_SECRET: signingSecretVariable(),
+  // C-6: accepted so the API and worker can carry one rotation set; the API always signs with the current one.
+  CONNECTIONS_INTERNAL_PREVIOUS_SECRET: signingSecretVariable().optional(),
   // Signs the attempt and grant tokens (C-4, C-5); domain-separated from the internal secret.
   CONNECTIONS_STATE_SECRET: signingSecretVariable(),
   CONNECTIONS_STATE_PREVIOUS_SECRET: signingSecretVariable().optional(),
@@ -54,6 +58,8 @@ export function parseConnectionsApiEnv(env: Readonly<Record<string, string | und
   const data = parsed.data;
   if (data.CONNECTIONS_STATE_SECRET === data.CONNECTIONS_INTERNAL_SECRET)
     throw new Error("Invalid environment: CONNECTIONS_STATE_SECRET must differ from CONNECTIONS_INTERNAL_SECRET");
+  if (data.CONNECTIONS_INTERNAL_PREVIOUS_SECRET !== undefined && data.CONNECTIONS_INTERNAL_PREVIOUS_SECRET === data.CONNECTIONS_INTERNAL_SECRET)
+    throw new Error("Invalid environment: CONNECTIONS_INTERNAL_PREVIOUS_SECRET must differ from CONNECTIONS_INTERNAL_SECRET");
   if (data.CONNECTIONS_STATE_PREVIOUS_SECRET !== undefined && data.CONNECTIONS_STATE_PREVIOUS_SECRET === data.CONNECTIONS_STATE_SECRET)
     throw new Error("Invalid environment: CONNECTIONS_STATE_PREVIOUS_SECRET must differ from CONNECTIONS_STATE_SECRET");
   return {

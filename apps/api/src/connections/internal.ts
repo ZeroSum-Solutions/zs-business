@@ -21,6 +21,31 @@ const MAX_BODY_BYTES = 64 * 1024;
 /** The API gives up at 7 seconds (C-10); the function is stopped at 30. */
 const OPERATION_BUDGET_MS = 25_000;
 
+/**
+ * B-6: reads at most `max` bytes as they arrive and stops at the cap, so an unsigned chunked body is refused
+ * without being buffered. Null when the body is larger than `max`.
+ */
+async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number): Promise<Uint8Array | null> {
+  if (stream === null) return new Uint8Array(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
+  return out;
+}
+
 export function connectionsInternalRoutes(config: {
   /** Null when the worker is not configured: every route is 404. */
   readonly worker: Pick<ConnectionsWorker, "link" | "complete" | "cancel" | "run" | "disconnect" | "takeNonce"> | null;
@@ -43,8 +68,8 @@ export function connectionsInternalRoutes(config: {
     if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return c.json(apiErrorBody("ValidationFailed", "Request too large"), 400);
     let body: string;
     try {
-      const bytes = new Uint8Array(await c.req.arrayBuffer());
-      if (bytes.byteLength > MAX_BODY_BYTES) return c.json(apiErrorBody("ValidationFailed", "Request too large"), 400);
+      const bytes = await readCapped(c.req.raw.body, MAX_BODY_BYTES);
+      if (bytes === null) return c.json(apiErrorBody("ValidationFailed", "Request too large"), 400);
       body = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
       return c.json(apiErrorBody("ValidationFailed", "Invalid request body"), 400);
@@ -70,7 +95,8 @@ export function connectionsInternalRoutes(config: {
       return c.json(apiErrorBody("Unauthorized", "Invalid internal credentials"), 401);
     }
     try {
-      const out = await handleConnectorOperation(worker, operation, body, AbortSignal.timeout(OPERATION_BUDGET_MS));
+      // B-6: a caller that goes away (the API gave up at 7 s) stops the Composio calls too.
+      const out = await handleConnectorOperation(worker, operation, body, AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(OPERATION_BUDGET_MS)]));
       return c.json(out.body, out.status);
     } catch (error) {
       config.onError?.(error);

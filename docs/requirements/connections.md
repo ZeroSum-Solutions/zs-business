@@ -102,7 +102,10 @@ role for workers (all workers share one pattern today; Known limits).
   - Signature: the API signs `env`, the worker's host, the method, the path, a timestamp, a
     128-bit random `jti` and the SHA-256 of the raw body with HMAC-SHA-256 under
     `CONNECTIONS_INTERNAL_SECRET` (a different value per environment;
-    `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` verifies through a rotation). The worker refuses a
+    `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` verifies through a rotation). The API therefore
+    holds `CONNECTIONS_ENV` too: a request signed for one environment never verifies in the
+    other, even if a secret were shared. The API accepts the optional previous internal
+    secret, refuses one equal to the current, and always signs with the current one. The worker refuses a
     timestamp more than 60 seconds off, a host or `env` that is not its own, and a `jti` it
     has seen (table `connector_request_nonces`, kept 5 minutes); tags are compared in
     constant time; redirects are not followed.
@@ -123,7 +126,10 @@ role for workers (all workers share one pattern today; Known limits).
   - A compromised API function can therefore make links and run catalog reads for a tenant it
     names. It cannot read the key, reach Proxy Execute, call a tool outside the catalog,
     choose the account, or replay a request.
-  - Off: without the worker config the internal routes answer 404. Without
+  - Off: without the worker config the internal routes and the cron route answer 404, and
+    `CRON_SECRET` (shared with other crons) is not checked by connections. The worker reads a
+    request body as it arrives and refuses it at 64 KiB, before the signature check, and the
+    request's abort signal stops the operation's Composio calls. Without
     `CONNECTIONS_WORKER_URL` and the secret in the API, every `/v1/connections` route answers
     404 and the C-10 tools are unlisted (a call is JSON-RPC `-32601`, H-5).
 - **C-4 Connect.** The Connections screen's Shopify card asks for the store's
@@ -345,7 +351,8 @@ role for workers (all workers share one pattern today; Known limits).
     `not_found`, also for another tenant's ID; `reauthorize` is
     `connection_needs_reconnect`); then the tool (in that toolkit's catalog, else
     `not_found`); then the strict argument schema (`invalid_arguments`); then C-12's limits;
-    then the worker.
+    then the worker. A call whose own fields do not fit (a connection ID that is not a UUID,
+    an unknown field, a missing one) is `invalid_arguments` too, after the token guard.
   - Time: the API aborts the worker call at 7 seconds and answers `provider_unavailable`
     inside the 10 second deadline. The worker aborts Composio at 6 seconds. Both pass the
     request's abort signal on.
@@ -403,7 +410,9 @@ role for workers (all workers share one pattern today; Known limits).
     append-only.
   - We store no tool arguments and no tool output.
   - Logs and error reports carry the tenant, connection ID, our tool name, our error code
-    and timings. They never carry arguments, output, labels, link URLs or provider messages.
+    and timings. Every run is logged that way; a callback's log line names the attempt's
+    tenant and connection ID; `account_mismatch`, `link_orphan` and `key_refused` are
+    warnings for the operator. They never carry arguments, output, labels, link URLs or provider messages.
     Account reads are parsed with an allowlist schema that drops `state` and every
     credential field.
   - Composio is a subprocessor: it logs tool arguments and results for up to one year by
@@ -495,6 +504,14 @@ role for workers (all workers share one pattern today; Known limits).
   table or screen yet.
 - Managed-auth provider quotas are partly shared with other Composio customers. A provider
   429 we did not cause still answers `provider_rate_limited`.
+- `/mcp` is mounted only when the API has the Activepieces config (`deps.activepieces`), so
+  for the pilot the connection tools exist only on an API that also serves Activepieces.
+- C-17 stays open: the provider scopes in the catalog are placeholders until the preview
+  consent screen is recorded, and the vendor gates are not passed yet.
+- `pnpm connections:check-catalog` (owner-run, `zsvault run --env COMPOSIO_API_KEY=<id>`)
+  reads `GET /tools/<slug>` for each pinned slug and checks the toolkit and version. That
+  route and its answer shape are the pilot's reading of Composio's API and are confirmed on
+  its first run (C-17).
 
 ## What the Mac sets
 
@@ -506,7 +523,7 @@ role for workers (all workers share one pattern today; Known limits).
   `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (optional), `CONNECTIONS_DATABASE_URL`,
   `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL`,
   `CONNECTIONS_CRON_SCHEDULE`.
-- API project: `CONNECTIONS_WORKER_URL`, `CONNECTIONS_INTERNAL_SECRET`,
+- API project: `CONNECTIONS_WORKER_URL`, `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`,
   `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (optional), `CONNECTIONS_STATE_SECRET`,
   `CONNECTIONS_STATE_PREVIOUS_SECRET` (optional), `CONNECTIONS_RETURN_URL`.
 - Dashboard project: nothing new beyond its existing API address.
