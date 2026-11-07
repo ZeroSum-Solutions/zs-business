@@ -1,5 +1,5 @@
 // Vercel Node function for GET /cron/billing (stripe.md S-8), bundled by scripts/build-vercel.mjs
-// into its own function, so the API function never holds the service database login. Like
+// into its own function, in the workers Vercel project (`pnpm build:vercel:worker`), so the API project never holds the service database login. Like
 // vercel.ts, it reads process.env and the system clock; one runner and one pool per instance.
 import { randomUUID } from "node:crypto";
 import process from "node:process";

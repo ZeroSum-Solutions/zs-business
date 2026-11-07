@@ -132,7 +132,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `TWILIO_WEBHOOK_BASE_URL` | The API's public https origin as Twilio calls it. Signatures are checked over this URL plus the path, never the `Host` header. |
 | `TWILIO_KEYWORD_REPLIES` | `provider` (default): Twilio's own opt-out handling answers STOP, START and HELP. `app`: this API answers them in TwiML (twilio.md T-8). |
 
-Only `src/main.ts`, `src/vercel.ts` and the `src/scripts/*` entry points read the
+Only `src/main.ts`, `src/vercel.ts`, the `src/vercel-*.ts` cron entries and the `src/scripts/*` entry points read the
 environment or the system clock. Everything else gets them through `createApp(deps)`.
 Both servers build the app with `createServer(env, clock)` (`src/server.ts`), which checks
 the runtime login before it serves.
@@ -536,7 +536,7 @@ Inbox for an owner's approval.
 | `FOLLOWUP_SLOT_MINUTES` | One run per tenant per slot (60). |
 | `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS` | 3, 5000, 20000; candidates × timeout must fit the budget. |
 | `FOLLOWUP_INTERVAL_MS` | The Node worker's pause between runs (300000). |
-| `FOLLOWUP_CRON_SCHEDULE` | Build time: adds the Vercel cron, for example `0 * * * *`. Unset: no cron. |
+| `FOLLOWUP_CRON_SCHEDULE` | Build time, workers project: adds the Vercel cron, for example `0 * * * *`. Unset: no cron. |
 
 `pnpm followup:global-switch off "reason"` stops new drafts for every tenant at once (G-3);
 `on` lets them draft again. It uses `FOLLOWUP_SERVICE_DATABASE_URL`.
@@ -660,11 +660,66 @@ against the pinned Supabase Root 2021 CA.
    ```sh
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ \
      mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # API
+   VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=<WORKER_PROJECT_ID> \
+     mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # cron workers
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_uTGH5yuyXfr6w9lAihGj1HcDxSdp \
      mise exec -- pnpm dlx vercel@latest deploy --yes [--target preview | --prod]   # dashboard
    ```
-   The API builds with `pnpm build:vercel` (`scripts/build-vercel.mjs`): esbuild bundles
-   `src/vercel.ts` into one Node 24 function under `.vercel/output` (Build Output API).
+   **Two Vercel projects from `apps/api`.** A project's environment variables are visible to every
+   function in it, so the cron workers are their own project: the API project never holds
+   `DELIVERY_DATABASE_URL`, `RESEND_API_KEY`, `GOOGLE_TOKEN_PRIVATE_KEY` or any other worker
+   secret (resend.md R-9, stripe.md S-8, google-calendar.md G-3, activepieces.md W-14,
+   agents.md G-13). Both projects have Root Directory `apps/api`, Node 24 and the same install
+   command; they differ in the build command (`scripts/build-vercel.mjs <target>`, esbuild into
+   `.vercel/output`, the Build Output API):
+
+   | Project | Build command | Output |
+   |---|---|---|
+   | API (`prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ`) | `pnpm build:vercel` | One Node 24 function from `src/vercel.ts` for every path. No cron functions, no crons. |
+   | Workers (`<WORKER_PROJECT_ID>`) | `pnpm build:vercel:worker` | Five functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces` and `/cron/followup`, and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
+
+   Environment per project (production and preview carry the same names; each target uses its own
+   database ref). `test/worker-split.test.ts` fails if the API bundle names a worker-only variable.
+
+   | Variable | API | Workers |
+   |---|---|---|
+   | `ENABLE_EXPERIMENTAL_COREPACK=1` | yes | yes |
+   | `DATABASE_CA_CERT` | yes | yes |
+   | `DATABASE_URL`, `DATABASE_POOL_MAX` | yes | no |
+   | `JWT_VERIFIER`, `JWT_JWKS_URL`, `JWT_SECRET`, `JWT_ISSUER`, `SESSION_CHECK`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` | yes | no |
+   | `PUBLIC_BOOKING_KEY_SECRET`, `PUBLIC_BASE_URL` | yes | only with `AGENT_TEMPLATED=on` (the follow-up agent signs `{booking_link}`) |
+   | `PUBLIC_CLIENT_IP_HEADER` and the other `PUBLIC_*` limits | yes | no |
+   | `UNSUBSCRIBE_TOKEN_SECRET` | yes (verifies links) | yes (signs links, only with `DELIVERY_WORKER=on`) |
+   | `RESEND_WEBHOOK_SECRET` | yes | no |
+   | `ACTIVEPIECES_KEY_SECRET` (and `ACTIVEPIECES_KEY_PREVIOUS_SECRET`, `ACTIVEPIECES_ALLOW_LOOPBACK`) | yes | yes (only with `ACTIVEPIECES_WEBHOOK_WORKER=on`) |
+   | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CHANNEL_SECRET` | yes | yes (only with `CALENDAR_WORKER=on`) |
+   | `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY` | yes | no |
+   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WEBHOOK_BASE_URL` | yes (webhooks) | only with `SMS_PROVIDER=twilio` |
+   | `STRIPE_*`, `TWILIO_PREVIOUS_AUTH_TOKEN`, `TWILIO_KEYWORD_REPLIES`, `SITES_STORE`, `R2_*`, `ALLOWED_ORIGINS`, `IMAGE_*`, `ENRICHMENT_*` | yes | no |
+   | `CRON_SECRET` | **no** | yes |
+   | `DELIVERY_WORKER`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_*`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, the other `DELIVERY_*` tuning, `SMS_PROVIDER` | **no** | yes |
+   | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | **no** | yes |
+   | `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | **no** | yes |
+   | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_*` tuning | **no** | yes |
+   | `CALENDAR_WORKER`, `CALENDAR_DATABASE_URL`, `GOOGLE_TOKEN_PRIVATE_KEY`, `GOOGLE_WEBHOOK_URL`, `GOOGLE_EVENT_TITLE`, `CALENDAR_*` tuning | **no** | yes |
+   | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_*` tuning | **no** | yes |
+   | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `AGENT_MODEL_*`, `AGENT_TEMPLATED`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_*`, `DEEPSEEK_*`, `FOLLOWUP_*` tuning | **no** | yes |
+   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE` (build time) | **no** (ignored) | yes |
+
+   `KIE_API_KEY` and `FAL_API_KEY` belong to the image worker, which runs on the Mac. The API's
+   config still requires the configured vendor's key to start (image-port.md IM-21), so do not set
+   `IMAGE_ADAPTER` to `kie` or `fal` on the API project until that check moves to the worker.
+
+   **Moving the crons out of a single project.** The API build no longer carries any cron, so the
+   next API deploy stops the live Activepieces cron unless the workers project already runs it. (1) Create the workers project and set its
+   variables. (2) Deploy it and check that its cron fires (`GET /cron/<name>` with the bearer
+   answers 200). (3) Deploy the API project with `pnpm build:vercel`, which drops the cron
+   functions and the `crons` entry, so the two projects never both run a cron. (4) Delete the
+   worker-only variables from the API project: `CRON_SECRET`, `DELIVERY_DATABASE_URL`,
+   `DELIVERY_UNSUBSCRIBE_BASE_URL`, `RESEND_API_KEY`, `RESEND_FROM`, `ACTIVEPIECES_DATABASE_URL`,
+   `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_CRON_SCHEDULE`. Do (3) before (4), or the API
+   deploy still holds them.
+
    API env per target: `DATABASE_URL` (zs_runtime, port 6543), `DATABASE_CA_CERT`,
    `DATABASE_POOL_MAX=3`, `JWT_VERIFIER=jwks` with `JWT_JWKS_URL`
    (`https://<ref>.supabase.co/auth/v1/.well-known/jwks.json`; both projects sign with ES256, so
@@ -789,12 +844,12 @@ Runs the delivery worker, so an approved Inbox reply is sent (resend.md R-9). Of
 | `SMS_PROVIDER` | `twilio` sends SMS through Twilio (twilio.md T-9); unset or `none` refuses SMS as `sms_provider_not_configured`. |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET` (or `TWILIO_AUTH_TOKEN`), `TWILIO_WEBHOOK_BASE_URL`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | With `SMS_PROVIDER=twilio`. Each tenant sends from its own number in `sms_numbers`. The status callback URL is built from `TWILIO_WEBHOOK_BASE_URL`. An outcome with no status callback waits `TWILIO_OUTCOME_WAIT_MS` (24 h) before it is a dead letter for an operator. |
 | `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `DELIVERY_WORKER_ID` | Optional tuning: 20000, 2, 5000, 15000 (Node worker only) and `delivery`. Limit × (timeout + 500 ms) + 1 s must fit the budget; the cron function allows at most 20000. |
-| `DELIVERY_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/delivery`, for example `*/5 * * * *`. Unset, there is no cron. |
+| `DELIVERY_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/delivery`, for example `*/5 * * * *`. Unset, there is no cron. |
 
 `GET /cron/delivery` answers 401 without the right bearer, 200 `{ ran: false }` with the switch
 off, 200 `{ ran: true, passes, ingested, claimed, sent, retried, blocked, dead, errors,
 budgetSpent }` after a run, and 503 when a run fails (the next run picks the work up again).
-It is its own Vercel function; the API function never opens the service login.
+It is its own Vercel function in the workers project; the API project never holds the service login.
 
 ## Billing runner (`/cron/billing`, `pnpm billing:worker`)
 
@@ -808,7 +863,7 @@ and the wallet reserves nothing until it is repaid). Off unless `BILLING_WORKER=
 | `CRON_SECRET` | The same bearer as `/cron/delivery`. Unset, the route is 404. |
 | `BILLING_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
 | `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS` | Optional tuning: 50, 20000 and 30000 (Node worker only). The cron function allows a budget of at most 20000. |
-| `BILLING_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/billing`. Unset, there is no cron. |
+| `BILLING_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/billing`. Unset, there is no cron. |
 
 `GET /cron/billing` answers like `/cron/delivery`, with `{ ran: true, passes, claimed,
 outcomes, budgetSpent }` after a run. Events that end `mismatch`, `orphaned` or `not_ours` are
@@ -834,7 +889,7 @@ connections (revoke, remove blocks). It alone holds the token private key. Off u
 | `GOOGLE_EVENT_TITLE` | Optional: the title of every pushed event, default `Booked`. No customer data. |
 | `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | Optional, for tests. |
 | `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS` | Optional tuning: 20000 and 60000 (Node worker only). The cron function allows a budget of at most 20000. |
-| `CALENDAR_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/calendar`. Unset, there is no cron. |
+| `CALENDAR_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/calendar`. Unset, there is no cron. |
 
 `GET /cron/calendar` answers like `/cron/delivery`, with `{ ran: true, passes, counts,
 budgetSpent }` after a run: `counts` sums the worker's passes (`synced`, `pushed`, `disconnected`,
@@ -855,7 +910,7 @@ approves (docs/requirements/activepieces.md). Off unless `ACTIVEPIECES_KEY_SECRE
 | `ACTIVEPIECES_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
 | `CRON_SECRET` | Shared with `/cron/delivery`. |
 | `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS`, `ACTIVEPIECES_WORKER_ID` | Optional tuning: 20000, 2, 5000, 8, 15000 (Node worker only) and `activepieces`. Limit × timeout must fit the budget. |
-| `ACTIVEPIECES_CRON_SCHEDULE` | Build time only. Adds the Vercel cron for `/cron/activepieces`. Unset, there is no cron. |
+| `ACTIVEPIECES_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/activepieces`. Unset, there is no cron. |
 
 Owner routes (Bearer member token, `integrations` permission, owners only): `GET|POST /webhooks`,
 `POST /webhooks/:id/update`, `POST /webhooks/:id/rotate`, `GET /webhooks/:id/deliveries`,

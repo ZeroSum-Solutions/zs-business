@@ -181,7 +181,7 @@ approvals route by an owner, who becomes the send's actor (A-6, A-7). Staff cann
 delivery worker then re-checks the approval, consent and suppression as for every reply (D-6).
 
 **G-13. Scheduled runs.** Off unless the deploy sets `FOLLOWUP_AGENT=on`, and on Vercel only
-when the build sets `FOLLOWUP_CRON_SCHEDULE`. `GET /cron/followup` (its own Vercel function,
+when the build sets `FOLLOWUP_CRON_SCHEDULE`. `GET /cron/followup` (its own Vercel function in the workers Vercel project, not the API's,
 `Authorization: Bearer <CRON_SECRET>`, 404 without a secret, 401 before any work, 200 without
 work while off) and `pnpm followup:worker` (a Node loop every `FOLLOWUP_INTERVAL_MS`) share
 one runner:

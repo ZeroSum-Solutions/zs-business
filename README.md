@@ -17,7 +17,8 @@ Pilot data only (the invented Halden & Rowe tenant). Everything is in US East.
 | Piece | Production | Preview |
 |---|---|---|
 | Supabase project (org Zerosumsolutions-Projects, Micro, Postgres 17) | `zs-business`, ref `ubzyxrflvxymikpijnto` | `zs-business-preview`, ref `cmpnzcijdumzyddoubga` |
-| API (Vercel `zs-business-api`, root `apps/api`) | https://api.zerosumsolutions.com | https://zs-business-api-preview.vercel.app |
+| API (Vercel `zs-business-api`, root `apps/api`, build `pnpm build:vercel`) | https://api.zerosumsolutions.com | https://zs-business-api-preview.vercel.app |
+| Cron workers (Vercel `<WORKER_PROJECT_NAME>`, root `apps/api`, build `pnpm build:vercel:worker`) | no public domain; Vercel Cron calls `/cron/*` | same project, preview deployments |
 | Dashboard (Vercel `zs-business-dashboard`, root `apps/dashboard`) | https://app.zerosumsolutions.com | https://zs-business-dashboard-preview.vercel.app (Vercel Authentication on) |
 | Auth email (Supabase custom SMTP through Resend) | `no-reply@mail.zerosumsolutions.com` | same |
 
@@ -27,6 +28,13 @@ ref, and the preview dashboard's `ZS_API_URL` is the preview API. DNS is on Clou
 Secrets live in ZS Vault (`zs_business_<prod|preview>_*`) and in Vercel env vars, never in
 the repo. The runbook (roles, migrations, seed, tokens, deploy, checks) is in
 `apps/api/README.md`, "Hosted deploy".
+
+The API and the cron workers are two Vercel projects built from the same `apps/api` source,
+because a project's environment variables are visible to every function in it. The API project
+must hold no worker secret (service database logins, the Resend key, the Google token private key,
+`CRON_SECRET`) and builds no cron functions; the workers project holds them and serves only
+`/cron/*`. Deploy the workers project before the next API deploy (owner step, `apps/api/README.md`):
+the API build no longer carries the Activepieces cron. `apps/api/README.md` lists which variables go on which project.
 
 On since 2026-10-20 (both targets): Supabase Auth sessions (an owner signs in by email link;
 prod owner devszerosum@gmail.com), public booking, unsubscribe links, the Resend bounce webhook

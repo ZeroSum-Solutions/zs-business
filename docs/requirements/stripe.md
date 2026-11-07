@@ -108,7 +108,8 @@ rows and may insert a pending top-up through the action; the only column it may 
 Checkout session URL (S-2), and it never updates money columns. The worker names `tenant_id`
 in every statement.
 
-**S-8. Running it.** `GET /cron/billing` is its own Vercel function, with the same Bearer
+**S-8. Running it.** `GET /cron/billing` is its own Vercel function in the workers Vercel project
+(not the API's), with the same Bearer
 `CRON_SECRET` check as `/cron/delivery`; `pnpm billing:worker` is the Node loop. The kill switch
 is `BILLING_WORKER=on`. The build adds a Vercel cron only when `BILLING_CRON_SCHEDULE` is set.
 A run stops starting passes once `BILLING_RUN_BUDGET_MS` is spent, and each pass stops claiming
@@ -119,7 +120,8 @@ budget over 20 s, since Vercel stops its function at 30 s (the Node loop may run
 (optional `STRIPE_WEBHOOK_PREVIOUS_SECRET`), `STRIPE_LIVEMODE` (`true` or `false`),
 `STRIPE_SUCCESS_URL`, `STRIPE_CANCEL_URL`, optional `STRIPE_CURRENCY` (`usd`),
 `STRIPE_TOPUP_MIN` and `STRIPE_TOPUP_MAX` (minor units), `STRIPE_API_VERSION`,
-`STRIPE_BASE_URL`. Billing function: `BILLING_WORKER=on`, `CRON_SECRET`,
+`STRIPE_BASE_URL`; none of them is set on the workers project. Billing function (workers
+project only): `BILLING_WORKER=on`, `CRON_SECRET`,
 `BILLING_DATABASE_URL` (a login that may `SET ROLE service_role`). In Stripe: a webhook
 endpoint at `https://<api host>/webhooks/stripe` for the events listed above.
 
