@@ -10,6 +10,7 @@ import {
 } from "@zs/db/testing";
 import { createLocalStubSessionCheck, InMemoryAudioStore, InMemoryIntakeFileStore, InMemoryVoicemails, signBookingKey, type AutomationEdgeConfig, type EnrichmentConfigInput, type ImageDependencies, type SiteCompiler } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
+import type { ScopedDatabase } from "@zs/db";
 import {
   createApp,
   createHs256Verifier,
@@ -206,6 +207,25 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     ...(documentIntake ? { documentIntake } : {}),
     close: () => database.close(),
   };
+}
+
+/**
+ * Another API instance over a given database (a second pool, or a wrapper that watches or fails
+ * statements), with the Activepieces routes and the remote MCP endpoint on. Owner tokens from
+ * `ApiHarness.a.token` work on it as long as `clock` does not pass their hour.
+ */
+export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number } = {}): App {
+  const appClock = options.clock ?? clock;
+  return createApp({
+    verifier: createHs256Verifier(SECRET, { clock: appClock }),
+    sessionCheck: createLocalStubSessionCheck(db, appClock),
+    clock: appClock,
+    db,
+    generateId: randomUUID,
+    config: { allowedOrigins: [ORIGIN], ...(options.requestTimeoutMs ? { requestTimeoutMs: options.requestTimeoutMs } : {}) },
+    ...(options.activepieces === false ? {} : { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } } }),
+    ...(options.onError ? { onError: options.onError } : {}),
+  });
 }
 
 export interface Call {
