@@ -54,6 +54,11 @@ export function createTokenReads(deps: EdgeDependencies) {
   const tenant = (principal: AutomationPrincipal) => principal.tenantId;
 
   return {
+    /**
+     * connections.md C-10: the token guard (H-3) and the scope check, for a tool whose work cannot sit inside one
+     * database transaction because it calls the worker. A token revoked after this returns finishes the call in flight.
+     */
+    guard: (principal: AutomationPrincipal, scope: ReadScope) => guarded(principal, scope, async () => undefined),
     listContacts(principal: AutomationPrincipal, query: unknown) {
       const parsed = parseInput(listContactsQuerySchema, query, "query");
       return guarded(principal, "contacts:read", (tx) => listContacts(tx, tenant(principal), parsed));

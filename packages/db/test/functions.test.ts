@@ -44,6 +44,10 @@ const expectedPath: Record<string, string> = {
   "agent_model_calls_guard()": "pg_catalog, pg_temp",
   "agent_runs_guard()": "pg_catalog, pg_temp",
   "approvals_transition()": "pg_catalog, pg_temp",
+  // Connections (20261106200000, C-7, C-12): the runtime status guard and the worker's Composio call budget.
+  "connections_guard()": "pg_catalog, pg_temp",
+  "connections_org_budget(timestamp with time zone,text,text)": "pg_catalog, pg_temp",
+  "connections_take_attempt()": "pg_catalog, pg_temp",
   // Hub access (20261106100000, H-8): usage counters only grow; the retention prune the API runs as the runtime role.
   "automation_token_usage_grow_only()": "pg_catalog, pg_temp",
   "prune_automation_token_usage(timestamp with time zone,integer)": "pg_catalog, pg_temp",
@@ -136,9 +140,10 @@ it("skips only planted logins: any other login that can reach an owner is caught
     await client.query(`CREATE ROLE ${planted} LOGIN; GRANT authenticated, zs_dispatcher TO ${planted}`);
     expect(await assumable()).toEqual([]);
     await client.query("CREATE ROLE zs_probe_login LOGIN; GRANT authenticated, zs_dispatcher TO zs_probe_login");
-    // The three functions that run as zs_dispatcher.
+    // The four functions that run as zs_dispatcher.
     expect(await assumable()).toEqual([
-      expect.stringMatching(/^business_profiles_sync_name\(/), expect.stringMatching(/^prune_automation_token_usage\(/),
+      expect.stringMatching(/^business_profiles_sync_name\(/), expect.stringMatching(/^connections_take_attempt\(/),
+      expect.stringMatching(/^prune_automation_token_usage\(/),
       expect.stringMatching(/^record_action_and_event\(/),
     ]);
   } finally {

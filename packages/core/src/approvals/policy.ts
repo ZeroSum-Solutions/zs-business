@@ -44,6 +44,8 @@ export const isSiteAction = (actionType: string) => actionType.startsWith("site.
  */
 export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set([
   "calendar.google.connect", "wallet.topup.create",
+  // connections.md C-5, C-16: connect runs only from the confirm step, disconnect is the owner's direct decision.
+  "connection.connect", "connection.disconnect",
   // document-intake.md DL-3: the upload route checks and stores the bytes first; an approved copy would queue a job for no file.
   "catalog.intake.upload",
   // image-port.md: these need the deploy's image config or the worker principal, which an approved run lacks.

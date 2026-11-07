@@ -25,6 +25,7 @@
     "image:worker": "tsx src/scripts/image-worker.ts",
     "billing:worker": "tsx src/scripts/billing-worker.ts",
     "calendar:worker": "tsx src/scripts/calendar-worker.ts",
+    "connections:check-catalog": "tsx src/scripts/connections-check-catalog.ts",
     "followup:worker": "tsx src/scripts/followup-worker.ts",
     "followup:global-switch": "tsx src/scripts/followup-global-switch.ts",
     "sms:number": "tsx src/scripts/sms-number.ts",

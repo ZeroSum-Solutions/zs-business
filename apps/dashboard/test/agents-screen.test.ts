@@ -149,7 +149,7 @@ describe("connections screen", () => {
   it("U3-7: promises only what works on this page", () => {
     const html = textOf(renderConnections());
     expect(html).not.toContain("Fix anything marked here");
-    expect(html).toContain("Connect Google Calendar here. The other accounts can't be changed here yet.");
+    expect(html).toContain("Connect Google Calendar and Shopify here. The other accounts can't be changed here yet.");
     expect(html).toContain("Reconnect");
     expect(html).toContain("You can't change this here yet.");
     expect(html).not.toContain("go live");

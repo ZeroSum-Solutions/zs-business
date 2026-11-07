@@ -86,6 +86,9 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);
       }
+      // Connections (connections.md C-7): an active row names a label and a numeric store ID; an attempt a browser hash.
+      if (name === "connections") Object.assign(row, { account_label: "fixture", external_account_id: "1", account_domain: "fixture.myshopify.com", composio_account_id: `ca_${randomUUID()}` });
+      if (name === "connection_attempts") Object.assign(row, { browser_hash: "a".repeat(43), account_domain: "fixture.myshopify.com", composio_account_id: `ca_${randomUUID()}` });
       // Document intake (document-intake.md DL-1): a job needs a real hash, and its rows need a page count.
       // A row is written only into a job in review, which holds a page count, a parser and a digest.
       if (name === "document_intake_jobs") {

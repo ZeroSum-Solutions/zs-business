@@ -61,7 +61,7 @@ export {
 } from "./voice-session.js";
 export { assignVoiceNumber, defaultDisclosure, type VoiceNumberInput, type VoiceNumberSettings } from "../voice/numbers.js";
 export { voiceHandlers, textbackBody } from "../voice/actions.js";
-export { apiErrorBody, mapError, retryableAsUnavailable, SiteStoreUnavailable, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
+export { apiErrorBody, ConnectionsRefused, mapError, retryableAsUnavailable, SiteStoreUnavailable, Unauthenticated, validationError, type ApiErrorStatus, type MappedError } from "./errors.js";
 export {
   createHs256Verifier,
   createJwksVerifier,

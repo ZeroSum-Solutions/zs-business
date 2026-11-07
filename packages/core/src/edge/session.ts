@@ -168,6 +168,10 @@ import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
 import { getTopUpForCheckout, listTopUps, rememberCheckoutUrl, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
+import { connectionHandlers } from "../connections/handlers.js";
+import type { ConnectorPort } from "../connections/port.js";
+import type { ConnectionLimiter } from "../connections/limits.js";
+import type { ConnectionStateSecrets } from "../connections/tokens.js";
 import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
 import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
 import { pendingGrantId, verifyPendingGrant, type PendingGrant } from "../calendar/pending-grant.js";
@@ -193,6 +197,15 @@ export interface EdgeDependencies {
     readonly google: GoogleClient;
     readonly stateSecrets: OAuthStateSecrets;
     readonly tokenPublicKey: KeyObject;
+  };
+  /**
+   * Managed-tier connections (connections.md C-3, C-4, C-5); absent means the tier is off and every
+   * connections route answers 404. The connector reaches the worker, which alone holds the Composio key.
+   */
+  readonly connections?: {
+    readonly connector: ConnectorPort;
+    readonly stateSecrets: ConnectionStateSecrets;
+    readonly limiter: ConnectionLimiter;
   };
   /**
    * Site publishing (M4b): the object store releases go to and the compiler; absent means off.
@@ -251,7 +264,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
 });
 
@@ -296,6 +309,9 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   // google-calendar.md G-1, G-5: a connected calendar decides what the public pages offer.
   "calendar.google.connect": "publish",
   "calendar.google.disconnect": "publish",
+  // connections.md C-16: owners holding `integrations` connect and disconnect managed apps.
+  "connection.connect": "integrations",
+  "connection.disconnect": "integrations",
   // agents.md G-2, G-3: owners change settings and resume; any member may stop the agent.
   ...AGENT_MEMBER_PERMISSIONS,
   ...BROWSER_MEMBER_PERMISSIONS,

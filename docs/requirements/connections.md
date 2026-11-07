@@ -102,7 +102,10 @@ role for workers (all workers share one pattern today; Known limits).
   - Signature: the API signs `env`, the worker's host, the method, the path, a timestamp, a
     128-bit random `jti` and the SHA-256 of the raw body with HMAC-SHA-256 under
     `CONNECTIONS_INTERNAL_SECRET` (a different value per environment;
-    `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` verifies through a rotation). The worker refuses a
+    `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` verifies through a rotation). The API therefore
+    holds `CONNECTIONS_ENV` too: a request signed for one environment never verifies in the
+    other, even if a secret were shared. The API accepts the optional previous internal
+    secret, refuses one equal to the current, and always signs with the current one. The worker refuses a
     timestamp more than 60 seconds off, a host or `env` that is not its own, and a `jti` it
     has seen (table `connector_request_nonces`, kept 5 minutes); tags are compared in
     constant time; redirects are not followed.
@@ -123,7 +126,11 @@ role for workers (all workers share one pattern today; Known limits).
   - A compromised API function can therefore make links and run catalog reads for a tenant it
     names. It cannot read the key, reach Proxy Execute, call a tool outside the catalog,
     choose the account, or replay a request.
-  - Off: without the worker config the internal routes answer 404. Without
+  - Off: without the worker config the internal routes and the cron route answer 404, and
+    `CRON_SECRET` (shared with other crons) is not checked by connections. The worker reads a
+    request body as it arrives and refuses it at 64 KiB, before the signature check; a body
+    that takes over 5 seconds to arrive, or whose caller goes away, is a 400. The request's
+    abort signal stops the operation's Composio calls. Without
     `CONNECTIONS_WORKER_URL` and the secret in the API, every `/v1/connections` route answers
     404 and the C-10 tools are unlisted (a call is JSON-RPC `-32601`, H-5).
 - **C-4 Connect.** The Connections screen's Shopify card asks for the store's
@@ -132,7 +139,8 @@ role for workers (all workers share one pattern today; Known limits).
   browser key as `bindConnectStart` does (G-1; cookie `zs-connect-browser`, httpOnly,
   `SameSite=Lax`, path `/api/connections`, 10 minutes, `Secure` over https) and sends
   `SHA-256(browserKey)` with the body to the API's
-  `POST /v1/connections/:toolkit/connect` (permission `integrations`; toolkit matches
+  `POST /v1/connections/:toolkit/connect` (permission `integrations`, checked before the toolkit
+  and the body, so a caller without it gets 403 even for a malformed body; toolkit matches
   `^[a-z0-9_-]{1,40}$` and is in the catalog, else 404; `shopDomain` matches
   `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`).
   - Refused with 409 `already_connected` while the tenant has a row for that toolkit in
@@ -141,9 +149,16 @@ role for workers (all workers share one pattern today; Known limits).
     store, all or nothing.
   - The API makes a random attempt ID and a random connection ID and asks the worker to
     `link`. The worker inserts `connection_attempts` (`tenant_id`, `id`, `connection_id`,
-    `toolkit`, `composio_account_id`, `auth_config_id`, `created_by`, `browser_hash`,
-    `status` `started`, `expires_at` 10 minutes ahead, `created_at`) and returns
+    `toolkit`, `composio_account_id`, `auth_config_id`, `created_by` (the member's
+    `tenant_members.id`, which the API reads in the same transaction as the permission check),
+    `browser_hash`, `status` `started`, `expires_at` 10 minutes ahead, `created_at`) and returns
     `redirect_url` and the Composio account ID.
+  - A link refused for the budget or a Composio 429 is 429 `rate_limited` with the worker's
+    `retryAfterSeconds` (60 when it gives none). When the attempt insert fails after Composio
+    made the account, the worker deletes that account at once if no attempt or connection row
+    names it; if the delete fails it records the attempt as `cancelling` so the sweep removes
+    it, and only if that also fails does it report `link_orphan` to the operator, with the
+    Composio account ID so the operator can remove it.
   - The API answers `{ authorizeUrl }` and an attempt token `zca1.<body>.<tag>` in the
     `X-Zs-Connect-Attempt` header, signed by `CONNECTIONS_STATE_SECRET` (domain-separated;
     `CONNECTIONS_STATE_PREVIOUS_SECRET` verifies through a rotation). It names the tenant, the
@@ -170,18 +185,32 @@ role for workers (all workers share one pattern today; Known limits).
     account ID differs from the attempt's; `forbidden` when the member no longer holds
     `integrations` (read in a tenant transaction for the attempt's tenant); `rate_limited`
     over `conn-callback:<tenantId>` (30 per hour); `connected` when the attempt's connection
-    row exists, is `active`, and has the attempt's toolkit and external account (a reload),
+    row exists, is `active`, and has the attempt's toolkit and Composio account (a reload; the
+    attempt token carries no external account ID, so the account ID is the binding),
     `conflict` when it exists otherwise.
-  - Then the worker's `complete`, bounded by 7 seconds of the 10 second deadline:
-    - redeem `session_uri` with the tenant's `user_id`. If Composio says the session was
-      already used, read the account instead: only this browser held that `session_uri`, so
-      an account that is now `ACTIVE` for this `user_id` was redeemed by our earlier, lost
-      call;
+  - Then the worker's `complete`, bounded by 7 seconds of the 10 second deadline. It first
+    locks the attempt: `cancelling`, `cancelled`, `swept` or a missing attempt is
+    `invalid_attempt`, `confirmed` is `conflict`, and one past `expires_at` is `expired`. A
+    callback that carries a `session_uri` records `session_presented_at`; a status call (no
+    `session_uri`) on an attempt that never had one is `not_connected`. It redeems only a
+    `started` attempt, and it moves the attempt to `verified` with a conditional update that
+    fails (`invalid_attempt`) if a cancel or the sweep moved it meanwhile:
+    - redeem `session_uri` with the tenant's `user_id`. If Composio says the session is
+      unknown or used (404) and an earlier callback for this attempt had presented a session,
+      read the account instead: only this browser held that `session_uri`, so an account that
+      is now `ACTIVE` for this `user_id` was redeemed by our earlier, lost call. On the first
+      presentation a 404 is final, as are a 400 (Composio checked `user_id`) and a redemption
+      that names another account: the answer is `not_connected` and `session_presented_at` is
+      cleared, so no status call can verify the attempt afterwards. A 401, 403 or 410 is our key
+      or project (`provider_unavailable`, reported as `key_refused`), never the used-session
+      path;
     - read the account once and refuse it unless its ID, `user_id`, toolkit and auth config
       are the attempt's and its status is `ACTIVE` (`not_connected`). `INITIATED` or
       `INITIALIZING` answers `pending`; the page then calls the dashboard's
       `GET /api/connections/callback/status`, which repeats this step without the redemption,
-      at most 5 times, 2 seconds apart, while the attempt is valid;
+      at most 5 times, 2 seconds apart (2 to 10 s after the callback), while the attempt is valid. Each status call costs one
+      unit in `conn-status:<tenantId>` (120 per hour), `conn-status-attempt:<attemptId>` (5 per
+      hour) and C-12's `conn-minute` and `conn-day` buckets, all or nothing;
     - read identity with the toolkit's identity tool, on that account only, and keep the
       store's numeric ID as `external_account_id` and the shop name as the label (C-6). The
       attempt moves to `verified`.
@@ -194,19 +223,37 @@ role for workers (all workers share one pattern today; Known limits).
     `grantId` is the base64url SHA-256 of the grant. `tokensWithAccess` counts the tenant's
     live tokens with `connections:read`, which will read this store once it is confirmed
     (C-11).
-  - Confirm. `POST /v1/connections/confirm { grantId }` (permission `integrations`, no
-    `Idempotency-Key`). 409 `grant_changed` when the browser's grant has another `grantId`; it
+  - Confirm. `POST /v1/connections/confirm { grantId }` (permission `integrations`, checked
+    before the body; no `Idempotency-Key`). 409 `grant_changed` when the browser's grant has another `grantId`; it
     connects nothing and keeps the cookie. Otherwise it runs `connection.connect` through the
     dispatcher as the signed-in member, under the reserved key `connect:<connectionId>`, with
     a payload the server built from the grant, so a repeat replays. A grant that is missing,
-    forged, expired, or names another member or tenant answers 404. The action refuses any
-    other key and is never approved (C-16).
-  - Cancel. The dashboard's `DELETE /api/connections/pending` drops `zs-connect-grant` and
-    `zs-connect-attempt` and asks the API to `cancel` the attempt; the worker deletes that
-    Composio account at once (revoke as C-13) and marks the attempt `cancelled`.
+    forged, expired, or names another member or tenant answers 404. The payload names no
+    Composio account: the insert takes it from the verified attempt (C-7), so a grant whose
+    attempt was cancelled or swept meanwhile is 409 `attempt_changed` and connects nothing. A
+    key that already holds another payload is 409 `conflict`. The action refuses any other key
+    and is never approved (C-16).
+  - Cancel. The dashboard's `DELETE /api/connections/pending` sends both the grant and the
+    attempt token to the API's `DELETE /v1/connections/pending`. The attempt the staged grant
+    names wins over the attempt cookie (the cookie may hold a newer start). The worker locks
+    the attempt and moves it to `cancelling` under its lease, so it can no longer connect,
+    then reads the account, revokes once (the outcome is kept in `revoke_outcome`) and deletes
+    it (revoke as C-13), and marks the attempt `cancelled`. Answers: 200
+    `{ cancelled: true, revokeFailed }` (`revokeFailed`: the owner should remove the app in
+    Shopify admin; it is also true when the account was left alone: a read that names no user,
+    which the sweep retries, or a repeat of a cancel that ended with `account_mismatch`); 404 when nothing is waiting (no attempt, already `confirmed`, or its
+    account is owned by a connection row, which is never removed); 409 `account_mismatch` when
+    the account is not this tenant's (left alone, the attempt ends, the operator is told); 429
+    with `Retry-After` when the budget is spent or Composio answers 429 (the attempt stays
+    `cancelling` for a retry or the sweep); 409 `cancel_in_progress` while another cancel or
+    the sweep holds the attempt's lease (the removal has no outcome yet; ask again); 503 when
+    Composio is unavailable. The dashboard drops the two cookies after a 2xx or 404 only, so
+    every other answer leaves them for a retry.
   - Cookies. The dashboard drops the grant after a confirm that names it answered 2xx, 403,
-    404 or 409, and after a 404 read. Sign-out, and any API 401, drop all three connect
-    cookies.
+    404 or 409, and after a 404 read. A callback that arrives without a usable attempt cookie
+    answers `invalid_attempt` and drops the grant too. A cancel while the dashboard's live
+    settings are invalid is a 503 that keeps both cookies. Sign-out, and any API 401, drop all
+    three connect cookies.
 - **C-6 Catalog and curated read tools.** The catalog is code. Per toolkit: slug, display
   name, auth config variable, identity tool, provider scopes the auth config grants (recorded
   from the preview consent screen), and an allowlist of read tools. Each tool has our name
@@ -216,7 +263,9 @@ role for workers (all workers share one pattern today; Known limits).
   schema that keeps only named fields, and a disclosure line (C-11). Revision 2 catalog:
   - Shopify, identity: shop details (numeric ID, name, `myshopify` domain).
   - `shopify_list_orders { createdAfter?, createdBefore?, status?, limit? }`: at most 50
-    orders, a range of at most 92 days. Output per order: ID, name, created and updated
+    orders, a range of at most 92 days (also when only `createdAfter` is given). Each order is
+    projected on its own: an order that does not fit the output schema is left out, and so is
+    a line item; at most 250 line items per order are kept. Output per order: ID, name, created and updated
     time, financial and fulfilment status, currency, totals, line items (title, quantity,
     price) and the customer's ID, name and email.
   - `shopify_get_order { orderId }`: the same fields for one order.
@@ -228,21 +277,37 @@ role for workers (all workers share one pattern today; Known limits).
   `external_account_id`, `account_label` (null once `disconnected`), `status` (`active`,
   `reauthorize`, `disconnecting`, `disconnected`), `reauthorize_reason` (`provider_status`,
   `auth_error`, null), `connected_by` (member, `ON DELETE RESTRICT`), `last_checked_at`,
-  `last_error_code` (our code, cleared on recovery), `created_at`, `updated_at`; every column
-  but the nullable three is `NOT NULL`.
+  `last_error_code` (our code, cleared on recovery), `revoke_outcome` (`revoked`, `failed`,
+  null; only on a row leaving, C-13), `claimed_until` (the worker's lease, C-9), `created_at`,
+  `updated_at`; every column but the nullable five is `NOT NULL`.
   - At most one row per tenant and toolkit in `active`, `reauthorize` or `disconnecting`
-    (partial unique index). `composio_account_id` is unique among rows not `disconnected`
-    (partial).
+    (partial unique index). `composio_account_id` is unique over all rows: a disconnected
+    account is deleted at Composio, and a reconnect makes a new one.
   - Forced RLS, policies `TO authenticated` with the tenant check, two-tenant denial test.
-  - Runtime role: `SELECT`; `INSERT` (a trigger refuses any row not `active`, and the only
-    caller is the connect action); `UPDATE` granted on `status` and `updated_at` only, and a
-    trigger refuses any move but `active` or `reauthorize` to `disconnecting` with
-    `ERRCODE 42501`. No `DELETE`.
+  - Runtime role: `SELECT`; `INSERT` without `composio_account_id` (the only caller is the
+    connect action); `UPDATE` granted on `status` and `updated_at` only. No `DELETE`.
+  - Triggers. For every role: `disconnected` is final, `disconnecting` only becomes
+    `disconnected`, and `reauthorize` with `auth_error` never becomes `active` (C-8). The
+    runtime rules bind every role but the worker (a superuser, or a member of `service_role`
+    that is not a member of `authenticated`), so the API's login is bound with or without
+    `SET ROLE`: an insert must be `active`, and the only status move is `active` or
+    `reauthorize` to `disconnecting` (`ERRCODE 42501`). An insert without a Composio account
+    takes it from the worker's attempt for that connection ID, locked `FOR UPDATE`: it must be
+    the tenant in context, `verified`, and have the row's toolkit, domain, external account
+    and member; it is marked `confirmed` in the same transaction. Otherwise the insert fails
+    with `23514` `connections_verified_attempt`. That trigger is a definer owned by
+    `zs_dispatcher`, which reads those attempt columns and updates their status only.
   - `connection_attempts` (C-4) is a tenant table with forced RLS and no runtime grants: only
-    the worker reads and writes it. Statuses `started`, `verified`, `confirmed` (set by the
-    worker when it next sees the connection row), `cancelled`, `swept`.
-  - `connector_request_nonces` (`jti` primary key, `expires_at`) holds no tenant data and has
-    no runtime grants.
+    the worker reads and writes it. `created_by` is the member (`tenant_members.id`,
+    `FOREIGN KEY (tenant_id, created_by)`, `ON DELETE SET NULL`); one attempt per connection
+    ID. It also holds `external_account_id` (set with `verified`), `session_presented_at`
+    (C-5), `last_error_code`, `revoke_outcome` and `claimed_until`. Statuses `started`,
+    `verified`, `confirmed` (set by the connection insert), `cancelling` (a cancel or a
+    failed link cleanup the sweep finishes), `cancelled`, `swept`.
+  - `connector_request_nonces` (`jti` primary key, `expires_at`) holds no tenant data. It is
+    in `public` with forced RLS, no policy and no runtime grants, so only the worker's service
+    role reaches it (`zs_internal` is the migrator's private ledger and holds no runtime
+    table).
   - The worker uses `CONNECTIONS_DATABASE_URL`, a login that may `SET ROLE service_role`, as
     the calendar worker does (G-6). Every worker statement names the tenant and the row's ID,
     and every status change is conditional on the current status
@@ -263,15 +328,28 @@ role for workers (all workers share one pattern today; Known limits).
     `disconnecting` or `disconnected` row.
 - **C-9 Health, sweep, schedule.** `GET /cron/connections` in the worker project
   (`Authorization: Bearer <CRON_SECRET>`, 404 without a secret, 401 before any work), on
-  `CONNECTIONS_CRON_SCHEDULE` (every 5 minutes). Each pass, at most 40 seconds and at most 200
-  Composio calls, claims with `FOR UPDATE SKIP LOCKED`, oldest first:
+  `CONNECTIONS_CRON_SCHEDULE` (every 5 minutes). Each pass, at most 20 seconds (configurable,
+  never above 25, inside the function's 30) and at most 200 Composio calls, takes rows oldest
+  first. It leases one row at a time: a short transaction sets `claimed_until` one minute
+  ahead through `FOR UPDATE SKIP LOCKED`, and no transaction is held across a Composio call.
+  The lease is released only by the worker holding it (`WHERE claimed_until = <its lease>`).
+  Cancel and disconnect lease the same way, so two workers never remove one account at once:
   - `disconnecting` rows: finish them (C-13);
-  - attempts not `confirmed` past `expires_at` plus one hour: when a connection row with the
-    attempt's connection ID exists, mark the attempt `confirmed` and stop. Otherwise delete
-    that Composio account after checking its `user_id` is the attempt tenant's (a 404 counts
-    as done), then mark the attempt `swept`. The sweep deletes only accounts named by an
+  - attempts left `cancelling`, and attempts `started` or `verified` past `expires_at` plus
+    one hour: when a connection row has the attempt's connection ID or Composio account, the
+    account is owned and never removed; the attempt ends `confirmed` (or `swept` when it has no
+    external account). Otherwise delete that Composio account after a fresh read shows its ID,
+    `user_id`, toolkit and auth config are the attempt's (a 404 counts as done), then mark the
+    attempt `cancelled` (from `cancelling`) or `swept`. A foreign account is left alone and the
+    attempt ends with `account_mismatch`. A read that names no `user_id` is retried, reported
+    as `sweep_failed`, for 24 hours past the sweep time, then the attempt ends with
+    `account_unverified`. A failed delete keeps `delete_failed` and is retried next pass. The sweep deletes only accounts named by an
     attempt row with no connection row. It never lists or deletes other accounts;
-  - live rows with `last_checked_at` older than 24 hours: read the account (C-8);
+  - live rows with `last_checked_at` older than 24 hours: read the account (C-8). A row whose
+    toolkit has no auth config in this worker is checked off with `not_configured`, so it never
+    blocks the rest. A read that succeeds clears a transient code (`provider_unavailable`,
+    `provider_rate_limited`, `not_configured`) only on an `active` row; a row still `reauthorize` keeps its last
+    code until it recovers;
   - nonces past `expires_at`: delete.
   A Reconnect button shows on a `reauthorize` row. For owners, the dashboard's Home shows one
   notice line while any connection is `reauthorize`, read from `GET /v1/connections` (not from
@@ -288,7 +366,8 @@ role for workers (all workers share one pattern today; Known limits).
     `not_found`, also for another tenant's ID; `reauthorize` is
     `connection_needs_reconnect`); then the tool (in that toolkit's catalog, else
     `not_found`); then the strict argument schema (`invalid_arguments`); then C-12's limits;
-    then the worker.
+    then the worker. A call whose own fields do not fit (a connection ID that is not a UUID,
+    an unknown field, a missing one) is `invalid_arguments` too, after the token guard.
   - Time: the API aborts the worker call at 7 seconds and answers `provider_unavailable`
     inside the 10 second deadline. The worker aborts Composio at 6 seconds. Both pass the
     request's abort signal on.
@@ -312,7 +391,8 @@ role for workers (all workers share one pattern today; Known limits).
   retention line.
 - **C-12 Limits.** Each run, before the worker call, costs one unit in
   `conn-minute:<tenantId>` (60 per minute) and `conn-day:<tenantId>` (2,000 per day), all or
-  nothing; over either is `provider_rate_limited` with `retryAfterSeconds`. The worker also
+  nothing; over either is `provider_rate_limited` with `retryAfterSeconds`. Callback status
+  calls (C-5) spend the same two buckets. The worker also
   charges `composio-org:<env>` for every Composio call it makes, of any operation:
   production 3,000 and preview 500 per minute, so both projects together stay under a third
   of the organization's 10,000. Over that, the worker refuses the call (`provider_rate_limited`
@@ -325,8 +405,16 @@ role for workers (all workers share one pattern today; Known limits).
   `connection.disconnect_requested` commits with it; `disconnecting` and `disconnected` answer
   as they are. The API then asks the worker to `disconnect` at once (best effort); the pass
   (C-9) finishes any it missed.
-  - The worker calls `revoke`, then `DELETE` (a 404 counts as done), then marks the row
-    `disconnected` and clears the label.
+  - The worker first reads the account and removes it only when its ID, `user_id`, toolkit
+    and auth config are the row's. It calls `revoke` once (the outcome is kept in
+    `revoke_outcome`, so a retry never revokes again; a 404 counts as revoked), then `DELETE`
+    (a 404 counts as done), then marks the row `disconnected` and clears the label. An account
+    that is not the tenant's, or whose read names no user, is left alone: the row ends
+    `disconnected` with `account_mismatch` and the operator is told. A failed read or delete
+    keeps the row `disconnecting` with `delete_failed` for the next pass. A worker that has no
+    auth config for the row's toolkit cannot prove the account is the tenant's, so it calls
+    nothing: the row stays `disconnecting` with `not_configured` until the config is back, and
+    the operator is told.
   - A revoke that fails is recorded as `last_error_code = revoke_failed`; the delete still
     runs. The screen then tells the owner to remove the Composio app in Shopify admin. The
     screen says in every case that disconnect stops our access and asks Shopify to remove
@@ -340,7 +428,9 @@ role for workers (all workers share one pattern today; Known limits).
     append-only.
   - We store no tool arguments and no tool output.
   - Logs and error reports carry the tenant, connection ID, our tool name, our error code
-    and timings. They never carry arguments, output, labels, link URLs or provider messages.
+    and timings. Every run is logged that way; a callback's log line names the attempt's
+    tenant and connection ID; `account_mismatch`, `link_orphan` and `key_refused` are
+    warnings for the operator. They never carry arguments, output, labels, link URLs or provider messages.
     Account reads are parsed with an allowlist schema that drops `state` and every
     credential field.
   - Composio is a subprocessor: it logs tool arguments and results for up to one year by
@@ -356,8 +446,9 @@ role for workers (all workers share one pattern today; Known limits).
     browser key mismatch is refused; a demoted member's callback is `forbidden`;
   - a lost `complete_auth` answer recovers; a used `session_uri` from another tenant never
     connects;
-  - a reload after confirm answers `connected` only for the same toolkit and external
-    account; a confirm replays under its key; another grant is `grant_changed`; an expired
+  - a reload after confirm answers `connected` only for the same toolkit and Composio
+    account (the row's store is the verified attempt's: the insert binds `external_account_id`
+    to the attempt, and no application role can update it afterwards); a confirm replays under its key; another grant is `grant_changed`; an expired
     attempt or grant is refused;
   - Cancel deletes the Composio account at once; sign-out and an API 401 drop the cookies;
   - tenant A's token never lists or runs tenant B's connection, also with B's IDs; a tool
@@ -374,7 +465,9 @@ role for workers (all workers share one pattern today; Known limits).
   - the sweep deletes only attempt-named accounts past expiry plus one hour;
   - disconnect revokes, deletes, ends `disconnected` and clears the label;
   - the runtime role cannot set any status but `disconnecting` or any other column
-    (`42501`), cannot insert a non-`active` row, and cannot read `connection_attempts`;
+    (`42501`), cannot insert a non-`active` row or one without a matching verified attempt,
+    and cannot read `connection_attempts`; the same holds for its raw login without
+    `SET ROLE`;
   - the catalog two-tenant suite covers the new tenant tables;
   - org and tenant limits refuse before the worker or Composio is called.
 - **C-16 Migration and wiring.** One forward migration:
@@ -430,6 +523,14 @@ role for workers (all workers share one pattern today; Known limits).
   table or screen yet.
 - Managed-auth provider quotas are partly shared with other Composio customers. A provider
   429 we did not cause still answers `provider_rate_limited`.
+- `/mcp` is mounted only when the API has the Activepieces config (`deps.activepieces`), so
+  for the pilot the connection tools exist only on an API that also serves Activepieces.
+- C-17 stays open: the provider scopes in the catalog are placeholders until the preview
+  consent screen is recorded, and the vendor gates are not passed yet.
+- `pnpm connections:check-catalog` (owner-run, `zsvault run --env COMPOSIO_API_KEY=<id>`)
+  reads `GET /tools/<slug>` for each pinned slug and checks the toolkit and version. That
+  route and its answer shape are the pilot's reading of Composio's API and are confirmed on
+  its first run (C-17).
 
 ## What the Mac sets
 
@@ -441,7 +542,8 @@ role for workers (all workers share one pattern today; Known limits).
   `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (optional), `CONNECTIONS_DATABASE_URL`,
   `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL`,
   `CONNECTIONS_CRON_SCHEDULE`.
-- API project: `CONNECTIONS_WORKER_URL`, `CONNECTIONS_INTERNAL_SECRET`,
+- API project: `CONNECTIONS_WORKER_URL`, `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`,
   `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (optional), `CONNECTIONS_STATE_SECRET`,
-  `CONNECTIONS_STATE_PREVIOUS_SECRET` (optional), `CONNECTIONS_RETURN_URL`.
+  `CONNECTIONS_STATE_PREVIOUS_SECRET` (optional), `CONNECTIONS_RETURN_URL`. The four secrets,
+  previous ones included, must all differ; the API refuses to start otherwise.
 - Dashboard project: nothing new beyond its existing API address.

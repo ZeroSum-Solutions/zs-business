@@ -20,6 +20,7 @@ import {
 import {
   apiErrorBody,
   createAutomationInbound,
+  createConnectionsTools,
   createTokenReads,
   mapError,
   parseInput,
@@ -31,7 +32,7 @@ import {
 import type { ScopedDatabase } from "@zs/db";
 import type { AppEnv } from "../app.js";
 import type { RateLimit, RateLimiter } from "../public/limiter.js";
-import { MCP_INSTRUCTIONS, toolsFor, type ToolDefinition } from "./tools.js";
+import { MCP_INSTRUCTIONS, ToolFailure, toolsFor, type ToolDefinition } from "./tools.js";
 
 export const MCP_PATH = "/mcp";
 /** H-7: units per token, counted one per request whose tag is valid. */
@@ -139,6 +140,11 @@ function buildServer(tools: readonly ToolDefinition[], run: (tool: ToolDefinitio
       if (tool.kind === "proposal") outcome.proposals += 1; else outcome.reads += 1;
       return toolResult(output);
     } catch (error) {
+      // C-10: a connection tool's domain error is its own result shape, never provider text.
+      if (error instanceof ToolFailure) {
+        if (error.refusal) outcome.refused = true;
+        return toolResult(error.value, true);
+      }
       const mapped = mapError(error);
       if (mapped.status >= 500 || mapped.status === 401) fail(error);
       else outcome.refused = true;
@@ -147,6 +153,9 @@ function buildServer(tools: readonly ToolDefinition[], run: (tool: ToolDefinitio
   });
   return server;
 }
+
+/** A ValidationFailed `ActionError`, or a schema error core maps to one (a connection ID that is not a UUID). */
+const isValidationFailure = (error: unknown) => mapError(error).body.error.code === "ValidationFailed";
 
 export function mcpRoutes(config: McpEdgeDependencies, requestEdge: (c: Context<AppEnv>) => EdgeDependencies) {
   const tooLarge = (c: Context) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413);
@@ -162,13 +171,15 @@ export function mcpRoutes(config: McpEdgeDependencies, requestEdge: (c: Context<
   let pruning = false;
   const pruneEveryMs = config.usage.pruneEveryMs ?? USAGE_PRUNE_EVERY_MS;
   const maybePrune = async () => {
-    const started = Date.now();
-    if (pruning || started - lastPrune < pruneEveryMs) return;
+    // The throttle reads the injected clock; the budget is elapsed time, so it uses the monotonic timer.
+    const at = config.usage.clock.now().getTime();
+    if (pruning || at - lastPrune < pruneEveryMs) return;
     pruning = true;
-    lastPrune = started;
+    lastPrune = at;
+    const started = performance.now();
     try {
       await pruneTokenUsage({ db: config.usage.db, clock: config.usage.clock }, {
-        signal: AbortSignal.timeout(USAGE_PRUNE_TIMEOUT_MS), remainingMs: () => USAGE_PRUNE_TIMEOUT_MS - (Date.now() - started),
+        signal: AbortSignal.timeout(USAGE_PRUNE_TIMEOUT_MS), remainingMs: () => USAGE_PRUNE_TIMEOUT_MS - (performance.now() - started),
       });
     } catch (error) {
       config.report?.(error);
@@ -179,10 +190,10 @@ export function mcpRoutes(config: McpEdgeDependencies, requestEdge: (c: Context<
 
   /** H-8: one increment, on the raw database with its own budget. A failure is reported, never raised. */
   const writeUsage = async (ref: { tenantId: string; tokenId: string }, delta: Parameters<typeof recordTokenUsage>[2]) => {
-    const started = Date.now();
+    const started = performance.now();
     try {
       await recordTokenUsage({ db: config.usage.db, clock: config.usage.clock }, ref, delta, {
-        signal: AbortSignal.timeout(usageTimeoutMs), remainingMs: () => usageTimeoutMs - (Date.now() - started),
+        signal: AbortSignal.timeout(usageTimeoutMs), remainingMs: () => usageTimeoutMs - (performance.now() - started),
       });
     } catch (error) {
       config.report?.(error);
@@ -261,9 +272,30 @@ export function mcpRoutes(config: McpEdgeDependencies, requestEdge: (c: Context<
     if (!isRpcCall(body)) return rpcError(c, 400, -32600, "Invalid Request: the body is not a JSON-RPC request");
 
     const reads = createTokenReads(edge);
-    const server = buildServer(toolsFor(principal.scopes), (tool, args) =>
-      tool.run(parseInput(tool.inputSchema, args ?? {}, `arguments for ${tool.name}`) as never, { principal, inbound, reads }),
-    tools, fail);
+    // C-10: the connections tools exist only with the connections config.
+    const connections = edge.connections ? createConnectionsTools(edge, principal.tenantId) : null;
+    const server = buildServer(toolsFor(principal.scopes, { connections: connections !== null }), async (tool, args) => {
+      const context = { principal, inbound, reads, connections, signal: c.var.signal };
+      if (tool.scope !== "connections:read")
+        return tool.run(parseInput(tool.inputSchema, args ?? {}, `arguments for ${tool.name}`) as never, context);
+      // C-10: a connection tool answers in its own codes, so a malformed call (the wrapper's fields, or an ID
+      // core refuses) is `invalid_arguments`, after H-3's token guard, never a ValidationFailed body.
+      let input: unknown;
+      try {
+        input = parseInput(tool.inputSchema, args ?? {}, `arguments for ${tool.name}`);
+      } catch (error) {
+        if (!isValidationFailure(error)) throw error;
+        await reads.guard(principal, "connections:read");
+        throw new ToolFailure("invalid_arguments");
+      }
+      try {
+        return await tool.run(input as never, context);
+      } catch (error) {
+        // A ValidationFailed, or a schema error core maps to one (a connection ID that is not a UUID).
+        if (isValidationFailure(error)) throw new ToolFailure("invalid_arguments");
+        throw error;
+      }
+    }, tools, fail);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     try {
       await server.connect(transport);

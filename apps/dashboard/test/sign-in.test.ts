@@ -204,7 +204,8 @@ describe("sign-out", () => {
     expect((await signOut(signOutRequest(`${AUTH_COOKIE}=x`), null)).status).toBe(503);
     const pilotOnly = await signOut(signOutRequest(`${PILOT_COOKIE}=y`), { ok: false, problem: "unset" });
     expect(pilotOnly.status).toBe(204);
-    expect([...setCookies(pilotOnly).keys()]).toEqual([PILOT_COOKIE]);
+    // The connect cookies sit under /api/connections, which sign-out is never sent, so all three expire too.
+    expect([...setCookies(pilotOnly).keys()].sort()).toEqual([PILOT_COOKIE, "zs-connect-attempt", "zs-connect-browser", "zs-connect-grant"].sort());
     expect((await signOut(signOutRequest("", {}), null)).status).toBe(204);
     expect((await signOut(signOutRequest("", { Origin: "https://evil.example" }), harness.setup)).status).toBe(403);
   });
