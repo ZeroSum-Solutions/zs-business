@@ -1,3 +1,4 @@
+import type { Connection, ConnectionStatus, PendingConnection } from "@zs/contracts";
 import type {
   AgentKindStatus,
   ApprovalRecord,
@@ -132,6 +133,12 @@ export type {
   UpdateFollowUpSettingsRequest,
   WeekStart,
 };
+
+/**
+ * Managed-tier connections (connections.md): what an owner sees of one, and of the grant that waits
+ * for the owner's confirmation. Named apart from the sample workspace's `Connection`.
+ */
+export type { Connection as ManagedConnection, ConnectionStatus as ManagedConnectionStatus, PendingConnection as PendingManagedConnection };
 
 /**
  * Options every write needs. The caller owns the Idempotency-Key (see `useIntentKey`):
@@ -561,6 +568,51 @@ export interface CalendarSyncApi {
   disconnectCalendar(connectionId: string, options: WriteOptions): Promise<CalendarConnection>;
 }
 
+/**
+ * How a managed-tier connect ended, as the callback or its status call said (connections.md C-5):
+ * `connected` (this browser's connection already exists), `confirm` (a grant waits for the owner),
+ * `pending` (the provider has not finished; ask again), or `error` with a `reason` from
+ * `CONNECT_ERROR_REASONS` or `unavailable`.
+ */
+export interface ManagedConnectOutcome {
+  connection: "connected" | "confirm" | "pending" | "error";
+  reason?: string | undefined;
+}
+
+/**
+ * Managed-tier connections (connections.md C-4, C-5, C-13), such as a Shopify store. Every call needs
+ * the owner-only `integrations` permission. A connect writes nothing: it answers the provider's
+ * address. When the provider sends the owner back, the grant waits in this browser (httpOnly cookies the
+ * page never reads) until the owner confirms the account it names on the Connections page.
+ */
+export interface ManagedConnectionsApi {
+  /** Every connection of the business, retired ones included, never a provider ID. */
+  listManagedConnections(options?: ReadOptions): Promise<Connection[]>;
+  /**
+   * The address that starts connecting this store. Throws `not_found` when the server has no
+   * connections settings, `conflict` (reason `already_connected`) for a store that is connected, and
+   * `rate_limited` after too many tries. It changes nothing a repeat could double, so it takes no key.
+   */
+  startManagedConnect(toolkit: string, shopDomain: string): Promise<{ authorizeUrl: string }>;
+  /** What the grant waiting in this browser names, or null when there is none. */
+  getPendingManagedConnect(options?: ReadOptions): Promise<PendingConnection | null>;
+  /**
+   * Connects the waiting grant the owner was shown, named by its `grantId`. Throws `not_found` when
+   * it is gone or expired and `conflict` (reason `grant_changed`) when another grant has replaced it.
+   * Safe to repeat: the server keys it by the grant.
+   */
+  confirmManagedConnect(grantId: string): Promise<Connection>;
+  /** Drops the waiting grant and the attempt; nothing is connected. Safe to repeat. */
+  cancelManagedConnect(): Promise<void>;
+  /** Asks again how the connect ended while the provider had not finished (the callback said `pending`). */
+  checkManagedConnectStatus(options?: ReadOptions): Promise<ManagedConnectOutcome>;
+  /**
+   * Stops our access and asks the provider to remove the app's access. The connection answers as
+   * `disconnecting`, with `revokeFailed` once a revoke did not succeed.
+   */
+  disconnectManagedConnection(connectionId: string, options: WriteOptions): Promise<Connection>;
+}
+
 /** Customers per page of the customer list. */
 export const CONTACT_PAGE_SIZE = 50;
 /** Most IDs one `listContacts({ ids })` call takes (`MAX_CONTACT_IDS` in the API). */
@@ -627,7 +679,7 @@ export interface DocumentIntakeApi {
   discardIntakeJob(id: string, options: WriteOptions): Promise<void>;
 }
 
-export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
+export type ZsApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
 
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */

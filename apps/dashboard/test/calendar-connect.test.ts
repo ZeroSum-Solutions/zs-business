@@ -281,7 +281,8 @@ describe("the staged grant (proxy, discard, sign-out)", () => {
       method: "POST", headers: { Cookie: `${GRANT_COOKIE}=${GRANT}; ${CONNECT_COOKIE}=${"k".repeat(43)}`, ...sameOrigin() },
     }), { ok: false, problem: "unset" });
     expect(unset.status).toBe(204);
-    expect([...setCookies(unset).keys()].sort()).toEqual([CONNECT_COOKIE, GRANT_COOKIE].sort());
+    // The managed-tier connect cookies sit under another path and are never sent here: all three expire (connections.md C-5).
+    expect([...setCookies(unset).keys()].sort()).toEqual([CONNECT_COOKIE, GRANT_COOKIE, "zs-connect-attempt", "zs-connect-browser", "zs-connect-grant"].sort());
 
     const again = await withGrant();
     again.harness.api = async () => Response.json({ error: { code: "Unauthorized", message: "x", details: {} } }, { status: 401 });

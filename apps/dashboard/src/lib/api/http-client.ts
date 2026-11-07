@@ -24,6 +24,10 @@ import {
   enrichmentProposalListSchema,
   enrichmentRequestRecordSchema,
   calendarConnectionListSchema,
+  connectConnectionResponseSchema,
+  connectionListSchema,
+  connectionSchema,
+  pendingConnectionSchema,
   calendarConnectionSchema,
   connectGoogleCalendarResponseSchema,
   pendingGoogleConnectSchema,
@@ -90,6 +94,7 @@ import {
   type EnrichmentApi,
   type BookingApi,
   type CalendarSyncApi,
+  type ManagedConnectionsApi,
   type CrmApi,
   type DocumentIntakeApi,
   type HomeApi,
@@ -125,9 +130,10 @@ interface RequestSpec<T extends z.ZodType> {
    * Why a request other than a GET takes no Idempotency-Key; every other write needs one from
    * the caller. `read_only`: it changes nothing (a preview). `server_keyed`: the server runs it
    * under a key it derives itself (confirming a staged Google grant uses the grant's). `repeatable`:
-   * repeating it leaves the same state (dropping a cookie).
+   * repeating it leaves the same state (dropping a cookie). `attempt_scoped`: each try is its own
+   * attempt, which the server signs and binds to this browser (starting a managed connection).
    */
-  keyless?: "read_only" | "server_keyed" | "repeatable";
+  keyless?: "read_only" | "server_keyed" | "repeatable" | "attempt_scoped";
   schema: T;
   signal?: AbortSignal | undefined;
 }
@@ -137,6 +143,13 @@ const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
 const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema) });
 /** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
 const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
+/** POST /v1/connections/:id/disconnect answers the action and the connection as it is now (connections.md C-13). */
+const disconnectManagedOutputSchema = z.object({ actionId: uuidSchema, result: connectionSchema });
+/** The dashboard's /api/connections/callback/status: how the connect ended so far; the grant itself never comes here. */
+const managedConnectOutcomeSchema = z.object({
+  connection: z.enum(["connected", "confirm", "pending", "error"]),
+  reason: z.string().max(40).optional(),
+});
 /** PUT /v1/business answers the action and the profile as it is now; a newer API's extra keys are dropped (BP-10). */
 /** POST /v1/enrichment/requests answers the action and the request as it is now. */
 const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
@@ -156,7 +169,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -532,6 +545,46 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     async disconnectCalendar(connectionId, options) {
       const path = `/v1/calendar/connections/${encodeURIComponent(connectionId)}/disconnect`;
       return (await write(path, {}, disconnectCalendarOutputSchema, options)).result;
+    },
+
+    async listManagedConnections(options = {}) {
+      return (await request({ method: "GET", path: "/v1/connections", schema: connectionListSchema, signal: options.signal })).items;
+    },
+
+    startManagedConnect(toolkit, shopDomain) {
+      // The dashboard's own route (not the API's): it binds the flow to this browser and keeps the attempt in a cookie.
+      return request({
+        method: "POST", path: `/connections/${encodeURIComponent(toolkit)}/connect`, body: { shopDomain }, keyless: "attempt_scoped",
+        schema: connectConnectionResponseSchema,
+      });
+    },
+
+    async getPendingManagedConnect(options = {}) {
+      try {
+        return await request({ method: "GET", path: "/connections/pending", schema: pendingConnectionSchema, signal: options.signal });
+      } catch (error) {
+        // None waits in this browser: no cookie, expired, or another member's.
+        if (isApiError(error, "not_found")) return null;
+        throw error;
+      }
+    },
+
+    confirmManagedConnect(grantId) {
+      // Keyed by the staged grant on the server, like the Google confirm.
+      return request({ method: "POST", path: "/connections/confirm", body: { grantId }, keyless: "server_keyed", schema: connectionSchema });
+    },
+
+    async cancelManagedConnect() {
+      await request({ method: "DELETE", path: "/connections/pending", keyless: "repeatable", schema: z.undefined() });
+    },
+
+    checkManagedConnectStatus(options = {}) {
+      return request({ method: "GET", path: "/connections/callback/status", schema: managedConnectOutcomeSchema, signal: options.signal });
+    },
+
+    async disconnectManagedConnection(connectionId, options) {
+      const path = `/v1/connections/${encodeURIComponent(connectionId)}/disconnect`;
+      return (await write(path, {}, disconnectManagedOutputSchema, options)).result;
     },
 
     getBrowserStatus(options = {}) {

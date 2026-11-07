@@ -3,15 +3,17 @@
 import { CheckCircle, Clock, WarningCircle } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DisabledReason, SampleBadge } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import type { ConnectionStatus } from "@/lib/api";
 import { returnNotice, type ReturnNotice } from "@/lib/calendar-sync";
+import { returnNotice as managedReturnNotice } from "@/lib/managed-connections";
 import { useConnections, useKeys } from "@/lib/queries";
 import { GoogleCalendarCard } from "./google-calendar-card";
+import { ShopifyCard } from "./shopify-card";
 
 const STATUS: Record<ConnectionStatus, { label: string; tone: "success" | "warn" | "neutral"; icon: typeof CheckCircle; action: string | null }> = {
   connected: { label: "Connected", tone: "success", icon: CheckCircle, action: null },
@@ -20,21 +22,58 @@ const STATUS: Record<ConnectionStatus, { label: string; tone: "success" | "warn"
   verifying: { label: "Checking", tone: "neutral", icon: Clock, action: null },
 };
 
-/** Only Google Calendar connects from here today; the other rows are read-only (U3-7). */
-const CONNECTIONS_DESCRIPTION = "Accounts this business uses. Connect Google Calendar here. The other accounts can't be changed here yet.";
+/** Only Google Calendar and Shopify connect from here today; the other rows are read-only (U3-7). */
+const CONNECTIONS_DESCRIPTION = "Accounts this business uses. Connect Google Calendar and Shopify here. The other accounts can't be changed here yet.";
 
 export function ConnectionsView() {
   const [notice, setNotice] = useState<ReturnNotice | null>(null);
+  const [shopifyNotice, setShopifyNotice] = useState<ReturnNotice | null>(null);
+  // Shopify has not finished: the card asks again a few times (connections.md C-5).
+  const [shopifyWaiting, setShopifyWaiting] = useState(false);
+  const settleShopify = useCallback(() => setShopifyWaiting(false), []);
   return (
     <>
       <PageHeader title="Connections" description={CONNECTIONS_DESCRIPTION} />
       <Suspense fallback={null}>
         <GoogleReturn onNotice={setNotice} />
+        <ManagedReturn onNotice={setShopifyNotice} onWaiting={setShopifyWaiting} />
       </Suspense>
       <GoogleCalendarCard notice={notice} onNotice={setNotice} />
+      <ShopifyCard notice={shopifyNotice} onNotice={setShopifyNotice} waiting={shopifyWaiting} onSettled={settleShopify} />
       <OtherAccounts />
     </>
   );
+}
+
+/**
+ * Shopify's callback sends the owner back here with `?connection=confirm`, `?connection=pending` or
+ * `?connection=error&reason=...` (connections.md C-5). Keep what it said on screen, read the waiting grant and the
+ * connections again, and take the query off the address so a reload or a shared link does not repeat it.
+ */
+function ManagedReturn({ onNotice, onWaiting }: { onNotice: (notice: ReturnNotice | null) => void; onWaiting: (waiting: boolean) => void }) {
+  const params = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const queryClient = useQueryClient();
+  const { keys } = useKeys();
+  const outcome = params.get("connection");
+  const reason = params.get("reason");
+  const handled = useRef<string | null>(null);
+  useEffect(() => {
+    if (outcome === null) {
+      handled.current = null;
+      return;
+    }
+    const search = params.toString();
+    if (handled.current === search) return;
+    handled.current = search;
+    onNotice(managedReturnNotice(outcome, reason));
+    onWaiting(outcome === "pending");
+    void queryClient.invalidateQueries({ queryKey: keys.managedPending });
+    void queryClient.invalidateQueries({ queryKey: keys.managedConnections });
+    router.replace(pathname, { scroll: false });
+  }, [params, outcome, reason, onNotice, onWaiting, queryClient, keys, router, pathname]);
+  return null;
 }
 
 /**
