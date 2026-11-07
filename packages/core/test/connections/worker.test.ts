@@ -340,7 +340,9 @@ describe("complete (C-5, C-8, C-14)", () => {
       fake.accounts.get(accountId)!.status = "ACTIVE";
       fake.override(/POST \/connected_accounts\/complete_auth/, { status, json: {}, times: 1 });
       expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "provider_unavailable" });
-      expect((await attemptRow(a.tenantId, attemptId)).status).toBe("started");
+      expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+      // Nothing was redeemed, so no status call may pick up an account somebody else activated.
+      expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
     }
     expect(reports.filter((r) => r.kind === "key_refused")).toHaveLength(3);
   });

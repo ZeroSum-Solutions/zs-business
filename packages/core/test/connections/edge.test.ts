@@ -237,7 +237,7 @@ describe("callback (C-5)", () => {
   });
 
   it("C-5: a user or toolkit that differs from the attempt's is refused when the callback carries no account ID", async () => {
-    for (const change of [{ userId: composioUserId(ENV, b.tenantId) }, { toolkit: "gmail" }]) {
+    for (const change of [{ userId: composioUserId(ENV, b.tenantId) }, { toolkit: "gmail" }, { authConfigId: "ac_other" }]) {
       const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
       const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
       const sessionUri = fake.consent(claims.composioAccountId);

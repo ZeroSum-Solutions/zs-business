@@ -169,7 +169,9 @@ role for workers (all workers share one pattern today; Known limits).
     `{ authorizeUrl }`. The attempt never goes in a URL.
   - Two tabs: the browser key is kept, so both links stay bound to the browser, but the
     attempt cookie holds the newest attempt (last start wins). The older link finishes with
-    `reason=attempt_changed` and its account is swept (C-9).
+    `reason=attempt_changed` and its account is swept (C-9). Its callback carries no account
+    ID, so the worker finds the account in the redemption answer (C-5); the redemption
+    activates that account at Composio, and the sweep removes it.
 - **C-5 Callback, stage, confirm.**
   - Callback. Composio redirects to the dashboard's `GET /api/connections/callback`
     (`CONNECTIONS_CALLBACK_URL`). Composio's redirect carries `session_uri` and nothing else:
@@ -211,10 +213,11 @@ role for workers (all workers share one pattern today; Known limits).
       read the account instead: only this browser held that `session_uri`, so an account that
       is now `ACTIVE` for this `user_id` was redeemed by our earlier, lost call. On the first
       presentation a 404 is final, as are a 400 (Composio checked `user_id`) and a redemption
-      that names another account: the answer is `not_connected` and `session_presented_at` is
+      that names another account or toolkit: the answer is `not_connected` and `session_presented_at` is
       cleared, so no status call can verify the attempt afterwards. A 401, 403 or 410 is our key
       or project (`provider_unavailable`, reported as `key_refused`), never the used-session
-      path;
+      path; that, a 429 and a spent budget also clear `session_presented_at`, since nothing was
+      redeemed. Only a call with no answer (network, timeout, 5xx) leaves it for the retry;
     - read the account once and refuse it unless its ID, `user_id`, toolkit and auth config
       are the attempt's and its status is `ACTIVE` (`not_connected`). `INITIATED` or
       `INITIALIZING` answers `pending`; the page then calls the dashboard's

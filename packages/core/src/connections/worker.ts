@@ -427,10 +427,11 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
      * A-4: a redemption that failed for good ends what the session marker allowed: the marker goes, so no
      * status call can pick up an account this browser never redeemed. Only a `started` attempt holds one.
      */
+    const clearMarker = () => service((tx) => tx.query(
+      "UPDATE connection_attempts SET session_presented_at=NULL, updated_at=$3 WHERE tenant_id=$1 AND id=$2 AND status='started'",
+      [input.tenantId, input.attemptId, now()]));
     const definitive = async (reason: Refused["reason"] = "not_connected"): Promise<Refused> => {
-      await service((tx) => tx.query(
-        "UPDATE connection_attempts SET session_presented_at=NULL, updated_at=$3 WHERE tenant_id=$1 AND id=$2 AND status='started'",
-        [input.tenantId, input.attemptId, now()]));
+      await clearMarker();
       return refused(reason);
     };
     try {
@@ -460,6 +461,9 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
             if (error instanceof ComposioError && error.kind === "not_found") {
               if (!presentedBefore) return await definitive();
             } else {
+              // Our budget, or an HTTP answer that redeemed nothing (429, or our key refused): no call of ours can be
+              // "lost", so the marker goes. Only a call with no answer (network, timeout, 5xx) may have redeemed.
+              if (error instanceof BudgetRefused || (error instanceof ComposioError && (error.kind === "rate_limited" || error.kind === "key_refused"))) await clearMarker();
               throw error;
             }
           }
