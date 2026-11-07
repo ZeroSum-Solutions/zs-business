@@ -228,21 +228,37 @@ role for workers (all workers share one pattern today; Known limits).
   `external_account_id`, `account_label` (null once `disconnected`), `status` (`active`,
   `reauthorize`, `disconnecting`, `disconnected`), `reauthorize_reason` (`provider_status`,
   `auth_error`, null), `connected_by` (member, `ON DELETE RESTRICT`), `last_checked_at`,
-  `last_error_code` (our code, cleared on recovery), `created_at`, `updated_at`; every column
-  but the nullable three is `NOT NULL`.
+  `last_error_code` (our code, cleared on recovery), `revoke_outcome` (`revoked`, `failed`,
+  null; only on a row leaving, C-13), `claimed_until` (the worker's lease, C-9), `created_at`,
+  `updated_at`; every column but the nullable five is `NOT NULL`.
   - At most one row per tenant and toolkit in `active`, `reauthorize` or `disconnecting`
-    (partial unique index). `composio_account_id` is unique among rows not `disconnected`
-    (partial).
+    (partial unique index). `composio_account_id` is unique over all rows: a disconnected
+    account is deleted at Composio, and a reconnect makes a new one.
   - Forced RLS, policies `TO authenticated` with the tenant check, two-tenant denial test.
-  - Runtime role: `SELECT`; `INSERT` (a trigger refuses any row not `active`, and the only
-    caller is the connect action); `UPDATE` granted on `status` and `updated_at` only, and a
-    trigger refuses any move but `active` or `reauthorize` to `disconnecting` with
-    `ERRCODE 42501`. No `DELETE`.
+  - Runtime role: `SELECT`; `INSERT` without `composio_account_id` (the only caller is the
+    connect action); `UPDATE` granted on `status` and `updated_at` only. No `DELETE`.
+  - Triggers. For every role: `disconnected` is final, `disconnecting` only becomes
+    `disconnected`, and `reauthorize` with `auth_error` never becomes `active` (C-8). The
+    runtime rules bind every role but the worker (a superuser, or a member of `service_role`
+    that is not a member of `authenticated`), so the API's login is bound with or without
+    `SET ROLE`: an insert must be `active`, and the only status move is `active` or
+    `reauthorize` to `disconnecting` (`ERRCODE 42501`). An insert without a Composio account
+    takes it from the worker's attempt for that connection ID, locked `FOR UPDATE`: it must be
+    the tenant in context, `verified`, and have the row's toolkit, domain, external account
+    and member; it is marked `confirmed` in the same transaction. Otherwise the insert fails
+    with `23514` `connections_verified_attempt`. That trigger is a definer owned by
+    `zs_dispatcher`, which reads those attempt columns and updates their status only.
   - `connection_attempts` (C-4) is a tenant table with forced RLS and no runtime grants: only
-    the worker reads and writes it. Statuses `started`, `verified`, `confirmed` (set by the
-    worker when it next sees the connection row), `cancelled`, `swept`.
-  - `connector_request_nonces` (`jti` primary key, `expires_at`) holds no tenant data and has
-    no runtime grants.
+    the worker reads and writes it. `created_by` is the member (`tenant_members.id`,
+    `FOREIGN KEY (tenant_id, created_by)`, `ON DELETE SET NULL`); one attempt per connection
+    ID. It also holds `external_account_id` (set with `verified`), `session_presented_at`
+    (C-5), `last_error_code`, `revoke_outcome` and `claimed_until`. Statuses `started`,
+    `verified`, `confirmed` (set by the connection insert), `cancelling` (a cancel or a
+    failed link cleanup the sweep finishes), `cancelled`, `swept`.
+  - `connector_request_nonces` (`jti` primary key, `expires_at`) holds no tenant data. It is
+    in `public` with forced RLS, no policy and no runtime grants, so only the worker's service
+    role reaches it (`zs_internal` is the migrator's private ledger and holds no runtime
+    table).
   - The worker uses `CONNECTIONS_DATABASE_URL`, a login that may `SET ROLE service_role`, as
     the calendar worker does (G-6). Every worker statement names the tenant and the row's ID,
     and every status change is conditional on the current status
@@ -374,7 +390,9 @@ role for workers (all workers share one pattern today; Known limits).
   - the sweep deletes only attempt-named accounts past expiry plus one hour;
   - disconnect revokes, deletes, ends `disconnected` and clears the label;
   - the runtime role cannot set any status but `disconnecting` or any other column
-    (`42501`), cannot insert a non-`active` row, and cannot read `connection_attempts`;
+    (`42501`), cannot insert a non-`active` row or one without a matching verified attempt,
+    and cannot read `connection_attempts`; the same holds for its raw login without
+    `SET ROLE`;
   - the catalog two-tenant suite covers the new tenant tables;
   - org and tenant limits refuse before the worker or Composio is called.
 - **C-16 Migration and wiring.** One forward migration:

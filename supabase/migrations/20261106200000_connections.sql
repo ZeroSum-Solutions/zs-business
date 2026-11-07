@@ -1,7 +1,8 @@
 -- Managed-tier connections (docs/requirements/connections.md C-7, C-12, C-16). A connection is
 -- one tenant's grant to one external app, held at Composio; we store only account IDs. The
--- runtime role (the API) reads rows, inserts an active row through the connect action and may
--- only move a row to disconnecting. Every other change is the worker's (service role).
+-- runtime role (the API) reads rows, inserts an active row through the connect action (only for
+-- the worker's verified attempt, which supplies the Composio account) and may only move a row to
+-- disconnecting. Every other change is the worker's (service role).
 
 -- C-10, C-16: the scope that lets an agent read connected apps through /mcp.
 ALTER TYPE public.automation_token_scope ADD VALUE IF NOT EXISTS 'connections:read';
@@ -30,7 +31,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 DO $$ BEGIN
-  CREATE TYPE public.connection_attempt_status AS ENUM ('started', 'verified', 'confirmed', 'cancelled', 'swept');
+  CREATE TYPE public.connection_attempt_status AS ENUM ('started', 'verified', 'confirmed', 'cancelling', 'cancelled', 'swept');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
@@ -51,20 +52,26 @@ CREATE TABLE public.connections (
   connected_by uuid NOT NULL,
   last_checked_at timestamptz NOT NULL,
   last_error_code text CONSTRAINT connections_error_code CHECK (last_error_code ~ '^[a-z_]{1,40}$'),
+  -- C-13: what the one revoke call answered, kept across disconnect retries so a success is never
+  -- repeated and a failure is never lost.
+  revoke_outcome text CONSTRAINT connections_revoke_outcome CHECK (revoke_outcome IN ('revoked', 'failed')),
+  -- C-9: the worker's lease on the row while it calls Composio; no transaction is held meanwhile.
+  claimed_until timestamptz,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, id),
   FOREIGN KEY (tenant_id, connected_by) REFERENCES public.tenant_members(tenant_id, id) ON DELETE RESTRICT,
+  CONSTRAINT connections_revoke_state CHECK (revoke_outcome IS NULL OR status IN ('disconnecting', 'disconnected')),
   CONSTRAINT connections_label_state CHECK ((status = 'disconnected') = (account_label IS NULL)),
   -- A reason belongs to a row that needs reconnecting; it survives the move to disconnecting.
   CONSTRAINT connections_reason_state CHECK (
     (status <> 'active' OR reauthorize_reason IS NULL) AND (status <> 'reauthorize' OR reauthorize_reason IS NOT NULL))
 );
--- At most one live row per tenant and toolkit, and one live row per Composio account.
+-- At most one live row per tenant and toolkit. A Composio account belongs to one row ever: a
+-- disconnected account is deleted at Composio and a reconnect makes a new one (C-7).
 CREATE UNIQUE INDEX connections_one_live_per_toolkit ON public.connections (tenant_id, toolkit)
   WHERE status IN ('active', 'reauthorize', 'disconnecting');
-CREATE UNIQUE INDEX connections_one_live_per_account ON public.connections (composio_account_id)
-  WHERE status <> 'disconnected';
+CREATE UNIQUE INDEX connections_composio_account ON public.connections (composio_account_id);
 -- The worker's pass claims the oldest unchecked live rows and the rows to finish.
 CREATE INDEX connections_due ON public.connections (last_checked_at) WHERE status <> 'disconnected';
 
@@ -77,19 +84,33 @@ CREATE TABLE public.connection_attempts (
   composio_account_id text NOT NULL CONSTRAINT connection_attempts_account_length CHECK (char_length(composio_account_id) BETWEEN 1 AND 128),
   auth_config_id text NOT NULL CONSTRAINT connection_attempts_auth_config_length CHECK (char_length(auth_config_id) BETWEEN 1 AND 128),
   account_domain text NOT NULL CONSTRAINT connection_attempts_domain_length CHECK (char_length(account_domain) BETWEEN 1 AND 253),
-  created_by uuid NOT NULL,
+  -- The member who started it (tenant_members.id); null once that member is removed, which no
+  -- confirm can then match.
+  created_by uuid,
   -- base64url SHA-256 of the browser key (G-1).
   browser_hash text NOT NULL CONSTRAINT connection_attempts_browser_hash CHECK (browser_hash ~ '^[A-Za-z0-9_-]{43}$'),
   status public.connection_attempt_status NOT NULL DEFAULT 'started',
+  -- C-5: set before the worker redeems a callback for this attempt; a status call needs it.
+  session_presented_at timestamptz,
+  -- The store the identity read verified (C-5), set with status verified.
+  external_account_id text CONSTRAINT connection_attempts_external_account_length CHECK (char_length(external_account_id) BETWEEN 1 AND 64),
+  last_error_code text CONSTRAINT connection_attempts_error_code CHECK (last_error_code ~ '^[a-z_]{1,40}$'),
+  revoke_outcome text CONSTRAINT connection_attempts_revoke_outcome CHECK (revoke_outcome IN ('revoked', 'failed')),
+  claimed_until timestamptz,
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
-  PRIMARY KEY (tenant_id, id)
+  PRIMARY KEY (tenant_id, id),
+  CONSTRAINT connection_attempts_connection UNIQUE (tenant_id, connection_id),
+  FOREIGN KEY (tenant_id, created_by) REFERENCES public.tenant_members(tenant_id, id) ON DELETE SET NULL (created_by),
+  CONSTRAINT connection_attempts_verified CHECK (status NOT IN ('verified', 'confirmed') OR external_account_id IS NOT NULL)
 );
-CREATE INDEX connection_attempts_sweep ON public.connection_attempts (expires_at) WHERE status IN ('started', 'verified');
+CREATE INDEX connection_attempts_sweep ON public.connection_attempts (expires_at) WHERE status IN ('started', 'verified', 'cancelling');
 CREATE UNIQUE INDEX connection_attempts_account ON public.connection_attempts (composio_account_id);
 
--- C-3: request IDs the worker has seen, kept 5 minutes. No tenant data.
+-- C-3: request IDs the worker has seen, kept 5 minutes. No tenant data. It lives in public with
+-- FORCE row level security and no policy, so only a role that bypasses RLS (the worker's service
+-- role) reaches it; zs_internal is the migrator's private ledger and holds no runtime table.
 CREATE TABLE public.connector_request_nonces (
   jti text PRIMARY KEY CONSTRAINT connector_request_nonces_jti CHECK (jti ~ '^[A-Za-z0-9_-]{16,64}$'),
   expires_at timestamptz NOT NULL
@@ -116,26 +137,38 @@ END $$;
 -- C-7: the runtime role reads, inserts an active row through the connect action and may only
 -- change status and updated_at (the trigger below allows one move). No DELETE.
 GRANT SELECT ON public.connections TO authenticated;
-GRANT INSERT (tenant_id, id, tier, toolkit, composio_account_id, external_account_id, account_domain, account_label,
+GRANT INSERT (tenant_id, id, tier, toolkit, external_account_id, account_domain, account_label,
   status, connected_by, last_checked_at, created_at, updated_at) ON public.connections TO authenticated;
 GRANT UPDATE (status, updated_at) ON public.connections TO authenticated;
 -- The worker moves rows, records checks and finishes disconnects. It never edits identity columns.
 GRANT SELECT, INSERT ON public.connections TO service_role;
-GRANT UPDATE (status, reauthorize_reason, last_checked_at, last_error_code, account_label, updated_at) ON public.connections TO service_role;
+GRANT UPDATE (status, reauthorize_reason, last_checked_at, last_error_code, account_label, revoke_outcome, claimed_until, updated_at)
+  ON public.connections TO service_role;
 -- connection_attempts: no runtime grants.
 GRANT SELECT, INSERT, UPDATE ON public.connection_attempts TO service_role;
 GRANT SELECT, INSERT, DELETE ON public.connector_request_nonces TO service_role;
 
--- C-7: a connection the runtime role creates starts active, its one status change is to
--- disconnecting, and disconnected is final for every role.
+-- C-7, C-8, C-13. Every role: disconnected is final, disconnecting only finishes, and an
+-- auth_error row never comes back to active by itself. The runtime rules (a row starts active, its
+-- one status change is to disconnecting) bind every role except the worker: a superuser or a
+-- member of service_role that is not a member of authenticated. Any other role, including the
+-- API's own login before or without SET ROLE, gets the runtime rules (fail closed).
 CREATE FUNCTION public.connections_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  worker boolean := current_user <> 'authenticated' AND (
+    coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false)
+    OR (pg_catalog.pg_has_role(current_user, 'service_role', 'MEMBER')
+        AND NOT pg_catalog.pg_has_role(current_user, 'authenticated', 'MEMBER')));
 BEGIN
-  IF TG_OP = 'UPDATE' AND OLD.status = 'disconnected' AND NEW.status <> 'disconnected' THEN
-    RAISE EXCEPTION 'A disconnected connection stays disconnected'
+  IF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status AND (
+      OLD.status = 'disconnected'
+      OR (OLD.status = 'disconnecting' AND NEW.status <> 'disconnected')
+      OR (OLD.status = 'reauthorize' AND OLD.reauthorize_reason = 'auth_error' AND NEW.status = 'active')) THEN
+    RAISE EXCEPTION 'Connection status cannot move from % to %', OLD.status, NEW.status
       USING ERRCODE = 'insufficient_privilege', SCHEMA = 'public', TABLE = 'connections';
   END IF;
-  IF current_user = 'authenticated' AND (
+  IF NOT worker AND (
       (TG_OP = 'INSERT' AND NEW.status <> 'active')
       OR (TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status
         AND NOT (NEW.status = 'disconnecting' AND OLD.status IN ('active', 'reauthorize')))) THEN
@@ -146,15 +179,57 @@ BEGIN
 END $$;
 CREATE TRIGGER connections_guard BEFORE INSERT OR UPDATE ON public.connections
   FOR EACH ROW EXECUTE FUNCTION public.connections_guard();
+
+-- C-1, C-5: the connect action never carries a Composio account ID. The runtime role cannot name
+-- one (no column grant), so its insert takes the account from the worker's verified attempt for
+-- this connection ID: same tenant (the one in context), toolkit, store and member. The attempt is
+-- locked, so a cancel that holds it first wins, and is marked confirmed in the same transaction.
+-- It runs as zs_dispatcher, which reaches these attempt columns only, for the tenant in context.
+CREATE FUNCTION public.connections_take_attempt() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  attempt record;
+BEGIN
+  IF NEW.composio_account_id IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.tenant_id IS DISTINCT FROM nullif(current_setting('app.tenant_id', true), '')::uuid THEN
+    RAISE EXCEPTION 'Tenant % is not in context', NEW.tenant_id
+      USING ERRCODE = 'insufficient_privilege', SCHEMA = 'public', TABLE = 'connections';
+  END IF;
+  SELECT a.id, a.composio_account_id INTO attempt FROM public.connection_attempts a
+   WHERE a.tenant_id = NEW.tenant_id AND a.connection_id = NEW.id AND a.status = 'verified' AND a.toolkit = NEW.toolkit AND a.account_domain = NEW.account_domain
+     AND a.external_account_id = NEW.external_account_id AND a.created_by = NEW.connected_by
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'No verified attempt for this connection'
+      USING ERRCODE = 'check_violation', SCHEMA = 'public', TABLE = 'connections', CONSTRAINT = 'connections_verified_attempt';
+  END IF;
+  UPDATE public.connection_attempts SET status = 'confirmed', updated_at = NEW.created_at
+   WHERE tenant_id = NEW.tenant_id AND id = attempt.id;
+  NEW.composio_account_id := attempt.composio_account_id;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER connections_take_attempt BEFORE INSERT ON public.connections
+  FOR EACH ROW EXECUTE FUNCTION public.connections_take_attempt();
+GRANT SELECT (tenant_id, id, connection_id, toolkit, composio_account_id, account_domain, external_account_id, created_by, status),
+  UPDATE (status, updated_at) ON public.connection_attempts TO zs_dispatcher;
+ALTER POLICY tenant_scope ON public.connection_attempts TO authenticated, zs_dispatcher;
+
 REVOKE ALL ON FUNCTION public.connections_guard() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.connections_take_attempt() FROM PUBLIC;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
     REVOKE ALL ON FUNCTION public.connections_guard() FROM anon;
+    REVOKE ALL ON FUNCTION public.connections_take_attempt() FROM anon;
   END IF;
 END $$;
 GRANT CREATE ON SCHEMA public TO zs_function_owner;
 ALTER FUNCTION public.connections_guard() OWNER TO zs_function_owner;
 REVOKE CREATE ON SCHEMA public FROM zs_function_owner;
+GRANT CREATE ON SCHEMA public TO zs_dispatcher;
+ALTER FUNCTION public.connections_take_attempt() OWNER TO zs_dispatcher;
+REVOKE CREATE ON SCHEMA public FROM zs_dispatcher;
 
 -- C-12: the worker's budget for every Composio call of one environment (3000 a minute in
 -- production, 500 in preview) and the 60 second cooldown a provider 429 opens. The worker's
