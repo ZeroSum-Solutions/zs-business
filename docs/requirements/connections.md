@@ -206,7 +206,7 @@ role for workers (all workers share one pattern today; Known limits).
       are the attempt's and its status is `ACTIVE` (`not_connected`). `INITIATED` or
       `INITIALIZING` answers `pending`; the page then calls the dashboard's
       `GET /api/connections/callback/status`, which repeats this step without the redemption,
-      at most 5 times, 2 seconds apart, while the attempt is valid. Each status call costs one
+      at most 5 times, 2 seconds apart (2 to 10 s after the callback), while the attempt is valid. Each status call costs one
       unit in `conn-status:<tenantId>` (120 per hour), `conn-status-attempt:<attemptId>` (5 per
       hour) and C-12's `conn-minute` and `conn-day` buckets, all or nothing;
     - read identity with the toolkit's identity tool, on that account only, and keep the
@@ -247,8 +247,10 @@ role for workers (all workers share one pattern today; Known limits).
     Composio is unavailable. The dashboard drops the two cookies after a 2xx or 404 only, so
     every other answer leaves them for a retry.
   - Cookies. The dashboard drops the grant after a confirm that names it answered 2xx, 403,
-    404 or 409, and after a 404 read. Sign-out, and any API 401, drop all three connect
-    cookies.
+    404 or 409, and after a 404 read. A callback that arrives without a usable attempt cookie
+    answers `invalid_attempt` and drops the grant too. A cancel while the dashboard's live
+    settings are invalid is a 503 that keeps both cookies. Sign-out, and any API 401, drop all
+    three connect cookies.
 - **C-6 Catalog and curated read tools.** The catalog is code. Per toolkit: slug, display
   name, auth config variable, identity tool, provider scopes the auth config grants (recorded
   from the preview consent screen), and an allowlist of read tools. Each tool has our name

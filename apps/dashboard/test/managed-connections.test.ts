@@ -161,15 +161,18 @@ describe("asking again while Shopify has not finished (C-5)", () => {
     return { waits, sleep: async (ms: number) => { waits.push(ms); } };
   };
 
-  it("asks at most five times, two seconds apart, then gives up", async () => {
-    const { waits, sleep } = sleepLog();
-    const check = vi.fn(async (): Promise<ManagedConnectOutcome> => ({ connection: "pending" }));
+  it("asks at most five times, two seconds apart, spread over 2 to 10 s after the callback's own ask, then gives up", async () => {
+    let clock = 0;
+    const askedAt: number[] = [];
+    const sleep = async (ms: number) => { clock += ms; };
+    const check = vi.fn(async (): Promise<ManagedConnectOutcome> => { askedAt.push(clock); return { connection: "pending" }; });
     const result = await pollConnectStatus(check, { sleep });
     expect(result).toBe("timeout");
     expect(check).toHaveBeenCalledTimes(5);
     expect(STATUS_POLLS).toBe(5);
-    expect(waits).toEqual([STATUS_POLL_MS, STATUS_POLL_MS, STATUS_POLL_MS, STATUS_POLL_MS]);
     expect(STATUS_POLL_MS).toBe(2_000);
+    // The callback was the ask at 0 s; asking again at once would only repeat its answer.
+    expect(askedAt).toEqual([2_000, 4_000, 6_000, 8_000, 10_000]);
   });
 
   it("stops at the first answer that is not pending", async () => {
@@ -178,15 +181,21 @@ describe("asking again while Shopify has not finished (C-5)", () => {
     const check = vi.fn(async () => answers.shift()!);
     expect(await pollConnectStatus(check, { sleep })).toEqual({ connection: "confirm" });
     expect(check).toHaveBeenCalledTimes(3);
-    expect(waits).toHaveLength(2);
+    expect(waits).toEqual([STATUS_POLL_MS, STATUS_POLL_MS, STATUS_POLL_MS]);
   });
 
   it("stops asking once the page says it is done with the answer", async () => {
     let stop = false;
     const check = vi.fn(async (): Promise<ManagedConnectOutcome> => ({ connection: "pending" }));
-    const result = await pollConnectStatus(check, { sleep: async () => { stop = true; }, stopped: () => stop });
+    let waited = 0;
+    const result = await pollConnectStatus(check, { sleep: async () => { waited += 1; if (waited === 2) stop = true; }, stopped: () => stop });
     expect(result).toBe("stopped");
     expect(check).toHaveBeenCalledTimes(1);
+    // Stopped during the very first wait: nothing is asked.
+    stop = false;
+    const early = vi.fn(async (): Promise<ManagedConnectOutcome> => ({ connection: "pending" }));
+    expect(await pollConnectStatus(early, { sleep: async () => { stop = true; }, stopped: () => stop })).toBe("stopped");
+    expect(early).not.toHaveBeenCalled();
   });
 
   it("lets a failed ask reach the caller", async () => {

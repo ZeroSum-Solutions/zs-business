@@ -314,7 +314,8 @@ Managed connections (Shopify). The list and the disconnect go through the generi
 `zs-connect-attempt` (the API's signed attempt) and `zs-connect-grant` (the grant the callback
 staged). `POST /:toolkit/connect` starts it and expires a stale grant; `GET /callback` is
 Shopify's redirect back and needs no session; `GET /callback/status` (same origin, signed in)
-is asked up to five times, two seconds apart, while the answer is `pending`, and the page
+is asked up to five times, two seconds apart (at 2 to 10 s; the callback was the ask at 0 s), while
+the answer is `pending`, and the page
 remembers a pending wait in `sessionStorage` so a reload goes on; `GET /pending` reads the
 grant for the confirm screen; `POST /confirm` spends the grant only, so a reload of the callback
 still answers `connected`; `DELETE /pending` sends the grant and the attempt to the API and drops

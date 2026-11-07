@@ -184,7 +184,8 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
 
 /**
  * While the provider has not finished (the callback said "pending"), asks how the connect ended: at most
- * STATUS_POLLS times, STATUS_POLL_MS apart (connections.md C-5), the first ask at once. The whole wait is one
+ * STATUS_POLLS times, STATUS_POLL_MS apart (connections.md C-5), the first ask after one wait (the callback was
+ * the ask at 0 s). The whole wait is one
  * `pollConnectStatus` call started when `active` turns on, and the effect depends on `active` alone: what it
  * needs besides (the API, the cache, the callbacks) is read from a ref, so a rerender, which makes new `keys`
  * every time, cannot restart the wait or give it a new count.

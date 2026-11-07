@@ -230,6 +230,17 @@ describe("the callback route", () => {
     expect(harness.apiCalls.length).toBe(before);
   });
 
+  it("a callback without a usable attempt cookie also expires a grant cookie left from an earlier flow (D-4)", async () => {
+    const harness = createLiveHarness();
+    const before = harness.apiCalls.length;
+    for (const cookie of [`${GRANT_COOKIE}=${GRANT}; ${BROWSER_COOKIE}=${KEY}`, `${GRANT_COOKIE}=${GRANT}; ${ATTEMPT_COOKIE}=zca1.short; ${BROWSER_COOKIE}=${KEY}`]) {
+      const response = await completeManagedConnect(callbackRequest("?session_uri=s", cookie), harness.setup);
+      expect(landsOn(response)).toEqual({ connection: "error", reason: "invalid_attempt" });
+      expect(setCookies(response).get(GRANT_COOKIE)?.value, cookie).toBeNull();
+    }
+    expect(harness.apiCalls.length).toBe(before);
+  });
+
   it("stages a grant in a Strict httpOnly cookie, never in the address, and keeps the attempt for a cancel", async () => {
     const harness = createLiveHarness();
     harness.api = redirectTo("connection=confirm", { "x-zs-connect-grant": GRANT });
@@ -605,18 +616,18 @@ describe("the staged grant", () => {
     expect(setCookies(response).get(ATTEMPT_COOKIE)?.value).toBeNull();
   });
 
-  it("answers 204 and calls nobody when there is no grant and no attempt, or no live settings", async () => {
+  it("answers 204 and calls nobody when there is no grant and no attempt; invalid live settings are a 503 that keeps the cookies", async () => {
     const { harness, jar } = await owner();
     harness.api = async () => Response.json({ cancelled: true, revokeFailed: false });
     const before = harness.apiCalls.length;
     const bare = await cancelPendingConnection(pendingRequest(jar, "DELETE", {}, {}), harness.setup);
     expect(bare.status).toBe(204);
     expect(harness.apiCalls.length).toBe(before);
-    // Without live settings the cookies still go.
-    const unset = await cancelPendingConnection(pendingRequest(new Jar(), "DELETE"), { ok: false, problem: "unset" });
-    expect(unset.status).toBe(204);
-    expect(setCookies(unset).get(GRANT_COOKIE)?.value).toBeNull();
-    expect(setCookies(unset).get(ATTEMPT_COOKIE)?.value).toBeNull();
+    // D-2: invalid live settings are an error, and the cookies stay for a retry once the settings are fixed.
+    const unset = await cancelPendingConnection(pendingRequest(jar, "DELETE"), { ok: false, problem: "unset" });
+    expect(unset.status).toBe(503);
+    expect(unset.headers.get("set-cookie")).toBeNull();
+    expect(harness.apiCalls.length).toBe(before);
   });
 
   it("refuses a cancel from another site, with another method, or signed out, and drops everything when the API refuses the session", async () => {

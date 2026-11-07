@@ -73,16 +73,17 @@ export interface PollOptions {
 }
 
 /**
- * Asks how a pending connect ended: at once, then every STATUS_POLL_MS, at most STATUS_POLLS times in all
- * (C-5). One call is one budget, so the page's rerenders cannot give it more. Resolves with the first answer
- * that is not "pending", "timeout" when every ask said pending, or "stopped". A failed ask rejects.
+ * Asks how a pending connect ended: STATUS_POLLS times, each after a STATUS_POLL_MS wait (C-5). The callback
+ * was the ask at 0 s, so asking again at once would only repeat it; the asks land at 2, 4, 6, 8 and 10 s.
+ * One call is one budget, so the page's rerenders cannot give it more. Resolves with the first answer that is
+ * not "pending", "timeout" when every ask said pending, or "stopped". A failed ask rejects.
  */
 export async function pollConnectStatus(
   check: () => Promise<ManagedConnectOutcome>,
   { stopped = () => false, sleep = defaultSleep, polls = STATUS_POLLS, delayMs = STATUS_POLL_MS }: PollOptions = {},
 ): Promise<ManagedConnectOutcome | "timeout" | "stopped"> {
   for (let asked = 0; asked < polls; asked += 1) {
-    if (asked > 0) await sleep(delayMs);
+    await sleep(delayMs);
     if (stopped()) return "stopped";
     const outcome = await check();
     if (stopped()) return "stopped";

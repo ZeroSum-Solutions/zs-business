@@ -263,8 +263,12 @@ export async function completeManagedConnect(request: Request, setup: LiveSetup 
   }
   const secure = isHttps(request, setup.config.trustProxy);
   const attempt = attemptOf(request);
-  // No attempt cookie: another browser, or an expired flow. The API would say the same.
-  if (attempt === undefined) return landing({ connection: "error", reason: "invalid_attempt" }, []);
+  // No attempt cookie: another browser, or an expired flow. The API would say the same, and the flow is over,
+  // so a grant left from an earlier flow goes too (D-4).
+  if (attempt === undefined) {
+    const outcome: CallbackOutcome = { connection: "error", reason: "invalid_attempt" };
+    return landing(outcome, outcomeCookies(outcome, secure));
+  }
   const upstream = await askCallback(setup.config, request, "callback", attempt);
   const outcome: CallbackOutcome = upstream ? outcomeOf(upstream) : { connection: "error", reason: UNAVAILABLE };
   return landing(outcome, outcomeCookies(outcome, secure));
@@ -307,7 +311,8 @@ export async function readPendingConnection(request: Request, setup: LiveSetup |
  * grant names the attempt that staged it, which the API prefers over the attempt cookie). The cookies are
  * dropped only once the API has answered 2xx, or 404 (nothing left to cancel), so any other refusal or a lost
  * answer reaches the page with the cookies still there to try again. Answers the API's body
- * (`{ cancelled, revokeFailed }`). With nothing to send, or no live settings, it only drops what is here.
+ * (`{ cancelled, revokeFailed }`). With nothing to send it only drops what is here; invalid live settings are a
+ * 503 that keeps both cookies.
  */
 export async function cancelPendingConnection(request: Request, setup: LiveSetup | null): Promise<Response> {
   if (!setup) return notFound();
@@ -318,7 +323,12 @@ export async function cancelPendingConnection(request: Request, setup: LiveSetup
   const drop = [expiredConnectCookie(GRANT_COOKIE, secure), expiredConnectCookie(ATTEMPT_COOKIE, secure)];
   const attempt = attemptOf(request);
   const grant = grantOf(request);
-  if (!setup.ok || (attempt === undefined && grant === undefined)) {
+  // D-2: invalid live settings cannot reach the API, so nothing was cancelled; the cookies stay for a retry.
+  if (!setup.ok) {
+    reportSetupProblem(setup.problem);
+    return reply(503, "Internal");
+  }
+  if (attempt === undefined && grant === undefined) {
     const response = new Response(null, { status: 204, headers: NO_STORE });
     for (const cookie of drop) response.headers.append("Set-Cookie", cookie);
     return response;
