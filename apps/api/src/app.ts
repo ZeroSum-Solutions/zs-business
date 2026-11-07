@@ -176,7 +176,9 @@ export function createApp(deps: AppDependencies) {
   const origins = new Set(deps.config.allowedOrigins);
   app.use("*", cors({
     origin: (origin) => (origins.has(origin) ? origin : null),
-    allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", INTAKE_FILENAME_HEADER],
+    // Mcp-Protocol-Version: a browser-based MCP client sends it on every request after initialize.
+    // Mcp-Session-Id is not needed: the endpoint is stateless and refuses a session ID.
+    allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "Mcp-Protocol-Version", INTAKE_FILENAME_HEADER],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     maxAge: 600,
   }));
@@ -194,6 +196,8 @@ export function createApp(deps: AppDependencies) {
   // requests get the same one, so a lost reply cannot hold a pool connection open.
   const requestTimeoutMs = deps.config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const deadline: MiddlewareHandler<AppEnv> = async (c, next) => {
+    // A caller that is already gone gets no work at all.
+    if (c.req.raw.signal?.aborted) throw new DatabaseUnavailable("aborted");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
     const clientGone = () => controller.abort();
@@ -259,6 +263,8 @@ export function createApp(deps: AppDependencies) {
     app.route(MCP_PATH, mcpRoutes({
       keySecrets: deps.activepieces.keySecrets,
       limiter: createPostgresRateLimiter(deps.db, deps.clock),
+      // The usage write runs on the raw database, off the request's deadline (H-8).
+      usage: { db: deps.db, clock: deps.clock },
       ...(deps.onError ? { report: deps.onError } : {}),
     }, requestEdge));
   }
