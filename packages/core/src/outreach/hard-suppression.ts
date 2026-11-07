@@ -31,18 +31,30 @@ export const HARD_SUPPRESSED_PEOPLE: readonly string[] = Object.freeze([
 
 const squash = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
 
+const trimDots = (host: string): string => {
+  let end = host.length;
+  while (end > 0 && host[end - 1] === ".") end -= 1;
+  return host.slice(0, end);
+};
+
+const stripWww = (host: string): string => (host.startsWith("www.") ? host.slice(4) : host);
+
 export function normaliseDomain(input: string): string {
-  const raw = input.trim();
-  if (/^https?:\/\//i.test(raw)) {
+  const raw = input.trim().toLowerCase();
+  if (raw.startsWith("http://") || raw.startsWith("https://")) {
     try {
-      return new URL(raw).hostname.toLowerCase().replace(/^www\./, "").replace(/\.+$/, "");
+      return stripWww(trimDots(new URL(raw).hostname));
     } catch {
       /* fall through to the loose parse */
     }
   }
   const at = raw.lastIndexOf("@");
-  const host = (at >= 0 ? raw.slice(at + 1) : raw).toLowerCase();
-  return host.replace(/^https?:\/\//, "").replace(/[/?#:].*$/, "").replace(/^www\./, "").replace(/\.+$/, "");
+  let host = at >= 0 ? raw.slice(at + 1) : raw;
+  if (host.startsWith("http://")) host = host.slice(7);
+  else if (host.startsWith("https://")) host = host.slice(8);
+  const cut = host.search(/[/?#:]/);
+  if (cut >= 0) host = host.slice(0, cut);
+  return stripWww(trimDots(host));
 }
 
 export interface OutreachCandidate {
