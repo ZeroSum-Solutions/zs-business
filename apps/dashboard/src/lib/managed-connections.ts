@@ -200,10 +200,16 @@ export function connectErrorMessage(error: unknown): string {
 /**
  * The connections the card shows: connected, needing the owner, or being removed. Retired ones are history,
  * except one whose revoke Shopify did not confirm: the app may still be installed there, so the owner keeps
- * seeing it, with the warning to remove it in Shopify admin (C-13).
+ * seeing it, with the warning to remove it in Shopify admin (C-13). A newer connection of the same store
+ * replaces that warning: connecting again installed the app under the new grant, and that row says what is
+ * true now (a later disconnect that Shopify confirmed removed the app).
  */
 export const currentConnections = (items: readonly ManagedConnection[]): ManagedConnection[] =>
-  items.filter((item) => item.status !== "disconnected" || item.revokeFailed);
+  items.filter((item) => item.status !== "disconnected" || (item.revokeFailed && !hasNewerConnection(items, item)));
+
+const hasNewerConnection = (items: readonly ManagedConnection[], item: ManagedConnection): boolean =>
+  items.some((other) => other.id !== item.id && other.toolkit === item.toolkit
+    && other.accountDomain === item.accountDomain && Date.parse(other.createdAt) > Date.parse(item.createdAt));
 
 /** Whether any connection waits for the owner to connect it again (C-8). */
 export const needsReauthorize = (items: readonly ManagedConnection[] | undefined): boolean =>
