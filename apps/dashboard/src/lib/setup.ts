@@ -31,16 +31,28 @@ export function initialZone(profileZone: string | null | undefined, browser: str
   return profileZone || browser;
 }
 
+export type DealTarget = { pipelineId: string; stageId: string };
+export type DealTargetResult = DealTarget | { problem: "no_pipeline" | "no_open_stage" };
+
 /**
  * IT-10: a new deal goes into the first stage that is neither won nor lost of the template's
- * pipeline. Without a setup (or once its pipeline is gone) the business's first pipeline stands in.
- * Null when there is no pipeline or it has no such stage.
+ * pipeline. `setupPipelineId` is the applied template's pipeline, or null when the setup read
+ * definitively says no template was applied; only then does the business's first pipeline stand in.
+ * Callers pass nothing while the setup read is pending or failed. An applied pipeline that is gone
+ * is "no pipeline", never another pipeline.
  */
-export function dealTarget(pipelines: readonly PipelineSummary[], setupPipelineId: string | null | undefined): { pipelineId: string; stageId: string } | null {
-  const pipeline = pipelines.find((item) => item.id === setupPipelineId) ?? pipelines[0];
-  if (!pipeline) return null;
+export function dealTarget(pipelines: readonly PipelineSummary[], setupPipelineId: string | null): DealTargetResult {
+  const pipeline = setupPipelineId === null ? pipelines[0] : pipelines.find((item) => item.id === setupPipelineId);
+  if (!pipeline) return { problem: "no_pipeline" };
   const stage = [...pipeline.stages].sort((a, b) => a.position - b.position).find((item) => item.outcome === "open");
-  return stage ? { pipelineId: pipeline.id, stageId: stage.id } : null;
+  return stage ? { pipelineId: pipeline.id, stageId: stage.id } : { problem: "no_open_stage" };
+}
+
+/** "24 hours before the appointment, by email": the preview message's own timing and channel. */
+export function messageTimingLine(message: IndustryTemplatePreview["messages"][number]): string {
+  const count = message.timingHours;
+  const channel = message.channel === "sms" ? "text message" : "email";
+  return `${count} ${count === 1 ? "hour" : "hours"} ${message.timing} the appointment, by ${channel}`;
 }
 
 export type RecommendableConnection = (typeof RECOMMENDABLE_CONNECTIONS)[number];
@@ -55,7 +67,10 @@ export function durationLabel(minutes: number): string {
   return unit(minutes, "minute");
 }
 
-/** Google Calendar counts as connected for the template's calendar while a connection is active or needs a reconnect. */
+/**
+ * Google Calendar counts as connected for the template's calendar only while a connection is
+ * active. A connection that needs a reconnect (`reauthorize`) no longer keeps busy times in sync.
+ */
 export function calendarConnected(connections: readonly { resourceId: string; status: string }[], resourceId: string): boolean {
-  return connections.some((item) => item.resourceId === resourceId && (item.status === "active" || item.status === "reauthorize"));
+  return connections.some((item) => item.resourceId === resourceId && item.status === "active");
 }

@@ -7,11 +7,20 @@ import { MANAGE_BUSINESS, useCan } from "@/lib/session";
 /**
  * industry-templates.md IT-7: while the business has no setup, Home has one line about it. Owners
  * get a link to `/setup`; staff learn that their owner has not finished. Nothing shows while the
- * read is pending or failed, or once a template is applied.
+ * read is pending or once a template is applied. A failed read is not "applied": it shows one
+ * line with a retry, so a member is not told nothing is wrong.
  */
 export function SetupLine() {
   const setup = useSetup();
   const owner = useCan(MANAGE_BUSINESS);
+  if (setup.isError && !setup.data) {
+    return (
+      <p className="mb-4 text-body text-muted lg:mb-6" data-testid="setup-line-error" role="status">
+        Your setup status didn&apos;t load.{" "}
+        <button type="button" onClick={() => void setup.refetch()} className="inline-flex min-h-11 items-center font-bold text-accent-ink underline-offset-4 hover:underline">Try again</button>
+      </p>
+    );
+  }
   if (!setup.data || setup.data.applied !== null) return null;
   return (
     <p className="mb-4 text-body text-muted lg:mb-6" data-testid="setup-line">

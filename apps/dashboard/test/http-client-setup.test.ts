@@ -49,6 +49,18 @@ describe("http client: setup", () => {
     expect(calls[0]!.init.method).toBe("GET");
   });
 
+  it("reads the applied page's title and address from GET /v1/setup, and refuses a response without them", async () => {
+    const appliedRead = {
+      templateId: "jewelry", templateVersion: 1, appliedAt: "2026-11-07T10:00:00.000Z", pipelineId: PIPELINE, resourceId: RESOURCE,
+      bookingPageId: PAGE, bookingPageTitle: "Book a consultation", bookingUrl: "https://book.example.com/book/k", published: true,
+    };
+    const ok = client([json(200, { applied: appliedRead, timeZone: "Europe/London", templates })]);
+    expect((await ok.api.getSetup()).applied).toMatchObject({ bookingPageTitle: "Book a consultation", bookingUrl: "https://book.example.com/book/k" });
+    const { bookingPageTitle: _title, bookingUrl: _url, ...old } = appliedRead;
+    const stale = client([json(200, { applied: old, timeZone: null, templates })]);
+    await expect(stale.api.getSetup()).rejects.toMatchObject({ kind: "invalid_response" });
+  });
+
   it("applies with POST and no idempotency key, and passes replayed through", async () => {
     const { api, calls } = client([json(200, { actionId: ACTION, result: applied, replayed: true })]);
     const answer = await api.applyTemplate({ templateId: "jewelry", timeZone: "Europe/London" });

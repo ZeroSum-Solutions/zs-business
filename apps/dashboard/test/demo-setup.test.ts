@@ -85,11 +85,44 @@ describe("demo adapter: setup", () => {
     expect(await api.listPipelines()).toHaveLength(1);
   });
 
-  it("lets staff read the setup", async () => {
+  it("lets staff read the setup with the page's title and address, but not list booking pages (the API's `publish` permission)", async () => {
     const api = adapter();
-    api.applyTemplateElsewhere("crafts", "Europe/Paris");
+    const { bookingPageId } = api.applyTemplateElsewhere("crafts", "Europe/Paris");
+    const owned = (await api.listBookingPages()).find((page) => page.id === bookingPageId)!;
     api.actAs("staff");
-    expect((await api.getSetup()).applied).toMatchObject({ templateId: "crafts", published: false });
+    expect((await api.getSetup()).applied).toMatchObject({
+      templateId: "crafts", published: false, bookingPageTitle: INDUSTRY_TEMPLATES.crafts.bookingPage.title, bookingUrl: owned.bookingUrl,
+    });
+    expect(await failure(api.listBookingPages())).toMatchObject({ kind: "forbidden", status: 403 });
+  });
+
+  it("numbers the template's stages from 0 and keeps its booking horizon, as the core handler does", async () => {
+    const api = adapter();
+    const applied = await api.applyTemplate({ templateId: "agency", timeZone: "America/Chicago" });
+    const pipeline = (await api.listPipelines()).find((item) => item.id === applied.result.pipelineId)!;
+    expect(pipeline.stages.map((stage) => stage.position)).toEqual(pipeline.stages.map((_stage, index) => index));
+    // Nothing is bookable from the horizon on: 60 days ahead for every template.
+    const horizon = INDUSTRY_TEMPLATES.agency.resource.bookingHorizonMinutes * 60_000;
+    const day = 86_400_000;
+    const near = await api.getSlots({ resourceId: applied.result.resourceId, from: NOW.toISOString(), to: new Date(NOW.getTime() + 7 * day).toISOString() });
+    expect(near.slots.length).toBeGreaterThan(0);
+    const beyond = await api.getSlots({
+      resourceId: applied.result.resourceId, from: new Date(NOW.getTime() + horizon).toISOString(), to: new Date(NOW.getTime() + horizon + 7 * day).toISOString(),
+    });
+    expect(beyond.slots).toEqual([]);
+    // The same weekday and hour 56 days out books (inside the horizon); 63 days out (beyond it) does not.
+    const slot = near.slots[0]!.startsAt;
+    const at = (days: number) => new Date(Date.parse(slot) + days * day).toISOString();
+    await expect(api.createBooking({ resourceId: applied.result.resourceId, startsAt: at(56) }, key())).resolves.toBeTruthy();
+    expect(await failure(api.createBooking({ resourceId: applied.result.resourceId, startsAt: at(63) }, key()))).toMatchObject({ kind: "conflict" });
+  });
+
+  it("accepts a valid zone alias PostgreSQL lists, and refuses a zone in the wrong case", async () => {
+    for (const timeZone of ["Asia/Kolkata", "Etc/UTC", "UTC"]) {
+      const api = adapter();
+      expect((await api.applyTemplate({ templateId: "jewelry", timeZone })).result.timeZone, timeZone).toBe(timeZone);
+    }
+    expect(await failure(adapter().applyTemplate({ templateId: "jewelry", timeZone: "america/los_angeles" }))).toMatchObject({ status: 422, reason: "invalid_time_zone" });
   });
 
   it("takes the page live and off line again; the same value is no change, staff get 403, an unknown page 404", async () => {

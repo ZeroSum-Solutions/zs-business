@@ -116,6 +116,14 @@ test("staff see what was set up but cannot take the page live", async ({ page },
   await expect(toggle).toBeDisabled();
   await expect(toggle).toHaveAccessibleDescription(/Only an owner can take the booking page live or off line\.$/);
   await expect(page.getByTestId("applied-template")).toContainText("Gym or personal trainer");
+  // The page's title comes with the setup read, and its link once an owner has taken it live; staff cannot list pages.
+  await expect(page.getByTestId("applied-page")).toContainText("Book a free intro");
+  await expect(page.getByRole("link", { name: "Open booking page" })).toHaveCount(0);
+  await page.evaluate(() => window.__zsDemo!.actAs("owner"));
+  await page.getByRole("switch", { name: "Take the booking page live" }).click();
+  await expect(page.getByRole("status").getByText("Your booking page is live.")).toBeVisible();
+  await page.evaluate(() => window.__zsDemo!.actAs("staff"));
+  await expect(page.getByTestId("applied-page").getByRole("link", { name: "Open booking page" })).toHaveAttribute("href", /\/book\/zsb1_/);
   await shot(page, "setup-staff", info.project.name);
   await mainNav(page).getByRole("link", { name: "Home" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
@@ -131,6 +139,12 @@ test("New deal on a customer's page goes into the template's first open stage (I
   const deals = page.locator('[aria-labelledby="deals-title"]');
   await page.getByRole("button", { name: "New deal" }).click();
   const dialog = page.getByRole("dialog", { name: "New deal" });
+  // Cancel is a plain button: it closes the dialog and adds nothing, even with a title typed.
+  await dialog.getByLabel("Title").fill("Never added");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(deals.getByRole("listitem").filter({ hasText: "Never added" })).toHaveCount(0);
+  await page.getByRole("button", { name: "New deal" }).click();
   await dialog.getByLabel("Title").fill("AI audit");
   await dialog.getByLabel("Value (optional)").fill("4800");
   await dialog.getByRole("button", { name: "Add deal" }).click();

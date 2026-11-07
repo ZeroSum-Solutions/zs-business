@@ -9,12 +9,13 @@ import type { QueryClient } from "@tanstack/react-query";
 import { createElement as h } from "react";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { ConnectionsView } from "../src/components/account/connections-view";
-import { createDealWithValue, NewDealButton, NO_PIPELINE_REASON, PIPELINES_NOT_LOADED } from "../src/components/customers/new-deal-dialog";
+import { createDealWithValue, NewDealButton, NO_OPEN_STAGE_REASON, NO_PIPELINE_REASON, PIPELINES_NOT_LOADED, SETUP_NOT_LOADED } from "../src/components/customers/new-deal-dialog";
 import { SetupLine } from "../src/components/home/setup-line";
-import { ApplyTemplate, OWNER_ONLY_TOGGLE, SENDING_OFF, SetupView, STAFF_SETUP_DESCRIPTION } from "../src/components/setup/setup-view";
+import { ApplyTemplate, CALENDAR_CLASH_ADVICE, OWNER_ONLY_TOGGLE, SENDING_OFF, SetupView, STAFF_SETUP_DESCRIPTION } from "../src/components/setup/setup-view";
 import { ApiError } from "../src/lib/api";
 import { createDemoAdapter } from "../src/lib/api/demo/adapter";
 import { DEMO_PIPELINE } from "../src/lib/api/demo/seed";
+import { dealTarget } from "../src/lib/setup";
 import { failQuery, keys, renderScreen } from "./helpers/render";
 
 vi.mock("next/navigation", () => ({
@@ -34,13 +35,12 @@ const PIPELINE = "2a4c6e80-1b3d-4f5a-9c7e-0000000000aa";
 const templates = INDUSTRY_TEMPLATE_IDS.map((id) => industryTemplatePreview(INDUSTRY_TEMPLATES[id]));
 const fresh: SetupRead = { applied: null, timeZone: null, templates };
 const applied = (templateId: (typeof INDUSTRY_TEMPLATE_IDS)[number], published = false): SetupRead => ({
-  applied: { templateId, templateVersion: 1, appliedAt: "2026-11-07T10:00:00.000Z", pipelineId: PIPELINE, resourceId: RESOURCE, bookingPageId: PAGE, published },
+  applied: {
+    templateId, templateVersion: 1, appliedAt: "2026-11-07T10:00:00.000Z", pipelineId: PIPELINE, resourceId: RESOURCE, bookingPageId: PAGE,
+    bookingPageTitle: "Book a consultation", bookingUrl: "https://book.example.com/book/k", published,
+  },
   timeZone: "Europe/London",
   templates,
-});
-const page = (published: boolean) => ({
-  id: PAGE, title: "Book a consultation", published, disclosureVersion: "2026-11", resourceIds: [RESOURCE], publicKey: "k",
-  bookingUrl: "https://book.example.com/book/k", embedScript: "", embedIframe: "",
 });
 const text = (html: string) => html.replaceAll("<!-- -->", "").replaceAll("&#x27;", "'").replaceAll("&amp;", "&");
 const render = (node: Parameters<typeof renderScreen>[0], fill: (client: QueryClient) => void, staff = false) =>
@@ -102,39 +102,66 @@ describe("the preview and confirm", () => {
 });
 
 describe("/setup after apply", () => {
+  // No booking page list is filled: the screen takes the page's title and address from the setup read.
   const fill = (read: SetupRead, connections: unknown[] = []) => (client: QueryClient) => {
     client.setQueryData(keys.setup, read);
-    client.setQueryData(keys.bookingPages, [page(read.applied?.published ?? false)]);
     client.setQueryData(keys.calendarConnections, connections);
   };
+  const connection = (status: string) => ({ id: PAGE, provider: "google", resourceId: RESOURCE, calendarId: "primary", accountEmail: null, status, lastSyncedAt: null, lastError: null, createdAt: "2026-11-07T10:00:00.000Z" });
 
-  it("shows the template, the page off line with its switch and link, the Google note, the agents and the area links", () => {
+  it("shows the template, the page off line with its switch and no link, the Google note, the agents and the area links", () => {
     const html = render(h(SetupView), fill(applied("jewelry")));
     expect(html).toContain("Jewelry: custom and bridal");
+    expect(html).toContain("Book a consultation");
     expect(html).toContain(">Off line<");
     expect(html).toMatch(/id="setup-page-live"[^>]*aria-checked="false"|aria-checked="false"[^>]*id="setup-page-live"/);
     expect(html).not.toMatch(/<button[^>]*id="setup-page-live"[^>]*disabled/);
-    expect(html).toContain('href="https://book.example.com/book/k"');
+    // The public address 404s while the page is off line, so no link is offered yet.
+    expect(html).not.toContain("https://book.example.com/book/k");
     expect(html).toContain("Google Calendar is not connected yet");
+    expect(html).toContain(CALENDAR_CLASH_ADVICE);
     expect(html).toContain('href="/agents#reminder-title"');
     expect(html).toContain('href="/agents#review-title"');
     expect(html.match(new RegExp(SENDING_OFF, "g"))).toHaveLength(2);
     for (const href of ["/calendar", "/customers", "/account/connections"]) expect(html).toContain(`href="${href}"`);
   });
 
-  it("shows a live page as Live, and no Google note once the calendar is connected", () => {
-    const connection = { id: PAGE, provider: "google", resourceId: RESOURCE, calendarId: "primary", accountEmail: null, status: "active", lastSyncedAt: null, lastError: null, createdAt: "2026-11-07T10:00:00.000Z" };
-    const html = render(h(SetupView), fill(applied("agency", true), [connection]));
+  it("shows a live page as Live with its link, and no Google note once the calendar has an active connection", () => {
+    const html = render(h(SetupView), fill(applied("agency", true), [connection("active")]));
     expect(html).toContain(">Live<");
+    expect(html).toContain('href="https://book.example.com/book/k"');
     expect(html).not.toContain("Google Calendar is not connected yet");
     expect(html).toContain('href="/agents#reminder-title"');
     expect(html).not.toContain('href="/agents#review-title"');
   });
 
-  it("disables the switch for staff and says why", () => {
-    const html = render(h(SetupView), fill(applied("crafts")), true);
-    expect(html).toMatch(/<button[^>]*id="setup-page-live"[^>]*disabled=""|<button[^>]*disabled=""[^>]*id="setup-page-live"/);
-    expect(html).toContain(OWNER_ONLY_TOGGLE);
+  it("keeps the Google note for a connection that needs a reconnect, and says so on a failed read", () => {
+    const reconnect = render(h(SetupView), fill(applied("agency"), [connection("reauthorize")]));
+    expect(reconnect).toContain('data-testid="google-not-connected"');
+    expect(reconnect).toContain("Google Calendar needs to be reconnected");
+    expect(reconnect).toContain(CALENDAR_CLASH_ADVICE);
+    const failed = render(h(SetupView), (client) => {
+      client.setQueryData(keys.setup, applied("agency"));
+      failQuery(client, keys.calendarConnections, new ApiError("server", "Something went wrong on our side. Try again."));
+    });
+    expect(failed).toContain('data-testid="google-unknown"');
+    expect(failed).toContain("couldn&#x27;t check your Google Calendar connection".replace("&#x27;", "'"));
+  });
+
+  it("gives staff the page title and, while it is live, the link, without the owner-only page list", () => {
+    const off = render(h(SetupView), fill(applied("crafts")), true);
+    expect(off).toMatch(/<button[^>]*id="setup-page-live"[^>]*disabled=""|<button[^>]*disabled=""[^>]*id="setup-page-live"/);
+    expect(off).toContain(OWNER_ONLY_TOGGLE);
+    expect(off).toContain("Book a consultation");
+    const live = render(h(SetupView), fill(applied("crafts", true)), true);
+    expect(live).toContain('href="https://book.example.com/book/k"');
+  });
+
+  it("shows each message's own timing and channel from the preview", () => {
+    const sms = { ...templates[3]!, messages: templates[3]!.messages.map((message) => ({ ...message, channel: "sms" as const, timingHours: 1 })) };
+    const html = render(h(ApplyTemplate, { template: sms, profileZone: null, onBack: () => undefined }), () => undefined);
+    expect(html).toContain("1 hour before the appointment, by text message");
+    expect(html).toContain("1 hour after the appointment, by text message");
   });
 });
 
@@ -148,6 +175,14 @@ describe("Home's setup line", () => {
     expect(render(h(SetupLine), (client) => client.setQueryData(keys.setup, applied("fitness")))).not.toContain('data-testid="setup-line"');
     expect(render(h(SetupLine), () => undefined)).not.toContain('data-testid="setup-line"');
     expect(owner).toContain('data-testid="setup-line"');
+  });
+
+  it("does not read a failed setup as 'already applied': it says so with a retry, to owners and staff", () => {
+    for (const staff of [false, true]) {
+      const html = render(h(SetupLine), (client) => failQuery(client, keys.setup, new ApiError("server", "Something went wrong on our side. Try again.")), staff);
+      expect(html, String(staff)).toContain('data-testid="setup-line-error"');
+      expect(html, String(staff)).toContain("Try again");
+    }
   });
 });
 
@@ -169,9 +204,27 @@ describe("recommended connections (IT-8)", () => {
     const before = render(h(ConnectionsView), (client) => client.setQueryData(keys.setup, fresh));
     expect(before).not.toContain("Recommended for");
   });
+
+  it("waits for the setup read before ordering, and on a failed read keeps the default order with no recommended lines", () => {
+    const pending = render(h(ConnectionsView), () => undefined);
+    expect(pending).not.toContain('data-testid="shopify-card"');
+    expect(pending).not.toContain('data-testid="gcal-card"');
+    const failed = render(h(ConnectionsView), (client) => failQuery(client, keys.setup, new ApiError("server", "Something went wrong on our side. Try again.")));
+    expect(failed).not.toContain("Recommended for");
+    expect(failed.indexOf('data-testid="gcal-card"')).toBeGreaterThan(-1);
+    expect(failed.indexOf('data-testid="gcal-card"')).toBeLessThan(failed.indexOf('data-testid="shopify-card"'));
+  });
 });
 
 describe("New deal (IT-10)", () => {
+  const SEED_AND_TEMPLATE = (applyId: string | null) => (client: QueryClient) => {
+    client.setQueryData(keys.pipelines, [
+      { id: "aaa-template-comes-second", name: "Zed", stages: [{ id: "t1", name: "Lead", position: 0, outcome: "open" }] },
+      DEMO_PIPELINE,
+    ]);
+    client.setQueryData(keys.setup, applyId === null ? fresh : { ...applied("jewelry"), applied: { ...applied("jewelry").applied!, pipelineId: applyId } });
+  };
+
   it("is disabled with the reason while there is no pipeline", () => {
     const html = render(h(NewDealButton, { contactId: "c" }), (client) => {
       client.setQueryData(keys.pipelines, []);
@@ -194,7 +247,7 @@ describe("New deal (IT-10)", () => {
     expect(loading).not.toContain(NO_PIPELINE_REASON);
   });
 
-  it("is enabled with a pipeline", () => {
+  it("is enabled with a pipeline when setup says no template was applied", () => {
     const html = render(h(NewDealButton, { contactId: "c" }), (client) => {
       client.setQueryData(keys.pipelines, [DEMO_PIPELINE]);
       client.setQueryData(keys.setup, fresh);
@@ -203,27 +256,75 @@ describe("New deal (IT-10)", () => {
     expect(html).not.toContain(NO_PIPELINE_REASON);
   });
 
-  it("creates the deal in the open stage, then saves its value", async () => {
-    const api = createDemoAdapter();
-    const { pipelineId } = api.applyTemplateElsewhere("jewelry");
-    const pipeline = (await api.listPipelines()).find((item) => item.id === pipelineId)!;
-    const contact = (await api.listContacts()).items[0]!;
-    let n = 0;
-    const result = await createDealWithValue(api, { contactId: contact.id, pipelineId, stageId: pipeline.stages[0]!.id, title: "Engagement ring" },
-      { amountMinor: 250_000, currency: "USD" }, () => `key-${++n}`);
-    expect(result).toEqual({ title: "Engagement ring", valueError: null });
-    const deal = (await api.listDeals({ contactId: contact.id })).items.find((item) => item.title === "Engagement ring");
-    expect(deal).toMatchObject({ stageId: pipeline.stages[0]!.id, value: { amountMinor: 250_000, currency: "USD" }, revision: 2 });
+  it("waits for the setup read: busy and disabled while it is pending, an error and no fallback pipeline when it failed", () => {
+    const pending = render(h(NewDealButton, { contactId: "c" }), (client) => client.setQueryData(keys.pipelines, [DEMO_PIPELINE]));
+    expect(pending).toMatch(/<button[^>]*disabled=""[^>]*>.*New deal/);
+    expect(pending).toMatch(/<button[^>]*aria-busy="true"/);
+    const failed = render(h(NewDealButton, { contactId: "c" }), (client) => {
+      client.setQueryData(keys.pipelines, [DEMO_PIPELINE]);
+      failQuery(client, keys.setup, new ApiError("server", "Something went wrong on our side. Try again."));
+    });
+    expect(failed).toMatch(/<button[^>]*disabled=""[^>]*>.*New deal/);
+    expect(failed).toContain(SETUP_NOT_LOADED);
   });
 
-  it("keeps the deal and reports the value step when only that step fails", async () => {
+  it("targets the applied template's pipeline beside a seed pipeline, never the first by name", () => {
+    // The applied pipeline sits second in the list: a fallback to pipelines[0] would pick the other.
+    const enabled = render(h(NewDealButton, { contactId: "c" }), SEED_AND_TEMPLATE(DEMO_PIPELINE.id));
+    expect(enabled).not.toMatch(/<button[^>]*disabled=""[^>]*>.*New deal/);
+    // Its pipeline gone from the list: no pipeline, and the other pipeline does not stand in.
+    const gone = render(h(NewDealButton, { contactId: "c" }), SEED_AND_TEMPLATE("deleted-pipeline"));
+    expect(gone).toMatch(/<button[^>]*disabled=""[^>]*>.*New deal/);
+    expect(gone).toContain(NO_PIPELINE_REASON);
+  });
+
+  it("uses its own words when the pipeline has no open stage", () => {
+    const html = render(h(NewDealButton, { contactId: "c" }), (client) => {
+      client.setQueryData(keys.pipelines, [{ id: "closed", name: "Closed", stages: [{ id: "w", name: "Won", position: 0, outcome: "won" }] }]);
+      client.setQueryData(keys.setup, fresh);
+    });
+    expect(html).toContain(NO_OPEN_STAGE_REASON);
+    expect(html).not.toContain(NO_PIPELINE_REASON);
+  });
+
+  it("creates the deal in the template pipeline's first open stage, then saves its value", async () => {
+    const api = createDemoAdapter();
+    const { pipelineId } = api.applyTemplateElsewhere("jewelry");
+    const pipelines = await api.listPipelines();
+    expect(pipelines.length).toBeGreaterThan(1);
+    const target = dealTarget(pipelines, pipelineId);
+    expect(target).toMatchObject({ pipelineId });
+    if ("problem" in target) throw new Error(target.problem);
+    const contact = (await api.listContacts()).items[0]!;
+    let n = 0;
+    const result = await createDealWithValue(api, { contactId: contact.id, ...target, title: "Engagement ring" },
+      { amountMinor: 250_000, currency: "USD" }, () => `key-${++n}`);
+    expect(result).toMatchObject({ deal: { title: "Engagement ring" }, valueError: null });
+    const deal = (await api.listDeals({ contactId: contact.id })).items.find((item) => item.title === "Engagement ring");
+    expect(deal).toMatchObject({ pipelineId, stageId: target.stageId, value: { amountMinor: 250_000, currency: "USD" }, revision: 2 });
+  });
+
+  it("keeps the deal and reports the value step when only that step fails, and a retry saves the value without a second deal", async () => {
     const api = createDemoAdapter();
     const contact = (await api.listContacts()).items[0]!;
-    const failing = { createDeal: api.createDeal, setDealDetails: async () => { throw new ApiError("network", "offline"); } };
+    let fail = true;
+    const flaky = {
+      createDeal: api.createDeal,
+      setDealDetails: (change: Parameters<typeof api.setDealDetails>[0], options: Parameters<typeof api.setDealDetails>[1]) => {
+        if (fail) return Promise.reject(new ApiError("network", "offline"));
+        return api.setDealDetails(change, options);
+      },
+    };
     let n = 0;
-    const result = await createDealWithValue(failing, { contactId: contact.id, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[0]!.id, title: "Repair" },
-      { amountMinor: 100, currency: "USD" }, () => `key-${++n}`);
-    expect(result.valueError).toBeInstanceOf(ApiError);
-    expect((await api.listDeals({ contactId: contact.id })).items.some((item) => item.title === "Repair")).toBe(true);
+    const input = { contactId: contact.id, pipelineId: DEMO_PIPELINE.id, stageId: DEMO_PIPELINE.stages[0]!.id, title: "Repair" };
+    const first = await createDealWithValue(flaky, input, { amountMinor: 100, currency: "USD" }, () => `key-${++n}`);
+    expect(first.valueError).toBeInstanceOf(ApiError);
+    const count = async () => (await api.listDeals({ contactId: contact.id })).items.filter((item) => item.title === "Repair").length;
+    expect(await count()).toBe(1);
+    fail = false;
+    const retry = await createDealWithValue(flaky, input, { amountMinor: 100, currency: "USD" }, () => `key-${++n}`, first.deal);
+    expect(retry.valueError).toBeNull();
+    expect(await count()).toBe(1);
+    expect((await api.listDeals({ contactId: contact.id })).items.find((item) => item.title === "Repair")?.value).toMatchObject({ amountMinor: 100 });
   });
 });

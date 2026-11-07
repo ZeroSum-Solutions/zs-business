@@ -15,13 +15,13 @@ import { DisabledReason } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
-import { KIND_COPY, timeZoneChoices, timingSentence, zoneName } from "@/lib/agents";
+import { KIND_COPY, timeZoneChoices, zoneName } from "@/lib/agents";
 import { isApiError } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { browserZone, useBookingPages, useCalendarConnections, useKeys, useSetup } from "@/lib/queries";
+import { browserZone, useCalendarConnections, useKeys, useSetup } from "@/lib/queries";
 import { MANAGE_BUSINESS, useCan } from "@/lib/session";
-import { calendarConnected, CONNECTION_LABELS, durationLabel, hoursLines, initialZone } from "@/lib/setup";
+import { calendarConnected, CONNECTION_LABELS, durationLabel, hoursLines, initialZone, messageTimingLine } from "@/lib/setup";
 import { formatDay } from "@/lib/time";
 
 export const SETUP_DESCRIPTION = "Pick the template closest to your business. It adds a pipeline, a calendar, a booking page and message wording. It changes nothing you already have.";
@@ -29,6 +29,8 @@ export const STAFF_SETUP_DESCRIPTION = "Your owner hasn't finished setup yet. Th
 export const APPLIED_DESCRIPTION = "What your template set up, and what is left to do.";
 export const SENDING_OFF = "Sending stays off until you approve the wording.";
 export const OWNER_ONLY_TOGGLE = "Only an owner can take the booking page live or off line.";
+export const ALREADY_SET_UP = "This business was already set up. Showing what is set up now.";
+export const CALENDAR_CLASH_ADVICE = "Until it is connected, keep the booking page off line, or watch your calendar for clashes yourself.";
 
 /** Agents page anchors for each kind's card (template-cards.tsx). */
 const AGENT_ANCHORS = { appointment_reminder: "reminder-title", review_request: "review-title" } as const;
@@ -113,11 +115,18 @@ export function ApplyTemplate({ template, profileZone, onBack }: { template: Ind
 
   const apply = useMutation({
     mutationFn: (input: { templateId: string; timeZone: string }) => api.applyTemplate(input),
-    onSuccess: async () => {
+    onSuccess: (result) => {
+      // The commit is done: leave at once. A refetch that fails later must not keep the owner on Confirm.
+      const refresh = (queryKeys: readonly (readonly unknown[])[]) =>
+        void Promise.allSettled(queryKeys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+      if (result.replayed) {
+        // Someone applied this template first, and the zone just chosen was not saved: show what is stored.
+        refresh([keys.setup, keys.business]);
+        toast(ALREADY_SET_UP, "info");
+        return;
+      }
       // The apply added a pipeline, a calendar, a booking page and wording, and set the zone.
-      await Promise.all([
-        keys.setup, keys.pipelines, keys.resources, keys.slotsAll, keys.bookingPages, keys.business, keys.agentsAll,
-      ].map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+      refresh([keys.setup, keys.pipelines, keys.resources, keys.slotsAll, keys.bookingPages, keys.business, keys.agentsAll]);
       // Said on the setup page, read on Home.
       toast(`Set up with ${template.label}.`, "success", { keepOnNavigate: true });
       router.push("/");
@@ -135,12 +144,12 @@ export function ApplyTemplate({ template, profileZone, onBack }: { template: Ind
 
   return (
     <>
-      <Button variant="ghost" className="-ml-2 mb-3" onClick={onBack}><ArrowLeft aria-hidden />All templates</Button>
+      <Button variant="ghost" className="-ml-2 mb-3" onClick={onBack} disabled={apply.isPending}><ArrowLeft aria-hidden />All templates</Button>
       <TemplatePreview template={template} headingRef={heading} />
       <Card aria-labelledby="confirm-title" className="mt-4">
         <CardHeader><CardTitle id="confirm-title">Confirm</CardTitle></CardHeader>
         <form onSubmit={submit} noValidate className="space-y-4">
-          <ZoneField zone={zone} onChange={setZone} />
+          <ZoneField zone={zone} onChange={setZone} disabled={apply.isPending} />
           {apply.isError ? <ErrorNote error={apply.error} /> : null}
           <Button type="submit" disabled={apply.isPending} aria-busy={apply.isPending}>Set up with this template</Button>
         </form>
@@ -149,12 +158,12 @@ export function ApplyTemplate({ template, profileZone, onBack }: { template: Ind
   );
 }
 
-function ZoneField({ zone, onChange }: { zone: string; onChange: (zone: string) => void }) {
+function ZoneField({ zone, onChange, disabled }: { zone: string; onChange: (zone: string) => void; disabled: boolean }) {
   const zones = useMemo(() => timeZoneChoices(zone), [zone]);
   return (
     <div>
       <Label htmlFor="setup-zone">Time zone</Label>
-      <Select id="setup-zone" className="w-full" value={zone} aria-describedby="setup-zone-hint" onChange={(event) => onChange(event.target.value)}>
+      <Select id="setup-zone" className="w-full" value={zone} disabled={disabled} aria-describedby="setup-zone-hint" onChange={(event) => onChange(event.target.value)}>
         {zones.map((item) => <option key={item} value={item}>{zoneName(item)}</option>)}
       </Select>
       <p id="setup-zone-hint" className="mt-1 text-xs text-meta">Your opening hours and appointments use this zone. It is saved to your business details.</p>
@@ -207,7 +216,7 @@ export function TemplatePreview({ template, headingRef }: { template: IndustryTe
             {template.messages.map((message) => (
               <Fact key={message.agentKind} label={KIND_COPY[message.agentKind].title}>
                 {message.subject ? <span className="block">{message.subject}</span> : null}
-                <span className="block text-meta">{timingSentence(message.agentKind, message.timingHours)}, by email</span>
+                <span className="block text-meta">{messageTimingLine(message)}</span>
               </Fact>
             ))}
             <Fact label="Recommended connections">{connectionsLine(template)}</Fact>
@@ -277,8 +286,7 @@ function BookingPageSwitch({ applied, owner }: { applied: AppliedSetup; owner: b
   const { keys } = useKeys();
   const toast = useToast();
   const intents = useIntentKey();
-  const pages = useBookingPages();
-  const page = pages.data?.find((item) => item.id === applied.bookingPageId);
+  // The title and address come with the setup read, so staff (who cannot list pages) see them too.
   const live = applied.published;
 
   const change = useMutation({
@@ -286,8 +294,10 @@ function BookingPageSwitch({ applied, owner }: { applied: AppliedSetup; owner: b
       api.setBookingPagePublished(payload.pageId, payload.published, { idempotencyKey: intents.keyFor(payload) }),
     onSettled: (_result, error, payload) => intents.settle(payload, error),
     onSuccess: async (result) => {
+      // An older setup read still in flight would put the previous flag back: stop it first.
+      await queryClient.cancelQueries({ queryKey: keys.setup });
       queryClient.setQueryData<SetupRead>(keys.setup, (read) => (read?.applied ? { ...read, applied: { ...read.applied, published: result.published } } : read));
-      await Promise.all([queryClient.invalidateQueries({ queryKey: keys.setup }), queryClient.invalidateQueries({ queryKey: keys.bookingPages })]);
+      void Promise.allSettled([queryClient.invalidateQueries({ queryKey: keys.setup }), queryClient.invalidateQueries({ queryKey: keys.bookingPages })]);
       toast(result.published ? "Your booking page is live." : "Your booking page is off line.");
     },
   });
@@ -297,7 +307,7 @@ function BookingPageSwitch({ applied, owner }: { applied: AppliedSetup; owner: b
       <CardHeader className="mb-2">
         <CardTitle id="applied-page-title" className="flex flex-wrap items-center gap-2">
           <Globe size={20} aria-hidden className="text-meta" />
-          {page?.title ?? "Booking page"}
+          {applied.bookingPageTitle}
         </CardTitle>
         <Badge tone={live ? "success" : "neutral"} live={live}>{live ? "Live" : "Off line"}</Badge>
       </CardHeader>
@@ -317,23 +327,38 @@ function BookingPageSwitch({ applied, owner }: { applied: AppliedSetup; owner: b
       </div>
       {owner ? null : <DisabledReason id="setup-page-reason">{OWNER_ONLY_TOGGLE}</DisabledReason>}
       {change.isError ? <ErrorNote error={change.error} /> : null}
-      {page ? (
+      {live && applied.bookingUrl ? (
         <Button asChild variant="secondary" className="mt-3">
-          <a href={page.bookingUrl} target="_blank" rel="noreferrer noopener"><ArrowSquareOut aria-hidden />Open booking page</a>
+          <a href={applied.bookingUrl} target="_blank" rel="noreferrer noopener"><ArrowSquareOut aria-hidden />Open booking page</a>
         </Button>
       ) : null}
     </Card>
   );
 }
 
-/** IT-7: a note while the template's calendar has no Google Calendar connection. Nothing while the read is pending or failed. */
+/**
+ * IT-7: a note unless the template's calendar has an active Google Calendar connection. A
+ * connection that needs a reconnect counts as not connected. Nothing while the read is pending.
+ */
 function CalendarNote({ resourceId }: { resourceId: string }) {
   const connections = useCalendarConnections();
+  if (connections.isError) {
+    return (
+      <Card aria-labelledby="applied-google-title" data-testid="google-unknown">
+        <CardHeader className="mb-2"><CardTitle id="applied-google-title">Google Calendar</CardTitle></CardHeader>
+        <ErrorNote error={connections.error} retry={() => void connections.refetch()} message="We couldn't check your Google Calendar connection." />
+        <p className="mt-3 text-sm text-muted">{CALENDAR_CLASH_ADVICE}</p>
+      </Card>
+    );
+  }
   if (!connections.isSuccess || calendarConnected(connections.data, resourceId)) return null;
+  const needsReconnect = connections.data.some((item) => item.resourceId === resourceId && item.status === "reauthorize");
   return (
     <Card aria-labelledby="applied-google-title" data-testid="google-not-connected">
-      <CardHeader className="mb-2"><CardTitle id="applied-google-title">Google Calendar is not connected yet</CardTitle></CardHeader>
-      <CardDescription>Connect it so busy times there are kept free on your booking page.</CardDescription>
+      <CardHeader className="mb-2">
+        <CardTitle id="applied-google-title">{needsReconnect ? "Google Calendar needs to be reconnected" : "Google Calendar is not connected yet"}</CardTitle>
+      </CardHeader>
+      <CardDescription>Connect it so busy times there are kept free on your booking page. {CALENDAR_CLASH_ADVICE}</CardDescription>
       <Button asChild variant="secondary" className="mt-3">
         <Link href="/account/connections">Go to Connections</Link>
       </Button>

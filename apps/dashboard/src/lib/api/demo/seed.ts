@@ -35,6 +35,8 @@ export interface DemoResource extends ResourceSummary {
   bufferBeforeMinutes: number;
   bufferAfterMinutes: number;
   minimumNoticeMinutes: number;
+  /** How far ahead a slot may be booked, exclusive (B-12). The seeded calendars have no limit; a template's does. */
+  bookingHorizonMinutes?: number;
 }
 
 export const SHOWROOM_ID = "0b7e5c1a-9d2f-4a3b-8c6d-1e2f3a4b5c61";

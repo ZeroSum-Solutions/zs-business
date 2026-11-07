@@ -5,7 +5,7 @@
  * one is 409 `template_already_applied`. An apply confirms the zone on the business profile and adds
  * the template's pipeline, calendar, booking page (off line) and wording beside what the business
  * already has; it changes or removes nothing. The booking page switch is the owner's, and the value
- * a page already has is a replay. In memory: it starts again on every page load.
+ * a page already has answers changed:false (a replay only for the same Idempotency-Key). In memory: it starts again on every page load.
  */
 import type { z } from "zod";
 import {
@@ -64,11 +64,16 @@ interface StoredSetup {
 const clone = <T>(value: T): T => structuredClone(value);
 const PREVIEWS = INDUSTRY_TEMPLATE_IDS.map((id) => industryTemplatePreview(INDUSTRY_TEMPLATES[id]));
 
-/** Like the API's check: an IANA name (or UTC) this runtime knows by that exact name. */
+/**
+ * Like the API's check: an IANA name (or UTC) this runtime knows. An alias such as Asia/Kolkata or
+ * Etc/UTC is a name PostgreSQL lists, so it passes; a name in the wrong case does not (PostgreSQL
+ * compares names exactly).
+ */
 function zoneKnown(zone: string): boolean {
   if (!bookingTimeZoneSchema.safeParse(zone).success) return false;
   try {
-    return new Intl.DateTimeFormat("en", { timeZone: zone }).resolvedOptions().timeZone.toLowerCase() === zone.toLowerCase();
+    const resolved = new Intl.DateTimeFormat("en", { timeZone: zone }).resolvedOptions().timeZone;
+    return resolved === zone || resolved.toLowerCase() !== zone.toLowerCase();
   } catch {
     return false;
   }
@@ -89,7 +94,7 @@ export function createDemoSetup(ctx: DemoSetupContext): SetupApi & DemoSetupCont
   function create(template: IndustryTemplate, timeZone: string): StoredSetup {
     ctx.confirmTimeZone(timeZone);
     const pipelineId = ctx.newId();
-    const stages = template.pipeline.stages.map((stage, index) => ({ id: ctx.newId(), name: stage.name, position: index + 1, outcome: stage.outcome }));
+    const stages = template.pipeline.stages.map((stage, index) => ({ id: ctx.newId(), name: stage.name, position: index, outcome: stage.outcome }));
     ctx.addPipeline({ id: pipelineId, name: template.pipeline.name, stages });
 
     const { resource } = template;
@@ -104,7 +109,7 @@ export function createDemoSetup(ctx: DemoSetupContext): SetupApi & DemoSetupCont
       id: resourceId, name: resource.name, kind: "template", timeZone, hours,
       slotLengthMinutes: resource.slotLengthMinutes, slotStepMinutes: resource.slotStepMinutes,
       bufferBeforeMinutes: resource.bufferBeforeMinutes, bufferAfterMinutes: resource.bufferAfterMinutes,
-      minimumNoticeMinutes: resource.minimumNoticeMinutes,
+      minimumNoticeMinutes: resource.minimumNoticeMinutes, bookingHorizonMinutes: resource.bookingHorizonMinutes,
     });
 
     const bookingPageId = ctx.newId();
@@ -145,6 +150,9 @@ export function createDemoSetup(ctx: DemoSetupContext): SetupApi & DemoSetupCont
     return {
       templateId: result.templateId, templateVersion: result.templateVersion, appliedAt: result.appliedAt,
       pipelineId: result.pipelineId, resourceId: result.resourceId, bookingPageId: result.bookingPageId,
+      // Any member reads these with the setup, as on the API; the page list stays the owner's.
+      bookingPageTitle: page?.title ?? INDUSTRY_TEMPLATES[result.templateId].bookingPage.title,
+      bookingUrl: page?.bookingUrl ?? null,
       published: page?.published ?? false,
     };
   }

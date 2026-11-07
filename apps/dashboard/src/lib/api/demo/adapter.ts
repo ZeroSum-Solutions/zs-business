@@ -453,6 +453,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   });
   const managedConnections = createDemoManagedConnections({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
 
+  /** B-12: the first instant too far ahead to book; none for a calendar without a horizon. */
+  const horizonOf = (resource: DemoResource) =>
+    resource.bookingHorizonMinutes === undefined ? Infinity : clock.now().getTime() + resource.bookingHorizonMinutes * 60000;
+
   return {
     ...agents,
     ...templates,
@@ -476,12 +480,13 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       const toMs = Date.parse(query.to);
       const labelZone = query.zone ?? resource.timeZone;
       const earliest = clock.now().getTime() + resource.minimumNoticeMinutes * 60000;
+      const horizon = horizonOf(resource);
       const slots: { startsAt: string; endsAt: string; localStart: string }[] = [];
       const lastDay = zonedDateKey(toMs, resource.timeZone);
       for (let day = zonedDateKey(fromMs, resource.timeZone); day <= lastDay; day = addDays(day, 1)) {
         for (const start of gridStarts(resource, day)) {
           const slot = occupied(resource, start);
-          if (start < fromMs || slot.endsMs > toMs || start < earliest) continue;
+          if (start < fromMs || slot.endsMs > toMs || start < earliest || start >= horizon) continue;
           if (clashes(resource, slot.occStart, slot.occEnd)) continue;
           slots.push({ startsAt: new Date(slot.startsMs).toISOString(), endsAt: new Date(slot.endsMs).toISOString(), localStart: localIso(slot.startsMs, labelZone) });
         }
@@ -510,7 +515,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         const startsMs = Date.parse(request.startsAt);
         const onGrid = !Number.isNaN(startsMs) && gridStarts(resource, zonedDateKey(startsMs, resource.timeZone)).includes(startsMs);
         // The API refuses a start that is off the grid or too soon as a conflict, not a 400.
-        if (!onGrid || startsMs < clock.now().getTime() + resource.minimumNoticeMinutes * 60000) {
+        if (!onGrid || startsMs < clock.now().getTime() + resource.minimumNoticeMinutes * 60000 || startsMs >= horizonOf(resource)) {
           throw demoError("Conflict", { reason: "slot_unavailable" });
         }
         return toRecord(insertBooking(resource, request.startsAt, newId(), null));
@@ -726,6 +731,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
     async listBookingPages() {
       await wait();
+      // The API lists pages for the `publish` permission, an owner's.
+      if (actor.role !== "owner") throw demoError("Forbidden");
       return clone(bookingPages);
     },
 

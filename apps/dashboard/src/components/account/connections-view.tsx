@@ -46,7 +46,11 @@ export function ConnectionsView() {
     if (pendingRemembered(pendingStorage(), Date.now())) setShopifyWaiting(true);
   }, []);
   const setup = useSetup();
-  // industry-templates.md IT-8: the applied template's recommended connections come first.
+  // industry-templates.md IT-8: the applied template's recommended connections come first. Wait for
+  // the setup read to settle before ordering, so the cards do not jump; on a failed read the cards
+  // keep their default order with no recommended lines.
+  // A read that is not running (no session yet) has nothing to wait for.
+  const settled = !(setup.isPending && setup.fetchStatus === "fetching");
   const template = setup.data?.templates.find((item) => item.id === setup.data?.applied?.templateId);
   const cards: Record<(typeof OFFERED_CONNECTIONS)[number], ReactNode> = {
     google_calendar: <GoogleCalendarCard notice={notice} onNotice={setNotice} />,
@@ -59,12 +63,12 @@ export function ConnectionsView() {
         <GoogleReturn onNotice={setNotice} />
         <ManagedReturn onNotice={setShopifyNotice} onWaiting={setShopifyWaiting} />
       </Suspense>
-      {orderConnections(OFFERED_CONNECTIONS, template?.recommendedConnections ?? []).map(({ id, recommended }) => (
+      {settled ? orderConnections(OFFERED_CONNECTIONS, template?.recommendedConnections ?? []).map(({ id, recommended }) => (
         <Fragment key={id}>
           {recommended && template ? <p className="mb-2 text-sm font-semibold text-muted" data-testid={`recommended-${id}`}>Recommended for {template.label}</p> : null}
           {cards[id]}
         </Fragment>
-      ))}
+      )) : <LoadingRows rows={2} label="Loading connections" />}
       <OtherAccounts />
     </>
   );

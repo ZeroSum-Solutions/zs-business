@@ -19,28 +19,40 @@ import { dealTarget } from "@/lib/setup";
 import { amountHint, FALLBACK_CURRENCY, parseAmount } from "./deal-details-dialog";
 
 export const NO_PIPELINE_REASON = "There is no pipeline for deals yet. An owner adds one in Setup.";
+export const NO_OPEN_STAGE_REASON = "The pipeline has no open stage for a new deal. Add a stage that is not Won or Lost in the pipeline.";
 export const PIPELINES_NOT_LOADED = "Your pipelines didn't load, so a deal can't be added. Reload the page to try again.";
-export const VALUE_NOT_SAVED = "The deal was added, but its value was not saved. Add the value in the deal's details.";
+export const SETUP_NOT_LOADED = "Your setup didn't load, so a deal can't be added yet. Reload the page to try again.";
+export const VALUE_NOT_SAVED = "The deal was added, but its value was not saved. Save the value again, or add it later in the deal's details.";
+export const CHOOSE_CURRENCY = "Choose a currency for the value.";
+
+/** The deal a failed value step left behind, so a retry saves the value and never adds a second deal. */
+export interface CreatedDeal { id: string; revision: number; title: string }
 
 /**
  * industry-templates.md IT-10: a new deal goes into the first stage that is neither won nor lost.
  * The create takes no value (crm.deal.create), so a value is saved next with the deal's details.
- * Answers the deal, and the error of the value step when only that step failed.
+ * Answers the deal, and the error of the value step when only that step failed. With `created`
+ * (the deal of an earlier attempt whose value step failed) only the value step runs again.
  */
 export async function createDealWithValue(
   api: Pick<ZsApi, "createDeal" | "setDealDetails">,
   input: NewDeal,
   value: DealValue | null,
   keyFor: (payload: unknown) => string,
-): Promise<{ title: string; valueError: unknown }> {
-  const deal = await api.createDeal(input, { idempotencyKey: keyFor(input) });
-  if (!value) return { title: deal.title, valueError: null };
+  created: CreatedDeal | null = null,
+  settle: (payload: unknown, error?: unknown) => void = () => undefined,
+): Promise<{ deal: CreatedDeal; valueError: unknown }> {
+  const deal: CreatedDeal = created ?? await api.createDeal(input, { idempotencyKey: keyFor(input) })
+    .then((made) => ({ id: made.id, revision: made.revision, title: made.title }));
+  if (!value) return { deal, valueError: null };
   const change: DealDetailsChange = { dealId: deal.id, expectedRevision: deal.revision, value, leadSource: null };
   try {
     await api.setDealDetails(change, { idempotencyKey: keyFor(change) });
-    return { title: deal.title, valueError: null };
+    settle(change);
+    return { deal, valueError: null };
   } catch (error) {
-    return { title: deal.title, valueError: error };
+    settle(change, error);
+    return { deal, valueError: error };
   }
 }
 
@@ -49,16 +61,21 @@ export function NewDealButton({ contactId }: { contactId: string }) {
   const pipelines = usePipelines();
   const setup = useSetup();
   const [open, setOpen] = useState(false);
-  // Without a setup read (an older API) the business's first pipeline still takes the deal.
-  const target = pipelines.data ? dealTarget(pipelines.data, setup.data?.applied?.pipelineId) : null;
-  // Disabled only with a visible reason; while the pipelines load it is busy instead.
-  const reason = pipelines.isError ? PIPELINES_NOT_LOADED : pipelines.isSuccess && target === null ? NO_PIPELINE_REASON : null;
+  // The pipeline depends on the setup read: wait for it, and never guess on a failure. The first
+  // pipeline stands in only when setup definitively says no template was applied.
+  const ready = pipelines.isSuccess && setup.isSuccess;
+  const result = ready ? dealTarget(pipelines.data, setup.data.applied?.pipelineId ?? null) : null;
+  const target = result && !("problem" in result) ? result : null;
+  const reason = pipelines.isError ? PIPELINES_NOT_LOADED
+    : setup.isError ? SETUP_NOT_LOADED
+    : result && "problem" in result ? (result.problem === "no_open_stage" ? NO_OPEN_STAGE_REASON : NO_PIPELINE_REASON)
+    : null;
   return (
     <div className="flex flex-col items-end gap-1">
       <Button
         variant="secondary"
         disabled={target === null}
-        aria-busy={pipelines.isPending || undefined}
+        aria-busy={(!ready && !pipelines.isError && !setup.isError) || undefined}
         aria-describedby={reason ? "new-deal-reason" : undefined}
         onClick={() => setOpen(true)}
       >
@@ -87,19 +104,27 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
   const [currency, setCurrency] = useState<string | null>(null);
-  const [problem, setProblem] = useState<"title" | "amount" | null>(null);
+  const [problem, setProblem] = useState<"title" | "amount" | "currency" | null>(null);
+  // The deal the first attempt added when only its value failed: the retry saves the value alone.
+  const [created, setCreated] = useState<CreatedDeal | null>(null);
+  // A value needs the business's currency, or one the owner picked: never a guessed USD.
+  const currencyKnown = currency !== null || profile.isSuccess;
   const shownCurrency = currency ?? profileCurrency;
 
   const create = useMutation({
-    mutationFn: ({ input, value }: { input: NewDeal; value: DealValue | null; generation: number }) =>
-      createDealWithValue(api, input, value, (payload) => intents.keyFor(payload)),
-    onSettled: (_result, error, attempt) => intents.settle(attempt.input, error),
+    mutationFn: ({ input, value, created: earlier }: { input: NewDeal; value: DealValue | null; created: CreatedDeal | null; generation: number }) =>
+      createDealWithValue(api, input, value, (payload) => intents.keyFor(payload), earlier, (payload, error) => intents.settle(payload, error)),
+    onSettled: (_result, error, attempt) => { if (!attempt.created) intents.settle(attempt.input, error); },
     onSuccess: async (result, attempt) => {
       void queryClient.invalidateQueries({ queryKey: keys.resultsAll });
       await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
+      if (result.valueError) {
+        // The deal exists: keep the dialog open on the error so the value can be saved again.
+        if (generation.isCurrent(attempt.generation)) setCreated(result.deal);
+        return;
+      }
       if (generation.isCurrent(attempt.generation)) onOpenChange(false);
-      if (result.valueError) toast(VALUE_NOT_SAVED, "danger");
-      else toast(`Added the deal ${result.title}.`);
+      toast(`Added the deal ${result.deal.title}.`);
     },
   });
   const { reset } = create;
@@ -111,6 +136,7 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
     setAmount("");
     setCurrency(null);
     setProblem(null);
+    setCreated(null);
   }, [open, reset]);
 
   const submit = (event: FormEvent) => {
@@ -119,12 +145,15 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
     if (!name) return setProblem("title");
     let value: DealValue | null = null;
     if (amount.trim() !== "") {
+      if (!currencyKnown) return setProblem("currency");
       const amountMinor = parseAmount(amount, shownCurrency);
       if (amountMinor === null) return setProblem("amount");
       value = { amountMinor, currency: shownCurrency };
     }
     setProblem(null);
-    create.mutate({ input: { contactId, pipelineId: target.pipelineId, stageId: target.stageId, title: name }, value, generation: generation.current() });
+    create.mutate({
+      input: { contactId, pipelineId: target.pipelineId, stageId: target.stageId, title: name }, value, created, generation: generation.current(),
+    });
   };
 
   return (
@@ -137,6 +166,7 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
               id="new-deal-title"
               maxLength={200}
               value={title}
+              readOnly={created !== null}
               aria-invalid={problem === "title" || undefined}
               aria-describedby={problem === "title" ? "new-deal-problem" : undefined}
               onChange={(event) => setTitle(event.target.value)}
@@ -150,6 +180,7 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
                 inputMode="decimal"
                 placeholder="1250"
                 value={amount}
+                readOnly={created !== null}
                 aria-invalid={problem === "amount" || undefined}
                 aria-describedby={problem === "amount" ? "new-deal-problem new-deal-help" : "new-deal-help"}
                 onChange={(event) => setAmount(event.target.value)}
@@ -157,21 +188,29 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
             </div>
             <div>
               <Label htmlFor="new-deal-currency">Currency</Label>
-              <Select id="new-deal-currency" className="w-full" value={shownCurrency} onChange={(event) => setCurrency(event.target.value)}>
+              <Select
+                id="new-deal-currency"
+                className="w-full"
+                value={currencyKnown ? shownCurrency : ""}
+                disabled={created !== null}
+                onChange={(event) => setCurrency(event.target.value)}
+              >
+                {currencyKnown ? null : <option value="" disabled>Choose a currency</option>}
                 {CURRENCIES.filter((item) => isActiveCurrencyCode(item.code)).map((item) => <option key={item.code} value={item.code}>{currencyLabel(item.code)}</option>)}
               </Select>
             </div>
           </div>
           {problem ? (
             <p id="new-deal-problem" role="alert" className="-mt-2 text-sm text-danger">
-              {problem === "title" ? "Give the deal a title." : amountHint(shownCurrency)}
+              {problem === "title" ? "Give the deal a title." : problem === "currency" ? CHOOSE_CURRENCY : amountHint(shownCurrency)}
             </p>
           ) : null}
           <p id="new-deal-help" className={problem ? "text-xs text-meta" : "-mt-2 text-xs text-meta"}>Leave the value empty if it is not known yet.</p>
           {create.isError ? <ErrorNote error={create.error} /> : null}
+          {created && create.data?.valueError ? <ErrorNote error={create.data.valueError} message={VALUE_NOT_SAVED} /> : null}
           <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
-            <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={create.isPending} aria-busy={create.isPending}>Add deal</Button>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>{created ? "Close" : "Cancel"}</Button>
+            <Button type="submit" disabled={create.isPending} aria-busy={create.isPending}>{created ? "Save the value" : "Add deal"}</Button>
           </div>
         </form>
       </DialogContent>

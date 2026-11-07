@@ -35,15 +35,18 @@ describe("dealTarget", () => {
     expect(dealTarget(pipelines, "tpl")).toEqual({ pipelineId: "tpl", stageId: "tpl-s2" });
   });
 
-  it("falls back to the first pipeline without a setup, or when the setup's pipeline is gone", () => {
+  it("falls back to the first pipeline only when setup says no template was applied", () => {
     const pipelines = [pipeline("seed", ["open", "won"])];
     expect(dealTarget(pipelines, null)).toEqual({ pipelineId: "seed", stageId: "seed-s1" });
-    expect(dealTarget(pipelines, "gone")).toEqual({ pipelineId: "seed", stageId: "seed-s1" });
   });
 
-  it("is null with no pipeline or no open stage", () => {
-    expect(dealTarget([], null)).toBeNull();
-    expect(dealTarget([pipeline("closed", ["won", "lost"])], "closed")).toBeNull();
+  it("never stands another pipeline in for an applied one that is gone", () => {
+    expect(dealTarget([pipeline("seed", ["open", "won"])], "gone")).toEqual({ problem: "no_pipeline" });
+  });
+
+  it("tells no pipeline from no open stage", () => {
+    expect(dealTarget([], null)).toEqual({ problem: "no_pipeline" });
+    expect(dealTarget([pipeline("closed", ["won", "lost"])], "closed")).toEqual({ problem: "no_open_stage" });
   });
 });
 
@@ -68,9 +71,9 @@ describe("durationLabel and calendarConnected", () => {
     expect(durationLabel(86_400)).toBe("60 days");
   });
 
-  it("counts an active or reauthorize connection of the template's calendar", () => {
+  it("counts only an active connection of the template's calendar; a reconnect-needed one does not count", () => {
     expect(calendarConnected([{ resourceId: "r", status: "active" }], "r")).toBe(true);
-    expect(calendarConnected([{ resourceId: "r", status: "reauthorize" }], "r")).toBe(true);
+    expect(calendarConnected([{ resourceId: "r", status: "reauthorize" }], "r")).toBe(false);
     expect(calendarConnected([{ resourceId: "r", status: "disconnected" }, { resourceId: "x", status: "active" }], "r")).toBe(false);
   });
 });
