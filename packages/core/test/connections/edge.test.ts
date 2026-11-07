@@ -111,12 +111,16 @@ beforeEach(async () => {
   taken = [];
 });
 
+const attemptStatus = async (attemptId: string) =>
+  (await database.pool.query<{ status: string }>("SELECT status FROM connection_attempts WHERE id=$1", [attemptId])).rows[0]?.status;
+
 /** Start → consent → callback: returns what the dashboard holds just before the confirm screen. */
 async function reachConfirm(tenant = a.tenantId, actor = a.owner.userId) {
   const started = await session(tenant, actor).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
   const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
   const sessionUri = fake.consent(claims.composioAccountId);
-  const outcome = await callback().callback({ attempt: started.attempt, browserKey: KEY, accountId: claims.composioAccountId, sessionUri });
+  // C-5: the real redirect carries `session_uri` only.
+  const outcome = await callback().callback({ attempt: started.attempt, browserKey: KEY, sessionUri });
   if (outcome.kind !== "confirm") throw new Error(`expected confirm, got ${JSON.stringify(outcome)}`);
   return { started, claims, sessionUri, grant: outcome.grant };
 }
@@ -196,17 +200,76 @@ describe("callback (C-5)", () => {
     const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
     const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
     const sessionUri = fake.consent(claims.composioAccountId);
-    const input = { attempt: started.attempt, browserKey: KEY, accountId: claims.composioAccountId, sessionUri };
+    const input = { attempt: started.attempt, browserKey: KEY, sessionUri };
     expect(await callback().callback({ ...input, attempt: "zca1.garbage" })).toEqual({ kind: "invalid" });
     expect(await callback().callback({ ...input, attempt: undefined })).toEqual({ kind: "invalid" });
     expect(await callback().callback({ ...input, browserKey: randomBytes(32).toString("base64url") })).toEqual({ kind: "error", reason: "browser_mismatch" });
     expect(await callback().callback({ ...input, browserKey: undefined })).toEqual({ kind: "error", reason: "browser_mismatch" });
     expect(await callback().callback({ ...input, accountId: "ca_other" })).toEqual({ kind: "error", reason: "attempt_changed" });
+    expect(await callback().callback({ ...input, accountId: "" })).toEqual({ kind: "error", reason: "attempt_changed" });
     expect(await callback().callback({ ...input, sessionUri: undefined })).toEqual({ kind: "error", reason: "not_connected" });
     expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
     limiterRefuses = true;
     expect(await callback().callback(input)).toEqual({ kind: "error", reason: "rate_limited" });
     expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
+  });
+
+  it("C-5: a callback with session_uri and no account ID finishes: the account comes from complete_auth and is the attempt's", async () => {
+    const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
+    const sessionUri = fake.consent(claims.composioAccountId);
+    const outcome = await callback().callback({ attempt: started.attempt, browserKey: KEY, sessionUri });
+    expect(outcome).toMatchObject({ kind: "confirm" });
+    expect(fake.callsTo(/complete_auth/)[0]!.body).toEqual({ session_uri: sessionUri, user_id: composioUserId(ENV, a.tenantId) });
+    expect(fake.accounts.get(claims.composioAccountId)!.status).toBe("ACTIVE");
+    // A reload with the same session and no account ID is still safe; an account ID that matches is accepted too.
+    expect(await callback().callback({ attempt: started.attempt, browserKey: KEY, accountId: claims.composioAccountId, sessionUri })).toMatchObject({ kind: "confirm" });
+  });
+
+  it("C-5: an account ID that complete_auth names, other than the attempt's, never connects", async () => {
+    const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
+    const sessionUri = fake.consent(claims.composioAccountId);
+    fake.override(/POST \/connected_accounts\/complete_auth/, { json: { connected_account_id: "ca_another", toolkit_slug: "shopify" }, times: 1 });
+    expect(await callback().callback({ attempt: started.attempt, browserKey: KEY, sessionUri })).toEqual({ kind: "error", reason: "not_connected" });
+    expect((await database.pool.query("SELECT 1 FROM connections")).rowCount).toBe(0);
+    expect(await attemptStatus(claims.attemptId)).toBe("started");
+  });
+
+  it("C-5: a user or toolkit that differs from the attempt's is refused when the callback carries no account ID", async () => {
+    for (const change of [{ userId: composioUserId(ENV, b.tenantId) }, { toolkit: "gmail" }]) {
+      const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+      const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
+      const sessionUri = fake.consent(claims.composioAccountId);
+      Object.assign(fake.accounts.get(claims.composioAccountId)!, change);
+      expect(await callback().callback({ attempt: started.attempt, browserKey: KEY, sessionUri })).toEqual({ kind: "error", reason: "not_connected" });
+      expect(await attemptStatus(claims.attemptId)).toBe("started");
+    }
+  });
+
+  it("C-5: a lost complete_auth answer recovers on the retry of the same session_uri-only callback", async () => {
+    const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
+    const sessionUri = fake.consent(claims.composioAccountId);
+    fake.loseNextCompleteAuth = true;
+    const input = { attempt: started.attempt, browserKey: KEY, sessionUri };
+    expect(await callback().callback(input)).toEqual({ kind: "error", reason: "provider_unavailable" });
+    // The session is now used (404); the attempt's own stored account is read instead.
+    expect(await callback().callback(input)).toMatchObject({ kind: "confirm" });
+    expect(fake.callsTo(/complete_auth/)).toHaveLength(2);
+  });
+
+  it("C-15: a session_uri replayed from another tenant, with no account ID, never connects either side", async () => {
+    const mine = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const myClaims = verifyConnectAttempt({ current: STATE }, mine.attempt, clock.now())!;
+    const other = await session(b.tenantId, b.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const otherClaims = verifyConnectAttempt({ current: STATE }, other.attempt, clock.now())!;
+    const foreign = fake.consent(otherClaims.composioAccountId);
+    expect(await callback().callback({ attempt: mine.attempt, browserKey: KEY, sessionUri: foreign })).toEqual({ kind: "error", reason: "not_connected" });
+    expect(fake.accounts.get(otherClaims.composioAccountId)!.status).toBe("INITIATED");
+    expect(fake.accounts.get(myClaims.composioAccountId)!.status).toBe("INITIATED");
+    // The other tenant's own callback still works afterwards.
+    expect(await callback().callback({ attempt: other.attempt, browserKey: KEY, sessionUri: foreign })).toMatchObject({ kind: "confirm" });
   });
 
   it("a member demoted since the start is forbidden", async () => {

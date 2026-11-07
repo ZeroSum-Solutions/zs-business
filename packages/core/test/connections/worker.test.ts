@@ -79,7 +79,9 @@ describe("link (C-3, C-5)", () => {
     const { attemptId, accountId, linked } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     expect(linked.outcome).toBe("linked");
     const call = fake.callsTo(/connected_accounts\/link/)[0]!;
-    expect(call.body).toMatchObject({ auth_config_id: AUTH_CONFIG, user_id: `zsb:${ENV}:${a.tenantId}`, callback_url: CALLBACK_URL, connection_data: { shop: "testshop" } });
+    expect(call.body).toMatchObject({ auth_config_id: AUTH_CONFIG, user_id: `zsb:${ENV}:${a.tenantId}`, callback_url: CALLBACK_URL, connection_data: { subdomain: "testshop" } });
+    // The Shopify auth config's field is `subdomain` and takes the bare store name; the old `shop` key prefilled nothing.
+    expect(call.body).not.toHaveProperty("connection_data.shop");
     expect(call.apiKey).toBe("test-key");
     expect(fake.accounts.get(accountId)?.userId).toBe(composioUserId(ENV, a.tenantId));
     expect(await attemptOf(fixture, a.tenantId, attemptId)).toEqual({ status: "started" });
@@ -193,11 +195,14 @@ describe("complete (C-5, C-8, C-14)", () => {
   });
 
   it("A-4: a definitive 400 or a redemption of another account clears the marker, so a later status call is refused", async () => {
-    for (const answer of [{ status: 400, json: { error: { message: "user mismatch" } } }, { status: 200, json: { connected_account_id: "ca_someone_else", toolkit_slug: "shopify" } }]) {
+    for (const answer of [{ status: 400, json: { error: { message: "user mismatch" } } }, { status: 200, json: { connected_account_id: "ca_someone_else", toolkit_slug: "shopify" } },
+      // The right account but another toolkit in Composio's answer.
+      { status: 200, json: { connected_account_id: "SAME", toolkit_slug: "gmail" } }]) {
       const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
       const session = fake.consent(accountId);
       fake.accounts.get(accountId)!.status = "ACTIVE";
-      fake.override(/POST \/connected_accounts\/complete_auth/, { ...answer, times: 1 });
+      const same = (answer.json as { connected_account_id?: string }).connected_account_id === "SAME";
+      fake.override(/POST \/connected_accounts\/complete_auth/, { ...answer, json: same ? { ...answer.json, connected_account_id: accountId } : answer.json, times: 1 });
       expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "not_connected" });
       expect((await attemptRow(a.tenantId, attemptId)).session_presented_at).toBeNull();
       expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });

@@ -192,6 +192,13 @@ describe("the callback route", () => {
     return Object.fromEntries(new URLSearchParams(location.slice(location.indexOf("?") + 1)));
   };
 
+  it("forwards a session_uri-only callback (the real redirect) unchanged", async () => {
+    const harness = createLiveHarness();
+    harness.api = redirectTo("connection=confirm");
+    await completeManagedConnect(callbackRequest("?session_uri=su_1&state=y"), harness.setup);
+    expect(Object.fromEntries(new URL(harness.apiCalls.at(-1)!.url).searchParams)).toEqual({ session_uri: "su_1" });
+  });
+
   it("forwards only the two ids with the attempt and the key as headers, and lands on the Connections page", async () => {
     const harness = createLiveHarness();
     harness.api = redirectTo("connection=connected");

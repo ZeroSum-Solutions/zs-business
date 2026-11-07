@@ -66,7 +66,11 @@ export class FakeComposio {
   clearOverrides(): void { this.overrides.length = 0; }
   callsTo(pattern: RegExp): FakeCall[] { return this.calls.filter((call) => pattern.test(`${call.method} ${call.path}`)); }
 
-  /** The person signs in and consents: the account stays INITIATED when verification is deferred. */
+  /**
+   * The person signs in and consents: the account stays INITIATED when verification is deferred.
+   * Like the real redirect (observed 2026-11-07), the callback then carries `session_uri` only: no account
+   * ID, user ID or toolkit. A test passes the returned value as `sessionUri` and no `accountId`.
+   */
   consent(accountId: string): string {
     const account = this.accounts.get(accountId);
     if (!account) throw new Error("no such account");
@@ -122,7 +126,8 @@ export class FakeComposio {
     if (method === "POST" && path === "/connected_accounts/link") {
       const id = `ca_${++this.counter}`;
       const data = (b["connection_data"] ?? {}) as Record<string, unknown>;
-      const shop = typeof data["shop"] === "string" ? `${data["shop"]}.myshopify.com` : null;
+      // The real Shopify auth config asks for `subdomain` (the bare store name).
+      const shop = typeof data["subdomain"] === "string" ? `${data["subdomain"]}.myshopify.com` : null;
       this.accounts.set(id, {
         id, userId: String(b["user_id"]), toolkit: "shopify", authConfigId: String(b["auth_config_id"]), status: "INITIATED", shopDomain: shop, deleted: false, revoked: false,
       });

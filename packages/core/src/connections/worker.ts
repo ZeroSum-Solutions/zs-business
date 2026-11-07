@@ -430,7 +430,10 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
         try {
           const redeemed = await spend(undefined, () => composio.completeAuth({ sessionUri, userId }, signal));
           // Another account than the attempt's never connects (C-5).
+          // The callback names no account, so this answer is what ties the session to the attempt: its account and
+          // toolkit must be the attempt's (the account read below checks the user and auth config).
           if (redeemed.connectedAccountId !== attempt.composio_account_id) return await definitive();
+          if (redeemed.toolkit !== null && redeemed.toolkit.toLowerCase() !== attempt.toolkit) return await definitive();
         } catch (error) {
           // 400: Composio checked `user_id` and it is not the session's.
           if (error instanceof ComposioError && error.kind === "bad_request") return await definitive();

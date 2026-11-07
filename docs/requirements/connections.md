@@ -172,8 +172,9 @@ role for workers (all workers share one pattern today; Known limits).
     `reason=attempt_changed` and its account is swept (C-9).
 - **C-5 Callback, stage, confirm.**
   - Callback. Composio redirects to the dashboard's `GET /api/connections/callback`
-    (`CONNECTIONS_CALLBACK_URL`). It forwards only `session_uri` and `connected_account_id`,
-    with the attempt token in `X-Zs-Connect-Attempt` and the browser key in
+    (`CONNECTIONS_CALLBACK_URL`). Composio's redirect carries `session_uri` and nothing else:
+    no account ID, user ID or toolkit (observed 2026-11-07, C-17). The dashboard forwards only
+    `session_uri`, and `connected_account_id` if a callback ever has one, with the attempt token in `X-Zs-Connect-Attempt` and the browser key in
     `X-Zs-Browser-Key`, to the API's anonymous `GET /oauth/connections/callback`. The API
     answers 400 when the attempt is missing, forged or expired (the dashboard shows
     `reason=invalid_attempt`); otherwise 303 to `CONNECTIONS_RETURN_URL` with
@@ -181,8 +182,8 @@ role for workers (all workers share one pattern today; Known limits).
     dashboard rebuilds its own redirect to `/account/connections` from that answer (never the
     API's address), with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
   - Checks, in order, first failure answers: `browser_mismatch` when the browser key's
-    SHA-256 differs from the attempt's (constant time); `attempt_changed` when the query's
-    account ID differs from the attempt's; `forbidden` when the member no longer holds
+    SHA-256 differs from the attempt's (constant time); `attempt_changed` when the query carries an
+    account ID that differs from the attempt's (a missing one is the normal case and passes); `forbidden` when the member no longer holds
     `integrations` (read in a tenant transaction for the attempt's tenant); `rate_limited`
     over `conn-callback:<tenantId>` (30 per hour); `connected` when the attempt's connection
     row exists, is `active`, and has the attempt's toolkit and Composio account (a reload; the
@@ -195,7 +196,11 @@ role for workers (all workers share one pattern today; Known limits).
     `session_uri`) on an attempt that never had one is `not_connected`. It redeems only a
     `started` attempt, and it moves the attempt to `verified` with a conditional update that
     fails (`invalid_attempt`) if a cancel or the sweep moved it meanwhile:
-    - redeem `session_uri` with the tenant's `user_id`. If Composio says the session is
+    - redeem `session_uri` with the tenant's `user_id`. Composio's answer names the account
+      and toolkit. Because the callback names no account, this answer is what ties the session
+      to the attempt: the account must equal the account ID the attempt stored at link time,
+      and a toolkit that differs from the attempt's is refused. The next step then checks the
+      user. If Composio says the session is
       unknown or used (404) and an earlier callback for this attempt had presented a session,
       read the account instead: only this browser held that `session_uri`, so an account that
       is now `ACTIVE` for this `user_id` was redeemed by our earlier, lost call. On the first
@@ -261,7 +266,8 @@ role for workers (all workers share one pattern today; Known limits).
   (every call sends it; a missing version is an error), a strict input schema in our
   contracts (unknown fields are refused, at the API and again at the worker), an output
   schema that keeps only named fields, and a disclosure line (C-11). Revision 2 catalog:
-  - Shopify, identity: shop details (numeric ID, name, `myshopify` domain).
+  - Shopify, identity: shop details (numeric ID, name, `myshopify` domain). The link
+    prefills the store with the auth config's `subdomain` field, the bare store name.
   - `shopify_list_orders { createdAfter?, createdBefore?, status?, limit? }`: at most 50
     orders, a range of at most 92 days (also when only `createdAfter` is given). Each order is
     projected on its own: an order that does not fit the output schema is left out, and so is
@@ -442,10 +448,11 @@ role for workers (all workers share one pattern today; Known limits).
   Composio. The cloud never holds the key. Tests prove:
   - fixation: A starts, B consents in another browser, A's browser cannot stage or confirm,
     and B's callback stages nothing;
-  - a callback with another account ID, `user_id`, toolkit or auth config is refused; a
-    browser key mismatch is refused; a demoted member's callback is `forbidden`;
-  - a lost `complete_auth` answer recovers; a used `session_uri` from another tenant never
-    connects;
+  - a callback with `session_uri` only finishes (the real shape); a callback that carries
+    another account ID, or whose redemption names another account, `user_id`, toolkit or auth
+    config, is refused; a browser key mismatch is refused; a demoted member's callback is `forbidden`;
+  - a lost `complete_auth` answer recovers on the retry of the same `session_uri`-only
+    callback; a used or unused `session_uri` from another tenant never connects;
   - a reload after confirm answers `connected` only for the same toolkit and Composio
     account (the row's store is the verified attempt's: the insert binds `external_account_id`
     to the attempt, and no application role can update it afterwards); a confirm replays under its key; another grant is `grant_changed`; an expired
@@ -490,7 +497,7 @@ role for workers (all workers share one pattern today; Known limits).
 - **C-17 Pilot gate.** The managed tier stays on preview, for Zero Sum's own test store, until
   all of these hold:
   - deferred verification is on for the Composio project, and a callback without
-    `session_uri` connects nothing. If Composio cannot turn it on, the tier does not open,
+    `session_uri` connects nothing (checked on preview 2026-11-07). If Composio cannot turn it on, the tier does not open,
     and this contract is revised;
   - the Shopify consent screen, the granted scopes and the one-click path are recorded;
   - revoke and delete were seen to remove the app from the test store;
@@ -525,6 +532,14 @@ role for workers (all workers share one pattern today; Known limits).
   429 we did not cause still answers `provider_rate_limited`.
 - `/mcp` is mounted only when the API has the Activepieces config (`deps.activepieces`), so
   for the pilot the connection tools exist only on an API that also serves Activepieces.
+- Observed on preview, 2026-11-07: after consent, Composio sends the browser to our callback
+  with `session_uri` only. The first design expected an account ID too and so refused every
+  real connect as `attempt_changed`; C-5 now treats the account ID as optional and takes the
+  account from the redemption answer. The store form on Composio's link page is prefilled
+  only when the link names the auth config's own field, `subdomain` (the bare store name,
+  not the full domain; C-6).
+- Unconfirmed attempts are swept one hour after they expire (ten minutes after the start), so
+  a Composio account that Composio itself marks `EXPIRED` earlier stays until that pass.
 - C-17 stays open: the provider scopes in the catalog are placeholders until the preview
   consent screen is recorded, and the vendor gates are not passed yet.
 - `pnpm connections:check-catalog` (owner-run, `zsvault run --env COMPOSIO_API_KEY=<id>`)

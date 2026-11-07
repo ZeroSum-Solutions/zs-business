@@ -268,7 +268,7 @@ export interface ConnectionsCallbackInput {
   readonly attempt?: string | undefined;
   /** The browser key from the cookie of the browser that came back. */
   readonly browserKey?: string | undefined;
-  /** Composio's `connected_account_id` query value. */
+  /** Composio's `connected_account_id` query value, when a callback carries one (the real redirect does not). */
   readonly accountId?: string | undefined;
   /** Composio's `session_uri` query value; the status call sends none. */
   readonly sessionUri?: string | undefined;
@@ -296,7 +296,9 @@ export function createConnectionsCallback(deps: EdgeDependencies) {
     const fail = (reason: Exclude<ConnectErrorReason, "invalid_attempt">): ConnectionsCallbackOutcome => ({ kind: "error", reason });
     // C-5, in this order, the first failure answers.
     if (!attemptBrowserMatches(attempt, input.browserKey)) return fail("browser_mismatch");
-    if (!status && input.accountId !== attempt.composioAccountId) return fail("attempt_changed");
+    // Composio's real redirect carries `session_uri` only. An account ID is optional here; when one is given it
+    // must be this attempt's. Without one, the worker binds the redeemed account to the attempt (below).
+    if (!status && input.accountId !== undefined && input.accountId !== attempt.composioAccountId) return fail("attempt_changed");
     try {
       await deps.db.tenant(attempt.tenantId, (tx) => requireMember(tx, attempt.tenantId, attempt.actorId, "integrations"));
     } catch (error) {

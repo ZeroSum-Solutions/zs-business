@@ -145,7 +145,9 @@ const shopify: CatalogToolkit = {
       return { externalAccountId: id, name: parsed.data.name, domain: parsed.data.myshopifyDomain.toLowerCase() };
     },
   },
-  linkData: (shopDomain) => ({ shop: shopDomain.replace(/\.myshopify\.com$/, "") }),
+  // The auth config's connection field is `subdomain`: the bare store name, not the full domain (checked
+  // against the toolkit's field metadata on 2026-11-07; `shop` is only its legacy template name).
+  linkData: (shopDomain) => ({ subdomain: shopDomain.replace(/\.myshopify\.com$/, "") }),
   tools: [
     {
       name: SHOPIFY_LIST_ORDERS_TOOL,
