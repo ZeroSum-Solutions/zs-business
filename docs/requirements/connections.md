@@ -477,7 +477,9 @@ role for workers (all workers share one pattern today; Known limits).
     nothing: the row stays `disconnecting` with `not_configured` until the config is back, and
     the operator is told.
   - A revoke that fails is recorded as `last_error_code = revoke_failed`; the delete still
-    runs. The screen then tells the owner to remove the app in Shopify admin. The
+    runs. The screen then tells the owner to remove the app in Shopify admin, until a newer
+    connection of the same store replaces that row (connecting again installs the app under
+    the new grant, so the newer row says what is true; found on preview, run 4). The
     screen says in every case that disconnect stops our access and asks Shopify to remove
     the app's access.
   - Runs stop at `disconnecting`.

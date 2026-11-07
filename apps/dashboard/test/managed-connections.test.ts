@@ -133,6 +133,22 @@ describe("the list", () => {
     expect(currentConnections([failed, connection("disconnected")])).toEqual([failed]);
   });
 
+  it("drops that warning once the same store was connected again, since the newer row says what is true now", () => {
+    const failed = { ...connection("disconnected"), revokeFailed: true };
+    const later = (status: ManagedConnection["status"], id: string) =>
+      ({ ...connection(status), id, createdAt: "2026-11-07T12:00:00.000Z" });
+    const revoked = later("disconnected", "b7d9f1a3-5c7e-4a9b-8d1f-000000000002");
+    expect(currentConnections([revoked, failed])).toEqual([]);
+    const active = later("active", "b7d9f1a3-5c7e-4a9b-8d1f-000000000003");
+    expect(currentConnections([active, failed])).toEqual([active]);
+    const failedAgain = { ...revoked, revokeFailed: true };
+    expect(currentConnections([failedAgain, failed])).toEqual([failedAgain]);
+    const otherStore = { ...active, accountDomain: "other-shop.myshopify.com" };
+    expect(currentConnections([otherStore, failed])).toEqual([otherStore, failed]);
+    const older = { ...active, createdAt: "2026-11-04T12:00:00.000Z" };
+    expect(currentConnections([failed, older])).toEqual([failed, older]);
+  });
+
   it("tells the owner why a store needs them, and that agents are cut off until then", () => {
     expect(reauthorizeMessage("provider_status")).toContain("needs approval again");
     expect(reauthorizeMessage("auth_error")).toContain("no longer accepts");
