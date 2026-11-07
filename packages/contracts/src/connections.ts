@@ -15,7 +15,13 @@ export const CONNECTION_CONNECTED_EVENT = "connection.connected";
 
 /** C-4: the toolkit in a URL, and the only shop address form the pilot accepts. */
 export const toolkitSchema = z.string().regex(/^[a-z0-9_-]{1,40}$/);
-export const shopDomainSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$/);
+/** Trimmed and lower-cased before the pattern, so every side compares one spelling. */
+export const shopDomainSchema = z.string().max(200).trim().toLowerCase().regex(/^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$/);
+/** C-14: 1..120 characters (code points, as `normalizeAccountLabel` cuts and Postgres counts). */
+export const accountLabelSchema = z.string().max(480).refine((value) => {
+  const length = [...value].length;
+  return length >= 1 && length <= 120;
+}, "A label is 1 to 120 characters");
 /** The SHA-256 (base64url) of the dashboard's browser key (G-1). */
 const browserBindingSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 
@@ -48,7 +54,7 @@ export const pendingConnectionSchema = z.strictObject({
   grantId: grantIdSchema,
   toolkit: toolkitSchema,
   shopDomain: shopDomainSchema,
-  accountLabel: z.string().min(1).max(120),
+  accountLabel: accountLabelSchema,
   expiresAt: instantSchema,
   tokensWithAccess: z.number().int().nonnegative(),
 });
@@ -66,14 +72,16 @@ export function normalizeAccountLabel(raw: string): string | null {
   return cut.length > 0 ? cut : null;
 }
 
-/** C-5: the payload the confirm handler builds from the staged grant; nothing here is client input. */
+/**
+ * C-5: the payload the confirm handler builds from the staged grant; nothing here is client input. It
+ * names no Composio account (C-1): the insert takes that from the worker's verified attempt (C-7).
+ */
 export const connectConnectionInputSchema = z.strictObject({
   connectionId: idSchema,
   toolkit: toolkitSchema,
-  composioAccountId: z.string().min(1).max(128),
   externalAccountId: z.string().min(1).max(64),
   accountDomain: shopDomainSchema,
-  accountLabel: z.string().min(1).max(120),
+  accountLabel: accountLabelSchema,
 });
 export type ConnectConnectionInput = z.infer<typeof connectConnectionInputSchema>;
 export const connectConnectionCommandSchema = z.lazy(() => actionCommandSchema.extend({
@@ -211,7 +219,11 @@ export const connectorLinkResponseSchema = z.strictObject({
   composioAccountId: z.string().min(1).max(128),
   authConfigId: z.string().min(1).max(128),
   expiresAt: instantSchema,
-}).or(z.strictObject({ outcome: z.literal("refused"), code: z.enum(["provider_unavailable", "provider_rate_limited", "not_found"]) }));
+}).or(z.strictObject({
+  outcome: z.literal("refused"),
+  code: z.enum(["provider_unavailable", "provider_rate_limited", "not_found"]),
+  retryAfterSeconds: z.number().int().positive().max(86_400).optional(),
+}));
 export type ConnectorLinkResponse = z.infer<typeof connectorLinkResponseSchema>;
 
 export const connectorCompleteRequestSchema = z.strictObject({
@@ -226,7 +238,7 @@ export const connectorCompleteResponseSchema = z.discriminatedUnion("outcome", [
     composioAccountId: z.string().min(1).max(128),
     externalAccountId: z.string().min(1).max(64),
     accountDomain: shopDomainSchema,
-    accountLabel: z.string().min(1).max(120),
+    accountLabel: accountLabelSchema,
   }),
   z.strictObject({ outcome: z.literal("pending") }),
   z.strictObject({ outcome: z.literal("refused"), reason: connectErrorReasonSchema }),
@@ -234,7 +246,20 @@ export const connectorCompleteResponseSchema = z.discriminatedUnion("outcome", [
 export type ConnectorCompleteResponse = z.infer<typeof connectorCompleteResponseSchema>;
 
 export const connectorCancelRequestSchema = z.strictObject({ tenantId: idSchema, attemptId: idSchema });
-export const connectorCancelResponseSchema = z.strictObject({ outcome: z.enum(["cancelled", "not_found"]) });
+/**
+ * C-5: `cancelled` once the attempt can no longer connect and its account is gone (`revokeFailed`: the
+ * revoke call failed, so the owner should check Shopify admin); `refused` when the account is not ours
+ * to remove or the budget is spent (the attempt stays cancelling, for a retry or the sweep).
+ */
+export const connectorCancelResponseSchema = z.discriminatedUnion("outcome", [
+  z.strictObject({ outcome: z.literal("cancelled"), revokeFailed: z.boolean() }),
+  z.strictObject({ outcome: z.literal("not_found") }),
+  z.strictObject({
+    outcome: z.literal("refused"),
+    code: z.enum(["account_mismatch", "provider_rate_limited"]),
+    retryAfterSeconds: z.number().int().positive().max(86_400).optional(),
+  }),
+]);
 
 export const connectorRunRequestSchema = z.strictObject({
   tenantId: idSchema,

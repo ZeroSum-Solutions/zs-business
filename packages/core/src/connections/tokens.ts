@@ -42,6 +42,9 @@ export interface ConnectGrant {
   readonly attemptId: string;
   readonly connectionId: string;
   readonly composioAccountId: string;
+  /** C-14: the auth config and browser binding of the attempt the callback verified. */
+  readonly authConfigId: string;
+  readonly browserHash: string;
   readonly accountDomain: string;
   readonly externalAccountId: string;
   readonly accountLabel: string;
@@ -78,7 +81,9 @@ function open(prefix: string, secrets: OAuthStateSecrets, token: string | undefi
 }
 
 const isUuid = (value: unknown): value is string => typeof value === "string" && UUID.test(value);
-const isText = (value: unknown, max: number): value is string => typeof value === "string" && value.length >= 1 && value.length <= max;
+/** 1..max characters, counted in code points as normalizeAccountLabel and Postgres count them (C-8). */
+const isText = (value: unknown, max: number): value is string =>
+  typeof value === "string" && value.length >= 1 && value.length <= max * 4 && [...value].length <= max;
 const live = (expiresAt: unknown, now: Date): expiresAt is number =>
   typeof expiresAt === "number" && Number.isSafeInteger(expiresAt) && expiresAt > now.getTime();
 
@@ -110,25 +115,26 @@ export const attemptBrowserMatches = (attempt: Pick<ConnectAttempt, "browserHash
 export function signConnectGrant(secret: string, grant: ConnectGrant): string | null {
   const token = sign(GRANT_PREFIX, secret, [
     grant.tenantId, grant.actorId, grant.toolkit, grant.attemptId, grant.connectionId, grant.composioAccountId,
-    grant.accountDomain, grant.externalAccountId, grant.accountLabel, grant.expiresAt,
+    grant.authConfigId, grant.browserHash, grant.accountDomain, grant.externalAccountId, grant.accountLabel, grant.expiresAt,
   ]);
   return token.length <= MAX_CONNECT_GRANT_LENGTH ? token : null;
 }
 /** The grant, or null when it is malformed, not signed by a known secret, or expired. */
 export function verifyConnectGrant(secrets: OAuthStateSecrets, token: string | undefined, now: Date): ConnectGrant | null {
   const fields = open(GRANT_PREFIX, secrets, token, MAX_CONNECT_GRANT_LENGTH);
-  if (!fields || fields.length !== 10) return null;
-  const [tenantId, actorId, toolkit, attemptId, connectionId, composioAccountId, accountDomain, externalAccountId, accountLabel, expiresAt] = fields;
+  if (!fields || fields.length !== 12) return null;
+  const [tenantId, actorId, toolkit, attemptId, connectionId, composioAccountId, authConfigId, browserHash, accountDomain, externalAccountId, accountLabel, expiresAt] = fields;
   if (![tenantId, actorId, attemptId, connectionId].every(isUuid)) return null;
   if (typeof toolkit !== "string" || !toolkitSchema.safeParse(toolkit).success) return null;
-  if (!isText(composioAccountId, 128) || !isText(externalAccountId, 64) || !isText(accountLabel, 120)) return null;
+  if (!isText(composioAccountId, 128) || !isText(authConfigId, 128) || !isText(externalAccountId, 64) || !isText(accountLabel, 120)) return null;
+  if (typeof browserHash !== "string" || !KEY_32.test(browserHash)) return null;
   if (typeof accountDomain !== "string" || !shopDomainSchema.safeParse(accountDomain).success) return null;
   // Signed by us, but the label must still be in the normal form the action will store.
   if (normalizeAccountLabel(accountLabel) !== accountLabel) return null;
   if (!live(expiresAt, now)) return null;
   return {
     tenantId: tenantId as string, actorId: actorId as string, toolkit, attemptId: attemptId as string, connectionId: connectionId as string,
-    composioAccountId, accountDomain, externalAccountId, accountLabel, expiresAt,
+    composioAccountId, authConfigId, browserHash, accountDomain, externalAccountId, accountLabel, expiresAt,
   };
 }
 /** The grant's ID: the SHA-256 (base64url) of its token, so a replaced grant is never confirmed in place of the one reviewed. */

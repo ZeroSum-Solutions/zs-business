@@ -46,6 +46,8 @@ export interface CatalogToolkit {
   readonly tools: readonly CatalogTool[];
 }
 
+const MAX_ORDERS = 50;
+const MAX_LINE_ITEMS = 250;
 const idLike = z.union([z.string().min(1).max(64), z.number().int()]).transform((value) => String(value));
 const text = z.string().max(2000).nullish().transform((value) => value ?? null);
 const money = z.union([z.string().max(64), z.number()]).nullish().transform((value) => (value === null || value === undefined ? null : String(value)));
@@ -75,7 +77,12 @@ const order = z.object({
   total_price: money,
   subtotal_price: money,
   total_tax: money,
-  line_items: z.array(lineItem).max(250).nullish().transform((value) => value ?? []),
+  // C-9: one line item that does not fit is dropped, not the order; at most 250 are kept and the size
+  // trim cuts further.
+  line_items: z.array(z.unknown()).nullish().transform((value) => (value ?? []).slice(0, MAX_LINE_ITEMS).flatMap((item) => {
+    const parsed = lineItem.safeParse(item);
+    return parsed.success ? [parsed.data] : [];
+  })),
   customer,
 }).transform((value) => ({
   id: value.id,
@@ -95,10 +102,20 @@ const order = z.object({
 const record = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 
+/**
+ * C-6, C-9: at most 50 orders, each projected on its own, so one order that does not fit is left out
+ * instead of failing the answer.
+ */
 const projectOrders = (data: unknown): unknown => {
   const list = Array.isArray(data) ? data : record(data)?.["orders"];
-  const parsed = z.array(order).max(250).safeParse(list);
-  return parsed.success ? { orders: parsed.data } : undefined;
+  if (!Array.isArray(list)) return undefined;
+  const orders: unknown[] = [];
+  for (const item of list) {
+    if (orders.length >= MAX_ORDERS) break;
+    const parsed = order.safeParse(item);
+    if (parsed.success) orders.push(parsed.data);
+  }
+  return { orders };
 };
 const projectOrder = (data: unknown): unknown => {
   const parsed = order.safeParse(record(data)?.["order"] ?? data);

@@ -23,8 +23,10 @@ export const CONNECTION_LIMITS = Object.freeze({
   connect: { limit: 10, windowMs: HOUR },
   /** C-5: callbacks that reach the worker per tenant. */
   callback: { limit: 30, windowMs: HOUR },
-  /** The status call repeats the account read at most 5 times per attempt; its own bucket keeps it from starving callbacks. */
+  /** The status call: its own tenant bucket keeps it from starving callbacks. */
   callbackStatus: { limit: 120, windowMs: HOUR },
+  /** C-5: at most 5 status calls per attempt, over more than the attempt's 10 minute life. */
+  callbackStatusAttempt: { limit: 5, windowMs: HOUR },
   /** C-12: tool runs per tenant. */
   runMinute: { limit: 60, windowMs: MINUTE },
   runDay: { limit: 2000, windowMs: DAY },
@@ -34,8 +36,13 @@ export const connectCharges = (tenantId: string): ConnectionCharge[] =>
   [{ key: `conn-connect:${tenantId}`, rule: CONNECTION_LIMITS.connect }];
 export const callbackCharges = (tenantId: string): ConnectionCharge[] =>
   [{ key: `conn-callback:${tenantId}`, rule: CONNECTION_LIMITS.callback }];
-export const callbackStatusCharges = (tenantId: string): ConnectionCharge[] =>
-  [{ key: `conn-status:${tenantId}`, rule: CONNECTION_LIMITS.callbackStatus }];
+/** C-5, C-12: a status call reads Composio, so it also spends the tenant's run buckets. */
+export const callbackStatusCharges = (tenantId: string, attemptId: string): ConnectionCharge[] => [
+  { key: `conn-status:${tenantId}`, rule: CONNECTION_LIMITS.callbackStatus },
+  { key: `conn-status-attempt:${attemptId}`, rule: CONNECTION_LIMITS.callbackStatusAttempt },
+  { key: `conn-minute:${tenantId}`, rule: CONNECTION_LIMITS.runMinute },
+  { key: `conn-day:${tenantId}`, rule: CONNECTION_LIMITS.runDay },
+];
 /** C-12: one unit in each of the two run buckets, all or nothing. */
 export const runCharges = (tenantId: string): ConnectionCharge[] => [
   { key: `conn-minute:${tenantId}`, rule: CONNECTION_LIMITS.runMinute },

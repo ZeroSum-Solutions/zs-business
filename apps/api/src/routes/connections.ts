@@ -26,7 +26,8 @@ export function connectionsRoutes(session: (c: Context<AppEnv>) => ReturnType<ty
     // C-5: cancels the attempt and has the worker delete its Composio account.
     .delete("/pending", async (c) => {
       noStore(c);
-      return c.json(await session(c).cancel(c.req.header(CONNECT_ATTEMPT_HEADER), c.var.signal));
+      // D-2: the staged grant names the attempt it came from and wins over the attempt cookie.
+      return c.json(await session(c).cancel({ grant: c.req.header(CONNECT_GRANT_HEADER), attempt: c.req.header(CONNECT_ATTEMPT_HEADER) }, c.var.signal));
     })
     // C-4: the signed attempt token goes back in a header and never in the body.
     .post("/:toolkit/connect", async (c) => {

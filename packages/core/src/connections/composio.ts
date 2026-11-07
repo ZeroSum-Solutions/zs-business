@@ -7,7 +7,9 @@
 //   - Account reads are parsed with an allowlist schema: the `state` block and every credential field
 //     are dropped before anything else sees the answer (C-14).
 //   - Provider text never leaves this file: failures become a `ComposioError` kind, and a 200 with
-//     `successful: false` is classified from its text and then discarded.
+//     `successful: false` is classified from its structured status fields only, never its text.
+//   - A 401 or 403 on our own call means Composio refused our key or project (`key_refused`), never
+//     that the store's grant failed: only a provider status inside an execute envelope says that.
 // The response shapes of GET account and the Shopify tools are the pilot's best reading (C-17); the
 // owner-run `pnpm connections:check-catalog` confirms them against the preview project.
 import { z } from "zod";
@@ -17,10 +19,18 @@ export const COMPOSIO_BASE_URL = "https://backend.composio.dev/api/v3.1";
 export const COMPOSIO_TIMEOUT_MS = 6_000;
 export const COMPOSIO_MAX_BODY_BYTES = 1024 * 1024;
 
-export type ComposioErrorKind = "rate_limited" | "auth" | "not_found" | "bad_request" | "unavailable";
-/** Never carries provider text: only our kind and the HTTP status. */
+export type ComposioErrorKind = "rate_limited" | "key_refused" | "not_found" | "bad_request" | "unavailable";
+/**
+ * Never carries provider text: only our kind and the HTTP status. `accountId` is set when a link
+ * answer could not be used but named the account it made, so the caller can remove it (B-7).
+ */
 export class ComposioError extends Error {
-  constructor(readonly kind: ComposioErrorKind, readonly status?: number, readonly detail?: "too_large" | "malformed" | "timeout" | "network") {
+  constructor(
+    readonly kind: ComposioErrorKind,
+    readonly status?: number,
+    readonly detail?: "too_large" | "malformed" | "timeout" | "network",
+    readonly accountId?: string,
+  ) {
     super(`composio ${kind}${status === undefined ? "" : ` ${status}`}${detail ? ` ${detail}` : ""}`);
     this.name = "ComposioError";
   }
@@ -114,14 +124,24 @@ export type ExecuteOutcome =
   | { readonly kind: "ok"; readonly data: unknown }
   | { readonly kind: "failed"; readonly reason: "auth" | "rate_limited" | "unavailable" };
 const executeSchema = z.object({ successful: z.boolean(), data: z.unknown().optional(), error: z.unknown().optional() });
-const AUTH_TEXT = /\b(unauthori[sz]ed|forbidden|invalid[_ -]?(?:access[_ -]?)?token|expired[_ -]?(?:access[_ -]?)?token|token (?:has )?(?:expired|been revoked)|revoked|auth(?:entication|orization)? (?:failed|error|required)|insufficient (?:scope|permission)s?|401|403)\b/i;
-const RATE_TEXT = /\b(rate[_ -]?limit(?:ed)?|too many requests|quota|throttl(?:ed|ing)|429)\b/i;
-/** A 200 with `successful: false`: only our class survives; the text is dropped (C-10, C-14). */
-export function classifyExecuteFailure(error: unknown): "auth" | "rate_limited" | "unavailable" {
-  const text = typeof error === "string" ? error : (() => { try { return JSON.stringify(error) ?? ""; } catch { return ""; } })();
-  const head = text.slice(0, 2000);
-  if (RATE_TEXT.test(head)) return "rate_limited";
-  if (AUTH_TEXT.test(head)) return "auth";
+/** The numeric fields a failed envelope may carry the provider's HTTP status in. */
+const STATUS_FIELDS = ["status_code", "statusCode", "http_status", "httpStatus", "status"] as const;
+/**
+ * A 200 with `successful: false`: only our class survives (C-10, C-14). The class comes from a
+ * provider HTTP status in a structured field of `error` or `data` (401 or 403 is the store's grant,
+ * 429 a provider limit); text is never read, so an order titled "Forbidden" is not an auth error.
+ */
+export function classifyExecuteFailure(envelope: { readonly error?: unknown; readonly data?: unknown }): "auth" | "rate_limited" | "unavailable" {
+  const statuses: number[] = [];
+  for (const part of [envelope.error, envelope.data]) {
+    if (typeof part !== "object" || part === null || Array.isArray(part)) continue;
+    for (const field of STATUS_FIELDS) {
+      const value = (part as Record<string, unknown>)[field];
+      if (typeof value === "number" && Number.isInteger(value)) statuses.push(value);
+    }
+  }
+  if (statuses.includes(429)) return "rate_limited";
+  if (statuses.some((status) => status === 401 || status === 403)) return "auth";
   return "unavailable";
 }
 
@@ -147,8 +167,8 @@ export interface ComposioClientConfig {
 
 function kindOf(status: number): ComposioErrorKind {
   if (status === 429 || status === 402) return "rate_limited";
-  if (status === 401 || status === 403 || status === 410) return "auth";
-  if (status === 404) return "not_found";
+  if (status === 401 || status === 403) return "key_refused";
+  if (status === 404 || status === 410) return "not_found";
   if (status >= 400 && status < 500) return "bad_request";
   return "unavailable";
 }
@@ -231,7 +251,13 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
         callback_url: input.callbackUrl,
         connection_data: input.connectionData,
       }, signal);
-      const out = parse(linkSchema, json);
+      const parsed = linkSchema.safeParse(json);
+      if (!parsed.success) {
+        // The account may exist although the answer is unusable: name it so the caller removes it.
+        const named = typeof json === "object" && json !== null ? (json as Record<string, unknown>)["connected_account_id"] : undefined;
+        throw new ComposioError("unavailable", undefined, "malformed", typeof named === "string" && named.length > 0 && named.length <= 128 ? named : undefined);
+      }
+      const out = parsed.data;
       return { redirectUrl: out.redirect_url, connectedAccountId: out.connected_account_id, expiresAt: out.expires_at ?? null };
     },
     async completeAuth(input, signal) {
@@ -269,7 +295,7 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
     async execute(input, signal) {
       const { json } = await call("POST", `/tools/execute/${enc(input.slug)}`, buildExecuteEnvelope(input), signal);
       const out = parse(executeSchema, json);
-      if (!out.successful) return { kind: "failed", reason: classifyExecuteFailure(out.error) };
+      if (!out.successful) return { kind: "failed", reason: classifyExecuteFailure(out) };
       // A missing `data` is an error, never data (C-10).
       if (out.data === undefined || out.data === null) return { kind: "failed", reason: "unavailable" };
       return { kind: "ok", data: out.data };

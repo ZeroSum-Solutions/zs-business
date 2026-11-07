@@ -3,7 +3,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { composioUserId, type ConnectionsWorkerReport } from "../../src/index.js";
+import { asService } from "@zs/db";
+import { composioUserId, createComposioClient, createConnectionsWorker, type ConnectionsWorkerReport } from "../../src/index.js";
 import { FakeComposio, fakeOrder } from "./fake-composio.js";
 import { addMember, attemptOf, AUTH_CONFIG, CALLBACK_URL, ENV, makeClock, makeWorker, newTenant, seedConnection, startAttempt, statusOf, T0, type TestClock } from "./harness.js";
 
@@ -44,6 +45,24 @@ const exhaustBudget = () => database.pool.query(
   `INSERT INTO rate_limit_buckets (key, window_start, expires_at, count) VALUES (sha256(convert_to('composio-org:preview','UTF8')), $1, $2, 500)
    ON CONFLICT (key) DO UPDATE SET count = 500, window_start = $1, expires_at = $2`, [new Date(T0), new Date(T0 + 60_000)]);
 
+/** Removes the organization budget bucket, so the next call may spend again. */
+const restoreBudget = () => database.pool.query("DELETE FROM rate_limit_buckets");
+
+/** A promise a test resolves by hand, to hold one side of a race at a known point. */
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+const attemptRow = (tenantId: string, id: string) => fixture.service(async (tx) => (await tx.query<{
+  status: string; last_error_code: string | null; revoke_outcome: string | null; claimed_until: Date | null; session_presented_at: Date | null; external_account_id: string | null;
+}>("SELECT status, last_error_code, revoke_outcome, claimed_until, session_presented_at, external_account_id FROM connection_attempts WHERE tenant_id=$1 AND id=$2", [tenantId, id])).rows[0]!);
+const connectionRow = (tenantId: string, id: string) => fixture.service(async (tx) => (await tx.query<{ revoke_outcome: string | null; claimed_until: Date | null; updated_at: Date }>(
+  "SELECT revoke_outcome, claimed_until, updated_at FROM connections WHERE tenant_id=$1 AND id=$2", [tenantId, id])).rows[0]!);
+/** A structured provider-auth failure inside a 200 envelope (A-5). */
+const AUTH_ENVELOPE = { status: 200, json: { successful: false, error: "the store refused the token", data: { status_code: 401 } } };
+
 /** A connected account the fake already holds for a tenant. */
 const seedAccount = (tenantId: string, id = `ca_seed_${randomUUID().slice(0, 8)}`) => {
   fake.seed({ id, userId: composioUserId(ENV, tenantId), authConfigId: AUTH_CONFIG });
@@ -51,8 +70,13 @@ const seedAccount = (tenantId: string, id = `ca_seed_${randomUUID().slice(0, 8)}
 };
 
 describe("link (C-3, C-5)", () => {
+  const linkInput = (over: Partial<Parameters<typeof worker.link>[0]> = {}) => ({
+    tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: "testshop.myshopify.com",
+    createdBy: a.memberId, browserHash: "b".repeat(43), ...over,
+  });
+
   it("creates the account for the derived user, records the attempt and sends the one callback URL", async () => {
-    const { attemptId, accountId, linked } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId, accountId, linked } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     expect(linked.outcome).toBe("linked");
     const call = fake.callsTo(/connected_accounts\/link/)[0]!;
     expect(call.body).toMatchObject({ auth_config_id: AUTH_CONFIG, user_id: `zsb:${ENV}:${a.tenantId}`, callback_url: CALLBACK_URL, connection_data: { shop: "testshop" } });
@@ -62,100 +86,161 @@ describe("link (C-3, C-5)", () => {
   });
 
   it("refuses an unknown toolkit and a missing auth config without calling Composio", async () => {
-    const out = await worker.link({ tenantId: a.tenantId, toolkit: "nope", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: "x.myshopify.com", createdBy: a.userId, browserHash: "b".repeat(43) });
+    const out = await worker.link(linkInput({ toolkit: "nope", shopDomain: "x.myshopify.com" }));
     expect(out).toEqual({ outcome: "refused", code: "not_found" });
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("opens the cooldown on a Composio 429, then refuses without a call", async () => {
+  it("opens the cooldown on a Composio 429 and says when to retry, then refuses without a call", async () => {
     fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
-    const first = await worker.link({ tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: "testshop.myshopify.com", createdBy: a.userId, browserHash: "b".repeat(43) });
-    expect(first).toEqual({ outcome: "refused", code: "provider_rate_limited" });
+    expect(await worker.link(linkInput())).toEqual({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 60 });
     const calls = fake.calls.length;
-    const second = await worker.link({ tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: "testshop.myshopify.com", createdBy: a.userId, browserHash: "b".repeat(43) });
-    expect(second).toEqual({ outcome: "refused", code: "provider_rate_limited" });
+    const second = await worker.link(linkInput());
+    expect(second).toMatchObject({ outcome: "refused", code: "provider_rate_limited" });
+    expect(second.outcome === "refused" && second.retryAfterSeconds).toBeGreaterThan(0);
     expect(fake.calls).toHaveLength(calls);
     expect(reports.some((r) => r.kind === "cooldown")).toBe(true);
   });
 
   it("deletes the new account when the attempt row cannot be written", async () => {
     // A tenant that does not exist makes the insert fail on its foreign key.
-    const out = await worker.link({ tenantId: randomUUID(), toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: "testshop.myshopify.com", createdBy: a.userId, browserHash: "b".repeat(43) });
+    const out = await worker.link(linkInput({ tenantId: randomUUID() }));
     expect(out).toEqual({ outcome: "refused", code: "provider_unavailable" });
     expect([...fake.accounts.values()].filter((x) => !x.deleted)).toHaveLength(0);
+  });
+
+  it("B-7: an account the link answer names but cannot be read is removed at once", async () => {
+    fake.seed({ id: "ca_orphan", userId: composioUserId(ENV, a.tenantId), status: "INITIATED" });
+    fake.override(/POST \/connected_accounts\/link/, { status: 201, json: { connected_account_id: "ca_orphan" }, times: 1 });
+    expect(await worker.link(linkInput())).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    expect(fake.accounts.get("ca_orphan")).toMatchObject({ deleted: true });
+  });
+
+  it("B-7: a failed insert never deletes an account another attempt names", async () => {
+    const first = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    fake.override(/POST \/connected_accounts\/link/, {
+      status: 201, times: 1,
+      json: { link_token: "lt_x", redirect_url: "https://connect.composio.test/link/x", expires_at: "2026-11-06T12:00:00.000Z", connected_account_id: first.accountId },
+    });
+    // The same attempt ID makes the insert fail on the primary key.
+    expect(await worker.link(linkInput({ attemptId: first.attemptId }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    expect(fake.accounts.get(first.accountId)).toMatchObject({ deleted: false, revoked: false });
+  });
+
+  it("B-7: when the compensating delete fails, a cancelling attempt records the account and the pass removes it", async () => {
+    const connectionId = randomUUID();
+    const blocker = randomUUID();
+    fake.gate = async (call) => {
+      // The insert loses to a row that takes the connection ID; that row is gone again by the time the delete fails.
+      if (call.path === "/connected_accounts/link")
+        await fixture.service((tx) => tx.query(
+          `INSERT INTO connection_attempts (tenant_id,id,connection_id,toolkit,composio_account_id,auth_config_id,account_domain,created_by,browser_hash,status,expires_at,created_at,updated_at)
+           VALUES ($1,$2,$3,'shopify','ca_blocker',$4,'testshop.myshopify.com',$5,$6,'started',$7,$8,$8)`,
+          [a.tenantId, blocker, connectionId, AUTH_CONFIG, a.memberId, "b".repeat(43), new Date(T0 + 600_000), new Date(T0)]));
+      // (The worker's role cannot delete attempt rows; the test's admin pool can.)
+      if (call.method === "DELETE") await database.pool.query("DELETE FROM connection_attempts WHERE id=$1", [blocker]);
+    };
+    fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
+    const attemptId = randomUUID();
+    expect(await worker.link(linkInput({ attemptId, connectionId }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    fake.gate = null;
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelling" });
+    const accountId = [...fake.accounts.keys()][0]!; // the one account the link made
+    expect(fake.accounts.get(accountId)!.deleted).toBe(false);
+    expect((await worker.pass()).swept).toBe(1);
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelled" });
+  });
+
+  it("B-7: when nothing can record the account, an operator hears of it", async () => {
+    fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
+    expect(await worker.link(linkInput({ tenantId: randomUUID() }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    expect(reports.some((r) => r.kind === "link_orphan")).toBe(true);
   });
 });
 
 describe("complete (C-5, C-8, C-14)", () => {
-  it("fixation: without a redeemed session the account stays INITIATED and the call answers pending", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-    fake.consent(accountId); // the person consented, but nobody redeemed the session
-    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "pending" });
-    expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
-    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("started");
+  it("A-4: a status call for an attempt no callback reached is refused, even when the account is ACTIVE", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    fake.consent(accountId);
+    fake.accounts.get(accountId)!.status = "ACTIVE"; // consented in some other browser; nobody redeemed a session here
+    const calls = fake.calls.length;
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
+    expect(fake.calls).toHaveLength(calls);
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "started", session_presented_at: null });
+  });
+
+  it("A-4: once a callback presented a session, a status call picks up the account (the lost-answer path)", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
+    fake.loseNextCompleteAuth = true;
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "provider_unavailable" });
+    expect((await attemptRow(a.tenantId, attemptId)).session_presented_at).not.toBeNull();
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toMatchObject({ outcome: "verified", composioAccountId: accountId });
+    expect(fake.callsTo(/complete_auth/)).toHaveLength(1);
   });
 
   it("verifies after the session is redeemed for the tenant's user and reads the store identity through the envelope", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     const session = fake.consent(accountId);
     const out = await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session });
     expect(out).toEqual({ outcome: "verified", composioAccountId: accountId, externalAccountId: "8812345", accountDomain: "testshop.myshopify.com", accountLabel: "Test Shop" });
     expect(fake.callsTo(/complete_auth/)[0]!.body).toEqual({ session_uri: session, user_id: composioUserId(ENV, a.tenantId) });
-    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("verified");
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "verified", external_account_id: "8812345" });
+  });
+
+  it("A-3: a verified attempt (a reload) is checked again without a second redemption", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
+    await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toMatchObject({ outcome: "verified" });
+    expect(fake.callsTo(/complete_auth/)).toHaveLength(1);
   });
 
   it("a session redeemed for another tenant's user never connects (400 from Composio)", async () => {
-    const { attemptId: attemptA, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     const session = fake.consent(accountId);
     // Tenant B's callback carries the session but names its own attempt.
-    const other = await startAttempt(worker, { tenantId: b.tenantId, createdBy: b.userId });
+    const other = await startAttempt(worker, { tenantId: b.tenantId, createdBy: b.memberId });
     const out = await worker.complete({ tenantId: b.tenantId, attemptId: other.attemptId, sessionUri: session });
     expect(out).toEqual({ outcome: "refused", reason: "not_connected" });
     expect(fake.accounts.get(accountId)?.status).toBe("INITIATED");
     expect((await attemptOf(fixture, b.tenantId, other.attemptId))?.status).toBe("started");
-    expect(attemptA).toBeTruthy();
   });
 
   it("a used session cannot be replayed to take the account over: the account stays pending", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     const session = fake.consent(accountId);
     fake.sessions.get(session)!.used = true; // someone else used it first
-    const out = await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session });
-    expect(out).toEqual({ outcome: "pending" });
-  });
-
-  it("a lost complete_auth answer recovers through the account read (C-5)", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-    const session = fake.consent(accountId);
-    fake.loseNextCompleteAuth = true;
-    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "provider_unavailable" });
-    expect(fake.accounts.get(accountId)?.status).toBe("ACTIVE");
-    const again = await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session });
-    expect(again).toMatchObject({ outcome: "verified", composioAccountId: accountId });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "pending" });
   });
 
   it("refuses an account whose user, toolkit or auth config differs from the attempt", async () => {
     for (const change of [{ userId: composioUserId(ENV, b.tenantId) }, { toolkit: "gmail" }, { authConfigId: "ac_other" }]) {
-      const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-      Object.assign(fake.accounts.get(accountId)!, { status: "ACTIVE", ...change });
-      expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
+      const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+      const session = fake.consent(accountId);
+      Object.assign(fake.accounts.get(accountId)!, change);
+      expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "not_connected" });
     }
   });
 
   it("refuses when the consenting store differs from the typed shop domain (C-14)", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-    fake.accounts.get(accountId)!.status = "ACTIVE";
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
     fake.shops.set(accountId, { id: "1", name: "Other Shop", domain: "othershop.myshopify.com" });
-    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "not_connected" });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "not_connected" });
     expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("started");
   });
 
   it("maps every Composio status: INITIATED/INITIALIZING pending, ACTIVE go, INACTIVE/FAILED/EXPIRED/unknown refuse", async () => {
     const outcomes: Record<string, string> = {};
     for (const status of ["INITIATED", "INITIALIZING", "ACTIVE", "INACTIVE", "FAILED", "EXPIRED", "SOMETHING_NEW"]) {
-      const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+      const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+      // A session that was already used (404) leaves the decision to the account read.
+      const session = fake.consent(accountId);
+      fake.sessions.get(session)!.used = true;
       fake.accounts.get(accountId)!.status = status;
-      const out = await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null });
+      const out = await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session });
       outcomes[status] = out.outcome === "refused" ? `refused:${out.reason}` : out.outcome;
     }
     expect(outcomes).toEqual({
@@ -164,61 +249,139 @@ describe("complete (C-5, C-8, C-14)", () => {
     });
   });
 
+  it("B-11: a 401 or 403 on complete_auth is our key, never the store: provider_unavailable and a key_refused report", async () => {
+    for (const status of [401, 403]) {
+      const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+      const session = fake.consent(accountId);
+      fake.override(/POST \/connected_accounts\/complete_auth/, { status, json: {}, times: 1 });
+      expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "provider_unavailable" });
+    }
+    expect(reports.filter((r) => r.kind === "key_refused")).toHaveLength(2);
+  });
+
+  it("B-3: a rate-limited identity read opens the organization cooldown", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
+    fake.override(/POST \/tools\/execute\/SHOPIFY_GET_SHOP_DETAILS/, { status: 200, json: { successful: false, error: "slow down", data: { status_code: 429 } }, times: 1 });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "rate_limited" });
+    expect(reports.some((r) => r.kind === "cooldown")).toBe(true);
+    const calls = fake.calls.length;
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "rate_limited" });
+    expect(fake.calls).toHaveLength(calls);
+  });
+
   it("refuses an expired attempt, another tenant's attempt, a cancelled attempt and a confirmed one", async () => {
-    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     expect(await worker.complete({ tenantId: b.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "invalid_attempt" });
     clock.ms = T0 + 11 * 60_000;
     expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "expired" });
     clock.ms = T0;
     await worker.cancel({ tenantId: a.tenantId, attemptId });
-    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "invalid_attempt" });
-    const second = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-    await fixture.service((tx) => tx.query("UPDATE connection_attempts SET status='confirmed' WHERE id=$1", [second.attemptId]));
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: "session-x" })).toEqual({ outcome: "refused", reason: "invalid_attempt" });
+    const second = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    await fixture.service((tx) => tx.query("UPDATE connection_attempts SET status='confirmed', external_account_id='8812345' WHERE id=$1", [second.attemptId]));
     expect(await worker.complete({ tenantId: a.tenantId, attemptId: second.attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "conflict" });
   });
 
   it("answers rate_limited when the organization budget is spent, before any Composio call", async () => {
-    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
     await exhaustBudget();
     const calls = fake.calls.length;
-    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: null })).toEqual({ outcome: "refused", reason: "rate_limited" });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "rate_limited" });
     expect(fake.calls).toHaveLength(calls);
+  });
+
+  it("A-3 race: a cancel that lands while complete reads the store wins; complete moves nothing", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    const session = fake.consent(accountId);
+    let cancelled: unknown;
+    // The identity answer is already on its way when the cancel deletes the account.
+    fake.override(/POST \/tools\/execute\/SHOPIFY_GET_SHOP_DETAILS/, {
+      status: 200, times: 1, json: { successful: true, error: null, data: { shop: { id: "8812345", name: "Test Shop", myshopify_domain: "testshop.myshopify.com" } } },
+    });
+    fake.gate = async (call) => {
+      if (call.path === "/tools/execute/SHOPIFY_GET_SHOP_DETAILS" && cancelled === undefined) {
+        cancelled = null;
+        cancelled = await worker.cancel({ tenantId: a.tenantId, attemptId });
+      }
+    };
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: session })).toEqual({ outcome: "refused", reason: "invalid_attempt" });
+    expect(cancelled).toEqual({ outcome: "cancelled", revokeFailed: false });
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelled", external_account_id: null });
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+  });
+
+  it("A-3 race, other order: a verified attempt that is then cancelled ends cancelled", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: fake.consent(accountId) })).toMatchObject({ outcome: "verified" });
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: false });
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelled" });
   });
 });
 
 describe("cancel (C-5, C-9)", () => {
   it("revokes and deletes the account at once and marks the attempt cancelled", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled" });
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: false });
     expect(fake.accounts.get(accountId)).toMatchObject({ revoked: true, deleted: true });
-    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("cancelled");
-    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled" });
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelled", revoke_outcome: "revoked", claimed_until: null });
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: false });
   });
 
-  it("does not delete an account another user owns", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+  it("B-10: a revoke failure is recorded and surfaced, also on a repeat", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500 });
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: true });
+  });
+
+  it("A-2, B-10: never touches an account another user owns; the attempt ends and the answer says so", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     fake.accounts.get(accountId)!.userId = composioUserId(ENV, b.tenantId);
-    await expect(worker.cancel({ tenantId: a.tenantId, attemptId })).rejects.toThrow();
-    expect(fake.accounts.get(accountId)!.deleted).toBe(false);
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "refused", code: "account_mismatch" });
+    expect(fake.accounts.get(accountId)).toMatchObject({ deleted: false, revoked: false });
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelled", last_error_code: "account_mismatch" });
+    expect(reports.some((r) => r.kind === "account_mismatch")).toBe(true);
   });
 
-  it("never deletes an account a connection row already owns; the attempt becomes confirmed", async () => {
-    const { attemptId, accountId, connectionId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+  it("B-10: a spent budget answers provider_rate_limited with a retry time and leaves the attempt cancelling", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    await exhaustBudget();
+    const out = await worker.cancel({ tenantId: a.tenantId, attemptId });
+    expect(out).toMatchObject({ outcome: "refused", code: "provider_rate_limited" });
+    expect(out.outcome === "refused" && out.retryAfterSeconds).toBeGreaterThan(0);
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelling", claimed_until: null });
+    // A cancelling attempt can no longer verify.
+    expect(await worker.complete({ tenantId: a.tenantId, attemptId, sessionUri: fake.consent(accountId) })).toEqual({ outcome: "refused", reason: "invalid_attempt" });
+    await restoreBudget();
+    expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "cancelled", revokeFailed: false });
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+  });
+
+  it("never deletes an account a connection row already owns", async () => {
+    const { attemptId, accountId, connectionId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, id: connectionId, accountId });
     expect(await worker.cancel({ tenantId: a.tenantId, attemptId })).toEqual({ outcome: "not_found" });
     expect(fake.accounts.get(accountId)!.deleted).toBe(false);
-    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("confirmed");
+    // The attempt never verified a store, so it ends swept rather than confirmed (C-7).
+    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("swept");
   });
 
-  it("a delete failure leaves the attempt started for the sweep", async () => {
-    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-    fake.override(/DELETE \/connected_accounts/, { status: 500 });
+  it("a delete failure leaves the attempt cancelling for the sweep, which finishes it without waiting for expiry", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
     await expect(worker.cancel({ tenantId: a.tenantId, attemptId })).rejects.toThrow();
-    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("started");
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "cancelling", last_error_code: "delete_failed", claimed_until: null });
+    expect((await worker.pass()).swept).toBe(1);
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1); // the recorded revoke is not repeated
+    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("cancelled");
   });
 
   it("another tenant's attempt is not found", async () => {
-    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     expect(await worker.cancel({ tenantId: b.tenantId, attemptId })).toEqual({ outcome: "not_found" });
   });
 });
@@ -272,11 +435,59 @@ describe("run (C-6, C-10, C-12)", () => {
 
   it("an authorization failure marks the row reauthorize/auth_error; the next run does not call Composio", async () => {
     const { id } = await liveConnection();
-    fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "401 Unauthorized: invalid access token", data: null } });
+    fake.override(/POST \/tools\/execute/, AUTH_ENVELOPE);
     expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "connection_needs_reconnect" });
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
     const before = fake.calls.length;
     expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "connection_needs_reconnect" });
+    expect(fake.calls).toHaveLength(before);
+  });
+
+  it("A-5: auth words in the provider text alone are not an authorization failure", async () => {
+    const { id } = await liveConnection();
+    fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "401 Unauthorized: forbidden", data: null } });
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "provider_unavailable" });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active" });
+  });
+
+  it("A-5: a 401 or 403 on our own Composio call is our key: provider_unavailable, a report, the row untouched", async () => {
+    for (const status of [401, 403]) {
+      const { id } = await liveConnection();
+      fake.override(/POST \/tools\/execute/, { status, json: {}, times: 1 });
+      expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "provider_unavailable" });
+      expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", reauthorize_reason: null });
+      await database.pool.query("DELETE FROM connections WHERE id=$1", [id]);
+    }
+    expect(reports.filter((r) => r.kind === "key_refused")).toHaveLength(2);
+  });
+
+  it("B-2: an auth failure during the call upgrades a provider_status mark the health read made meanwhile", async () => {
+    const { id } = await liveConnection();
+    fake.gate = async (call) => {
+      if (call.path.startsWith("/tools/execute/"))
+        await fixture.service((tx) => tx.query("UPDATE connections SET status='reauthorize', reauthorize_reason='provider_status' WHERE id=$1", [id]));
+    };
+    fake.override(/POST \/tools\/execute/, AUTH_ENVELOPE);
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "connection_needs_reconnect" });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
+  });
+
+  it("B-9: a disconnect that lands during the call wins; the data is dropped", async () => {
+    const { id } = await liveConnection();
+    fake.gate = async (call) => {
+      if (call.path.startsWith("/tools/execute/"))
+        await fixture.service((tx) => tx.query("UPDATE connections SET status='disconnecting' WHERE id=$1", [id]));
+    };
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "not_found" });
+  });
+
+  it("B-3: a rate limit inside the envelope opens the organization cooldown", async () => {
+    const { id } = await liveConnection();
+    fake.override(/POST \/tools\/execute/, { status: 200, json: { successful: false, error: "slow down", data: { status_code: 429 } }, times: 1 });
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toEqual({ outcome: "error", code: "provider_rate_limited", retryAfterSeconds: 60 });
+    expect(reports.some((r) => r.kind === "cooldown")).toBe(true);
+    const before = fake.calls.length;
+    expect(await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} })).toMatchObject({ outcome: "error", code: "provider_rate_limited" });
     expect(fake.calls).toHaveLength(before);
   });
 
@@ -344,6 +555,7 @@ describe("disconnect (C-13)", () => {
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
     expect(fake.accounts.get(accountId)).toMatchObject({ revoked: true, deleted: true });
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", account_label: null, last_error_code: null });
+    expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "revoked", claimed_until: null });
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
   });
 
@@ -353,6 +565,42 @@ describe("disconnect (C-13)", () => {
     expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
     expect(fake.accounts.get(accountId)!.deleted).toBe(true);
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "revoke_failed" });
+  });
+
+  it("B-1: a revoke failure survives a failed delete and the retry, which never revokes again", async () => {
+    const { id, accountId } = await disconnecting();
+    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
+    expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "failed", claimed_until: null });
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "revoke_failed" });
+  });
+
+  it("B-1: a recorded revoke survives a spent budget; the retry deletes without revoking again", async () => {
+    const { id, accountId } = await disconnecting();
+    fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
+    await exhaustBudget();
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
+    expect(await connectionRow(a.tenantId, id)).toMatchObject({ revoke_outcome: "revoked", claimed_until: null });
+    await restoreBudget();
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+    expect(fake.callsTo(/\/revoke$/)).toHaveLength(1);
+    expect(fake.accounts.get(accountId)!.deleted).toBe(true);
+  });
+
+  it("A-2: an account that is not the tenant's is never revoked or deleted; the row ends with account_mismatch", async () => {
+    for (const change of [{ userId: composioUserId(ENV, b.tenantId) }, { authConfigId: "ac_other" }, { toolkit: "gmail" }]) {
+      const { id, accountId } = await disconnecting();
+      Object.assign(fake.accounts.get(accountId)!, change);
+      expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+      expect(fake.accounts.get(accountId)).toMatchObject({ revoked: false, deleted: false });
+      expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected", last_error_code: "account_mismatch" });
+    }
+    expect(reports.filter((r) => r.kind === "account_mismatch")).toHaveLength(3);
   });
 
   it("a delete failure leaves the row disconnecting; the pass finishes it later", async () => {
@@ -368,24 +616,44 @@ describe("disconnect (C-13)", () => {
   it("answers pending for a row another worker holds, and not_found for another tenant or a live row", async () => {
     const { id } = await disconnecting();
     expect(await worker.disconnect({ tenantId: b.tenantId, connectionId: id })).toEqual({ outcome: "not_found" });
-    const held = database.pool.connect();
-    const client = await held;
-    try {
-      await client.query("BEGIN");
-      await client.query("SELECT 1 FROM connections WHERE id=$1 FOR UPDATE", [id]);
-      expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
-    } finally {
-      await client.query("ROLLBACK");
-      client.release();
-    }
+    // A lease another worker holds.
+    await fixture.service((tx) => tx.query("UPDATE connections SET claimed_until=$2 WHERE id=$1", [id, new Date(T0 + 30_000)]));
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "pending" });
+    expect(fake.calls).toHaveLength(0);
+    // A lease that lapsed is taken over.
+    clock.ms = T0 + 31_000;
+    expect(await worker.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
     const live = await seedConnection(fixture, { tenantId: b.tenantId, memberId: b.memberId, accountId: seedAccount(b.tenantId) });
     expect(await worker.disconnect({ tenantId: b.tenantId, connectionId: live })).toEqual({ outcome: "not_found" });
+  });
+
+  it("B-5: no transaction is held across a Composio call, so a pool of one connection never deadlocks", async () => {
+    const { id } = await disconnecting();
+    type ServicePool = typeof database.servicePool;
+    const PoolOfOne = database.servicePool.constructor as new (config: object) => ServicePool;
+    const single = new PoolOfOne({ ...(database.servicePool as unknown as { options: object }).options, max: 1 });
+    try {
+      const one = createConnectionsWorker({
+        service: (work) => asService(single, work),
+        composio: createComposioClient({ apiKey: "test-key", baseUrl: "https://composio.test/api/v3.1", fetch: fake.fetch, timeoutMs: 1500 }),
+        clock, config: { env: ENV, callbackUrl: CALLBACK_URL, authConfigIds: { shopify: AUTH_CONFIG } },
+      });
+      // While each Composio call is in flight, the one pool connection must be free for another statement.
+      fake.gate = async () => { await asService(single, (tx) => tx.query("SELECT 1")); };
+      expect(await one.disconnect({ tenantId: a.tenantId, connectionId: id })).toEqual({ outcome: "disconnected" });
+      const t = await newTenant(fixture);
+      await seedConnection(fixture, { tenantId: t.tenantId, memberId: t.memberId, accountId: seedAccount(t.tenantId), lastChecked: new Date(T0 - 2 * DAY) });
+      expect(await one.pass()).toMatchObject({ checked: 1, stopped: null });
+    } finally {
+      fake.gate = null;
+      await single.end();
+    }
   });
 });
 
 describe("the pass (C-8, C-9, C-12)", () => {
   it("sweeps an unconfirmed attempt only after expiry plus one hour, and only an account the attempt names", async () => {
-    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     const bystander = seedAccount(a.tenantId, "ca_bystander");
     clock.ms = T0 + 10 * 60_000 + HOUR - 1000;
     expect((await worker.pass()).swept).toBe(0);
@@ -394,31 +662,50 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect((await worker.pass()).swept).toBe(1);
     expect(fake.accounts.get(accountId)).toMatchObject({ revoked: true, deleted: true });
     expect(fake.accounts.get(bystander)!.deleted).toBe(false);
-    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("swept");
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "swept", claimed_until: null });
   });
 
-  it("marks an attempt confirmed instead of deleting when a connection row exists; leaves a foreign user's account alone; counts a 404 as swept", async () => {
-    const one = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+  it("ends an attempt a connection row owns without touching the account; counts a 404 as swept", async () => {
+    const one = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, id: one.connectionId, accountId: one.accountId, lastChecked: new Date(T0 + 2 * HOUR) });
-    const two = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
-    fake.accounts.get(two.accountId)!.userId = composioUserId(ENV, b.tenantId);
-    const three = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const three = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     fake.accounts.get(three.accountId)!.deleted = true; // already gone
     clock.ms = T0 + 2 * HOUR;
     await worker.pass();
-    expect((await attemptOf(fixture, a.tenantId, one.attemptId))?.status).toBe("confirmed");
+    expect((await attemptOf(fixture, a.tenantId, one.attemptId))?.status).toBe("swept");
     expect(fake.accounts.get(one.accountId)!.deleted).toBe(false);
-    expect(fake.accounts.get(two.accountId)!.deleted).toBe(false);
-    expect((await attemptOf(fixture, a.tenantId, two.attemptId))?.status).toBe("swept");
     expect((await attemptOf(fixture, a.tenantId, three.attemptId))?.status).toBe("swept");
   });
 
+  it("B-8: a foreign account is left alone; the attempt ends with account_mismatch and an operator hears of it", async () => {
+    const two = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    fake.accounts.get(two.accountId)!.userId = composioUserId(ENV, b.tenantId);
+    clock.ms = T0 + 2 * HOUR;
+    expect((await worker.pass()).swept).toBe(1);
+    expect(fake.accounts.get(two.accountId)).toMatchObject({ deleted: false, revoked: false });
+    expect(await attemptRow(a.tenantId, two.attemptId)).toMatchObject({ status: "swept", last_error_code: "account_mismatch" });
+    expect(reports).toContainEqual({ kind: "account_mismatch", tenantId: a.tenantId, attemptId: two.attemptId });
+  });
+
+  it("B-8: an account whose read names no user is retried for a day, then given up", async () => {
+    const { attemptId, accountId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
+    (fake.accounts.get(accountId) as unknown as { userId: string | null }).userId = null;
+    clock.ms = T0 + 2 * HOUR;
+    expect((await worker.pass()).swept).toBe(0);
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "started", claimed_until: null });
+    expect(reports.some((r) => r.kind === "sweep_failed" && r.code === "account_unverified")).toBe(true);
+    clock.ms = T0 + 10 * 60_000 + HOUR + DAY + 1000;
+    expect((await worker.pass()).swept).toBe(1);
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "swept", last_error_code: "account_unverified" });
+    expect(fake.accounts.get(accountId)!.deleted).toBe(false);
+  });
+
   it("a failed sweep delete leaves the attempt for the next pass", async () => {
-    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.userId });
+    const { attemptId } = await startAttempt(worker, { tenantId: a.tenantId, createdBy: a.memberId });
     clock.ms = T0 + 2 * HOUR;
     fake.override(/DELETE \/connected_accounts/, { status: 500, times: 1 });
     expect((await worker.pass()).swept).toBe(0);
-    expect((await attemptOf(fixture, a.tenantId, attemptId))?.status).toBe("started");
+    expect(await attemptRow(a.tenantId, attemptId)).toMatchObject({ status: "started", last_error_code: "delete_failed", claimed_until: null });
     expect((await worker.pass()).swept).toBe(1);
   });
 
@@ -426,15 +713,42 @@ describe("the pass (C-8, C-9, C-12)", () => {
     const accountA = seedAccount(a.tenantId);
     const accountB = seedAccount(b.tenantId);
     const stale = new Date(T0 - 2 * DAY);
+    const c = await newTenant(fixture);
     const activeId = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId: accountA, lastChecked: stale });
     const providerRow = await seedConnection(fixture, { tenantId: b.tenantId, memberId: b.memberId, accountId: accountB, status: "reauthorize", reason: "provider_status", lastChecked: stale });
-    const authRow = await seedConnection(fixture, { tenantId: b.tenantId, memberId: b.memberId, accountId: seedAccount(b.tenantId), toolkit: "gmail", status: "reauthorize", reason: "auth_error", lastChecked: stale });
+    // E-2: a shopify row, so the read really runs and finds the account healthy.
+    const authRow = await seedConnection(fixture, { tenantId: c.tenantId, memberId: c.memberId, accountId: seedAccount(c.tenantId), status: "reauthorize", reason: "auth_error", lastChecked: stale });
     fake.accounts.get(accountA)!.status = "INACTIVE";
     const result = await worker.pass();
     expect(result.checked).toBe(3);
+    expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(3);
     expect(await statusOf(fixture, a.tenantId, activeId)).toMatchObject({ status: "reauthorize", reauthorize_reason: "provider_status" });
     expect(await statusOf(fixture, b.tenantId, providerRow)).toMatchObject({ status: "active", reauthorize_reason: null });
-    expect(await statusOf(fixture, b.tenantId, authRow)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
+    expect(await statusOf(fixture, c.tenantId, authRow)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error", last_checked_at: new Date(T0) });
+  });
+
+  it("B-2: a toolkit without an auth config is checked off with not_configured and never starves the rest", async () => {
+    const stale = new Date(T0 - 2 * DAY);
+    const gmail = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId: seedAccount(a.tenantId), toolkit: "gmail", lastChecked: new Date(T0 - 3 * DAY) });
+    const shop = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId: seedAccount(a.tenantId), lastChecked: stale });
+    expect(await makeWorker(database, fake, clock, { passMaxCalls: 1 }, reports).pass()).toMatchObject({ checked: 2, stopped: null });
+    expect(await statusOf(fixture, a.tenantId, gmail)).toMatchObject({ status: "active", last_error_code: "not_configured", last_checked_at: new Date(T0) });
+    expect(await statusOf(fixture, a.tenantId, shop)).toMatchObject({ last_checked_at: new Date(T0) });
+  });
+
+  it("B-2: a read that succeeds clears a transient code and bumps updated_at; a failed read records its code and bumps updated_at", async () => {
+    const stale = new Date(T0 - 2 * DAY);
+    const id = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId: seedAccount(a.tenantId), lastChecked: stale, errorCode: "provider_unavailable" });
+    clock.ms = T0 + 1000;
+    await worker.pass();
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", last_error_code: null });
+    expect((await connectionRow(a.tenantId, id)).updated_at).toEqual(new Date(T0 + 1000));
+    await fixture.service((tx) => tx.query("UPDATE connections SET last_checked_at=$2 WHERE id=$1", [id, stale]));
+    fake.override(/GET \/connected_accounts\//, { status: 503, times: 1 });
+    clock.ms = T0 + 2000;
+    await worker.pass();
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", last_error_code: "provider_unavailable" });
+    expect((await connectionRow(a.tenantId, id)).updated_at).toEqual(new Date(T0 + 2000));
   });
 
   it("health: a healthy provider_status row stays reauthorize while the tenant has another live row for the toolkit", async () => {
@@ -444,49 +758,68 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect(sibling).not.toBeNull();
     const row = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId: seedAccount(a.tenantId), status: "reauthorize", reason: "provider_status", lastChecked: stale }).catch(() => null);
     if (row === null) return; // the schema itself refuses the second live row, which is the stronger guarantee
-    fake.gate = null;
     await worker.pass();
     expect(await statusOf(fixture, a.tenantId, row)).toMatchObject({ status: "reauthorize" });
   });
 
-  it("race: a run that marks auth_error while the pass holds the row is never undone by the pass", async () => {
+  it("E-1 race: a run that marks auth_error while the health read is in flight is never undone by the pass", async () => {
     const accountId = seedAccount(a.tenantId);
     const id = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId, lastChecked: new Date(T0 - 2 * DAY) });
-    let marked: Promise<unknown> | undefined;
+    let ran: unknown;
+    fake.override(/POST \/tools\/execute/, AUTH_ENVELOPE);
     fake.gate = async (call) => {
-      if (call.method === "GET" && !marked) {
-        // The run fails with an auth error while the pass has the row locked; its update waits for the pass.
-        marked = worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} }).catch(() => undefined);
+      // The pass's health read is held here until the run has marked the row.
+      if (call.method === "GET" && ran === undefined) {
+        ran = null;
+        ran = await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} });
       }
     };
-    await worker.pass();
+    expect((await worker.pass()).checked).toBe(1);
+    expect(ran).toEqual({ outcome: "error", code: "connection_needs_reconnect" });
+    // The account reads healthy, and still the row keeps its auth_error.
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
+  });
+
+  it("E-1 race, other order: a provider_status mark landing during a run's call is upgraded by its auth failure, and a later healthy read keeps it", async () => {
+    const accountId = seedAccount(a.tenantId);
+    const id = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId, lastChecked: new Date(T0 - 2 * DAY) });
+    const held = deferred();
+    let passed: Promise<unknown> | undefined;
+    fake.override(/POST \/tools\/execute/, AUTH_ENVELOPE);
+    fake.gate = async (call) => {
+      if (call.path.startsWith("/tools/execute/") && !passed) {
+        // While the run's call is in flight, the pass reads the account as INACTIVE and marks the row.
+        fake.accounts.get(accountId)!.status = "INACTIVE";
+        passed = worker.pass().then(() => held.resolve());
+        await held.promise;
+      }
+    };
+    const out = await worker.run({ tenantId: a.tenantId, connectionId: id, tool: "shopify_list_orders", arguments: {} });
+    expect(out).toEqual({ outcome: "error", code: "connection_needs_reconnect" });
+    expect(reports.filter((r) => r.kind === "reauthorize").map((r) => r.kind === "reauthorize" && r.reason)).toEqual(["provider_status", "auth_error"]);
     fake.gate = null;
-    await marked;
-    const row = await statusOf(fixture, a.tenantId, id);
-    expect(["active", "reauthorize"]).toContain(row.status);
-    // Whatever order they ran in, an auth_error mark is final until Reconnect.
-    await fixture.service((tx) => tx.query("UPDATE connections SET status='reauthorize', reauthorize_reason='auth_error' WHERE id=$1", [id]));
+    fake.accounts.get(accountId)!.status = "ACTIVE";
     await fixture.service((tx) => tx.query("UPDATE connections SET last_checked_at=$2 WHERE id=$1", [id, new Date(T0 - 2 * DAY)]));
     await worker.pass();
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
   });
 
-  it("race: a row that turns disconnecting is not touched by the health read", async () => {
+  it("E-1 race: a disconnect that lands during the health read is never undone; the next pass finishes it", async () => {
     const accountId = seedAccount(a.tenantId);
     const id = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId, lastChecked: new Date(T0 - 2 * DAY) });
     fake.accounts.get(accountId)!.status = "INACTIVE";
-    await fixture.service((tx) => tx.query("UPDATE connections SET status='disconnecting' WHERE id=$1", [id]));
-    const result = await worker.pass();
-    expect(result.disconnected).toBe(1);
+    let moved = false;
+    fake.gate = async (call) => {
+      if (call.method === "GET" && !moved) {
+        moved = true;
+        await fixture.service((tx) => tx.query("UPDATE connections SET status='disconnecting', updated_at=$2 WHERE id=$1", [id, new Date(T0)]));
+      }
+    };
+    expect(await worker.pass()).toMatchObject({ checked: 1, disconnected: 0 });
+    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnecting", reauthorize_reason: null });
+    fake.gate = null;
+    expect((await worker.pass()).disconnected).toBe(1);
     expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "disconnected" });
-  });
-
-  it("a transient provider error leaves the row as it is and records the code", async () => {
-    const accountId = seedAccount(a.tenantId);
-    const id = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.memberId, accountId, lastChecked: new Date(T0 - 2 * DAY) });
-    fake.override(/GET \/connected_accounts\//, { status: 503 });
-    await worker.pass();
-    expect(await statusOf(fixture, a.tenantId, id)).toMatchObject({ status: "active", last_error_code: "provider_unavailable" });
   });
 
   it("stops at its call limit, its time limit and an exhausted budget; the nonce cleanup still runs", async () => {
@@ -501,17 +834,24 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect(byCalls).toMatchObject({ stopped: "calls", composioCalls: 2 });
     const left = await fixture.service(async (tx) => (await tx.query("SELECT count(*)::int AS n FROM connector_request_nonces WHERE jti='old-jti-0123456789abcdef'")).rows[0]!.n);
     expect(left).toBe(0);
+    // Every lease the stopped pass took was given back.
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM connections WHERE claimed_until IS NOT NULL")).rows[0].n).toBe(0);
 
     await database.pool.query("UPDATE connections SET last_checked_at=$1", [stale]);
     const slowFake = new FakeComposio();
     for (const a2 of fake.accounts.values()) slowFake.accounts.set(a2.id, a2);
     slowFake.gate = async () => { clock.ms += 30_000; };
-    const timed = makeWorker(database, slowFake, clock, { passMs: 40_000 }, reports);
+    const timed = makeWorker(database, slowFake, clock, { passMs: 20_000 }, reports);
     expect((await timed.pass()).stopped).toBe("time");
 
     clock.ms = T0;
     await exhaustBudget();
     expect((await makeWorker(database, fake, clock, {}, reports).pass()).stopped).toBe("budget");
+  });
+
+  it("B-4: the pass budget fits the 30 s function limit", () => {
+    expect(() => makeWorker(database, fake, clock, { passMs: 40_000 })).toThrow();
+    expect(worker.config.passMs).toBeLessThanOrEqual(25_000);
   });
 
   it("two passes at once never take the same row twice", async () => {
@@ -522,6 +862,7 @@ describe("the pass (C-8, C-9, C-12)", () => {
     }
     const [one, two] = await Promise.all([worker.pass(), makeWorker(database, fake, clock, {}, reports).pass()]);
     expect(one.checked + two.checked).toBe(4);
+    expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(4);
   });
 });
 

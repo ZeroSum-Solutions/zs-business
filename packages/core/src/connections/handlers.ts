@@ -21,7 +21,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
-import { parseOrFail } from "../crm/rows.js";
+import { parseOrFail, pgCode, pgConstraint } from "../crm/rows.js";
 import { findMembership } from "../members/access.js";
 import { catalogToolkit } from "./catalog.js";
 import { connectIdempotencyKey } from "./tokens.js";
@@ -34,11 +34,12 @@ interface ConnectionRow {
   status: Connection["status"];
   reauthorize_reason: Connection["reauthorizeReason"];
   last_error_code: string | null;
+  revoke_outcome: "revoked" | "failed" | null;
   last_checked_at: Date;
   created_at: Date;
 }
 /** Never a Composio or external account ID (C-13). */
-const COLUMNS = "id, toolkit, account_label, account_domain, status, reauthorize_reason, last_error_code, last_checked_at, created_at";
+const COLUMNS = "id, toolkit, account_label, account_domain, status, reauthorize_reason, last_error_code, revoke_outcome, last_checked_at, created_at";
 
 export const managedConnectionFromRow = (row: ConnectionRow): Connection => connectionSchema.parse({
   id: row.id,
@@ -47,8 +48,9 @@ export const managedConnectionFromRow = (row: ConnectionRow): Connection => conn
   accountDomain: row.account_domain,
   status: row.status,
   reauthorizeReason: row.reauthorize_reason,
-  // C-13: the screen then tells the owner to remove the app in the store's admin.
-  revokeFailed: row.last_error_code === "revoke_failed",
+  // C-13: the screen then tells the owner to remove the app in the store's admin. An account that
+  // was not this tenant's was never touched, so it too may still hold access.
+  revokeFailed: row.revoke_outcome === "failed" || row.last_error_code === "revoke_failed" || row.last_error_code === "account_mismatch",
   lastCheckedAt: row.last_checked_at.toISOString(),
   createdAt: row.created_at.toISOString(),
 });
@@ -93,7 +95,9 @@ async function resolveConnectionTarget(tx: Transaction, target: Target): Promise
 /**
  * C-5: record the verified account. Only the reserved key is accepted, so an approval run or a
  * hand-built command is refused. The toolkit must be in the catalog, the connection ID unused and
- * no other live connection of the toolkit may exist (a conflict, not a replay).
+ * no other live connection of the toolkit may exist (a conflict, not a replay). The command never
+ * names the Composio account: the database takes it from the tenant's verified attempt for this
+ * connection ID (C-7, `connections_take_attempt`), and refuses the insert when there is none.
  */
 export const connectConnectionHandler: ActionHandler = {
   resolveTarget: resolveConnectionTarget,
@@ -111,16 +115,29 @@ export const connectConnectionHandler: ActionHandler = {
       [binding.tenantId, payload.toolkit])).rowCount)
       throw new Conflict("This app is already connected", { reason: "already_connected" });
     const row = (await tx.query<ConnectionRow>(
-      `INSERT INTO connections (tenant_id, id, tier, toolkit, composio_account_id, external_account_id, account_domain, account_label,
+      `INSERT INTO connections (tenant_id, id, tier, toolkit, external_account_id, account_domain, account_label,
          status, connected_by, last_checked_at, created_at, updated_at)
-       VALUES ($1,$2,'composio',$3,$4,$5,$6,$7,'active',$8,$9,$9,$9) RETURNING ${COLUMNS}`,
-      [binding.tenantId, payload.connectionId, payload.toolkit, payload.composioAccountId, payload.externalAccountId, payload.accountDomain,
+       VALUES ($1,$2,'composio',$3,$4,$5,$6,'active',$7,$8,$8,$8) RETURNING ${COLUMNS}`,
+      [binding.tenantId, payload.connectionId, payload.toolkit, payload.externalAccountId, payload.accountDomain,
         payload.accountLabel, member.memberId, now])).rows[0]!;
     const result = managedConnectionFromRow(row);
     return {
       result: { ...result },
       event: { type: CONNECTION_CONNECTED_EVENT, payload: { connectionId: result.id, toolkit: result.toolkit } },
     };
+  },
+  mapError(error) {
+    const code = pgCode(error);
+    const constraint = pgConstraint(error);
+    // The attempt was cancelled, swept or changed after the confirm screen was shown.
+    if (code === "23514" && constraint === "connections_verified_attempt")
+      return new Conflict("The connection attempt is no longer verified", { reason: "attempt_changed" });
+    // A concurrent confirm of another attempt for the same toolkit won.
+    if (code === "23505" && constraint === "connections_one_live_per_toolkit")
+      return new Conflict("This app is already connected", { reason: "already_connected" });
+    if (code === "23505" && (constraint === "connections_pkey" || constraint === "connections_composio_account"))
+      return new Conflict("The connection ID is already in use", { reason: "id_in_use" });
+    return undefined;
   },
 };
 

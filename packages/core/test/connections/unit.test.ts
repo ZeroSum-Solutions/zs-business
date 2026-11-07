@@ -7,7 +7,7 @@ import {
   COMPOSIO_STATUSES, ComposioError, OVERRIDE_KEYS, buildExecuteEnvelope, catalogTool, catalogToolkit, classifyExecuteFailure, completeDecision,
   connectGrantId, connectIdempotencyKey, createComposioClient, liveDecision, normalizeStatus, signConnectAttempt, signConnectGrant,
   signConnectorRequest, trimToSize, verifyConnectAttempt, verifyConnectGrant, verifyConnectorRequest, attemptBrowserMatches,
-  MAX_CONNECT_GRANT_LENGTH, browserBindingFor, callbackCharges, runCharges, connectCharges,
+  MAX_CONNECT_GRANT_LENGTH, browserBindingFor, callbackCharges, callbackStatusCharges, runCharges, connectCharges,
 } from "../../src/index.js";
 import { FakeComposio, fakeOrder } from "./fake-composio.js";
 
@@ -70,6 +70,7 @@ const attemptFields = () => ({
 });
 const grantFields = () => ({
   tenantId: randomUUID(), actorId: randomUUID(), toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), composioAccountId: "ca_1",
+  authConfigId: "ac_shopify", browserHash: "b".repeat(43),
   accountDomain: "testshop.myshopify.com", externalAccountId: "8812345", accountLabel: "Test Shop", expiresAt: NOW.getTime() + 600_000,
 });
 
@@ -108,6 +109,18 @@ describe("attempt and grant tokens (C-4, C-5)", () => {
     expect(connectIdempotencyKey("ABC")).toBe("connect:abc");
   });
 
+  it("C-14: the grant carries the attempt's auth config and browser binding", () => {
+    const fields = grantFields();
+    expect(verifyConnectGrant({ current: STATE }, signConnectGrant(STATE, fields)!, NOW)).toEqual(fields);
+    expect(verifyConnectGrant({ current: STATE }, signConnectGrant(STATE, { ...fields, browserHash: "short" })!, NOW)).toBeNull();
+  });
+
+  it("C-8: a label is counted in characters, so 120 astral characters fit and 121 do not", () => {
+    const fits = "\u{1F600}".repeat(120);
+    expect(verifyConnectGrant({ current: STATE }, signConnectGrant(STATE, { ...grantFields(), accountLabel: fits })!, NOW)?.accountLabel).toBe(fits);
+    expect(verifyConnectGrant({ current: STATE }, signConnectGrant(STATE, { ...grantFields(), accountLabel: `${fits}x` })!, NOW)).toBeNull();
+  });
+
   it("refuses a grant whose label is not in normal form, and one that would not fit a cookie", () => {
     expect(verifyConnectGrant({ current: STATE }, signConnectGrant(STATE, { ...grantFields(), accountLabel: "  two  spaces " })!, NOW)).toBeNull();
     expect(signConnectGrant(STATE, { ...grantFields(), accountLabel: "x".repeat(120), externalAccountId: "1".repeat(64), composioAccountId: "c".repeat(128) })!.length)
@@ -120,6 +133,11 @@ describe("rate-limit charges (C-4, C-5, C-12)", () => {
     const tenant = randomUUID();
     expect(connectCharges(tenant)).toEqual([{ key: `conn-connect:${tenant}`, rule: { limit: 10, windowMs: 3_600_000 } }]);
     expect(callbackCharges(tenant)[0]).toEqual({ key: `conn-callback:${tenant}`, rule: { limit: 30, windowMs: 3_600_000 } });
+    const attempt = randomUUID();
+    // C-5: a status call is capped per attempt and spends the tenant's run buckets too.
+    expect(callbackStatusCharges(tenant, attempt).map((c) => [c.key, c.rule.limit])).toEqual([
+      [`conn-status:${tenant}`, 120], [`conn-status-attempt:${attempt}`, 5], [`conn-minute:${tenant}`, 60], [`conn-day:${tenant}`, 2000],
+    ]);
     expect(runCharges(tenant).map((c) => [c.key, c.rule.limit, c.rule.windowMs])).toEqual([
       [`conn-minute:${tenant}`, 60, 60_000], [`conn-day:${tenant}`, 2000, 86_400_000],
     ]);
@@ -170,10 +188,14 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     fake.seed({ id: "ca_1", userId: "u" });
     const client = make(fake);
     const call = () => client.execute({ slug: "SHOPIFY_GET_SHOP_DETAILS", version: "v", userId: "u", connectedAccountId: "ca_1", arguments: {} });
+    // A-5: the class comes from a structured status only; words in the text never make an auth error.
     fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: "Token has expired; please reauthorize" } });
+    expect(await call()).toEqual({ kind: "failed", reason: "unavailable" });
+    fake.clearOverrides();
+    fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: "Forbidden product title", data: { status_code: 401 } } });
     expect(await call()).toEqual({ kind: "failed", reason: "auth" });
     fake.clearOverrides();
-    fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: "rate limit exceeded" } });
+    fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: { status_code: 429, message: "slow down" } } });
     expect(await call()).toEqual({ kind: "failed", reason: "rate_limited" });
     fake.clearOverrides();
     fake.override(/tools\/execute/, { status: 200, json: { successful: false, error: { message: "boom" } } });
@@ -186,14 +208,15 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     await expect(call()).rejects.toMatchObject({ kind: "unavailable", detail: "malformed" });
   });
 
-  it("maps HTTP statuses without provider text: 429 and 402 rate, 401 and 403 auth, 5xx unavailable", async () => {
+  it("maps HTTP statuses without provider text: 429 and 402 rate, 401 and 403 our key refused, 410 gone, 5xx unavailable", async () => {
     const fake = new FakeComposio();
     const client = make(fake);
-    const kinds: Record<number, string> = { 429: "rate_limited", 402: "rate_limited", 401: "auth", 403: "auth", 400: "bad_request", 500: "unavailable", 503: "unavailable" };
+    // A-5: a 401 or 403 on our own call is about our key or project, never the store's grant.
+    const kinds: Record<number, string> = { 429: "rate_limited", 402: "rate_limited", 401: "key_refused", 403: "key_refused", 410: "not_found", 400: "bad_request", 500: "unavailable", 503: "unavailable" };
     for (const [status, kind] of Object.entries(kinds)) {
       fake.clearOverrides();
-      fake.override(/connected_accounts\/ca_x$/, { status: Number(status), json: { error: { message: "provider words" } } });
-      const error = await client.getAccount("ca_x").catch((e: unknown) => e);
+      fake.override(/connected_accounts\/ca_x(\/revoke)?$/, { status: Number(status), json: { error: { message: "provider words" } } });
+      const error = await client.revoke("ca_x").catch((e: unknown) => e);
       expect(error).toBeInstanceOf(ComposioError);
       expect((error as ComposioError).kind).toBe(kind);
       expect((error as Error).message).not.toMatch(/provider words/);
@@ -220,11 +243,22 @@ describe("Composio client (C-2, C-3, C-10, C-14)", () => {
     expect(redirect).toBe("error");
   });
 
-  it("classifies a 200 failure from its text and keeps none of it", () => {
-    expect(classifyExecuteFailure("Invalid access token")).toBe("auth");
-    expect(classifyExecuteFailure({ message: "HTTP 429 Too Many Requests" })).toBe("rate_limited");
-    expect(classifyExecuteFailure("Something broke")).toBe("unavailable");
-    expect(classifyExecuteFailure(undefined)).toBe("unavailable");
+  it("classifies a 200 failure from structured status fields only and keeps none of its text", () => {
+    expect(classifyExecuteFailure({ error: "Invalid access token" })).toBe("unavailable");
+    expect(classifyExecuteFailure({ error: { message: "HTTP 429 Too Many Requests" } })).toBe("unavailable");
+    expect(classifyExecuteFailure({ error: "x", data: { status_code: 403 } })).toBe("auth");
+    expect(classifyExecuteFailure({ error: { statusCode: 401 } })).toBe("auth");
+    expect(classifyExecuteFailure({ data: { http_status: 429 } })).toBe("rate_limited");
+    expect(classifyExecuteFailure({ data: { status_code: "401" } })).toBe("unavailable");
+    expect(classifyExecuteFailure({ data: { status_code: 500 } })).toBe("unavailable");
+    expect(classifyExecuteFailure({})).toBe("unavailable");
+  });
+
+  it("keeps the account ID of a link answer it cannot parse, so the worker can remove it (B-7)", async () => {
+    const fake = new FakeComposio();
+    fake.override(/connected_accounts\/link/, { status: 201, json: { connected_account_id: "ca_orphan", redirect_url: "http://not-https.example" } });
+    const error = await make(fake).link({ authConfigId: "ac", userId: "u", callbackUrl: "https://x.test/cb", connectionData: {} }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "unavailable", detail: "malformed", accountId: "ca_orphan" });
   });
 });
 
@@ -262,9 +296,30 @@ describe("catalog and output projection (C-6, C-10, C-14)", () => {
       lineItems: [{ title: "Mug", quantity: 2, price: "27.00" }], customer: { id: "207119551", name: "Ada Lovelace", email: "ada@example.com" },
     });
     expect(list.project({ orders: "no" })).toBeUndefined();
-    expect(list.project({ orders: [{ name: "#1" }] })).toBeUndefined();
+    expect(list.project({ orders: [{ name: "#1" }] })).toEqual({ orders: [] });
     expect(get.project({ order: fakeOrder(5) })).toMatchObject({ order: { id: "5" } });
     expect(get.project(null)).toBeUndefined();
+  });
+
+  it("C-9: projects each order on its own, keeps at most 50 orders and 250 line items", () => {
+    const sixty = Array.from({ length: 60 }, (_, i) => fakeOrder(2000 + i));
+    const capped = list.project({ orders: sixty }) as { orders: { id: string }[] };
+    expect(capped.orders).toHaveLength(50);
+    expect(capped.orders[0]!.id).toBe("2000");
+
+    const mixed = list.project({ orders: [fakeOrder(1), { name: "no id" }, fakeOrder(3)] }) as { orders: { id: string }[] };
+    expect(mixed.orders.map((entry) => entry.id)).toEqual(["1", "3"]);
+
+    const many = { ...fakeOrder(7), line_items: [...Array.from({ length: 300 }, () => ({ title: "Mug", quantity: 1, price: "1.00" })), { title: 5 }] };
+    const one = list.project({ orders: [many] }) as { orders: { lineItems: unknown[] }[] };
+    expect(one.orders[0]!.lineItems).toHaveLength(250);
+    const bad = { ...fakeOrder(8), line_items: [{ title: 5 }, { title: "Cup", quantity: 1, price: "2.00" }] };
+    expect((list.project({ orders: [bad] }) as { orders: { lineItems: unknown[] }[] }).orders[0]!.lineItems).toEqual([{ title: "Cup", quantity: 1, price: "2.00" }]);
+  });
+
+  it("C-9: a createdAfter far in the past still gives a span of at most 92 days", () => {
+    const args = list.toArguments(list.input.parse({ createdAfter: "2020-01-01T00:00:00.000Z" }), NOW) as { created_at_min: string; created_at_max: string };
+    expect(Date.parse(args.created_at_max) - Date.parse(args.created_at_min)).toBeLessThanOrEqual(92 * 86_400_000);
   });
 
   it("trims a long list from the tail, flags it, and leaves a small one alone", () => {

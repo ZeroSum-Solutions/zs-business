@@ -111,6 +111,21 @@ describe("start (C-4)", () => {
     expect(taken).toContain("conn-connect");
   });
 
+  it("records the member row, not the user, as the attempt's creator (C-7)", async () => {
+    const { claims } = await reachConfirm();
+    expect((await database.pool.query("SELECT created_by FROM connection_attempts WHERE id=$1", [claims.attemptId])).rows[0]).toEqual({ created_by: a.owner.memberId });
+  });
+
+  it("C-2: the permission answers before the toolkit, the body or the key is looked at", async () => {
+    const staff = session(a.tenantId, a.staff.userId);
+    await expect(staff.start("not a slug!", { nonsense: true })).rejects.toBeInstanceOf(TenantDenied);
+    await expect(staff.start("gmail", {})).rejects.toBeInstanceOf(TenantDenied);
+    await expect(staff.disconnect("not-a-uuid", undefined)).rejects.toBeInstanceOf(TenantDenied);
+    await expect(staff.pending("zcg1.nope")).rejects.toBeInstanceOf(TenantDenied);
+    await expect(staff.confirm("zcg1.nope", { nonsense: true })).rejects.toBeInstanceOf(TenantDenied);
+    await expect(staff.cancel({ attempt: "zca1.nope" })).rejects.toBeInstanceOf(TenantDenied);
+  });
+
   it("needs the integrations permission, a catalog toolkit and a configured server", async () => {
     await expect(session(a.tenantId, a.staff.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING })).rejects.toBeInstanceOf(TenantDenied);
     await expect(session(a.tenantId, a.owner.userId).start("gmail", { shopDomain: SHOP, browserBinding: BINDING })).rejects.toBeInstanceOf(NotFound);
@@ -192,14 +207,24 @@ describe("callback (C-5)", () => {
     expect(await callback().callback({ attempt: started.attempt, browserKey: KEY, accountId: "x", sessionUri: "s" })).toEqual({ kind: "invalid" });
   });
 
-  it("the status call answers pending until the account is ACTIVE and never redeems a session", async () => {
+  it("A-4: the status call never redeems a session and connects nothing a callback did not reach", async () => {
     const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
     const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
-    expect(await callback().status({ attempt: started.attempt, browserKey: KEY })).toEqual({ kind: "pending" });
-    expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
-    // The status call does not need the callback's account parameter.
-    expect(taken).toContain("conn-status");
+    fake.consent(claims.composioAccountId);
     fake.accounts.get(claims.composioAccountId)!.status = "ACTIVE";
+    expect(await callback().status({ attempt: started.attempt, browserKey: KEY })).toEqual({ kind: "error", reason: "not_connected" });
+    expect(fake.callsTo(/complete_auth/)).toHaveLength(0);
+    // C-5: it is charged per attempt and on the tenant's run buckets as well as its own.
+    expect(taken).toEqual(["conn-connect", "conn-status", "conn-status-attempt", "conn-minute", "conn-day"]);
+  });
+
+  it("A-4: after a callback whose redemption answer was lost, the status call picks the account up", async () => {
+    const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
+    const sessionUri = fake.consent(claims.composioAccountId);
+    fake.loseNextCompleteAuth = true;
+    expect(await callback().callback({ attempt: started.attempt, browserKey: KEY, accountId: claims.composioAccountId, sessionUri }))
+      .toEqual({ kind: "error", reason: "provider_unavailable" });
     expect(await callback().status({ attempt: started.attempt, browserKey: KEY })).toMatchObject({ kind: "confirm" });
   });
 
@@ -251,6 +276,27 @@ describe("pending and confirm (C-5)", () => {
     await expect(session(a.tenantId, a.owner.userId).pending(grant)).rejects.toBeInstanceOf(NotFound);
   });
 
+  it("A-6: a repeat after the row moved replays the stored result through the dispatcher", async () => {
+    const { grant, claims } = await reachConfirm();
+    const s = session(a.tenantId, a.owner.userId);
+    const shown = await s.pending(grant);
+    const first = await s.confirm(grant, { grantId: shown.grantId });
+    await database.pool.query("UPDATE connections SET status='disconnecting' WHERE id=$1", [claims.connectionId]);
+    expect(await s.confirm(grant, { grantId: shown.grantId })).toEqual(first);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM actions WHERE tenant_id=$1 AND action_type='connection.connect' AND target->>'id'=$2", [a.tenantId, claims.connectionId])).rows[0].n).toBe(1);
+  });
+
+  it("A-3: a grant whose attempt was cancelled meanwhile never connects (409 attempt_changed)", async () => {
+    const { grant } = await reachConfirm();
+    const s = session(a.tenantId, a.owner.userId);
+    const shown = await s.pending(grant);
+    expect(await s.cancel({ grant })).toEqual({ cancelled: true, revokeFailed: false });
+    const error = await s.confirm(grant, { grantId: shown.grantId }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Conflict);
+    expect(error).toMatchObject({ details: { reason: "attempt_changed" } });
+    expect((await database.pool.query("SELECT 1 FROM connections")).rowCount).toBe(0);
+  });
+
   it("confirm connects under connect:<id>, records the member, and a repeat replays the same row", async () => {
     const { grant, claims } = await reachConfirm();
     const s = session(a.tenantId, a.owner.userId);
@@ -261,7 +307,7 @@ describe("pending and confirm (C-5)", () => {
     expect(await s.confirm(grant, { grantId: shown.grantId })).toEqual(first);
     const row = (await database.pool.query("SELECT connected_by, composio_account_id, external_account_id FROM connections WHERE id=$1", [claims.connectionId])).rows[0];
     expect(row).toEqual({ connected_by: a.owner.memberId, composio_account_id: claims.composioAccountId, external_account_id: "8812345" });
-    const events = await database.pool.query("SELECT payload FROM outbox WHERE tenant_id=$1 AND event_type='connection.connected'", [a.tenantId]);
+    const events = await database.pool.query("SELECT payload FROM outbox WHERE tenant_id=$1 AND event_type='connection.connected' AND payload->>'connectionId'=$2", [a.tenantId, claims.connectionId]);
     expect(events.rows).toHaveLength(1);
     expect(JSON.stringify(events.rows[0].payload)).not.toContain(claims.composioAccountId);
     expect((await s.list()).items.map((i) => i.id)).toEqual([claims.connectionId]);
@@ -284,7 +330,7 @@ describe("pending and confirm (C-5)", () => {
     const claims = verifyConnectAttempt({ current: STATE }, first.started.attempt, clock.now())!;
     const second = signConnectGrant(STATE, {
       tenantId: a.tenantId, actorId: a.owner.userId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), composioAccountId: "ca_other",
-      accountDomain: SHOP, externalAccountId: "1", accountLabel: "Other", expiresAt: T0 + 60_000,
+      authConfigId: "ac_shopify", browserHash: BINDING, accountDomain: SHOP, externalAccountId: "1", accountLabel: "Other", expiresAt: T0 + 60_000,
     })!;
     const error = await s.confirm(second, { grantId: (await s.pending(second)).grantId }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Conflict);
@@ -298,15 +344,35 @@ describe("the connect action (C-5)", () => {
     target: { tenantId: a.tenantId, type: "connection", id: connectionId },
     approvalReference: { tenantId: a.tenantId, id: derivedId(a.tenantId, key, "approval") },
     idempotencyKey: key,
-    payload: { connectionId, toolkit: "shopify", composioAccountId: "ca_x", externalAccountId: "1", accountDomain: SHOP, accountLabel: "Shop" },
+    payload: { connectionId, toolkit: "shopify", externalAccountId: "1", accountDomain: SHOP, accountLabel: "Shop" },
   });
+  /** The verified attempt the worker would have left for this connection ID. */
+  const verifiedAttempt = (connectionId: string, accountId = `ca_${randomUUID().slice(0, 8)}`) => fixture.service((tx) => tx.query(
+    `INSERT INTO connection_attempts (tenant_id,id,connection_id,toolkit,composio_account_id,auth_config_id,account_domain,created_by,browser_hash,status,external_account_id,expires_at,created_at,updated_at)
+     VALUES ($1,$2,$3,'shopify',$4,'ac_shopify',$5,$6,$7,'verified','1',$8,$9,$9)`,
+    [a.tenantId, randomUUID(), connectionId, accountId, SHOP, a.owner.memberId, BINDING, new Date(T0 + 600_000), new Date(T0)]));
 
   it("is refused under any key other than connect:<id>", async () => {
     const run = memberDispatch(deps(), { tenantId: a.tenantId, actorId: a.owner.userId });
     await expect(run(command("some-other-key"))).rejects.toBeInstanceOf(ValidationFailed);
     const id = randomUUID();
+    await verifiedAttempt(id);
     const ok = await run(command(connectIdempotencyKey(id), id));
     expect(ok.result).toMatchObject({ id, status: "active" });
+  });
+
+  it("C-1: names no Composio account; without the worker's verified attempt the insert is refused", async () => {
+    const run = memberDispatch(deps(), { tenantId: a.tenantId, actorId: a.owner.userId });
+    const id = randomUUID();
+    await expect(run({ ...command(connectIdempotencyKey(id), id), payload: { ...(command("k", id).payload as Record<string, unknown>), composioAccountId: "ca_x" } } as ActionCommand)).rejects.toBeInstanceOf(ValidationFailed);
+    const error = await run(command(connectIdempotencyKey(id), id)).catch((e: unknown) => e);
+    expect(error).toMatchObject({ details: { reason: "attempt_changed" } });
+    await verifiedAttempt(id, "ca_named");
+    await run(command(connectIdempotencyKey(id), id));
+    const logged = await database.pool.query("SELECT a.payload, a.result, o.payload AS event FROM actions a LEFT JOIN outbox o ON o.tenant_id=a.tenant_id AND o.action_id=a.id WHERE a.tenant_id=$1 AND a.action_type=$2 AND a.target->>'id'=$3", [a.tenantId, CONNECTION_CONNECT_ACTION, id]);
+    expect(logged.rows.length).toBeGreaterThan(0);
+    expect(JSON.stringify(logged.rows)).not.toContain("ca_named");
+    expect((await database.pool.query("SELECT composio_account_id FROM connections WHERE id=$1", [id])).rows[0]).toEqual({ composio_account_id: "ca_named" });
   });
 
   it("is refused for a member without integrations and is never an approval action", async () => {
@@ -321,10 +387,32 @@ describe("cancel and disconnect (C-5, C-13)", () => {
   it("cancel deletes the attempt's account at once; it ignores another member's attempt", async () => {
     const started = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
     const claims = verifyConnectAttempt({ current: STATE }, started.attempt, clock.now())!;
-    await expect(session(a.tenantId, a.owner.userId).cancel("zca1.bad")).rejects.toBeInstanceOf(NotFound);
-    await expect(session(b.tenantId, b.owner.userId).cancel(started.attempt)).rejects.toBeInstanceOf(NotFound);
-    expect(await session(a.tenantId, a.owner.userId).cancel(started.attempt)).toEqual({ cancelled: true });
+    await expect(session(a.tenantId, a.owner.userId).cancel({ attempt: "zca1.bad" })).rejects.toBeInstanceOf(NotFound);
+    await expect(session(b.tenantId, b.owner.userId).cancel({ attempt: started.attempt })).rejects.toBeInstanceOf(NotFound);
+    expect(await session(a.tenantId, a.owner.userId).cancel({ attempt: started.attempt })).toEqual({ cancelled: true, revokeFailed: false });
     expect(fake.accounts.get(claims.composioAccountId)).toMatchObject({ revoked: true, deleted: true });
+  });
+
+  it("D-2: the staged grant names the attempt to cancel, over the attempt cookie", async () => {
+    const first = await reachConfirm();
+    const newer = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    const newerClaims = verifyConnectAttempt({ current: STATE }, newer.attempt, clock.now())!;
+    expect(await session(a.tenantId, a.owner.userId).cancel({ grant: first.grant, attempt: newer.attempt })).toEqual({ cancelled: true, revokeFailed: false });
+    expect(fake.accounts.get(first.claims.composioAccountId)!.deleted).toBe(true);
+    expect(fake.accounts.get(newerClaims.composioAccountId)!.deleted).toBe(false);
+  });
+
+  it("B-10: cancel shows a failed revoke, refuses a foreign account with 409 and a spent budget with 429", async () => {
+    const s = session(a.tenantId, a.owner.userId);
+    const one = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    fake.override(/POST \/connected_accounts\/[^/]+\/revoke/, { status: 500, times: 1 });
+    expect(await s.cancel({ attempt: one.attempt })).toEqual({ cancelled: true, revokeFailed: true });
+    const two = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    fake.accounts.get(verifyConnectAttempt({ current: STATE }, two.attempt, clock.now())!.composioAccountId)!.userId = composioUserId(ENV, b.tenantId);
+    expect(await s.cancel({ attempt: two.attempt }).catch((e: unknown) => e)).toMatchObject({ details: { reason: "account_mismatch" } });
+    const three = await s.start("shopify", { shopDomain: SHOP, browserBinding: BINDING });
+    fake.override(/GET \/connected_accounts\//, { status: 429, json: {}, times: 1 });
+    expect(await s.cancel({ attempt: three.attempt }).catch((e: unknown) => e)).toMatchObject({ kind: "rate_limited", retryAfterSeconds: 60 });
   });
 
   it("disconnect runs the action, finishes at once and replays under the same key", async () => {
@@ -373,7 +461,12 @@ describe("tools (C-10)", () => {
     const idB = await seeded({ tenantId: b.tenantId, memberId: b.owner.memberId });
     expect((await tools(a.tenantId).list()).map((c) => c.id)).toEqual([idA]);
     expect((await tools(b.tenantId).list()).map((c) => c.id)).toEqual([idB]);
-    expect((await tools(a.tenantId).tools(idA))!.map((t) => t.name)).toEqual(["shopify_list_orders", "shopify_get_order"]);
+    const listed = (await tools(a.tenantId).tools(idA))!;
+    expect(listed.map((t) => t.name)).toEqual(["shopify_list_orders", "shopify_get_order"]);
+    // A-7: plain JSON Schema an MCP client can read, not a zod object.
+    expect(JSON.parse(JSON.stringify(listed))).toEqual(listed);
+    expect(listed[1]!.inputSchema).toMatchObject({ type: "object", properties: { orderId: { type: "string" } }, required: ["orderId"] });
+    expect(listed[0]!.inputSchema).toMatchObject({ type: "object", properties: { limit: { type: "integer" } } });
     expect(await tools(a.tenantId).tools(idB)).toBeNull();
     const out = await tools(a.tenantId).run({ connectionId: idA, tool: "shopify_list_orders", arguments: { limit: 1 } });
     expect(out).toMatchObject({ ok: true, truncated: false });
@@ -439,7 +532,7 @@ describe("the signed connector port (C-3, C-10)", () => {
 
   it("a signed link reaches the worker and its answer is parsed by the contract", async () => {
     const attemptId = randomUUID();
-    const out = await http(route(() => clock.now())).link({ tenantId: a.tenantId, toolkit: "shopify", attemptId, connectionId: randomUUID(), shopDomain: SHOP, createdBy: a.owner.userId, browserHash: BINDING });
+    const out = await http(route(() => clock.now())).link({ tenantId: a.tenantId, toolkit: "shopify", attemptId, connectionId: randomUUID(), shopDomain: SHOP, createdBy: a.owner.memberId, browserHash: BINDING });
     expect(out).toMatchObject({ outcome: "linked", authConfigId: "ac_shopify" });
   });
 
