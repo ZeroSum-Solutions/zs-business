@@ -326,7 +326,8 @@ export type ApplyTemplateResponse = z.infer<typeof applyTemplateResponseSchema>;
 /** IT-11: POST /v1/setup/booking-pages/:id/published. */
 export const setBookingPagePublishedRequestSchema = z.strictObject({ published: z.boolean() });
 export type SetBookingPagePublishedRequest = z.infer<typeof setBookingPagePublishedRequestSchema>;
-export const bookingPagePublishedSchema = z.strictObject({ pageId: idSchema, published: z.boolean() });
+/** `changed` is false when the page already had the requested value. */
+export const bookingPagePublishedSchema = z.strictObject({ pageId: idSchema, published: z.boolean(), changed: z.boolean() });
 export type BookingPagePublished = z.infer<typeof bookingPagePublishedSchema>;
 /** `replayed` is true when the page already had the requested value (no change, no new action). */
 export const setBookingPagePublishedResponseSchema = z.lazy(() =>

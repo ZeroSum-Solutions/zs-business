@@ -50,6 +50,9 @@ export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set([
   "media.asset.upload", "media.variant.generate", "media.variant.stage", "media.variant.fail",
   // IM-23: rejecting is the owner's direct decision; it publishes nothing, so nothing approves it.
   "media.variant.reject",
+  // industry-templates.md IT-4: the apply route checks the template and zone and reads the setup
+  // row before it dispatches under its reserved key; an approved copy would skip those steps.
+  "tenant.template.apply",
 ]);
 export const cannotBeApproved = (actionType: string) =>
   isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);

@@ -59,6 +59,12 @@ export interface ActionHandler<Config = DispatchConfig> {
     clock: () => Date;
     config: Config;
     generateId: () => string;
+    /**
+     * Optional to call: reserves the id the dispatcher records this action under, for a handler
+     * whose rows point at their action (a deferred key, checked at commit). The first call mints
+     * it; later calls return the same id. A handler that never calls it changes nothing.
+     */
+    actionId?: () => string;
   }): Promise<HandlerResult>;
   /** Return a typed domain error, or undefined to use the shared mapping. */
   mapError?(error: unknown): ActionError | undefined;
@@ -201,8 +207,10 @@ export function createDispatcher<Config = DispatchConfig>(
           return new Date(latest);
         };
         const now = readClock();
+        let reservedActionId: string | undefined;
+        const actionIdFor = () => (reservedActionId ??= generateId());
         const handled = await runHandler(() =>
-          handler.handle({ tx, command, binding, now, clock: readClock, config, generateId }),
+          handler.handle({ tx, command, binding, now, clock: readClock, config, generateId, actionId: actionIdFor }),
         );
         // Handlers are trusted server code we write. This check catches a handler that leaves
         // the transaction scoped to another tenant; throwing rolls back. It sees only the final
@@ -217,7 +225,7 @@ export function createDispatcher<Config = DispatchConfig>(
         const parsedResult = jsonValueSchema.safeParse(handled.result);
         if (!parsedResult.success) throw new ValidationFailed(parsedResult.error.message);
         const result = parsedResult.data;
-        const actionId = generateId();
+        const actionId = reservedActionId ?? generateId();
         const event = handled.event ?? {
           type: binding.actionType,
           payload: { actionId, actionType: binding.actionType, target: binding.target, result },

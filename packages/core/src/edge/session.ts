@@ -6,6 +6,19 @@
 // M3b: stored approvals (approvals.md) run through approvedDispatch beside the direct path.
 import {
   ROLE_PERMISSIONS,
+  applyTemplateRequestSchema,
+  applyTemplateResponseSchema,
+  BOOKING_PAGE_SET_PUBLISHED_ACTION,
+  bookingTimeZoneSchema,
+  isIndustryTemplateId,
+  Refused,
+  setBookingPagePublishedRequestSchema,
+  setBookingPagePublishedResponseSchema,
+  TEMPLATE_APPLY_ACTION,
+  templateApplyKey,
+  type ApplyTemplateResponse,
+  type SetBookingPagePublishedResponse,
+  type SetupRead,
   WALLET_TOPUP_CREATE_ACTION,
   CALENDAR_GOOGLE_CONNECT_ACTION,
   CALENDAR_GOOGLE_DISCONNECT_ACTION,
@@ -135,6 +148,7 @@ import { AGENT_MEMBER_PERMISSIONS, agentHandlers, agentKindStatus, followUpStatu
 import { templateHandlers } from "../templates/handlers.js";
 import { templatedKindHandlers } from "../templates/send.js";
 import { businessHandlers, getBusinessProfile } from "../business/index.js";
+import { loadSetup, readSetup, setupHandlers, storedApplyResult, zoneKnown } from "../setup/index.js";
 import { transcriptionHandlers } from "../transcription/handlers.js";
 import { documentIntakeHandlers } from "../document-intake/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
@@ -253,6 +267,7 @@ const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
+  ...setupHandlers,
 });
 
 /**
@@ -301,6 +316,9 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   ...BROWSER_MEMBER_PERMISSIONS,
   // business-profile.md BP-6: only owners change who the business is.
   "business.profile.update": "business",
+  // industry-templates.md IT-4, IT-11: only owners apply a template and take its page live.
+  [TEMPLATE_APPLY_ACTION]: "business",
+  [BOOKING_PAGE_SET_PUBLISHED_ACTION]: "business",
   // document-intake.md DL-3, DL-13: owners upload and discard; apply is `required` in APPROVAL_POLICIES.
   "catalog.intake.upload": "publish",
   "catalog.intake.apply": "publish",
@@ -500,7 +518,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "calendar_connection" | "site" | "media_asset" | "media_variant";
+  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "calendar_connection" | "site" | "media_asset" | "media_variant" | "tenant_setup" | "booking_page";
   const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
     keyedEnvelope(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
   /** The envelope for a key the server built itself, such as a reserved `inbox:` step key. */
@@ -520,6 +538,33 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       await requireMember(tx, tenantId, actorId, permission);
       return work(tx);
     });
+  /** Dispatch, and tell whether the answer is a stored action (a replay) rather than this call's own. */
+  const runTracked = async (command: ActionCommand): Promise<{ output: ActionResult; replayed: boolean }> => {
+    const minted = new Set<string>();
+    const generateId = () => {
+      const id = deps.generateId();
+      minted.add(id);
+      return id;
+    };
+    const output = await directDispatch({ ...deps, generateId }, tenantId, actorId, memberAuthorize(tenantId, actorId))(command);
+    return { output, replayed: !minted.has(output.actionId) };
+  };
+  /**
+   * industry-templates.md IT-4: owner only; the template id (404) and the zone (422) are checked,
+   * then the setup row answers: the same template replays its stored result, another is a 409.
+   * Null when nothing is applied yet. Nothing here stores a key.
+   */
+  const appliedAnswer = (templateId: string, timeZone: string) => read("business", async (tx): Promise<ApplyTemplateResponse | null> => {
+    if (!isIndustryTemplateId(templateId)) throw new NotFound("No such template");
+    if (!bookingTimeZoneSchema.safeParse(timeZone).success || !(await zoneKnown(tx, timeZone)))
+      throw new Refused(422, "invalid_time_zone", "Unknown time zone");
+    const stored = await loadSetup(tx, tenantId);
+    if (!stored) return null;
+    if (stored.setup.templateId !== templateId)
+      throw new Conflict("Another template is already applied", { reason: "template_already_applied" });
+    const result = await storedApplyResult(tx, tenantId, stored.actionId);
+    return parseInput(applyTemplateResponseSchema, { actionId: stored.actionId, result, replayed: true }, "result");
+  });
   /**
    * inbox-home.md I-6: a key for one step of a reply write, derived so a retry replays that step.
    * `inbox:` is a reserved prefix (SERVER_IDEMPOTENCY_PREFIXES), so no caller can take it first.
@@ -993,6 +1038,46 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const request = parseInput(updateBusinessProfileRequestSchema, body);
       return parseInput(businessProfileOutputSchema,
         await run({ actionType: "business.profile.update", ...businessEnvelope(key), payload: toJson(request) }), "result");
+    },
+
+    /** industry-templates.md IT-6: any member reads what was applied, the zone and every template's preview. */
+    getSetup: (): Promise<SetupRead> => read(null, (tx) => readSetup(tx, tenantId)),
+    /**
+     * IT-4: apply a template once, under the server's `template:<id>` key. A concurrent apply that
+     * loses (the setup row's key, or this key bound to another owner or zone) reads the winner's
+     * answer: a replay of the same template, or a 409 for another.
+     */
+    async applyTemplate(body: unknown): Promise<ApplyTemplateResponse> {
+      const request = parseInput(applyTemplateRequestSchema, body);
+      const known = await appliedAnswer(request.templateId, request.timeZone);
+      if (known) return known;
+      const templateId = request.templateId as Parameters<typeof templateApplyKey>[0];
+      const { id: _id, ...rest } = keyedEnvelope(templateApplyKey(templateId), "tenant_setup", tenantId);
+      try {
+        const { output, replayed } = await runTracked({
+          actionType: TEMPLATE_APPLY_ACTION, ...rest, payload: { templateId, timeZone: request.timeZone },
+        } as ActionCommand);
+        return parseInput(applyTemplateResponseSchema, { ...output, replayed }, "result");
+      } catch (error) {
+        const lost = error instanceof BindingMismatch || error instanceof IdempotencyConflict ||
+          (error instanceof Conflict && error.details.constraint === "tenant_setups_pkey");
+        if (!lost) throw error;
+        const settled = await appliedAnswer(request.templateId, request.timeZone);
+        if (settled) return settled;
+        throw error;
+      }
+    },
+    /** IT-11: an owner takes one of the tenant's pages live or off line; the same value again changes nothing. */
+    async setBookingPagePublished(pageId: unknown, body: unknown, key: unknown): Promise<SetBookingPagePublishedResponse> {
+      const page = uuidSchema.safeParse(pageId);
+      if (!page.success) throw new NotFound("No such booking page");
+      const request = parseInput(setBookingPagePublishedRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "booking_page", page.data);
+      const { output, replayed } = await runTracked({
+        actionType: BOOKING_PAGE_SET_PUBLISHED_ACTION, ...rest, payload: { pageId: page.data, published: request.published },
+      } as ActionCommand);
+      const parsed = parseInput(setBookingPagePublishedResponseSchema, { ...output, replayed }, "result");
+      return { ...parsed, replayed: replayed || !parsed.result.changed };
     },
 
     /** The caller's own membership; any member may ask. `profile` adds the business name and email. */
