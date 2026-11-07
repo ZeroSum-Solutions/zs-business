@@ -3,14 +3,15 @@
 import { CheckCircle, Clock, WarningCircle } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Fragment, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DisabledReason, SampleBadge } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import type { ConnectionStatus } from "@/lib/api";
 import { returnNotice, type ReturnNotice } from "@/lib/calendar-sync";
-import { useConnections, useKeys } from "@/lib/queries";
+import { useConnections, useKeys, useSetup } from "@/lib/queries";
+import { orderConnections } from "@/lib/recommended-connections";
 import { GoogleCalendarCard } from "./google-calendar-card";
 
 const STATUS: Record<ConnectionStatus, { label: string; tone: "success" | "warn" | "neutral"; icon: typeof CheckCircle; action: string | null }> = {
@@ -23,15 +24,29 @@ const STATUS: Record<ConnectionStatus, { label: string; tone: "success" | "warn"
 /** Only Google Calendar connects from here today; the other rows are read-only (U3-7). */
 const CONNECTIONS_DESCRIPTION = "Accounts this business uses. Connect Google Calendar here. The other accounts can't be changed here yet.";
 
+/** The connection cards this environment offers, by catalog id. */
+const OFFERED_CONNECTIONS = ["google_calendar"] as const;
+
 export function ConnectionsView() {
   const [notice, setNotice] = useState<ReturnNotice | null>(null);
+  const setup = useSetup();
+  // industry-templates.md IT-8: the applied template's recommended connections come first.
+  const template = setup.data?.templates.find((item) => item.id === setup.data?.applied?.templateId);
+  const cards: Record<(typeof OFFERED_CONNECTIONS)[number], ReactNode> = {
+    google_calendar: <GoogleCalendarCard notice={notice} onNotice={setNotice} />,
+  };
   return (
     <>
       <PageHeader title="Connections" description={CONNECTIONS_DESCRIPTION} />
       <Suspense fallback={null}>
         <GoogleReturn onNotice={setNotice} />
       </Suspense>
-      <GoogleCalendarCard notice={notice} onNotice={setNotice} />
+      {orderConnections(OFFERED_CONNECTIONS, template?.recommendedConnections ?? []).map(({ id, recommended }) => (
+        <Fragment key={id}>
+          {recommended && template ? <p className="mb-2 text-sm font-semibold text-muted" data-testid={`recommended-${id}`}>Recommended for {template.label}</p> : null}
+          {cards[id]}
+        </Fragment>
+      ))}
       <OtherAccounts />
     </>
   );
