@@ -41,6 +41,7 @@ import {
   type EdgeDependencies,
 } from "../../src/index.js";
 import { NEVER_APPROVED_ACTIONS } from "../../src/approvals/policy.js";
+import { REFUND_BUDGET_MS } from "../../src/connections/edge.js";
 import { FakeComposio } from "./fake-composio.js";
 import { addMember, ENV, makeClock, makeWorker, newTenant, seedConnection, T0, type TestClock } from "./harness.js";
 
@@ -877,10 +878,18 @@ describe("connect quota refund (C-4)", () => {
   let allowanceFull = false;
   let allowanceFails = false;
   let refundSignal: AbortSignal | undefined;
+  /** Makes the allowance check or the refund wait until its signal aborts, as a stalled store would. */
+  let stall: "allowance" | "refund" | null = null;
+  const untilAborted = (signal: AbortSignal | undefined) => new Promise<never>((_, reject) => {
+    if (signal?.aborted) reject(signal.reason);
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
   const receiptLimiter: ConnectionLimiter = {
     async take(charges, options) {
       if (charges[0]!.key.startsWith("conn-connect-refund:")) {
         taken.push("conn-connect-refund");
+        options?.signal?.throwIfAborted(); // as the shared limiter does
+        if (stall === "allowance") return untilAborted(options?.signal);
         if (allowanceFails) throw new Error("store down");
         return allowanceFull ? { ok: false, retryAfterSeconds: 3000 } : { ok: true };
       }
@@ -895,12 +904,14 @@ describe("connect quota refund (C-4)", () => {
     },
     async refund(receipt, options) {
       refundSignal = options?.signal;
+      options?.signal?.throwIfAborted();
+      if (stall === "refund") return untilAborted(options?.signal);
       if (refundFails) throw new Error("store down");
       refunded.push(receipt.id);
       return 1;
     },
   };
-  beforeEach(() => { issued = []; refunded = []; reported = []; refundFails = false; allowanceFull = false; allowanceFails = false; refundSignal = undefined; });
+  beforeEach(() => { issued = []; refunded = []; reported = []; refundFails = false; allowanceFull = false; allowanceFails = false; refundSignal = undefined; stall = null; });
   const start = (connector: ConnectorPort = port, who = a, signal?: AbortSignal) =>
     createConnectionsSession({ ...deps(), connections: { connector, stateSecrets: { current: STATE }, limiter: receiptLimiter, report: (event) => reported.push(event) } }, { tenantId: who.tenantId, actorId: who.owner.userId })
       .start("shopify", { shopDomain: SHOP, browserBinding: BINDING }, signal).catch((e: unknown) => e);
@@ -968,6 +979,46 @@ describe("connect quota refund (C-4)", () => {
       allowanceFails = true;
       await exhaustBudget();
       expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(refunded).toEqual([]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "failed" }]);
+    });
+
+    it("a stalled allowance check is cut off at the refund budget, the charge stands, and the connect still answers", async () => {
+      stall = "allowance";
+      await exhaustBudget();
+      const began = Date.now();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(REFUND_BUDGET_MS - 100);
+      expect(Date.now() - began).toBeLessThan(REFUND_BUDGET_MS + 1500);
+      expect(refunded).toEqual([]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "failed" }]);
+    });
+
+    it("a stalled refund is cut off at the refund budget and reported as commit_unknown; no later refund starts", async () => {
+      stall = "refund";
+      await exhaustBudget();
+      const began = Date.now();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(REFUND_BUDGET_MS - 100);
+      expect(Date.now() - began).toBeLessThan(REFUND_BUDGET_MS + 1500);
+      expect(refundSignal!.aborted).toBe(true);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "commit_unknown" }]);
+      stall = null;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(refunded).toEqual([]);
+    });
+
+    it("a request cancelled before the refund starts keeps the charge and is reported failed", async () => {
+      await exhaustBudget();
+      const controller = new AbortController();
+      const gone: ConnectionLimiter = { ...receiptLimiter, async takeWithReceipt(charges, options) {
+        const result = await receiptLimiter.takeWithReceipt!(charges, options);
+        controller.abort(); // the caller leaves right after the charge
+        return result;
+      } };
+      const error = await createConnectionsSession({ ...deps(), connections: { connector: port, stateSecrets: { current: STATE }, limiter: gone, report: (event) => reported.push(event) } },
+        { tenantId: a.tenantId, actorId: a.owner.userId }).start("shopify", { shopDomain: SHOP, browserBinding: BINDING }, controller.signal).catch((e: unknown) => e);
+      expect(error).toBeDefined();
       expect(refunded).toEqual([]);
       expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "failed" }]);
     });

@@ -187,9 +187,11 @@ role for workers (all workers share one pattern today; Known limits).
     That bounds refunds to 3 per refund window per tenant; it is not a flat cap on attempts,
     since the charge and refund windows are separate and a boundary can allow a burst across two
     windows. The refund only gives back a rate-limit unit; no money or billing credit moves. It
-    runs inside the request deadline (1.5 s); a refused allowance or a failed refund keeps the
-    charge and is reported (`connect_refund`: `capped`, `failed`, or `commit_unknown` when the
-    refund call itself was cut off). Every Composio link failure raises a `link_refused` worker
+    runs inside the request deadline (1.5 s); a refused allowance or a failed allowance check keeps the
+    charge and is reported (`connect_refund`: `capped` or `failed`). A refund call that throws or
+    is cut off is reported `commit_unknown`: it may still have committed, so the charge may or
+    may not have come back. Every Composio link failure except a 429 (which raises the `cooldown` report) raises a
+    `link_refused` worker
     report (class and request id only) so an operator sees a run of them; no report claims or
     removes an account. `beforeProvider` is not in the wire body (the strict contract is
     unchanged): the worker sets the response header `x-zs-link-before-provider: 1`, so the API and
