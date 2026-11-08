@@ -16,7 +16,7 @@ import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
 import { useBusinessProfile, useKeys, usePipelines, useSetup } from "@/lib/queries";
 import { dealTarget } from "@/lib/setup";
-import { amountHint, FALLBACK_CURRENCY, parseAmount } from "./deal-details-dialog";
+import { amountHint, businessCurrency, FALLBACK_CURRENCY, parseAmount } from "./deal-details-dialog";
 
 export const NO_PIPELINE_REASON = "There is no pipeline for deals yet. An owner adds one in Setup.";
 export const NO_OPEN_STAGE_REASON = "The pipeline has no open stage for a new deal. Add a stage that is not Won or Lost in the pipeline.";
@@ -116,7 +116,7 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
   const intents = useIntentKey();
   const generation = useDialogGeneration(open);
   const profile = useBusinessProfile();
-  const profileCurrency = profile.data && isActiveCurrencyCode(profile.data.currency) ? profile.data.currency : FALLBACK_CURRENCY;
+  const profileCurrency = businessCurrency(profile.data) ?? FALLBACK_CURRENCY;
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
   const [currency, setCurrency] = useState<string | null>(null);
@@ -124,7 +124,7 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
   // The deal the first attempt added when only its value failed: the retry saves the value alone.
   const [created, setCreated] = useState<CreatedDeal | null>(null);
   // A value needs the business's currency, or one the owner picked: never a guessed USD.
-  const currencyKnown = currency !== null || profile.isSuccess;
+  const currencyKnown = currency !== null || businessCurrency(profile.data) !== null;
   const shownCurrency = currency ?? profileCurrency;
 
   const create = useMutation({

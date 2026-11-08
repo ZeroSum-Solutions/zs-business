@@ -56,6 +56,17 @@ describe("the page and its policy", () => {
     for (const path of ["/", "/sign-in", "/account/connections", "/api/shopify/open", "/shopify", "/shopify/application", "/shopify/app-two"]) expect(matches(path), path).toBe(true);
     for (const path of ["/shopify/app", "/shopify/app/", "/shopify/app/extra"]) expect(matches(path), path).toBe(false);
   });
+
+  it("adds no framing header of its own to /shopify/app through any rule in next.config", async () => {
+    const rules = await nextConfig.headers!();
+    const framing = new Set(["content-security-policy", "x-frame-options"]);
+    const unmatched = rules.filter((rule) => {
+      // Rule sources are path patterns; the general one is a negative-lookahead regex, the others are literal paths.
+      const hit = rule.source.includes("(") ? new RegExp(`^${rule.source}$`).test("/shopify/app") : rule.source === "/shopify/app";
+      return hit && rule.headers.some((header) => framing.has(header.key.toLowerCase()));
+    });
+    expect(unmatched).toEqual([]);
+  });
 });
 
 // ---- the session-token proxy -------------------------------------------------------------------
@@ -885,8 +896,21 @@ describe("GET /shopify/app (C-20 headers)", () => {
     const response = await get("?shop=halden-rowe.myshopify.com&host=abc");
     expect(response.status).toBe(200);
     const csp = response.headers.get("content-security-policy")!;
-    expect(csp).toContain("frame-ancestors https://halden-rowe.myshopify.com https://admin.shopify.com");
-    expect(csp).toContain("object-src 'none'");
+    // The whole value, with the per-request nonce read back from it: an extra ancestor or source cannot pass.
+    const nonce = /script-src 'nonce-([A-Za-z0-9_-]{24})' /.exec(csp)?.[1];
+    expect(nonce).toBeDefined();
+    expect(csp).toBe([
+      "default-src 'none'",
+      `script-src 'nonce-${nonce}' https://cdn.shopify.com`,
+      `style-src 'nonce-${nonce}'`,
+      "connect-src 'self' https://*.shopify.com https://*.shopifycloud.com",
+      "img-src 'self' data: https://cdn.shopify.com",
+      "font-src 'self'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "object-src 'none'",
+      "frame-ancestors https://halden-rowe.myshopify.com https://admin.shopify.com",
+    ].join("; "));
     expect(response.headers.get("x-frame-options")).toBeNull();
     expect(response.headers.has("set-cookie")).toBe(false);
     expect(await response.text()).toContain('name="shopify-api-key" content="' + "b".repeat(32) + '"');

@@ -216,6 +216,22 @@ describe("recommended connections (IT-8)", () => {
   });
 });
 
+describe("recommended connections when a refetch fails with cached setup (IT-8)", () => {
+  it("shows no recommended lines and keeps the default order once the setup read has failed, even with cached data", () => {
+    const html = render(h(ConnectionsView), (client) => {
+      client.setQueryData(keys.setup, applied("jewelry"));
+      client.getQueryCache().find({ queryKey: keys.setup })!.setState({
+        status: "error", fetchStatus: "idle", error: new ApiError("server", "Something went wrong on our side. Try again."), errorUpdateCount: 1, errorUpdatedAt: Date.now(),
+        fetchFailureCount: 1, fetchFailureReason: new ApiError("server", "Something went wrong on our side. Try again."),
+      });
+      expect(client.getQueryData(keys.setup)).toBeDefined();
+    });
+    expect(html).toContain('data-testid="gcal-card"');
+    expect(html).not.toContain("Recommended for");
+    expect(html.indexOf('data-testid="gcal-card"')).toBeLessThan(html.indexOf('data-testid="shopify-card"'));
+  });
+});
+
 describe("New deal (IT-10)", () => {
   const SEED_AND_TEMPLATE = (applyId: string | null) => (client: QueryClient) => {
     client.setQueryData(keys.pipelines, [

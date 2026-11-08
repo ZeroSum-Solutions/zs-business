@@ -115,7 +115,8 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
   const hasLive = items.some((item) => item.status !== "disconnected");
   // A server without connections settings answers 404 for the list: Shopify is not offered at all.
   const notSetUp = connections.isError && isApiError(connections.error, "not_found");
-  const { native, pending: nativePending } = useNativeShopify(canManage);
+  const { state: nativeState, retry: retryNative } = useNativeShopify(canManage);
+  const native = nativeState === "native";
 
   return (
     <Card aria-labelledby="shopify-title" data-testid="shopify-card" className="mb-6">
@@ -177,7 +178,7 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
             {/* One live connection per toolkit (C-7): a retired store left in view for its warning does not count. */}
             {hasLive ? null : <ShopifyClaim />}
             {/* C-18, S1 2.3.1: with the native tier on, no screen asks for a shop domain; the store is installed from the Shopify App Store. */}
-            {hasLive || nativePending ? null : native ? <AppStoreNote /> : <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />}
+            {hasLive || nativeState === "pending" ? null : native ? <AppStoreNote /> : nativeState === "unknown" ? <NativeUnknownNote retry={retryNative} /> : <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />}
           </>
         )
       ) : (
@@ -378,6 +379,16 @@ function AppStoreNote() {
   return (
     <p className="mt-4 text-sm text-fg-2" data-testid="shopify-app-store-note">
       To connect a store, install ZS Business Connections from the Shopify App Store. Open it in your Shopify admin, then link the store to this hub there or with the link code above.
+    </p>
+  );
+}
+
+/** The claim read failed without saying whether the native tier is on: no address form is guessed (C-18). */
+function NativeUnknownNote({ retry }: { retry: () => void }) {
+  return (
+    <p className="mt-4 text-sm text-fg-2" role="status" data-testid="shopify-native-unknown">
+      We could not check how to connect a store right now.{" "}
+      <button type="button" onClick={retry} className="inline-flex min-h-11 items-center font-bold text-accent-ink underline-offset-4 hover:underline">Try again</button>
     </p>
   );
 }
