@@ -2,7 +2,7 @@
 // eight signed operations, the webhook endpoint, and the API's embedded and claim routes against the real Hono app,
 // a real local Postgres, the real native worker in process and the in-process fake Shopify. The core suite covers
 // the rules; these tests cover the HTTP shape and the isolation between two tenants.
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   CONNECTOR_SIGNATURE_HEADERS,
@@ -17,9 +17,10 @@ import {
   type HubPort,
   type ShopifyPort,
 } from "@zs/core";
-import { shopifyOpenResponseSchema } from "@zs/contracts";
+import { SHOPIFY_EMBEDDED_ADDRESS_HEADER, SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER, shopifyEmbeddedAddressMessage, shopifyOpenResponseSchema } from "@zs/contracts";
 import { asService } from "@zs/db";
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
+import type { ClientIpConfig } from "../src/public/client-ip.js";
 import { parseConnectionsEnv, parseShopifyNativeEnv } from "../src/connections/config.js";
 import { connectionsInternalRoutes } from "../src/connections/internal.js";
 import { shopifyWebhookRoutes } from "../src/connections/shopify-webhook.js";
@@ -137,7 +138,7 @@ function makeNative() {
   });
 }
 
-function build(shopify: ShopifyPort | null, shopifyAppHandle?: string): App {
+function build(shopify: ShopifyPort | null, shopifyAppHandle?: string, edge: { clientIp?: ClientIpConfig; embeddedAddressSecret?: string } = {}): App {
   return createApp({
     ...(shopifyAppHandle ? { shopifyAppHandle } : {}),
     verifier: createHs256Verifier(SECRET, { clock }),
@@ -153,6 +154,7 @@ function build(shopify: ShopifyPort | null, shopifyAppHandle?: string): App {
         returnUrl: "https://app.haldenrowe.example/account/connections",
         limiter,
         shopify,
+        ...edge,
       },
     }),
   });
@@ -257,6 +259,35 @@ describe("the embedded routes (C-21, C-22)", () => {
     const body = await json(response);
     expect(body).toMatchObject({ outcome: "ok", summary: { count: 1, total: { amount: "30.00", currency: "USD" } } });
     expect(JSON.stringify(body)).not.toMatch(/customer|email/i);
+  });
+
+  it("counts each browser by the dashboard's signed note of its address, and the host's address otherwise (C-30)", async () => {
+    const secret = "v".repeat(32);
+    const behindDashboard = build(createLocalShopifyPort(native), undefined, { clientIp: { header: "x-vercel-forwarded-for" }, embeddedAddressSecret: secret });
+    const sign = (address: string, idToken: string, key = secret) => createHmac("sha256", key).update(shopifyEmbeddedAddressMessage(address, idToken)).digest("base64url");
+    // The vector the dashboard's test pins too.
+    expect(sign("203.0.113.5", "aaaa.bbbb.cccc")).toBe("pyAmXzMBfL5iUyDdYwm13m7UwxccPS8MFUPMJX5Q1Y0");
+    const keyOf = async (app: App, idToken: string, headers: Record<string, string>) => {
+      charged = [];
+      await app.request(`${ORIGIN}/public/v1/shopify/embedded/orders`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${idToken}`, "x-vercel-forwarded-for": "10.0.0.9", ...headers },
+        body: "{}",
+      });
+      return charged[0]?.[0]?.key;
+    };
+    const t1 = token();
+    const t2 = token();
+    const note = (address: string, idToken: string, key?: string) => ({ [SHOPIFY_EMBEDDED_ADDRESS_HEADER]: address, [SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER]: sign(address, idToken, key) });
+    expect(await keyOf(behindDashboard, t1, note("203.0.113.5", t1))).toBe("shopify-embedded:203.0.113.5");
+    expect(await keyOf(behindDashboard, t2, note("198.51.100.7", t2))).toBe("shopify-embedded:198.51.100.7");
+    expect(await keyOf(behindDashboard, t1, note("2001:db8:1:2:3:4:5:6", t1))).toBe("shopify-embedded:2001:db8:1:2::/64");
+    // A note signed for another token, with another key, unsigned, or not an address: the host's address counts.
+    for (const headers of [note("203.0.113.5", t2), note("203.0.113.5", t1, "w".repeat(32)), { [SHOPIFY_EMBEDDED_ADDRESS_HEADER]: "203.0.113.5" }, note("not-an-ip", t1), {}])
+      expect(await keyOf(behindDashboard, t1, headers), JSON.stringify(headers)).toBe("shopify-embedded:10.0.0.9");
+    // An API without the secret never reads the note.
+    const noSecret = build(createLocalShopifyPort(native), undefined, { clientIp: { header: "x-vercel-forwarded-for" } });
+    expect(await keyOf(noSecret, t1, note("203.0.113.5", t1))).toBe("shopify-embedded:10.0.0.9");
   });
 
   it("orders (C-30): a forged token is a 401, the rate limit is a 429, and busy and a dead worker map like open", async () => {

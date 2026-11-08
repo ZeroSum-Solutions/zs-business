@@ -1,13 +1,17 @@
 // The embedded Shopify app on the dashboard side (docs/requirements/connections.md C-21): the page's HTML and policy,
 // the session-token proxy, the claim routes through the generic proxy, and the page script run against a fake document.
+import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { SHOPIFY_EMBEDDED_ADDRESS_HEADER, SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER, shopifyEmbeddedAddressMessage } from "@zs/contracts";
 import nextConfig from "../next.config";
 import { proxyApiRequest } from "../src/lib/server/api-proxy";
 import { EMBEDDED_CLIENT_PARAMS, EMBEDDED_CLIENT_SOURCE } from "../src/lib/server/shopify-embedded-client";
 import { APP_BRIDGE_URL, embeddedPolicy, frameAncestors, renderEmbeddedPage, shopFromQuery } from "../src/lib/server/shopify-embedded-page";
-import { embeddedConfigFrom, proxyEmbedded } from "../src/lib/server/shopify-embedded";
+import { embeddedConfigFrom, proxyEmbedded, type EmbeddedConfig } from "../src/lib/server/shopify-embedded";
 
 const CLIENT_ID = "a".repeat(32);
+/** HMAC-SHA256 under "v" x 32 of the address note for 203.0.113.5 and token aaaa.bbbb.cccc; apps/api's test pins the same. */
+const ADDRESS_VECTOR = "pyAmXzMBfL5iUyDdYwm13m7UwxccPS8MFUPMJX5Q1Y0";
 const NONCE = "n".repeat(24);
 const b64 = (text: string) => Buffer.from(text).toString("base64url");
 const TOKEN = [b64('{"alg":"HS256","typ":"JWT"}'), b64('{"dest":"https://halden-rowe.myshopify.com"}'), b64("signature-bytes-here")].join(".");
@@ -93,6 +97,41 @@ describe("POST /api/shopify/<op> (the dashboard half of C-21)", () => {
     const upstream = okFetch();
     await proxyEmbedded(post("{}", { "x-forwarded-for": "203.0.113.5" }), "open", { ...config(upstream), trustProxy: true });
     expect(new Headers((upstream.mock.calls[0]![1] as RequestInit).headers).get("x-forwarded-for")).toBe("203.0.113.5");
+  });
+
+  it("signs the browser's address for the API with the shared secret, bound to the token (C-30)", async () => {
+    const secret = "s".repeat(40);
+    const sent = async (headers: Record<string, string>, over: Partial<EmbeddedConfig>) => {
+      const upstream = okFetch();
+      await proxyEmbedded(post("{}", headers), "orders", { ...config(upstream), ...over });
+      return new Headers((upstream.mock.calls[0]![1] as RequestInit).headers);
+    };
+    const signed = await sent({ "x-forwarded-for": "198.51.100.1, 203.0.113.5" }, { trustProxy: true, addressSecret: secret });
+    // The right-most entry is the one the trusted proxy appended (as for sign-in); a caller writes the rest.
+    expect(signed.get(SHOPIFY_EMBEDDED_ADDRESS_HEADER)).toBe("203.0.113.5");
+    expect(signed.get(SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER)).toBe(createHmac("sha256", secret).update(shopifyEmbeddedAddressMessage("203.0.113.5", TOKEN)).digest("base64url"));
+    // The pinned vector the API's test checks too, so both halves agree on the message.
+    expect(createHmac("sha256", "v".repeat(32)).update(shopifyEmbeddedAddressMessage("203.0.113.5", "aaaa.bbbb.cccc")).digest("base64url")).toBe(ADDRESS_VECTOR);
+    for (const over of [{ trustProxy: false, addressSecret: secret }, { trustProxy: true, addressSecret: null }]) {
+      const plain = await sent({ "x-forwarded-for": "203.0.113.5" }, over);
+      expect(plain.get(SHOPIFY_EMBEDDED_ADDRESS_HEADER), JSON.stringify(over)).toBeNull();
+      expect(plain.get(SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER)).toBeNull();
+    }
+    expect(embeddedConfigFrom({ ZS_API_URL: "https://api.example.test", CONNECTIONS_EMBEDDED_ADDRESS_SECRET: secret })?.addressSecret).toBe(secret);
+    expect(embeddedConfigFrom({ ZS_API_URL: "https://api.example.test", CONNECTIONS_EMBEDDED_ADDRESS_SECRET: "short" })?.addressSecret).toBeNull();
+  });
+
+  it("aborts the API call when the browser's request is aborted", async () => {
+    let seen: AbortSignal | undefined;
+    const upstream = (async (_url: unknown, init?: RequestInit) => { seen = init?.signal ?? undefined; return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))); }) as unknown as typeof fetch;
+    const controller = new AbortController();
+    const request = new Request(post("{}"), { signal: controller.signal });
+    const pending = proxyEmbedded(request, "orders", config(upstream));
+    for (let i = 0; i < 50 && seen === undefined; i += 1) await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(seen?.aborted).toBe(false);
+    controller.abort();
+    expect((await pending).status).toBe(502);
+    expect(seen?.aborted).toBe(true);
   });
 
   it("refuses a missing or malformed token (401), another site (403), a non-JSON body (400) and a big body (413) without calling the API", async () => {
@@ -188,7 +227,8 @@ function runClient(options: { framed?: boolean; search?: string; hidden?: boolea
     (isOrders ? orderCalls : calls).push({ url, init });
     if (isOrders && options.gate) await options.gate;
     const next = (isOrders ? orderQueue : queue).shift() ?? { status: 503, body: {} };
-    if ("hang" in next) return new Promise<never>(() => undefined);
+    // A hung request ends only when the page aborts it, as fetch does.
+    if ("hang" in next) return new Promise<never>((_, reject) => { init.signal?.addEventListener("abort", () => reject(new Error("aborted"))); });
     if (next.wait) await next.wait;
     const headers = new Headers(next.headers ?? {});
     return { status: next.status, ok: next.status >= 200 && next.status < 300, headers, json: async () => next.body };
@@ -583,6 +623,41 @@ describe("recent orders on the page (C-30)", () => {
     await settle();
     expect(cells(app)).toContain("$999,999,999,999,999.99");
     expect(texts(app)).toContain("total $1,000,000,000,000,000.00");
+  });
+
+  it("keeps every decimal Shopify sent and never fewer than the currency's own", async () => {
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([
+      order("#1", { total: { amount: "1.234567", currency: "USD" } }),
+      order("#2", { total: { amount: "10.5", currency: "USD" } }),
+      order("#3", { total: { amount: "1500", currency: "JPY" } }),
+    ], { count: 3, total: { amount: "11.734567", currency: "USD" } })] });
+    await settle();
+    expect(cells(app)).toEqual(expect.arrayContaining(["$1.234567", "$10.50", "¥1,500"]));
+    expect(texts(app)).toContain("total $11.734567");
+  });
+
+  it("gives up on a hung read at its 15 s deadline: the request is aborted and the slot says not available", async () => {
+    const { app, orderCalls, advance } = runClient({ answers: [opened()], orders: [{ hang: true }] });
+    await settle();
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(false);
+    await advance(14_999);
+    expect(texts(app)).toContain("Loading recent orders");
+    await advance(1);
+    expect(texts(app)).toContain("Orders are not available right now");
+    expect(texts(app)).not.toContain("Loading recent orders");
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(true);
+  });
+
+  it("aborts the orders read when the page moves to another screen", async () => {
+    const confirming = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: LINKED } };
+    const unlinked = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: { state: "none" } } };
+    const { app, orderCalls, advance } = runClient({ search: "?plan=welcome", answers: [confirming, unlinked], orders: [{ hang: true }] });
+    await settle();
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(false);
+    await advance(30_000);
+    expect(texts(app)).toContain("Not linked to a ZS Hub yet");
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(true);
+    expect(texts(app)).not.toContain("Orders are not available");
   });
 
   it("still shows the orders when Open ZS Hub is clicked while they are read (Open ZS Hub keeps the screen)", async () => {

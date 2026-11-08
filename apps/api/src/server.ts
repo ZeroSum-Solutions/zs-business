@@ -129,6 +129,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         ...(env.publicIntake === null ? {} : { clientIp: env.publicIntake.clientIp }),
         stateSecrets: env.connections.stateSecrets,
         returnUrl: env.connections.returnUrl,
+        embeddedAddressSecret: env.connections.embeddedAddressSecret,
         report: (event) => {
           // A refused callback may need an operator; the routine outcomes are not logged.
           if (event.outcome.startsWith("error:") && !["error:browser_mismatch", "error:rate_limited"].includes(event.outcome)) console.warn("Connections callback", event);

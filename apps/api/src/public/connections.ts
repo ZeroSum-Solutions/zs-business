@@ -29,6 +29,8 @@ export interface ConnectionsApiConfig {
   readonly shopify?: ShopifyPort;
   /** Where the caller's address comes from for the embedded app's rate limits (P-10). */
   readonly clientIp?: ClientIpConfig;
+  /** C-30: verifies the dashboard's signed note of the browser's address (CONNECTIONS_EMBEDDED_ADDRESS_SECRET). */
+  readonly embeddedAddressSecret?: string | null;
   /** Receives what each callback did, for logs (C-14): the attempt's tenant and connection ID, never a token or an account ID. */
   readonly report?: (event: { readonly route: "callback" | "status"; readonly outcome: string; readonly tenantId?: string; readonly connectionId?: string }) => void;
 }

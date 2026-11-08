@@ -634,7 +634,13 @@ describe("the API environment (C-3)", () => {
     expect(parseConnectionsApiEnv({ CONNECTIONS_ENV: "" })).toBeNull();
     expect(parseConnectionsApiEnv(values)).toEqual({
       workerUrl: values.CONNECTIONS_WORKER_URL, env: "preview", internalSecret: INTERNAL, stateSecrets: { current: STATE }, returnUrl: RETURN_URL,
+      embeddedAddressSecret: null,
     });
+    // C-30: the optional secret that verifies the dashboard's signed browser address; short or shared is refused.
+    const address = ["conn", "address", "a".repeat(32)].join("-");
+    expect(parseConnectionsApiEnv({ ...values, CONNECTIONS_EMBEDDED_ADDRESS_SECRET: address })?.embeddedAddressSecret).toBe(address);
+    expect(errorOf({ ...values, CONNECTIONS_EMBEDDED_ADDRESS_SECRET: "short" })).toContain("CONNECTIONS_EMBEDDED_ADDRESS_SECRET");
+    expect(errorOf({ ...values, CONNECTIONS_EMBEDDED_ADDRESS_SECRET: STATE })).toContain("must differ");
     const previous = ["conn", "state", "p".repeat(32)].join("-");
     expect(parseConnectionsApiEnv({ ...values, CONNECTIONS_STATE_PREVIOUS_SECRET: previous })?.stateSecrets).toEqual({ current: STATE, previous });
   });

@@ -70,7 +70,7 @@ export async function readCapped(stream: ReadableStream<Uint8Array> | null, max:
 export function connectionsInternalRoutes(config: {
   /** Null when the worker is not configured: every route is 404. */
   readonly worker: Pick<ConnectionsWorker, "link" | "complete" | "cancel" | "run" | "disconnect" | "takeNonce"> | null;
-  /** The native Shopify tier's eight operations under /internal/shopify/<operation> (C-21 to C-24); null when it is off. */
+  /** The native Shopify tier's nine operations under /internal/shopify/<operation> (C-21 to C-24, C-30); null when it is off. */
   readonly native?: ShopifyWorkerOps | null;
   readonly env: ConnectorEnv;
   readonly secrets: { readonly current: string; readonly previous?: string };

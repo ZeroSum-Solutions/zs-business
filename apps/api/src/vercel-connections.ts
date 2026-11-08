@@ -1,4 +1,4 @@
-// Vercel Node function for GET /cron/connections and the five signed POST /internal/connections/<operation>, the eight /internal/shopify/<operation> and POST /webhooks/shopify
+// Vercel Node function for GET /cron/connections and the five signed POST /internal/connections/<operation>, the nine /internal/shopify/<operation> and POST /webhooks/shopify
 // routes (docs/requirements/connections.md C-3, C-7, C-9). scripts/build-vercel.mjs bundles this file once and
 // copies it into six function directories in the workers Vercel project (`pnpm build:vercel:worker`), so the API
 // project never holds the Composio key or the service database login. Like vercel-calendar.ts, it reads

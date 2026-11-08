@@ -134,3 +134,15 @@ export const shopifyOrdersResponseSchema = z.discriminatedUnion("outcome", [
   z.strictObject({ outcome: z.enum(["invalid_token", "unavailable", "busy", "not_supported", "not_linked"]) }),
 ]);
 export type ShopifyOrdersResponse = z.infer<typeof shopifyOrdersResponseSchema>;
+
+/**
+ * C-30: the browser's address, from the dashboard proxy to the API, signed. The API sees only the dashboard's own
+ * address on a server-to-server call (Vercel overwrites x-vercel-forwarded-for), so without this note every merchant
+ * would share one embedded rate-limit bucket. The API counts the note only with a valid HMAC-SHA256 under
+ * CONNECTIONS_EMBEDDED_ADDRESS_SECRET (both projects hold it); the signature also covers the bearer token, so a seen
+ * note fits that one short-lived token only.
+ */
+export const SHOPIFY_EMBEDDED_ADDRESS_HEADER = "x-zs-embedded-address";
+export const SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER = "x-zs-embedded-address-signature";
+export const shopifyEmbeddedAddressMessage = (address: string, idToken: string): string =>
+  `zs-shopify-embedded-address.v1\n${address}\n${idToken}`;

@@ -832,7 +832,12 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   native orders carry `customer: null` and the app requests no protected data. A `401` from Shopify (an invalid or revoked token that a refresh cannot repair) marks the
   install `needs_reauth` (C-8 `auth_error` path). A `403`, or a GraphQL `ACCESS_DENIED`, is
   `provider_permission_denied` (C-8 unchanged): reauthenticating cannot add a permission. `429` or a `THROTTLED` error is `provider_rate_limited`. Output size, schema and
-  disclosure rules are C-6 and C-11 unchanged.
+  disclosure rules are C-6 and C-11 unchanged. Shopify refuses, before it runs, a query whose requested cost is over
+  1,000 points (shopify.dev, GraphQL Admin API rate limits: an object costs 1, a connection 2 plus `first` times one
+  node), so 50 orders with 50 line items each (about 7,950 points) never ran. `shopify_list_orders` asks for as many line
+  items per order as fit (`listLineItemsPage`: 50 up to 6 orders, 30 at 10, 3 at 50); `shopify_get_order` reads one
+  order with up to 50. `packages/core/test/shopify/query-cost.ts` computes the cost independently and the fake
+  Shopify answers `MAX_COST_EXCEEDED` over 1,000, as Shopify does.
 - **C-24 Webhooks and compliance.** One public route in the workers project:
   `POST /webhooks/shopify`.
   - Reads the raw body (capped at 256 KiB) **before** any parse, computes the base64
@@ -1007,12 +1012,20 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     store (never opened, no hub, disconnected, uninstalled) gets `not_linked` and no Shopify call
     is made. Only then does it get the access token, once (refresh under the `shopify_locks`
     lease; `busy`, `unavailable` as in `open`). It never exchanges a token: the page calls `open`
-    first, which does. The route passes the caller's abort signal (B-6) to the Shopify calls. It reads with `listOrdersQuery` and
-    `listOrdersSearch` (window = injected clock now minus 60 days, status any, first 50) and
-    shapes each order with `orderToRest`. The query never selects the `customer` object (C-23).
-    A Shopify failure answers `unavailable`; a 401 marks the current install as needing reauth,
-    as in C-22. Each shaped order is checked with `shopifyRecentOrderSchema`; one that does not
-    fit (name, time, total or currency) is skipped, never cut to fit.
+    first, which does. The install and its link are read in one statement; an install that is
+    gone by the time the token is read is `not_linked` too. The route passes the caller's abort
+    signal (B-6) to the Shopify calls. It reads with `recentOrdersQuery` and `listOrdersSearch`
+    (window = injected clock now minus 60 days, status any, first 50): name, created time, the
+    two statuses, currency and total, and nothing else (no line items, whose custom titles can
+    carry a buyer's text, no IDs, no `customer` object; 152 requested points). After Shopify
+    answers it reads the link again: a disconnect or uninstall that committed meanwhile gets
+    `not_linked`, not the orders. A Shopify failure answers `unavailable`; a 401 marks the
+    current install as needing reauth, as in C-22. Each order is checked before anything is
+    repaired: the created time must be ISO 8601 with an offset (a loose date such as `March 5`
+    or `2026-02-30` is skipped, not normalised) and inside the window; statuses are only
+    lowercased; then `shopifyRecentOrderSchema` decides. An order that does not fit (name,
+    time, a status over 60 characters or not a string, total or currency) is skipped, never
+    cut to fit.
   - Response (`shopifyOrdersResponseSchema`): `{outcome:"ok", orders:[{name, createdAt,
     displayFinancialStatus, displayFulfillmentStatus, total:{amount,currency}}] (at most 10),
     summary:{count, total:{amount,currency}|null}}`. `total` is the exact decimal sum and is null
@@ -1021,20 +1034,40 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     pass the contract.
   - API route `POST /public/v1/shopify/embedded/orders` beside `open`: same bearer token, same
     `shopify-embedded` guard (240 per 10 minutes per address), same mapping (`invalid_token` is a
-    401, a dead worker is `unavailable`). The dashboard proxy allows the `orders` operation.
+    401, a dead worker is `unavailable`). The dashboard proxy allows the `orders` operation and
+    passes the browser's abort signal on with its 12 s deadline.
+  - The address every embedded limit counts. The page calls the dashboard, and the dashboard
+    calls the API server to server, so on Vercel the API's `x-vercel-forwarded-for` is the
+    dashboard's own address and every merchant would share one bucket. With
+    `CONNECTIONS_EMBEDDED_ADDRESS_SECRET` (32+ characters, the same value on the dashboard and
+    the API project) and `DASHBOARD_TRUST_PROXY=1`, the dashboard sends the browser's address
+    (the right-most `X-Forwarded-For` entry, as for sign-in) in `X-ZS-Embedded-Address` with
+    `X-ZS-Embedded-Address-Signature`, a base64url HMAC-SHA256 over
+    `zs-shopify-embedded-address.v1`, the address and the bearer token, so a note fits one
+    short-lived token only. The API counts the note only when the signature verifies (constant
+    time) and the address parses; otherwise, and whenever the secret is unset, it counts the
+    address the host gives, as before. This covers `open`, `orders`, `create-hub`, `sign-in`
+    and `redeem-claim`.
   - Page: after `open`, for a linked store only, it reads `orders` and shows a **Recent orders**
     table (Order, Date, Payment, Fulfillment, Total) and the summary line. The screen shown after
     the hub is made or relinked reads them too, once its `open` read confirms the link. Amounts
     are formatted from the decimal string, never through a float. Empty: "No orders in
-    the last 60 days". Any failure: "Orders are not available right now". All values are set
+    the last 60 days". Any failure: "Orders are not available right now". The read has a 15 s
+    deadline (token and request together): at it the request is aborted and the slot shows the
+    failure line. A new screen aborts the read of the old one. Amounts keep every decimal sent
+    (up to 6), never fewer than the currency's own. Dates are the UTC calendar day. All values are set
     with `textContent`; the CSP and the no-cookie model are unchanged. An answer that lands
     after the page moved to another screen is dropped (the C-29 generation guard; only a new
     screen moves it, so Open ZS Hub during the read still settles the orders).
   - Tests: `packages/core/test/shopify/native-worker.test.ts` (linked, not linked with zero
-    Shopify calls, 60-day window, no customer fields, skipped orders, largest total, refresh,
-    busy, abort signal), `apps/api/test/shopify-native-api.test.ts` (auth, rate limit key and
-    rule, mapping), `apps/dashboard/test/shopify-embedded.test.ts` (table, empty, error, safe
-    rendering, exact amounts, Open ZS Hub mid-read, stale answer, orders after hub creation).
+    Shopify calls, 60-day window, at most 50, no customer fields, fields and cost asked for,
+    skipped orders including loose dates and long statuses, out-of-window answers, largest
+    total, refresh, busy, abort signal through the real Shopify call, disconnect while Shopify
+    answers, two stores each seeing only their own orders), `packages/core/test/shopify/orders.test.ts`
+    (query costs), `apps/api/test/shopify-native-api.test.ts` (auth, rate limit key and rule,
+    signed address, mapping), `apps/dashboard/test/shopify-embedded.test.ts` (table, empty,
+    error, safe rendering, exact amounts and decimals, deadline, abort on a new screen, Open ZS
+    Hub mid-read, stale answer, orders after hub creation, proxy abort and signed address).
 
 
 ## Acceptance
