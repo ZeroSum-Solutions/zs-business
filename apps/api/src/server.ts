@@ -131,6 +131,10 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         stateSecrets: env.connections.stateSecrets,
         returnUrl: env.connections.returnUrl,
         embeddedAddressSecret: env.connections.embeddedAddressSecret,
+        // C-4: a refund that failed or hit its cap needs an operator's eye; a made refund is routine.
+        reportQuota: (event) => {
+          if (event.outcome === "failed" || event.outcome === "capped" || event.outcome === "commit_unknown") console.warn("Connections connect refund", event);
+        },
         report: (event) => {
           // A refused callback may need an operator; the routine outcomes are not logged.
           if (event.outcome.startsWith("error:") && !["error:browser_mismatch", "error:rate_limited"].includes(event.outcome)) console.warn("Connections callback", event);

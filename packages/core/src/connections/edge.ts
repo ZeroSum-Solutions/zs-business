@@ -38,7 +38,7 @@ import { memberDispatch, parseInput, type EdgeDependencies, type Principal } fro
 import { requireMember } from "../members/access.js";
 import { catalogTool, catalogToolkit, OVERRIDE_KEYS } from "./catalog.js";
 import { countTokensWithAccess, getConnection, listConnections, listLiveConnections } from "./handlers.js";
-import { callbackCharges, callbackStatusCharges, connectCharges, runCharges, type ConnectionLimiter } from "./limits.js";
+import { callbackCharges, callbackStatusCharges, connectCharges, connectRefundCharges, runCharges, type ConnectionLimiter, type ConnectionReceipt, type ConnectionsQuotaReport } from "./limits.js";
 import { ComposioError } from "./composio.js";
 import { ConnectorUnavailable, type ConnectorPort } from "./port.js";
 import {
@@ -57,6 +57,8 @@ import {
 
 /** C-5: the worker call inside the callback has 7 of the request's 10 seconds. */
 export const CALLBACK_WORKER_BUDGET_MS = 7_000;
+/** C-4: a connect refund (two quick limiter calls) has this long, and never outlives the request's own deadline. */
+export const REFUND_BUDGET_MS = 1_500;
 
 function config(deps: EdgeDependencies) {
   const connections = deps.connections;
@@ -70,6 +72,17 @@ const withDeadline = (signal: AbortSignal | undefined, ms = CALLBACK_WORKER_BUDG
 async function charge(limiter: ConnectionLimiter, charges: Parameters<ConnectionLimiter["take"]>[0], signal?: AbortSignal): Promise<void> {
   const taken = await limiter.take(charges, signal ? { signal } : {});
   if (!taken.ok) throw new ConnectionsRefused("rate_limited", taken.retryAfterSeconds);
+}
+
+/** Like `charge`, and returns the charge's receipt when the limiter issues one (C-4). */
+async function chargeWithReceipt(limiter: ConnectionLimiter, charges: Parameters<ConnectionLimiter["take"]>[0], signal?: AbortSignal): Promise<ConnectionReceipt | undefined> {
+  if (!limiter.takeWithReceipt) {
+    await charge(limiter, charges, signal);
+    return undefined;
+  }
+  const taken = await limiter.takeWithReceipt(charges, signal ? { signal } : {});
+  if (!taken.ok) throw new ConnectionsRefused("rate_limited", taken.retryAfterSeconds);
+  return taken.receipt;
 }
 
 /**
@@ -125,7 +138,37 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
         if (live.rowCount) throw new Conflict("This app is already connected", { reason: "already_connected" });
         return { toolkit: named, request: parsed, memberId: member.memberId };
       });
-      await charge(connections.limiter, connectCharges(tenantId), signal);
+      const receipt = await chargeWithReceipt(connections.limiter, connectCharges(tenantId), signal);
+      /**
+       * C-4: gives the connect charge back, but only where the worker says it refused before any call to Composio
+       * (`beforeProvider`: our own catalog, config or native-tier refusal, or our own org budget, see worker.ts). A refusal
+       * after a provider call never refunds, whatever its class. Fail closed: the refund needs the charge's receipt, a unit
+       * of the tenant's refund allowance (`connectRefund`, which bounds how many attempts a tenant can get back) and a refund
+       * that finishes inside the request's deadline. If any step fails or is refused the charge stands, and the outcome is
+       * reported, never swallowed.
+       */
+      const refundCharge = async (): Promise<void> => {
+        // `commit_unknown`: the refund call itself threw or was cut off, so the store may or may not have applied it.
+        // `failed`: the allowance check failed before any refund was tried, so nothing was refunded.
+        let phase: "allowance" | "refund" = "allowance";
+        let result: ConnectionsQuotaReport["outcome"];
+        try {
+          if (!receipt || !connections.limiter.refund) result = "no_receipt";
+          else {
+            const options = { signal: withDeadline(signal, REFUND_BUDGET_MS) };
+            const allowance = await connections.limiter.take(connectRefundCharges(tenantId), options);
+            if (!allowance.ok) result = "capped";
+            else {
+              phase = "refund";
+              result = (await connections.limiter.refund(receipt, options)) > 0 ? "refunded" : "nothing_to_give";
+            }
+          }
+        } catch {
+          // The charge stands as far as we know. The window ends within the hour, and the report tells an operator.
+          result = phase === "refund" ? "commit_unknown" : "failed";
+        }
+        try { connections.report?.({ kind: "connect_refund", tenantId, outcome: result }); } catch { /* a reporter never breaks the request */ }
+      };
       const attemptId = deps.generateId().toLowerCase();
       const connectionId = deps.generateId().toLowerCase();
       let linked;
@@ -138,6 +181,7 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
         throw error;
       }
       if (linked.outcome === "refused") {
+        if (linked.beforeProvider === true) await refundCharge();
         if (linked.code === "not_found") throw new NotFound();
         if (linked.code === "provider_rate_limited") throw new ConnectionsRefused("rate_limited", linked.retryAfterSeconds ?? 60);
         throw new ConnectionsRefused("unavailable");

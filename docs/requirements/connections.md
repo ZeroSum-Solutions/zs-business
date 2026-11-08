@@ -174,7 +174,26 @@ role for workers (all workers share one pattern today; Known limits).
   - Refused with 409 `already_connected` while the tenant has a row for that toolkit in
     `active`, `reauthorize` or `disconnecting`. Reconnect is disconnect, then connect (C-13).
   - Limits before the worker call: `conn-connect:<tenantId>` 10 per hour, in the shared
-    store, all or nothing.
+    store, all or nothing. The charge returns a receipt. The API gives the unit back (once, in
+    the window it was taken in, never below zero) only when the worker marks a refused link
+    `beforeProvider`: the refusal came before the first call to Composio. Those are our own
+    refusals: an unknown toolkit or a missing auth config of ours, the native tier refusing a
+    Composio Shopify link (C-18), and our own organization budget refusing the call (C-12) or
+    failing to be read. Once the call to Composio starts, the charge stands whatever happens: any
+    status or error envelope (a documented 400, 404 or 422 included), a timeout, a network error,
+    an unreadable body, or a failure after an account exists. Composio gives no guarantee, from
+    an error answer or from its account list, that nothing was created, so no later answer can
+    prove it. A refund also takes one unit of `conn-connect-refund:<tenantId>` (3 an hour) first.
+    That bounds refunds to 3 per refund window per tenant; it is not a flat cap on attempts,
+    since the charge and refund windows are separate and a boundary can allow a burst across two
+    windows. The refund only gives back a rate-limit unit; no money or billing credit moves. It
+    runs inside the request deadline (1.5 s); a refused allowance or a failed refund keeps the
+    charge and is reported (`connect_refund`: `capped`, `failed`, or `commit_unknown` when the
+    refund call itself was cut off). Every Composio link failure raises a `link_refused` worker
+    report (class and request id only) so an operator sees a run of them; no report claims or
+    removes an account. `beforeProvider` is not in the wire body (the strict contract is
+    unchanged): the worker sets the response header `x-zs-link-before-provider: 1`, so the API and
+    the worker deploy in either order (an older API ignores it, an older worker never sends it).
   - The API makes a random attempt ID and a random connection ID and asks the worker to
     `link`. The worker inserts `connection_attempts` (`tenant_id`, `id`, `connection_id`,
     `toolkit`, `composio_account_id`, `auth_config_id`, `created_by` (the member's

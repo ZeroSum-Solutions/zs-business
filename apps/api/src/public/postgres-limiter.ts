@@ -4,7 +4,7 @@
 // and charges every bucket of a request atomically, under the request's deadline.
 import { createHash } from "node:crypto";
 import { DatabaseUnavailable, type ScopedDatabase } from "@zs/db";
-import { retryAfterSeconds, type RateLimiter } from "./limiter.js";
+import { retryAfterSeconds, type ChargeReceipt, type RateLimiter, type TakeReceiptResult } from "./limiter.js";
 
 /** Buckets are stored by the SHA-256 of their name, so the table holds no client address. */
 const bucketKey = (name: string) => createHash("sha256").update(name).digest("hex");
@@ -27,6 +27,8 @@ function transient(error: unknown): DatabaseUnavailable | undefined {
   return undefined;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export function createPostgresRateLimiter(db: ScopedDatabase, clock: { now(): Date }): RateLimiter {
   return {
     async take(charges, options = {}) {
@@ -41,6 +43,38 @@ export function createPostgresRateLimiter(db: ScopedDatabase, clock: { now(): Da
         throw transient(error) ?? error;
       });
       return retryAfterMs > 0 ? { ok: false, retryAfterSeconds: retryAfterSeconds(retryAfterMs) } : { ok: true };
+    },
+    // C-4: the same charge as `take`, through rate_limit_receipt_take, which also stores a receipt of the
+    // buckets and windows it charged (supabase/migrations/20261108900000_rate_limit_receipt_refund.sql).
+    async takeWithReceipt(charges, options = {}): Promise<TakeReceiptResult> {
+      const payload = charges.map(({ key, rule }) => ({ key: bucketKey(key), limit: rule.limit, windowMs: rule.windowMs }));
+      const answer = await db.withoutTenant(async (tx) => {
+        const { rows } = await tx.query<{ answer: unknown }>(
+          "SELECT public.rate_limit_receipt_take($1, $2::jsonb) AS answer",
+          [clock.now().toISOString(), JSON.stringify(payload)],
+        );
+        return rows[0]?.answer;
+      }, options).catch((error: unknown) => {
+        throw transient(error) ?? error;
+      });
+      const { retryMs, receipt } = (answer ?? {}) as { retryMs?: unknown; receipt?: { id?: unknown } | null };
+      if (typeof retryMs !== "number") throw new Error("rate_limit_receipt_take answered something unexpected");
+      if (retryMs > 0) return { ok: false, retryAfterSeconds: retryAfterSeconds(retryMs) };
+      if (typeof receipt?.id !== "string" || !UUID.test(receipt.id)) throw new Error("rate_limit_receipt_take answered no receipt");
+      return { ok: true, receipt: { id: receipt.id } };
+    },
+    async refund(receipt: ChargeReceipt, options = {}) {
+      if (!UUID.test(receipt.id)) return 0;
+      const given = await db.withoutTenant(async (tx) => {
+        const { rows } = await tx.query<{ given: number }>(
+          "SELECT public.rate_limit_refund($1, $2::uuid) AS given",
+          [clock.now().toISOString(), receipt.id],
+        );
+        return Number(rows[0]?.given ?? 0);
+      }, options).catch((error: unknown) => {
+        throw transient(error) ?? error;
+      });
+      return given;
     },
   };
 }

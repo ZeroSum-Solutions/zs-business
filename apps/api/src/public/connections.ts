@@ -8,6 +8,7 @@ import {
   apiErrorBody,
   createConnectionsCallback,
   type ConnectionLimiter,
+  type ConnectionsQuotaReport,
   type ConnectionStateSecrets,
   type ConnectorPort,
   type EdgeDependencies,
@@ -25,6 +26,8 @@ export interface ConnectionsApiConfig {
   readonly returnUrl: string;
   /** The shared limiter (C-4, C-5, C-12); defaults to the Postgres one on the app's database. */
   readonly limiter?: ConnectionLimiter;
+  /** Receives what became of each connect refund (C-4): a capped, failed or made refund, with the tenant only. */
+  readonly reportQuota?: (event: ConnectionsQuotaReport) => void;
   /** The native Shopify tier's signed client (C-21 to C-24); absent: the embedded routes and claims are off (404). */
   readonly shopify?: ShopifyPort;
   /** Where the caller's address comes from for the embedded app's rate limits (P-10). */

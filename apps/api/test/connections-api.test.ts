@@ -30,6 +30,7 @@ import {
   type ConnectorPort,
 } from "@zs/core";
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
+import { createPostgresRateLimiter } from "../src/public/postgres-limiter.js";
 import { parseConnectionsApiEnv } from "../src/connections/api-env.js";
 import { parseServerEnv } from "../src/config.js";
 import { ACTIVEPIECES_KEY_SECRET, call, clock, createApiHarness, NOW, ORIGIN, SECRET, signedInMember, type ApiHarness, type MemberSetup } from "./helpers.js";
@@ -154,6 +155,52 @@ describe("off without the config (C-3, C-15)", () => {
     for (const name of CONNECTION_TOOLS)
       await expect(client.callTool({ name, arguments: { connectionId: randomUUID(), tool: "x", arguments: {} } }), name).rejects.toMatchObject({ code: -32601 });
     await client.close();
+  });
+});
+
+describe("the connect quota against the shared limiter (C-4)", () => {
+  const quota: { outcome: string }[] = [];
+  beforeEach(() => { quota.length = 0; });
+  const countOfConnect = async () => Number((await h.database.pool.query<{ count: number }>(
+    "SELECT coalesce(sum(count),0)::int AS count FROM rate_limit_buckets WHERE key = sha256(convert_to($1, 'UTF8'))", [`conn-connect:${h.a.tenantId}`])).rows[0]!.count);
+  const buildShared = () => createApp({
+    verifier: createHs256Verifier(SECRET, { clock }), sessionCheck: createLocalStubSessionCheck(h.database.db, clock), clock,
+    db: h.database.db, generateId: randomUUID, config: { allowedOrigins: [ORIGIN] }, activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } },
+    connections: { connector: port, stateSecrets: { current: STATE }, returnUrl: RETURN_URL, limiter: createPostgresRateLimiter(h.database.db, clock), report: (event) => reports.push(event), reportQuota: (event) => quota.push(event) },
+  });
+
+  /** Fills the organization budget (the admin pool: the runtime roles cannot write the bucket table). */
+  const exhaustBudget = () => h.database.pool.query(
+    `INSERT INTO rate_limit_buckets (key, window_start, expires_at, count) VALUES (sha256(convert_to('composio-org:preview','UTF8')), $1, $2, 500)
+     ON CONFLICT (key) DO UPDATE SET count = 500, window_start = $1, expires_at = $2`, [new Date(Date.parse(NOW) - 1000), new Date(Date.parse(NOW) + 60_000)]);
+  const LINK = /POST \/connected_accounts\/link/;
+
+  it("a refusal before any Composio call gives its unit back, up to the hourly refund allowance; a refusal after a provider call does not", async () => {
+    const shared = buildShared();
+    await exhaustBudget();
+    expect((await start(shared, h.a.token)).response.status).toBe(429);
+    expect(fake.calls).toHaveLength(0);
+    expect(quota).toEqual([{ kind: "connect_refund", tenantId: h.a.tenantId, outcome: "refunded" }]);
+    expect(await countOfConnect()).toBe(0);
+    // The refund allowance is 3 an hour: two more are refunded, the next one is not.
+    for (let n = 0; n < 2; n += 1) await start(shared, h.a.token);
+    expect(await countOfConnect()).toBe(0);
+    await start(shared, h.a.token);
+    expect(await countOfConnect()).toBe(1);
+    expect(quota.map((e) => e.outcome)).toEqual(["refunded", "refunded", "refunded", "capped"]);
+    // Past the provider call: a documented Composio refusal envelope, a 503, an unreadable body. The unit stays spent.
+    await h.database.pool.query("DELETE FROM rate_limit_buckets");
+    quota.length = 0;
+    const refusal = { error: { message: "x", status: 422, request_id: "req_9" } };
+    for (const [status, json] of [[422, refusal], [503, {}], [422, {}]] as const) {
+      fake.override(LINK, { status, json, times: 1 });
+      expect((await start(shared, h.a.token)).response.status).toBeGreaterThanOrEqual(400);
+    }
+    expect(await countOfConnect()).toBe(3);
+    expect(quota).toEqual([]);
+    // A link that worked is a spent unit too.
+    expect((await start(shared, h.a.token)).response.status).toBe(200);
+    expect(await countOfConnect()).toBe(4);
   });
 });
 

@@ -79,7 +79,8 @@ describe("native tier link (C-4, C-18)", () => {
     });
     const linked = await nativeWorker.link({ tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(),
       shopDomain: "testshop.myshopify.com", createdBy: a.memberId, browserHash: "b".repeat(43) });
-    expect(linked).toEqual({ outcome: "refused", code: "not_found" });
+    // C-4: refused before any Composio call, so the API may give the connect charge back.
+    expect(linked).toEqual({ outcome: "refused", code: "not_found", beforeProvider: true });
     expect(fake.calls).toHaveLength(0);
     expect((await database.pool.query("SELECT 1 FROM connection_attempts")).rowCount).toBe(0);
     // Without the native tier the same call links.
@@ -107,8 +108,66 @@ describe("link (C-3, C-5)", () => {
 
   it("refuses an unknown toolkit and a missing auth config without calling Composio", async () => {
     const out = await worker.link(linkInput({ toolkit: "nope", shopDomain: "x.myshopify.com" }));
-    expect(out).toEqual({ outcome: "refused", code: "not_found" });
+    expect(out).toEqual({ outcome: "refused", code: "not_found", beforeProvider: true });
     expect(fake.calls).toHaveLength(0);
+    // A catalog toolkit with no auth config of ours is the same: nothing reached Composio.
+    const bare = makeWorker(database, fake, clock, { authConfigIds: {} });
+    expect(await bare.link(linkInput())).toEqual({ outcome: "refused", code: "not_found", beforeProvider: true });
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  describe("C-4: only a refusal before the first Composio call is marked beforeProvider", () => {
+    const LINK = /POST \/connected_accounts\/link/;
+    const envelope = (status: number) => ({ error: { message: "x", status, request_id: "req_1" } });
+
+    it("our own organization budget refusing the call is marked, and makes no call", async () => {
+      await exhaustBudget();
+      const out = await worker.link(linkInput());
+      expect(out).toMatchObject({ outcome: "refused", code: "provider_rate_limited", beforeProvider: true });
+      expect(fake.calls).toHaveLength(0);
+    });
+
+    it("a failed budget read (before the call) is marked", async () => {
+      const broken = createConnectionsWorker({
+        service: async () => { throw Object.assign(new Error("down"), { code: "57P01" }); },
+        composio: createComposioClient({ apiKey: "test-key", baseUrl: "https://composio.test/api/v3.1", fetch: fake.fetch, timeoutMs: 1500 }),
+        clock, config: { env: ENV, callbackUrl: CALLBACK_URL, authConfigIds: { shopify: AUTH_CONFIG } },
+      });
+      expect(await broken.link(linkInput())).toEqual({ outcome: "refused", code: "provider_unavailable", beforeProvider: true });
+      expect(fake.calls).toHaveLength(0);
+    });
+
+    it.each([400, 401, 403, 404, 408, 409, 410, 422, 425, 429, 500, 502, 503, 504])("a Composio %i answer is never marked, documented envelope or not", async (status) => {
+      for (const json of [envelope(status), {}, "text"]) {
+        fake.override(LINK, { status, json, times: 1 });
+        const out = await worker.link(linkInput());
+        expect(out.outcome).toBe("refused");
+        expect(out).not.toHaveProperty("beforeProvider");
+        await restoreBudget(); // a 429 opens the cooldown; the next try should reach the provider again
+      }
+      expect(fake.callsTo(LINK)).toHaveLength(3);
+    });
+
+    it("a timeout or network failure is never marked", async () => {
+      fake.override(LINK, { hang: true, times: 1 });
+      const timed = await worker.link(linkInput());
+      expect(timed).toEqual({ outcome: "refused", code: "provider_unavailable" });
+      expect(fake.callsTo(LINK)).toHaveLength(1);
+    });
+
+    it("a link that made an account but could not be recorded is never marked", async () => {
+      expect(await worker.link(linkInput({ tenantId: randomUUID() }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    });
+
+    it("a documented refusal reports link_refused (class and request id only) and keeps no claim on any account", async () => {
+      fake.override(LINK, { status: 422, json: envelope(422), times: 1 });
+      await worker.link(linkInput());
+      expect(reports.filter((r) => r.kind === "link_refused")).toEqual([{ kind: "link_refused", env: ENV, status: 422, errorClass: "provider_refused", requestId: "req_1" }]);
+      // No account listing, and no attempt row: nothing in the worker claims or removes an account on a refusal.
+      expect(fake.callsTo(/GET \/connected_accounts/)).toHaveLength(0);
+      expect(fake.callsTo(/DELETE/)).toHaveLength(0);
+      expect((await database.pool.query("SELECT 1 FROM connection_attempts")).rowCount).toBe(0);
+    });
   });
 
   it("opens the cooldown on a Composio 429 and says when to retry, then refuses without a call", async () => {

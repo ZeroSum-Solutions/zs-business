@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { asService } from "@zs/db";
 import type { TestDatabase, TwoTenantFixture } from "@zs/db/testing";
-import { composioUserId, createComposioClient, createConnectionsWorker, type ConnectionsWorkerConfig, type ConnectionsWorkerReport } from "../../src/index.js";
+import { composioUserId, createComposioClient, createConnectionsWorker, type ConnectionsWorkerConfig, type ConnectionsWorkerDeps, type ConnectionsWorkerReport } from "../../src/index.js";
 import type { FakeComposio } from "./fake-composio.js";
 
 export const T0 = Date.parse("2026-11-06T12:00:00.000Z");
@@ -58,13 +58,14 @@ export const statusOf = (fixture: TwoTenantFixture, tenantId: string, id: string
 export const attemptOf = (fixture: TwoTenantFixture, tenantId: string, id: string) =>
   fixture.service(async (tx) => (await tx.query<{ status: string }>("SELECT status FROM connection_attempts WHERE tenant_id=$1 AND id=$2", [tenantId, id])).rows[0]);
 
-export function makeWorker(database: TestDatabase, fake: FakeComposio, clock: TestClock, extra: Partial<ConnectionsWorkerConfig> = {}, reports: ConnectionsWorkerReport[] = []) {
+export function makeWorker(database: TestDatabase, fake: FakeComposio, clock: TestClock, extra: Partial<ConnectionsWorkerConfig> = {}, reports: ConnectionsWorkerReport[] = [], native?: ConnectionsWorkerDeps["native"]) {
   return createConnectionsWorker({
     service: (work) => asService(database.servicePool, work),
     composio: createComposioClient({ apiKey: "test-key", baseUrl: "https://composio.test/api/v3.1", fetch: fake.fetch, timeoutMs: 1500 }),
     clock,
     config: { env: ENV, callbackUrl: CALLBACK_URL, authConfigIds: { shopify: AUTH_CONFIG }, ...extra },
     report: (event) => reports.push(event),
+    ...(native ? { native } : {}),
   });
 }
 

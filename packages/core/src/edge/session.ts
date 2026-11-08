@@ -192,7 +192,7 @@ import type { StripePlansClient } from "../billing/plan-stripe.js";
 import { connectionHandlers } from "../connections/handlers.js";
 import type { ConnectorPort } from "../connections/port.js";
 import type { ShopifyPort } from "../shopify/port.js";
-import type { ConnectionLimiter } from "../connections/limits.js";
+import type { ConnectionLimiter, ConnectionsQuotaReport } from "../connections/limits.js";
 import type { ConnectionStateSecrets } from "../connections/tokens.js";
 import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
 import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
@@ -235,6 +235,8 @@ export interface EdgeDependencies {
     readonly connector: ConnectorPort;
     readonly stateSecrets: ConnectionStateSecrets;
     readonly limiter: ConnectionLimiter;
+    /** C-4: what became of each connect refund, for an operator. Ids and our codes only. */
+    readonly report?: (event: ConnectionsQuotaReport) => void;
     /** The native Shopify tier's port (C-21 to C-24); absent means the embedded app and claims are off (404). */
     readonly shopify?: ShopifyPort;
   };
