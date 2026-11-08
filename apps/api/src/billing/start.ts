@@ -25,7 +25,7 @@ export function startBillingRunner(env: BillingRunnerEnv, deps: {
       ...(env.stripeReader === null ? {} : { subscriptions: createStripeSubscriptionReader({ config: env.stripeReader }) }),
       report: (event) => {
         // Events that need an operator; the rest are routine.
-        if (["mismatch", "orphaned", "error", "not_ours", "plan_duplicate"].includes(event.outcome)) console.warn("Billing worker", event);
+        if (["mismatch", "orphaned", "error", "not_ours", "plan_duplicate", "plan_held"].includes(event.outcome)) console.warn("Billing worker", event);
       },
     });
     // plans.md PL-18: the Shopify pass, after the Stripe passes.

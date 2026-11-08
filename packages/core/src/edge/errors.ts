@@ -96,7 +96,7 @@ const CONFLICT_REASONS = new Set([
   // plans.md PL-4..PL-7, PL-11, PL-14, PL-15: why a plan Checkout, the Portal or a top-up is refused.
   "plan_exists", "checkout_open", "checkout_closed", "no_customer", "founding_full", "billing_provider",
   // PL-8: an action refused by the plan, on Stripe or Shopify.
-  "plan_read_only", "plan_limit",
+  "plan_read_only", "plan_limit", "plan_price_hold",
 ]);
 /** PL-8: the counted resources a plan_limit conflict may name. */
 const PLAN_LIMIT_RESOURCES = new Set(["seats", "bookableResources", "managedConnections", "automationTokens"]);

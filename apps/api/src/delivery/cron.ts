@@ -3,7 +3,7 @@
 // switch off it answers 200 without touching the database, so a scheduled call never alarms.
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
-import { apiErrorBody } from "@zs/core";
+import { apiErrorBody, PLAN_PRICE_ALERT_JOB } from "@zs/core";
 import { startCronRun, type CronAlerts } from "../cron-alerts.js";
 import { CronRunFailed, runFailure } from "../cron-outcome.js";
 import { responseHeaders } from "../response-headers.js";
@@ -46,6 +46,8 @@ export function cronRoutes(config: {
       await config.alerts?.failed(job, error, run);
       return c.json(apiErrorBody("Unavailable", `${name} run failed`), 503);
     }
+    // PL-2: core writes the unknown-price alert row; every billing run mails it until a send is accepted.
+    if (job === "billing") await config.alerts?.notifyOpen(PLAN_PRICE_ALERT_JOB, run);
     // A run whose work items all failed is a failure too, though it answers 200 (cron-outcome.ts).
     const failure = runFailure(job, result);
     if (failure === null) await config.alerts?.succeeded(job, run);
@@ -55,3 +57,4 @@ export function cronRoutes(config: {
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   return app;
 }
+
