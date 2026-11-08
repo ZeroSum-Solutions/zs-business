@@ -8,9 +8,7 @@ import { z } from "zod";
 import { parseSealPrivateKey, type GoogleClientConfig } from "@zs/core";
 import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 import { formatIssues, googleClientFromVariables, googleClientVariables, signingSecretVariable } from "./google-env.js";
-
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
+import { int, LOOPBACK } from "../env-schema.js";
 
 const onSchema = z.object({
   // A login that may SET ROLE service_role: only the worker writes external blocks (booking.md B-21).

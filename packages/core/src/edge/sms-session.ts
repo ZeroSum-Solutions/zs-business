@@ -5,7 +5,6 @@
 import {
   SMS_STATUS_RECORD_ACTION,
   SUPPRESSION_RECORD_ACTION,
-  TenantDenied,
   contactPhoneSchema,
   uuidSchema,
   type SmsStatusResult,
@@ -16,12 +15,9 @@ import { TWILIO_OPTED_OUT_ERROR, type TwilioInbound, type TwilioStatusCallback }
 import { createInboundSmsSession, type InboundSmsReplies } from "./delivery-session.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, type Authorize, type EdgeDependencies } from "./session.js";
+import { only } from "./dispatch-util.js";
 
 export const smsStatusActorId = (tenantId: string) => derivedId(tenantId, "sms-status", "actor");
-
-const only = (...actionTypes: string[]): Authorize => async (_tx, binding) => {
-  if (!actionTypes.includes(binding.actionType)) throw new TenantDenied();
-};
 
 export type SmsStatusOutcome =
   | { readonly handled: true; readonly result: SmsStatusResult; readonly suppressed: boolean }

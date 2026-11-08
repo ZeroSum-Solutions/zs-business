@@ -5,9 +5,7 @@
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { parseEnrichmentEnv, type EnrichmentConfig } from "@zs/core";
-
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
+import { int, LOOPBACK, problems } from "../env-schema.js";
 
 const onSchema = z.object({
   // A login that may SET ROLE service_role (postgres on hosted Supabase). Never the API's runtime login.
@@ -35,8 +33,6 @@ export interface EnrichmentRunnerEnv {
   readonly tregToken: string | undefined;
   readonly tregBaseUrl: string | undefined;
 }
-
-const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
 /** Null when ENRICHMENT_WORKER is not `on`: nothing runs. */
 export function parseEnrichmentRunnerEnv(env: Readonly<Record<string, string | undefined>>): EnrichmentRunnerEnv | null {
