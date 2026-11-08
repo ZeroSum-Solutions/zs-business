@@ -138,6 +138,12 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
     the limit, and a refused body still counts; one Supabase could not take is given back.
     The address comes from the right-most `X-Forwarded-For` entry only with
     `DASHBOARD_TRUST_PROXY=1`; otherwise every caller shares one key.
+- Embedded Shopify app (`POST /api/shopify/<op>`, connections.md C-21, C-30): the session-token
+  proxy to the API. With `DASHBOARD_TRUST_PROXY=1` and `CONNECTIONS_EMBEDDED_ADDRESS_SECRET` (32+
+  characters, the same value as on the API project) it sends the browser's address (the same
+  right-most `X-Forwarded-For` entry) in a note signed with that secret, so the API's embedded
+  limits count each browser rather than this server's address. Unset, every merchant shares the
+  dashboard's bucket on Vercel.
   - `GET /auth/confirm?token_hash=…&type=email&next=…` verifies the link with Supabase and
     sets the session cookies: `zs-auth` (split into `zs-auth.0`, `zs-auth.1`, … when long),
     httpOnly, `SameSite=Strict`, `Path=/`, `Secure` over https. It then redirects to

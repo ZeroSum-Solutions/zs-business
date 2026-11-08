@@ -7,12 +7,16 @@
 //     when an uninstall ran changes nothing.
 //   - Nothing in a log, report or error carries a token, an ID token, a code or a customer value.
 import { createHmac, randomInt } from "node:crypto";
-import { Conflict, PLAN_CATALOG, normalizeAccountLabel, type HubPlan } from "@zs/contracts";
+import { z } from "zod";
+import {
+  Conflict, PLAN_CATALOG, SHOPIFY_RECENT_ORDERS_DAYS, SHOPIFY_RECENT_ORDERS_FETCHED, SHOPIFY_RECENT_ORDERS_SHOWN,
+  normalizeAccountLabel, shopifyRecentOrderSchema, type HubPlan, type ShopifyOrdersResponse, type ShopifyRecentOrder,
+} from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { setShopifyBilling } from "../billing/shopify-plans.js";
 import { shopifyListWindow } from "../connections/catalog.js";
 import { verifyIdToken, SHOP_DOMAIN } from "./id-token.js";
-import { getOrderQuery, listOrdersQuery, listOrdersSearch, orderToRest } from "./orders.js";
+import { GET_ORDER_LINE_ITEMS, getOrderQuery, listLineItemsPage, listOrdersQuery, listOrdersSearch, orderToRest, recentOrdersQuery } from "./orders.js";
 import { openToken, sealToken, SealError, type SealKeys } from "./seal.js";
 import { redactStoreIdentity } from "./redact.js";
 import { verifyWebhookHmac } from "./webhook.js";
@@ -120,6 +124,7 @@ export type ShopPlan = { readonly state: "none" } | { readonly state: "active" |
 export type OpenResult =
   | { readonly outcome: "ok"; readonly shop: { readonly domain: string; readonly name: string }; readonly plan: ShopPlan; readonly link: ShopLink }
   | { readonly outcome: "invalid_token" | "unavailable" | "busy" | "not_supported" };
+export type OrdersResult = ShopifyOrdersResponse;
 export type CreateHubResult =
   | { readonly outcome: "created" | "relinked"; readonly businessName: string; readonly ownerEmail: string }
   | { readonly outcome: "already_linked" | "not_owner" | "email_has_hub" | "store_in_use" | "not_installed" | "invalid_token" | "unavailable" };
@@ -156,6 +161,44 @@ const shopGid = (value: unknown): string | null => {
   const text = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : typeof value === "string" ? value : "";
   return /^[1-9][0-9]{0,19}$/.test(text) ? `gid://shopify/Shop/${text}` : null;
 };
+/** Decimal strings added exactly in micro-units (no floats); null when one is not a plain non-negative decimal. */
+const MICRO = 1_000_000n;
+function toMicro(text: string): bigint | null {
+  const m = /^([0-9]{1,15})(?:\.([0-9]{1,6}))?$/.exec(text);
+  return m ? BigInt(m[1]!) * MICRO + BigInt((m[2] ?? "").padEnd(6, "0")) : null;
+}
+function fromMicro(value: bigint): string {
+  const whole = value / MICRO;
+  const cents = (value % MICRO).toString().padStart(6, "0").replace(/0+$/, "").padEnd(2, "0");
+  return `${whole}.${cents}`;
+}
+/** A Shopify time as Shopify writes it (ISO 8601 with an offset). Checked before any Date parse, which would repair it. */
+const shopifyTime = z.iso.datetime({ offset: true });
+/** A status word, lowercased, or null when Shopify sent none; anything else is left as it came, for the contract to refuse. */
+const statusWord = (value: unknown): unknown => (value === null || value === undefined ? null : typeof value === "string" ? value.toLowerCase() : value);
+/**
+ * C-30: one GraphQL order node as a recent order, or null to skip it. The contract decides what is shown: an order that
+ * does not fit it (name, time, statuses, total, currency) is skipped, never cut or repaired to fit, and so is one
+ * created outside the window asked for.
+ */
+function recentOrderOf(node: unknown, start: Date, end: Date): (ShopifyRecentOrder & { micro: bigint }) | null {
+  const o = record(node);
+  if (!o) return null;
+  const time = shopifyTime.safeParse(o["createdAt"]);
+  const amount = record(record(o["totalPriceSet"])?.["shopMoney"])?.["amount"];
+  const micro = typeof amount === "string" ? toMicro(amount) : null;
+  if (!time.success || micro === null) return null;
+  const created = new Date(time.data);
+  if (Number.isNaN(created.getTime()) || created.getTime() < start.getTime() || created.getTime() > end.getTime()) return null;
+  const shaped = shopifyRecentOrderSchema.safeParse({
+    name: o["name"],
+    createdAt: created.toISOString(),
+    displayFinancialStatus: statusWord(o["displayFinancialStatus"]),
+    displayFulfillmentStatus: statusWord(o["displayFulfillmentStatus"]),
+    total: { amount: fromMicro(micro), currency: o["currencyCode"] },
+  });
+  return shaped.success ? { ...shaped.data, micro } : null;
+}
 const isDup = (error: unknown) => typeof error === "object" && error !== null && (error as { code?: unknown }).code === "23505";
 
 export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
@@ -393,6 +436,62 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, plan, link };
   }
 
+  /**
+   * C-30: the store's install and its live link in one statement (one snapshot): the shop ID when the install is not
+   * uninstalled and a native connection is `active` or `reauthorize`, else null.
+   */
+  async function linkedShopOf(domain: string): Promise<string | null> {
+    const row = (await service((tx) => tx.query<{ shop_id: string }>(
+      `SELECT i.shop_id FROM shopify_installs i
+         JOIN connections c ON c.tier='native' AND c.external_account_id=i.shop_id AND c.status IN ('active','reauthorize')
+        WHERE i.shop_domain=$1 AND i.status<>'uninstalled' LIMIT 1`, [domain]))).rows[0];
+    return row?.shop_id ?? null;
+  }
+
+  /**
+   * C-30: the newest orders of the last 60 days for the embedded page, read-only and without customer data. It
+   * verifies the ID token, then checks the store's live link from the database, and only then gets an access token
+   * (refresh under the lease, as in `run`). An unlinked, disconnected or uninstalled store gets `not_linked` with no
+   * Shopify call. It never exchanges a token: the page calls `open` first, which does. After Shopify answers it checks
+   * the link again, so a disconnect that committed meanwhile gets `not_linked`, not the orders.
+   */
+  async function orders(input: { idToken: string }, signal?: AbortSignal): Promise<OrdersResult> {
+    const verified = verifyIdToken(idConfig(), input.idToken);
+    if (!verified.ok) return { outcome: "invalid_token" };
+    const domain = verified.shopDomain;
+    const shopId = await linkedShopOf(domain);
+    if (shopId === null) return { outcome: "not_linked" };
+    const access = await ensureAccess(domain, signal);
+    if (access.kind === "busy") return { outcome: "busy" };
+    if (access.kind === "none") return { outcome: "not_linked" };
+    if (access.kind !== "ok" || access.row.shop_id !== shopId) return { outcome: "unavailable" };
+    const end = now();
+    const start = new Date(end.getTime() - SHOPIFY_RECENT_ORDERS_DAYS * DAY);
+    const answer = await client.graphql(domain, access.token, recentOrdersQuery(),
+      { first: SHOPIFY_RECENT_ORDERS_FETCHED, query: listOrdersSearch({ start, end, status: "any" }) }, signal);
+    if (answer.kind === "failed") {
+      // Only the install that is current may be marked; a stale 401 just means: try again.
+      if (answer.reason === "unauthorized" || answer.reason === "invalid_grant") await markNeedsReauth(access.row);
+      return { outcome: "unavailable" };
+    }
+    if ((await linkedShopOf(domain)) !== shopId) return { outcome: "not_linked" };
+    const nodes = record(answer.data["orders"])?.["nodes"];
+    if (!Array.isArray(nodes)) return { outcome: "unavailable" };
+    const seen: Array<ShopifyRecentOrder & { micro: bigint }> = [];
+    for (const node of nodes.slice(0, SHOPIFY_RECENT_ORDERS_FETCHED)) {
+      const shaped = recentOrderOf(node, start, end);
+      if (shaped !== null) seen.push(shaped);
+    }
+    seen.sort((x, y) => y.createdAt.localeCompare(x.createdAt));
+    const currencies = new Set(seen.map((order) => order.total.currency));
+    const sum = seen.reduce((acc, order) => acc + order.micro, 0n);
+    return {
+      outcome: "ok",
+      orders: seen.slice(0, SHOPIFY_RECENT_ORDERS_SHOWN).map(({ micro: _micro, ...order }) => order),
+      summary: { count: seen.length, total: currencies.size === 1 ? { amount: fromMicro(sum), currency: [...currencies][0]! } : null },
+    };
+  }
+
   /** The store owner behind a token: the online exchange must name an account owner with a verified email. */
   async function storeOwner(domain: string, idToken: string): Promise<{ kind: "ok"; email: string } | { kind: "not_owner" | "unavailable" | "invalid_token" }> {
     const answer = await client.exchangeOnline(domain, idToken);
@@ -611,10 +710,12 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     if (input.tool === "shopify_list_orders") {
       const args = input.arguments as { createdAfter?: string; createdBefore?: string; status?: "open" | "closed" | "cancelled" | "any"; limit?: number };
       const { start, end } = shopifyListWindow(args, now());
+      const first = Math.min(args.limit ?? 50, 50);
       answer = await client.graphql(input.row.account_domain, access.token, listOrdersQuery(),
-        { first: Math.min(args.limit ?? 50, 50), query: listOrdersSearch({ start, end, status: args.status ?? "any" }) }, signal);
+        { first, query: listOrdersSearch({ start, end, status: args.status ?? "any" }), lineItems: listLineItemsPage(first) }, signal);
     } else if (input.tool === "shopify_get_order") {
-      answer = await client.graphql(input.row.account_domain, access.token, getOrderQuery(), { id: `gid://shopify/Order/${String(input.arguments["orderId"])}` }, signal);
+      answer = await client.graphql(input.row.account_domain, access.token, getOrderQuery(),
+        { id: `gid://shopify/Order/${String(input.arguments["orderId"])}`, lineItems: GET_ORDER_LINE_ITEMS }, signal);
     } else {
       return { kind: "error", code: "not_found" };
     }
@@ -826,6 +927,6 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     return { refreshed };
   }
 
-  return { open, createHub, claimStart, claimStatus, claimCancel, redeemClaim, claimConfirm, signIn, run, finishDisconnect, webhook, pass, probe };
+  return { open, orders, createHub, claimStart, claimStatus, claimCancel, redeemClaim, claimConfirm, signIn, run, finishDisconnect, webhook, pass, probe };
 }
 export type ShopifyNativeWorker = ReturnType<typeof createShopifyNativeWorker>;

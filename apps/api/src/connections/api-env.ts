@@ -37,9 +37,13 @@ const apiSchema = z.object({
   CONNECTIONS_STATE_PREVIOUS_SECRET: signingSecretVariable().optional(),
   // The dashboard page the callback sends the owner back to (https://<dashboard host>/account/connections).
   CONNECTIONS_RETURN_URL: secureUrlVariable("CONNECTIONS_RETURN_URL"),
+  // C-30: verifies the dashboard proxy's signed note of the browser's address for the embedded app's limits. The
+  // dashboard holds the same value. Unset: those limits count the address the host gives (on Vercel, the dashboard's).
+  CONNECTIONS_EMBEDDED_ADDRESS_SECRET: signingSecretVariable().optional(),
 });
 const SECRET_VARIABLES = [
   "CONNECTIONS_INTERNAL_SECRET", "CONNECTIONS_INTERNAL_PREVIOUS_SECRET", "CONNECTIONS_STATE_SECRET", "CONNECTIONS_STATE_PREVIOUS_SECRET",
+  "CONNECTIONS_EMBEDDED_ADDRESS_SECRET",
 ] as const;
 /** What sets the API's connections side. The worker project's own variables (C-3) are not among them. */
 export const CONNECTIONS_API_VARIABLES: readonly string[] = Object.freeze(Object.keys(apiSchema.shape));
@@ -50,6 +54,8 @@ export interface ConnectionsApiEnv {
   readonly internalSecret: string;
   readonly stateSecrets: { readonly current: string; readonly previous?: string };
   readonly returnUrl: string;
+  /** C-30: null when CONNECTIONS_EMBEDDED_ADDRESS_SECRET is unset. */
+  readonly embeddedAddressSecret: string | null;
 }
 
 /** C-3: null when no API connections variable is set (every connections route is 404). Any one set requires the rest. */
@@ -73,5 +79,6 @@ export function parseConnectionsApiEnv(env: Readonly<Record<string, string | und
       ...(data.CONNECTIONS_STATE_PREVIOUS_SECRET === undefined ? {} : { previous: data.CONNECTIONS_STATE_PREVIOUS_SECRET }),
     },
     returnUrl: data.CONNECTIONS_RETURN_URL,
+    embeddedAddressSecret: data.CONNECTIONS_EMBEDDED_ADDRESS_SECRET ?? null,
   };
 }

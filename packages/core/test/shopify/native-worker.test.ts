@@ -4,7 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { asService } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { createShopifyClient, createShopifyNativeWorker, parseSealKeys, type HubPort, type ShopifyNativeReport } from "../../src/index.js";
+import { shopifyOrdersResponseSchema } from "@zs/contracts";
+import { createLocalShopifyPort, createShopifyClient, createShopifyNativeWorker, handleShopifyOperation, parseSealKeys, type HubPort, type ShopifyNativeReport, type ShopifyWorkerOps } from "../../src/index.js";
 import { createConnectionsWorker, createComposioClient } from "../../src/index.js";
 import { addMember, makeClock, T0, type TestClock } from "../connections/harness.js";
 import { FakeComposio } from "../connections/fake-composio.js";
@@ -640,6 +641,19 @@ describe("native reads and disconnect (C-13, C-23)", () => {
     const call = fake.calls.filter((c) => c.url.endsWith("/graphql.json")).at(-1)!;
     expect(String(call.body?.query)).not.toMatch(/customer|email|firstName|lastName/i);
   });
+  it("keeps a list of 50 within Shopify's 1,000-point query cost by cutting the line-item page, and reads one order with 50", async () => {
+    fake.orders = [{ id: 1001, name: "#1001", created_at: "2026-11-01T10:00:00Z", lineItems: 8 }];
+    const listed = await worker.run(await input("shopify_list_orders", { limit: 50 }));
+    expect(listed).toMatchObject({ kind: "ok", projected: { orders: [{ id: "1001" }] } });
+    expect(fake.costs.at(-1)).toBeLessThanOrEqual(1000);
+    expect((listed as { projected: { orders: Array<{ line_items: unknown[] }> } }).projected.orders[0]!.line_items).toHaveLength(3);
+    const few = await worker.run(await input("shopify_list_orders", { limit: 5 }));
+    expect((few as { projected: { orders: Array<{ line_items: unknown[] }> } }).projected.orders[0]!.line_items).toHaveLength(8);
+    const one = await worker.run(await input("shopify_get_order", { orderId: "1001" }));
+    expect(one).toMatchObject({ kind: "ok", projected: { id: "1001" } });
+    expect((one as { projected: { line_items: unknown[] } }).projected.line_items).toHaveLength(8);
+    expect(fake.costs.every((cost) => cost <= 1000)).toBe(true);
+  });
   it("tells a revoked token (reauthorize) from a permission failure (stays active) and a throttle", async () => {
     fake.failGraphql = { status: 403 };
     expect(await worker.run(await input("shopify_list_orders"))).toEqual({ kind: "error", code: "provider_permission_denied" });
@@ -672,6 +686,240 @@ describe("native reads and disconnect (C-13, C-23)", () => {
     expect(await worker.finishDisconnect(await input("x").then((i) => i.row))).toBe("pending");
     fake.failGraphql = null;
     expect(await worker.finishDisconnect(await input("x").then((i) => i.row))).toBe("disconnected");
+  });
+});
+
+describe("shopify_orders: recent orders for the embedded page (C-30)", () => {
+  const DAY = 86_400_000;
+  const iso = (daysAgo: number) => new Date(clock.now().getTime() - daysAgo * DAY).toISOString();
+  const lastQuery = () => fake.calls.filter((c) => c.url.endsWith("/graphql.json")).at(-1)!.body as { query: string; variables: { first: number; query: string } };
+  const link = async () => { await worker.open({ idToken: token() }); await worker.createHub({ idToken: token() }); };
+
+  it("answers not_linked with no Shopify call at all for a store that was never opened", async () => {
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    expect(fake.calls).toHaveLength(0);
+    expect(await install()).toBeUndefined();
+  });
+
+  it("answers not_linked with no Shopify call for an installed store without a hub, even with its token near the end", async () => {
+    await worker.open({ idToken: token() });
+    const before = await install();
+    clock.ms += 56 * 60_000;
+    const seen = fake.calls.length;
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    expect(fake.calls).toHaveLength(seen);
+    expect((await install()).access_sealed).toBe(before.access_sealed);
+  });
+
+  it("answers not_linked with no Shopify call after a disconnect, and stores no token again", async () => {
+    await link();
+    const connectionId = (await database.pool.query("SELECT tenant_id, id FROM connections")).rows[0];
+    await database.pool.query("UPDATE connections SET status='disconnecting'");
+    const row = { tenant_id: connectionId.tenant_id, id: connectionId.id, external_account_id: SHOP_GID, account_domain: SHOP, status: "disconnecting", last_error_code: null, revoke_outcome: null };
+    expect(await worker.finishDisconnect(row)).toBe("disconnected");
+    const seen = fake.calls.length;
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    clock.ms += 56 * 60_000;
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    expect(fake.calls).toHaveLength(seen);
+    expect(await install()).toMatchObject({ status: "uninstalled", access_sealed: null, refresh_sealed: null });
+  });
+
+  it("for a linked store gets the access token once and makes one Shopify call", async () => {
+    await link();
+    const seen = fake.calls.length;
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok" });
+    expect(fake.calls.slice(seen).map((c) => c.url.split("/").at(-1))).toEqual(["graphql.json"]);
+  });
+
+  it("hands the caller's abort signal to the worker through the route handler and the local port", async () => {
+    const seen: Array<AbortSignal | undefined> = [];
+    const stub = { orders: async (_input: { idToken: string }, signal?: AbortSignal) => { seen.push(signal); return { outcome: "not_linked" as const }; } } as unknown as ShopifyWorkerOps;
+    const controller = new AbortController();
+    expect(await handleShopifyOperation(stub, "orders", JSON.stringify({ idToken: "aaaa.bbbb.cccc" }), controller.signal)).toEqual({ status: 200, body: { outcome: "not_linked" } });
+    expect(await createLocalShopifyPort(stub).orders({ idToken: "aaaa.bbbb.cccc" }, controller.signal)).toEqual({ outcome: "not_linked" });
+    expect(seen).toEqual([controller.signal, controller.signal]);
+  });
+
+  it("aborts the real Shopify call when the caller's signal fires, and answers unavailable", async () => {
+    await link();
+    fake.hangGraphql = true;
+    const controller = new AbortController();
+    const pending = worker.orders({ idToken: token() }, controller.signal);
+    const graphqlCalls = () => fake.calls.filter((c) => c.url.endsWith("/graphql.json")).length;
+    const before = graphqlCalls();
+    for (let i = 0; i < 200 && graphqlCalls() === before; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(graphqlCalls()).toBe(before + 1);
+    controller.abort();
+    expect(await pending).toEqual({ outcome: "unavailable" });
+  });
+
+  it("asks Shopify only for the fields the table shows, well within the single-query cost limit", async () => {
+    await link();
+    fake.orders = [{ id: 1, name: "#1", created_at: iso(1), lineItems: 3 }];
+    await worker.orders({ idToken: token() });
+    const q = lastQuery().query;
+    expect(q).not.toMatch(/lineItems|title|legacyResourceId|\bid\b|customer/);
+    expect(fake.costs.at(-1)).toBe(152);
+  });
+
+  it("answers not_linked, not the orders, when a disconnect commits while Shopify answers", async () => {
+    await link();
+    fake.orders = [{ id: 1, name: "#1", created_at: iso(1) }];
+    const raced = makeNative({ fetch: afterNextGraphql(() => database.pool.query("UPDATE connections SET status='disconnected', account_label=NULL").then(() => undefined)) });
+    expect(await raced.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+  });
+
+  it("gives each store only its own orders, and a third store without a hub not_linked", async () => {
+    const OTHER = "other-store.myshopify.com";
+    const THIRD = "third-store.myshopify.com";
+    fake.otherShops = { [OTHER]: { gid: "gid://shopify/Shop/9002", name: "Other Store" }, [THIRD]: { gid: "gid://shopify/Shop/9003", name: "Third Store" } };
+    fake.orders = [{ id: 1, name: "#A-1", created_at: iso(1) }];
+    fake.ordersByShop = { [OTHER]: [{ id: 2, name: "#B-1", created_at: iso(1) }], [THIRD]: [{ id: 3, name: "#C-1", created_at: iso(1) }] };
+    const other = () => mintIdToken(clock.now(), {}, CLIENT_SECRET, OTHER);
+    const third = () => mintIdToken(clock.now(), {}, CLIENT_SECRET, THIRD);
+    try {
+      await link();
+      fake.email = "owner-b@example.com";
+      await worker.open({ idToken: other() });
+      expect(await worker.createHub({ idToken: other() })).toMatchObject({ outcome: "created" });
+      await worker.open({ idToken: third() });
+      const mine = await worker.orders({ idToken: token() });
+      const theirs = await worker.orders({ idToken: other() });
+      expect(mine).toMatchObject({ outcome: "ok", summary: { count: 1 } });
+      expect(theirs).toMatchObject({ outcome: "ok", summary: { count: 1 } });
+      if (mine.outcome !== "ok" || theirs.outcome !== "ok") throw new Error("unreachable");
+      expect(mine.orders.map((o) => o.name)).toEqual(["#A-1"]);
+      expect(theirs.orders.map((o) => o.name)).toEqual(["#B-1"]);
+      const seen = fake.calls.length;
+      expect(await worker.orders({ idToken: third() })).toEqual({ outcome: "not_linked" });
+      expect(fake.calls).toHaveLength(seen);
+    } finally {
+      await database.pool.query("DELETE FROM connections");
+      await database.pool.query("DELETE FROM tenant_members WHERE lower(email)='owner-b@example.com'");
+    }
+  });
+
+  it("authenticates like open: a bad token is invalid_token before any request", async () => {
+    for (const bad of [token({}, "x".repeat(48)), token({ aud: "other" }), "not-a-jwt"]) expect(await worker.orders({ idToken: bad })).toEqual({ outcome: "invalid_token" });
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("returns the 10 newest orders newest first and a summary over all of those fetched", async () => {
+    await link();
+    fake.orders = Array.from({ length: 12 }, (_, i) => ({ id: 2000 + i, name: `#${2000 + i}`, created_at: iso(12 - i), total: "10.50" }));
+    const out = await worker.orders({ idToken: token() });
+    expect(out).toMatchObject({ outcome: "ok", summary: { count: 12, total: { amount: "126.00", currency: "USD" } } });
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(out.orders.map((o) => o.name)).toEqual(Array.from({ length: 10 }, (_, i) => `#${2011 - i}`));
+    expect(out.orders[0]).toEqual({ name: "#2011", createdAt: iso(1), displayFinancialStatus: "paid", displayFulfillmentStatus: "unfulfilled", total: { amount: "10.50", currency: "USD" } });
+  });
+
+  it("asks for the last 60 days from the injected clock, 50 at most, and works for a reauthorize connection too", async () => {
+    await link();
+    clock.ms += 3 * DAY;
+    await worker.orders({ idToken: token() });
+    const q = lastQuery();
+    expect(q.variables.first).toBe(50);
+    expect(q.variables.query).toBe(`created_at:>='${iso(60)}' created_at:<='${iso(0)}'`);
+    await database.pool.query("UPDATE connections SET status='reauthorize', reauthorize_reason='auth_error'");
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok" });
+  });
+
+  it("never selects or returns customer data", async () => {
+    await link();
+    fake.orders = [{ id: 1, name: "#1", created_at: iso(1), customerId: 55 }];
+    const out = await worker.orders({ idToken: token() });
+    expect(lastQuery().query).not.toMatch(/customer|email|firstName|lastName|phone|address/i);
+    expect(JSON.stringify(out)).not.toMatch(/customer|email|55/i);
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(Object.keys(out.orders[0]!).sort()).toEqual(["createdAt", "displayFinancialStatus", "displayFulfillmentStatus", "name", "total"]);
+  });
+
+  it("skips an order that does not fit the contract instead of cutting it, and keeps the rest", async () => {
+    await link();
+    fake.orders = [
+      { id: 1, name: "#1", created_at: iso(1) },
+      { id: 2, name: "x".repeat(101), created_at: iso(2) },
+      { id: 3, name: "#3", created_at: "+010000-01-01T00:00:00.000Z" },
+      { id: 4, name: "#4", created_at: iso(3), currency: "usd" },
+      { id: 5, name: "#5", created_at: iso(4), total: "1234567890123456.00" },
+      { id: 6, name: "#6", created_at: iso(5), financialStatus: "P".repeat(61) },
+      { id: 7, name: "#7", created_at: iso(5), fulfillmentStatus: 7 },
+      { id: 8, name: "#8", created_at: "1" },
+      { id: 9, name: "#9", created_at: "March 5" },
+      { id: 10, name: "#10", created_at: "2026-02-30T00:00:00Z" },
+      { id: 11, name: "#11", created_at: iso(6), fulfillmentStatus: null },
+    ];
+    const out = await worker.orders({ idToken: token() });
+    expect(shopifyOrdersResponseSchema.safeParse(out).success).toBe(true);
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(out.orders.map((o) => o.name)).toEqual(["#1", "#11"]);
+    expect(out.orders[1]).toMatchObject({ displayFulfillmentStatus: null });
+    expect(out.summary.count).toBe(2);
+  });
+
+  it("skips an order Shopify returns from outside the 60-day window, and keeps an offset time as an exact instant", async () => {
+    await link();
+    fake.ignoreSearch = true;
+    const inside = new Date(clock.now().getTime() - DAY);
+    const offset = `${new Date(inside.getTime() - 5 * 3_600_000).toISOString().slice(0, 19)}-05:00`;
+    fake.orders = [
+      { id: 1, name: "#1", created_at: offset },
+      { id: 2, name: "#2", created_at: iso(61) },
+      { id: 3, name: "#3", created_at: new Date(clock.now().getTime() + DAY).toISOString() },
+    ];
+    const out = await worker.orders({ idToken: token() });
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(out.orders.map((o) => [o.name, o.createdAt])).toEqual([["#1", inside.toISOString().replace(/\.\d{3}Z$/, ".000Z")]]);
+    expect(out.summary.count).toBe(1);
+  });
+
+  it("reads only the 50 newest of more orders in the window", async () => {
+    await link();
+    fake.orders = Array.from({ length: 60 }, (_, i) => ({ id: 5000 + i, name: `#${5000 + i}`, created_at: iso(59 - i * 0.9), total: "1.00" }));
+    const out = await worker.orders({ idToken: token() });
+    expect(out).toMatchObject({ outcome: "ok", summary: { count: 50, total: { amount: "50.00", currency: "USD" } } });
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(out.orders[0]!.name).toBe("#5059");
+  });
+
+  it("sums the largest valid amounts into a total the contract still accepts", async () => {
+    await link();
+    fake.orders = Array.from({ length: 50 }, (_, i) => ({ id: 3000 + i, name: `#${3000 + i}`, created_at: iso(1 + i / 100), total: "999999999999999.99" }));
+    const out = await worker.orders({ idToken: token() });
+    expect(shopifyOrdersResponseSchema.safeParse(out).success).toBe(true);
+    expect(out).toMatchObject({ outcome: "ok", summary: { count: 50, total: { amount: "49999999999999999.50", currency: "USD" } } });
+  });
+
+  it("is empty with a null total when there are no orders, and has no total across currencies", async () => {
+    await link();
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "ok", orders: [], summary: { count: 0, total: null } });
+    fake.orders = [{ id: 1, name: "#1", created_at: iso(1) }, { id: 2, name: "#2", created_at: iso(2), currency: "CAD" }];
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok", summary: { count: 2, total: null } });
+  });
+
+  it("refreshes a token near its end first, and answers busy while another refresh holds the lease", async () => {
+    await link();
+    clock.ms += 56 * 60_000;
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok" });
+    expect(fake.calls.filter((c) => c.body?.grant_type === "refresh_token")).toHaveLength(1);
+    expect(reports).toContainEqual({ kind: "refreshed", shop: SHOP });
+    clock.ms += 56 * 60_000;
+    await database.pool.query("INSERT INTO shopify_locks (shop_domain, held_until, holder) VALUES ($1,$2,$3)", [SHOP, new Date(clock.now().getTime() + 30_000), randomUUID()]);
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "busy" });
+  });
+
+  it("maps a Shopify failure to unavailable, and a revoked token marks the connection reauthorize", async () => {
+    await link();
+    fake.failGraphql = { status: 403 };
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "unavailable" });
+    fake.failGraphql = { status: 429 };
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "unavailable" });
+    expect((await connections())[0]).toMatchObject({ status: "active" });
+    fake.failGraphql = { status: 401 };
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "unavailable" });
+    expect((await connections())[0]).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
   });
 });
 

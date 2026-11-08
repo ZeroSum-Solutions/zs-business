@@ -2,26 +2,46 @@
 // /public/v1/shopify/embedded/<operation>. The only credential is the Shopify session token (an ID token) in
 // `Authorization: Bearer`; no cookie is read or set. The route checks nothing about the token: it rate-limits by the
 // caller's address and forwards it to the worker, which verifies it. Every answer is no-store.
-import { ValidationFailed, shopifyClaimCodeSchema, shopifyIdTokenSchema } from "@zs/contracts";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import {
+  SHOPIFY_EMBEDDED_ADDRESS_HEADER, SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER, ValidationFailed, shopifyClaimCodeSchema, shopifyEmbeddedAddressMessage,
+  shopifyIdTokenSchema,
+} from "@zs/contracts";
 import { createShopifyEmbedded, shopifyPricingUrl, type EdgeDependencies } from "@zs/core";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { apiErrorBody } from "@zs/core";
 import type { AppEnv } from "../app.js";
-import { createClientAddress, addressBucket, type ClientIpConfig } from "./client-ip.js";
+import { canonicalIp, createClientAddress, addressBucket, type ClientIpConfig } from "./client-ip.js";
 
 interface NodeBindings {
   incoming?: { socket?: { remoteAddress?: string } };
 }
 
 export function shopifyEmbeddedRoutes(
-  config: { readonly clientIp?: ClientIpConfig | undefined; readonly shopifyAppHandle?: string | null | undefined },
+  config: {
+    readonly clientIp?: ClientIpConfig | undefined;
+    readonly shopifyAppHandle?: string | null | undefined;
+    /** CONNECTIONS_EMBEDDED_ADDRESS_SECRET: verifies the dashboard proxy's signed note of the browser's address (C-30). */
+    readonly addressSecret?: string | null | undefined;
+  },
   requestEdge: (c: Context<AppEnv>) => EdgeDependencies,
 ) {
   const clientAddress = createClientAddress(config.clientIp);
-  const session = (c: Context<AppEnv>) => {
+  /** The browser's address from the dashboard's note, only when its HMAC over that address and this token is valid. */
+  const signedAddress = (c: Context<AppEnv>, token: string): string | null => {
+    const secret = config.addressSecret;
+    const address = c.req.header(SHOPIFY_EMBEDDED_ADDRESS_HEADER);
+    const signature = c.req.header(SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER);
+    if (!secret || address === undefined || signature === undefined || address.length > 64 || !/^[A-Za-z0-9_-]{43}$/.test(signature)) return null;
+    const expected = createHmac("sha256", secret).update(shopifyEmbeddedAddressMessage(address, token)).digest();
+    const given = Buffer.from(signature, "base64url");
+    return given.length === expected.length && timingSafeEqual(given, expected) ? canonicalIp(address) : null;
+  };
+  const session = (c: Context<AppEnv>, token: string) => {
     const socket = (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress;
-    return createShopifyEmbedded(requestEdge(c), addressBucket(clientAddress(socket, (name) => c.req.header(name))));
+    const address = signedAddress(c, token) ?? clientAddress(socket, (name) => c.req.header(name));
+    return createShopifyEmbedded(requestEdge(c), addressBucket(address));
   };
   /** A missing or malformed token is a plain 401: nothing about the worker or the store is learned. */
   const tokenOf = (c: Context<AppEnv>): string | null => {
@@ -42,17 +62,21 @@ export function shopifyEmbeddedRoutes(
     .post("/open", async (c) => {
       const token = tokenOf(c);
       if (token === null) return refused(c);
-      const opened = await session(c).open(token, c.var.signal);
+      const opened = await session(c, token).open(token, c.var.signal);
       // C-29: the worker knows the plan; only the API holds the app handle, so it adds Shopify's plan selection page.
       return answer(c, opened.outcome === "ok" ? { ...opened, planUrl: shopifyPricingUrl(opened.shop.domain, config.shopifyAppHandle) } : opened);
     })
+    .post("/orders", async (c) => {
+      const token = tokenOf(c);
+      return token === null ? refused(c) : answer(c, await session(c, token).orders(token, c.var.signal));
+    })
     .post("/create-hub", async (c) => {
       const token = tokenOf(c);
-      return token === null ? refused(c) : answer(c, await session(c).createHub(token, c.var.signal));
+      return token === null ? refused(c) : answer(c, await session(c, token).createHub(token, c.var.signal));
     })
     .post("/sign-in", async (c) => {
       const token = tokenOf(c);
-      return token === null ? refused(c) : answer(c, await session(c).signIn(token, c.var.signal));
+      return token === null ? refused(c) : answer(c, await session(c, token).signIn(token, c.var.signal));
     })
     .post("/redeem-claim", async (c) => {
       const token = tokenOf(c);
@@ -61,6 +85,6 @@ export function shopifyEmbeddedRoutes(
       try { body = await c.req.json(); } catch { throw new ValidationFailed("Invalid request"); }
       const code = shopifyClaimCodeSchema.safeParse((body as { code?: unknown } | null)?.code);
       if (!code.success) return c.json({ outcome: "invalid_code" });
-      return answer(c, await session(c).redeemClaim(token, code.data, c.var.signal));
+      return answer(c, await session(c, token).redeemClaim(token, code.data, c.var.signal));
     });
 }

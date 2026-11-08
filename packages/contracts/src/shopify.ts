@@ -6,11 +6,11 @@ import { uuidSchema } from "./index.js";
 //   - The embedded app's calls (an App Bridge session token, a Shopify ID token, in the Authorization header). The
 //     dashboard forwards them to the API, the API signs them to the worker, and the worker alone checks the token.
 //   - The owner's claim calls (a signed-in hub owner), which carry no ID token.
-// The worker's eight operations travel under /internal/shopify/<operation>. Domain outcomes are 200 with an `outcome`.
+// The worker's nine operations travel under /internal/shopify/<operation>. Domain outcomes are 200 with an `outcome`.
 const idSchema = z.lazy(() => uuidSchema);
 
 export const SHOPIFY_OPERATIONS = Object.freeze([
-  "open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm",
+  "open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm", "orders",
 ] as const);
 export type ShopifyOperation = (typeof SHOPIFY_OPERATIONS)[number];
 export const SHOPIFY_PATH_PREFIX = "/internal/shopify/";
@@ -24,6 +24,7 @@ const idTokenBody = z.strictObject({ idToken: shopifyIdTokenSchema });
 export const shopifyOpenRequestSchema = idTokenBody;
 export const shopifyCreateHubRequestSchema = idTokenBody;
 export const shopifySignInRequestSchema = idTokenBody;
+export const shopifyOrdersRequestSchema = idTokenBody;
 export const shopifyRedeemClaimRequestSchema = z.strictObject({ idToken: shopifyIdTokenSchema, code: shopifyClaimCodeSchema });
 export const shopifyClaimStartRequestSchema = z.strictObject({ tenantId: idSchema, memberId: idSchema });
 export const shopifyClaimStatusRequestSchema = z.strictObject({ tenantId: idSchema });
@@ -99,3 +100,49 @@ export const shopifyClaimConfirmResponseSchema = z.discriminatedUnion("outcome",
   z.strictObject({ outcome: z.enum(["not_redeemed", "expired", "install_gone", "store_in_use", "tenant_has_store", "not_found"]) }),
   z.strictObject({ outcome: z.literal("billing_conflict"), reason: z.string().max(64) }),
 ]);
+
+/**
+ * C-30: the embedded page's read-only "Recent orders" view. No customer field exists in this type (the strict objects
+ * would reject one): an order is its name, time, two status words and a total.
+ */
+const moneyAmount = z.string().regex(/^[0-9]{1,15}(\.[0-9]{1,6})?$/);
+/** The summary adds up to 50 amounts of at most 15 integer digits each, so the sum needs up to 17. */
+const summedAmount = z.string().regex(/^[0-9]{1,17}(\.[0-9]{1,6})?$/);
+const currencyCode = z.string().regex(/^[A-Z]{3}$/);
+export const SHOPIFY_RECENT_ORDERS_DAYS = 60;
+export const SHOPIFY_RECENT_ORDERS_SHOWN = 10;
+export const SHOPIFY_RECENT_ORDERS_FETCHED = 50;
+export const shopifyRecentOrderSchema = z.strictObject({
+  name: z.string().min(1).max(100),
+  createdAt: instant,
+  displayFinancialStatus: z.string().max(60).nullable(),
+  displayFulfillmentStatus: z.string().max(60).nullable(),
+  total: z.strictObject({ amount: moneyAmount, currency: currencyCode }),
+});
+export type ShopifyRecentOrder = z.infer<typeof shopifyRecentOrderSchema>;
+export const shopifyOrdersResponseSchema = z.discriminatedUnion("outcome", [
+  z.strictObject({
+    outcome: z.literal("ok"),
+    /** The newest orders of the last 60 days, newest first, at most 10. */
+    orders: z.array(shopifyRecentOrderSchema).max(SHOPIFY_RECENT_ORDERS_SHOWN),
+    /** Counted over the orders fetched (at most 50); `total` is null when their currencies differ. */
+    summary: z.strictObject({
+      count: z.number().int().min(0).max(SHOPIFY_RECENT_ORDERS_FETCHED),
+      total: z.strictObject({ amount: summedAmount, currency: currencyCode }).nullable(),
+    }),
+  }),
+  z.strictObject({ outcome: z.enum(["invalid_token", "unavailable", "busy", "not_supported", "not_linked"]) }),
+]);
+export type ShopifyOrdersResponse = z.infer<typeof shopifyOrdersResponseSchema>;
+
+/**
+ * C-30: the browser's address, from the dashboard proxy to the API, signed. The API sees only the dashboard's own
+ * address on a server-to-server call (Vercel overwrites x-vercel-forwarded-for), so without this note every merchant
+ * would share one embedded rate-limit bucket. The API counts the note only with a valid HMAC-SHA256 under
+ * CONNECTIONS_EMBEDDED_ADDRESS_SECRET (both projects hold it); the signature also covers the bearer token, so a seen
+ * note fits that one short-lived token only.
+ */
+export const SHOPIFY_EMBEDDED_ADDRESS_HEADER = "x-zs-embedded-address";
+export const SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER = "x-zs-embedded-address-signature";
+export const shopifyEmbeddedAddressMessage = (address: string, idToken: string): string =>
+  `zs-shopify-embedded-address.v1\n${address}\n${idToken}`;

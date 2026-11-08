@@ -152,7 +152,7 @@ describe("build-vercel.mjs", () => {
     const names = ["activepieces", "billing", "calendar", "connections", "delivery", "followup"].map((name) => `cron/${name}`);
     const internal = [
       ...["cancel", "complete", "disconnect", "link", "run"].map((name) => `internal/connections/${name}`),
-      ...["open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm"].map((name) => `internal/shopify/${name}`),
+      ...["open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm", "orders"].map((name) => `internal/shopify/${name}`),
       "webhooks/shopify",
     ];
     expect(functions).toEqual([...names, ...internal].map((name) => `${name}.func`).sort());
@@ -177,7 +177,7 @@ describe("build-vercel.mjs", () => {
 
   it("worker: with no schedule variables there is no crons key", async () => {
     const { config, functions } = await run("worker", {});
-    expect(functions).toHaveLength(20);
+    expect(functions).toHaveLength(21);
     expect(config.crons).toBeUndefined();
   }, 120_000);
 

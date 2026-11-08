@@ -1,13 +1,17 @@
 // The embedded Shopify app on the dashboard side (docs/requirements/connections.md C-21): the page's HTML and policy,
 // the session-token proxy, the claim routes through the generic proxy, and the page script run against a fake document.
+import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { SHOPIFY_EMBEDDED_ADDRESS_HEADER, SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER, shopifyEmbeddedAddressMessage } from "@zs/contracts";
 import nextConfig from "../next.config";
 import { proxyApiRequest } from "../src/lib/server/api-proxy";
 import { EMBEDDED_CLIENT_PARAMS, EMBEDDED_CLIENT_SOURCE } from "../src/lib/server/shopify-embedded-client";
 import { APP_BRIDGE_URL, embeddedPolicy, frameAncestors, renderEmbeddedPage, shopFromQuery } from "../src/lib/server/shopify-embedded-page";
-import { embeddedConfigFrom, proxyEmbedded } from "../src/lib/server/shopify-embedded";
+import { embeddedConfigFrom, proxyEmbedded, type EmbeddedConfig } from "../src/lib/server/shopify-embedded";
 
 const CLIENT_ID = "a".repeat(32);
+/** HMAC-SHA256 under "v" x 32 of the address note for 203.0.113.5 and token aaaa.bbbb.cccc; apps/api's test pins the same. */
+const ADDRESS_VECTOR = "pyAmXzMBfL5iUyDdYwm13m7UwxccPS8MFUPMJX5Q1Y0";
 const NONCE = "n".repeat(24);
 const b64 = (text: string) => Buffer.from(text).toString("base64url");
 const TOKEN = [b64('{"alg":"HS256","typ":"JWT"}'), b64('{"dest":"https://halden-rowe.myshopify.com"}'), b64("signature-bytes-here")].join(".");
@@ -95,6 +99,41 @@ describe("POST /api/shopify/<op> (the dashboard half of C-21)", () => {
     expect(new Headers((upstream.mock.calls[0]![1] as RequestInit).headers).get("x-forwarded-for")).toBe("203.0.113.5");
   });
 
+  it("signs the browser's address for the API with the shared secret, bound to the token (C-30)", async () => {
+    const secret = "s".repeat(40);
+    const sent = async (headers: Record<string, string>, over: Partial<EmbeddedConfig>) => {
+      const upstream = okFetch();
+      await proxyEmbedded(post("{}", headers), "orders", { ...config(upstream), ...over });
+      return new Headers((upstream.mock.calls[0]![1] as RequestInit).headers);
+    };
+    const signed = await sent({ "x-forwarded-for": "198.51.100.1, 203.0.113.5" }, { trustProxy: true, addressSecret: secret });
+    // The right-most entry is the one the trusted proxy appended (as for sign-in); a caller writes the rest.
+    expect(signed.get(SHOPIFY_EMBEDDED_ADDRESS_HEADER)).toBe("203.0.113.5");
+    expect(signed.get(SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER)).toBe(createHmac("sha256", secret).update(shopifyEmbeddedAddressMessage("203.0.113.5", TOKEN)).digest("base64url"));
+    // The pinned vector the API's test checks too, so both halves agree on the message.
+    expect(createHmac("sha256", "v".repeat(32)).update(shopifyEmbeddedAddressMessage("203.0.113.5", "aaaa.bbbb.cccc")).digest("base64url")).toBe(ADDRESS_VECTOR);
+    for (const over of [{ trustProxy: false, addressSecret: secret }, { trustProxy: true, addressSecret: null }]) {
+      const plain = await sent({ "x-forwarded-for": "203.0.113.5" }, over);
+      expect(plain.get(SHOPIFY_EMBEDDED_ADDRESS_HEADER), JSON.stringify(over)).toBeNull();
+      expect(plain.get(SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER)).toBeNull();
+    }
+    expect(embeddedConfigFrom({ ZS_API_URL: "https://api.example.test", CONNECTIONS_EMBEDDED_ADDRESS_SECRET: secret })?.addressSecret).toBe(secret);
+    expect(embeddedConfigFrom({ ZS_API_URL: "https://api.example.test", CONNECTIONS_EMBEDDED_ADDRESS_SECRET: "short" })?.addressSecret).toBeNull();
+  });
+
+  it("aborts the API call when the browser's request is aborted", async () => {
+    let seen: AbortSignal | undefined;
+    const upstream = (async (_url: unknown, init?: RequestInit) => { seen = init?.signal ?? undefined; return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))); }) as unknown as typeof fetch;
+    const controller = new AbortController();
+    const request = new Request(post("{}"), { signal: controller.signal });
+    const pending = proxyEmbedded(request, "orders", config(upstream));
+    for (let i = 0; i < 50 && seen === undefined; i += 1) await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(seen?.aborted).toBe(false);
+    controller.abort();
+    expect((await pending).status).toBe(502);
+    expect(seen?.aborted).toBe(true);
+  });
+
   it("refuses a missing or malformed token (401), another site (403), a non-JSON body (400) and a big body (413) without calling the API", async () => {
     const upstream = okFetch();
     const c = config(upstream);
@@ -161,9 +200,10 @@ type Answer = { status: number; body: unknown; headers?: Record<string, string>;
 interface FakeTimer { id: number; at: number; ms: number; fn: () => void }
 
 /** Runs the page script against a fake document, a fake clock and a timer queue that honours delays and clearTimeout. */
-function runClient(options: { framed?: boolean; search?: string; hidden?: boolean; answers: Answer[] }) {
+function runClient(options: { framed?: boolean; search?: string; hidden?: boolean; gate?: Promise<void>; orders?: Answer[]; answers: Answer[] }) {
   const app = new FakeNode("main");
   const calls: Array<{ url: string; init: RequestInit }> = [];
+  const orderCalls: Array<{ url: string; init: RequestInit }> = [];
   const opened: Array<{ href: string | null }> = [];
   const document = { getElementById: () => app, createElement: (tag: string) => new FakeNode(tag), visibilityState: options.hidden ? "hidden" : "visible" };
   const timers: FakeTimer[] = [];
@@ -180,10 +220,15 @@ function runClient(options: { framed?: boolean; search?: string; hidden?: boolea
   };
   if (options.framed === false) { win.top = win.self; }
   const queue = [...options.answers];
+  const orderQueue = [...(options.orders ?? [])];
   const fetchImpl = async (url: string, init: RequestInit) => {
-    calls.push({ url, init });
-    const next = queue.shift() ?? { status: 503, body: {} };
-    if ("hang" in next) return new Promise<never>(() => undefined);
+    // C-30: the orders read has its own answers and call list, so the sequences the older tests assert stay as they were.
+    const isOrders = url.endsWith("/orders");
+    (isOrders ? orderCalls : calls).push({ url, init });
+    if (isOrders && options.gate) await options.gate;
+    const next = (isOrders ? orderQueue : queue).shift() ?? { status: 503, body: {} };
+    // A hung request ends only when the page aborts it, as fetch does.
+    if ("hang" in next) return new Promise<never>((_, reject) => { init.signal?.addEventListener("abort", () => reject(new Error("aborted"))); });
     if (next.wait) await next.wait;
     const headers = new Headers(next.headers ?? {});
     return { status: next.status, ok: next.status >= 200 && next.status < 300, headers, json: async () => next.body };
@@ -206,7 +251,7 @@ function runClient(options: { framed?: boolean; search?: string; hidden?: boolea
     await settle();
   };
   const polls = () => timers.filter((timer) => timer.fn.name === "refreshPlan");
-  return { app, calls, win, opened, timers, clock, advance, polls };
+  return { app, calls, orderCalls, win, opened, timers, clock, advance, polls };
 }
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const texts = (app: FakeNode) => app.all().map((node) => node.text).join(" | ");
@@ -499,6 +544,183 @@ describe("the plan on the page (C-29)", () => {
     expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/sign-in", "/api/shopify/open"]);
     expect(texts(app)).toContain("Plan: Pro");
     expect(texts(app)).toContain("Only the store owner can open the hub");
+  });
+});
+
+describe("recent orders on the page (C-30)", () => {
+  const LINKED = { state: "linked", businessName: "Halden", connection: "active" };
+  const opened = (link: unknown = LINKED) => ({ status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "active", name: "Solo" }, link } });
+  const order = (name: string, over: Record<string, unknown> = {}) => ({ name, createdAt: "2026-11-05T14:30:00.000Z", displayFinancialStatus: "partially_refunded", displayFulfillmentStatus: "unfulfilled", total: { amount: "30.00", currency: "USD" }, ...over });
+  const okOrders = (orders: unknown[], summary: unknown = { count: orders.length, total: { amount: "90.50", currency: "USD" } }) => ({ status: 200, body: { outcome: "ok", orders, summary } });
+  const cells = (app: FakeNode) => app.all().filter((node) => node.tag === "td" || node.tag === "th").map((node) => node.text);
+
+  it("reads orders after open for a linked store and shows the table and the summary line", async () => {
+    const { app, calls, orderCalls } = runClient({ answers: [opened()], orders: [okOrders([order("#1002"), order("#1001", { displayFulfillmentStatus: "fulfilled", displayFinancialStatus: "paid", total: { amount: "60.50", currency: "USD" } })], { count: 2, total: { amount: "90.50", currency: "USD" } })] });
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open"]);
+    expect(orderCalls.map((call) => call.url)).toEqual(["/api/shopify/orders"]);
+    expect((orderCalls[0]!.init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+    expect(orderCalls[0]!.init.credentials).toBe("omit");
+    expect(orderCalls[0]!.init.referrerPolicy).toBe("no-referrer");
+    expect(texts(app)).toContain("Recent orders");
+    expect(cells(app).slice(0, 5)).toEqual(["Order", "Date", "Payment", "Fulfillment", "Total"]);
+    expect(cells(app).slice(5, 10)).toEqual(["#1002", "2026-11-05", "Partially refunded", "Unfulfilled", "$30.00"]);
+    expect(cells(app).slice(10, 15)).toEqual(["#1001", "2026-11-05", "Paid", "Fulfilled", "$60.50"]);
+    const summary = app.all().find((node) => node.attrs["data-testid"] === "orders-summary")!;
+    expect(summary.text).toBe("2 orders in the last 60 days, total $90.50");
+  });
+
+  it("says one order and no single total when currencies differ", async () => {
+    const one = runClient({ answers: [opened()], orders: [okOrders([order("#1")], { count: 1, total: { amount: "30.00", currency: "USD" } })] });
+    await settle();
+    expect(texts(one.app)).toContain("1 order in the last 60 days, total $30.00");
+    const mixed = runClient({ answers: [opened()], orders: [okOrders([order("#1")], { count: 3, total: null })] });
+    await settle();
+    expect(texts(mixed.app)).toContain("3 orders in the last 60 days, total in more than one currency");
+  });
+
+  it("does not read orders for a store without a hub, and shows the reconnect state with orders for a reauthorize link", async () => {
+    const none = runClient({ answers: [opened({ state: "none" })] });
+    await settle();
+    expect(none.calls.map((call) => call.url)).toEqual(["/api/shopify/open"]);
+    expect(none.orderCalls).toHaveLength(0);
+    expect(texts(none.app)).not.toContain("Recent orders");
+    const reauth = runClient({ answers: [opened({ state: "linked", businessName: "Halden", connection: "reauthorize" })], orders: [okOrders([order("#7")])] });
+    await settle();
+    expect(texts(reauth.app)).toContain("Reconnect needed");
+    expect(cells(reauth.app)).toContain("#7");
+  });
+
+  it("shows the empty state", async () => {
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([], { count: 0, total: null })] });
+    await settle();
+    expect(texts(app)).toContain("No orders in the last 60 days");
+    expect(app.all().some((node) => node.tag === "table")).toBe(false);
+  });
+
+  it("shows the error state for any failure and keeps the rest of the page", async () => {
+    for (const answer of [{ status: 503, body: {} }, { status: 429, body: {} }, { status: 200, body: { outcome: "unavailable" } }, { status: 200, body: { outcome: "not_linked" } }, { status: 401, body: {} }]) {
+      const { app } = runClient({ answers: [opened()], orders: [answer, answer] });
+      await settle();
+      expect(texts(app), JSON.stringify(answer)).toContain("Orders are not available right now");
+      expect(texts(app)).toContain("Connected");
+      expect(button(app, "Open ZS Hub")).toBeDefined();
+    }
+  });
+
+  it("renders an order name as text, never as markup", async () => {
+    const evil = '<img src=x onerror=alert(1)>';
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([order(evil, { displayFinancialStatus: "<script>x</script>" })])] });
+    await settle();
+    expect(cells(app)).toContain(evil);
+    expect(app.all().some((node) => node.tag === "img" || node.tag === "script")).toBe(false);
+    expect(EMBEDDED_CLIENT_SOURCE).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+  });
+
+  it("formats a large amount exactly, without rounding it through a float", async () => {
+    const big = { amount: "999999999999999.99", currency: "USD" };
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([order("#1", { total: big })], { count: 2, total: { amount: "1000000000000000.00", currency: "USD" } })] });
+    await settle();
+    expect(cells(app)).toContain("$999,999,999,999,999.99");
+    expect(texts(app)).toContain("total $1,000,000,000,000,000.00");
+  });
+
+  it("keeps every decimal Shopify sent and never fewer than the currency's own", async () => {
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([
+      order("#1", { total: { amount: "1.234567", currency: "USD" } }),
+      order("#2", { total: { amount: "10.5", currency: "USD" } }),
+      order("#3", { total: { amount: "1500", currency: "JPY" } }),
+    ], { count: 3, total: { amount: "11.734567", currency: "USD" } })] });
+    await settle();
+    expect(cells(app)).toEqual(expect.arrayContaining(["$1.234567", "$10.50", "¥1,500"]));
+    expect(texts(app)).toContain("total $11.734567");
+  });
+
+  it("gives up on a hung read at its 15 s deadline: the request is aborted and the slot says not available", async () => {
+    const { app, orderCalls, advance } = runClient({ answers: [opened()], orders: [{ hang: true }] });
+    await settle();
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(false);
+    await advance(14_999);
+    expect(texts(app)).toContain("Loading recent orders");
+    await advance(1);
+    expect(texts(app)).toContain("Orders are not available right now");
+    expect(texts(app)).not.toContain("Loading recent orders");
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(true);
+  });
+
+  it("aborts the orders read when the page moves to another screen", async () => {
+    const confirming = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: LINKED } };
+    const unlinked = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: { state: "none" } } };
+    const { app, orderCalls, advance } = runClient({ search: "?plan=welcome", answers: [confirming, unlinked], orders: [{ hang: true }] });
+    await settle();
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(false);
+    await advance(30_000);
+    expect(texts(app)).toContain("Not linked to a ZS Hub yet");
+    expect(orderCalls[0]!.init.signal?.aborted).toBe(true);
+    expect(texts(app)).not.toContain("Orders are not available");
+  });
+
+  it("still shows the orders when Open ZS Hub is clicked while they are read (Open ZS Hub keeps the screen)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { app } = runClient({ gate, answers: [opened(), { status: 200, body: { outcome: "ok", url: "https://hub.example.test/sign-in" } }], orders: [okOrders([order("#LATE")])] });
+    await settle();
+    expect(texts(app)).toContain("Loading recent orders");
+    button(app, "Open ZS Hub").click();
+    await settle();
+    release();
+    await settle();
+    expect(cells(app)).toContain("#LATE");
+    expect(texts(app)).not.toContain("Loading recent orders");
+    expect(texts(app)).toContain("Your hub opened in a new tab.");
+  });
+
+  it("drops an orders answer that lands after the page moved to another screen", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const confirming = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: LINKED } };
+    const unlinked = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: { state: "none" } } };
+    const { app, advance } = runClient({ search: "?plan=welcome", gate, answers: [confirming, unlinked], orders: [okOrders([order("#LATE")])] });
+    await settle();
+    expect(texts(app)).toContain("Loading recent orders");
+    await advance(30_000);
+    expect(texts(app)).toContain("Not linked to a ZS Hub yet");
+    release();
+    await settle();
+    expect(cells(app)).not.toContain("#LATE");
+    expect(texts(app)).not.toContain("Recent orders");
+  });
+
+  it("loads the orders on the screen shown after the hub is made, once the read confirms the link", async () => {
+    const { app, calls, orderCalls } = runClient({ answers: [
+      opened({ state: "none" }),
+      { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+      opened(),
+    ], orders: [okOrders([order("#NEW")])] });
+    await settle();
+    expect(orderCalls).toHaveLength(0);
+    button(app, "Create my ZS Hub").click();
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/create-hub", "/api/shopify/open"]);
+    expect(orderCalls).toHaveLength(1);
+    expect(texts(app)).toContain("Your hub is ready");
+    expect(cells(app)).toContain("#NEW");
+  });
+
+  it("reads no orders after the hub is made when the read finds the store unlinked or fails", async () => {
+    for (const third of [opened({ state: "none" }), { status: 503, body: {} }]) {
+      const { app, calls, orderCalls } = runClient({ answers: [
+        opened({ state: "none" }),
+        { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+        third,
+      ] });
+      await settle();
+      button(app, "Create my ZS Hub").click();
+      await settle();
+      expect(calls, JSON.stringify(third)).toHaveLength(3);
+      expect(orderCalls).toHaveLength(0);
+      expect(texts(app)).not.toContain("Recent orders");
+    }
   });
 });
 

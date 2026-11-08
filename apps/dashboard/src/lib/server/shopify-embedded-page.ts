@@ -71,6 +71,17 @@ input:focus-visible, .btn:focus-visible, a:focus-visible { outline: 2px solid va
 .plan { margin: 0 0 8px; }
 .plan-name { margin: 0; font-weight: 700; color: var(--fg); }
 .plan .actions { margin: 8px 0 12px; }
+.orders { margin: 24px 0 0; }
+.orders h2 { margin: 0 0 8px; font-size: 1.125rem; line-height: 1.3; }
+.orders-summary { font-weight: 700; color: var(--fg); }
+.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; }
+.table-wrap:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.orders-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.orders-table th, .orders-table td { padding: 10px 12px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--border); color: var(--fg-2); }
+.orders-table thead th { background: var(--inset); color: var(--fg); font-weight: 700; }
+.orders-table tbody th { color: var(--fg); font-weight: 700; }
+.orders-table tr:last-child > * { border-bottom: 0; }
+.orders-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .legal { max-width: 34rem; margin: 0 auto; padding: 0 16px 32px; display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.875rem; }
 .legal a { color: var(--meta); display: inline-flex; align-items: center; min-height: 44px; }
 .note:empty { display: none; }

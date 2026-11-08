@@ -5,13 +5,17 @@
  * caller's own cookies are never forwarded. The owner's claim calls are different: they carry a hub session and go
  * through the generic proxy (api-proxy.ts).
  */
-import { shopifyIdTokenSchema, type ApiErrorCode } from "@zs/contracts";
+import { createHmac } from "node:crypto";
+import {
+  SHOPIFY_EMBEDDED_ADDRESS_HEADER, SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER, shopifyEmbeddedAddressMessage, shopifyIdTokenSchema, type ApiErrorCode,
+} from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
 import { readBoundedBody, type BodyTiming } from "./body";
 import { trustProxyFromEnv } from "./live-config";
 import { isSameOrigin } from "./origin";
+import { clientAddress, DIRECT_ADDRESS } from "./rate-limit";
 
-export const EMBEDDED_OPS: ReadonlySet<string> = new Set(["open", "create-hub", "sign-in", "redeem-claim"]);
+export const EMBEDDED_OPS: ReadonlySet<string> = new Set(["open", "orders", "create-hub", "sign-in", "redeem-claim"]);
 const MAX_BODY_BYTES = 2048;
 const BODY_DEADLINE_MS = 10_000;
 const UPSTREAM_TIMEOUT_MS = 12_000;
@@ -27,6 +31,8 @@ const reply = (status: number, code: ApiErrorCode, extra: Record<string, string>
 export interface EmbeddedConfig {
   readonly apiUrl: string;
   readonly trustProxy: boolean;
+  /** CONNECTIONS_EMBEDDED_ADDRESS_SECRET (32+ characters, the API holds the same): signs the browser's address (C-30). */
+  readonly addressSecret?: string | null;
   readonly fetch?: typeof fetch;
 }
 
@@ -34,7 +40,8 @@ export interface EmbeddedConfig {
 export function embeddedConfigFrom(vars: Record<string, string | undefined>): EmbeddedConfig | null {
   const apiUrl = vars.ZS_API_URL?.trim().replace(/\/+$/, "");
   if (!apiUrl) return null;
-  return { apiUrl, trustProxy: trustProxyFromEnv(vars) };
+  const secret = vars.CONNECTIONS_EMBEDDED_ADDRESS_SECRET;
+  return { apiUrl, trustProxy: trustProxyFromEnv(vars), addressSecret: secret !== undefined && secret.length >= 32 ? secret : null };
 }
 
 export async function proxyEmbedded(request: Request, op: string, config: EmbeddedConfig | null, timing: BodyTiming = {}): Promise<Response> {
@@ -51,9 +58,17 @@ export async function proxyEmbedded(request: Request, op: string, config: Embedd
   if (!read.ok) return reply(BODY_REFUSED[read.reason], "ValidationFailed");
 
   const headers = new Headers({ Authorization: `Bearer ${token.data}`, "Content-Type": "application/json" });
-  // The API limits by caller address; behind a trusted proxy the browser's address is the first entry we were given.
+  // The API limits by caller address. A self-hosted API that trusts this dashboard as a proxy reads X-Forwarded-For.
   const forwarded = config.trustProxy ? request.headers.get("x-forwarded-for") : null;
   if (forwarded) headers.set("X-Forwarded-For", forwarded);
+  // On a host that overwrites the address header (Vercel), the API sees only this server's address, so the browser's
+  // address (the one the trusted proxy appended, as for sign-in) goes in a note the API verifies (C-30).
+  const address = config.trustProxy && config.addressSecret ? clientAddress(request, true) : DIRECT_ADDRESS;
+  if (config.addressSecret && address !== DIRECT_ADDRESS && address.length <= 64) {
+    headers.set(SHOPIFY_EMBEDDED_ADDRESS_HEADER, address);
+    headers.set(SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER,
+      createHmac("sha256", config.addressSecret).update(shopifyEmbeddedAddressMessage(address, token.data)).digest("base64url"));
+  }
 
   let upstream: Response;
   try {
@@ -62,7 +77,8 @@ export async function proxyEmbedded(request: Request, op: string, config: Embedd
       headers,
       body: read.bytes,
       redirect: "manual",
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      // A browser that goes away (the admin closed, the page's own deadline) stops the API call too.
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)]),
     });
   } catch {
     return reply(502, "Internal");

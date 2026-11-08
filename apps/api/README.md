@@ -602,6 +602,7 @@ holds `COMPOSIO_API_KEY`, an auth config ID or the service database login.
 | `CONNECTIONS_STATE_SECRET` | 32+ characters, different from the internal secret. Signs the attempt and grant tokens (10 minutes). |
 | `CONNECTIONS_STATE_PREVIOUS_SECRET` | Optional, during a rotation: tokens it signed keep verifying; must differ from the current one. |
 | `CONNECTIONS_RETURN_URL` | The dashboard page the callback sends the owner back to (`https://<dashboard host>/account/connections`). |
+| `CONNECTIONS_EMBEDDED_ADDRESS_SECRET` | Optional (32+ characters, must differ from the other connections secrets; the dashboard holds the same value): verifies the dashboard's signed note of the browser's address, so the embedded Shopify app's limits count each browser and not the dashboard's own address (connections.md C-30). Unset: the address the host gives counts, which on Vercel is the dashboard's for every merchant. |
 
 The callback is `GET /oauth/connections/callback` (and `/status`). Like the Google one it trusts only the
 signed attempt token and the browser key, both forwarded by the dashboard in headers
@@ -800,7 +801,7 @@ against the pinned Supabase Root 2021 CA.
    | `CONNECTIONS_DATABASE_URL`, `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL` (with `COMPOSIO_API_KEY`, listed above) | **no** | yes |
    | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_ID`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS_ID`, `SHOPIFY_API_VERSION`, `SHOPIFY_PLAN_GRACE_DAYS`, `SUPABASE_SERVICE_ROLE_KEY`, `HUB_SIGN_IN_URL` (the native Shopify tier) | **no** | yes |
    | `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`, `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (the signing secrets and environment; the same values in both projects) | yes (the API signs with them) | yes |
-   | `CONNECTIONS_WORKER_URL`, `CONNECTIONS_STATE_SECRET`, `CONNECTIONS_STATE_PREVIOUS_SECRET`, `CONNECTIONS_RETURN_URL` (the API side only) | yes | no |
+   | `CONNECTIONS_WORKER_URL`, `CONNECTIONS_STATE_SECRET`, `CONNECTIONS_STATE_PREVIOUS_SECRET`, `CONNECTIONS_RETURN_URL`, `CONNECTIONS_EMBEDDED_ADDRESS_SECRET` (the API side only; the last one also on the dashboard project) | yes | no |
    | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
 
    `CEREBRAS_*`, `DEEPSEEK_*` and `AGENT_MODEL_*` are worker-only because `POST /v1/agents/followup/runs`

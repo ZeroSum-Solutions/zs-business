@@ -285,7 +285,7 @@ export function createApp(deps: AppDependencies) {
   if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
   if (deps.connections) app.route("/", connectionsCallbackRoutes(deps.connections, requestEdge));
   // C-21, C-22: the embedded app's anonymous calls; absent the Shopify port they are unknown routes (404).
-  if (deps.connections?.shopify) app.route("/public/v1/shopify/embedded", shopifyEmbeddedRoutes({ clientIp: deps.connections.clientIp, shopifyAppHandle: deps.shopifyAppHandle }, requestEdge));
+  if (deps.connections?.shopify) app.route("/public/v1/shopify/embedded", shopifyEmbeddedRoutes({ clientIp: deps.connections.clientIp, shopifyAppHandle: deps.shopifyAppHandle, addressSecret: deps.connections.embeddedAddressSecret }, requestEdge));
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
   // hub-access.md H-5: the remote MCP endpoint rides on the automation key, so it is off without it (404).
