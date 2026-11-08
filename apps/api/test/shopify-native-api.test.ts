@@ -135,8 +135,9 @@ function makeNative() {
   });
 }
 
-function build(shopify: ShopifyPort | null): App {
+function build(shopify: ShopifyPort | null, shopifyAppHandle?: string): App {
   return createApp({
+    ...(shopifyAppHandle ? { shopifyAppHandle } : {}),
     verifier: createHs256Verifier(SECRET, { clock }),
     sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
     clock,
@@ -207,9 +208,15 @@ describe("the embedded routes (C-21, C-22)", () => {
   it("open shows the store, never sets a cookie, and is not cacheable", async () => {
     const response = await embedded(on, "open", token());
     expect(response.status).toBe(200);
-    expect(await json(response)).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, link: { state: "none" } });
+    expect(await json(response)).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, plan: { state: "none" }, planUrl: null, link: { state: "none" } });
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("open adds Shopify's plan selection page when the app handle is configured (C-29)", async () => {
+    const withHandle = build(createLocalShopifyPort(native), "zs-business-connections");
+    const body = await json(await embedded(withHandle, "open", token())) as { planUrl: string };
+    expect(body.planUrl).toBe(`https://admin.shopify.com/store/${SHOP.replace(".myshopify.com", "")}/charges/zs-business-connections/pricing_plans`);
   });
 
   it("a forged token is a 401 (so the page retries with a fresh one), not a crash", async () => {

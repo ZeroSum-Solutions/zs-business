@@ -100,10 +100,33 @@ function afterNextGraphql(hook: () => Promise<void>): typeof fetch {
 }
 const bumpGeneration = () => database.pool.query("UPDATE shopify_installs SET generation=generation+1").then(() => undefined);
 
+describe("shopify_open: the plan state (C-29)", () => {
+  const storePlan = (plan: string, status: string) => database.pool.query(
+    `INSERT INTO tenant_plans (tenant_id, billing_provider, shopify_shop_id, shopify_shop_domain, plan, plan_interval, status, created_at, updated_at)
+     VALUES ($1,'shopify',$2,$3,$4,'month',$5,now(),now())`, [a.tenantId, SHOP_GID, SHOP, plan, status]);
+
+  it("is none until the billing runner has stored a plan", async () => {
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" } });
+    await database.pool.query("INSERT INTO tenant_plans (tenant_id, billing_provider, shopify_shop_id, shopify_shop_domain, status, created_at, updated_at) VALUES ($1,'shopify',$2,$3,'none',now(),now())", [a.tenantId, SHOP_GID, SHOP]);
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" } });
+  });
+
+  it("names the plan when active or past due, calls a trialing one a trial, and treats a canceled one as none", async () => {
+    await storePlan("studio", "active");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "active", name: "Studio" } });
+    await database.pool.query("UPDATE tenant_plans SET status='trialing', plan='solo'");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "trial", name: "Solo" } });
+    await database.pool.query("UPDATE tenant_plans SET status='past_due', plan='pro'");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "active", name: "Pro" } });
+    await database.pool.query("UPDATE tenant_plans SET status='canceled'");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" } });
+  });
+});
+
 describe("shopify_open: authenticate, exchange once, store sealed (C-21, C-22)", () => {
   it("exchanges for an expiring offline token, seals it and shows 90 day and 1 hour expiries", async () => {
     const out = await worker.open({ idToken: token() });
-    expect(out).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, link: { state: "none" } });
+    expect(out).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, plan: { state: "none" }, link: { state: "none" } });
     expect(exchanges()).toHaveLength(1);
     expect(exchanges()[0]!.body).toMatchObject({ expiring: 1 });
     const row = await install();

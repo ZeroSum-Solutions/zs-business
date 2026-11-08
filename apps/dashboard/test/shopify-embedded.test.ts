@@ -157,15 +157,18 @@ class FakeNode {
   }
 }
 
-function runClient(options: { framed?: boolean; answers: Array<{ status: number; body: unknown }> }) {
+function runClient(options: { framed?: boolean; search?: string; answers: Array<{ status: number; body: unknown }> }) {
   const app = new FakeNode("main");
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const opened: Array<{ href: string | null }> = [];
   const document = { getElementById: () => app, createElement: (tag: string) => new FakeNode(tag) };
-  const win: { top: object | undefined; self: object | undefined; location: { reload: ReturnType<typeof vi.fn> }; open: ReturnType<typeof vi.fn> } = {
+  const timers: Array<() => void> = [];
+  const win: { top: object | undefined; self: object | undefined; location: { reload: ReturnType<typeof vi.fn>; search: string }; open: ReturnType<typeof vi.fn>; setTimeout: (fn: () => void, ms: number) => number; clearTimeout: () => void } = {
     top: options.framed === false ? undefined : {},
     self: undefined,
-    location: { reload: vi.fn() },
+    location: { reload: vi.fn(), search: options.search ?? "?shop=halden-rowe.myshopify.com&host=abc" },
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    clearTimeout: () => undefined,
     open: vi.fn(() => { const tab = { opener: {}, location: { href: null as string | null }, close: vi.fn() }; opened.push(tab.location); return tab; }),
   };
   if (options.framed === false) { win.top = win.self; }
@@ -177,12 +180,72 @@ function runClient(options: { framed?: boolean; answers: Array<{ status: number;
   };
   const shopify = { idToken: async () => TOKEN };
   new Function(...EMBEDDED_CLIENT_PARAMS, EMBEDDED_CLIENT_SOURCE)(document, win, fetchImpl, shopify);
-  return { app, calls, win, opened };
+  return { app, calls, win, opened, timers };
 }
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const texts = (app: FakeNode) => app.all().map((node) => node.text).join(" | ");
 const button = (app: FakeNode, label: string) => app.all().find((node) => node.tag === "button" && node.text === label)!;
 const SHOP = { domain: "halden-rowe.myshopify.com", name: "Halden & Rowe" };
+
+const PLAN_URL = "https://admin.shopify.com/store/halden-rowe/charges/zs-business-connections/pricing_plans";
+const link = (app: FakeNode, label: string) => app.all().find((node) => node.tag === "a" && node.text === label);
+
+describe("the footer (C-29)", () => {
+  it("links privacy, terms and support, outside the element the script replaces", () => {
+    const html = renderEmbeddedPage({ clientId: CLIENT_ID, nonce: NONCE });
+    expect(html).toContain('href="https://zerosumsolutions.com/privacy#shopify"');
+    expect(html).toContain('href="https://zerosumsolutions.com/terms#shopify"');
+    expect(html).toContain('href="mailto:devin@zerosumsolutions.com"');
+    expect(html.indexOf("</main>")).toBeLessThan(html.indexOf('<footer class="legal">'));
+  });
+});
+
+describe("the plan on the page (C-29)", () => {
+  const ok = (plan: unknown, planUrl: string | null | undefined, link = { state: "none" }) => ({ status: 200, body: { outcome: "ok", shop: SHOP, plan, ...(planUrl === undefined ? {} : { planUrl }), link } });
+
+  it("with no plan shows Choose a plan to the exact pricing page, opened at the top level", async () => {
+    const { app } = runClient({ answers: [ok({ state: "none" }, PLAN_URL)] });
+    await settle();
+    const choose = link(app, "Choose a plan")!;
+    expect(choose.attrs.href).toBe(PLAN_URL);
+    expect(choose.attrs.target).toBe("_top");
+    expect(link(app, "Change plan")).toBeUndefined();
+  });
+
+  it("with a plan shows its name and a Change plan link to the same page", async () => {
+    const { app } = runClient({ answers: [ok({ state: "active", name: "Studio" }, PLAN_URL, { state: "linked", businessName: "Halden", connection: "active" } as never)] });
+    await settle();
+    expect(texts(app)).toContain("Plan: Studio");
+    expect(link(app, "Change plan")!.attrs.href).toBe(PLAN_URL);
+    expect(link(app, "Choose a plan")).toBeUndefined();
+  });
+
+  it("marks a trial", async () => {
+    const { app } = runClient({ answers: [ok({ state: "trial", name: "Solo" }, PLAN_URL)] });
+    await settle();
+    expect(texts(app)).toContain("Plan: Solo (free trial)");
+  });
+
+  it("shows no plan link when the app handle is unset or the address is not a Shopify admin one", async () => {
+    for (const planUrl of [null, undefined, "https://evil.example/store/x/charges/y/pricing_plans", "javascript:alert(1)"]) {
+      const { app } = runClient({ answers: [ok({ state: "none" }, planUrl)] });
+      await settle();
+      expect(app.all().some((node) => node.attrs["data-testid"] === "plan-link"), String(planUrl)).toBe(false);
+    }
+  });
+
+  it("after the welcome redirect shows Confirming your plan, reads again, and then shows the plan", async () => {
+    const { app, calls, timers } = runClient({ search: "?shop=halden-rowe.myshopify.com&plan=welcome", answers: [ok({ state: "none" }, PLAN_URL), ok({ state: "active", name: "Pro" }, PLAN_URL)] });
+    await settle();
+    expect(texts(app)).toContain("Confirming your plan");
+    expect(link(app, "Choose a plan")).toBeUndefined();
+    expect(timers).toHaveLength(1);
+    timers[0]!();
+    await settle();
+    expect(calls).toHaveLength(2);
+    expect(texts(app)).toContain("Plan: Pro");
+  });
+});
 
 describe("the page script", () => {
   it("outside the Shopify admin it asks to open the app from there and calls nothing", async () => {

@@ -7,7 +7,7 @@
 //     when an uninstall ran changes nothing.
 //   - Nothing in a log, report or error carries a token, an ID token, a code or a customer value.
 import { createHmac, randomInt } from "node:crypto";
-import { Conflict, normalizeAccountLabel } from "@zs/contracts";
+import { Conflict, PLAN_CATALOG, normalizeAccountLabel, type HubPlan } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { setShopifyBilling } from "../billing/shopify-plans.js";
 import { shopifyListWindow } from "../connections/catalog.js";
@@ -116,8 +116,9 @@ export type ShopLink =
   | { readonly state: "none" }
   | { readonly state: "linked"; readonly businessName: string; readonly connection: "active" | "reauthorize" };
 
+export type ShopPlan = { readonly state: "none" } | { readonly state: "active" | "trial"; readonly name: string };
 export type OpenResult =
-  | { readonly outcome: "ok"; readonly shop: { readonly domain: string; readonly name: string }; readonly link: ShopLink }
+  | { readonly outcome: "ok"; readonly shop: { readonly domain: string; readonly name: string }; readonly plan: ShopPlan; readonly link: ShopLink }
   | { readonly outcome: "invalid_token" | "unavailable" | "busy" | "not_supported" };
 export type CreateHubResult =
   | { readonly outcome: "created" | "relinked"; readonly businessName: string; readonly ownerEmail: string }
@@ -364,11 +365,20 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     return exchanged.kind === "invalid" ? { kind: "invalid_token" } : { kind: exchanged.kind };
   }
 
+  /** C-29: the shop's plan as the billing runner last stored it (plans.md PL-18). Trialing and active (past due keeps the plan, PL-4) count; all else is none. */
+  async function planOf(shopId: string): Promise<{ state: "none" } | { state: "active" | "trial"; name: string }> {
+    const row = (await service((tx) => tx.query<{ plan: HubPlan | null; status: string }>(
+      "SELECT plan, status::text AS status FROM tenant_plans WHERE billing_provider='shopify' AND shopify_shop_id=$1", [shopId]))).rows[0];
+    if (!row?.plan || !PLAN_CATALOG[row.plan]) return { state: "none" };
+    if (row.status === "trialing") return { state: "trial", name: PLAN_CATALOG[row.plan].name };
+    return row.status === "active" || row.status === "past_due" ? { state: "active", name: PLAN_CATALOG[row.plan].name } : { state: "none" };
+  }
+
   async function open(input: { idToken: string }): Promise<OpenResult> {
     const auth = await authenticate(input.idToken);
     if (auth.kind === "refused") return { outcome: "not_supported" };
     if (auth.kind !== "ok") return { outcome: auth.kind === "not_installed" ? "unavailable" : auth.kind };
-    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, link: await linkOf(auth.row.shop_id) };
+    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, plan: await planOf(auth.row.shop_id), link: await linkOf(auth.row.shop_id) };
   }
 
   /** The store owner behind a token: the online exchange must name an account owner with a verified email. */

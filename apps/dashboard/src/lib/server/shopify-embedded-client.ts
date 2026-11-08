@@ -103,12 +103,62 @@ function openHub(status) {
   });
 }
 
+// C-29: Shopify's plan selection page, only when the API sent a Shopify admin address (never a URL from anywhere else).
+var PLAN_URL_PREFIX = "https://admin.shopify.com/store/";
+var WELCOME_POLL_MS = 15000;
+var WELCOME_POLL_MAX = 40;
+var welcomePolls = 0;
+var welcomeTimer = null;
+function planLink(open, label, kind) {
+  var url = open.planUrl;
+  if (typeof url !== "string" || url.indexOf(PLAN_URL_PREFIX) !== 0) return null;
+  // target _top leaves the admin iframe; Shopify allows it from a click.
+  return el("a", label, { href: url, target: "_top", class: kind === "secondary" ? "btn secondary" : "btn", "data-testid": "plan-link" });
+}
+function cameFromPlanPage() {
+  var search = (window.location && window.location.search) || "";
+  return /(^|[?&])plan=welcome(&|$)/.test(search);
+}
+function planBlock(open) {
+  var plan = open.plan || { state: "none" };
+  var block = el("div", null, { class: "plan", "data-testid": "plan-state" });
+  if (plan.state === "active" || plan.state === "trial") {
+    block.appendChild(el("p", plan.state === "trial" ? "Plan: " + plan.name + " (free trial)" : "Plan: " + plan.name, { class: "plan-name" }));
+    var change = planLink(open, "Change plan", "secondary");
+    if (change) { var row = el("div", null, { class: "actions" }); row.appendChild(change); block.appendChild(row); }
+    return block;
+  }
+  if (cameFromPlanPage() && welcomePolls < WELCOME_POLL_MAX) {
+    block.appendChild(el("p", "Confirming your plan...", { class: "badge neutral", "data-testid": "plan-confirming" }));
+    block.appendChild(el("p", "Shopify has your choice. It can take a few minutes to show here.", { class: "help" }));
+    if (welcomeTimer !== null) window.clearTimeout(welcomeTimer);
+    welcomeTimer = window.setTimeout(refreshPlan, WELCOME_POLL_MS);
+    return block;
+  }
+  block.appendChild(el("p", "No plan yet", { class: "badge warn" }));
+  var choose = planLink(open, "Choose a plan");
+  if (choose) { var actions = el("div", null, { class: "actions" }); actions.appendChild(choose); block.appendChild(actions); }
+  return block;
+}
+function refreshPlan() {
+  welcomeTimer = null;
+  // Only while the "confirming" state is still on screen; another screen (creating a hub, a code) is left alone.
+  if (!root.querySelector || !root.querySelector(".plan")) return;
+  welcomePolls += 1;
+  call("open").then(function (open) {
+    if (open.outcome !== "ok") return;
+    if (open.link.state === "linked") return renderLinked(open);
+    renderChoice(open);
+  });
+}
+
 function renderLinked(open) {
   var status = el("p", null, { class: "note info", role: "status" });
   var needsRenewal = open.link.connection === "reauthorize";
   show(
     title("ZS Business Connections"),
     shopBlock(open.shop),
+    planBlock(open),
     el("p", needsRenewal ? "Reconnect needed" : "Connected", { class: "badge " + (needsRenewal ? "warn" : "ok"), "data-testid": "link-state" }),
     el("p", needsRenewal
       ? "Shopify access for " + open.link.businessName + " needs to be renewed. Open your hub to reconnect."
@@ -199,6 +249,7 @@ function renderChoice(open) {
   show(
     title("ZS Business Connections"),
     shopBlock(open.shop),
+    planBlock(open),
     el("p", "Not linked to a ZS Hub yet", { class: "badge neutral", "data-testid": "link-state" }),
     el("p", "ZS Hub lets your agents read this store's orders. It asks Shopify for read-only access to orders and cannot change anything in your store."),
     el("p", "New here? We make a hub for the store owner's email. Already have one? Link this store with a code."),

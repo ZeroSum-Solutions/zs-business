@@ -938,6 +938,32 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   so a misconfigured allowlist never uninstalls anything; the E2E run proves a call from
   outside the allowlist fails with 403.
 
+- **C-29 Plan state and plan selection on the embedded page (added 2026-11-07; Shopify
+  requirement 1.2.2, Managed Pricing).** A merchant without an active subscription must reach
+  Shopify's plan selection page.
+  - `open` (C-21) adds `plan`, read by the worker from `tenant_plans` by `shopify_shop_id`
+    (what the billing runner stored, plans.md PL-18; no Shopify call, no `customer` object):
+    `{state:"active", name}` for status `active` or `past_due`, `{state:"trial", name}` for
+    `trialing`, else `{state:"none"}` (also a shop the hub does not link). `name` is the PL-1
+    catalog name (Solo, Studio, Pro). The API route adds `planUrl`:
+    `https://admin.shopify.com/store/<store>/charges/<SHOPIFY_BILLING_APP_HANDLE>/pricing_plans`
+    (plans.md PL-15, PL-19), or null when the handle is unset. The handle is config, never code.
+  - The page shows the plan name (with "free trial" for a trial). With no plan it shows
+    **Choose a plan**, a link to `planUrl` with `target="_top"` so it leaves the admin iframe.
+    With a plan it shows a secondary **Change plan** link to the same URL. With `planUrl` null
+    (or not a `https://admin.shopify.com/store/` address) it shows no plan link.
+  - Welcome link: set in the Partner Dashboard to `<application_url>?plan=welcome`. With
+    that query and no plan yet, the page shows "Confirming your plan..." and reads `open` again
+    every 15 seconds for up to ten minutes (the billing runner runs every 5 minutes), then
+    falls back to **Choose a plan**.
+  - Footer, outside the script's reach: Privacy `https://zerosumsolutions.com/privacy#shopify`,
+    Terms `https://zerosumsolutions.com/terms#shopify` and Support `mailto:devin@zerosumsolutions.com`.
+  - Unchanged: per-shop frame-ancestors (C-20), no cookie, bearer token per call, no token or
+    customer data in logs.
+  - Tests: `apps/dashboard/test/shopify-embedded.test.ts` (no plan, plan, trial, handle unset,
+    confirming, footer), `packages/core/test/shopify/native-worker.test.ts` (plan states),
+    `apps/api/test/shopify-native-api.test.ts` (`planUrl`).
+
 
 ## Acceptance
 
