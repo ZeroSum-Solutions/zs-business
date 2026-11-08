@@ -212,6 +212,25 @@ describe("refresh and recovery (C-22)", () => {
     expect(fake.lastRefreshWithTokens).toHaveLength(2);
     expect(fake.lastRefreshWithTokens[0]).toBe(fake.lastRefreshWithTokens[1]);
   });
+  it("two simultaneous refreshes send one refresh request: the lease keeps the other out (C-27)", async () => {
+    await worker.open({ idToken: token() });
+    const before = await install();
+    clock.ms += 56 * 60_000;
+    const row = { tenant_id: a.tenantId, id: randomUUID(), external_account_id: SHOP_GID, account_domain: SHOP, status: "active", last_error_code: null, revoke_outcome: null } as const;
+    // The refresh answers slowly, so both calls are inside it together unless the lease keeps one out.
+    const slow: typeof fetch = async (input, init) => {
+      if (String(input).endsWith("/oauth/access_token")) await new Promise((resolve) => setTimeout(resolve, 100));
+      return fake.fetch(input, init);
+    };
+    const racing = makeNative({ fetch: slow });
+    const results = await Promise.all([
+      racing.run({ row, tool: "shopify_list_orders", arguments: {} }),
+      racing.run({ row, tool: "shopify_list_orders", arguments: {} }),
+    ]);
+    expect(results.some((result) => result.kind === "ok")).toBe(true);
+    expect(fake.lastRefreshWithTokens).toHaveLength(1);
+    expect((await install()).refresh_sealed).not.toBe(before.refresh_sealed);
+  });
   it("an invalid refresh token marks the install and the connection, and reopening the app restores both", async () => {
     await worker.open({ idToken: token() });
     await worker.createHub({ idToken: token() });
@@ -307,6 +326,8 @@ describe("shopify_create_hub: a new tenant with no operator (C-21)", () => {
     const out = await worker.createHub({ idToken: token() });
     expect(out).toMatchObject({ outcome: "relinked" });
     expect((await connections()).filter((c) => c.status === "active")).toHaveLength(1);
+    const active = (await connections()).find((c) => c.status === "active")!;
+    expect(await plan(active.tenant_id)).toEqual({ billing_provider: "shopify", shopify_shop_id: SHOP_GID });
   });
 });
 
