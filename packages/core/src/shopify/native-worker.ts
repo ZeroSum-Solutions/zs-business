@@ -69,7 +69,7 @@ export type ShopifyNativeReport =
   | { readonly kind: "delayed_uninstall_dropped"; readonly shop: string }
   | { readonly kind: "redacted"; readonly shop: string }
   | { readonly kind: "redact_skipped_reinstall"; readonly shop: string }
-  | { readonly kind: "webhook"; readonly topic: string; readonly shop: string; readonly status: number }
+  | { readonly kind: "webhook"; readonly topic: string; readonly shop: string; readonly status: number; readonly ms: number }
   | { readonly kind: "claim_locked"; readonly shop: string }
   | { readonly kind: "hub_failed"; readonly shop: string };
 
@@ -787,7 +787,8 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
   const TOPICS = new Set(["app/uninstalled", "customers/data_request", "customers/redact", "shop/redact"]);
 
   async function webhook(input: WebhookInput): Promise<{ status: 200 | 401 | 500 }> {
-    const done = (status: 200 | 401 | 500, topic = "unknown", shop = "unknown") => { report({ kind: "webhook", topic, shop, status }); return { status }; };
+    const started = now().getTime();
+    const done = (status: 200 | 401 | 500, topic = "unknown", shop = "unknown") => { report({ kind: "webhook", topic, shop, status, ms: Math.max(0, now().getTime() - started) }); return { status }; };
     if (input.rawBody.byteLength > MAX_WEBHOOK_BYTES) return done(401);
     if (!verifyWebhookHmac(config.secrets, input.rawBody, input.hmac)) return done(401);
     const { topic, shopDomain, webhookId } = input;

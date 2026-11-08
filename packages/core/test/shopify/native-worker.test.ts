@@ -446,6 +446,23 @@ describe("webhooks (C-24)", () => {
     expect((await send("app/uninstalled", uninstallBody)).status).toBe(500);
     expect((await install()).status).toBe("live");
   });
+  it("logs the topic, the shop, our status code and the time taken, and no body or header (C-24)", async () => {
+    const slow: typeof fetch = async (input, init) => { clock.ms += 250; return fake.fetch(input, init); };
+    worker = makeNative({ fetch: slow });
+    expect((await send("app/uninstalled", uninstallBody)).status).toBe(200);
+    const event = reports.find((report) => report.kind === "webhook");
+    expect(event).toEqual({ kind: "webhook", topic: "app/uninstalled", shop: SHOP, status: 200, ms: 250 });
+  });
+  it("counts a 403 from the shop probe as live, so a misconfigured IP allowlist uninstalls and redacts nothing (C-28)", async () => {
+    fake.failGraphql = { status: 403 };
+    expect((await send("app/uninstalled", uninstallBody)).status).toBe(200);
+    expect((await install()).status).toBe("live");
+    expect((await connections())[0]!.status).toBe("active");
+    expect(reports).toContainEqual({ kind: "delayed_uninstall_dropped", shop: SHOP });
+    expect((await send("shop/redact", redactBody)).status).toBe(200);
+    expect((await install()).status).toBe("live");
+    expect((await connections())[0]).toMatchObject({ status: "active", account_domain: SHOP });
+  });
   it("records customers/data_request and customers/redact and answers 200 (the hub holds no customer data)", async () => {
     expect((await send("customers/data_request", { shop_id: 9001, shop_domain: SHOP, customer: { id: 1 } })).status).toBe(200);
     expect((await send("customers/redact", { shop_id: 9001, shop_domain: SHOP, customer: { id: 1 } })).status).toBe(200);
