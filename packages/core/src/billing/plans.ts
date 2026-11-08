@@ -225,7 +225,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   readonly checkoutEnabled: boolean;
 }): Promise<BillingPlan> {
   const row = await tenantPlan(tx, tenantId);
-  const invited = Boolean(row?.founding_invite || row?.founding);
+  // PL-11: a new founding offer follows the invite alone; a past founding subscription is no offer.
+  const invited = Boolean(row?.founding_invite);
   const stripe = (row?.billing_provider ?? "stripe") === "stripe";
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",

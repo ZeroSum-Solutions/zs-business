@@ -102,7 +102,7 @@ CREATE TABLE public.plan_invoices (
   provider text NOT NULL DEFAULT 'stripe' CONSTRAINT plan_invoices_provider CHECK (provider IN ('stripe', 'shopify')),
   id text NOT NULL CONSTRAINT plan_invoices_id CHECK (char_length(id) BETWEEN 1 AND 300 AND (provider <> 'stripe' OR id ~ '^in_[A-Za-z0-9_]{1,250}$')),
   stripe_subscription_id text CONSTRAINT plan_invoices_subscription CHECK (stripe_subscription_id ~ '^sub_[A-Za-z0-9_]{1,250}$'),
-  status text NOT NULL DEFAULT 'failed' CONSTRAINT plan_invoices_status CHECK (status IN ('paid', 'failed')),
+  status text NOT NULL DEFAULT 'failed' CONSTRAINT plan_invoices_status CHECK (status IN ('paid', 'failed', 'resolved')),
   amount_due bigint NOT NULL DEFAULT 0 CONSTRAINT plan_invoices_amount CHECK (amount_due >= 0),
   currency text NOT NULL DEFAULT 'usd' CONSTRAINT plan_invoices_currency CHECK (currency ~ '^[a-z]{3}$'),
   first_failed_at timestamptz,

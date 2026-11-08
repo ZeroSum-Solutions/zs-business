@@ -97,7 +97,7 @@ PL-10 derives from the subscriptions: the **effective** subscription and its fie
 `payment_failed_at` and `read_only_after`. A tenant with no row, or with status `none` and no
 `read_only_after`, is **comped**: no plan limits and never read-only.
 `plan_checkouts` holds each started Checkout like `wallet_topups` holds top-ups.
-`plan_invoices` holds one row per Stripe invoice the worker saw: `paid` or `failed`, and when it
+`plan_invoices` holds one row per Stripe invoice the worker saw: `paid`, `failed` or `resolved`, and when it
 first failed.
 
 **PL-4. Starting Checkout.** `POST /v1/billing/plan/checkout { plan, interval, extraConnections }`
@@ -189,7 +189,9 @@ back, so a retry starts from the same rows. Rules:
   subscription is the latest-started one in `trialing`, `active` or `past_due` with a recognised
   plan; with none, the latest-started recognised one. `payment_failed_at` is the earliest failure
   among the effective subscription's `failed` invoices while Stripe says it is `past_due` (so an
-  invoice Stripe voided or forgave never counts), else null. `read_only_after` is
+  invoice Stripe voided or forgave never counts), else null. When a `past_due` or `unpaid`
+  subscription turns `trialing` or `active`, its `failed` invoices become `resolved`, so a later
+  failure starts a fresh grace; a new failure of a `resolved` invoice counts from its new time. `read_only_after` is
   `payment_failed_at + grace` (or null) while the effective subscription is in one of those three;
   otherwise it is the `status_since` of the latest subscription in `canceled`, `unpaid`,
   `incomplete_expired` or `paused`, or null when none ever ended. So an `incomplete` replacement

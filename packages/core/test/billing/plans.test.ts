@@ -209,6 +209,28 @@ describe("applying plan events (PL-10)", () => {
     await expect(session.upsertContact({ displayName: "Ada Halden", email: "ada@haldenrowe.example" }, `c-${randomUUID()}`)).resolves.toBeDefined();
   });
 
+  it("a failure Stripe forgave never dates a later grace (PL-10)", async () => {
+    const tenantId = await b.tenant();
+    const { sub } = await subscribe(tenantId);
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, stripeId("in")));
+    await worker().runOnce();
+    expect(await plan(tenantId)).toMatchObject({ status: "past_due" });
+    // Stripe voids the invoice: the subscription pays again with no invoice.paid.
+    fake.subscriptions.set(sub.id, { ...sub, status: "active" });
+    await b.deliver(subEvent("customer.subscription.updated", fake.subscriptions.get(sub.id)!));
+    await worker().runOnce();
+    expect(await plan(tenantId)).toMatchObject({ status: "active", read_only_after: null });
+    b.h.clock.advance(30 * DAY);
+    const laterFailure = b.h.clock.now();
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, stripeId("in")));
+    await worker().runOnce();
+    const row = await plan(tenantId);
+    expect(row!.read_only_after.getTime()).toBe(Math.floor(laterFailure.getTime() / 1000) * 1000 + 7 * DAY);
+    expect((await (await planSession(tenantId)).getBillingPlan()).readOnly).toBe(false);
+  });
+
   it("an ended plan is read-only, and an incomplete replacement does not lift it until it pays", async () => {
     const tenantId = await b.tenant();
     const { sub, customer } = await subscribe(tenantId);
@@ -295,6 +317,8 @@ describe("founding (PL-11)", () => {
     const ended = await plan(tenantId);
     expect(ended).toMatchObject({ founding_invite: false });
     expect(ended!.founding_started_at).not.toBeNull();
+    // The invite ended with the subscription: no founding price is offered again.
+    expect((await (await planSession(tenantId)).getBillingPlan()).catalog.find((offer) => offer.plan === "studio")!.foundingPrices).toBeNull();
     // Solo has no founding price: an invited tenant pays list price for it.
     const solo = await b.tenant();
     await b.h.service((tx) => setFoundingInvite(tx, { tenantId: solo, invited: true, now: b.h.clock.now() }));

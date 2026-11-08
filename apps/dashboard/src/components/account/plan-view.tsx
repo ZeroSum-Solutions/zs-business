@@ -12,6 +12,7 @@ import { Segmented } from "@/components/ui/segmented";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { ApiError } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
+import { useIntentKey } from "@/lib/intent-key";
 import { browserZone, usePlan } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatMoney, formatNumber } from "@/lib/utils";
@@ -91,10 +92,12 @@ export function PlanView() {
   const zone = browserZone();
   const [interval, setInterval] = useState<PlanInterval>("month");
   const [extra, setExtra] = useState(0);
+  // One key per checkout intent: a lost answer retries with the same key and replays it (PL-4).
+  const keys = useIntentKey();
+  const intent = (chosen: HubPlan) => ({ plan: chosen, interval, extraConnections: interval === "month" ? extra : 0 });
   const checkout = useMutation({
-    mutationFn: (chosen: HubPlan) => api.startPlanCheckout(
-      { plan: chosen, interval, extraConnections: interval === "month" ? extra : 0 },
-      { idempotencyKey: crypto.randomUUID() }),
+    mutationFn: (chosen: HubPlan) => api.startPlanCheckout(intent(chosen), { idempotencyKey: keys.keyFor(intent(chosen)) }),
+    onSettled: (_result, error, chosen) => keys.settle(intent(chosen), error ?? undefined),
     onSuccess: (result) => go(result.checkoutUrl),
     // PL-4: an open checkout answers its stored URL, so the owner goes back to it.
     onError: (error) => {

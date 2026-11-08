@@ -135,6 +135,13 @@ export function createPlanEvents(deps: PlanEventDeps) {
          status_since=EXCLUDED.status_since, updated_at=EXCLUDED.updated_at`,
       [tenantId, subscriptionId, customerId, status, plan.plan, plan.interval, plan.founding, extra,
         seconds(answer.trial_end), periodEnd, answer.cancel_at_period_end === true, startedAt, endedAt, statusSince, at]);
+    // PL-10: when a past-due subscription pays again, its failed invoices are settled (paid, voided
+    // or forgiven), so a later failure starts a fresh grace. A failure seen while the subscription is
+    // still active stays: Stripe may move it to past_due next.
+    if ((status === "active" || status === "trialing") && (previous?.status === "past_due" || previous?.status === "unpaid"))
+      await tx.query(
+        "UPDATE plan_invoices SET status='resolved', updated_at=$3 WHERE tenant_id=$1 AND provider='stripe' AND stripe_subscription_id=$2 AND status='failed'",
+        [tenantId, subscriptionId, at]);
     // PL-11: a founding subscription first seen ended gives up the invite; the slot stays used.
     if (plan.founding && ENDED.has(status) && !(previous && ENDED.has(previous.status)))
       await tx.query("UPDATE tenant_plans SET founding_invite=false, updated_at=$2 WHERE tenant_id=$1", [tenantId, at]);
@@ -232,7 +239,9 @@ export function createPlanEvents(deps: PlanEventDeps) {
         `INSERT INTO plan_invoices (tenant_id, id, stripe_subscription_id, status, amount_due, currency, first_failed_at, created_at, updated_at)
          VALUES ($1,$2,$3,'failed',$4,$5,$6,$7,$7)
          ON CONFLICT (tenant_id, id) DO UPDATE SET
-           first_failed_at=CASE WHEN plan_invoices.first_failed_at IS NULL THEN EXCLUDED.first_failed_at ELSE least(plan_invoices.first_failed_at, EXCLUDED.first_failed_at) END,
+           status=CASE WHEN plan_invoices.status='paid' THEN 'paid' ELSE 'failed' END,
+           first_failed_at=CASE WHEN plan_invoices.status='resolved' OR plan_invoices.first_failed_at IS NULL THEN EXCLUDED.first_failed_at
+             ELSE least(plan_invoices.first_failed_at, EXCLUDED.first_failed_at) END,
            updated_at=EXCLUDED.updated_at`,
         [tenantId, invoiceId, subscriptionId, amount, currency, when, at]);
     }
