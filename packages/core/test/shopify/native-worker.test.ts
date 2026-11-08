@@ -508,12 +508,12 @@ describe("native reads and disconnect (C-13, C-23)", () => {
   });
   const input = async (tool: string, args: Record<string, unknown> = {}) => ({ row: { ...row(), tenant_id: (await database.pool.query("SELECT tenant_id FROM connections")).rows[0].tenant_id }, tool, arguments: args });
 
-  it("lists orders over GraphQL with the customer id only", async () => {
+  it("lists orders over GraphQL without the customer object", async () => {
     fake.orders = [{ id: 1001, name: "#1001", created_at: "2026-11-01T10:00:00Z", customerId: 55 }];
     const out = await worker.run(await input("shopify_list_orders"));
     expect(out).toMatchObject({ kind: "ok", projected: { orders: [{ id: "1001" }] } });
     const call = fake.calls.filter((c) => c.url.endsWith("/graphql.json")).at(-1)!;
-    expect(String(call.body?.query)).not.toMatch(/email|firstName|lastName/i);
+    expect(String(call.body?.query)).not.toMatch(/customer|email|firstName|lastName/i);
   });
   it("tells a revoked token (reauthorize) from a permission failure (stays active) and a throttle", async () => {
     fake.failGraphql = { status: 403 };

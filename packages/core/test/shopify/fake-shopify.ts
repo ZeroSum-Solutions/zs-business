@@ -116,7 +116,6 @@ export class FakeShopify {
       displayFinancialStatus: "PAID", displayFulfillmentStatus: "UNFULFILLED", currencyCode: "USD",
       totalPriceSet: { shopMoney: { amount: "30.00" } }, subtotalPriceSet: { shopMoney: { amount: "25.00" } }, totalTaxSet: { shopMoney: { amount: "5.00" } },
       lineItems: { nodes: [{ title: "Mug", quantity: 2, originalUnitPriceSet: { shopMoney: { amount: "12.50" } } }] },
-      customer: o.customerId === null || o.customerId === undefined ? null : { id: `gid://shopify/Customer/${o.customerId}` },
     };
   }
 }

@@ -826,9 +826,10 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
 - **C-23 Reading orders natively.** `run` on a `native` connection uses the Admin GraphQL API
   (S1 2.2.4), never REST. The catalog tools keep their names and outputs: `shopify_list_orders`
   and `shopify_get_order` map the GraphQL order into the REST-shaped record the existing
-  projection already trims (C-6), asking only for the fields the projection keeps and for the
-  customer **id only** (no protected field is requested, so Level 1 access never trips an
-  access error). A `401` from Shopify (an invalid or revoked token that a refresh cannot repair) marks the
+  projection already trims (C-6), asking only for the fields the projection keeps. The query
+  never names the `customer` object: the preview store answered `ACCESS_DENIED` to
+  `customer { id }` without protected customer data access (Dev Dashboard log, 2026-11-08), so
+  native orders carry `customer: null` and the app requests no protected data. A `401` from Shopify (an invalid or revoked token that a refresh cannot repair) marks the
   install `needs_reauth` (C-8 `auth_error` path). A `403`, or a GraphQL `ACCESS_DENIED`, is
   `provider_permission_denied` (C-8 unchanged): reauthenticating cannot add a permission. `429` or a `THROTTLED` error is `provider_rate_limited`. Output size, schema and
   disclosure rules are C-6 and C-11 unchanged.
