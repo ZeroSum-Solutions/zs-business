@@ -944,18 +944,32 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   - `open` (C-21) adds `plan`, read by the worker from `tenant_plans` by `shopify_shop_id`
     (what the billing runner stored, plans.md PL-18; no Shopify call, no `customer` object):
     `{state:"active", name}` for status `active` or `past_due`, `{state:"trial", name}` for
-    `trialing`, else `{state:"none"}` (also a shop the hub does not link). `name` is the PL-1
+    `trialing`, else `{state:"none"}`. It is read in the same transaction as the link and is
+    `none` unless the shop has a live native connection (`active` or `reauthorize`): the hub
+    tracks a shop's plan only from the link on (plans.md PL-17, PL-18), so a plan chosen before
+    the hub exists is not seen, and a disconnected or uninstalled shop shows none. `plan` may be
+    missing (an older worker during a deploy); that reads as no plan. `name` is the PL-1
     catalog name (Solo, Studio, Pro). The API route adds `planUrl`:
     `https://admin.shopify.com/store/<store>/charges/<SHOPIFY_BILLING_APP_HANDLE>/pricing_plans`
     (plans.md PL-15, PL-19), or null when the handle is unset. The handle is config, never code.
-  - The page shows the plan name (with "free trial" for a trial). With no plan it shows
+  - A plan is chosen after the hub exists. A shop with no hub (link `none`) sees no plan block
+    at all: no plan, no **Choose a plan**, no confirming state, even after the welcome
+    redirect. The screen shown right after **Create my ZS Hub** reads `open` again and then
+    shows **Choose a plan** next to the hub link.
+  - For a linked shop the page shows the plan name (with "free trial" for a trial). With no plan it shows
     **Choose a plan**, a link to `planUrl` with `target="_top"` so it leaves the admin iframe.
     With a plan it shows a secondary **Change plan** link to the same URL. With `planUrl` null
     (or not a `https://admin.shopify.com/store/` address) it shows no plan link.
-  - Welcome link: set in the Partner Dashboard to `<application_url>?plan=welcome`. With
-    that query and no plan yet, the page shows "Confirming your plan..." and reads `open` again
-    every 15 seconds for up to ten minutes (the billing runner runs every 5 minutes), then
-    falls back to **Choose a plan**.
+  - Welcome link: the relative path `/?plan=welcome` on all five Managed Pricing plans, so
+    Shopify opens the app at `/shopify/app?plan=welcome` and appends `plan_handle`, `shop`,
+    `host` and `embedded`. The page reads `plan=welcome` from the query string whatever else is
+    there. For a linked shop with no plan yet it shows "Confirming your plan..." and reads
+    `open` every 15 seconds until an absolute deadline ten minutes after load (the billing
+    runner runs every 5 minutes), then shows **Choose a plan**. A failed read (busy, 429, 5xx,
+    network) keeps the last good answer and tries again. With a plan already active (a
+    **Change plan** return) the page shows that plan and does not poll. A read that comes back
+    after the merchant has moved to another screen, or started an action, is dropped, and
+    polling stops while a form or action is open.
   - Footer, outside the script's reach: Privacy `https://zerosumsolutions.com/privacy#shopify`,
     Terms `https://zerosumsolutions.com/terms#shopify` and Support `mailto:devin@zerosumsolutions.com`.
   - Unchanged: per-shop frame-ancestors (C-20), no cookie, bearer token per call, no token or

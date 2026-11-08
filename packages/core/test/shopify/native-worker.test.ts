@@ -101,14 +101,23 @@ function afterNextGraphql(hook: () => Promise<void>): typeof fetch {
 const bumpGeneration = () => database.pool.query("UPDATE shopify_installs SET generation=generation+1").then(() => undefined);
 
 describe("shopify_open: the plan state (C-29)", () => {
-  const storePlan = (plan: string, status: string) => database.pool.query(
-    `INSERT INTO tenant_plans (tenant_id, billing_provider, shopify_shop_id, shopify_shop_domain, plan, plan_interval, status, created_at, updated_at)
-     VALUES ($1,'shopify',$2,$3,$4,'month',$5,now(),now())`, [a.tenantId, SHOP_GID, SHOP, plan, status]);
+  /** Links the store to a new hub (which stores the Shopify billing row), then sets what the billing runner would have stored. */
+  const storePlan = async (plan: string, status: string) => {
+    await worker.open({ idToken: token() });
+    expect(await worker.createHub({ idToken: token() })).toMatchObject({ outcome: "created" });
+    await database.pool.query("UPDATE tenant_plans SET plan=$1, plan_interval='month', status=$2 WHERE shopify_shop_id=$3", [plan, status, SHOP_GID]);
+  };
 
-  it("is none until the billing runner has stored a plan", async () => {
-    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" } });
-    await database.pool.query("INSERT INTO tenant_plans (tenant_id, billing_provider, shopify_shop_id, shopify_shop_domain, status, created_at, updated_at) VALUES ($1,'shopify',$2,$3,'none',now(),now())", [a.tenantId, SHOP_GID, SHOP]);
-    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" } });
+  it("is none for a store that is not linked, and for a linked one until the billing runner has stored a plan", async () => {
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" }, link: { state: "none" } });
+    await worker.createHub({ idToken: token() });
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" }, link: { state: "linked" } });
+  });
+
+  it("shows no plan once the connection is disconnected, although the plan row stays", async () => {
+    await storePlan("studio", "active");
+    await database.pool.query("UPDATE connections SET status='disconnected', account_label=NULL");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" }, link: { state: "none" } });
   });
 
   it("names the plan when active or past due, calls a trialing one a trial, and treats a canceled one as none", async () => {

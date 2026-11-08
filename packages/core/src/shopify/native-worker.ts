@@ -365,20 +365,32 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     return exchanged.kind === "invalid" ? { kind: "invalid_token" } : { kind: exchanged.kind };
   }
 
-  /** C-29: the shop's plan as the billing runner last stored it (plans.md PL-18). Trialing and active (past due keeps the plan, PL-4) count; all else is none. */
-  async function planOf(shopId: string): Promise<{ state: "none" } | { state: "active" | "trial"; name: string }> {
-    const row = (await service((tx) => tx.query<{ plan: HubPlan | null; status: string }>(
-      "SELECT plan, status::text AS status FROM tenant_plans WHERE billing_provider='shopify' AND shopify_shop_id=$1", [shopId]))).rows[0];
-    if (!row?.plan || !PLAN_CATALOG[row.plan]) return { state: "none" };
-    if (row.status === "trialing") return { state: "trial", name: PLAN_CATALOG[row.plan].name };
-    return row.status === "active" || row.status === "past_due" ? { state: "active", name: PLAN_CATALOG[row.plan].name } : { state: "none" };
+  /**
+   * C-29: the shop's plan as the billing runner last stored it (plans.md PL-18), read with the link in one transaction.
+   * Only a store linked to a hub has a plan to show (a disconnected or uninstalled store keeps its row but shows none).
+   * Trialing and active (past due keeps the plan, PL-4) count; all else is none.
+   */
+  async function linkAndPlanOf(shopId: string): Promise<{ link: ShopLink; plan: ShopPlan }> {
+    return service(async (tx) => {
+      const linked = (await tx.query<{ tenant_id: string; name: string; status: "active" | "reauthorize" }>(
+        `SELECT c.tenant_id, t.name, c.status::text AS status FROM connections c JOIN tenants t ON t.tenant_id=c.tenant_id
+          WHERE c.tier='native' AND c.external_account_id=$1 AND c.status IN ('active','reauthorize')`, [shopId])).rows[0];
+      if (!linked) return { link: { state: "none" }, plan: { state: "none" } };
+      const link: ShopLink = { state: "linked", businessName: linked.name, connection: linked.status };
+      const row = (await tx.query<{ plan: HubPlan | null; status: string }>(
+        "SELECT plan, status::text AS status FROM tenant_plans WHERE tenant_id=$1 AND billing_provider='shopify' AND shopify_shop_id=$2", [linked.tenant_id, shopId])).rows[0];
+      if (!row?.plan || !PLAN_CATALOG[row.plan]) return { link, plan: { state: "none" } };
+      if (row.status === "trialing") return { link, plan: { state: "trial", name: PLAN_CATALOG[row.plan].name } };
+      return { link, plan: row.status === "active" || row.status === "past_due" ? { state: "active", name: PLAN_CATALOG[row.plan].name } : { state: "none" } };
+    });
   }
 
   async function open(input: { idToken: string }): Promise<OpenResult> {
     const auth = await authenticate(input.idToken);
     if (auth.kind === "refused") return { outcome: "not_supported" };
     if (auth.kind !== "ok") return { outcome: auth.kind === "not_installed" ? "unavailable" : auth.kind };
-    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, plan: await planOf(auth.row.shop_id), link: await linkOf(auth.row.shop_id) };
+    const { link, plan } = await linkAndPlanOf(auth.row.shop_id);
+    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, plan, link };
   }
 
   /** The store owner behind a token: the online exchange must name an account owner with a verified email. */

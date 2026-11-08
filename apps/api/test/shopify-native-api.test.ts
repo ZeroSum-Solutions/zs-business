@@ -17,6 +17,7 @@ import {
   type HubPort,
   type ShopifyPort,
 } from "@zs/core";
+import { shopifyOpenResponseSchema } from "@zs/contracts";
 import { asService } from "@zs/db";
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
 import { parseConnectionsEnv, parseShopifyNativeEnv } from "../src/connections/config.js";
@@ -217,6 +218,16 @@ describe("the embedded routes (C-21, C-22)", () => {
     const withHandle = build(createLocalShopifyPort(native), "zs-business-connections");
     const body = await json(await embedded(withHandle, "open", token())) as { planUrl: string };
     expect(body.planUrl).toBe(`https://admin.shopify.com/store/${SHOP.replace(".myshopify.com", "")}/charges/zs-business-connections/pricing_plans`);
+  });
+
+  it("accepts an open answer from an older worker that has no plan, and still adds planUrl (deploy overlap)", async () => {
+    const older: ShopifyPort = { ...createLocalShopifyPort(native), open: async () => ({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, link: { state: "none" } }) };
+    const response = await embedded(build(older, "zs-business-connections"), "open", token());
+    expect(response.status).toBe(200);
+    const body = await json(response) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("plan");
+    expect(body.planUrl).toContain("/charges/zs-business-connections/pricing_plans");
+    expect(shopifyOpenResponseSchema.safeParse({ outcome: "ok", shop: { domain: SHOP, name: "x" }, link: { state: "none" } }).success).toBe(true);
   });
 
   it("a forged token is a 401 (so the page retries with a fresh one), not a crash", async () => {

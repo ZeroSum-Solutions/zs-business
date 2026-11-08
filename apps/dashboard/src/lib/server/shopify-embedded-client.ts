@@ -21,7 +21,13 @@ function el(tag, text, attrs) {
   if (attrs) for (var key in attrs) node.setAttribute(key, attrs[key]);
   return node;
 }
+var screen = 0;
+var frozen = false;
+// A person's action in place (typing a code, creating a hub) ends the plan polling and drops any read still in flight.
+function interact() { screen += 1; frozen = true; }
 function show() {
+  screen += 1;
+  frozen = false;
   var nodes = Array.prototype.slice.call(arguments);
   root.replaceChildren.apply(root, nodes);
   var heading = root.querySelector ? root.querySelector("h1") : null;
@@ -81,6 +87,7 @@ function shopBlock(shop) {
 }
 
 function openHub(status) {
+  interact();
   // Open the tab first, while the click still counts as a person's action, and point it at the link when it arrives.
   var tab = window.open("", "_blank");
   if (tab) { try { tab.opener = null; } catch (error) { /* a cross-origin tab refuses; the link below still works */ } }
@@ -106,20 +113,35 @@ function openHub(status) {
 // C-29: Shopify's plan selection page, only when the API sent a Shopify admin address (never a URL from anywhere else).
 var PLAN_URL_PREFIX = "https://admin.shopify.com/store/";
 var WELCOME_POLL_MS = 15000;
-var WELCOME_POLL_MAX = 40;
-var welcomePolls = 0;
+var WELCOME_WINDOW_MS = 600000;
+var welcomeDeadline = null;
 var welcomeTimer = null;
+var lastOpen = null;
+function nowMs() { return (window.Date || Date).now(); }
 function planLink(open, label, kind) {
   var url = open.planUrl;
   if (typeof url !== "string" || url.indexOf(PLAN_URL_PREFIX) !== 0) return null;
   // target _top leaves the admin iframe; Shopify allows it from a click.
   return el("a", label, { href: url, target: "_top", class: kind === "secondary" ? "btn secondary" : "btn", "data-testid": "plan-link" });
 }
+// Shopify appends plan_handle, shop, host and embedded to the welcome link; only the plan=welcome pair matters.
 function cameFromPlanPage() {
   var search = (window.location && window.location.search) || "";
   return /(^|[?&])plan=welcome(&|$)/.test(search);
 }
-function planBlock(open) {
+function confirmingPlan() {
+  if (!cameFromPlanPage()) return false;
+  if (welcomeDeadline === null) welcomeDeadline = nowMs() + WELCOME_WINDOW_MS;
+  return nowMs() < welcomeDeadline;
+}
+function scheduleWelcome() {
+  if (welcomeTimer !== null) window.clearTimeout(welcomeTimer);
+  welcomeTimer = window.setTimeout(refreshPlan, WELCOME_POLL_MS);
+}
+// Only a store linked to a hub has a plan to show: the hub tracks the plan from the link on (plans.md PL-17, PL-18).
+// canConfirm is false right after the hub is made, because the welcome link cannot belong to a plan chosen before the hub existed.
+function planBlock(open, canConfirm) {
+  lastOpen = open;
   var plan = open.plan || { state: "none" };
   var block = el("div", null, { class: "plan", "data-testid": "plan-state" });
   if (plan.state === "active" || plan.state === "trial") {
@@ -128,11 +150,10 @@ function planBlock(open) {
     if (change) { var row = el("div", null, { class: "actions" }); row.appendChild(change); block.appendChild(row); }
     return block;
   }
-  if (cameFromPlanPage() && welcomePolls < WELCOME_POLL_MAX) {
+  if (canConfirm !== false && confirmingPlan()) {
     block.appendChild(el("p", "Confirming your plan...", { class: "badge neutral", "data-testid": "plan-confirming" }));
     block.appendChild(el("p", "Shopify has your choice. It can take a few minutes to show here.", { class: "help" }));
-    if (welcomeTimer !== null) window.clearTimeout(welcomeTimer);
-    welcomeTimer = window.setTimeout(refreshPlan, WELCOME_POLL_MS);
+    scheduleWelcome();
     return block;
   }
   block.appendChild(el("p", "No plan yet", { class: "badge warn" }));
@@ -142,14 +163,20 @@ function planBlock(open) {
 }
 function refreshPlan() {
   welcomeTimer = null;
-  // Only while the "confirming" state is still on screen; another screen (creating a hub, a code) is left alone.
-  if (!root.querySelector || !root.querySelector(".plan")) return;
-  welcomePolls += 1;
+  // Only while the "confirming" screen is on show and untouched; a form or a running action stops the polling.
+  if (frozen || !root.querySelector || !root.querySelector(".plan")) return;
+  var generation = screen;
   call("open").then(function (open) {
-    if (open.outcome !== "ok") return;
-    if (open.link.state === "linked") return renderLinked(open);
-    renderChoice(open);
+    if (generation !== screen || frozen) return;
+    if (open.outcome === "ok") return showOpen(open);
+    // A failed read keeps the last good result and tries again; past the deadline the same result renders as "Choose a plan".
+    if (confirmingPlan()) scheduleWelcome();
+    else if (lastOpen) showOpen(lastOpen);
   });
+}
+function showOpen(open) {
+  if (open.link.state === "linked") return renderLinked(open);
+  renderChoice(open);
 }
 
 function renderLinked(open) {
@@ -178,6 +205,12 @@ function renderCreated(result) {
       root.appendChild(status);
     })
   );
+  // The hub now tracks this store's plan (PL-17): read it again and offer Choose a plan next to the hub link.
+  var generation = screen;
+  call("open").then(function (open) {
+    if (generation !== screen || open.outcome !== "ok") return;
+    root.appendChild(planBlock(open, false));
+  });
 }
 
 var CREATE_TROUBLE = {
@@ -190,6 +223,7 @@ var CREATE_TROUBLE = {
 };
 
 function createHub(statusNode, buttons) {
+  interact();
   buttons.forEach(function (node) { node.disabled = true; });
   statusNode.textContent = "Creating your hub...";
   call("create-hub").then(function (result) {
@@ -204,6 +238,7 @@ function renderCode(open) {
   var input = el("input", null, { id: "claim-code", type: "text", inputmode: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: "false", maxlength: "16", "aria-describedby": "claim-help" });
   var status = el("p", null, { class: "note info", role: "status" });
   var submit = button("Link this store", function () {
+    interact();
     submit.disabled = true;
     status.textContent = "Checking the code...";
     call("redeem-claim", { code: input.value }).then(function (result) {
@@ -249,7 +284,6 @@ function renderChoice(open) {
   show(
     title("ZS Business Connections"),
     shopBlock(open.shop),
-    planBlock(open),
     el("p", "Not linked to a ZS Hub yet", { class: "badge neutral", "data-testid": "link-state" }),
     el("p", "ZS Hub lets your agents read this store's orders. It asks Shopify for read-only access to orders and cannot change anything in your store."),
     el("p", "New here? We make a hub for the store owner's email. Already have one? Link this store with a code."),

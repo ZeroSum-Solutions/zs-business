@@ -44,7 +44,8 @@ export const shopifyOpenResponseSchema = z.discriminatedUnion("outcome", [
   z.strictObject({
     outcome: z.literal("ok"),
     shop: shopSchema,
-    plan: shopifyPlanStateSchema,
+    /** Optional so a new API accepts an older worker's answer during a deploy; missing means unknown and renders as no plan. */
+    plan: shopifyPlanStateSchema.optional(),
     /** C-29: Shopify's plan selection page; the API route adds it (the worker does not know the app handle). Null when the handle is unset. */
     planUrl: z.url({ protocol: /^https$/ }).max(500).nullable().optional(),
     link: z.discriminatedUnion("state", [

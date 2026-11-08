@@ -163,10 +163,12 @@ function runClient(options: { framed?: boolean; search?: string; answers: Array<
   const opened: Array<{ href: string | null }> = [];
   const document = { getElementById: () => app, createElement: (tag: string) => new FakeNode(tag) };
   const timers: Array<() => void> = [];
-  const win: { top: object | undefined; self: object | undefined; location: { reload: ReturnType<typeof vi.fn>; search: string }; open: ReturnType<typeof vi.fn>; setTimeout: (fn: () => void, ms: number) => number; clearTimeout: () => void } = {
+  const clock = { ms: 1_000_000 };
+  const win: { top: object | undefined; self: object | undefined; Date: { now: () => number }; location: { reload: ReturnType<typeof vi.fn>; search: string }; open: ReturnType<typeof vi.fn>; setTimeout: (fn: () => void, ms: number) => number; clearTimeout: () => void } = {
     top: options.framed === false ? undefined : {},
     self: undefined,
     location: { reload: vi.fn(), search: options.search ?? "?shop=halden-rowe.myshopify.com&host=abc" },
+    Date: { now: () => clock.ms },
     setTimeout: (fn) => { timers.push(fn); return timers.length; },
     clearTimeout: () => undefined,
     open: vi.fn(() => { const tab = { opener: {}, location: { href: null as string | null }, close: vi.fn() }; opened.push(tab.location); return tab; }),
@@ -180,7 +182,7 @@ function runClient(options: { framed?: boolean; search?: string; answers: Array<
   };
   const shopify = { idToken: async () => TOKEN };
   new Function(...EMBEDDED_CLIENT_PARAMS, EMBEDDED_CLIENT_SOURCE)(document, win, fetchImpl, shopify);
-  return { app, calls, win, opened, timers };
+  return { app, calls, win, opened, timers, clock };
 }
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const texts = (app: FakeNode) => app.all().map((node) => node.text).join(" | ");
@@ -200,8 +202,11 @@ describe("the footer (C-29)", () => {
   });
 });
 
+
 describe("the plan on the page (C-29)", () => {
-  const ok = (plan: unknown, planUrl: string | null | undefined, link = { state: "none" }) => ({ status: 200, body: { outcome: "ok", shop: SHOP, plan, ...(planUrl === undefined ? {} : { planUrl }), link } });
+  const LINKED = { state: "linked", businessName: "Halden", connection: "active" };
+  const ok = (plan: unknown, planUrl: string | null | undefined, link: unknown = LINKED) => ({ status: 200, body: { outcome: "ok", shop: SHOP, plan, ...(planUrl === undefined ? {} : { planUrl }), link } });
+  const WELCOME = "?embedded=1&host=abc&plan=welcome&plan_handle=hub-solo&shop=halden-rowe.myshopify.com";
 
   it("with no plan shows Choose a plan to the exact pricing page, opened at the top level", async () => {
     const { app } = runClient({ answers: [ok({ state: "none" }, PLAN_URL)] });
@@ -213,7 +218,7 @@ describe("the plan on the page (C-29)", () => {
   });
 
   it("with a plan shows its name and a Change plan link to the same page", async () => {
-    const { app } = runClient({ answers: [ok({ state: "active", name: "Studio" }, PLAN_URL, { state: "linked", businessName: "Halden", connection: "active" } as never)] });
+    const { app } = runClient({ answers: [ok({ state: "active", name: "Studio" }, PLAN_URL)] });
     await settle();
     expect(texts(app)).toContain("Plan: Studio");
     expect(link(app, "Change plan")!.attrs.href).toBe(PLAN_URL);
@@ -226,6 +231,12 @@ describe("the plan on the page (C-29)", () => {
     expect(texts(app)).toContain("Plan: Solo (free trial)");
   });
 
+  it("treats an answer with no plan as no plan, and keeps Choose a plan when the address is there", async () => {
+    const { app } = runClient({ answers: [ok(undefined, PLAN_URL)] });
+    await settle();
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
+  });
+
   it("shows no plan link when the app handle is unset or the address is not a Shopify admin one", async () => {
     for (const planUrl of [null, undefined, "https://evil.example/store/x/charges/y/pricing_plans", "javascript:alert(1)"]) {
       const { app } = runClient({ answers: [ok({ state: "none" }, planUrl)] });
@@ -234,16 +245,102 @@ describe("the plan on the page (C-29)", () => {
     }
   });
 
-  it("after the welcome redirect shows Confirming your plan, reads again, and then shows the plan", async () => {
-    const { app, calls, timers } = runClient({ search: "?shop=halden-rowe.myshopify.com&plan=welcome", answers: [ok({ state: "none" }, PLAN_URL), ok({ state: "active", name: "Pro" }, PLAN_URL)] });
+  it("shows no plan, no Choose a plan and no confirming state for a store without a hub, even after the welcome redirect", async () => {
+    for (const search of [undefined, WELCOME]) {
+      const { app, timers } = runClient({ ...(search ? { search } : {}), answers: [ok({ state: "none" }, PLAN_URL, { state: "none" })] });
+      await settle();
+      expect(texts(app)).toContain("Not linked to a ZS Hub yet");
+      expect(app.all().some((node) => node.attrs["data-testid"] === "plan-state")).toBe(false);
+      expect(texts(app)).not.toContain("Confirming your plan");
+      expect(timers).toHaveLength(0);
+    }
+  });
+
+  it("offers Choose a plan on the screen shown after the hub is made", async () => {
+    const { app, calls } = runClient({ search: WELCOME, answers: [
+      ok({ state: "none" }, PLAN_URL, { state: "none" }),
+      { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+      ok({ state: "none" }, PLAN_URL),
+    ] });
+    await settle();
+    button(app, "Create my ZS Hub").click();
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/create-hub", "/api/shopify/open"]);
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
+    expect(texts(app)).not.toContain("Confirming your plan");
+  });
+
+  it("shows the current plan, not a confirming state, when the welcome link brings back a merchant who already has one", async () => {
+    const { app, timers } = runClient({ search: WELCOME, answers: [ok({ state: "active", name: "Solo" }, PLAN_URL)] });
+    await settle();
+    expect(texts(app)).toContain("Plan: Solo");
+    expect(texts(app)).not.toContain("Confirming your plan");
+    expect(timers).toHaveLength(0);
+  });
+
+  it("reads plan=welcome even when Shopify appends plan_handle, shop, host and embedded, and shows the new plan when it arrives", async () => {
+    const { app, calls, timers } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), ok({ state: "active", name: "Pro" }, PLAN_URL)] });
     await settle();
     expect(texts(app)).toContain("Confirming your plan");
     expect(link(app, "Choose a plan")).toBeUndefined();
     expect(timers).toHaveLength(1);
-    timers[0]!();
+    timers.shift()!();
     await settle();
     expect(calls).toHaveLength(2);
     expect(texts(app)).toContain("Plan: Pro");
+  });
+
+  it("keeps trying after failed reads, then shows Choose a plan once ten minutes have passed (elapsed time, not a count)", async () => {
+    const { app, calls, timers, clock } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), { status: 503, body: {} }, { status: 429, body: {} }, { status: 503, body: {} }] });
+    await settle();
+    for (const step of [15_000, 15_000]) {
+      clock.ms += step;
+      timers.shift()!();
+      await settle();
+      expect(texts(app)).toContain("Confirming your plan");
+      expect(timers).toHaveLength(1);
+    }
+    expect(calls).toHaveLength(3);
+    clock.ms += 600_000;
+    timers.shift()!();
+    await settle();
+    expect(calls).toHaveLength(4);
+    expect(texts(app)).not.toContain("Confirming your plan");
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
+  });
+
+  it("polls past forty reads while the ten minutes last", async () => {
+    const answers = [ok({ state: "none" }, PLAN_URL), ...Array.from({ length: 45 }, () => ok({ state: "none" }, PLAN_URL))];
+    const { app, calls, timers, clock } = runClient({ search: WELCOME, answers });
+    await settle();
+    for (let i = 0; i < 45; i += 1) { clock.ms += 5_000; timers.shift()!(); await settle(); }
+    expect(calls).toHaveLength(46);
+    expect(texts(app)).toContain("Confirming your plan");
+  });
+
+  it("drops a poll answer that lands after the merchant opened the hub, and leaves the screen alone", async () => {
+    const { app, calls, timers } = runClient({ search: WELCOME, answers: [
+      ok({ state: "none" }, PLAN_URL),
+      ok({ state: "active", name: "Pro" }, PLAN_URL),
+      { status: 200, body: { outcome: "ok", url: "https://hub.example.test/sign-in" } },
+    ] });
+    await settle();
+    timers.shift()!();
+    button(app, "Open ZS Hub").click();
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/open", "/api/shopify/sign-in"]);
+    expect(texts(app)).not.toContain("Plan: Pro");
+    expect(timers).toHaveLength(0);
+  });
+
+  it("does not poll again once an action is running", async () => {
+    const { app, calls, timers } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL)] });
+    await settle();
+    button(app, "Open ZS Hub").click();
+    await settle();
+    timers.shift()!();
+    await settle();
+    expect(calls.filter((call) => call.url === "/api/shopify/open")).toHaveLength(1);
   });
 });
 
