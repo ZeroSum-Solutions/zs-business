@@ -74,6 +74,12 @@ export function referencedRoles(schemaSql: string): string[] {
   return [...roles].sort();
 }
 
+/** The major version of the pg_dump that wrote a plain-SQL dump, from its header; null when absent. */
+export function archiveDumpMajor(sql: string): number | null {
+  const match = /^-- Dumped by pg_dump version (\d+)/m.exec(sql);
+  return match ? Number(match[1]) : null;
+}
+
 export const countPolicies = (schemaSql: string) => (schemaSql.match(/^CREATE POLICY /gm) ?? []).length;
 
 export interface CheckResult { name: string; ok: boolean; detail: unknown }
@@ -307,6 +313,12 @@ export async function restoreProof(options: RestoreProofOptions): Promise<Restor
   try {
     const superuser = (await admin.query<{ su: boolean }>("SELECT rolsuper AS su FROM pg_roles WHERE rolname = current_user")).rows[0]?.su;
     if (!superuser) throw new Error("Refusing to run: the admin URL must log in as a superuser of the throwaway cluster");
+    // An archive written by a newer pg_dump carries settings an older server rejects
+    // (pg_dump 17 writes SET transaction_timeout), so restore only into the same major or newer.
+    const serverMajor = Math.floor(Number((await admin.query<{ v: string }>("SELECT current_setting('server_version_num') AS v")).rows[0]!.v) / 10000);
+    const dumpMajor = archiveDumpMajor(schemaSql);
+    if (dumpMajor !== null && dumpMajor > serverMajor)
+      throw new Error(`Refusing to restore: the archive was written by pg_dump ${dumpMajor}; restore it into PostgreSQL ${dumpMajor} or newer, not ${serverMajor}`);
     const client = await admin.connect();
     try {
       // Cluster roles are shared; serialize with other runs, as the test harness does.

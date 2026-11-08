@@ -6,16 +6,16 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, testAdminUrl, type TestDatabase } from "@zs/db/testing";
 import { BACKUP_EXTENSIONS, readLedger, takeBackup } from "../src/hosted-backup.js";
-import { checkRestoredDatabase, countCopyRows, countPolicies, referencedRoles, restoreProof } from "../src/restore-proof.js";
+import { archiveDumpMajor, checkRestoredDatabase, countCopyRows, countPolicies, referencedRoles, restoreProof } from "../src/restore-proof.js";
 import { resolvePgTool } from "../src/pg-tools.js";
 
-const hasPgTools = (() => {
+/** The newest pg_dump's major, or null when the client tools are missing. */
+const toolMajor = (() => {
   try {
-    execFileSync(resolvePgTool("pg_dump"), ["--version"]);
     execFileSync(resolvePgTool("pg_restore"), ["--version"]);
-    return true;
+    return Number(/(\d+)\./.exec(execFileSync(resolvePgTool("pg_dump"), ["--version"], { encoding: "utf8" }))?.[1] ?? NaN);
   } catch {
-    return false;
+    return null;
   }
 })();
 
@@ -46,6 +46,10 @@ describe("archive parsing", () => {
     expect(referencedRoles(sql)).toEqual(["Odd Role", "anon", "authenticated", "supabase_admin", "zs_dispatcher", "zs_migrator"].sort());
     expect(countPolicies(sql)).toBe(2);
   });
+  it("reads the pg_dump major from the dump header", () => {
+    expect(archiveDumpMajor("--\n-- Dumped from database version 17.11\n-- Dumped by pg_dump version 17.11 (Homebrew)\n")).toBe(17);
+    expect(archiveDumpMajor("SET x = 1;")).toBeNull();
+  });
 });
 
 describe("every extension the migrations create is in the backup", () => {
@@ -59,7 +63,7 @@ describe("every extension the migrations create is in the backup", () => {
   });
 });
 
-describe.skipIf(!hasPgTools)("restore proof on the local cluster", () => {
+describe("restore proof on the local cluster", () => {
   let database: TestDatabase;
   let dir: string;
   const tenantA = randomUUID();
@@ -76,6 +80,18 @@ describe.skipIf(!hasPgTools)("restore proof on the local cluster", () => {
     await database?.close();
     await rm(dir, { recursive: true, force: true });
   });
+  // The round trip needs pg_dump and pg_restore no newer than the server (CI runs 15 and 16 servers
+  // beside a newer client); a newer archive is refused, which the last case below checks.
+  const serverMajor = async () => Math.floor(Number((await database.pool.query<{ v: string }>("SELECT current_setting('server_version_num') AS v")).rows[0]!.v) / 10000);
+  const roundTrip = async () => toolMajor !== null && toolMajor <= await serverMajor();
+  const backUp = async (out: string) => {
+    const url = new URL(database.url);
+    await takeBackup({
+      pool: database.pool,
+      connection: { host: url.hostname, port: url.port, user: decodeURIComponent(url.username), password: "", database: url.pathname.slice(1) },
+      rootCertFile: null, projectRef: "prodprodprodprodprod", out, clock: { now: () => new Date() }, searchPath: process.env.PATH,
+    });
+  };
 
   const archiveFacts = async () => {
     const rows = new Map<string, number>();
@@ -88,14 +104,10 @@ describe.skipIf(!hasPgTools)("restore proof on the local cluster", () => {
     return { ledger: await readLedger(database.pool), rows, policies };
   };
 
-  it("backs up, restores into a throwaway database, passes every check and drops it", async () => {
-    const url = new URL(database.url);
+  it("backs up, restores into a throwaway database, passes every check and drops it", async (context) => {
+    if (!(await roundTrip())) context.skip();
     const out = join(dir, "proof.dump");
-    await takeBackup({
-      pool: database.pool,
-      connection: { host: url.hostname, port: url.port, user: decodeURIComponent(url.username), password: "", database: url.pathname.slice(1) },
-      rootCertFile: null, projectRef: "prodprodprodprodprod", out, clock: { now: () => new Date() }, searchPath: process.env.PATH,
-    });
+    await backUp(out);
     const report = await restoreProof({ archivePath: out, adminUrl: testAdminUrl().href, clock: { now: () => new Date() }, searchPath: process.env.PATH });
     expect(report.checks.filter((check) => !check.ok)).toEqual([]);
     expect(report.ok).toBe(true);
@@ -107,14 +119,24 @@ describe.skipIf(!hasPgTools)("restore proof on the local cluster", () => {
     expect(left.rowCount).toBe(0);
   });
 
-  it("refuses an archive whose manifest does not match it, and a non-loopback cluster", async () => {
-    const out = join(dir, "proof.dump");
+  it("refuses an archive whose manifest does not match it, and a non-loopback cluster", async (context) => {
+    if (toolMajor === null) context.skip();
+    const out = join(dir, "manifest.dump");
+    await backUp(out);
     const copy = join(dir, "tampered.dump");
     await writeFile(copy, Buffer.concat([await readFile(out), Buffer.from("x")]));
-    await writeFile(`${copy}.manifest.json`, (await readFile(`${out}.manifest.json`, "utf8")).replace("proof.dump", "tampered.dump"));
+    await writeFile(`${copy}.manifest.json`, (await readFile(`${out}.manifest.json`, "utf8")).replace("manifest.dump", "tampered.dump"));
     await expect(restoreProof({ archivePath: copy, adminUrl: testAdminUrl().href, clock: { now: () => new Date() } })).rejects.toThrow(/sha256/);
     await expect(restoreProof({ archivePath: out, adminUrl: "postgres://postgres@db.example.com:5432/postgres", clock: { now: () => new Date() } }))
       .rejects.toThrow(/127\.0\.0\.1 or localhost/);
+  });
+
+  it("refuses to restore an archive from a newer pg_dump into an older server", async (context) => {
+    if (toolMajor === null || toolMajor <= await serverMajor()) context.skip();
+    const out = join(dir, "newer.dump");
+    await backUp(out);
+    await expect(restoreProof({ archivePath: out, adminUrl: testAdminUrl().href, clock: { now: () => new Date() }, searchPath: process.env.PATH }))
+      .rejects.toThrow(/written by pg_dump \d+; restore it into PostgreSQL/);
   });
 
   it("fails the checks when RLS is not forced, a policy is gone, rows are missing, or a tenant sees another's rows", async () => {

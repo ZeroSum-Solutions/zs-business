@@ -995,7 +995,9 @@ docker stop zs-restore-proof
 `db:restore-proof` (`src/restore-proof.ts`) refuses an admin URL that is not loopback, names
 another database than `postgres` or is not a superuser, and an archive whose manifest does not
 match it by name, size and sha256 (it applies no age or live-ledger gate, so any earlier backup
-can be tested). It creates the roles the archive names as owner, grantee or policy target
+can be tested). It also refuses a server older than the pg_dump that wrote the archive: pg_dump
+17 writes `SET transaction_timeout`, which PostgreSQL 16 rejects, so use a 17 cluster for
+hosted archives. It creates the roles the archive names as owner, grantee or policy target
 (NOLOGIN) and `zs_runtime` (a LOGIN member of `authenticated` only, as `bootstrap-roles.sql`),
 creates a new `zs_restore_proof_<time>_<id>` database from `template0`, drops its empty `public`
 schema (the archive creates it, with its owner and grants), and runs `pg_restore --exit-on-error
