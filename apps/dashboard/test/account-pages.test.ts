@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { billingNotice, PLAN_BADGE, planDateLine, PlanView } from "../src/components/account/plan-view";
+import { billingNotice, PLAN_BADGE, planDateLine, PlanView, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
 import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
 import type { BillingPlan, BusinessProfile } from "@zs/contracts";
@@ -61,6 +61,25 @@ describe("plan", () => {
     const picker = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, { ...base, status: "none", plan: null, limits: null }));
     expect(picker).toContain("Choose Solo");
     expect(picker).toContain("Paying for a plan is not switched on here yet.");
+  });
+
+  it("sends a Shopify-billed business to Shopify's plan page, with no Stripe button or add-on (PL-19)", () => {
+    const url = "https://admin.shopify.com/store/halden-rowe/charges/zs-business-connections/pricing_plans";
+    const shopify = { ...base, billingProvider: "shopify" as const, checkoutEnabled: false, portalEnabled: false, shopifyManageUrl: url };
+    const held = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, { ...shopify, status: "active" }));
+    expect(held).toContain("Manage billing in Shopify");
+    expect(held).toContain(`href="${url.replaceAll("&", "&amp;")}"`);
+    expect(held).not.toContain("Billing is not available here yet.");
+    const picker = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan,
+      { ...shopify, status: "none", plan: null, limits: null }));
+    expect(picker).toContain("Manage billing in Shopify");
+    expect(picker).not.toContain("Choose Solo");
+    expect(picker).not.toContain("Extra managed connections");
+    expect(picker).not.toContain("Paying for a plan is not switched on here yet.");
+    const unknown = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan,
+      { ...shopify, status: "none", plan: null, limits: null, shopifyManageUrl: null }));
+    expect(unknown).toContain(escaped(SHOPIFY_ADMIN_HINT).replaceAll(">", "&gt;"));
+    expect(unknown).not.toContain("Manage billing in Shopify");
   });
 
   it("describes the wallet and the providers as the contracts do", async () => {

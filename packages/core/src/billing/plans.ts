@@ -79,9 +79,10 @@ interface TenantPlanRow {
   founding_invite: boolean;
   payment_failed_at: Date | null;
   read_only_after: Date | null;
+  shopify_shop_domain: string | null;
 }
 const PLAN_COLUMNS = `billing_provider, plan, plan_interval, founding, status, extra_connections, stripe_customer_id, trial_end, current_period_end,
-  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after`;
+  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain`;
 const tenantPlan = async (tx: Transaction, tenantId: string): Promise<TenantPlanRow | null> =>
   (await tx.query<TenantPlanRow>(`SELECT ${PLAN_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0] ?? null;
 
@@ -223,11 +224,19 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   readonly now: Date;
   readonly trialDays: number;
   readonly checkoutEnabled: boolean;
+  /** PL-19: the app handle in Shopify's plan selection URL, when configured. */
+  readonly shopifyAppHandle?: string | null;
 }): Promise<BillingPlan> {
   const row = await tenantPlan(tx, tenantId);
   // PL-11: a new founding offer follows the invite alone; a past founding subscription is no offer.
   const invited = Boolean(row?.founding_invite);
   const stripe = (row?.billing_provider ?? "stripe") === "stripe";
+  const shopify = row?.billing_provider === "shopify";
+  // PL-15, PL-19: the store handle is the myshopify.com name.
+  const storeHandle = shopify && row?.shopify_shop_domain ? row.shopify_shop_domain.replace(/\.myshopify\.com$/, "") : null;
+  const shopifyManageUrl = storeHandle && input.shopifyAppHandle
+    ? `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/charges/${encodeURIComponent(input.shopifyAppHandle)}/pricing_plans`
+    : null;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -239,8 +248,9 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     trialEnd: iso(row?.trial_end ?? null),
     currentPeriodEnd: iso(row?.current_period_end ?? null),
     cancelAtPeriodEnd: row?.cancel_at_period_end ?? false,
-    trialAvailable: !(row?.trial_used ?? false) && input.trialDays > 0,
-    trialDays: !(row?.trial_used ?? false) ? input.trialDays : 0,
+    // PL-19: Shopify owns a Shopify tenant's trial.
+    trialAvailable: stripe && !(row?.trial_used ?? false) && input.trialDays > 0,
+    trialDays: stripe && !(row?.trial_used ?? false) ? input.trialDays : 0,
     paymentFailedAt: iso(row?.payment_failed_at ?? null),
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly: isReadOnly(row, input.now),
@@ -250,6 +260,7 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     currency: "usd",
     checkoutEnabled: input.checkoutEnabled && stripe,
     portalEnabled: input.checkoutEnabled && stripe && Boolean(row?.stripe_customer_id),
+    shopifyManageUrl,
   });
 }
 

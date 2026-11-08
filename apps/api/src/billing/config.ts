@@ -3,6 +3,7 @@
 // anything but `on` runs nothing and needs no other variable.
 import { parse } from "pg-connection-string";
 import { z } from "zod";
+import { shopifyBillingConfigSchema, type ShopifyBillingConfig } from "@zs/core";
 import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -21,7 +22,44 @@ const onSchema = z.object({
   BILLING_STRIPE_KEY: z.string().regex(/^rk_(test|live)_[A-Za-z0-9]{8,250}$/, "must be a Stripe restricted key").optional(),
   BILLING_STRIPE_BASE_URL: z.url({ protocol: /^https?$/ }).optional(),
   BILLING_PLAN_GRACE_DAYS: int(1, 30).default(7),
+  // plans.md PL-20: the Shopify pass; the four required ones come together or not at all.
+  BILLING_SHOPIFY_SYNC_LIMIT: int(1, 100).default(20),
 });
+
+const SHOPIFY_REQUIRED = ["BILLING_SHOPIFY_PARTNER_ID", "BILLING_SHOPIFY_PARTNER_TOKEN", "BILLING_SHOPIFY_APP_ID", "BILLING_SHOPIFY_PLAN_HANDLES"] as const;
+const SHOPIFY_OPTIONAL = ["BILLING_SHOPIFY_API_VERSION", "BILLING_SHOPIFY_BASE_URL"] as const;
+
+/** PL-20: the Partner API reader's config, or null when no BILLING_SHOPIFY_ variable is set. */
+function parseShopify(source: Readonly<Record<string, string | undefined>>): ShopifyBillingConfig | null {
+  const set = SHOPIFY_REQUIRED.filter((name) => source[name] !== undefined);
+  const optional = SHOPIFY_OPTIONAL.filter((name) => source[name] !== undefined);
+  if (set.length === 0) {
+    if (optional.length > 0) throw new Error(`Invalid environment: ${optional.join(", ")} needs ${SHOPIFY_REQUIRED.join(", ")}`);
+    return null;
+  }
+  if (set.length < SHOPIFY_REQUIRED.length)
+    throw new Error(`Invalid environment: the Shopify pass needs all of ${SHOPIFY_REQUIRED.join(", ")}; missing ${SHOPIFY_REQUIRED.filter((name) => !set.includes(name)).join(", ")}`);
+  let planHandles: unknown;
+  try {
+    planHandles = JSON.parse(source.BILLING_SHOPIFY_PLAN_HANDLES!);
+  } catch {
+    throw new Error("Invalid environment: BILLING_SHOPIFY_PLAN_HANDLES is not JSON");
+  }
+  const parsed = shopifyBillingConfigSchema.safeParse({
+    partnerId: source.BILLING_SHOPIFY_PARTNER_ID,
+    token: source.BILLING_SHOPIFY_PARTNER_TOKEN,
+    appId: source.BILLING_SHOPIFY_APP_ID,
+    planHandles,
+    ...(source.BILLING_SHOPIFY_API_VERSION === undefined ? {} : { apiVersion: source.BILLING_SHOPIFY_API_VERSION }),
+    ...(source.BILLING_SHOPIFY_BASE_URL === undefined ? {} : { baseUrl: source.BILLING_SHOPIFY_BASE_URL }),
+  });
+  // The token never appears in the message: only the paths of the fields that failed.
+  if (!parsed.success) throw new Error(`Invalid environment: BILLING_SHOPIFY_ ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "value"}: ${issue.path[0] === "token" ? "invalid" : issue.message}`).join("; ")}`);
+  const config = parsed.data;
+  if (!config.baseUrl.startsWith("https://") && !LOOPBACK.has(new URL(config.baseUrl).hostname.replace(/^\[|\]$/g, "")))
+    throw new Error("Invalid environment: BILLING_SHOPIFY_BASE_URL must be https (http only on a loopback host)");
+  return config;
+}
 
 export interface BillingRunnerEnv {
   readonly serviceDatabaseUrl: string;
@@ -32,6 +70,8 @@ export interface BillingRunnerEnv {
   /** PL-13: reads plan subscriptions again; null means plan events wait. */
   readonly stripeReader: { readonly secretKey: string; readonly baseUrl?: string } | null;
   readonly planGraceDays: number;
+  /** PL-18, PL-20: the Shopify pass; null means it does not run. */
+  readonly shopify: { readonly reader: ShopifyBillingConfig; readonly syncLimit: number } | null;
 }
 
 export interface BillingEnv {
@@ -61,6 +101,7 @@ export function parseBillingEnv(env: Readonly<Record<string, string | undefined>
   const parsed = onSchema.safeParse(env);
   if (!parsed.success) throw new Error(`Invalid environment: ${problems(parsed.error)}`);
   const data = parsed.data;
+  const shopify = parseShopify(env);
   let host: string;
   try {
     host = (parse(data.BILLING_DATABASE_URL).host ?? "").toLowerCase();
@@ -86,6 +127,7 @@ export function parseBillingEnv(env: Readonly<Record<string, string | undefined>
         ...(data.BILLING_STRIPE_BASE_URL === undefined ? {} : { baseUrl: data.BILLING_STRIPE_BASE_URL }),
       },
       planGraceDays: data.BILLING_PLAN_GRACE_DAYS,
+      shopify: shopify === null ? null : { reader: shopify, syncLimit: data.BILLING_SHOPIFY_SYNC_LIMIT },
     },
   };
 }

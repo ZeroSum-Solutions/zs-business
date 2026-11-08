@@ -55,3 +55,29 @@ export {
 } from "./plans.js";
 export { lockTenantPlan, planGate, planLimits, READ_ONLY_ALLOWED_ACTIONS } from "./plan-gate.js";
 export { createPlanEvents, type PlanOutcome } from "./plan-events.js";
+export { derivePlanRecord } from "./plan-events.js";
+export {
+  createShopifySubscriptionReader,
+  SHOPIFY_INTERVALS,
+  SHOPIFY_PARTNER_DEFAULT_BASE_URL,
+  SHOPIFY_PARTNER_DEFAULT_VERSION,
+  SHOPIFY_PLAN_KEY_PLANS,
+  SHOPIFY_PLAN_KEYS,
+  SHOPIFY_SHOP_DOMAIN,
+  SHOPIFY_SHOP_GID,
+  shopifyBillingConfigSchema,
+  ShopifyPartnerError,
+  type ParsedShopifyBillingConfig,
+  type ShopifyBillingConfig,
+  type ShopifyContract,
+  type ShopifyPlanKey,
+  type ShopifySubscriptionReader,
+} from "./plan-shopify.js";
+export {
+  createShopifyPlanSync,
+  setShopifyBilling,
+  SHOPIFY_CALL_SPACING_MS,
+  SHOPIFY_LINK_CHECKOUT_GATE_MS,
+  type ShopifySyncOutcome,
+  type ShopifySyncSummary,
+} from "./shopify-plans.js";

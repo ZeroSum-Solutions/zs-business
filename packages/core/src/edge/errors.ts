@@ -93,12 +93,16 @@ const CONFLICT_REASONS = new Set([
   // enrichment.md E-17: the only enrichment reasons a tenant sees.
   ...ENRICHMENT_ERROR_CODES,
   "consent_required", "lease_lost", "intake_not_in_review", "intake_changed", "intake_target_changed",
+  // plans.md PL-4..PL-7, PL-11, PL-14, PL-15: why a plan Checkout, the Portal or a top-up is refused.
+  "plan_exists", "checkout_open", "checkout_closed", "no_customer", "founding_full", "billing_provider",
 ]);
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
 /** H-1 revision 4: an invalid_currency conflict names the deal's stored code (three capitals). */
 const STORED_CURRENCY = /^[A-Z]{3}$/;
 /** I-6: an approved_by_other conflict names the owner who finishes the send. */
+/** PL-4: only an https Checkout URL Stripe answered leaves with checkout_open. */
+const STRIPE_CHECKOUT_URL = /^https:\/\/[^\s]{1,2040}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** One fixed message per code, so database or handler text never reaches a response. */
@@ -126,6 +130,9 @@ function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<s
     safe.approvedBy = details.approvedBy;
   if (safe.reason === "invalid_currency" && typeof details.currency === "string" && STORED_CURRENCY.test(details.currency))
     safe.currency = details.currency;
+  // PL-4: an open plan checkout answers its stored Stripe Checkout URL, so the owner goes back to it.
+  if (safe.reason === "checkout_open" && typeof details.checkoutUrl === "string" && STRIPE_CHECKOUT_URL.test(details.checkoutUrl))
+    safe.checkoutUrl = details.checkoutUrl;
   return safe;
 }
 

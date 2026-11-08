@@ -313,7 +313,11 @@ across tenants) and its `<name>.myshopify.com` domain, under the tenant's plan l
 no tenant pays twice and no Stripe payment lands after the switch:
 - 409 `stripe_plan_active` while a Stripe subscription of the tenant is not ended (any status but
   `canceled`, `unpaid`, `incomplete_expired`), or while a plan checkout of the tenant is
-  `pending` and less than 24 hours old (a Checkout Session lives one hour; PL-5).
+  `pending` and less than 24 hours old (a Checkout Session lives one hour; PL-5), or while a
+  wallet top-up of the tenant is `pending` and less than an hour old (stripe.md S-2).
+- 409 `shop_taken` when another tenant names the shop, or holds a row for it in
+  `plan_subscriptions` (a shop's row ID is global). Moving a shop between businesses is an
+  operator data change. 409 `shop_invalid` for a malformed GID or domain.
 - 409 `shopify_plan_active` when the tenant already names another shop whose row is `trialing`
   or `active`. Relinking from an ended shop is allowed; the old row stays as history.
 - Setting the provider back to `stripe` clears the shop and is refused (409
@@ -351,8 +355,9 @@ clock and clears `shopify_sync_failures` and `shopify_next_sync_at`.
   malformed answer or an answer for another shop writes nothing to the plan rows and is reported.
   It adds one to `shopify_sync_failures` and sets `shopify_next_sync_at` to the clock plus one
   minute doubled per failure, at most one hour, so failing shops never starve the others.
-  Throttling (HTTP 429, or a GraphQL error "Too many requests" or code 429 in a 200 answer) and
-  5xx also end the pass.
+  Throttling (HTTP 429, or a GraphQL error "Too many requests" or code 429 in a 200 answer), 5xx
+  and an unreachable Partner API also end the pass. The Shopify pass starts only if the Stripe
+  passes left time before the runner's deadline; the run summary carries it as `shopify`.
 - Shopify handles failed payments itself (it freezes the store). The hub adds no grace for a
   Shopify tenant: a contract that disappears makes the tenant read-only as an ended Stripe
   subscription does (PL-10), and a contract seen again lifts it.
@@ -367,8 +372,11 @@ clock and clears `shopify_sync_failures` and `shopify_next_sync_at`.
 `shopifyManageUrl`: the plan selection page of PL-15 for the tenant's shop domain, when the
 tenant is Shopify-billed, has a domain and `SHOPIFY_BILLING_APP_HANDLE` is set; otherwise null.
 For a Shopify tenant, `checkoutEnabled` and `portalEnabled` are false and `trialAvailable` is
-false (Shopify owns the trial). The dashboard hides wallet top-ups for it (PL-15). The dashboard plan page then shows no Stripe plan buttons and no
-add-on field. It shows a **Manage billing in Shopify** link to `shopifyManageUrl` (with the plan
+false (Shopify owns the trial). The API refuses its wallet top-ups (409 `billing_provider`,
+PL-15), checked again before each Stripe call, a replay included. The plan conflict reasons
+(`plan_exists`, `checkout_open` with its `checkoutUrl`, `checkout_closed`, `no_customer`,
+`founding_full`, `billing_provider`) leave the API as documented reasons. The dashboard plan page
+shows a Shopify tenant no Stripe plan buttons and no add-on field. It shows a **Manage billing in Shopify** link to `shopifyManageUrl` (with the plan
 and without one), or, when it is null, the words "Open your Shopify admin, then Settings > Apps".
 After `?shopify=welcome` it polls the plan until it holds one, as after a Stripe Checkout.
 
@@ -411,6 +419,8 @@ Sources (fetched 2026-11-07):
   contract does.
 - A Stripe plan Checkout that completes after a PL-17 link (only possible past the 24-hour gate)
   is not applied; the operator refunds it in Stripe.
+- A shop bills one business for good: its row ID is global, so moving a shop to another tenant
+  is an operator data change (PL-17 `shop_taken`).
 
 - A tenant that never subscribed is comped. Requiring a plan of new tenants needs a rule here.
 - Bookable resources, model-assisted agents, voice, the agent daily cap and the email allowance

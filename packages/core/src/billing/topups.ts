@@ -75,6 +75,7 @@ export const createTopUpHandler: ActionHandler<TopUpDispatchConfig> = {
     // Only the member session's top-up route passes the terms; nothing else may create one.
     const terms = config.topUp;
     if (!terms) throw new NotFound();
+    await notStripeBilled(tx, binding.tenantId);
     if (payload.amount < terms.minAmount || payload.amount > terms.maxAmount)
       throw new ValidationFailed(`Top-ups are between ${terms.minAmount} and ${terms.maxAmount} minor units`);
     // A wallet's currency is fixed by its first credit; a payment in another could never be credited.
@@ -90,6 +91,13 @@ export const createTopUpHandler: ActionHandler<TopUpDispatchConfig> = {
     return { result: { ...topUpFromRow(row) } };
   },
 };
+
+/** PL-15: a tenant another provider bills is never charged through Stripe, top-ups included. */
+const otherProvider = () => new Conflict("This business is billed through another provider", { reason: "billing_provider" });
+async function notStripeBilled(tx: Transaction, tenantId: string): Promise<void> {
+  const row = (await tx.query<{ billing_provider: string }>("SELECT billing_provider FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
+  if (row && row.billing_provider !== "stripe") throw otherProvider();
+}
 
 export const topUpHandlers: Readonly<Record<string, ActionHandler>> = Object.freeze({
   [WALLET_TOPUP_CREATE_ACTION]: createTopUpHandler as ActionHandler,
@@ -109,6 +117,8 @@ export interface TopUpForCheckout {
   readonly checkout: CheckoutTerms | null;
   /** S-2: the session URL Stripe answered, once one was stored. */
   readonly checkoutUrl: string | null;
+  /** PL-15: the tenant's billing provider now. */
+  readonly billingProvider: string;
 }
 
 /** A stored top-up with what its Checkout request needs. */
@@ -119,17 +129,19 @@ export async function getTopUpForCheckout(tx: Transaction, tenantId: string, top
     checkout_cancel_url: string | null;
     checkout_product_name: string | null;
     checkout_url: string | null;
+    billing_provider: string | null;
   }>(
     `SELECT ${TOPUP_COLUMNS.split(",").map((column) => `t.${column.trim()}`).join(", ")}, w.currency AS wallet_currency,
-            t.checkout_success_url, t.checkout_cancel_url, t.checkout_product_name, t.checkout_url
-       FROM wallet_topups t LEFT JOIN wallets w ON w.tenant_id=t.tenant_id
+            t.checkout_success_url, t.checkout_cancel_url, t.checkout_product_name, t.checkout_url, p.billing_provider
+       FROM wallet_topups t LEFT JOIN wallets w ON w.tenant_id=t.tenant_id LEFT JOIN tenant_plans p ON p.tenant_id=t.tenant_id
       WHERE t.tenant_id=$1 AND t.id=$2`, [tenantId, topupId])).rows[0];
   if (!row) return null;
   // The migration's check keeps the three set or unset together.
   const checkout = row.checkout_success_url !== null && row.checkout_cancel_url !== null && row.checkout_product_name !== null
     ? { successUrl: row.checkout_success_url, cancelUrl: row.checkout_cancel_url, productName: row.checkout_product_name }
     : null;
-  return { topup: topUpFromRow(row), walletCurrency: row.wallet_currency, checkout, checkoutUrl: row.checkout_url };
+  return { topup: topUpFromRow(row), walletCurrency: row.wallet_currency, checkout, checkoutUrl: row.checkout_url,
+    billingProvider: row.billing_provider ?? "stripe" };
 }
 
 /** S-2: records the session URL Stripe answered; the first one stays. */
@@ -162,6 +174,8 @@ export async function startTopUp(input: {
   await input.dispatch(parsed);
   const found = await input.read(parsed.payload.topupId);
   if (!found) throw new Conflict("The top-up is not available", { reason: "topup_closed" });
+  // PL-15: checked again before every Stripe call; the tenant may have been linked to Shopify since.
+  if (found.billingProvider !== "stripe") throw otherProvider();
   const { topup } = found;
   const createdAt = Date.parse(topup.createdAt);
   if (topup.status !== "pending" || input.now.getTime() - createdAt > CHECKOUT_RETRY_LIMIT_MS)

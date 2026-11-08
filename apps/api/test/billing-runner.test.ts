@@ -179,6 +179,27 @@ describe("createBillingRunner", () => {
       .toMatchObject({ passes: 2, claimed: 3, budgetSpent: false });
   });
 
+  it("runs the Shopify pass after the Stripe passes, with the run's deadline (plans.md PL-18)", async () => {
+    const { worker } = stubWorker([{ claimed: 1, outcomes: { credited: 1 }, takesMs: 1_000 }]);
+    const deadlines: Array<number | undefined> = [];
+    const shopify = { async runOnce(options: { deadline?: Date }) {
+      deadlines.push(options.deadline?.getTime());
+      return { checked: 2, outcomes: { plan_synced: 2 }, stopped: false };
+    } };
+    expect(await createBillingRunner({ worker, clock, budgetMs: 5_000, claimLimit: 2, shopify }).run()).toEqual({
+      ...summary({ claimed: 1, outcomes: { credited: 1 } }), shopify: { checked: 2, outcomes: { plan_synced: 2 }, stopped: false },
+    });
+    expect(deadlines).toEqual([START + 5_000]);
+  });
+
+  it("skips the Shopify pass when the Stripe passes spent the budget", async () => {
+    const { worker } = stubWorker([{ claimed: 2, takesMs: 6_000 }]);
+    const runOnce = vi.fn();
+    expect(await createBillingRunner({ worker, clock, budgetMs: 5_000, claimLimit: 2, shopify: { runOnce } }).run())
+      .toMatchObject({ budgetSpent: true, shopify: null });
+    expect(runOnce).not.toHaveBeenCalled();
+  });
+
   it("lets a throwing pass fail the run", async () => {
     const worker = { config: {}, runOnce: async () => { throw new Error("pool closed"); } } as unknown as BillingWorker;
     await expect(createBillingRunner({ worker, clock, budgetMs: 20_000, claimLimit: 2 }).run()).rejects.toThrow("pool closed");

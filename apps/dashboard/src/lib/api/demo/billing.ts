@@ -39,6 +39,7 @@ export function createDemoBilling(options: { clock?: DemoClock; latencyMs?: numb
     currency: "usd",
     checkoutEnabled: false,
     portalEnabled: false,
+    shopifyManageUrl: null,
   });
 
   return {

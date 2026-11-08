@@ -126,6 +126,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `STRIPE_WEBHOOK_PREVIOUS_SECRET`, `STRIPE_CURRENCY`, `STRIPE_TOPUP_MIN`, `STRIPE_TOPUP_MAX`, `STRIPE_API_VERSION`, `STRIPE_BASE_URL` | Optional: a rotation secret, `usd`, 500 and 50000 minor units, the account's default API version, `https://api.stripe.com`. |
 | `STRIPE_PLAN_PRICES`, `STRIPE_PLAN_RETURN_URL` | Hub plans (plans.md PL-13), both or none, and only with the top-up variables above. A JSON object from all eleven PL-2 lookup keys to `price_` IDs, and the https dashboard plan page. None set: `GET /v1/billing/plan` says plans are off, and Checkout and the Portal are 404. |
 | `STRIPE_PLAN_TRIAL_DAYS`, `STRIPE_PORTAL_CONFIGURATION` | Optional: trial length, 0 to 30 (14), and the Portal configuration (`bpc_`). |
+| `SHOPIFY_BILLING_APP_HANDLE` | Optional (plans.md PL-19): the app handle in Shopify's plan page URL, lowercase letters, digits and dashes. Set, a Shopify-billed tenant's plan carries `shopifyManageUrl`; unset, it is null and the dashboard says where to find the page. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY`, `GOOGLE_CHANNEL_SECRET` | Google Calendar busy sync (google-calendar.md G-12), all or none. None set: connecting, `GET /oauth/google/callback` and `POST /webhooks/google/calendar` are off. The OAuth web client's ID and secret; `https://<dashboard host>/api/calendar/google/callback` (also registered in Google Cloud; the dashboard forwards to `/oauth/google/callback` here); `https://<dashboard host>/account/connections`; a state signing secret (32+ characters); base64 of the DER SPKI of the X25519 key whose private half only the calendar runner holds; the push channel secret (32+ characters, the same as the runner's). URLs must be https (plain http only on loopback). |
 | `GOOGLE_STATE_PREVIOUS_SECRET`, `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | Optional: a rotation secret (states it signed keep verifying for their 10 minutes), and base URLs for tests (`https://accounts.google.com`, `https://oauth2.googleapis.com`, `https://www.googleapis.com`). |
 | `TWILIO_AUTH_TOKEN` | The Twilio account's auth token (32 hex), which verifies `X-Twilio-Signature`. Unset, the `/webhooks/twilio` routes are off. Needs `TWILIO_ACCOUNT_SID` and `TWILIO_WEBHOOK_BASE_URL`. |
@@ -769,7 +770,8 @@ against the pinned Supabase Root 2021 CA.
    | `DELIVERY_WORKER`, `DELIVERY_WORKER_ID`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `SMS_PROVIDER` | **no** | yes |
    | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | **no** | yes |
    | `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | **no** | only with `SMS_PROVIDER=twilio` (`TWILIO_API_KEY_SID` and `TWILIO_API_KEY_SECRET` come together) |
-   | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS`, `BILLING_STRIPE_KEY`, `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS` | **no** | yes |
+   | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS`, `BILLING_STRIPE_KEY`, `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS`, `BILLING_SHOPIFY_*` | **no** | yes |
+   | `SHOPIFY_BILLING_APP_HANDLE` | yes | no |
    | `CALENDAR_WORKER`, `CALENDAR_DATABASE_URL`, `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS`, `GOOGLE_TOKEN_PRIVATE_KEY`, `GOOGLE_WEBHOOK_URL`, `GOOGLE_EVENT_TITLE` | **no** | yes |
    | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_WORKER_ID`, `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS` (this row does not cover `ACTIVEPIECES_KEY_SECRET`: the API needs it for the owner routes) | **no** | yes |
    | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `FOLLOWUP_MODEL`, `FOLLOWUP_SLOT_MINUTES`, `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS`, `FOLLOWUP_INTERVAL_MS`, `AGENT_MODEL_PERSONAL_DATA`, `AGENT_MODEL_NO_PERSONAL_DATA`, `AGENT_TEMPLATED`, `AGENT_TEMPLATED_MAX_CANDIDATES`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `COMPOSIO_API_KEY` | **no** | yes |
@@ -979,10 +981,13 @@ and the wallet reserves nothing until it is repaid). Off unless `BILLING_WORKER=
 | `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS` | Optional tuning: 50, 20000 and 30000 (Node worker only). The cron function allows a budget of at most 20000. |
 | `BILLING_STRIPE_KEY` | Hub plan events (plans.md PL-13): a restricted key that may only read subscriptions (`rk_`), in the mode of `STRIPE_LIVEMODE`. Unset, plan events wait and end `orphaned`. |
 | `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS` | Optional: `https://api.stripe.com`, and the days from a failed plan invoice to read-only, 1 to 30 (7). |
+| `BILLING_SHOPIFY_PARTNER_ID`, `BILLING_SHOPIFY_PARTNER_TOKEN`, `BILLING_SHOPIFY_APP_ID`, `BILLING_SHOPIFY_PLAN_HANDLES` | Shopify App Pricing (plans.md PL-18, PL-20), all four or none: the Partner organisation number, a Partner API client token with only "Manage apps", the numeric app ID, and JSON from the five PL-16 keys to distinct plan handles. Set, each run ends with a Shopify pass that reads linked shops' contracts. |
+| `BILLING_SHOPIFY_SYNC_LIMIT`, `BILLING_SHOPIFY_API_VERSION`, `BILLING_SHOPIFY_BASE_URL` | Optional: shops per run, 1 to 100 (20); `2026-10`; `https://partners.shopify.com` (http only on loopback, for tests). |
 | `BILLING_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/billing`. Unset, there is no cron. |
 
 `GET /cron/billing` answers like `/cron/delivery`, with `{ ran: true, passes, claimed,
-outcomes, budgetSpent }` after a run. Events that end `mismatch`, `orphaned` or `not_ours` are
+outcomes, budgetSpent }` after a run, and `shopify` (the Shopify pass, or null when no time was
+left) when the Shopify pass is configured. Events that end `mismatch`, `orphaned` or `not_ours` are
 logged for an operator.
 
 ## Calendar runner (`/cron/calendar`, `pnpm calendar:worker`)

@@ -160,5 +160,7 @@ export const billingPlanSchema = z.strictObject({
   currency: z.literal("usd"),
   checkoutEnabled: z.boolean(),
   portalEnabled: z.boolean(),
+  /** PL-19: Shopify's plan selection page for a Shopify-billed tenant; null otherwise. */
+  shopifyManageUrl: z.url({ protocol: /^https$/ }).nullable(),
 });
 export type BillingPlan = z.infer<typeof billingPlanSchema>;
