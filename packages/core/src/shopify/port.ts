@@ -14,6 +14,8 @@ import {
   shopifyCreateHubRequestSchema,
   shopifyCreateHubResponseSchema,
   shopifyOpenRequestSchema,
+  shopifyOrdersRequestSchema,
+  shopifyOrdersResponseSchema,
   shopifyOpenResponseSchema,
   shopifyRedeemClaimRequestSchema,
   shopifyRedeemClaimResponseSchema,
@@ -38,9 +40,10 @@ export interface ShopifyPort {
   claimStatus(request: Req<typeof shopifyClaimStatusRequestSchema>, signal?: AbortSignal): Promise<z.infer<typeof shopifyClaimStatusResponseSchema>>;
   claimCancel(request: Req<typeof shopifyClaimCancelRequestSchema>, signal?: AbortSignal): Promise<z.infer<typeof shopifyClaimCancelResponseSchema>>;
   claimConfirm(request: Req<typeof shopifyClaimConfirmRequestSchema>, signal?: AbortSignal): Promise<z.infer<typeof shopifyClaimConfirmResponseSchema>>;
+  orders(request: Req<typeof shopifyOrdersRequestSchema>, signal?: AbortSignal): Promise<z.infer<typeof shopifyOrdersResponseSchema>>;
 }
 
-export type ShopifyWorkerOps = Pick<ShopifyNativeWorker, "open" | "createHub" | "redeemClaim" | "signIn" | "claimStart" | "claimStatus" | "claimCancel" | "claimConfirm">;
+export type ShopifyWorkerOps = Pick<ShopifyNativeWorker, "open" | "createHub" | "redeemClaim" | "signIn" | "claimStart" | "claimStatus" | "claimCancel" | "claimConfirm" | "orders">;
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
@@ -102,6 +105,7 @@ export function createHttpShopifyPort(config: HttpShopifyPortConfig): ShopifyPor
     claimStatus: (r, s) => call("claim_status", r, shopifyClaimStatusResponseSchema, s),
     claimCancel: (r, s) => call("claim_cancel", r, shopifyClaimCancelResponseSchema, s),
     claimConfirm: (r, s) => call("claim_confirm", r, shopifyClaimConfirmResponseSchema, s),
+    orders: (r, s) => call("orders", r, shopifyOrdersResponseSchema, s),
   };
 }
 
@@ -128,6 +132,7 @@ export async function handleShopifyOperation(
     }
     case "claim_cancel": { const r = shopifyClaimCancelRequestSchema.safeParse(json); return r.success ? { status: 200, body: await worker.claimCancel(r.data) } : bad; }
     case "claim_confirm": { const r = shopifyClaimConfirmRequestSchema.safeParse(json); return r.success ? { status: 200, body: await worker.claimConfirm(r.data) } : bad; }
+    case "orders": { const r = shopifyOrdersRequestSchema.safeParse(json); return r.success ? { status: 200, body: await worker.orders(r.data) } : bad; }
   }
 }
 
@@ -147,5 +152,6 @@ export function createLocalShopifyPort(worker: ShopifyWorkerOps): ShopifyPort {
     claimStatus: (r) => via("claim_status", r, shopifyClaimStatusResponseSchema),
     claimCancel: (r) => via("claim_cancel", r, shopifyClaimCancelResponseSchema),
     claimConfirm: (r) => via("claim_confirm", r, shopifyClaimConfirmResponseSchema),
+    orders: (r) => via("orders", r, shopifyOrdersResponseSchema),
   };
 }

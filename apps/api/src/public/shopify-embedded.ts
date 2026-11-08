@@ -46,6 +46,10 @@ export function shopifyEmbeddedRoutes(
       // C-29: the worker knows the plan; only the API holds the app handle, so it adds Shopify's plan selection page.
       return answer(c, opened.outcome === "ok" ? { ...opened, planUrl: shopifyPricingUrl(opened.shop.domain, config.shopifyAppHandle) } : opened);
     })
+    .post("/orders", async (c) => {
+      const token = tokenOf(c);
+      return token === null ? refused(c) : answer(c, await session(c).orders(token, c.var.signal));
+    })
     .post("/create-hub", async (c) => {
       const token = tokenOf(c);
       return token === null ? refused(c) : answer(c, await session(c).createHub(token, c.var.signal));

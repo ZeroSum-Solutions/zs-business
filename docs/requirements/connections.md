@@ -996,6 +996,38 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     confirming, deadline, polling, footer), `packages/core/test/shopify/native-worker.test.ts` (plan states),
     `apps/api/test/shopify-native-api.test.ts` (`planUrl`).
 
+- **C-30 Recent orders on the embedded page (added 2026-11-07; Shopify app review must see the
+  app read orders).** A linked store's embedded page shows its 10 most recent orders from the
+  last 60 days, newest first, and a one-line summary: "N orders in the last 60 days, total
+  <money>", computed over the orders returned (up to 50 fetched). The view is read-only and has
+  no customer fields.
+  - Worker operation `orders` (`POST /internal/shopify/orders`, body `{idToken}`) authenticates
+    exactly like `open` (verified ID token, install, shop; refresh, the `shopify_locks` lease and
+    the `busy`, `unavailable`, `invalid_token`, `not_supported` outcomes are the same). It answers
+    only for a store whose connection is `active` or `reauthorize`; any other store gets
+    `not_linked` and no Shopify call is made. It reads with `listOrdersQuery` and
+    `listOrdersSearch` (window = injected clock now minus 60 days, status any, first 50) and
+    shapes each order with `orderToRest`. The query never selects the `customer` object (C-23).
+    A Shopify failure answers `unavailable`; a 401 marks the current install as needing reauth,
+    as in C-22. Orders whose name, time, total or currency do not fit the contract are skipped.
+  - Response (`shopifyOrdersResponseSchema`): `{outcome:"ok", orders:[{name, createdAt,
+    displayFinancialStatus, displayFulfillmentStatus, total:{amount,currency}}] (at most 10),
+    summary:{count, total:{amount,currency}|null}}`. `total` is the exact decimal sum and is null
+    when no order was returned or the currencies differ. Strict objects: a customer field cannot
+    pass the contract.
+  - API route `POST /public/v1/shopify/embedded/orders` beside `open`: same bearer token, same
+    `shopify-embedded` guard (240 per 10 minutes per address), same mapping (`invalid_token` is a
+    401, a dead worker is `unavailable`). The dashboard proxy allows the `orders` operation.
+  - Page: after `open`, for a linked store only, it reads `orders` and shows a **Recent orders**
+    table (Order, Date, Payment, Fulfillment, Total) and the summary line. Empty: "No orders in
+    the last 60 days". Any failure: "Orders are not available right now". All values are set
+    with `textContent`; the CSP and the no-cookie model are unchanged. An answer that lands
+    after the merchant moved to another screen is dropped (the C-29 generation guard).
+  - Tests: `packages/core/test/shopify/native-worker.test.ts` (linked, not linked, 60-day window,
+    no customer fields, refresh, busy), `apps/api/test/shopify-native-api.test.ts` (auth, rate
+    limit, mapping), `apps/dashboard/test/shopify-embedded.test.ts` (table, empty, error, safe
+    rendering, stale answer).
+
 
 ## Acceptance
 

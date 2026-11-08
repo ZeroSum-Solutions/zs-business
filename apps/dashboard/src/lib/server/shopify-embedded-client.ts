@@ -227,11 +227,72 @@ function showOpen(open) {
   renderChoice(open);
 }
 
+// C-30: the read-only "Recent orders" view. Every value comes from the API as data and is set with textContent only.
+function orderStatus(value) {
+  if (typeof value !== "string" || value === "") return "-";
+  var text = value.replace(/_/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+function orderDate(value) { return typeof value === "string" ? value.slice(0, 10) : "-"; }
+function money(total) {
+  if (!total) return "-";
+  var amount = Number(total.amount);
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: total.currency }).format(amount);
+  } catch (error) {
+    return String(total.amount) + " " + String(total.currency);
+  }
+}
+function ordersBlock(result) {
+  var block = el("div", null, { class: "orders", "data-testid": "recent-orders" });
+  block.appendChild(el("h2", "Recent orders"));
+  if (result.outcome !== "ok" || !result.orders || !result.summary) {
+    block.appendChild(note("Orders are not available right now.", "info"));
+    return block;
+  }
+  if (result.orders.length === 0) {
+    block.appendChild(el("p", "No orders in the last 60 days", { class: "help", "data-testid": "orders-empty" }));
+    return block;
+  }
+  var count = result.summary.count;
+  block.appendChild(el("p", count + (count === 1 ? " order" : " orders") + " in the last 60 days, total " + (result.summary.total ? money(result.summary.total) : "in more than one currency"), { class: "orders-summary", "data-testid": "orders-summary" }));
+  var wrap = el("div", null, { class: "table-wrap", tabindex: "0", role: "region", "aria-label": "Recent orders" });
+  var table = el("table", null, { class: "orders-table" });
+  var head = el("tr");
+  ["Order", "Date", "Payment", "Fulfillment", "Total"].forEach(function (label) { head.appendChild(el("th", label, { scope: "col" })); });
+  table.appendChild(el("thead")).appendChild(head);
+  var body = el("tbody");
+  result.orders.forEach(function (order) {
+    var row = el("tr");
+    row.appendChild(el("th", String(order.name), { scope: "row" }));
+    row.appendChild(el("td", orderDate(order.createdAt)));
+    row.appendChild(el("td", orderStatus(order.displayFinancialStatus)));
+    row.appendChild(el("td", orderStatus(order.displayFulfillmentStatus)));
+    row.appendChild(el("td", money(order.total), { class: "num" }));
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  wrap.appendChild(table);
+  block.appendChild(wrap);
+  return block;
+}
+// Read after open, only for a linked store. The screen number at the time of the call must still be the current one
+// when the answer lands, so a late answer never overwrites another screen.
+function loadOrders(slot) {
+  var generation = screen;
+  call("orders").then(function (result) {
+    if (generation !== screen) return;
+    slot.replaceChildren(ordersBlock(result));
+  });
+}
+
 function renderLinked(open) {
   var status = el("p", null, { class: "note info", role: "status" });
   var needsRenewal = open.link.connection === "reauthorize";
   var plan = planShell();
   lastOpen = open;
+  var ordersSlot = el("section", null, { class: "orders-slot" });
+  ordersSlot.appendChild(el("p", "Loading recent orders...", { class: "help", role: "status" }));
   show(
     title("ZS Business Connections"),
     shopBlock(open.shop),
@@ -241,10 +302,12 @@ function renderLinked(open) {
       ? "Shopify access for " + open.link.businessName + " needs to be renewed. Open your hub to reconnect."
       : "This store is connected to " + open.link.businessName + ". Your agents there can read this store's orders. Nothing in your store is changed."),
     button("Open ZS Hub", function () { openHub(status); }),
-    status
+    status,
+    ordersSlot
   );
   planNode = plan;
   if (setPlan(plan, open) === "confirming") schedulePlan();
+  loadOrders(ordersSlot);
 }
 
 // The hub now tracks this store's plan (PL-17): read it again and offer Choose a plan next to the hub link.

@@ -32,8 +32,8 @@ const cronEntries = [
 // The connections worker's signed operations (connections.md C-3): the same entry file as the cron, one
 // function per path, so each is its own anchored route and no function answers another's path.
 const connectionOperations = ["link", "complete", "cancel", "run", "disconnect"];
-// The native Shopify tier (C-21 to C-24): its eight signed operations and Shopify's webhook endpoint, same entry file.
-const shopifyOperations = ["open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm"];
+// The native Shopify tier (C-21 to C-24): its nine signed operations and Shopify's webhook endpoint, same entry file.
+const shopifyOperations = ["open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm", "orders"];
 const internalEntries = [
   ...connectionOperations.map((operation) => ({ path: `/internal/connections/${operation}`, entry: "../src/vercel-connections.ts" })),
   ...shopifyOperations.map((operation) => ({ path: `/internal/shopify/${operation}`, entry: "../src/vercel-connections.ts" })),

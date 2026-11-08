@@ -193,7 +193,7 @@ const json = async (response: Response) => (await response.json()) as Record<str
 
 describe("off without the Shopify port (C-21)", () => {
   it("the embedded routes and the claim routes are unknown routes (404)", async () => {
-    for (const op of ["open", "create-hub", "sign-in", "redeem-claim"]) expect((await embedded(off, op, token())).status, op).toBe(404);
+    for (const op of ["open", "orders", "create-hub", "sign-in", "redeem-claim"]) expect((await embedded(off, op, token())).status, op).toBe(404);
     expect((await call(off, "POST", "/v1/shopify/claims", { token: h.a.token, body: {} })).status).toBe(404);
     expect((await call(off, "GET", "/v1/shopify/claims/current", { token: h.a.token })).status).toBe(404);
   });
@@ -238,6 +238,39 @@ describe("the embedded routes (C-21, C-22)", () => {
     // The fields it reads stay strict.
     expect(shopifyOpenResponseSchema.safeParse({ ...newer, plan: { state: "active", name: "Solo", extra: 1 } }).success).toBe(false);
     expect(shopifyOpenResponseSchema.safeParse({ ...newer, link: { state: "none", extra: 1 } }).success).toBe(false);
+  });
+
+  it("orders (C-30): a missing or malformed token is a 401, a not-linked store is not_linked, a linked one lists its orders", async () => {
+    expect((await embedded(on, "orders", null)).status).toBe(401);
+    expect((await embedded(on, "orders", "not-a-token")).status).toBe(401);
+    expect(fake.calls).toHaveLength(0);
+    await embedded(on, "open", token());
+    expect(await json(await embedded(on, "orders", token()))).toEqual({ outcome: "not_linked" });
+    await embedded(on, "create-hub", token());
+    fake.orders = [{ id: 1, name: "#1", created_at: new Date(nativeClock.now().getTime() - 86_400_000).toISOString() }];
+    const response = await embedded(on, "orders", token());
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("set-cookie")).toBeNull();
+    const body = await json(response);
+    expect(body).toMatchObject({ outcome: "ok", summary: { count: 1, total: { amount: "30.00", currency: "USD" } } });
+    expect(JSON.stringify(body)).not.toMatch(/customer|email/i);
+  });
+
+  it("orders (C-30): a forged token is a 401, the rate limit is a 429, and busy and a dead worker map like open", async () => {
+    expect((await embedded(on, "orders", mintIdToken(nativeClock.now(), {}, "z".repeat(48)))).status).toBe(401);
+    limiterRefuses = true;
+    const limited = await embedded(on, "orders", token());
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("31");
+    expect(fake.calls).toHaveLength(0);
+    limiterRefuses = false;
+    const busy: ShopifyPort = { ...createLocalShopifyPort(native), orders: async () => ({ outcome: "busy" }) };
+    expect(await json(await embedded(build(busy), "orders", token()))).toEqual({ outcome: "busy" });
+    const dead = createHttpShopifyPort({ workerUrl: `https://${HOST}`, env: "preview", secrets: { current: INTERNAL }, clock: nativeClock, fetch: async () => { throw new Error("down"); } });
+    const unreachable = await embedded(build(dead), "orders", token());
+    expect(unreachable.status).toBe(503);
+    expect(JSON.stringify(await unreachable.json())).not.toContain("down");
   });
 
   it("a forged token is a 401 (so the page retries with a fresh one), not a crash", async () => {
@@ -411,6 +444,11 @@ describe("POST /internal/shopify/<operation> (C-21)", () => {
     expect((await send(app(true), "/internal/shopify/open", { idToken: "x" })).status).toBe(400);
     expect((await send(app(true), "/internal/shopify/open", { idToken: token(), extra: 1 })).status).toBe(400);
     expect((await send(app(true), "/internal/shopify/claim_start", { tenantId: "no", memberId: "no" })).status).toBe(400);
+  });
+
+  it("carries orders over the signed route, and rejects an extra key", async () => {
+    expect(await json(await send(app(true), "/internal/shopify/orders", { idToken: token() }))).toEqual({ outcome: "not_linked" });
+    expect((await send(app(true), "/internal/shopify/orders", { idToken: token(), extra: 1 })).status).toBe(400);
   });
 
   it("carries the claim operations over the signed route too", async () => {

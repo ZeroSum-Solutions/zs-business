@@ -17,7 +17,7 @@ export function mintIdToken(now: Date, over: Record<string, unknown> = {}, secre
 export const signWebhook = (body: string, secret = CLIENT_SECRET) => createHmac("sha256", secret).update(body).digest("base64");
 
 export interface FakeCall { readonly url: string; readonly headers: Record<string, string>; readonly body: Record<string, unknown> | null }
-export interface FakeOrder { id: number; name: string; created_at: string; customerId?: number | null }
+export interface FakeOrder { id: number; name: string; created_at: string; customerId?: number | null; total?: string; currency?: string }
 
 export class FakeShopify {
   readonly calls: FakeCall[] = [];
@@ -113,8 +113,8 @@ export class FakeShopify {
   private node(o: FakeOrder) {
     return {
       id: `gid://shopify/Order/${o.id}`, legacyResourceId: String(o.id), name: o.name, createdAt: o.created_at, updatedAt: o.created_at,
-      displayFinancialStatus: "PAID", displayFulfillmentStatus: "UNFULFILLED", currencyCode: "USD",
-      totalPriceSet: { shopMoney: { amount: "30.00" } }, subtotalPriceSet: { shopMoney: { amount: "25.00" } }, totalTaxSet: { shopMoney: { amount: "5.00" } },
+      displayFinancialStatus: "PAID", displayFulfillmentStatus: "UNFULFILLED", currencyCode: o.currency ?? "USD",
+      totalPriceSet: { shopMoney: { amount: o.total ?? "30.00" } }, subtotalPriceSet: { shopMoney: { amount: "25.00" } }, totalTaxSet: { shopMoney: { amount: "5.00" } },
       lineItems: { nodes: [{ title: "Mug", quantity: 2, originalUnitPriceSet: { shopMoney: { amount: "12.50" } } }] },
     };
   }

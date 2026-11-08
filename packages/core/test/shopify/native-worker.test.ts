@@ -675,6 +675,88 @@ describe("native reads and disconnect (C-13, C-23)", () => {
   });
 });
 
+describe("shopify_orders: recent orders for the embedded page (C-30)", () => {
+  const DAY = 86_400_000;
+  const iso = (daysAgo: number) => new Date(clock.now().getTime() - daysAgo * DAY).toISOString();
+  const lastQuery = () => fake.calls.filter((c) => c.url.endsWith("/graphql.json")).at(-1)!.body as { query: string; variables: { first: number; query: string } };
+  const link = async () => { await worker.open({ idToken: token() }); await worker.createHub({ idToken: token() }); };
+
+  it("answers not_linked, without asking Shopify for orders, for a store with no hub", async () => {
+    await worker.open({ idToken: token() });
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    expect(fake.calls.filter((c) => String(c.body?.query).includes("orders("))).toHaveLength(0);
+    await link();
+    await database.pool.query("UPDATE connections SET status='disconnected', account_label=NULL");
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+  });
+
+  it("authenticates like open: a bad token is invalid_token before any request", async () => {
+    for (const bad of [token({}, "x".repeat(48)), token({ aud: "other" }), "not-a-jwt"]) expect(await worker.orders({ idToken: bad })).toEqual({ outcome: "invalid_token" });
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("returns the 10 newest orders newest first and a summary over all of those fetched", async () => {
+    await link();
+    fake.orders = Array.from({ length: 12 }, (_, i) => ({ id: 2000 + i, name: `#${2000 + i}`, created_at: iso(12 - i), total: "10.50" }));
+    const out = await worker.orders({ idToken: token() });
+    expect(out).toMatchObject({ outcome: "ok", summary: { count: 12, total: { amount: "126.00", currency: "USD" } } });
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(out.orders.map((o) => o.name)).toEqual(Array.from({ length: 10 }, (_, i) => `#${2011 - i}`));
+    expect(out.orders[0]).toEqual({ name: "#2011", createdAt: iso(1), displayFinancialStatus: "paid", displayFulfillmentStatus: "unfulfilled", total: { amount: "10.50", currency: "USD" } });
+  });
+
+  it("asks for the last 60 days from the injected clock, 50 at most, and works for a reauthorize connection too", async () => {
+    await link();
+    clock.ms += 3 * DAY;
+    await worker.orders({ idToken: token() });
+    const q = lastQuery();
+    expect(q.variables.first).toBe(50);
+    expect(q.variables.query).toBe(`created_at:>='${iso(60)}' created_at:<='${iso(0)}'`);
+    await database.pool.query("UPDATE connections SET status='reauthorize', reauthorize_reason='auth_error'");
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok" });
+  });
+
+  it("never selects or returns customer data", async () => {
+    await link();
+    fake.orders = [{ id: 1, name: "#1", created_at: iso(1), customerId: 55 }];
+    const out = await worker.orders({ idToken: token() });
+    expect(lastQuery().query).not.toMatch(/customer|email|firstName|lastName|phone|address/i);
+    expect(JSON.stringify(out)).not.toMatch(/customer|email|55/i);
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(Object.keys(out.orders[0]!).sort()).toEqual(["createdAt", "displayFinancialStatus", "displayFulfillmentStatus", "name", "total"]);
+  });
+
+  it("is empty with a null total when there are no orders, and has no total across currencies", async () => {
+    await link();
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "ok", orders: [], summary: { count: 0, total: null } });
+    fake.orders = [{ id: 1, name: "#1", created_at: iso(1) }, { id: 2, name: "#2", created_at: iso(2), currency: "CAD" }];
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok", summary: { count: 2, total: null } });
+  });
+
+  it("refreshes a token near its end first, and answers busy while another refresh holds the lease", async () => {
+    await link();
+    clock.ms += 56 * 60_000;
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok" });
+    expect(fake.calls.filter((c) => c.body?.grant_type === "refresh_token")).toHaveLength(1);
+    expect(reports).toContainEqual({ kind: "refreshed", shop: SHOP });
+    clock.ms += 56 * 60_000;
+    await database.pool.query("INSERT INTO shopify_locks (shop_domain, held_until, holder) VALUES ($1,$2,$3)", [SHOP, new Date(clock.now().getTime() + 30_000), randomUUID()]);
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "busy" });
+  });
+
+  it("maps a Shopify failure to unavailable, and a revoked token marks the connection reauthorize", async () => {
+    await link();
+    fake.failGraphql = { status: 403 };
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "unavailable" });
+    fake.failGraphql = { status: 429 };
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "unavailable" });
+    expect((await connections())[0]).toMatchObject({ status: "active" });
+    fake.failGraphql = { status: 401 };
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "unavailable" });
+    expect((await connections())[0]).toMatchObject({ status: "reauthorize", reauthorize_reason: "auth_error" });
+  });
+});
+
 describe("the Composio worker hands native rows over (C-26)", () => {
   it("run, disconnect and the pass treat a native row as native and never ask Composio", async () => {
     await worker.open({ idToken: token() });

@@ -161,9 +161,10 @@ type Answer = { status: number; body: unknown; headers?: Record<string, string>;
 interface FakeTimer { id: number; at: number; ms: number; fn: () => void }
 
 /** Runs the page script against a fake document, a fake clock and a timer queue that honours delays and clearTimeout. */
-function runClient(options: { framed?: boolean; search?: string; hidden?: boolean; answers: Answer[] }) {
+function runClient(options: { framed?: boolean; search?: string; hidden?: boolean; gate?: Promise<void>; orders?: Answer[]; answers: Answer[] }) {
   const app = new FakeNode("main");
   const calls: Array<{ url: string; init: RequestInit }> = [];
+  const orderCalls: Array<{ url: string; init: RequestInit }> = [];
   const opened: Array<{ href: string | null }> = [];
   const document = { getElementById: () => app, createElement: (tag: string) => new FakeNode(tag), visibilityState: options.hidden ? "hidden" : "visible" };
   const timers: FakeTimer[] = [];
@@ -180,9 +181,13 @@ function runClient(options: { framed?: boolean; search?: string; hidden?: boolea
   };
   if (options.framed === false) { win.top = win.self; }
   const queue = [...options.answers];
+  const orderQueue = [...(options.orders ?? [])];
   const fetchImpl = async (url: string, init: RequestInit) => {
-    calls.push({ url, init });
-    const next = queue.shift() ?? { status: 503, body: {} };
+    // C-30: the orders read has its own answers and call list, so the sequences the older tests assert stay as they were.
+    const isOrders = url.endsWith("/orders");
+    (isOrders ? orderCalls : calls).push({ url, init });
+    if (isOrders && options.gate) await options.gate;
+    const next = (isOrders ? orderQueue : queue).shift() ?? { status: 503, body: {} };
     if ("hang" in next) return new Promise<never>(() => undefined);
     if (next.wait) await next.wait;
     const headers = new Headers(next.headers ?? {});
@@ -206,7 +211,7 @@ function runClient(options: { framed?: boolean; search?: string; hidden?: boolea
     await settle();
   };
   const polls = () => timers.filter((timer) => timer.fn.name === "refreshPlan");
-  return { app, calls, win, opened, timers, clock, advance, polls };
+  return { app, calls, orderCalls, win, opened, timers, clock, advance, polls };
 }
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const texts = (app: FakeNode) => app.all().map((node) => node.text).join(" | ");
@@ -499,6 +504,90 @@ describe("the plan on the page (C-29)", () => {
     expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/sign-in", "/api/shopify/open"]);
     expect(texts(app)).toContain("Plan: Pro");
     expect(texts(app)).toContain("Only the store owner can open the hub");
+  });
+});
+
+describe("recent orders on the page (C-30)", () => {
+  const LINKED = { state: "linked", businessName: "Halden", connection: "active" };
+  const opened = (link: unknown = LINKED) => ({ status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "active", name: "Solo" }, link } });
+  const order = (name: string, over: Record<string, unknown> = {}) => ({ name, createdAt: "2026-11-05T14:30:00.000Z", displayFinancialStatus: "partially_refunded", displayFulfillmentStatus: "unfulfilled", total: { amount: "30.00", currency: "USD" }, ...over });
+  const okOrders = (orders: unknown[], summary: unknown = { count: orders.length, total: { amount: "90.50", currency: "USD" } }) => ({ status: 200, body: { outcome: "ok", orders, summary } });
+  const cells = (app: FakeNode) => app.all().filter((node) => node.tag === "td" || node.tag === "th").map((node) => node.text);
+
+  it("reads orders after open for a linked store and shows the table and the summary line", async () => {
+    const { app, calls, orderCalls } = runClient({ answers: [opened()], orders: [okOrders([order("#1002"), order("#1001", { displayFulfillmentStatus: "fulfilled", displayFinancialStatus: "paid", total: { amount: "60.50", currency: "USD" } })], { count: 2, total: { amount: "90.50", currency: "USD" } })] });
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open"]);
+    expect(orderCalls.map((call) => call.url)).toEqual(["/api/shopify/orders"]);
+    expect((orderCalls[0]!.init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+    expect(orderCalls[0]!.init.credentials).toBe("omit");
+    expect(orderCalls[0]!.init.referrerPolicy).toBe("no-referrer");
+    expect(texts(app)).toContain("Recent orders");
+    expect(cells(app).slice(0, 5)).toEqual(["Order", "Date", "Payment", "Fulfillment", "Total"]);
+    expect(cells(app).slice(5, 10)).toEqual(["#1002", "2026-11-05", "Partially refunded", "Unfulfilled", "$30.00"]);
+    expect(cells(app).slice(10, 15)).toEqual(["#1001", "2026-11-05", "Paid", "Fulfilled", "$60.50"]);
+    const summary = app.all().find((node) => node.attrs["data-testid"] === "orders-summary")!;
+    expect(summary.text).toBe("2 orders in the last 60 days, total $90.50");
+  });
+
+  it("says one order and no single total when currencies differ", async () => {
+    const one = runClient({ answers: [opened()], orders: [okOrders([order("#1")], { count: 1, total: { amount: "30.00", currency: "USD" } })] });
+    await settle();
+    expect(texts(one.app)).toContain("1 order in the last 60 days, total $30.00");
+    const mixed = runClient({ answers: [opened()], orders: [okOrders([order("#1")], { count: 3, total: null })] });
+    await settle();
+    expect(texts(mixed.app)).toContain("3 orders in the last 60 days, total in more than one currency");
+  });
+
+  it("does not read orders for a store without a hub, and shows the reconnect state with orders for a reauthorize link", async () => {
+    const none = runClient({ answers: [opened({ state: "none" })] });
+    await settle();
+    expect(none.calls.map((call) => call.url)).toEqual(["/api/shopify/open"]);
+    expect(none.orderCalls).toHaveLength(0);
+    expect(texts(none.app)).not.toContain("Recent orders");
+    const reauth = runClient({ answers: [opened({ state: "linked", businessName: "Halden", connection: "reauthorize" })], orders: [okOrders([order("#7")])] });
+    await settle();
+    expect(texts(reauth.app)).toContain("Reconnect needed");
+    expect(cells(reauth.app)).toContain("#7");
+  });
+
+  it("shows the empty state", async () => {
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([], { count: 0, total: null })] });
+    await settle();
+    expect(texts(app)).toContain("No orders in the last 60 days");
+    expect(app.all().some((node) => node.tag === "table")).toBe(false);
+  });
+
+  it("shows the error state for any failure and keeps the rest of the page", async () => {
+    for (const answer of [{ status: 503, body: {} }, { status: 429, body: {} }, { status: 200, body: { outcome: "unavailable" } }, { status: 200, body: { outcome: "not_linked" } }, { status: 401, body: {} }]) {
+      const { app } = runClient({ answers: [opened()], orders: [answer, answer] });
+      await settle();
+      expect(texts(app), JSON.stringify(answer)).toContain("Orders are not available right now");
+      expect(texts(app)).toContain("Connected");
+      expect(button(app, "Open ZS Hub")).toBeDefined();
+    }
+  });
+
+  it("renders an order name as text, never as markup", async () => {
+    const evil = '<img src=x onerror=alert(1)>';
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([order(evil, { displayFinancialStatus: "<script>x</script>" })])] });
+    await settle();
+    expect(cells(app)).toContain(evil);
+    expect(app.all().some((node) => node.tag === "img" || node.tag === "script")).toBe(false);
+    expect(EMBEDDED_CLIENT_SOURCE).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
+  });
+
+  it("drops an orders answer that lands after the merchant opened the hub", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { app } = runClient({ gate, answers: [opened(), { status: 200, body: { outcome: "ok", url: "https://hub.example.test/sign-in" } }], orders: [okOrders([order("#LATE")])] });
+    await settle();
+    expect(texts(app)).toContain("Loading recent orders");
+    button(app, "Open ZS Hub").click();
+    release();
+    await settle();
+    expect(cells(app)).not.toContain("#LATE");
+    expect(texts(app)).not.toContain("Recent orders");
   });
 });
 

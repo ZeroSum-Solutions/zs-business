@@ -11,7 +11,7 @@ import { readBoundedBody, type BodyTiming } from "./body";
 import { trustProxyFromEnv } from "./live-config";
 import { isSameOrigin } from "./origin";
 
-export const EMBEDDED_OPS: ReadonlySet<string> = new Set(["open", "create-hub", "sign-in", "redeem-claim"]);
+export const EMBEDDED_OPS: ReadonlySet<string> = new Set(["open", "orders", "create-hub", "sign-in", "redeem-claim"]);
 const MAX_BODY_BYTES = 2048;
 const BODY_DEADLINE_MS = 10_000;
 const UPSTREAM_TIMEOUT_MS = 12_000;

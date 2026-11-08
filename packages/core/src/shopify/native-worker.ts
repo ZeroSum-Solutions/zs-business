@@ -7,7 +7,10 @@
 //     when an uninstall ran changes nothing.
 //   - Nothing in a log, report or error carries a token, an ID token, a code or a customer value.
 import { createHmac, randomInt } from "node:crypto";
-import { Conflict, PLAN_CATALOG, normalizeAccountLabel, type HubPlan } from "@zs/contracts";
+import {
+  Conflict, PLAN_CATALOG, SHOPIFY_RECENT_ORDERS_DAYS, SHOPIFY_RECENT_ORDERS_FETCHED, SHOPIFY_RECENT_ORDERS_SHOWN,
+  normalizeAccountLabel, type HubPlan, type ShopifyOrdersResponse, type ShopifyRecentOrder,
+} from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { setShopifyBilling } from "../billing/shopify-plans.js";
 import { shopifyListWindow } from "../connections/catalog.js";
@@ -120,6 +123,7 @@ export type ShopPlan = { readonly state: "none" } | { readonly state: "active" |
 export type OpenResult =
   | { readonly outcome: "ok"; readonly shop: { readonly domain: string; readonly name: string }; readonly plan: ShopPlan; readonly link: ShopLink }
   | { readonly outcome: "invalid_token" | "unavailable" | "busy" | "not_supported" };
+export type OrdersResult = ShopifyOrdersResponse;
 export type CreateHubResult =
   | { readonly outcome: "created" | "relinked"; readonly businessName: string; readonly ownerEmail: string }
   | { readonly outcome: "already_linked" | "not_owner" | "email_has_hub" | "store_in_use" | "not_installed" | "invalid_token" | "unavailable" };
@@ -156,6 +160,17 @@ const shopGid = (value: unknown): string | null => {
   const text = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : typeof value === "string" ? value : "";
   return /^[1-9][0-9]{0,19}$/.test(text) ? `gid://shopify/Shop/${text}` : null;
 };
+/** Decimal strings added exactly in micro-units (no floats); null when one is not a plain non-negative decimal. */
+const MICRO = 1_000_000n;
+function toMicro(text: string): bigint | null {
+  const m = /^([0-9]{1,15})(?:\.([0-9]{1,6}))?$/.exec(text);
+  return m ? BigInt(m[1]!) * MICRO + BigInt((m[2] ?? "").padEnd(6, "0")) : null;
+}
+function fromMicro(value: bigint): string {
+  const whole = value / MICRO;
+  const cents = (value % MICRO).toString().padStart(6, "0").replace(/0+$/, "").padEnd(2, "0");
+  return `${whole}.${cents}`;
+}
 const isDup = (error: unknown) => typeof error === "object" && error !== null && (error as { code?: unknown }).code === "23505";
 
 export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
@@ -391,6 +406,55 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     if (auth.kind !== "ok") return { outcome: auth.kind === "not_installed" ? "unavailable" : auth.kind };
     const { link, plan } = await linkAndPlanOf(auth.row.shop_id);
     return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, plan, link };
+  }
+
+  /**
+   * C-30: the newest orders of the last 60 days for the embedded page, read-only and without customer data. It
+   * authenticates like `open`, answers only for a linked store, and reuses the order reader and token path of `run`.
+   */
+  async function orders(input: { idToken: string }, signal?: AbortSignal): Promise<OrdersResult> {
+    const auth = await authenticate(input.idToken);
+    if (auth.kind === "refused") return { outcome: "not_supported" };
+    if (auth.kind !== "ok") return { outcome: auth.kind === "not_installed" ? "unavailable" : auth.kind };
+    if ((await linkOf(auth.row.shop_id)).state !== "linked") return { outcome: "not_linked" };
+    const access = await ensureAccess(auth.domain, signal);
+    if (access.kind === "busy") return { outcome: "busy" };
+    if (access.kind !== "ok" || access.row.shop_id !== auth.row.shop_id) return { outcome: "unavailable" };
+    const end = now();
+    const start = new Date(end.getTime() - SHOPIFY_RECENT_ORDERS_DAYS * DAY);
+    const answer = await client.graphql(auth.domain, access.token, listOrdersQuery(),
+      { first: SHOPIFY_RECENT_ORDERS_FETCHED, query: listOrdersSearch({ start, end, status: "any" }) }, signal);
+    if (answer.kind === "failed") {
+      // Only the install that is current may be marked; a stale 401 just means: try again.
+      if (answer.reason === "unauthorized" || answer.reason === "invalid_grant") await markNeedsReauth(access.row);
+      return { outcome: "unavailable" };
+    }
+    const nodes = record(answer.data["orders"])?.["nodes"];
+    if (!Array.isArray(nodes)) return { outcome: "unavailable" };
+    const seen: Array<ShopifyRecentOrder & { micro: bigint }> = [];
+    for (const node of nodes.slice(0, SHOPIFY_RECENT_ORDERS_FETCHED)) {
+      const o = orderToRest(node);
+      const created = typeof o["created_at"] === "string" ? new Date(o["created_at"]) : null;
+      const micro = typeof o["total_price"] === "string" ? toMicro(o["total_price"]) : null;
+      if (typeof o["name"] !== "string" || o["name"] === "" || created === null || Number.isNaN(created.getTime()) || micro === null
+        || typeof o["currency"] !== "string" || !/^[A-Z]{3}$/.test(o["currency"])) continue;
+      seen.push({
+        name: o["name"].slice(0, 100),
+        createdAt: created.toISOString(),
+        displayFinancialStatus: typeof o["financial_status"] === "string" ? o["financial_status"].slice(0, 60) : null,
+        displayFulfillmentStatus: typeof o["fulfillment_status"] === "string" ? o["fulfillment_status"].slice(0, 60) : null,
+        total: { amount: fromMicro(micro), currency: o["currency"] },
+        micro,
+      });
+    }
+    seen.sort((x, y) => y.createdAt.localeCompare(x.createdAt));
+    const currencies = new Set(seen.map((order) => order.total.currency));
+    const sum = seen.reduce((acc, order) => acc + order.micro, 0n);
+    return {
+      outcome: "ok",
+      orders: seen.slice(0, SHOPIFY_RECENT_ORDERS_SHOWN).map(({ micro: _micro, ...order }) => order),
+      summary: { count: seen.length, total: currencies.size === 1 ? { amount: fromMicro(sum), currency: [...currencies][0]! } : null },
+    };
   }
 
   /** The store owner behind a token: the online exchange must name an account owner with a verified email. */
@@ -826,6 +890,6 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     return { refreshed };
   }
 
-  return { open, createHub, claimStart, claimStatus, claimCancel, redeemClaim, claimConfirm, signIn, run, finishDisconnect, webhook, pass, probe };
+  return { open, orders, createHub, claimStart, claimStatus, claimCancel, redeemClaim, claimConfirm, signIn, run, finishDisconnect, webhook, pass, probe };
 }
 export type ShopifyNativeWorker = ReturnType<typeof createShopifyNativeWorker>;

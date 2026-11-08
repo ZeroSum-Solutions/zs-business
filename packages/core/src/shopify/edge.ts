@@ -13,6 +13,7 @@ import {
   type ShopifyClaimView,
   type ShopifyCreateHubResponse,
   type ShopifyOpenResponse,
+  type ShopifyOrdersResponse,
   type ShopifyRedeemClaimResponse,
   type ShopifySignInResponse,
 } from "@zs/contracts";
@@ -99,6 +100,11 @@ export function createShopifyEmbedded(deps: EdgeDependencies, address: string) {
     async open(idToken: string, signal?: AbortSignal): Promise<ShopifyOpenResponse> {
       await guard(signal);
       return unavailable(shopify.open({ idToken }, signal));
+    },
+    /** C-30: the same guard as `open`, so a page load (open, then orders) costs two of the 240. */
+    async orders(idToken: string, signal?: AbortSignal): Promise<ShopifyOrdersResponse> {
+      await guard(signal);
+      return unavailable(shopify.orders({ idToken }, signal));
     },
     async createHub(idToken: string, signal?: AbortSignal): Promise<ShopifyCreateHubResponse> {
       await charge(limiter, [{ key: `shopify-create-hub:${address}`, rule: { limit: 20, windowMs: HOUR } }], signal);
