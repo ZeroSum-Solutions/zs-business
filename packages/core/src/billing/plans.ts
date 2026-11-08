@@ -187,10 +187,10 @@ export async function startPlanCheckout(input: {
   if (found.billingProvider !== "stripe") throw notStripe();
   const { checkout } = found;
   const createdAt = Date.parse(checkout.createdAt);
-  if (found.checkoutUrl !== null && checkout.status === "pending" && input.now.getTime() - createdAt < PLAN_CHECKOUT_LIFETIME_MS)
-    return { checkout, checkoutUrl: found.checkoutUrl };
+  // PL-5: the 25-minute retry window applies to a replay of the stored URL too (as for top-ups, S-2).
   if (checkout.status !== "pending" || input.now.getTime() - createdAt > PLAN_CHECKOUT_RETRY_LIMIT_MS)
     throw new Conflict("This checkout can no longer be used; start a new one", { reason: "checkout_closed" });
+  if (found.checkoutUrl !== null) return { checkout, checkoutUrl: found.checkoutUrl };
   const session = await input.stripe.createSubscriptionCheckout({
     tenantId: input.tenantId,
     checkoutId: checkout.id,

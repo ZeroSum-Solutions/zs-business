@@ -7,7 +7,9 @@ import type { Transaction } from "@zs/db";
 import { lockTenantPlan } from "./plan-gate.js";
 import type { StripeSubscriptionReader } from "./plan-stripe.js";
 
-export type PlanOutcome = "plan_synced" | "plan_duplicate" | "checkout_completed" | "expired" | "mismatch" | "ignored" | "not_ours" | "wait";
+export type PlanOutcome = "plan_synced" | "plan_duplicate" | "checkout_completed" | "expired" | "mismatch" | "ignored" | "not_ours" | "wait"
+  /** PL-17: not ours, but the checkout row was closed; the worker keeps that write and records the outcome `not_ours`. */
+  | "not_ours_closed";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const STRIPE_ID = /^[A-Za-z0-9_]{1,250}$/;
@@ -216,7 +218,7 @@ export function createPlanEvents(deps: PlanEventDeps) {
         `UPDATE plan_checkouts SET status=$5, stripe_checkout_session_id=coalesce(stripe_checkout_session_id,$3), updated_at=$4
           WHERE tenant_id=$1 AND id=$2 AND status='pending'`,
         [tenantId, checkoutId, sessionId, at, type === "checkout.session.expired" ? "expired" : "completed"]);
-      return "not_ours";
+      return "not_ours_closed";
     }
     if (type === "checkout.session.expired") {
       const updated = await tx.query(

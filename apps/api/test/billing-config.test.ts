@@ -221,6 +221,16 @@ describe("parseBillingEnv (S-8, S-9)", () => {
     expect(parseBillingEnv({ ...ON, STRIPE_LIVEMODE: "true" }).runner).toMatchObject({ stripeReader: null });
   });
 
+  // A STRIPE_LIVEMODE that is set but is not true or false is a typo, not "unset": the mode check must not be skipped by it.
+  it("refuses a read key beside a STRIPE_LIVEMODE that is set but invalid (plans.md PL-13)", () => {
+    const live = ["rk", "live", "k".repeat(24)].join("_");
+    for (const livemode of ["yes", "TRUE", "1", " true"]) {
+      const message = billingError({ ...ON, BILLING_STRIPE_KEY: live, STRIPE_LIVEMODE: livemode });
+      expect(message, livemode).toMatch(/STRIPE_LIVEMODE must be true or false/);
+      expect(message).not.toContain(live);
+    }
+  });
+
   it("lets the Node worker take a long budget, but the cron entry at most 20 s inside its 30 s function", () => {
     const long = parseBillingEnv({ ...ON, BILLING_RUN_BUDGET_MS: "60000" }).runner;
     expect(long).toMatchObject({ budgetMs: 60_000 });

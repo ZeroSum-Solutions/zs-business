@@ -8,7 +8,7 @@ import { cannotBeApproved } from "../../src/approvals/index.js";
 import { derivedId, mapError, memberDispatch } from "../../src/edge/index.js";
 import {
   connectIdempotencyKey, createAutomationAdmin, createBillingWorker, createSession, createStripeSubscriptionReader, PLAN_CHECKOUT_LIFETIME_MS,
-  PLAN_CHECKOUT_RETRY_LIMIT_MS, planGate, setFoundingInvite,
+  lockTenantPlan, planGate, READ_ONLY_ALLOWED_ACTIONS, setFoundingInvite,
   setShopifyBilling, SHOPIFY_LINK_CHECKOUT_GATE_MS, type Session,
 } from "../../src/index.js";
 import { startFakeStripePlans, type FakeStripePlans } from "./fake-stripe-plans.js";
@@ -136,7 +136,7 @@ describe("starting a plan checkout (PL-4, PL-5)", () => {
     fake.fail(503);
     await expect((await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-retry"))
       .rejects.toMatchObject({ name: "StripeRequestFailed" });
-    b.h.clock.advance(PLAN_CHECKOUT_RETRY_LIMIT_MS);
+    b.h.clock.advance(25 * 60_000); // PL-5: 25 minutes, written out so a changed constant fails here
     const calls = sessionCalls();
     const retried = await (await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-retry");
     expect(sessionCalls()).toBe(calls + 1);
@@ -145,11 +145,25 @@ describe("starting a plan checkout (PL-4, PL-5)", () => {
     const late = await b.tenant();
     fake.fail(503);
     await expect((await planSession(late)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-late")).rejects.toBeDefined();
-    b.h.clock.advance(PLAN_CHECKOUT_RETRY_LIMIT_MS + 1);
+    b.h.clock.advance(25 * 60_000 + 1);
     const before = sessionCalls();
     await expect((await planSession(late)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-late"))
       .rejects.toMatchObject({ code: "Conflict", details: { reason: "checkout_closed" } });
     expect(sessionCalls()).toBe(before);
+  });
+
+  // PL-5: "The same 25-minute retry window and topup_closed-style answer apply" - a replay of a stored URL included.
+  it("a replay with the stored URL works up to 25 minutes and is checkout_closed after, with Stripe not called", async () => {
+    const sessionCalls = () => fake.received.filter((r) => r.path === "/v1/checkout/sessions").length;
+    const tenantId = await b.tenant();
+    const first = await (await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-replay");
+    b.h.clock.advance(25 * 60_000);
+    const calls = sessionCalls();
+    await expect((await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-replay")).resolves.toEqual(first);
+    b.h.clock.advance(1);
+    await expect((await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-replay"))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "checkout_closed" } });
+    expect(sessionCalls()).toBe(calls);
   });
 
   // PL-5: Stripe unreachable, 409, 429 or 5xx is 503; any other refusal is 500.
@@ -425,6 +439,26 @@ describe("plan limits (PL-8)", () => {
       expect((await b.h.rows("SELECT 1 FROM connections WHERE tenant_id=$1", [tenantId]))).toHaveLength(1);
     });
 
+    // The catalog holds one toolkit (shopify), so two connects always share a toolkit and connections_one_live_per_toolkit
+    // could also reject the second. This test therefore pins the plan lock itself: a connect waits while another transaction holds it.
+    it("a connect waits for the tenant's plan lock before it counts (PL-8)", async () => {
+      const tenantId = await b.tenant();
+      await subscribe(tenantId, { plan: "solo" });
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let locked!: () => void;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const holder = b.h.service(async (tx) => { await lockTenantPlan(tx, tenantId); locked(); await held; });
+      await lockTaken;
+      let settled = false;
+      const pending = connect(tenantId).finally(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(settled, "the connect ran past the gate while the plan lock was held").toBe(false);
+      release();
+      await holder;
+      await expect(pending).resolves.toBeDefined();
+    });
+
     it("counts unrevoked, unexpired tokens only, and refuses at the limit", async () => {
       const tenantId = await b.tenant();
       await subscribe(tenantId, { plan: "studio" });
@@ -448,6 +482,21 @@ describe("plan limits (PL-8)", () => {
       expect((results.find((r): r is PromiseRejectedResult => r.status === "rejected")!).reason).toMatchObject(limitError("plan_limit"));
       expect((await b.h.rows("SELECT 1 FROM automation_tokens WHERE tenant_id=$1 AND revoked_at IS NULL", [tenantId]))).toHaveLength(2);
     });
+  });
+
+  // PL-8 lists these. Spec drift: it names `voice.textback.optin` in its list and then says "not voice.textback.optin"; the code
+  // leaves it out (it starts an outbound text), and so does this list. Any addition or removal must change this test.
+  it("pins the full read-only allowlist to PL-8", () => {
+    expect([...READ_ONLY_ALLOWED_ACTIONS].sort()).toEqual([
+      "plan.checkout.create", "wallet.topup.create", "suppression.record",
+      "sms.status.record", "sms.reply.record", "voice.call.record", "voice.voicemail.record",
+      "transcription.job.complete", "transcription.job.fail", "catalog.intake.result", "catalog.intake.fail",
+      "media.variant.stage", "media.variant.fail",
+      "agent.kill", "agent.kind.kill", "browser.kill", "agent.run.finish", "agent.run.stall", "agent.kind.run.finish", "agent.cost.warn",
+      "member.remove", "connection.disconnect", "calendar.google.disconnect", "automation.token.revoke",
+      "approval.reject", "approval.revoke", "inbox.reply.discard",
+    ].sort());
+    expect(PLAN_CHECKOUT_CREATE_ACTION).toBe("plan.checkout.create");
   });
 
   it("allows only the listed actions while read-only", async () => {
@@ -556,6 +605,36 @@ describe("billing provider (PL-14)", () => {
   });
 });
 
+describe("pending checkouts after a provider switch (PL-17)", () => {
+  // PL-17: the worker "only marks a pending plan checkout expired or completed, so the row never looks open".
+  it("marks a pending plan checkout expired or completed although the tenant is billed by Shopify, and ends the event not_ours", async () => {
+    const linkToShopify = async (tenantId: string) => {
+      const shopNumber = 8_000_000 + Math.floor(Math.random() * 1_000_000);
+      await b.h.service((tx) => setShopifyBilling(tx, {
+        tenantId, shop: { id: `gid://shopify/Shop/${shopNumber}`, domain: `kest-${shopNumber}.myshopify.com` }, now: b.h.clock.now(), graceDays: 7,
+      }));
+    };
+    const tenants = [await b.tenant(), await b.tenant()];
+    const started: Array<Awaited<ReturnType<Session["startPlanCheckout"]>>> = [];
+    for (const tenantId of tenants)
+      started.push(await (await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, `plan-${randomUUID()}`));
+    b.h.clock.advance(SHOPIFY_LINK_CHECKOUT_GATE_MS + 1);
+    for (const tenantId of tenants) await linkToShopify(tenantId);
+    for (const [i, tenantId] of tenants.entries()) expect((await checkoutRow(tenantId, started[i]!.checkout.id)).status, "pending before").toBe("pending");
+    const session = (type: string, i: number) => b.event(type, {
+      id: stripeId("cs"), object: "checkout.session", mode: "subscription", status: type.endsWith("expired") ? "expired" : "complete",
+      customer: null, subscription: null, metadata: { zs_tenant: tenants[i], zs_checkout: started[i]!.checkout.id },
+    });
+    await b.deliver(session("checkout.session.expired", 0));
+    await b.deliver(session("checkout.session.completed", 1));
+    expect((await worker().runOnce()).outcomes).toEqual({ not_ours: 2 });
+    expect((await checkoutRow(tenants[0]!, started[0]!.checkout.id)).status).toBe("expired");
+    expect((await checkoutRow(tenants[1]!, started[1]!.checkout.id)).status).toBe("completed");
+    // Nothing else was written for either tenant.
+    for (const tenantId of tenants) expect(await plan(tenantId)).toMatchObject({ billing_provider: "shopify", status: "none", stripe_customer_id: null });
+  });
+});
+
 describe("the Billing Portal (PL-6)", () => {
   it("opens for the stored customer and refuses before there is one", async () => {
     const tenantId = await b.tenant();
@@ -608,5 +687,24 @@ describe("tenancy of the plan tables (PL-12)", () => {
        VALUES ($1,$2,'solo','month','price_x','https://a.test/','https://a.test/',$2,now(),now())`,
       [other.tenantId, randomUUID()])).rejects.toMatchObject({ code: "42501" });
     expect(await plan(a.tenantId)).toMatchObject({ status: "active" });
+  });
+
+  // PL-3, PL-12: the runtime role never writes plan_invoices, and a paid invoice always has a paid_at.
+  it("denies a runtime-role insert into plan_invoices and enforces the paid-state check", async () => {
+    // A fresh tenant: the shared fixture tenant already holds a plan from the test above.
+    const a = { tenantId: await b.tenant() };
+    const { sub } = await subscribe(a.tenantId);
+    const insert = `INSERT INTO plan_invoices (tenant_id, id, stripe_subscription_id, status, paid_at, created_at, updated_at)
+                    VALUES ($1,$2,$3,$4,$5,now(),now())`;
+    await expect(b.h.database.db.tenant(a.tenantId, (tx) => tx.query(insert, [a.tenantId, stripeId("in"), sub.id, "failed", null])))
+      .rejects.toMatchObject({ code: "42501" });
+    // (status = 'paid') = (paid_at IS NOT NULL), checked as the service role so only the constraint can refuse.
+    const asService = (status: string, paidAt: Date | null) =>
+      b.h.service((tx) => tx.query(insert, [a.tenantId, stripeId("in"), sub.id, status, paidAt]));
+    await expect(asService("paid", null)).rejects.toMatchObject({ code: "23514", constraint: "plan_invoices_paid_state" });
+    await expect(asService("failed", b.h.clock.now())).rejects.toMatchObject({ code: "23514", constraint: "plan_invoices_paid_state" });
+    await expect(asService("resolved", b.h.clock.now())).rejects.toMatchObject({ code: "23514", constraint: "plan_invoices_paid_state" });
+    await expect(asService("paid", b.h.clock.now())).resolves.toBeDefined();
+    await expect(asService("failed", null)).resolves.toBeDefined();
   });
 });
