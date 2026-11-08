@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import AxeBuilder from "@axe-core/playwright";
 import type { APIRequestContext, Page } from "@playwright/test";
+import type { CalendarConnection, ManagedConnection } from "../../src/lib/api";
 import { CALENDAR_UNAVAILABLE, defaultMessage, demoErrorBody } from "../../src/lib/api/errors";
+import { connectionChecklist } from "../../src/lib/connection-rows";
 import { expectDialogInset, mainNav, openBookingOnFirstOpenDay, shot, viewportShot } from "../helpers";
 import { LIVE } from "./env";
 import { expect, lastSignInLink, ownerEmail, signInRequest, test } from "./fixtures";
@@ -421,17 +423,46 @@ test("retries a booking whose answer was lost with the same key, and the API rep
   expect(keys[1]).toBe(keys[0]);
 });
 
-test("labels sample areas and turns off writes that would not reach the API", async ({ page }, info) => {
+test("shows no sample data anywhere and turns off writes that would not reach the API", async ({ page }) => {
+  // Home's wallet (GET /v1/wallet) and connections (the calendar and Shopify routes) come from the API:
+  // each read must answer, and the screen must show what it answered, not just draw a container.
+  const read = (path: string) => page.waitForResponse((response) => response.request().method() === "GET"
+    && new URL(response.url()).pathname === `/api${path}`);
+  const [walletRead, calendarRead, storesRead] = [read("/v1/wallet"), read("/v1/calendar/connections"), read("/v1/connections")];
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
-  // Usage and the connections checklist still read the sample workspace; results are live.
-  for (const card of ["Wallet and usage", "Connections"]) {
-    await expect(page.getByRole("region", { name: card }).getByTestId("sample-badge")).toBeVisible();
+  const walletResponse = await walletRead;
+  expect(walletResponse.status()).toBe(200);
+  const wallet = (await walletResponse.json()) as { currency: string; balance: number; reserved: number; available: number };
+  const walletRegion = page.getByRole("region", { name: "Wallet" });
+  if (wallet.balance === 0) {
+    await expect(walletRegion.getByText("No money in the wallet yet")).toBeVisible();
+  } else {
+    // In the currency's own minor units (a yen wallet has none), as the card formats them.
+    const format = new Intl.NumberFormat("en-US", { style: "currency", currency: wallet.currency.toUpperCase() });
+    const money = (minor: number) => format.format(minor / 10 ** (format.resolvedOptions().maximumFractionDigits ?? 2));
+    await expect(walletRegion.getByTestId("wallet-balance")).toContainText(money(wallet.available));
+    if (wallet.reserved > 0) await expect(walletRegion.getByTestId("wallet-balance")).toContainText(`${money(wallet.reserved)} held for jobs in progress, of ${money(wallet.balance)}`);
   }
-  for (const card of ["Next appointments", "Revenue this week"]) {
-    await expect(page.getByRole("region", { name: card }).getByTestId("sample-badge")).toHaveCount(0);
+  // Connections: Home's rows are the ones the shared rules make of what the two routes answered.
+  const calendarResponse = await calendarRead;
+  expect(calendarResponse.status()).toBe(200);
+  const { items: calendars } = (await calendarResponse.json()) as { items: CalendarConnection[] };
+  // Shopify: an owner reads the stores; a server without connections settings answers 404 and Home leaves the row out.
+  const storesResponse = await storesRead;
+  if (storesResponse.status() !== 404) expect(storesResponse.status()).toBe(200);
+  const stores = storesResponse.status() === 404 ? null : ((await storesResponse.json()) as { items: ManagedConnection[] }).items;
+  const checklist = page.getByRole("region", { name: "Connections" });
+  for (const row of connectionChecklist(calendars, stores)) {
+    const shown = checklist.getByTestId(`checklist-${row.id}`);
+    await expect(shown).toContainText(row.badge);
+    await expect(shown).toContainText(row.detail);
   }
-  if (info.project.name === "desktop") await expect(page.getByTestId("sample-note")).toHaveText("Some areas show sample data until their API ships.");
+  if (stores === null) await expect(checklist.getByTestId("checklist-shopify")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Wallet and usage" })).toHaveCount(0);
+  await expect(page.getByTestId("sample-badge")).toHaveCount(0);
+  await expect(page.getByText(/sample data/i)).toHaveCount(0);
+  await expect(page.getByTestId("demo-note")).toHaveCount(0);
 
   // Bookings, customers, the Inbox, Agents and the site are live: no sample marker.
   for (const path of ["/calendar", "/customers", "/inbox", "/agents", "/site"]) {
@@ -449,6 +480,8 @@ test("labels sample areas and turns off writes that would not reach the API", as
   // Settings holds the live business profile (business-profile.md), and the plan is live (plans.md PL-7).
   await page.goto("/account/settings");
   await expect(header("Settings").getByTestId("sample-badge")).toHaveCount(0);
+  // No notification settings: nothing sends them.
+  await expect(page.getByText("Coming soon")).toHaveCount(0);
   await page.goto("/account/plan");
   await expect(header("Plan").getByTestId("sample-badge")).toHaveCount(0);
   // A comped tenant sees the picker; one on a plan sees Manage billing.
@@ -468,7 +501,8 @@ test("labels sample areas and turns off writes that would not reach the API", as
   await expect(business.getByLabel("Business name")).toBeEnabled();
   await expect(business.getByLabel("Business name")).not.toHaveValue("");
   await expect(business.getByRole("button", { name: "Save changes" })).toBeDisabled();
-  for (const toggle of await page.getByRole("switch").all()) await expect(toggle).toBeDisabled();
+  // No notification switches: nothing sends them, so Settings has none.
+  await expect(page.getByRole("switch")).toHaveCount(0);
 });
 
 test("reloads and allows a retry when the API reports a concurrent update", async ({ page }, info) => {

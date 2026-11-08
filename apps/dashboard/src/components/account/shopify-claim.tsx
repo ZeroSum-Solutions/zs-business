@@ -4,7 +4,7 @@ import { CheckCircle, Clock, LinkSimple, WarningCircle } from "@phosphor-icons/r
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useSampleOnly } from "@/components/ui/sample";
+import { useApiRuntime } from "@/lib/api/react";
 import { useToast } from "@/components/ui/toast";
 import {
   CLAIM_LINKED_MESSAGE,
@@ -28,7 +28,7 @@ export const CLAIM_POLL_MS = 5_000;
  * confirms the store the merchant entered it from. Live app only, and absent when the server has no native tier.
  */
 export function ShopifyClaim() {
-  const live = useSampleOnly();
+  const live = useApiRuntime().mode === "live";
   const api = useClaimState(live);
   const [shown, setShown] = useState<{ claimId: string; code: string } | null>(null);
   const [message, setMessage] = useState<{ tone: "info" | "error"; text: string } | null>(null);
@@ -133,7 +133,7 @@ export function ShopifyClaim() {
 
 /** True once the server answered the claim route, which exists only with the native Shopify tier (C-18). */
 export function useNativeShopify(enabled: boolean): { native: boolean; pending: boolean } {
-  const live = useSampleOnly();
+  const live = useApiRuntime().mode === "live";
   const claim = useClaimState(live && enabled);
   // The claim route is only ever read on the live app; a cached answer (success) is what says the native tier is on.
   return { native: claim.isSuccess, pending: live && enabled && claim.isPending };

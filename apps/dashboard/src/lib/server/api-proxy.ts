@@ -13,7 +13,7 @@
  * staged grant sends the API the grant this browser holds (calendar-connect.ts). Of the managed-tier
  * connection routes only GET /v1/connections and POST /v1/connections/:id/disconnect are forwarded; the
  * connect flow has its own routes (connections-connect.ts). Of the native Shopify routes only the owner's claim calls
- * (/v1/shopify/claims) are forwarded.
+ * (/v1/shopify/claims) are forwarded. Of the wallet routes only the read, GET /v1/wallet, is forwarded.
  */
 import { DOCUMENT_INTAKE_APPLY_PATH, INTAKE_APPLY_BODY_LIMIT, MEDIA_CONTENT_TYPES, MEDIA_LIMITS, PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
@@ -70,6 +70,11 @@ function billingRouteAllowed(method: string, rest: readonly string[]): boolean {
   return (method === "GET" && route === "plan") || (method === "POST" && (route === "plan/checkout" || route === "portal"));
 }
 
+/** delivery.md D-4: Home reads the wallet. Top-ups (/v1/wallet/top-ups) are not offered here, so they do not pass. */
+function walletRouteAllowed(method: string, rest: readonly string[]): boolean {
+  return method === "GET" && rest.length === 0;
+}
+
 /**
  * Linking an installed Shopify store to this hub (connections.md C-22): an owner starts a claim, reads it, confirms it
  * or cancels it. Nothing else under shopify; the embedded app's own calls have their own route (shopify-embedded.ts).
@@ -87,6 +92,7 @@ function routeAllowed(method: string, path: readonly string[]): boolean {
   if (area === "connections") return connectionsRouteAllowed(method, rest);
   if (area === "shopify") return shopifyRouteAllowed(method, rest);
   if (area === "billing") return billingRouteAllowed(method, rest);
+  if (area === "wallet") return walletRouteAllowed(method, rest);
   return rest.length === 0 ? SINGLE.has(area) : AREAS.has(area);
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, Clock, MinusCircle, WarningCircle } from "@phosphor-icons/react";
 import Link from "next/link";
 import { type ReactNode, useMemo, useState, useSyncExternalStore } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -8,17 +8,17 @@ import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle, Tray, TrayBody, TrayHeader, TrayTitle } from "@/components/ui/card";
 import { KpiTile } from "@/components/ui/kpi-tile";
-import { SampleBadge, useSampleOnly } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, Skeleton } from "@/components/ui/states";
 import { ApiError, bookingCustomerName, defaultMessage, type HomeResults } from "@/lib/api";
 import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
-import { useBookings, useChecklist, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useUsage } from "@/lib/queries";
+import { useConnectionChecklist, type ChecklistStatus } from "@/lib/connection-checklist";
+import { useBookings, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useWallet } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
 import { greetingLine } from "@/lib/greeting";
-import { READ_RESULTS, useCan } from "@/lib/session";
+import { READ_BILLING, READ_RESULTS, useCan } from "@/lib/session";
 import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey } from "@/lib/time";
 import { ReconnectNotice } from "./reconnect-notice";
-import { cn, currencyDigits, formatMinor, formatMoney, formatNumber, weekChange } from "@/lib/utils";
+import { cn, currencyDigits, formatMinor, formatNumber, weekChange } from "@/lib/utils";
 import {
   appointmentsPhrase,
   currentMinute,
@@ -31,7 +31,8 @@ import {
   readStatus,
   resourceTone,
   subscribeMinute,
-  walletCaption,
+  WALLET_CAPTION,
+  walletAmount,
   weekStripDays,
   weekStripQuery,
 } from "./home-model";
@@ -256,81 +257,72 @@ function IconTile({ tone, children }: { tone: "accent" | "warn" | "success" | "n
   return <span aria-hidden className={cn("flex size-11 shrink-0 items-center justify-center rounded-md", tones[tone])}>{children}</span>;
 }
 
-function Meter({ percent, className }: { percent: number; className?: string }) {
+/** The prepaid wallet (delivery.md D-4), read from GET /v1/wallet. Owners only: the API needs `billing`. */
+function WalletCard({ className }: { className?: string }) {
+  const wallet = useWallet(true);
   return (
-    <div aria-hidden className={cn("relative h-1.5", className)}>
-      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border-strong" />
-      <span className="absolute inset-y-0 left-0 rounded-pill bg-fg" style={{ width: `${Math.min(100, percent)}%` }} />
-    </div>
-  );
-}
-
-function UsageCard({ className }: { className?: string }) {
-  const usage = useUsage();
-  return (
-    <Tray className={className} aria-labelledby="usage-title">
+    <Tray className={className} aria-labelledby="wallet-title">
       <TrayHeader>
-        <div className="flex flex-wrap items-center gap-2"><TrayTitle id="usage-title">Wallet and usage</TrayTitle><SampleBadge /></div>
+        <TrayTitle id="wallet-title">Wallet</TrayTitle>
       </TrayHeader>
-      {paused(usage) ? <Card><ErrorNote error={OFFLINE} retry={() => usage.refetch()} /></Card> : usage.isPending ? <Card><LoadingRows rows={3} /></Card> : usage.isError ? <Card><ErrorNote error={usage.error} retry={() => usage.refetch()} /></Card> : (
-        <TrayBody className="sm:grid-cols-3">
-          <Card className="sm:col-span-3">
-            <p className="text-sm font-bold text-muted">Balance</p>
-            <p className="tabular mt-1 text-[32px] leading-none font-extrabold tracking-display text-fg">{formatMoney(usage.data.walletBalance, usage.data.currency, 2)}</p>
-            <div
-              role="meter"
-              aria-label="Wallet balance"
-              aria-valuemin={0}
-              aria-valuemax={usage.data.walletTopUp}
-              aria-valuenow={usage.data.walletBalance}
-              aria-valuetext={`${formatMoney(usage.data.walletBalance, usage.data.currency, 2)} of ${formatMoney(usage.data.walletTopUp, usage.data.currency)}`}
-              className="mt-4"
-            >
-              <Meter percent={(usage.data.walletBalance / usage.data.walletTopUp) * 100} />
-            </div>
-            <p className="mt-3 text-caption text-muted">{walletCaption(usage.data.walletTopUp, usage.data.currency)}</p>
+      {paused(wallet) ? <Card><ErrorNote error={OFFLINE} retry={() => wallet.refetch()} /></Card> : wallet.isPending ? <Card><LoadingRows rows={2} label="Loading the wallet" /></Card> : wallet.isError ? <Card><ErrorNote error={wallet.error} retry={() => wallet.refetch()} /></Card> : wallet.data.balance === 0 ? (
+        <EmptyState title="No money in the wallet yet">{WALLET_CAPTION}</EmptyState>
+      ) : (
+        <TrayBody>
+          <Card data-testid="wallet-balance">
+            <p className="text-sm font-bold text-muted">Available</p>
+            <p className="tabular mt-1 text-[32px] leading-none font-extrabold tracking-display text-fg">{walletAmount(wallet.data.available, wallet.data.currency)}</p>
+            {wallet.data.reserved > 0 ? (
+              <p className="tabular mt-2 text-caption text-fg-2">{walletAmount(wallet.data.reserved, wallet.data.currency)} held for jobs in progress, of {walletAmount(wallet.data.balance, wallet.data.currency)}</p>
+            ) : null}
+            <p className="mt-3 text-caption text-muted">{WALLET_CAPTION}</p>
           </Card>
-          {usage.data.lines.map((line) => (
-            <Card key={line.id}>
-              <p className="text-sm font-bold text-muted">{line.label}</p>
-              <p className="tabular mt-1 text-2xl leading-none font-extrabold tracking-display text-fg">
-                {formatNumber(line.used)} <span className="text-caption font-semibold tracking-normal text-muted">of {formatNumber(line.cap)}</span>
-              </p>
-              <Meter percent={(line.used / line.cap) * 100} className="mt-4" />
-            </Card>
-          ))}
         </TrayBody>
       )}
     </Tray>
   );
 }
 
-function ChecklistCard({ className }: { className?: string }) {
-  const checklist = useChecklist();
+// The badge words come with each row (`ChecklistItem.badge`); the status picks only the look.
+const CHECK: Record<ChecklistStatus, { tile: "neutral" | "warn"; icon: typeof CheckCircle; badge: "success" | "warn" | "neutral" }> = {
+  ok: { tile: "neutral", icon: CheckCircle, badge: "success" },
+  action: { tile: "warn", icon: WarningCircle, badge: "warn" },
+  warn: { tile: "warn", icon: WarningCircle, badge: "warn" },
+  pending: { tile: "neutral", icon: Clock, badge: "neutral" },
+  off: { tile: "neutral", icon: MinusCircle, badge: "neutral" },
+};
+
+/** Google Calendar and Shopify, from the routes the Connections page reads. */
+function ChecklistCard({ checklist, className }: { checklist: Needs["checklist"]; className?: string }) {
   const open = checklist.data?.filter((item) => item.status === "action").length ?? 0;
   return (
     <Tray className={className} aria-labelledby="checklist-title">
       <TrayHeader>
-        <div className="flex flex-wrap items-center gap-2"><TrayTitle id="checklist-title">Connections</TrayTitle><SampleBadge /></div>
+        <TrayTitle id="checklist-title">Connections</TrayTitle>
         <TrayLink href="/account/connections">Manage</TrayLink>
       </TrayHeader>
       <Card>
-        <p className="sr-only">{open > 0 ? `${open} need${open === 1 ? "s" : ""} you` : "Everything is connected"}</p>
-        {paused(checklist) ? <ErrorNote error={OFFLINE} retry={() => checklist.refetch()} /> : checklist.isPending ? <LoadingRows rows={3} /> : checklist.isError ? <ErrorNote error={checklist.error} retry={() => checklist.refetch()} /> : (
+        {checklist.data ? <p className="sr-only">{open > 0 ? `${open} need${open === 1 ? "s" : ""} you` : "None need you"}</p> : null}
+        {paused(checklist) ? <ErrorNote error={OFFLINE} retry={() => checklist.refetch()} /> : checklist.isPending ? <LoadingRows rows={3} /> : checklist.isError && !checklist.data ? <ErrorNote error={checklist.error} retry={() => checklist.refetch()} /> : (
+          <>
           <ul className="divide-y divide-border">
-            {checklist.data.map((item) => (
-              <li key={item.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                <IconTile tone={item.status === "ok" ? "neutral" : "warn"}>
-                  {item.status === "ok" ? <CheckCircle size={20} /> : <WarningCircle size={20} />}
-                </IconTile>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-bold text-fg">{item.label}</p>
-                  <p className="text-caption text-muted">{item.detail}</p>
-                </div>
-                <Badge tone={item.status === "ok" ? "success" : "warn"} className="shrink-0">{item.status === "ok" ? "Connected" : "Needs action"}</Badge>
-              </li>
-            ))}
+            {(checklist.data ?? []).map((item) => {
+              const check = CHECK[item.status];
+              return (
+                <li key={item.id} data-testid={`checklist-${item.id}`} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+                  <IconTile tone={check.tile}><check.icon size={20} /></IconTile>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-bold text-fg">{item.label}</p>
+                    <p className="text-caption text-muted">{item.detail}</p>
+                  </div>
+                  <Badge tone={check.badge} className="shrink-0">{item.badge}</Badge>
+                </li>
+              );
+            })}
           </ul>
+          {/* One list failed: the rows above are what did answer, and the retry reads the other again. */}
+          {checklist.isError ? <div className="mt-3"><ErrorNote error={checklist.error} retry={() => checklist.refetch()} /></div> : null}
+          </>
         )}
       </Card>
     </Tray>
@@ -409,7 +401,7 @@ function useBookingCutoff(now: number | null, zone: string): string {
 function useNeeds() {
   const waiting = useInboxCount();
   const threads = useThreads();
-  const checklist = useChecklist();
+  const checklist = useConnectionChecklist();
   const now = useNowMinute();
   const zone = useDisplayZone();
   const from = useBookingCutoff(now, zone);
@@ -447,10 +439,16 @@ function peopleLine(names: string[]): string {
   return `${short.slice(0, 3).join(", ")} and ${short.length - 3} more`;
 }
 
+/** "Google Calendar and Shopify are in Connections": only the rows Home has, so staff and a server without Shopify are told no more. */
+function settledConnections(items: readonly { label: string }[]): string {
+  const labels = items.map((item) => item.label);
+  if (labels.length === 0) return "Open Connections to see them";
+  return `${labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`} ${labels.length === 1 ? "is" : "are"} in Connections`;
+}
+
 /** What needs the owner now, first on every screen size (BRIEF: "what needs me now"). */
 function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
   const { waiting, threads, checklist, bookings, resources, next, now, zone, actions, people, count, state } = needs;
-  const sampleOnly = useSampleOnly();
   const open = actions.length;
   // Never claim "clear" or "nothing" before the answer is in: say so while loading or after a failure.
   const unknown = (query: { isPending: boolean; isError: boolean; fetchStatus: string }) =>
@@ -459,7 +457,8 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
   const inbox = unknown(threads);
   // The time needs the calendar's zone, so it waits for the resources too.
   const calendar = unknown(bookings) ?? (next ? unknown(resources) : null);
-  const connections = unknown(checklist);
+  // A row that needs the person stays in view even when the other list failed to load.
+  const connections = open > 0 ? null : unknown(checklist);
   const resource = resources.data?.find((item) => item.id === next?.resourceId);
   const customer = next ? bookingCustomerName(next) : null;
 
@@ -468,9 +467,10 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
   const inboxDetail = inbox?.detail ?? (waiting > 0 ? "Replies and reviews in Inbox" : threads.hasNextPage ? "Older conversations not checked" : "No replies or reviews waiting");
   const calendarTitle = calendar?.title ?? (next ? nextTitle(next.startsAt, now, zone) : "No appointments coming up");
   const calendarDetail = calendar?.detail ?? (next ? (next.title ?? customer ?? "Next appointment") : "Open slots are on the calendar");
-  const connectionsTitle = connections?.title ?? (open > 0 ? `${formatNumber(open)} connection${open === 1 ? "" : "s"} need${open === 1 ? "s" : ""} you` : "Everything is connected");
-  // Live mode still reads the sample checklist (see SampleBadge); the tile says so too.
-  const connectionsDetail = connections?.detail ?? (sampleOnly ? "Sample data until connections ship" : open > 0 ? "Fix these to keep requests coming in." : "Booking page, email and calendar");
+  const connectionsTitle = connections?.title ?? (open > 0 ? `${formatNumber(open)} connection${open === 1 ? "" : "s"} need${open === 1 ? "s" : ""} you` : "No connection needs you");
+  const connectionsDetail = connections?.detail ?? (open > 0
+    ? (checklist.isError ? "Couldn't check the others. Open Connections to try again." : "Open Connections to fix them.")
+    : settledConnections(checklist.data ?? []));
 
   const row = (icon: ReactNode, tone: Parameters<typeof IconTile>[0]["tone"], title: string, detail: string, foot?: ReactNode, arrow = true) => (
     <span className="flex items-start gap-3 lg:gap-4">
@@ -648,6 +648,8 @@ function HomeHeader({ needs, reports }: { needs: Needs; reports: boolean }) {
 export function HomeView() {
   // Staff have no `reports`: they neither see nor ask for results (H-5).
   const reports = useCan(READ_RESULTS);
+  // Staff have no `billing`: the wallet is the owner's (delivery.md D-4).
+  const billing = useCan(READ_BILLING);
   const needs = useNeeds();
   return (
     <>
@@ -659,8 +661,8 @@ export function HomeView() {
         <WeekStrip now={needs.clock} className="lg:hidden" />
         <NextAppointments needs={needs} className="lg:col-span-5 lg:self-stretch" />
         {reports ? <ResultsSection /> : null}
-        <ChecklistCard className="lg:col-span-5 lg:col-start-8" />
-        <UsageCard className="lg:col-span-7" />
+        <ChecklistCard checklist={needs.checklist} className="lg:col-span-5 lg:col-start-8" />
+        {billing ? <WalletCard className="lg:col-span-7" /> : null}
       </div>
     </>
   );

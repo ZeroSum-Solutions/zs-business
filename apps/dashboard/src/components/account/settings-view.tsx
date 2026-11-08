@@ -6,10 +6,9 @@ import { ACTIVE_CURRENCIES, currencyLabel, type BusinessProfile, type UpdateBusi
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
-import { DisabledReason } from "@/components/ui/sample";
+import { DisabledReason } from "@/components/ui/disabled-reason";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Segmented } from "@/components/ui/segmented";
-import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
 import { isApiError, isSettingsChanged } from "@/lib/api";
 import { useApi, useApiRuntime } from "@/lib/api/react";
@@ -36,13 +35,6 @@ const THEME_OPTIONS = [
   { value: "dark", label: "Dark" },
   { value: "system", label: "Match device" },
 ] as const satisfies readonly { value: Theme; label: string }[];
-
-// Nothing sends these yet, so they stay off and say so.
-const NOTIFY = [
-  { id: "booking", label: "New booking", hint: "When someone books." },
-  { id: "approval", label: "Agent needs approval", hint: "When a draft is waiting." },
-  { id: "digest", label: "Monday results", hint: "Last week's numbers." },
-];
 
 export const STALE_BUSINESS_MESSAGE = "Someone else saved the business details while you were editing. The latest details are loaded below. Check them and save again.";
 export const BUSINESS_OWNER_ONLY = "Only an owner can change business details.";
@@ -87,7 +79,7 @@ export function SettingsView() {
   const theme = useTheme();
   return (
     <>
-      <PageHeader title="Settings" description="Business details and how we reach you." />
+      <PageHeader title="Settings" description="Business details and how the hub looks." />
       <div className="tray grid max-w-3xl gap-1.5 lg:gap-2">
         <Card aria-labelledby="appearance-title">
           <CardHeader>
@@ -98,26 +90,8 @@ export function SettingsView() {
           </CardHeader>
           <Segmented label="Theme" value={theme} options={THEME_OPTIONS} onChange={setTheme} />
         </Card>
+        {/* No notification settings: nothing sends them, so the card is left out until an API does. */}
         <BusinessCard />
-        <Card aria-labelledby="notify-title">
-          <CardHeader>
-            <div>
-              <CardTitle id="notify-title">Notifications</CardTitle>
-              <p id="notify-unavailable" className="text-sm text-muted">Coming soon. Nothing sends these yet.</p>
-            </div>
-          </CardHeader>
-          <ul className="divide-y divide-border-soft">
-            {NOTIFY.map((item) => (
-              <li key={item.id} className="flex items-center gap-4 py-2">
-                <div className="flex-1">
-                  <p id={`n-${item.id}`} className="text-sm font-medium text-fg">{item.label}</p>
-                  <p className="text-sm text-muted">{item.hint}</p>
-                </div>
-                <Switch aria-labelledby={`n-${item.id}`} disabled aria-describedby="notify-unavailable" checked={false} />
-              </li>
-            ))}
-          </ul>
-        </Card>
       </div>
     </>
   );
@@ -134,8 +108,9 @@ function BusinessCard() {
     body = <LoadingRows rows={3} label="Loading business details" />;
   } else if (profile.isError && isApiError(profile.error, "not_found")) {
     // BP-10: the server is older than the profile. Show what is known, and why it cannot change.
+    // The currency is not known (empty), so the form says "Not available" rather than inventing one.
     const known: BusinessProfile = {
-      displayName: identity?.businessName ?? "", legalName: null, phoneE164: null, timeZone: null, currency: "USD",
+      displayName: identity?.businessName ?? "", legalName: null, phoneE164: null, timeZone: null, currency: "",
       postalAddress: null, revision: 1, updatedAt: "",
     };
     body = <BusinessFormBody profile={known} reload={async () => undefined} lockedReason={BUSINESS_NOT_AVAILABLE} />;
@@ -276,6 +251,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
         <div>
           <Label htmlFor={FIELD_IDS.currency}>Currency</Label>
           <Select {...props("currency", true)} className="w-full" value={form.currency} onChange={(event) => edit({ currency: event.target.value })}>
+            {form.currency === "" ? <option value="">Not available</option> : null}
             {ACTIVE_CURRENCIES.map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
           </Select>
           {note("currency", "New deals start in this currency. Saved amounts do not change.")}

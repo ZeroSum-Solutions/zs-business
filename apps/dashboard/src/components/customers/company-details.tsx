@@ -44,7 +44,11 @@ export function CompanyDetails({ contactId }: { contactId: string }) {
     mutationFn: () => api.requestEnrichment(contactId, { idempotencyKey: intents.keyFor({ contactId, run: read.data?.requests[0]?.id ?? null }) }),
     onSettled: (_result, error) => intents.settle({ contactId, run: read.data?.requests[0]?.id ?? null }, error),
     // Returned, so the button stays busy until the refreshed list shows the new request.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.contactEnrichment(contactId) }),
+    // An enrichment holds money from the wallet (D-11): Home's balance is read again too.
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: keys.contactEnrichment(contactId) }),
+      queryClient.invalidateQueries({ queryKey: keys.wallet }),
+    ]),
   });
 
   const latest: EnrichmentRequestRecord | undefined = read.data?.requests[0];

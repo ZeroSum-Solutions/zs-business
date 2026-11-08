@@ -5,7 +5,7 @@ test("navigates all six areas and the account pages", async ({ page }, info) => 
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
   await expect(page.getByText("Revenue this week")).toBeVisible();
-  await expect(page.getByText("Wallet and usage")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Wallet" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Next appointments" })).toBeVisible();
   await shot(page, "01-home", info.project.name);
 
@@ -55,7 +55,8 @@ test("navigates all six areas and the account pages", async ({ page }, info) => 
   await openAccountItem(page, "Settings");
   await shot(page, "10-settings", info.project.name);
   await openAccountItem(page, "Connections");
-  await expect(page.getByText("Reconnect needed")).toBeVisible();
+  await expect(page.getByTestId("gcal-card")).toBeVisible();
+  await expect(page.getByTestId("shopify-card")).toBeVisible();
   await shot(page, "11-connections", info.project.name);
   await openAccountItem(page, "Plan");
   await shot(page, "12-plan", info.project.name);

@@ -207,9 +207,14 @@ export function connectErrorMessage(error: unknown): string {
 export const currentConnections = (items: readonly ManagedConnection[]): ManagedConnection[] =>
   items.filter((item) => item.status !== "disconnected" || (item.revokeFailed && !hasNewerConnection(items, item)));
 
+// A live row stamped in the same millisecond counts as newer too (a reconnect under a fixed clock):
+// two rows cannot both be the later grant, and the live one says what is true now.
 const hasNewerConnection = (items: readonly ManagedConnection[], item: ManagedConnection): boolean =>
-  items.some((other) => other.id !== item.id && other.toolkit === item.toolkit
-    && other.accountDomain === item.accountDomain && Date.parse(other.createdAt) > Date.parse(item.createdAt));
+  items.some((other) => {
+    if (other.id === item.id || other.toolkit !== item.toolkit || other.accountDomain !== item.accountDomain) return false;
+    const [mine, theirs] = [Date.parse(item.createdAt), Date.parse(other.createdAt)];
+    return theirs > mine || (theirs === mine && other.status !== "disconnected");
+  });
 
 /** Whether any connection waits for the owner to connect it again (C-8). */
 export const needsReauthorize = (items: readonly ManagedConnection[] | undefined): boolean =>

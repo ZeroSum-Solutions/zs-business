@@ -1,5 +1,5 @@
-// The Connections screen (connections.md C-1, C-5): in the live app it shows Google Calendar and Shopify, the two
-// connections the API serves, and none of the sample accounts the demo workspace carries.
+// The Connections screen (connections.md C-1, C-5): it shows Google Calendar and Shopify, the two connections the
+// API serves, and no invented accounts, in the live app and in the demo.
 import { createElement as h } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ConnectionsView } from "../src/components/account/connections-view";
@@ -25,20 +25,18 @@ function screen(live: boolean) {
 }
 
 describe("Connections screen", () => {
-  it("shows Shopify and Google Calendar in the live app, and no sample accounts", () => {
-    const html = screen(true);
-    expect(html).toContain('data-testid="shopify-card"');
-    expect(html).not.toContain("other-accounts-title");
-    expect(html).not.toContain('data-testid="sample-badge"');
-    const body = text(html);
-    expect(body).not.toContain("Other accounts");
-    for (const name of SAMPLE_ACCOUNTS) expect(body, name).not.toContain(name);
-    expect(body).not.toContain("can't be changed here yet");
-  });
-
-  it("keeps the demo workspace's other accounts in the demo", () => {
-    const html = screen(false);
-    expect(html).toContain("other-accounts-title");
-    expect(text(html)).toContain("can't be changed here yet");
-  });
+  for (const live of [true, false]) {
+    it(`shows Shopify and Google Calendar and no sample accounts (${live ? "live" : "demo"})`, () => {
+      const html = screen(live);
+      // The demo waits for its setup read before ordering the cards; the live render has no session yet.
+      if (live) expect(html).toContain('data-testid="shopify-card"');
+      expect(html).not.toContain("other-accounts-title");
+      expect(html).not.toContain('data-testid="sample-badge"');
+      const body = text(html);
+      expect(body).not.toContain("Other accounts");
+      expect(body).not.toMatch(/sample data/i);
+      for (const name of SAMPLE_ACCOUNTS) expect(body, name).not.toContain(name);
+      expect(body).not.toContain("can't be changed here yet");
+    });
+  }
 });

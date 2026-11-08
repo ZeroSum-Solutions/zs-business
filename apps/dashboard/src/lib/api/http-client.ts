@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   billingPlanSchema,
   billingPortalResponseSchema,
+  walletSummarySchema,
   startPlanCheckoutResponseSchema,
   agentKindStatusOutputSchema,
   agentKindStatusSchema,
@@ -298,6 +299,10 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
   return {
     getBillingPlan(options = {}) {
       return request({ method: "GET", path: "/v1/billing/plan", schema: billingPlanSchema, signal: options.signal });
+    },
+
+    getWallet(options = {}) {
+      return request({ method: "GET", path: "/v1/wallet", schema: walletSummarySchema, signal: options.signal });
     },
 
     startPlanCheckout(input, options) {

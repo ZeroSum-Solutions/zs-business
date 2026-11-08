@@ -11,7 +11,6 @@ import type { BillingPlan, BusinessProfile } from "@zs/contracts";
 import { ApiError, createApi } from "../src/lib/api";
 import { DEMO_BUSINESS, DEMO_TENANT_ID } from "../src/lib/api/demo/seed";
 import { createDemoBilling } from "../src/lib/api/demo/billing";
-import { createDemoWorkspace } from "../src/lib/api/demo/workspace";
 import { ApiProvider } from "../src/lib/api/react";
 import { PLAN_POLL_MS, PLAN_WATCH_MS, PLAN_WATCH_POLL_MS, planRefetchInterval, scopeKeys } from "../src/lib/queries";
 import { SessionProvider } from "../src/lib/session";
@@ -95,14 +94,21 @@ describe("plan", () => {
     expect(planRefetchInterval(undefined, {}, now)).toBe(false);
   });
 
-  it("describes the wallet and the providers as the contracts do", async () => {
-    const workspace = createDemoWorkspace();
-    const text = JSON.stringify([await createDemoBilling().getBillingPlan(), await workspace.listConnections(), await workspace.getChecklist(), await workspace.getUsage()]);
+  it("describes the plan and the wallet as the contracts do", async () => {
+    const billing = createDemoBilling();
+    const text = JSON.stringify([await billing.getBillingPlan(), await billing.getWallet()]);
     expect(text).not.toMatch(/deposit|payout|refund/i);
     // twilio.md: nothing in v1 sends texts; resend.md: email goes out through the email provider, not a mailbox.
     expect(text).not.toMatch(/text message|text number|\bsms\b|gmail/i);
-    expect(text).not.toMatch(/pauses at \$0/i);
-    expect(text).toMatch(/top-up/i);
+    // delivery.md D-4: the wallet is integer minor units, and what is available is the balance less what is held.
+    const wallet = await billing.getWallet();
+    expect(wallet.available).toBe(wallet.balance - wallet.reserved);
+  });
+
+  it("reads nothing from a demo workspace in the live app", () => {
+    const api = createApi({ mode: "live" }).api as unknown as Record<string, unknown>;
+    for (const name of ["getUsage", "getChecklist", "listConnections"]) expect(api[name], name).toBeUndefined();
+    expect(typeof api.getWallet).toBe("function");
   });
 });
 
@@ -153,17 +159,20 @@ describe("settings", () => {
     });
     expect(html).toContain(BUSINESS_NOT_AVAILABLE);
     expect(html).toContain(`value="${escaped(DEMO_BUSINESS)}"`);
+    // The API gave no currency: none is invented.
+    expect(html).toMatch(/<option value="" selected="">Not available<\/option>/);
+    expect(html).not.toMatch(/<option value="USD" selected="">/);
     expect(html).toMatch(/<fieldset[^>]*disabled=""/);
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
   });
 
-  it("offers no notification it cannot send", () => {
+  it("shows no notification settings, since nothing sends them", () => {
     for (const mode of ["demo", "live"] as const) {
       const html = render(h(SettingsView), mode);
-      expect(html).toContain("Coming soon");
-      expect(html).not.toMatch(/A text when someone books|A push when/);
-      expect(html.match(/role="switch"[^>]*disabled=""/g)?.length).toBe(3);
-      expect(html).not.toMatch(/aria-checked="true"/);
+      expect(html).not.toContain("Coming soon");
+      expect(html).not.toContain("Notifications");
+      expect(html).not.toMatch(/New booking|Agent needs approval|Monday results/);
+      expect(html).not.toContain('role="switch"');
     }
   });
 });
