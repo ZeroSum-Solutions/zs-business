@@ -230,14 +230,17 @@ describe("the member routes (C-4, C-5, C-13)", () => {
     });
     expect(confirmed.status).toBe(200);
     expect(confirmed.headers.get("cache-control")).toBe("no-store");
-    expect(confirmed.body).toMatchObject({ id: claims.connectionId, toolkit: "shopify", status: "active", accountDomain: SHOP, revokeFailed: false });
+    expect(confirmed.body).toMatchObject({ id: claims.connectionId, toolkit: "shopify", status: "active", accountDomain: SHOP, revokeFailed: false, tier: "composio" });
     expect(JSON.stringify(confirmed.body)).not.toContain(claims.composioAccountId);
     const replay = await call(on, "POST", "/v1/connections/confirm", { token: h.a.token, headers: grantHeader(grant), body: { grantId: pending.body.grantId } });
     expect(replay.body).toEqual(confirmed.body);
 
     const list = await call(on, "GET", "/v1/connections", { token: h.a.token });
     expect(list.body.items.map((item: { id: string }) => item.id)).toEqual([claims.connectionId]);
-    expect(JSON.stringify(list.body)).not.toMatch(/composio|ca_\d/i);
+    // The tier's name is the one place the word appears (C-18); no provider account ID or other mention does.
+    expect(JSON.stringify(list.body).replace('"tier":"composio"', "")).not.toMatch(/composio|ca_\d/i);
+    // C-18: `tier` is the column's value (the word "composio" here is the tier, not a provider ID).
+    expect(list.body.items.map((item: { tier: string }) => item.tier)).toEqual(["composio"]);
 
     const key = `disconnect-${randomUUID()}`;
     const gone = await call(on, "POST", `/v1/connections/${claims.connectionId}/disconnect`, { token: h.a.token, key, body: {} });

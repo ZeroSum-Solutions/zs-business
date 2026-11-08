@@ -3,7 +3,7 @@ import {
   AUTOMATION_SCOPES, CONNECTION_TOOLKITS, CONNECTION_TOOL_ERROR_CODES, READ_SCOPES, SERVER_IDEMPOTENCY_PREFIXES, connectConnectionRequestSchema,
   connectionToolErrorSchema, idempotencyKeySchema, normalizeAccountLabel, runConnectionToolInputSchema,
   shopifyGetOrderInputSchema, shopifyListOrdersInputSchema, shopDomainSchema, toolkitSchema,
-  accountLabelSchema, connectConnectionInputSchema, connectorCancelResponseSchema, connectorLinkResponseSchema,
+  accountLabelSchema, connectConnectionInputSchema, connectionSchema, connectorCancelResponseSchema, connectorLinkResponseSchema,
 } from "../src/index.js";
 
 describe("connections contracts (C-4, C-6, C-10, C-14, C-16)", () => {
@@ -105,5 +105,19 @@ describe("connections contracts (C-4, C-6, C-10, C-14, C-16)", () => {
     expect(connectorCancelResponseSchema.safeParse({ outcome: "refused", code: "account_mismatch" }).success).toBe(true);
     expect(connectorCancelResponseSchema.safeParse({ outcome: "cancelled" }).success).toBe(false);
     expect(connectorLinkResponseSchema.safeParse({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 60 }).success).toBe(true);
+  });
+
+  it("reads a connection with a tier, and without one (additive field, C-18)", () => {
+    const base = {
+      id: "7b3f1a52-1111-4222-8333-444455556666", toolkit: "shopify", accountLabel: "A", accountDomain: "a.myshopify.com", status: "reauthorize",
+      reauthorizeReason: "auth_error", revokeFailed: false, lastCheckedAt: "2026-11-06T12:00:00.000Z", createdAt: "2026-11-05T12:00:00.000Z",
+    };
+    // An answer stored before the field existed, and one from an older server, still parse and carry no tier.
+    const old = connectionSchema.parse(base);
+    expect(old.tier).toBeUndefined();
+    expect("tier" in old).toBe(false);
+    for (const tier of ["native", "composio"] as const) expect(connectionSchema.parse({ ...base, tier }).tier).toBe(tier);
+    expect(connectionSchema.safeParse({ ...base, tier: "other" }).success).toBe(false);
+    expect(connectionSchema.safeParse({ ...base, tier: null }).success).toBe(false);
   });
 });

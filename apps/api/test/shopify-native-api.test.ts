@@ -386,6 +386,8 @@ describe("claims: an existing hub links an installed store (C-22)", () => {
 
     const confirmed = await call(on, "POST", `/v1/shopify/claims/${id}/confirm`, { token: h.a.token, body: {} });
     expect(confirmed.status).toBe(200);
+    // C-18: the list says which tier made the connection.
+    expect((await call(on, "GET", "/v1/connections", { token: h.a.token })).body.items).toEqual([expect.objectContaining({ toolkit: "shopify", tier: "native", status: "active" })]);
     expect((await h.database.pool.query("SELECT tenant_id, tier, status FROM connections")).rows).toEqual([{ tenant_id: h.a.tenantId, tier: "native", status: "active" }]);
     expect((await h.database.pool.query("SELECT billing_provider FROM tenant_plans WHERE tenant_id=$1", [h.a.tenantId])).rows[0].billing_provider).toBe("shopify");
   });

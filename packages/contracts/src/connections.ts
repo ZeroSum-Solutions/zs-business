@@ -102,6 +102,9 @@ export const disconnectConnectionCommandSchema = z.lazy(() => actionCommandSchem
 export const connectionStatusSchema = z.enum(["active", "reauthorize", "disconnecting", "disconnected"]);
 export type ConnectionStatus = z.infer<typeof connectionStatusSchema>;
 export const connectionReauthorizeReasonSchema = z.enum(["provider_status", "auth_error"]);
+/** C-18: how a connection was made. `composio` rows predate the native Shopify tier; `native` rows come from the App Store app. */
+export const connectionTierSchema = z.enum(["native", "composio"]);
+export type ConnectionTier = z.infer<typeof connectionTierSchema>;
 
 /** C-13: what an owner sees of a connection; never a Composio or external ID. */
 export const connectionSchema = z.strictObject({
@@ -118,6 +121,11 @@ export const connectionSchema = z.strictObject({
    * connection stays `active`: reconnecting cannot fix it (C-8, C-10); the owner changes the app's permissions in the store.
    */
   readBlocked: z.boolean().default(false), // a result stored before this field existed replays as not blocked
+  /**
+   * C-18: additive and optional, so a result stored, or a server built, before this field existed still parses. The API
+   * fills it for every connection it returns; the dashboard uses it to pick the reconnect path for a legacy row.
+   */
+  tier: connectionTierSchema.optional(),
   lastCheckedAt: instantSchema,
   createdAt: instantSchema,
 });

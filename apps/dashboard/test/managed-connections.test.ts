@@ -19,6 +19,8 @@ import {
   pendingRemembered,
   pollConnectStatus,
   reconnectStore,
+  reconnectPath,
+  disconnectForNativeInstall,
   rememberPending,
   waitUntilDisconnected,
   cancelNotice,
@@ -298,5 +300,25 @@ describe("reconnect waits for the old link to go (C-4, C-13)", () => {
     await expect(reconnectStore(failing, row("reauthorize"), "key-1", instant)).rejects.toMatchObject({ kind: "forbidden" });
     expect(failing.startManagedConnect).not.toHaveBeenCalled();
     await expect(waitUntilDisconnected(row("active").id, async () => [], instant)).resolves.toBeUndefined();
+  });
+});
+
+describe("reconnect path (C-18)", () => {
+  it("sends a legacy row to the native install under the native tier, and every other case to the path the worker allows", () => {
+    expect(reconnectPath({ tier: "composio" }, true)).toBe("native_install");
+    expect(reconnectPath({ tier: "native" }, true)).toBe("reopen");
+    expect(reconnectPath({}, true)).toBe("reopen");
+    expect(reconnectPath({ tier: "composio" }, false)).toBe("composio");
+    expect(reconnectPath({}, false)).toBe("composio");
+  });
+
+  it("disconnects the legacy row and waits until it is gone before the link code is made", async () => {
+    const calls: string[] = [];
+    const api = {
+      disconnectManagedConnection: async () => { calls.push("disconnect"); return connection("disconnecting"); },
+      listManagedConnections: async () => { calls.push("list"); return [connection("disconnected")]; },
+    };
+    await disconnectForNativeInstall(api, { id: connection("active").id }, "key", { sleep: async () => undefined });
+    expect(calls).toEqual(["disconnect", "list"]);
   });
 });
