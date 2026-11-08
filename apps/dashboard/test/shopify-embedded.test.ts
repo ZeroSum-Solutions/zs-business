@@ -1,9 +1,10 @@
 // The embedded Shopify app on the dashboard side (docs/requirements/connections.md C-21): the page's HTML and policy,
 // the session-token proxy, the claim routes through the generic proxy, and the page script run against a fake document.
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SHOPIFY_EMBEDDED_ADDRESS_HEADER, SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER, shopifyEmbeddedAddressMessage } from "@zs/contracts";
 import nextConfig from "../next.config";
+import { GET as embeddedGet } from "../src/app/shopify/app/route";
 import { proxyApiRequest } from "../src/lib/server/api-proxy";
 import { EMBEDDED_CLIENT_PARAMS, EMBEDDED_CLIENT_SOURCE } from "../src/lib/server/shopify-embedded-client";
 import { APP_BRIDGE_URL, embeddedPolicy, frameAncestors, renderEmbeddedPage, shopFromQuery } from "../src/lib/server/shopify-embedded-page";
@@ -871,5 +872,36 @@ describe("the page script", () => {
     await settle();
     expect(app.all().some((node) => node.tag === "img")).toBe(false);
     expect(texts(app)).toContain('<img src=x onerror="alert(1)">');
+  });
+});
+
+// ---- the route handler (C-20, S6) --------------------------------------------------------------
+describe("GET /shopify/app (C-20 headers)", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const get = (query: string) => Promise.resolve(embeddedGet(new Request(`https://hub.example.test/shopify/app${query}`)));
+
+  it("frames only that shop's admin and admin.shopify.com, with no X-Frame-Options and no Set-Cookie", async () => {
+    vi.stubEnv("SHOPIFY_CLIENT_ID", CLIENT_ID.replace(/a/g, "b"));
+    const response = await get("?shop=halden-rowe.myshopify.com&host=abc");
+    expect(response.status).toBe(200);
+    const csp = response.headers.get("content-security-policy")!;
+    expect(csp).toContain("frame-ancestors https://halden-rowe.myshopify.com https://admin.shopify.com");
+    expect(csp).toContain("object-src 'none'");
+    expect(response.headers.get("x-frame-options")).toBeNull();
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(await response.text()).toContain('name="shopify-api-key" content="' + "b".repeat(32) + '"');
+  });
+
+  it("frames nobody when the shop is missing or not a myshopify.com name", async () => {
+    vi.stubEnv("SHOPIFY_CLIENT_ID", "b".repeat(32));
+    for (const query of ["", "?shop=evil.example.com", "?shop=x.myshopify.com.evil.com"])
+      expect((await get(query)).headers.get("content-security-policy"), query).toContain("frame-ancestors 'none'");
+  });
+
+  it("answers 404 when SHOPIFY_CLIENT_ID is unset or malformed", async () => {
+    vi.stubEnv("SHOPIFY_CLIENT_ID", "");
+    expect((await get("?shop=halden-rowe.myshopify.com")).status).toBe(404);
+    vi.stubEnv("SHOPIFY_CLIENT_ID", "not-a-client-id");
+    expect((await get("?shop=halden-rowe.myshopify.com")).status).toBe(404);
   });
 });
