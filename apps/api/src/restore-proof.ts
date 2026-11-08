@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { Pool } from "pg";
 import { assertLocalDatabaseUrl, assertRuntimeLogin, createScopedDatabase, type Transaction } from "@zs/db";
 import { readBackupManifest, type LedgerEntry } from "./hosted-backup.js";
+import { redactSecrets } from "./hosted.js";
 import { resolvePgTool } from "./pg-tools.js";
 
 /**
@@ -30,6 +32,14 @@ const defaultRun: RunTool = async (file, args, env) => {
     return { code: typeof failure.code === "number" ? failure.code : 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? failure.message ?? "" };
   }
 };
+
+// pg_restore and Postgres quote production rows in these lines (DETAIL, CONTEXT, an INSERT command).
+const ROW_DATA_LINE = /^\s*(?:DETAIL:|CONTEXT:)|Failing row contains|^\s*Command was: INSERT/i;
+
+/** Tool output or an error message that is safe for a receipt: no secrets, no quoted production rows. */
+export function scrubOutput(text: string): string {
+  return redactSecrets(text.split("\n").filter((line) => !ROW_DATA_LINE.test(line)).join("\n"));
+}
 
 /** Rows per table in a plain-SQL data dump (`pg_restore --data-only --file=-`): one line per row in each COPY block. */
 export function countCopyRows(dataSql: string): Map<string, number> {
@@ -90,7 +100,9 @@ export interface ArchiveFacts {
   readonly policies: number;
 }
 
-type ProbeOut = Record<"ownVisible" | "foreignVisible" | "foreignWrites", Record<string, number | string>>;
+type ProbeOut = Record<"ownVisible" | "foreignVisible" | "foreignWrites" | "foreignDeletes", Record<string, number | string>>;
+/** The only outcome besides zero rows that proves a denial: Postgres refused with insufficient_privilege. */
+const REFUSED = "refused 42501";
 class RolledBack extends Error {
   constructor(readonly out: ProbeOut) {
     super("restore proof probe rolled back");
@@ -108,7 +120,7 @@ export async function checkRestoredDatabase(admin: Pool, runtime: Pool, archive:
       const { ok, detail } = await run();
       results.push({ name, ok, detail: detail ?? null });
     } catch (error) {
-      results.push({ name, ok: false, detail: `threw: ${error instanceof Error ? error.message : String(error)}` });
+      results.push({ name, ok: false, detail: `threw: ${scrubOutput(error instanceof Error ? error.message : String(error))}` });
     }
   };
 
@@ -169,7 +181,7 @@ export async function checkRestoredDatabase(admin: Pool, runtime: Pool, archive:
   const perTenant = new Map<string, Map<string, number>>();
   for (const table of tenantTables) {
     for (const row of (await admin.query<{ tenant_id: string; n: number }>(
-      `SELECT tenant_id::text, count(*)::int AS n FROM public.${ident(table)} GROUP BY 1`)).rows) {
+      `SELECT tenant_id::text, count(*)::int AS n FROM public.${ident(table)} WHERE tenant_id IS NOT NULL GROUP BY 1`)).rows) {
       if (!perTenant.has(row.tenant_id)) perTenant.set(row.tenant_id, new Map());
       perTenant.get(row.tenant_id)!.set(table, row.n);
     }
@@ -184,7 +196,7 @@ export async function checkRestoredDatabase(admin: Pool, runtime: Pool, archive:
   /** Under `self`, what the runtime sees of its own rows, and of everyone else's (must be nothing). */
   const probe = async (self: string | null, other: string): Promise<ProbeOut> => {
     const work = async (tx: Transaction): Promise<never> => {
-      const out: ProbeOut = { ownVisible: {}, foreignVisible: {}, foreignWrites: {} };
+      const out: ProbeOut = { ownVisible: {}, foreignVisible: {}, foreignWrites: {}, foreignDeletes: {} };
       for (const table of tenantTables) {
         const attempt = async (sql: string, params: unknown[]) => {
           await tx.query("SAVEPOINT restore_probe");
@@ -194,14 +206,18 @@ export async function checkRestoredDatabase(admin: Pool, runtime: Pool, archive:
             return result.rows[0]?.n ?? result.rowCount ?? 0;
           } catch (error) {
             await tx.query("ROLLBACK TO SAVEPOINT restore_probe");
-            return `refused ${(error as { code?: string }).code ?? "?"}`;
+            const code = (error as { code?: string }).code ?? "?";
+            return code === "42501" ? REFUSED : `error ${code}`;
           }
         };
         const t = `public.${ident(table)}`;
         if (self !== null) out.ownVisible[table] = await attempt(`SELECT count(*)::int AS n FROM ${t} WHERE tenant_id = $1`, [self]);
         out.foreignVisible[table] = await attempt(
-          self === null ? `SELECT count(*)::int AS n FROM ${t}` : `SELECT count(*)::int AS n FROM ${t} WHERE tenant_id <> $1`, self === null ? [] : [self]);
-        if (owned(other, table) > 0) out.foreignWrites[table] = await attempt(`UPDATE ${t} SET tenant_id = tenant_id WHERE tenant_id = $1`, [other]);
+          self === null ? `SELECT count(*)::int AS n FROM ${t}` : `SELECT count(*)::int AS n FROM ${t} WHERE tenant_id IS DISTINCT FROM $1`, self === null ? [] : [self]);
+        if (owned(other, table) > 0) {
+          out.foreignWrites[table] = await attempt(`UPDATE ${t} SET tenant_id = tenant_id WHERE tenant_id = $1`, [other]);
+          out.foreignDeletes[table] = await attempt(`DELETE FROM ${t} WHERE tenant_id = $1`, [other]);
+        }
       }
       // Every probe rolls back, so even a write the policies wrongly allowed changes nothing.
       throw new RolledBack(out);
@@ -214,7 +230,7 @@ export async function checkRestoredDatabase(admin: Pool, runtime: Pool, archive:
     }
     throw new Error("the probe transaction did not roll back");
   };
-  const zeroOrRefused = (values: Record<string, number | string>) => Object.values(values).every((value) => value === 0 || String(value).startsWith("refused"));
+  const zeroOrRefused = (values: Record<string, number | string>) => Object.values(values).every((value) => value === 0 || value === REFUSED);
 
   await check("two-tenant denial under the runtime role: neither tenant reads or updates the other's rows, no tenant reads nothing", async () => {
     const started = now();
@@ -228,20 +244,24 @@ export async function checkRestoredDatabase(admin: Pool, runtime: Pool, archive:
     // Own rows the runtime cannot read in full: tables it has no SELECT on, or whose policy is narrower than the tenant.
     const ownHidden = (tenant: string, visible: Record<string, number | string>) => Object.entries(visible)
       .filter(([table, value]) => owned(tenant, table) > 0 && value !== owned(tenant, table)).map(([table, value]) => ({ table, owned: owned(tenant, table), visible: value }));
-    const denied = zeroOrRefused(a.foreignVisible) && zeroOrRefused(b.foreignVisible) && zeroOrRefused(none.foreignVisible)
-      && zeroOrRefused(a.foreignWrites) && zeroOrRefused(b.foreignWrites);
+    const denied = [a, b, none].every((out) => zeroOrRefused(out.foreignVisible) && zeroOrRefused(out.foreignWrites) && zeroOrRefused(out.foreignDeletes));
     // The runtime must also see its own rows, or the denial proves nothing.
     const sees = aOwn.length > 0 && (ranked.length < 2 || bOwn.length > 0);
-    const leaks = (values: Record<string, number | string>) => Object.entries(values).filter(([, value]) => value !== 0 && !String(value).startsWith("refused"));
+    const leaks = (values: Record<string, number | string>) => Object.entries(values).filter(([, value]) => value !== 0 && value !== REFUSED);
+    // Tables where neither probed tenant owns a row: nothing was proven there (reported, not failed).
+    const unproven = tenantTables.filter((table) => owned(tenantA, table) === 0 && owned(tenantB, table) === 0);
     return {
       ok: denied && sees,
       detail: {
         tenantA: { id: tenantA, rows: ranked[0]?.rows ?? 0, ownTablesReadInFull: aOwn.length, ownNotReadInFull: ownHidden(tenantA, a.ownVisible) },
         tenantB: { id: tenantB, rows: ranked[1]?.rows ?? 0, ownTablesReadInFull: bOwn.length, ownNotReadInFull: ownHidden(tenantB, b.ownVisible), synthetic: ranked.length < 2 },
         tablesProbed: tenantTables.length,
+        unproven: { tables: unproven.length, names: unproven },
         foreignWriteProbes: Object.keys(a.foreignWrites).length + Object.keys(b.foreignWrites).length,
+        foreignDeleteProbes: Object.keys(a.foreignDeletes).length + Object.keys(b.foreignDeletes).length,
         leaks: { aSeesOthers: leaks(a.foreignVisible), bSeesOthers: leaks(b.foreignVisible), noTenantSees: leaks(none.foreignVisible),
-          aUpdatesB: leaks(a.foreignWrites), bUpdatesA: leaks(b.foreignWrites) },
+          aUpdatesB: leaks(a.foreignWrites), bUpdatesA: leaks(b.foreignWrites), noTenantUpdates: leaks(none.foreignWrites),
+          aDeletesB: leaks(a.foreignDeletes), bDeletesA: leaks(b.foreignDeletes), noTenantDeletes: leaks(none.foreignDeletes) },
         ms: now() - started,
       },
     };
@@ -251,6 +271,8 @@ export async function checkRestoredDatabase(admin: Pool, runtime: Pool, archive:
 
 export interface RestoreProofOptions {
   readonly archivePath: string;
+  /** The project ref the archive must have been taken from (ZS_TARGET_REF); the manifest must name it. */
+  readonly expectedProjectRef: string;
   /** Superuser URL of the loopback cluster's maintenance database, for example postgres://postgres@127.0.0.1:55433/postgres. */
   readonly adminUrl: string;
   readonly clock: { now(): Date };
@@ -258,6 +280,12 @@ export interface RestoreProofOptions {
   readonly searchPath?: string | undefined;
   /** Leave the restored database in place for inspection. */
   readonly keep?: boolean;
+  /**
+   * Run on a cluster that holds other databases. The CLI never sets this; the tests do, because
+   * the shared test cluster holds every suite's zs_test_* database. The restore creates roles
+   * and alters zs_runtime cluster-wide, so a real run needs a cluster of its own.
+   */
+  readonly allowSharedCluster?: boolean;
   readonly run?: RunTool;
 }
 export interface RestoreProofReport {
@@ -271,22 +299,53 @@ export interface RestoreProofReport {
   restore: { tool: string; exitCode: number; stderr: string };
   checks: CheckResult[];
   dropped: boolean;
+  /** Why the throwaway database could not be dropped; drop `database` by hand. Null when it was dropped or kept. */
+  cleanupError: string | null;
 }
+
+const PROJECT_REF = /^[a-z]{20}$/;
+const majorFrom = (text: string, pattern: RegExp) => {
+  const major = Number(pattern.exec(text)?.[1] ?? NaN);
+  return Number.isInteger(major) ? major : null;
+};
+const describe = (error: unknown) => scrubOutput(error instanceof Error ? error.message : String(error));
 
 /** Restore `archivePath` into a new zs_restore_proof_* database, check it, then drop it. */
 export async function restoreProof(options: RestoreProofOptions): Promise<RestoreProofReport> {
   const target = assertLocalDatabaseUrl(options.adminUrl);
   if (target.database !== "postgres") throw new Error("Refusing to run: the admin URL must name the cluster's postgres database");
+  if (!PROJECT_REF.test(options.expectedProjectRef)) throw new Error("Refusing to restore: pass the project ref the archive was taken from (ZS_TARGET_REF or --project-ref)");
   const run = options.run ?? defaultRun;
   const tool = options.pgRestore ?? resolvePgTool("pg_restore");
-  const bytes = await readFile(options.archivePath);
-  if (bytes.subarray(0, 5).toString("latin1") !== "PGDMP") throw new Error("Refusing to restore: not a pg_dump -Fc archive");
-  const manifest = await readBackupManifest(options.archivePath, bytes);
   const toolEnv = { ...(options.searchPath === undefined ? {} : { PATH: options.searchPath }) };
 
+  // One private copy: the hash that is checked and the bytes pg_restore reads are the same file.
+  const scratch = await mkdtemp(join(tmpdir(), "zs-restore-proof-"));
+  try {
+    const archivePath = join(scratch, basename(options.archivePath));
+    await copyFile(options.archivePath, archivePath);
+    const bytes = await readFile(archivePath);
+    if (bytes.subarray(0, 5).toString("latin1") !== "PGDMP") throw new Error("Refusing to restore: not a pg_dump -Fc archive");
+    const manifest = await readBackupManifest(options.archivePath, bytes);
+    if (manifest.projectRef !== options.expectedProjectRef)
+      throw new Error(`Refusing to restore: the backup was taken from project ${manifest.projectRef}, not ${options.expectedProjectRef}`);
+    return await proveRestore(options, { run, tool, toolEnv, archivePath, bytes, manifest, target });
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+async function proveRestore(
+  options: RestoreProofOptions,
+  input: {
+    run: RunTool; tool: string; toolEnv: Record<string, string>; archivePath: string; bytes: Buffer;
+    manifest: Awaited<ReturnType<typeof readBackupManifest>>; target: ReturnType<typeof assertLocalDatabaseUrl>;
+  },
+): Promise<RestoreProofReport> {
+  const { run, tool, toolEnv, archivePath, bytes, manifest, target } = input;
   const read = async (args: string[]) => {
-    const result = await run(tool, [...args, options.archivePath], toolEnv);
-    if (result.code !== 0) throw new Error(`pg_restore ${args.join(" ")} failed: ${result.stderr.trim().slice(0, 2000)}`);
+    const result = await run(tool, [...args, archivePath], toolEnv);
+    if (result.code !== 0) throw new Error(`pg_restore ${args.join(" ")} failed: ${scrubOutput(result.stderr.trim()).slice(0, 2000)}`);
     return result.stdout;
   };
   const schemaSql = await read(["--schema-only", "--file=-"]);
@@ -296,7 +355,16 @@ export async function restoreProof(options: RestoreProofOptions): Promise<Restor
 
   const stamp = options.clock.now().toISOString().replace(/[-:T]/g, "").slice(0, 14);
   const database = `zs_restore_proof_${stamp}_${randomUUID().slice(0, 8)}`;
-  const admin = new Pool({ connectionString: target.connectionString, max: 1 });
+  // A pool re-emits a backend's late error (DROP DATABASE ... WITH (FORCE) ends it with 57P01);
+  // an unhandled one would crash the run. Record the rest, so the cleanup in finally still runs.
+  const poolErrors: string[] = [];
+  const watch = (pool: Pool) => {
+    pool.on("error", (error: Error & { code?: string }) => {
+      if (error.code !== "57P01") poolErrors.push(describe(error));
+    });
+    return pool;
+  };
+  const admin = watch(new Pool({ connectionString: target.connectionString, max: 1 }));
   const dbUrl = new URL(target.connectionString);
   dbUrl.pathname = `/${database}`;
   const runtimeUrl = new URL(dbUrl);
@@ -304,37 +372,68 @@ export async function restoreProof(options: RestoreProofOptions): Promise<Restor
   runtimeUrl.password = "";
   const created: string[] = [];
   let createdDb = false;
-  let dropped = false;
-  const report: Omit<RestoreProofReport, "ok" | "checks" | "dropped" | "restore"> = {
+  const report: Omit<RestoreProofReport, "ok" | "checks" | "dropped" | "restore" | "cleanupError"> = {
     archive: basename(options.archivePath), bytes: bytes.length, sha256: manifest.sha256,
     manifest: { projectRef: manifest.projectRef, createdAt: manifest.createdAt, ledger: manifest.ledger.length },
     database, roles: { referenced, created },
   };
+  /** Drop the throwaway database; the reason, not a throw, when that fails. */
+  const dropDatabase = async (): Promise<string | null> => {
+    try {
+      // Let the ended pools' backends exit before forcing the drop.
+      for (let i = 0; i < 100; i += 1) {
+        const left = (await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1", [database])).rows[0]!.n;
+        if (left === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await admin.query(`DROP DATABASE IF EXISTS ${ident(database)} WITH (FORCE)`);
+      return null;
+    } catch (error) {
+      return describe(error);
+    }
+  };
   try {
     const superuser = (await admin.query<{ su: boolean }>("SELECT rolsuper AS su FROM pg_roles WHERE rolname = current_user")).rows[0]?.su;
     if (!superuser) throw new Error("Refusing to run: the admin URL must log in as a superuser of the throwaway cluster");
-    // An archive written by a newer pg_dump carries settings an older server rejects
-    // (pg_dump 17 writes SET transaction_timeout), so restore only into the same major or newer.
+    if (!options.allowSharedCluster) {
+      // The restore creates roles and alters zs_runtime cluster-wide: only a cluster that holds nothing else.
+      const others = (await admin.query<{ datname: string }>(
+        `SELECT datname FROM pg_database
+          WHERE datname NOT IN ('postgres', 'template0', 'template1') AND datname NOT LIKE 'zs\\_restore\\_proof\\_%' ESCAPE '\\' ORDER BY 1 LIMIT 10`)).rows;
+      if (others.length > 0)
+        throw new Error(`Refusing to run: the cluster is not a throwaway; it also holds ${others.map((row) => row.datname).join(", ")}. Use a new cluster of its own`);
+    }
+    // pg_dump 17 writes SET transaction_timeout, which a server before 17 rejects, and pg_restore 17
+    // writes it even for an older archive: neither the archive nor pg_restore may be newer than the server.
     const serverMajor = Math.floor(Number((await admin.query<{ v: string }>("SELECT current_setting('server_version_num') AS v")).rows[0]!.v) / 10000);
     const dumpMajor = archiveDumpMajor(schemaSql);
-    if (dumpMajor !== null && dumpMajor > serverMajor)
+    if (dumpMajor === null) throw new Error("Refusing to restore: the archive does not name the pg_dump version that wrote it");
+    if (dumpMajor > serverMajor)
       throw new Error(`Refusing to restore: the archive was written by pg_dump ${dumpMajor}; restore it into PostgreSQL ${dumpMajor} or newer, not ${serverMajor}`);
+    const version = await run(tool, ["--version"], toolEnv);
+    const restoreMajor = version.code === 0 ? majorFrom(version.stdout, /\(PostgreSQL\) (\d+)/) : null;
+    if (restoreMajor === null) throw new Error("Refusing to restore: could not read the version of pg_restore");
+    if (restoreMajor > serverMajor)
+      throw new Error(`Refusing to restore: pg_restore ${restoreMajor} is newer than the PostgreSQL ${serverMajor} server and writes settings it rejects; set PG_RESTORE to pg_restore ${serverMajor} or older`);
+
     const client = await admin.connect();
     try {
       // Cluster roles are shared; serialize with other runs, as the test harness does.
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended('zs-business:test-logins',0))");
-      for (const role of referenced) {
-        const exists = (await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [role])).rowCount;
-        if (exists) continue;
+      const exists = async (role: string) => (await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [role])).rowCount;
+      // zs_runtime is set up below: never as the NOLOGIN role of this loop.
+      for (const role of [...referenced, "authenticated"]) {
+        if (role === "zs_runtime" || (await exists(role))) continue;
         await client.query(`CREATE ROLE ${ident(role)} NOLOGIN`);
         created.push(role);
       }
       // bootstrap-roles.sql: zs_runtime is a LOGIN member of authenticated only.
-      if (!(await client.query("SELECT 1 FROM pg_roles WHERE rolname = 'zs_runtime'")).rowCount) {
-        await client.query("CREATE ROLE zs_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS");
+      if (!(await exists("zs_runtime"))) {
+        await client.query("CREATE ROLE zs_runtime");
         created.push("zs_runtime");
       }
+      await client.query("ALTER ROLE zs_runtime LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS");
       await client.query("GRANT authenticated TO zs_runtime");
       await client.query("COMMIT");
     } catch (error) {
@@ -347,7 +446,7 @@ export async function restoreProof(options: RestoreProofOptions): Promise<Restor
     createdDb = true;
     // pg_dump --schema=public writes CREATE SCHEMA public (with its owner and ACL), which fails
     // on the empty public schema every new database has. The database is new, so drop it first.
-    const fresh = new Pool({ connectionString: dbUrl.href, max: 1 });
+    const fresh = watch(new Pool({ connectionString: dbUrl.href, max: 1 }));
     try {
       await fresh.query("DROP SCHEMA public");
     } finally {
@@ -355,37 +454,33 @@ export async function restoreProof(options: RestoreProofOptions): Promise<Restor
     }
 
     const restore = await run(tool, [
-      "--exit-on-error", "--single-transaction", "--no-password", `--dbname=${database}`, options.archivePath,
+      "--exit-on-error", "--single-transaction", "--no-password", `--dbname=${database}`, archivePath,
     ], { ...toolEnv, PGHOST: target.host, PGPORT: target.port, PGUSER: target.user, PGPASSWORD: dbUrl.password ? decodeURIComponent(dbUrl.password) : "", PGSSLMODE: "disable" });
-    const restoreFacts = { tool, exitCode: restore.code, stderr: restore.stderr.trim().slice(0, 4000) };
+    const restoreFacts = { tool, exitCode: restore.code, stderr: scrubOutput(restore.stderr.trim()).slice(0, 4000) };
     let checks: CheckResult[] = [{ name: "pg_restore exits 0 in one transaction", ok: restore.code === 0, detail: restoreFacts.stderr || null }];
     if (restore.code === 0) {
-      const dbPool = new Pool({ connectionString: dbUrl.href, max: 2 });
-      const runtimePool = new Pool({ connectionString: runtimeUrl.href, max: 2 });
-      // DROP DATABASE ... WITH (FORCE) can reach a backend whose ended client is still closing;
-      // pg-pool re-emits that 57P01 on the pool, and an unhandled pool error crashes the run.
-      for (const pool of [dbPool, runtimePool]) pool.on("error", (error: Error & { code?: string }) => {
-        if (error.code !== "57P01") throw error;
-      });
+      const dbPool = watch(new Pool({ connectionString: dbUrl.href, max: 2 }));
+      const runtimePool = watch(new Pool({ connectionString: runtimeUrl.href, max: 2 }));
       try {
         checks = checks.concat(await checkRestoredDatabase(dbPool, runtimePool, archive, () => options.clock.now().getTime()));
       } finally {
         await Promise.all([dbPool.end(), runtimePool.end()]);
       }
     }
+    if (poolErrors.length > 0) checks.push({ name: "no unexpected connection errors", ok: false, detail: poolErrors.slice(0, 5) });
+    let dropped = false;
+    let cleanupError: string | null = null;
     if (!options.keep) {
-      // Let the ended pools' backends exit before forcing the drop.
-      for (let i = 0; i < 100; i += 1) {
-        const left = (await admin.query<{ n: number }>("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1", [database])).rows[0]!.n;
-        if (left === 0) break;
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      await admin.query(`DROP DATABASE ${ident(database)} WITH (FORCE)`);
-      dropped = true;
+      cleanupError = await dropDatabase();
+      dropped = cleanupError === null;
     }
-    return { ...report, ok: checks.every((item) => item.ok), restore: restoreFacts, checks, dropped };
+    return { ...report, ok: checks.every((item) => item.ok) && (options.keep === true || dropped), restore: restoreFacts, checks, dropped, cleanupError };
   } catch (error) {
-    if (createdDb && !options.keep && !dropped) await admin.query(`DROP DATABASE IF EXISTS ${ident(database)} WITH (FORCE)`).catch(() => undefined);
+    if (createdDb && !options.keep) {
+      const failure = await dropDatabase();
+      if (failure !== null)
+        throw new Error(`${describe(error)}; and the throwaway database ${database} could not be dropped (${failure}): drop it by hand`);
+    }
     throw error;
   } finally {
     await admin.end();
