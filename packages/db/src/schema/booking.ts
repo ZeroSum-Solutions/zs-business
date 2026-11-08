@@ -5,29 +5,23 @@ import {
   index,
   integer,
   jsonb,
-  pgPolicy,
-  pgRole,
   pgTable,
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import type { AvailabilityOverride, WeeklyAvailabilityRule } from "@zs/contracts";
 import { tenants } from "./index.js";
+import { tenantPolicy } from "./tenant-policy.js";
 
 // Mirrors supabase/migrations/20261017170000_booking.sql. The SQL migration is the
 // authority: it also FORCEs RLS, sets grants, installs the JSON validation functions and
-// declares bookings_resource_occupied_excl, which Drizzle cannot express.
-const authenticated = pgRole("authenticated").existing();
-const tenantPolicy = (tenantId: AnyPgColumn) =>
-  pgPolicy("tenant_scope", {
-    for: "all",
-    to: authenticated,
-    using: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-    withCheck: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-  });
+// declares bookings_resource_occupied_excl, which Drizzle cannot express (an EXCLUDE
+// constraint). The foreign keys from bookings.intake_item_id and booking_external_blocks.connection_id
+// point at tables this package does not mirror, so they are not declared here either.
+// test/drizzle-drift.test.ts compares everything declared here with the migrated database.
 const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "string" });
 
 export const bookingResources = pgTable(
@@ -77,6 +71,8 @@ export const bookings = pgTable(
     bufferAfterMinutes: integer("buffer_after_minutes").notNull().default(0),
     status: text("status").$type<"confirmed">().notNull().default("confirmed"),
     createdAt: instant("created_at").notNull(),
+    source: text("source").$type<"owner" | "website">().notNull().default("owner"),
+    intakeItemId: uuid("intake_item_id"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
@@ -91,6 +87,11 @@ export const bookings = pgTable(
       sql`${table.occupiedStartsAt} = ${table.startsAt} - make_interval(mins => ${table.bufferBeforeMinutes})
         AND ${table.occupiedEndsAt} = ${table.endsAt} + make_interval(mins => ${table.bufferAfterMinutes})`),
     check("bookings_status_confirmed", sql`${table.status} = 'confirmed'`),
+    index("bookings_tenant_start").on(table.tenantId, table.startsAt, table.id),
+    // Also covers the (tenant_id, resource_id) foreign key.
+    index("bookings_tenant_resource_start").on(table.tenantId, table.resourceId, table.startsAt, table.id),
+    index("bookings_tenant_created").on(table.tenantId, table.createdAt),
+    index("bookings_tenant_intake_item").on(table.tenantId, table.intakeItemId).where(sql`${table.intakeItemId} IS NOT NULL`),
     tenantPolicy(table.tenantId),
   ],
 ).enableRLS();
@@ -105,6 +106,8 @@ export const bookingExternalBlocks = pgTable(
     endsAt: instant("ends_at").notNull(),
     source: text("source").notNull(),
     createdAt: instant("created_at").notNull(),
+    connectionId: uuid("connection_id"),
+    externalId: text("external_id"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
@@ -114,6 +117,8 @@ export const bookingExternalBlocks = pgTable(
     }),
     check("booking_external_blocks_positive_range", sql`${table.startsAt} < ${table.endsAt}`),
     check("booking_external_blocks_source_nonempty", sql`length(${table.source}) > 0`),
+    uniqueIndex("booking_external_blocks_connection_event").on(table.tenantId, table.connectionId, table.externalId)
+      .where(sql`${table.connectionId} IS NOT NULL`),
     index("booking_external_blocks_resource_range")
       .using("gist", table.tenantId, table.resourceId, sql`tstzrange(${table.startsAt}, ${table.endsAt}, '[)')`),
     tenantPolicy(table.tenantId),

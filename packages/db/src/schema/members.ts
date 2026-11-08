@@ -1,17 +1,9 @@
 import { sql } from "drizzle-orm";
-import { check, pgEnum, pgPolicy, pgRole, pgTable, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
-import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { check, pgEnum, pgTable, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { tenants } from "./index.js";
+import { tenantPolicy } from "./tenant-policy.js";
 
 // Mirrors supabase/migrations/*_members_and_sessions.sql. SQL also FORCEs RLS and sets column grants.
-const authenticated = pgRole("authenticated").existing();
-const tenantPolicy = (tenantId: AnyPgColumn) =>
-  pgPolicy("tenant_scope", {
-    for: "all",
-    to: authenticated,
-    using: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-    withCheck: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-  });
 const timestamptz = (name: string) => timestamp(name, { withTimezone: true });
 
 export const memberRole = pgEnum("member_role", ["owner", "staff"]);

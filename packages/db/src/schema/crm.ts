@@ -6,8 +6,6 @@ import {
   index,
   integer,
   pgEnum,
-  pgPolicy,
-  pgRole,
   pgTable,
   primaryKey,
   text,
@@ -18,16 +16,9 @@ import {
 } from "drizzle-orm/pg-core";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { tenants } from "./index.js";
+import { tenantPolicy } from "./tenant-policy.js";
 
 // Mirrors supabase/migrations/*_crm.sql. SQL also FORCEs RLS and sets column grants.
-const authenticated = pgRole("authenticated").existing();
-const tenantPolicy = (tenantId: AnyPgColumn) =>
-  pgPolicy("tenant_scope", {
-    for: "all",
-    to: authenticated,
-    using: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-    withCheck: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-  });
 const textLength = (name: string, column: AnyPgColumn) =>
   check(name, sql`char_length(${column}) BETWEEN 1 AND 200`);
 const timestamptz = (name: string) => timestamp(name, { withTimezone: true });
@@ -60,6 +51,9 @@ export const crmContacts = pgTable(
       .where(sql`${table.normalizedEmail} IS NOT NULL`),
     uniqueIndex("crm_contacts_tenant_phone").on(table.tenantId, table.e164Phone)
       .where(sql`${table.e164Phone} IS NOT NULL`),
+    index("crm_contacts_tenant_recent").on(table.tenantId, table.createdAt.desc().nullsFirst(), table.id),
+    index("crm_contacts_tenant_name").on(table.tenantId,
+      sql`lower(COALESCE(${table.displayName}, ${table.normalizedEmail}, ${table.e164Phone}))`, table.id),
     tenantPolicy(table.tenantId),
   ],
 ).enableRLS();
@@ -107,6 +101,7 @@ export const crmStages = pgTable(
     pipelineId: uuid("pipeline_id").notNull(),
     name: text("name").notNull(),
     position: integer("position").notNull(),
+    outcome: text("outcome").$type<"open" | "won" | "lost">().notNull().default("open"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
@@ -131,6 +126,10 @@ export const crmDeals = pgTable(
     pipelineId: uuid("pipeline_id").notNull(),
     stageId: uuid("stage_id").notNull(),
     title: text("title").notNull(),
+    valueMinor: bigint("value_minor", { mode: "number" }),
+    currency: text("currency"),
+    leadSource: text("lead_source"),
+    wonAt: timestamptz("won_at"),
     // Range stays within Number.MAX_SAFE_INTEGER; serialize as a JS number.
     revision: bigint("revision", { mode: "number" }).notNull(),
     createdAt: timestamptz("created_at").notNull(),
@@ -154,6 +153,9 @@ export const crmDeals = pgTable(
     check("crm_deals_revision_range", sql`${table.revision} BETWEEN 1 AND 9007199254740991`),
     index("crm_deals_tenant_contact").on(table.tenantId, table.contactId),
     index("crm_deals_tenant_stage").on(table.tenantId, table.pipelineId, table.stageId),
+    index("crm_deals_tenant_recent").on(table.tenantId, table.updatedAt.desc().nullsFirst(), table.id),
+    index("crm_deals_tenant_pipeline_recent").on(table.tenantId, table.pipelineId, table.updatedAt.desc().nullsFirst(), table.id),
+    index("crm_deals_tenant_won").on(table.tenantId, table.wonAt).where(sql`${table.wonAt} IS NOT NULL`),
     tenantPolicy(table.tenantId),
   ],
 ).enableRLS();
