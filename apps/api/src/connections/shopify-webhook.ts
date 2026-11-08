@@ -1,7 +1,7 @@
 // POST /webhooks/shopify (docs/requirements/connections.md C-24): Shopify's mandatory compliance topics and
 // `app/uninstalled`, on the workers project (it holds the client secret). Shopify signs the raw body with the app's
 // client secret (X-Shopify-Hmac-SHA256); the worker checks that tag, that the signed body names the shop in the
-// header, and applies the event once. The route reads at most 64 KiB, as bytes, before anything else. Answers: 200
+// header, and applies the event once. The route reads at most 256 KiB, as bytes, before anything else. Answers: 200
 // (handled or a duplicate), 401 (a bad tag), 500 (try again later; Shopify retries), 404 (the native tier is off).
 // A body, a tag or a customer value never reaches a log.
 import { Hono } from "hono";
