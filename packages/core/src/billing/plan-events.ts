@@ -98,6 +98,8 @@ export async function derivePlanRecord(tx: Transaction, tenantId: string, at: Da
 
 /** PL-2: opens the platform alert (or raises its count) for a subscription held on an unknown price. No secret goes in; the operator email reads this text. */
 async function openPlanPriceAlert(tx: Transaction, tenantId: string, subscriptionId: string, at: Date): Promise<void> {
+  // Same lock as the close: a close then sees this hold once the lock is granted, never an uncommitted gap.
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [PLAN_PRICE_ALERT_JOB]);
   await tx.query(
     `INSERT INTO cron_alerts (job, opened_at, last_failed_at, failure_count, last_error, notified_at)
      VALUES ($1, $3, $3, 1, $2, NULL)
