@@ -871,10 +871,20 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     `external_account_id = 'redacted'` (the columns are NOT NULL with length checks; the
     migration grants the worker `UPDATE` on those two columns and `connections_native_guard`
     allows exactly this change, on a `disconnected` native row, by the worker, and nothing else).
+    The same transaction anonymises the action history of that shop's native connections: for each
+    connection (matched by tenant id and connection id, never by a text search across tenants) the
+    `connection.connect` and `connection.disconnect` rows in `actions` and the linked `outbox` events keep
+    their row but have the shop domain, shop id and store name replaced in `payload` and `result` with the
+    same placeholders (`redacted.invalid`, `redacted`; name keys become null; a client-chosen idempotency key that
+    carries the domain becomes `redacted:<action id>`). The store name is matched in name fields only, never in
+    machine fields or free text. The shop's lease row in `shopify_locks` is deleted too. The worker's `service_role`
+    already holds UPDATE on both tables, so no migration is needed. Tenant B's actions for another shop stay
+    untouched (tests). The business name (`tenants.name`, first taken from the shop name) and the owner's
+    email belong to the business and stay.
     A shop that proves to be live (the check above) is not redacted.
   - **Where shop identity is retained (listed, so redaction is not a guess).** Cleared:
-    `shopify_installs`, `shopify_claims`, `shopify_webhook_events` and the `connections`
-    identity columns. Kept on purpose: `tenant_plans.shopify_shop_id` and `shopify_shop_domain`
+    `shopify_installs`, `shopify_claims`, `shopify_webhook_events`, the `connections`
+    identity columns and the shop identity inside that shop's `actions` and `outbox` rows. Kept on purpose: `tenant_plans.shopify_shop_id` and `shopify_shop_domain`
     and the shop GID inside Shopify subscription records, because they are billing records the
     business must keep for tax and dispute purposes and they hold no customer data (the shop is
     a business). The listing's privacy text says this. The connection history keeps no store

@@ -64,6 +64,8 @@ beforeAll(async () => {
 afterAll(async () => { await database?.close(); });
 
 beforeEach(async () => {
+  await database.pool.query("DELETE FROM outbox");
+  await database.pool.query("DELETE FROM actions");
   await database.pool.query("DELETE FROM connections");
   await database.pool.query("DELETE FROM shopify_claims");
   await database.pool.query("DELETE FROM shopify_installs");
@@ -470,6 +472,97 @@ describe("webhooks (C-24)", () => {
     expect((await send("shop/redact", redactBody, { id })).status).toBe(200);
     expect((await database.pool.query("SELECT shop_domain FROM shopify_webhook_events WHERE webhook_id=$1", [id])).rows[0].shop_domain).toBe("redacted.myshopify.com");
     expect((await database.pool.query("SELECT 1 FROM shopify_webhook_events WHERE shop_domain=$1", [SHOP])).rowCount).toBe(0);
+  });
+  describe("a shop/redact also anonymises the action history of that shop's connections", () => {
+    const OTHER_SHOP = "other-store.myshopify.com";
+    const OTHER_GID = "gid://shopify/Shop/777";
+    const NAME = "ZS Test Store";
+    const shopCopies = (value: unknown) => ({ accountDomain: SHOP, accountLabel: NAME, externalAccountId: SHOP_GID, note: `store ${SHOP} (${SHOP_GID})`, value });
+    async function seedAction(tenantId: string, actorId: string, connectionId: string, type: string, payload: object, result: object, withEvent: object | null) {
+      const actionId = randomUUID();
+      await asService(database.servicePool, async (tx) => {
+        await tx.query(
+          "INSERT INTO actions (tenant_id,id,actor_id,action_type,target,payload,idempotency_key,result,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+          [tenantId, actionId, actorId, type, JSON.stringify({ tenantId, type: "connection", id: connectionId }), JSON.stringify(payload), `k-${actionId}`, JSON.stringify(result), new Date(T0)]);
+        if (withEvent) await tx.query("INSERT INTO outbox (tenant_id,id,action_id,event_type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6)", [tenantId, randomUUID(), actionId, "connection.disconnect_requested", JSON.stringify(withEvent), new Date(T0)]);
+      });
+      return actionId;
+    }
+    const connection = (domain: string, label: string | null, id: string) => ({ id, toolkit: "shopify", accountLabel: label, accountDomain: domain, status: "active", reauthorizeReason: null, revokeFailed: false, readBlocked: false, lastCheckedAt: "2026-11-07T00:00:00.000Z", createdAt: "2026-11-07T00:00:00.000Z" });
+    /** Every table that can hold a store's identity, as text, for one tenant (or all rows when the tenant is omitted). */
+    async function leaks(needles: string[]) {
+      const found: string[] = [];
+      for (const table of ["actions", "outbox", "connections", "shopify_installs", "shopify_claims", "shopify_webhook_events", "shopify_locks"]) {
+        for (const needle of needles) {
+          const { rowCount } = await database.pool.query(`SELECT 1 FROM ${table} t WHERE row_to_json(t)::text LIKE $1`, [`%${needle}%`]);
+          if (rowCount) found.push(`${table}:${needle}`);
+        }
+      }
+      return found;
+    }
+
+    it("keeps the history rows, replaces the shop domain, name and id in result, payload and event, and leaves other shops and tenants alone", async () => {
+      const bound = (await connections())[0]!;
+      const connectionId = (await database.pool.query<{ id: string }>("SELECT id FROM connections WHERE external_account_id=$1", [SHOP_GID])).rows[0]!.id;
+      // Tenant B: a different store whose connection has the SAME connection id (ids are per tenant), so only tenant scoping can tell them apart.
+      await asService(database.servicePool, (tx) => tx.query(
+        `INSERT INTO connections (tenant_id,id,tier,toolkit,external_account_id,account_domain,account_label,status,connected_by,last_checked_at,created_at,updated_at)
+         VALUES ($1,$2,'native','shopify',$3,$4,'Other Store','active',$5,$6,$6,$6)`, [b.tenantId, connectionId, OTHER_GID, OTHER_SHOP, b.memberId, new Date(T0)]));
+      const connect = await seedAction(bound.tenant_id, a.userId, connectionId, "connection.connect",
+        { connectionId, toolkit: "shopify", externalAccountId: SHOP_GID, accountDomain: SHOP, accountLabel: NAME }, connection(SHOP, NAME, connectionId), null);
+      const disconnect = await seedAction(bound.tenant_id, a.userId, connectionId, "connection.disconnect",
+        { connectionId }, { ...connection(SHOP, NAME, connectionId), status: "disconnecting", extra: shopCopies(1) }, { connectionId, toolkit: "shopify", store: SHOP, name: NAME });
+      await database.pool.query("UPDATE actions SET idempotency_key=$2 WHERE id=$1", [disconnect, `disconnect:${SHOP}`]);
+      await database.pool.query("INSERT INTO shopify_locks (shop_domain, held_until, holder) VALUES ($1,$2,$3)", [SHOP, new Date(T0 - 1000), randomUUID()]);
+      const bAction = await seedAction(b.tenantId, b.userId, connectionId, "connection.disconnect",
+        { connectionId }, connection(OTHER_SHOP, "Other Store", connectionId), { connectionId, toolkit: "shopify" });
+      const bBefore = (await database.pool.query("SELECT payload, result FROM actions WHERE id=$1", [bAction])).rows[0];
+      expect(await leaks([SHOP, NAME, SHOP_GID, "9001"])).toEqual(expect.arrayContaining(["actions:" + SHOP, "outbox:" + SHOP]));
+
+      fake.uninstalled = true;
+      expect((await send("shop/redact", redactBody)).status).toBe(200);
+
+      expect(await leaks([SHOP, NAME, SHOP_GID, "Shop/9001"])).toEqual([]);
+      const kept = (await database.pool.query("SELECT id, payload, result FROM actions WHERE tenant_id=$1 ORDER BY created_at, id", [bound.tenant_id])).rows;
+      expect(kept.map((r) => r.id).sort()).toEqual([connect, disconnect].sort());
+      const byId = Object.fromEntries(kept.map((r) => [r.id, r]));
+      expect(byId[connect].payload).toMatchObject({ connectionId, toolkit: "shopify", accountDomain: "redacted.invalid", externalAccountId: "redacted", accountLabel: null });
+      expect(byId[connect].result).toMatchObject({ id: connectionId, accountDomain: "redacted.invalid", accountLabel: null, status: "active" });
+      expect(byId[disconnect].result).toMatchObject({ status: "disconnecting", accountDomain: "redacted.invalid", accountLabel: null });
+      expect((await database.pool.query("SELECT id, idempotency_key FROM actions WHERE id=$1", [disconnect])).rows[0]).toEqual({ id: disconnect, idempotency_key: `redacted:${disconnect}` });
+      expect(byId[connect].idempotency_key ?? (await database.pool.query("SELECT idempotency_key FROM actions WHERE id=$1", [connect])).rows[0].idempotency_key).toBe(`k-${connect}`);
+      expect(byId[disconnect].result.extra.note).toBe("store redacted.invalid (redacted)");
+      expect((await database.pool.query("SELECT payload FROM outbox WHERE action_id=$1", [disconnect])).rows[0].payload).toEqual({ connectionId, toolkit: "shopify", store: "redacted.invalid", name: "redacted" });
+      // Tenant B's other shop: rows and connection untouched, byte for byte.
+      expect((await database.pool.query("SELECT payload, result FROM actions WHERE id=$1", [bAction])).rows[0]).toEqual(bBefore);
+      expect((await database.pool.query("SELECT payload FROM outbox WHERE action_id=$1", [bAction])).rows[0].payload).toEqual({ connectionId, toolkit: "shopify" });
+      expect((await database.pool.query("SELECT account_domain, account_label, external_account_id FROM connections WHERE tenant_id=$1", [b.tenantId])).rows[0])
+        .toEqual({ account_domain: OTHER_SHOP, account_label: "Other Store", external_account_id: OTHER_GID });
+      // A repeat is harmless.
+      expect((await send("shop/redact", redactBody)).status).toBe(200);
+      expect(await leaks([SHOP, NAME, SHOP_GID])).toEqual([]);
+    });
+    it("a redact that raced a delete and a reinstall (same generation, new incarnation) leaves the fresh install and its history alone", async () => {
+      const connectionId = (await database.pool.query<{ id: string }>("SELECT id FROM connections WHERE external_account_id=$1", [SHOP_GID])).rows[0]!.id;
+      const tenantId = (await connections())[0]!.tenant_id;
+      const id = await seedAction(tenantId, a.userId, connectionId, "connection.connect", { accountDomain: SHOP }, connection(SHOP, NAME, connectionId), null);
+      fake.uninstalled = true;
+      // Between the probe and the lock another redact deleted the install and a reinstall recreated it at generation 1.
+      worker = makeNative({ fetch: afterNextGraphql(async () => {
+        await database.pool.query("UPDATE shopify_installs SET created_at=created_at + interval '1 minute'");
+      }) });
+      expect((await send("shop/redact", redactBody)).status).toBe(200);
+      expect(await install()).toMatchObject({ shop_id: SHOP_GID });
+      expect((await database.pool.query("SELECT payload FROM actions WHERE id=$1", [id])).rows[0].payload).toEqual({ accountDomain: SHOP });
+      expect(reports).toContainEqual({ kind: "redact_skipped_reinstall", shop: SHOP });
+    });
+    it("a live shop's history is not touched (the redact is skipped)", async () => {
+      const connectionId = (await database.pool.query<{ id: string }>("SELECT id FROM connections WHERE external_account_id=$1", [SHOP_GID])).rows[0]!.id;
+      const tenantId = (await connections())[0]!.tenant_id;
+      const id = await seedAction(tenantId, a.userId, connectionId, "connection.connect", { accountDomain: SHOP }, connection(SHOP, NAME, connectionId), null);
+      expect((await send("shop/redact", redactBody)).status).toBe(200);
+      expect((await database.pool.query("SELECT payload FROM actions WHERE id=$1", [id])).rows[0].payload).toEqual({ accountDomain: SHOP });
+    });
   });
   it("answers 500 inside Shopify's 5 s limit when Shopify is slow, and Shopify retries", async () => {
     const slow = (async (input, init) => {
