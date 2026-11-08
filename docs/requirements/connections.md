@@ -1,9 +1,17 @@
 # Connections: one place a business connects its outside accounts
 
-Status: draft contract, revision 3 (2026-11-07). Code follows this file; a change to a
+Status: draft contract, revision 4 (2026-11-07). Code follows this file; a change to a
 numbered rule needs a new revision of this file first. Extends `hub-access.md` (H-1..H-12):
 connection reads are new `/mcp` tools behind a new scope, under the same token guard,
 limits and usage rules. Reuses the connect shapes of `google-calendar.md` (G-1, G-2, G-4).
+
+Revision 4 (2026-11-07, Track K of the four-verticals goal): the public Shopify app needs an
+embedded page, session tokens, expiring offline tokens, install-to-tenant binding with no
+operator and the compliance webhooks. Added: a native Shopify tier and C-18 to C-27 (at the end
+of "Evidence and decisions"). Changed: C-4 (no typed shop domain once the native tier is on),
+C-7 (`tier` also `native`), C-13 (a native disconnect deletes the sealed tokens and asks Shopify
+to uninstall with the stored token (`appUninstall`, as today), then marks the row `disconnected`; the uninstall webhook that follows is idempotent), C-14 (the
+sealed tokens and the install ledger are stored; still no orders or customer data).
 
 Revision 3 (2026-11-07, Devin's direction): the managed tier opens on production now, with
 Zero Sum Solutions (tenant 1) first, instead of waiting for the two-week preview measurement.
@@ -610,6 +618,247 @@ role for workers (all workers share one pattern today; Known limits).
     organization, no review, protected data always available, one auth config per app). Until
     then production connects Zero Sum's own stores only.
 
+### Revision 4: the Shopify App Store listing (2026-11-07, Track K)
+
+Goal: clear every Shopify App Store requirement that costs no money, so the listing can go in
+when Devin pays the one-time registration fee. This revision adds a **native** tier (`native`)
+for Shopify beside the `composio` tier, an embedded app page, install-to-tenant binding with no
+operator, and the compliance webhooks. It changes C-1, C-4, C-7, C-13 and C-14 only where
+named. Nothing here submits the listing.
+
+Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the page it relies on):
+- S1 App Store requirements: https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements
+  (1.1.1 session tokens, no third-party cookies; 1.2.1 Shopify billing; 2.2.1 to 2.2.4 APIs,
+  embedded, latest App Bridge `app-bridge.js` first, GraphQL; 2.3.1 install from a Shopify
+  surface and no typed shop domain; 2.3.2 authenticate before any UI; 3.1.1 TLS; 3.1.2 expiring
+  offline tokens; 3.2 minimum scopes).
+- S2 Expiring offline tokens: https://shopify.dev/docs/apps/build/authentication-authorization/migrate-to-expiring-offline-access-tokens
+  and https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens
+  (delisting of apps on non-expiring tokens from 2027-01-01, rejected Admin API calls from
+  2027-04-01; `expiring=1`; access token 3600 s; refresh token 90 days; every refresh returns a
+  new pair; the presented refresh token stays usable until the new one is used; a refresh and a
+  token exchange for one store must not run together; a bad refresh token is `401 invalid_request`).
+- S3 Token exchange: https://shopify.dev/docs/apps/build/authentication-authorization/get-access-tokens/token-exchange
+  and ID tokens https://shopify.dev/docs/apps/build/authentication-authorization/session-tokens
+  (HS256 with the client secret; claims `iss`, `dest`, `aud`, `sub`, `exp`, `nbf`, `iat`, `jti`;
+  `requested_token_type` offline or online; the online token carries `associated_user`).
+- S4 Managed installation: https://shopify.dev/docs/apps/build/authentication-authorization/app-installation/manage-by-shopify
+  (scopes in the app configuration; `use_legacy_install_flow = false`).
+- S5 App Home and App Bridge: https://shopify.dev/docs/apps/build/app-surfaces/app-home and
+  https://shopify.dev/docs/api/app-bridge-library (`shopify.idToken()`, `shopify-api-key` meta).
+- S6 Iframe protection: https://shopify.dev/docs/apps/build/security/set-up-iframe-protection
+  (`Content-Security-Policy: frame-ancestors https://<shop>.myshopify.com https://admin.shopify.com;`
+  on every HTML route, per shop; a missing or wildcard value fails review).
+- S7 Privacy law compliance: https://shopify.dev/docs/apps/build/compliance/privacy-law-compliance
+  (`customers/data_request`, `customers/redact`, `shop/redact`, set under `compliance_topics`).
+- S8 Webhooks: https://shopify.dev/docs/apps/build/webhooks/subscribe/get-started and
+  https://shopify.dev/docs/apps/build/webhooks/subscribe/https and
+  https://shopify.dev/docs/apps/build/webhooks/verify-deliveries
+  (`X-Shopify-Hmac-SHA256` is base64 HMAC-SHA256 of the raw body keyed with the client secret;
+  `X-Shopify-Webhook-Id` for deduplication; answer 200 within 5 seconds; wrong HMAC is 401).
+- S9 Composio create connected account (Shopify): https://docs.composio.dev/ (auth config and
+  connected-account reference read 2026-11-07).
+
+- **C-18 Why a native tier.** Composio's Shopify auth config has no field that asks Shopify
+  for `expiring=1`, and Composio does not refresh a token it did not issue as expiring (S9,
+  checked against the toolkit's auth detail). A public app whose stored tokens do not expire is
+  refused by S1 3.1.2 and S2. So the listed app must hold its own expiring offline tokens:
+  the worker does the token exchange and the refresh itself. Findings to prove on preview
+  before the listing is called ready: connect the preview app through Composio once and read
+  the account's token **field names only** (never values) to record whether `refresh_token` and
+  `expires_in` are present; the result goes in the proof file and the Known limits.
+  - The `composio` tier stays for toolkits other than Shopify, and for Shopify only while no
+    native config exists (`SHOPIFY_CLIENT_ID` unset in the worker). With a native config the
+    Shopify catalog entry is served natively; the Connections card sends the owner to the
+    Shopify App Store, and no screen asks for a shop domain (S1 2.3.1). Existing `composio`
+    Shopify rows keep working and are disconnected by the owner (C-13); the Zero Sum test
+    store relinks through the claim flow (C-21).
+  - Why not Composio's `BEARER_TOKEN` import: Composio would hold our token and not refresh it,
+    and order data would still pass through a subprocessor.
+- **C-19 App configuration.** One app per environment: preview `ZS Business Connections`
+  (app id `444938846209`, tested on the dev store `zs-hub-test-store`) and production (`adc380d0312483cd9ab82a09d9f0e267`).
+  Config files `shopify/preview/shopify.app.toml` and `shopify/production/shopify.app.toml`
+  (no secrets; the client id is public): `embedded = true`; `application_url` is
+  `<dashboard origin>/shopify/app`; `[access_scopes] scopes = "read_orders"` and
+  `use_legacy_install_flow = false` (managed installation, S4); `[webhooks] api_version` pinned
+  (checked by a live call in the build); `[[webhooks.subscriptions]]` for `app/uninstalled`
+  and the three `compliance_topics`, `uri` = the worker's `/webhooks/shopify`. The
+  minimum scope is `read_orders` (S1 3.2): not `read_all_orders`, and no customer scope. The
+  app's protected customer data Level 1 stays as in C-17. The release is made by the Mac
+  (Shopify CLI `shopify app deploy` or the Dev Dashboard) and recorded in the proof file.
+- **C-20 The embedded page and session tokens.** Route `/shopify/app` in the dashboard.
+  - First script is App Bridge `https://cdn.shopify.com/shopifycloud/app-bridge.js` with
+    `<meta name="shopify-api-key">` (S1 2.2.3, S5). The client id is public config read at
+    request time (`SHOPIFY_API_KEY`), not baked in.
+  - The page sets and reads no cookie. After load it asks `shopify.idToken()`, and sends
+    that token as `Authorization: Bearer` to the dashboard's `/api/shopify/*` handlers, which
+    relay it to the API's public `/v1/shopify/embedded/*` routes (no session, no cookies, no
+    CORS). A fresh token is requested per call (one-minute life). A `401` with
+    `X-Shopify-Retry-Invalid-Session-Request` makes the page retry once with a new token.
+  - Nothing is shown or enabled before `open` (C-21) returns: the page renders a neutral
+    loading state, authenticates (token exchange happens there), then renders (S1 2.3.2).
+    Outside the Shopify admin (no valid `shop` and `host`) the page shows a plain message and
+    no actions.
+  - It shows: the connection status (not linked; linked to `<business name>` with
+    `Connected`, `Needs attention` or `Disconnected`), a link "Open ZS Hub" to the hub's sign-in
+    page opened in a new top-level tab, and, when not linked, the two choices of C-21.
+  - Headers (S6): every response of `/shopify/*` carries
+    `Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;
+    base-uri 'self'; object-src 'none'` with `<shop>` the `shop` query value only when it
+    matches `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`; otherwise `frame-ancestors 'none'`.
+    The route has no `X-Frame-Options`. Every other dashboard route keeps `'none'` and `DENY`.
+    The proxy sets it per request (`proxy.ts`), so the value is never static or wildcard.
+- **C-21 Install-to-tenant binding with no operator.** The worker holds the Shopify client
+  secret, the token seal key and the Supabase service key; the API and the dashboard hold
+  none of them. New signed worker operations (same signing, nonce and deadlines as C-3):
+  `shopify_open`, `shopify_create_hub`, `shopify_redeem_claim`, `claim_start`,
+  `claim_status`, `claim_confirm`, `claim_cancel`. Public ID-token routes are `POST
+  /v1/shopify/embedded/open|create-hub|claim`; owner routes are `POST /v1/shopify/claims`,
+  `GET /v1/shopify/claims/current`, `POST /v1/shopify/claims/:id/confirm` and `DELETE
+  /v1/shopify/claims/:id` (permission `integrations`, member role `owner`).
+  - **ID token check** (worker, S3): HS256 against `SHOPIFY_CLIENT_SECRET` (and the previous
+    one during a rotation), `aud` equals the client id, `exp` and `nbf` hold with 10 s skew,
+    `dest` is `https://<shop>.myshopify.com` and `iss` is `dest + "/admin"`, `sub` present.
+    Any other algorithm or a missing field is refused. Operations that change state also take
+    the token's `jti` once (`connector_request_nonces`, expiry = `exp`), so a stolen token
+    cannot be replayed for a second change.
+  - **`shopify_open`.** Verifies the token. If no live install exists (or the stored access
+    token cannot be used and the refresh fails), runs a token exchange for an **expiring
+    offline** token with `expiring=1` (C-22), reads `shop { id name myshopifyDomain }` with
+    it, and upserts `shopify_installs`. Answers `{ shop: {domain, name}, link: none | linked,
+    businessName?, connection?: active | reauthorize | disconnected }`. It is the single
+    authentication step before any UI (S1 2.3.2, 2.3.4 on reinstall: an uninstalled row is
+    revived by a new exchange).
+  - **`shopify_create_hub` (new tenant).** Requires a live install with no binding, and an
+    **online** token exchange whose `associated_user` has `account_owner = true` and
+    `email_verified = true` (only the store owner can create a hub). The staff email is the
+    owner. If that email already belongs to a hub user, the answer is `email_has_hub` and
+    the page offers the claim flow instead (one tenant claim per user, `hub-access.md`). Else,
+    in order: Supabase Auth admin creates the user (idempotent by email, `app_metadata.tenant_id`
+    set by the existing provisioning code), the tenant, owner member and default records are
+    created by the existing tenant-create code with the business name from the shop name,
+    `setShopifyBilling` binds `billing_provider = 'shopify'` to the shop GID and domain, and a
+    `connections` row is inserted with `tier = 'native'`, `status = 'active'`,
+    `external_account_id` = shop GID. Database writes are one service-role transaction that names
+    the tenant in every statement; a failure after the Auth user was made leaves a user with no
+    tenant, which the retry reuses (idempotent), never a half-bound tenant. The page then says
+    "Sign in to the hub with <email>"; sign-in is the existing email link (no password, nothing
+    is emailed from this flow).
+  - **Claim (existing tenant), three steps.** (1) An owner in the hub starts a claim:
+    `claim_start` makes a code of 10 characters from a 32-letter alphabet (50 bits, CSPRNG),
+    stores only `HMAC-SHA256(code)` in `shopify_claims` (tenant table: `tenant_id`, `id`,
+    `created_by` member, `code_hash`, `status` `open | redeemed | confirmed | cancelled |
+    expired`, `shop_id`, `shop_domain`, `shop_name`, `expires_at` 15 minutes, `redeemed_at`,
+    `confirmed_at`), shows the code once, and allows one open claim per tenant. (2) In the
+    embedded page the store owner (`account_owner`, `email_verified`, online exchange) types
+    the code; `shopify_redeem_claim` finds the open claim by hash, records the shop on it
+    (`redeemed`) and binds nothing. Five wrong codes for one install lock redeeming for an hour
+    (`claim_failures`, `claim_locked_until`). (3) The hub owner sees "Link store `<shop name>`
+    (`<domain>`) to this business?" with the shop domain, and only their Confirm binds:
+    `claim_confirm` re-checks, in one transaction, that the claim is `redeemed`, unexpired and
+    this tenant's, that the install is live and unbound, and that the tenant has no active
+    Shopify connection; then inserts the `native` connection and calls `setShopifyBilling`.
+    A leaked code therefore cannot bind a store to a business: it only creates a pending claim
+    the owner sees and can cancel.
+  - **Isolation.** A shop is bound to one tenant (partial unique index on
+    `connections(external_account_id)` where `tier = 'native'` and the status is not
+    `disconnected`); a tenant has one live Shopify row (C-7). Claims are tenant rows with
+    forced RLS and no runtime grants (only the worker reads or writes them). Denial tests run
+    under the runtime role: tenant B cannot read, confirm or cancel tenant A's claim, a code
+    started by A never binds to B, and two tenants confirming claims for one shop at once end
+    with exactly one binding.
+- **C-22 Tokens: expiring offline, sealed, refreshed.** Table `shopify_installs` (worker-only:
+  no tenant column, `REVOKE ALL` from every role but the worker, forced RLS, no policy):
+  `shop_id` (GID) primary key, `shop_domain` unique, `shop_name`, `scopes`, `status` (`live`,
+  `needs_reauth`, `uninstalled`), `access_sealed`, `refresh_sealed`, `seal_key_id`,
+  `access_expires_at`, `refresh_expires_at`, `claim_failures`, `claim_locked_until`,
+  `claimed_until` (the lease), `installed_at`, `uninstalled_at`, `created_at`, `updated_at`.
+  - **Sealing.** AES-256-GCM, a random 96-bit nonce per write, key from `SHOPIFY_TOKEN_SEAL_KEY`
+    (32 bytes, base64; `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS` opens old rows during a rotation), the
+    authenticated data is `shop_id|column|seal_key_id`, so a sealed value copied to another
+    row or column fails to open. Tokens are never logged, never returned, never in an error.
+  - **Use.** A run reads the install, and if the access token expires within 5 minutes it
+    refreshes first, under the row lease (one short conditional UPDATE; S2 forbids a refresh
+    and an exchange together for one store). It sends `X-Shopify-Access-Token` to the Admin
+    GraphQL endpoint of the pinned API version.
+  - **Refresh.** `grant_type=refresh_token` at `https://<shop>/admin/oauth/access_token` with
+    the client id and secret. The new pair is written in one statement before the old
+    refresh token is dropped (Shopify keeps the presented token usable until the new one is
+    used, so a lost response is retried with the same one). `401 invalid_request`, or an
+    expired refresh token, sets `needs_reauth` and the connection `reauthorize` with reason
+    `auth_error`; the next `shopify_open` (the merchant opening the app) re-runs the exchange
+    and restores `live`.
+  - **Pass.** The cron pass (C-9) also refreshes every live install whose refresh token has
+    less than 30 days left or whose access token expired more than a day ago (a dormant store
+    stays under the 90 day limit), at most the pass call cap per run.
+  - **Proof.** The preview test reads the stored row's expiry fields and shows
+    `refresh_expires_at` about 90 days out and `access_expires_at` about an hour out, then forces a
+    refresh and shows both rotated (S1 3.1.2 evidence). Test `fetch` is injected.
+- **C-23 Reading orders natively.** `run` on a `native` connection uses the Admin GraphQL API
+  (S1 2.2.4), never REST. The catalog tools keep their names and outputs: `shopify_list_orders`
+  and `shopify_get_order` map the GraphQL order into the REST-shaped record the existing
+  projection already trims (C-6), asking only for the fields the projection keeps and for the
+  customer **id only** (no protected field is requested, so Level 1 access never trips an
+  access error). A `401` or `403` from Shopify marks the install `needs_reauth` (C-8 `auth_error`
+  path); `429` or a `THROTTLED` error is `provider_rate_limited`. Output size, schema and
+  disclosure rules are C-6 and C-11 unchanged.
+- **C-24 Webhooks and compliance.** One public route in the workers project:
+  `POST /webhooks/shopify`.
+  - Reads the raw body (capped at 64 KiB) **before** any parse, computes the base64
+    HMAC-SHA256 with `SHOPIFY_CLIENT_SECRET` (the previous secret also accepted during a
+    rotation), compares in constant time on equal-length buffers, and answers `401` with no
+    body on any mismatch or missing header (S8). Then it requires `X-Shopify-Topic`,
+    `X-Shopify-Shop-Domain` (shop regex above) and `X-Shopify-Webhook-Id`.
+  - Deduplication: `shopify_webhook_events` (`webhook_id` primary key, `topic`, `shop_domain`,
+    `received_at`) takes the id first; a repeat answers 200 and does nothing. Rows older than 30
+    days are removed by the pass. Each handler is one short transaction, so the 200 is sent
+    well inside 5 seconds. An unknown topic is 200 and ignored (never retried forever).
+  - `app/uninstalled`: the install becomes `uninstalled`, both sealed tokens are nulled, the
+    shop's `native` connection becomes `disconnected` with `revoke_outcome = 'revoked'`
+    (Shopify already revoked the token), and `account_label` is cleared (C-7). The tenant and its
+    CRM data stay: they belong to the business, not to the Shopify store. Billing follows the
+    subscription state the Shopify billing runner already reads (PL-17), not this event.
+  - `customers/data_request` and `customers/redact`: the hub keeps no Shopify customer data
+    (C-14: no tool arguments, no output, and `customer` only as an id in a live read). The
+    handler records the event, answers 200, and the privacy policy page says so. If this ever
+    changes, this rule changes first.
+  - `shop/redact` (48 hours after uninstall): deletes the shop's `shopify_installs` row, its
+    claims and its webhook events (but not the current one), and clears any remaining shop
+    name, domain and ID from `connections` for that shop. A shop that is live is not redacted
+    (the event is ignored and logged for the operator: Shopify sends it only after an uninstall).
+  - Logs carry topic, shop domain, our code and timing. Never a body, a header or a token.
+- **C-25 Compliance matrix (the proof file).** `SHOPIFY-LISTING-READY.md` lists every
+  S1 item that applies as Met or Open with evidence: 1.1.1 (page works with cookies blocked:
+  headless run with third-party cookies off), 1.2.1 (Track J), 2.2.1 to 2.2.4 (Admin GraphQL
+  use, embedded page, App Bridge first script), 2.3.1 (no typed shop in the install flow; the
+  hub card), 2.3.2 and 2.3.4 (authenticate before UI; reinstall revives), 3.1.1 (TLS on
+  every host), 3.1.2 (C-22 proof), 3.2 (scope `read_orders` only), S6 (CSP header per shop),
+  S7 and S8 (HMAC 401 on bad signature, 200 on good, dedupe, all three compliance topics and the
+  uninstall hook). Items that need money or a human at Shopify (the registration fee, the
+  listing text review, screencast) stay Open and named.
+- **C-26 Migration and wiring (revision 4).** One forward migration: creates
+  `shopify_installs`, `shopify_claims` and `shopify_webhook_events` (grants as C-22, C-21 and
+  C-24; claims are a tenant table with the standard test generator); relaxes
+  `connections_tier` to `composio` or `native` and the `composio_account_id` requirement to
+  `composio` rows only; adds the partial unique index of C-21. Contract schemas, the seven
+  operations, the worker env (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`,
+  `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`,
+  `SHOPIFY_API_VERSION`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `HUB_SIGN_IN_URL`), the
+  dashboard env (`SHOPIFY_API_KEY`) and the `shopify/*/shopify.app.toml` files are part of the
+  change. Config parsing is strict: a partial Shopify config disables the native tier
+  and fails the worker's start-up check with a named variable, never half-starts it.
+- **C-27 Tests (revision 4).** An in-process fake Shopify (token endpoint with exchange,
+  refresh and failure modes; GraphQL; signed ID tokens and webhooks). Cases: ID token
+  forgery (wrong alg, `none`, wrong `aud`, `exp`, `nbf`, host mismatch); exchange sends
+  `expiring=1`; sealed columns do not open on another row; refresh rotation, lost response,
+  concurrent refresh and exchange (lease), `invalid_request`; create-hub for owner and for a
+  non-owner, `email_has_hub`; claim lifecycle, wrong-code lockout, leaked-code cannot bind
+  without owner confirm, expiry, one open claim; the two-tenant denial and concurrent-binding
+  cases above; billing provider is `shopify` after each bind; webhook HMAC good and bad
+  (401), repeats, all topics, uninstall wipes tokens, redact removes the shop rows, a live
+  shop is not redacted; CSP value per shop and `'none'` for a bad shop; the page sets no cookie.
+
+
 ## Acceptance
 
 - On preview and on production, an owner connects Zero Sum's test store end to end through the
@@ -621,6 +870,11 @@ role for workers (all workers share one pattern today; Known limits).
   and runs are refused from `disconnecting` on.
 - Every C-15 case passes locally and in CI against the fake.
 - The API project's environment holds no `COMPOSIO_API_KEY`; the worker project's does.
+- Revision 4: on the preview app and the dev store `zs-hub-test-store`, an App Store style
+  install opens the embedded page, which authenticates by session token, creates or claims a
+  hub, shows its status and a hub link; the stored token row shows a 90 day refresh token and
+  an hour access token, a forced refresh rotates both; uninstall wipes the tokens and flips the
+  connection; the three compliance webhooks and a bad HMAC behave as C-24; every C-27 case passes.
 
 ## Known limits (revision 2)
 
