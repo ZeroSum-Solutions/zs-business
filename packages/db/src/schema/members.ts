@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, pgEnum, pgTable, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { check, foreignKey, pgEnum, pgTable, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { tenants } from "./index.js";
 import { tenantPolicy } from "./tenant-policy.js";
 
@@ -11,7 +11,7 @@ export const memberRole = pgEnum("member_role", ["owner", "staff"]);
 export const tenantMembers = pgTable(
   "tenant_members",
   {
-    tenantId: uuid("tenant_id").notNull().references(() => tenants.tenantId),
+    tenantId: uuid("tenant_id").notNull(),
     id: uuid("id").notNull(),
     email: text("email").notNull(),
     /** NULL while the invite is pending; only the service role binds it. */
@@ -23,6 +23,7 @@ export const tenantMembers = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
+    foreignKey({ name: "tenant_members_tenant_id_fkey", columns: [table.tenantId], foreignColumns: [tenants.tenantId] }),
     check("tenant_members_email_canonical",
       sql`char_length(${table.email}) BETWEEN 3 AND 254 AND ${table.email} = lower(${table.email})`),
     unique("tenant_members_tenant_email").on(table.tenantId, table.email),

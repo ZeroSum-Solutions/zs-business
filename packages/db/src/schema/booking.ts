@@ -19,15 +19,19 @@ import { tenantPolicy } from "./tenant-policy.js";
 // Mirrors supabase/migrations/20261017170000_booking.sql. The SQL migration is the
 // authority: it also FORCEs RLS, sets grants, installs the JSON validation functions and
 // declares bookings_resource_occupied_excl, which Drizzle cannot express (an EXCLUDE
-// constraint). The foreign keys from bookings.intake_item_id and booking_external_blocks.connection_id
-// point at tables this package does not mirror, so they are not declared here either.
+// constraint). The foreign keys bookings_intake_item_fk (to intake_items) and
+// booking_external_blocks_connection_fk (to calendar_connections) point at tables this package
+// does not mirror, so Drizzle cannot declare them; test/drizzle-drift.test.ts pins both by name and
+// definition instead. Nothing in the app imports these tables (runtime code uses raw SQL through
+// pg), so a column added here cannot reach an API response, log or MCP output; select explicit
+// columns if you start using them.
 // test/drizzle-drift.test.ts compares everything declared here with the migrated database.
 const instant = (name: string) => timestamp(name, { withTimezone: true, mode: "string" });
 
 export const bookingResources = pgTable(
   "booking_resources",
   {
-    tenantId: uuid("tenant_id").notNull().references(() => tenants.tenantId),
+    tenantId: uuid("tenant_id").notNull(),
     id: uuid("id").notNull(),
     timeZone: text("time_zone").notNull().default("UTC"),
     weekly: jsonb("weekly").$type<WeeklyAvailabilityRule[]>().notNull().default(sql`'[]'::jsonb`),
@@ -42,6 +46,7 @@ export const bookingResources = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
+    foreignKey({ name: "booking_resources_tenant_id_fkey", columns: [table.tenantId], foreignColumns: [tenants.tenantId] }),
     check("booking_resources_name_length", sql`${table.name} IS NULL OR char_length(${table.name}) BETWEEN 1 AND 200`),
     check("booking_resources_time_zone_shape",
       sql`${table.timeZone} = 'UTC' OR (length(${table.timeZone}) BETWEEN 3 AND 100 AND position('/' IN ${table.timeZone}) > 0)`),
@@ -60,7 +65,7 @@ export const bookingResources = pgTable(
 export const bookings = pgTable(
   "bookings",
   {
-    tenantId: uuid("tenant_id").notNull().references(() => tenants.tenantId),
+    tenantId: uuid("tenant_id").notNull(),
     id: uuid("id").notNull(),
     resourceId: uuid("resource_id").notNull(),
     startsAt: instant("starts_at").notNull(),
@@ -76,10 +81,14 @@ export const bookings = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
+    foreignKey({ name: "bookings_tenant_id_fkey", columns: [table.tenantId], foreignColumns: [tenants.tenantId] }),
     foreignKey({
+      name: "bookings_tenant_id_resource_id_fkey",
       columns: [table.tenantId, table.resourceId],
       foreignColumns: [bookingResources.tenantId, bookingResources.id],
     }),
+    check("bookings_source", sql`${table.source} IN ('owner', 'website')`),
+    check("bookings_source_intake", sql`(${table.source} = 'website') = (${table.intakeItemId} IS NOT NULL)`),
     check("bookings_positive_range", sql`${table.startsAt} < ${table.endsAt}`),
     check("bookings_buffers",
       sql`${table.bufferBeforeMinutes} BETWEEN 0 AND 1440 AND ${table.bufferAfterMinutes} BETWEEN 0 AND 1440`),
@@ -99,7 +108,7 @@ export const bookings = pgTable(
 export const bookingExternalBlocks = pgTable(
   "booking_external_blocks",
   {
-    tenantId: uuid("tenant_id").notNull().references(() => tenants.tenantId),
+    tenantId: uuid("tenant_id").notNull(),
     id: uuid("id").notNull(),
     resourceId: uuid("resource_id").notNull(),
     startsAt: instant("starts_at").notNull(),
@@ -111,10 +120,14 @@ export const bookingExternalBlocks = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
+    foreignKey({ name: "booking_external_blocks_tenant_id_fkey", columns: [table.tenantId], foreignColumns: [tenants.tenantId] }),
     foreignKey({
+      name: "booking_external_blocks_tenant_id_resource_id_fkey",
       columns: [table.tenantId, table.resourceId],
       foreignColumns: [bookingResources.tenantId, bookingResources.id],
     }),
+    check("booking_external_blocks_connection_pair", sql`(${table.connectionId} IS NULL) = (${table.externalId} IS NULL)`),
+    check("booking_external_blocks_external_length", sql`char_length(${table.externalId}) BETWEEN 1 AND 1024`),
     check("booking_external_blocks_positive_range", sql`${table.startsAt} < ${table.endsAt}`),
     check("booking_external_blocks_source_nonempty", sql`length(${table.source}) > 0`),
     uniqueIndex("booking_external_blocks_connection_event").on(table.tenantId, table.connectionId, table.externalId)
