@@ -923,6 +923,33 @@ describe("shopify_orders: recent orders for the embedded page (C-30)", () => {
   });
 });
 
+describe("the pass sweeps old rows (C-24)", () => {
+  const DAYS = 24 * 3_600_000;
+  const seedClaim = (tenantId: string, status: string, expiresAt: number, hash: string) => database.pool.query(
+    `INSERT INTO shopify_claims (tenant_id,id,code_hash,status,shop_id,shop_domain,shop_name,expires_at,redeemed_at,created_at,updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'Store',$7,$8,$9,$9)`,
+    [tenantId, randomUUID(), hash.repeat(64), status, SHOP_GID, SHOP, new Date(expiresAt), status === "open" ? null : new Date(T0 - 1000), new Date(T0 - 3_600_000)]);
+  const claimStatuses = async () => (await database.pool.query("SELECT tenant_id, status FROM shopify_claims ORDER BY status")).rows.map((r) => `${r.tenant_id === a.tenantId ? "a" : "b"}:${r.status}`);
+
+  it("removes webhook ids older than 30 days, keeps fresh ones, drops stale locks and expires lapsed claims", async () => {
+    const event = (id: string, ageMs: number) => database.pool.query(
+      "INSERT INTO shopify_webhook_events (webhook_id, topic, shop_domain, received_at) VALUES ($1,'app/uninstalled',$2,$3)", [id, SHOP, new Date(T0 - ageMs)]);
+    await event("old", 30 * DAYS + 1000);
+    await event("fresh", 29 * DAYS);
+    await database.pool.query("INSERT INTO shopify_locks (shop_domain, held_until, holder) VALUES ($1,$2,$3), ($4,$5,$3)", [SHOP, new Date(T0 - 1000), randomUUID(), "other.myshopify.com", new Date(T0 + 30_000)]);
+    await seedClaim(a.tenantId, "redeemed", T0 - 1000, "a");
+    await seedClaim(a.tenantId, "confirmed", T0 - 1000, "c");
+    await seedClaim(b.tenantId, "open", T0 + 60_000, "b");
+
+    await worker.pass({ deadline: clock.ms + 20_000 });
+
+    expect((await database.pool.query("SELECT webhook_id FROM shopify_webhook_events ORDER BY webhook_id")).rows.map((r) => r.webhook_id)).toEqual(["fresh"]);
+    expect((await database.pool.query("SELECT shop_domain FROM shopify_locks")).rows.map((r) => r.shop_domain)).toEqual(["other.myshopify.com"]);
+    // The lapsed redeemed claim expires; a confirmed one and a live open one are left alone.
+    expect(await claimStatuses()).toEqual(["a:confirmed", "a:expired", "b:open"]);
+  });
+});
+
 describe("the Composio worker hands native rows over (C-26)", () => {
   it("run, disconnect and the pass treat a native row as native and never ask Composio", async () => {
     await worker.open({ idToken: token() });
