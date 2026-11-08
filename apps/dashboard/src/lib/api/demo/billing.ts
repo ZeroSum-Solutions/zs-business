@@ -1,8 +1,8 @@
 /**
- * The demo Hub plan (plans.md PL-7): a Studio plan in its trial, with the real catalog. Demo mode
- * never reaches Stripe, so Checkout and the Portal are off and say so.
+ * The demo Hub plan (plans.md PL-7): a Studio plan in its trial, with the real catalog, and a demo
+ * wallet (delivery.md D-4). Demo mode never reaches Stripe, so Checkout and the Portal are off and say so.
  */
-import { EXTRA_CONNECTION_PRICE, PLAN_CATALOG, type BillingPlan, type PlanCatalogEntry } from "@zs/contracts";
+import { EXTRA_CONNECTION_PRICE, PLAN_CATALOG, type BillingPlan, type PlanCatalogEntry, type WalletSummary } from "@zs/contracts";
 import { ApiError } from "../errors";
 import type { BillingApi } from "../types";
 import type { DemoClock } from "./adapter";
@@ -42,8 +42,11 @@ export function createDemoBilling(options: { clock?: DemoClock; latencyMs?: numb
     shopifyManageUrl: null,
   });
 
+  const wallet = (): WalletSummary => ({ currency: "usd", balance: 4118, reserved: 250, available: 3868 });
+
   return {
     async getBillingPlan() { await wait(); return plan(); },
+    async getWallet() { await wait(); return wallet(); },
     async startPlanCheckout() { await wait(); throw new ApiError("not_found", DEMO_PLAN_OFF, 404, "NotFound"); },
     async openBillingPortal() { await wait(); throw new ApiError("not_found", DEMO_PLAN_OFF, 404, "NotFound"); },
   };

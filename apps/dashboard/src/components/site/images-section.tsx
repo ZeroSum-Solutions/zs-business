@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, Tray, TrayBody, TrayHeader, TrayTitle } from "@/components/ui/card";
 import { Label, Select, Textarea } from "@/components/ui/input";
-import { DisabledReason } from "@/components/ui/sample";
+import { DisabledReason } from "@/components/ui/disabled-reason";
 import { EmptyState, ErrorNote, LoadingRows, Skeleton } from "@/components/ui/states";
 import { useClearToasts, useToast } from "@/components/ui/toast";
 import { isApiError } from "@/lib/api";

@@ -7,7 +7,7 @@ import type { BillingPlan, HubPlan, PlanInterval, PlanStatus } from "@zs/contrac
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { DisabledReason } from "@/components/ui/sample";
+import { DisabledReason } from "@/components/ui/disabled-reason";
 import { Segmented } from "@/components/ui/segmented";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { ApiError } from "@/lib/api";

@@ -76,8 +76,6 @@ export const keys = {
   contactEnrichment: (id: string) => ["crm", "contact", id, "enrichment"] as const,
   /** The business's company-detail proposals waiting for an owner (enrichment.md E-14, E-17). */
   enrichmentProposals: ["crm", "enrichment", "proposals"] as const,
-  usage: ["ws", "usage"] as const,
-  checklist: ["ws", "checklist"] as const,
   sites: ["sites", "list"] as const,
   siteReleases: (siteId: string) => ["sites", "releases", siteId] as const,
   siteRelease: (siteId: string, releaseId: string) => ["sites", "release", siteId, releaseId] as const,
@@ -95,7 +93,6 @@ export const keys = {
    * never stands for a newer one.
    */
   siteEdge: (siteId: string, pointerVersion: number) => ["siteEdge", siteId, pointerVersion] as const,
-  connections: ["ws", "connections"] as const,
   /** Google Calendar connections, every resource's (google-calendar.md G-5). */
   calendarConnections: ["calendarSync", "connections"] as const,
   /** The Google grant waiting in this browser for the owner to confirm (G-2). */
@@ -107,6 +104,8 @@ export const keys = {
   /** The open claim that links an App Store install to this hub (connections.md C-22). */
   shopifyClaim: ["managedConnections", "claim"] as const,
   plan: ["ws", "plan"] as const,
+  /** The prepaid wallet (delivery.md D-4). */
+  wallet: ["ws", "wallet"] as const,
   /** Product photos and their edits (image-port.md IM-22). */
   mediaAssets: ["media", "assets"] as const,
   imageVariants: ["media", "variants"] as const,
@@ -343,16 +342,11 @@ export function useResults(query: HomeResultsQuery | null) {
   });
 }
 
-export function useUsage() {
+/** The prepaid wallet (delivery.md D-4). Owners only: the API needs `billing`, so staff never ask. */
+export function useWallet(canRead: boolean) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.usage, queryFn: () => api.getUsage() });
-}
-
-export function useChecklist() {
-  const api = useApi();
-  const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.checklist, queryFn: () => api.getChecklist() });
+  return useQuery({ enabled: enabled && canRead, queryKey: keys.wallet, queryFn: ({ signal }) => api.getWallet({ signal }) });
 }
 
 /** The inbox list, a page at a time by keyset cursor (inbox-home.md I-8). */
@@ -629,12 +623,6 @@ export function useSiteEdge(siteId: string | null, pointerVersion: number, enabl
     staleTime: Infinity,
     retry: false,
   });
-}
-
-export function useConnections() {
-  const api = useApi();
-  const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.connections, queryFn: () => api.listConnections() });
 }
 
 /** How often the connections are read again while the calendar worker has something to finish. */

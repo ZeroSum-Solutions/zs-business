@@ -115,9 +115,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </main>
 
       <footer className="pb-[calc(var(--tabbar-height)+env(safe-area-inset-bottom)+24px)] text-center lg:pb-10">
-        <p className="text-caption text-meta" data-testid="sample-note">
-          {mode === "demo" ? "Sample data. Changes reset on reload." : "Some areas show sample data until their API ships."}
-        </p>
+        {mode === "demo" ? <p className="text-caption text-meta" data-testid="demo-note">Demo data. Changes reset on reload.</p> : null}
       </footer>
 
       {/* Phone: a floating ink dock, 16px off the bottom edge. */}

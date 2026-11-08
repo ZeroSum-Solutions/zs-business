@@ -182,9 +182,9 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
   live build started without it, answers every page and `/api` request with a 500 that
   names the mismatch, and logs it once at start (`src/instrumentation.ts`). Rebuild with
   the same `ZS_API_URL` setting the server runs with.
-- Live mode labels every area that still reads the demo workspace with a "Sample data"
-  badge, and disables its writes (cancel plan, settings) with the reason shown as visible text
-  (`src/components/ui/sample.tsx`). Nothing pretends to save.
+- Live mode reads only the API (`createApi` returns the HTTP client alone): no area falls back to
+  demo data, and nothing says "sample". A control that is off shows its reason as visible text
+  (`src/components/ui/disabled-reason.tsx`). Nothing pretends to save.
 - Errors: the demo adapter parses requests with the same `@zs/contracts` schemas and throws
   the error the HTTP client would build from the API's body: the fixed message per code,
   allowlisted conflict reasons, and 403 (never 404) for an unknown calendar, deal or stage.
@@ -300,12 +300,14 @@ page in the browser and exposes `rollBackElsewhere()`, `setSiteEdgeDown()`,
 `delayNextSiteWrite()` and `loseNextSiteAnswer()` on `window.__zsDemo` for tests.
 `e2e:live` runs the API with `SITES_STORE=memory`.
 
-`TODO(api)`: usage, the connections checklist and plan have no API yet. Live mode still
-reads them from the demo workspace. Connections do have one, for two toolkits: Google
-Calendar (`google-calendar.md`) and Shopify (`connections.md`, the managed tier). The
-Connections page shows those two in live mode and no sample accounts; the demo adapter
-(`src/lib/api/demo/managed-connections.ts`) keeps the Shopify rules, one live store per
-toolkit included.
+Home's Wallet card reads `GET /v1/wallet` (`delivery.md` D-4; owners only, the one wallet
+route the proxy forwards) and shows the available balance and what is held. There is no usage
+route, so Home shows no usage meters. Home's Connections card reads the same two lists as the
+Connections page: Google Calendar (`google-calendar.md` G-5) and Shopify (`connections.md`
+C-13, owners only), through `src/lib/connection-checklist.ts`. The Connections page shows only
+those two, in live and demo mode; the demo adapter (`src/lib/api/demo/managed-connections.ts`)
+keeps the Shopify rules, one live store per toolkit included. Settings has no notification
+switches: nothing sends them yet.
 
 Managed connections (Shopify). The list and the disconnect go through the generic
 `/api/v1` proxy. The connect flow has its own routes under `/api/connections`
