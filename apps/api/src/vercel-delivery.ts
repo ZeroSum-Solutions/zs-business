@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
+import { createCronAlertsForEnv } from "./cron-alerts.js";
 import { assertDeliveryCronFits, parseDeliveryEnv } from "./delivery/config.js";
 import { cronRoutes } from "./delivery/cron.js";
 import { startDeliveryRunner } from "./delivery/start.js";
@@ -16,5 +17,6 @@ const runner = env.runner === null ? null : startDeliveryRunner(env.runner, { cl
 export default getRequestListener(cronRoutes({
   cronSecret: env.cronSecret,
   runner,
+  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock) }),
   onError: (error) => console.error("Delivery run failed", error),
 }).fetch);

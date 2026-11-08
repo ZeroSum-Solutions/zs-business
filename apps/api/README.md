@@ -614,6 +614,32 @@ signed attempt token and the browser key, both forwarded by the dashboard in hea
 URL. `invalid` is a 400; everything else is a 303 to `CONNECTIONS_RETURN_URL?connection=connected|confirm|pending|error`
 (with `&reason=` on error). All answers are `Cache-Control: no-store` with `Referrer-Policy: no-referrer`.
 
+## Response headers (`src/response-headers.ts`)
+
+One middleware, first in `createApp` and in every cron function's Hono app, sets two headers on every
+answer, errors and CORS preflights included, and only when the route did not set them:
+
+- `X-Content-Type-Options: nosniff` on every response.
+- `Cache-Control: no-store` on private paths: `/v1/*`, `/worker/v1/*`, `/browser-runner/v1/*`, `/mcp`, `/cron/*`,
+  `/internal/*`. Without it Vercel adds `public, max-age=0, must-revalidate` to an authenticated answer.
+
+Routes that chose their own cache header keep it: the booking script and style (`public, max-age=300`), the
+booking page, OAuth callbacks, unsubscribe and webhooks (`no-store` plus their own CSP and Referrer-Policy),
+media (`private, no-store`). `/healthz` and the public pages with no header of their own are left to the platform
+default, as before. `check:hosted` probes the headers on `/healthz` and `/v1`.
+
+## Cron failure alerts (`src/cron-alerts.ts`)
+
+A cron function that fails (503) writes a row to `cron_alerts` (migration `20261108300000_cron_alerts.sql`, a
+platform table the workers' service role alone can use), so a stopped job does not wait for someone to read Vercel
+logs. One row per job: a repeat failure raises `failure_count` and keeps `opened_at`; the next good run sets
+`resolved_at`; a later failure opens the row again. The error text keeps the class and message only, with URLs and
+key-shaped tokens replaced, cut to 500 characters. A write that fails (the database is the failure) goes to the
+operator log and never changes the cron's answer. Open alerts are `SELECT * FROM cron_alerts WHERE resolved_at IS
+NULL`, or `listOpenCronAlerts`; `check:hosted` fails while any is open. Each cron function writes through its own
+`*_DATABASE_URL` login, so no new variable is needed. Not covered: a function that dies before its handler runs
+(a bad environment at start-up) and a cron that Vercel never calls; those still show only in Vercel.
+
 ## Database pool and request limits
 
 `createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from

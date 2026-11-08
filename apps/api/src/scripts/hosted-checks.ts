@@ -226,7 +226,26 @@ try {
   await check("no scoped transaction failed its session reset", async () =>
     ({ ok: resetFailures.length === 0, detail: { transport, failures: resetFailures.length, first: resetFailures.slice(0, 3) } }));
 
+  // A failed cron run leaves an open row here (cron-alerts.ts); a table the migration has not made yet is not a failure.
+  await check("no cron job has an open failure alert", async () => {
+    const table = await service.query<{ present: string | null }>("SELECT to_regclass('public.cron_alerts') AS present");
+    if (table.rows[0]?.present == null) return { ok: true, detail: "cron_alerts is not migrated yet" };
+    const open = await service.query<{ job: string; failure_count: number; last_failed_at: Date; last_error: string }>(
+      "SELECT job, failure_count, last_failed_at, last_error FROM public.cron_alerts WHERE resolved_at IS NULL ORDER BY last_failed_at DESC");
+    return { ok: open.rows.length === 0, detail: open.rows.map((row) => ({ ...row, last_error: redactSecrets(row.last_error) })) };
+  });
+
   // --- HTTP API -------------------------------------------------------------------------
+  await check("API: every JSON answer has nosniff and /v1 answers are no-store", async () => {
+    const headers = async (path: string, token: string | null) => {
+      const response = await fetch(apiUrl + path, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      await response.arrayBuffer();
+      return { status: response.status, nosniff: response.headers.get("x-content-type-options"), cache: response.headers.get("cache-control") };
+    };
+    const seen = { healthz: await headers("/healthz", null), unauthenticated: await headers("/v1/crm/contacts", null), member: await headers("/v1/crm/contacts", tokenA) };
+    const ok = Object.values(seen).every((row) => row.nosniff === "nosniff") && seen.unauthenticated.cache === "no-store" && seen.member.cache === "no-store";
+    return { ok, detail: seen };
+  });
   const resources = await api("/v1/booking/resources", tokenA);
   const resourceId = (resources.body?.items as { id: string }[] | undefined)?.[0]?.id ?? "";
   const deals = await api("/v1/crm/deals?limit=1", tokenA);

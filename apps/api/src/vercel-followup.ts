@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
+import { createCronAlertsForEnv } from "./cron-alerts.js";
 import { parseFollowUpEnv } from "./followup/config.js";
 import { followUpCronRoutes } from "./followup/cron.js";
 import { startFollowUpRunner } from "./followup/start.js";
@@ -15,5 +16,6 @@ const runner = env.runner === null ? null : (await startFollowUpRunner(env.runne
 export default getRequestListener(followUpCronRoutes({
   cronSecret: env.cronSecret,
   runner,
+  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock) }),
   onError: (error) => console.error("Follow-up run failed", error),
 }).fetch);

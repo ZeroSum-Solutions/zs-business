@@ -4,6 +4,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { apiErrorBody } from "@zs/core";
+import type { CronAlerts } from "../cron-alerts.js";
+import { responseHeaders } from "../response-headers.js";
 import type { ScheduledFollowUps } from "./runner.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
@@ -13,8 +15,11 @@ export function followUpCronRoutes(config: {
   /** Null when FOLLOWUP_AGENT is off. */
   readonly runner: ScheduledFollowUps | null;
   readonly onError?: (error: unknown) => void;
+  /** Records a failed run as an alert and closes it on the next good run (cron-alerts.ts). */
+  readonly alerts?: CronAlerts;
 }) {
   const app = new Hono();
+  app.use("*", responseHeaders);
   app.get("/cron/followup", async (c) => {
     if (config.cronSecret === null) return c.json(apiErrorBody("NotFound", "Route not found"), 404);
     c.header("Cache-Control", "no-store");
@@ -23,13 +28,17 @@ export function followUpCronRoutes(config: {
     if (!timingSafeEqual(digest(given), digest(`Bearer ${config.cronSecret}`)))
       return c.json(apiErrorBody("Unauthorized", "Invalid cron credentials"), 401);
     if (!config.runner) return c.json({ ran: false, reason: "FOLLOWUP_AGENT is off" }, 200);
+    let result: object;
     try {
-      return c.json({ ran: true, ...(await config.runner.run()) }, 200);
+      result = await config.runner.run();
     } catch (error) {
       // Each tenant's run keeps what committed; the next call in the slot continues it.
       config.onError?.(error);
+      await config.alerts?.failed("followup", error);
       return c.json(apiErrorBody("Unavailable", "Follow-up run failed"), 503);
     }
+    await config.alerts?.succeeded("followup");
+    return c.json({ ran: true, ...result }, 200);
   });
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   return app;

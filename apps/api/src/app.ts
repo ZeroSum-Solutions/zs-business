@@ -32,6 +32,7 @@ import type { SiteObjectStore } from "@zs/contracts";
 import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import { createBookingLinkProvider, createTemplateSession, createTemplatedAgents, type SiteCompiler, type TemplatedAgentsConfig } from "@zs/core";
 import { Unauthenticated, type TokenVerifier } from "./auth.js";
+import { responseHeaders } from "./response-headers.js";
 import { activepiecesRoutes } from "./routes/activepieces.js";
 import { agentKindRoutes, followUpRoutes } from "./routes/agents.js";
 import { businessRoutes } from "./routes/business.js";
@@ -193,6 +194,8 @@ const HTTP_ERROR_CODES: Partial<Record<number, ApiErrorCode>> = {
 export function createApp(deps: AppDependencies) {
   const app = new Hono<AppEnv>();
   const origins = new Set(deps.config.allowedOrigins);
+  // First, so it also covers the CORS preflight, the 404 and every error the handlers below raise.
+  app.use("*", responseHeaders);
   app.use("*", cors({
     origin: (origin) => (origins.has(origin) ? origin : null),
     // Mcp-Protocol-Version: a browser-based MCP client sends it on every request after initialize.

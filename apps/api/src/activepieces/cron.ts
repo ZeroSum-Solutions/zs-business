@@ -4,6 +4,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { apiErrorBody } from "@zs/core";
+import type { CronAlerts } from "../cron-alerts.js";
+import { responseHeaders } from "../response-headers.js";
 import type { ActivepiecesRunner } from "./runner.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
@@ -13,8 +15,11 @@ export function activepiecesCronRoutes(config: {
   /** Null when ACTIVEPIECES_WEBHOOK_WORKER is off. */
   readonly runner: ActivepiecesRunner | null;
   readonly onError?: (error: unknown) => void;
+  /** Records a failed run as an alert and closes it on the next good run (cron-alerts.ts). */
+  readonly alerts?: CronAlerts;
 }) {
   const app = new Hono();
+  app.use("*", responseHeaders);
   app.get("/cron/activepieces", async (c) => {
     if (config.cronSecret === null) return c.json(apiErrorBody("NotFound", "Route not found"), 404);
     c.header("Cache-Control", "no-store");
@@ -23,13 +28,17 @@ export function activepiecesCronRoutes(config: {
     if (!timingSafeEqual(digest(given), digest(`Bearer ${config.cronSecret}`)))
       return c.json(apiErrorBody("Unauthorized", "Invalid cron credentials"), 401);
     if (!config.runner) return c.json({ ran: false, reason: "ACTIVEPIECES_WEBHOOK_WORKER is off" }, 200);
+    let result: object;
     try {
-      return c.json({ ran: true, ...(await config.runner.run()) }, 200);
+      result = await config.runner.run();
     } catch (error) {
       // Leases and the ingest marks make a failed run safe to repeat on the next schedule.
       config.onError?.(error);
+      await config.alerts?.failed("activepieces", error);
       return c.json(apiErrorBody("Unavailable", "Activepieces webhook run failed"), 503);
     }
+    await config.alerts?.succeeded("activepieces");
+    return c.json({ ran: true, ...result }, 200);
   });
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
   return app;
