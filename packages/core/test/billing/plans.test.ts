@@ -420,6 +420,46 @@ describe("applying plan events (PL-10)", () => {
       expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.resolved_at).not.toBeNull();
     });
 
+    it("a reconcile waits for the alert lock, so a hold committed meanwhile keeps the alert open", async () => {
+      const { tenantId, sub } = await holdTenant();
+      await worker().runOnce();
+      const other = await b.tenant();
+      const otherSub = stripeId("sub");
+      b.h.clock.advance(1_000);
+      const fixed = subscription({ id: sub.id, customer: sub.customer, tenantId, status: "active", at: b.h.clock.now(), plan: "pro" });
+      fake.subscriptions.set(sub.id, fixed);
+      await b.deliver(subEvent("customer.subscription.updated", fixed));
+      // Client one holds the alert lock, as a concurrent open does, and commits a new hold only after the reconcile is waiting.
+      let locked!: () => void;
+      let release!: () => void;
+      const lockTaken = new Promise<void>((resolve) => { locked = resolve; });
+      const mayCommit = new Promise<void>((resolve) => { release = resolve; });
+      const holder = b.h.service(async (tx) => {
+        await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('billing-plan-price', 0))");
+        locked();
+        await mayCommit;
+        const now = b.h.clock.now();
+        await tx.query(
+          `INSERT INTO plan_subscriptions (tenant_id, id, status, plan, plan_interval, started_at, status_since, created_at, updated_at)
+           VALUES ($1,$2,'active',NULL,NULL,$3,$3,$3,$3)`, [other, otherSub, now]);
+      });
+      await lockTaken;
+      const reconcile = worker().runOnce();
+      // The reconcile is blocked on the advisory lock: it cannot finish while client one holds it.
+      for (let i = 0; i < 100; i += 1) {
+        const waiting = await b.h.database.pool.query("SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted");
+        if (waiting.rowCount) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect((await b.h.database.pool.query("SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted")).rowCount).toBe(1);
+      release();
+      await holder;
+      expect((await reconcile).outcomes).toEqual({ plan_synced: 1 });
+      expect(await plan(tenantId)).toMatchObject({ plan: "pro" });
+      // A tenant is on hold, so the alert must still be open.
+      expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.resolved_at).toBeNull();
+    });
+
     it("a known key never opens an alert or a hold", async () => {
       await b.h.database.pool.query("DELETE FROM cron_alerts WHERE job='billing-plan-price'");
       const tenantId = await b.tenant();
