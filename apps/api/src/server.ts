@@ -79,6 +79,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
     ...(sites === undefined ? {} : { sites }),
     ...(images === undefined ? {} : { images }),
     ...(unsubscribe === undefined ? {} : { unsubscribe }),
+    ...(env.signInLimiterSecrets === null ? {} : { signInLimit: { secrets: env.signInLimiterSecrets, ...shared } }),
     ...(env.resendWebhook === null ? {} : {
       resendWebhook: {
         secrets: env.resendWebhook.secrets,

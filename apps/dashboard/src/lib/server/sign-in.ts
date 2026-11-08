@@ -4,8 +4,11 @@
  * POST /api/sign-in takes `{ email, next? }` as JSON from this origin and asks Supabase to
  * email a sign-in link. It never creates an account (people join by invitation) and it
  * answers 204 whether or not the address has one, so it cannot be used to find out who
- * does. Every request is reserved against the caller's address and against everyone before
- * its body is read, so nobody can make the server send unlimited email.
+ * does not, and a Supabase rate-limit answer for an address looks the same (logged, not shown).
+ * Every request is charged to the caller's address and to everyone, in one call before its body
+ * is read, in the API's shared limiter (rate-limit.ts), so nobody can make the server send
+ * unlimited email however many instances serve. There is no per-email charge. When the limiter
+ * cannot answer, nothing is sent: 502 `unavailable`.
  *
  * GET /auth/confirm is where the link lands: it trades the link's one-time token hash for a
  * session (Supabase verifyOtp), sets the httpOnly session cookies and redirects to `next`.
@@ -21,16 +24,17 @@
  * a session cookie, again keeping it; 204 means there was no session to end or it was revoked.
  */
 import { isAuthRetryableFetchError } from "@supabase/supabase-js";
+import { contactEmailInputSchema } from "@zs/contracts";
 import { z } from "zod";
 import { safeNextUrl } from "../safe-next";
 import { readBoundedBody, type BodyTiming } from "./body";
 import { isHttps, jsonAnswer, publicOrigin, reportSetupProblem, trustProxyFromEnv, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
-import { clientAddress, type AttemptLimiter } from "./rate-limit";
+import { clientAddress, type Admission, type SignInLimiter } from "./rate-limit";
 import { authFor, expiredCookies, hasSessionCookie, lookupSession } from "./supabase";
 
 const SignInBody = z.object({
-  email: z.string().trim().toLowerCase().pipe(z.email().max(254)),
+  email: contactEmailInputSchema,
   next: z.string().max(512).optional(),
 });
 const MAX_BODY_BYTES = 2048;
@@ -44,11 +48,17 @@ function nextPath(next: string | null | undefined): string {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+/** The answer for a refused admission, or null when the request may go on. */
+function refusal(admission: Admission): Response | null {
+  if (admission.ok) return null;
+  if ("unavailable" in admission) return jsonAnswer(502, { error: "unavailable" });
+  return jsonAnswer(429, { error: "rate_limited" }, { "Retry-After": String(admission.retryAfterSeconds) });
+}
+
 export async function requestSignInLink(
   request: Request,
   setup: LiveSetup | null,
-  limiter: AttemptLimiter,
-  now: Date = new Date(),
+  limiter: SignInLimiter,
   timing: BodyTiming = {},
 ): Promise<Response> {
   // Demo mode has nothing to sign in to.
@@ -62,11 +72,9 @@ export async function requestSignInLink(
   if (!isSameOrigin(request, config.trustProxy)) return jsonAnswer(403, { error: "forbidden" });
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return jsonAnswer(415, { error: "unsupported_media_type" });
 
-  // Reserve before the first await: requests in flight together must all count.
-  const address = clientAddress(request, config.trustProxy);
-  const reservedAt = now.getTime();
-  const wait = limiter.reserve(address, reservedAt);
-  if (wait > 0) return jsonAnswer(429, { error: "rate_limited" }, { "Retry-After": String(wait) });
+  // Charge before the body is read: a refused or malformed body stays charged.
+  const refused = refusal(await limiter.admit(clientAddress(request, config.trustProxy), request.signal));
+  if (refused) return refused;
 
   // Read at most MAX_BODY_BYTES; a refused body stays charged, like a malformed one.
   const raw = await readBoundedBody(request, { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
@@ -88,11 +96,11 @@ export async function requestSignInLink(
   const emailRedirectTo = `${publicOrigin(request, config.trustProxy)}/auth/confirm?next=${encodeURIComponent(nextPath(parsed.next))}`;
   const { error } = await auth.client.auth.signInWithOtp({ email: parsed.email, options: { shouldCreateUser: false, emailRedirectTo } });
   if (error && (isAuthRetryableFetchError(error) || (error.status ?? 500) >= 500)) {
-    // Nothing was sent, so the attempt is not charged.
-    limiter.refund(address, reservedAt);
     return auth.finish(jsonAnswer(502, { error: "unavailable" }));
   }
-  if (error?.status === 429) return auth.finish(jsonAnswer(429, { error: "rate_limited" }, { "Retry-After": "60" }));
+  // Supabase's own limits (per address, per project) answer 429 for some addresses only, so showing it would tell
+  // who has an account. It reads like a sent link; the log is how an operator sees it.
+  if (error?.status === 429) console.warn("Supabase rate-limited a sign-in link request; answered 204 like any other");
   // Any other refusal (no such account, signups off) looks exactly like a sent link.
   return auth.finish(new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } }));
 }

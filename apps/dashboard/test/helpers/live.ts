@@ -3,7 +3,7 @@ import { decodeJwt, jwtVerify } from "jose";
 import { createFakeGoTrue, memoryAuthStore, type FakeGoTrue, type FakeUser } from "../../e2e/live/fake-gotrue";
 import type { LiveConfig, LiveSetup } from "../../src/lib/server/live-config";
 import { confirmSignIn, requestSignInLink } from "../../src/lib/server/sign-in";
-import { AttemptLimiter } from "../../src/lib/server/rate-limit";
+import { sharedLimiterStore } from "./shared-limiter";
 
 /** Synthetic values, built at runtime so secret scanners do not flag a literal. */
 export const SECRET = ["fake", "gotrue", "s".repeat(32)].join("-");
@@ -123,7 +123,7 @@ export function linkRequest(email: string, next?: string, headers: Record<string
 
 /** The whole email-link flow: ask for a link, open it, and return the browser's cookies. */
 export async function signInThroughLink(harness: LiveHarness, email = harness.owner.email, next = "/"): Promise<Jar> {
-  const asked = await requestSignInLink(linkRequest(email, next), harness.setup, new AttemptLimiter());
+  const asked = await requestSignInLink(linkRequest(email, next), harness.setup, sharedLimiterStore().limiter());
   if (asked.status !== 204) throw new Error(`sign-in link request answered ${asked.status}`);
   const jar = new Jar().apply(asked);
   const link = harness.gotrue.lastLink(email);
