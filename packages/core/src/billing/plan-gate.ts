@@ -45,18 +45,19 @@ const COUNTED: Readonly<Record<string, { resource: keyof PlanLimits; count: stri
 /**
  * PL-8: runs inside the action's own transaction, after a replay is answered and before the
  * handler. A comped tenant passes untouched; a read-only one runs only the allowed actions; a
- * counted action takes the tenant's plan lock, so two requests cannot both take the last slot.
+ * counted action takes the tenant's plan lock before it reads the plan, so two requests cannot both take the last slot.
  */
 export async function planGate(tx: Transaction, tenantId: string, actionType: string, now: Date): Promise<void> {
+  const counted = COUNTED[actionType];
+  // Lock before reading, so a plan change that commits meanwhile is the one enforced.
+  if (counted) await lockTenantPlan(tx, tenantId);
   const row = (await tx.query<{ plan: HubPlan | null; status: string; extra_connections: number; read_only_after: Date | null }>(
     "SELECT plan, status, extra_connections, read_only_after FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
   if (!row) return;
   if (isReadOnly(row, now) && !READ_ONLY_ALLOWED_ACTIONS.has(actionType))
     throw new Conflict("The plan has ended or its payment failed; the business is read-only until billing is fixed", { reason: "plan_read_only" });
-  const counted = COUNTED[actionType];
   const limits = planLimits(row);
   if (!counted || !limits) return;
-  await lockTenantPlan(tx, tenantId);
   const limit = limits[counted.resource] as number;
   const used = (await tx.query<{ used: number }>(counted.count, counted.count.includes("$2") ? [tenantId, now] : [tenantId])).rows[0]!.used;
   if (used >= limit)

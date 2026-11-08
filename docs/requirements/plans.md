@@ -140,7 +140,7 @@ are never listed there.
 
 **PL-7. Reading the plan.** `GET /v1/billing/plan` (owners, `billing`) answers the plan record as
 the dashboard needs it: plan, interval, status, founding, extra connections, trial and period
-ends, `cancelAtPeriodEnd`, `paymentFailedAt`, `readOnlyAfter`, `readOnly`, the limits in force,
+ends, `trialAvailable` and `trialDays` (the trial a new Checkout would get), `cancelAtPeriodEnd`, `paymentFailedAt`, `readOnlyAfter`, `readOnly`, the limits in force,
 the catalog with list prices, and founding prices only for an invited tenant; `checkoutEnabled`
 and `portalEnabled` say whether the routes are on. A comped tenant answers status `none`.
 
@@ -174,7 +174,8 @@ tenant, or through a stored subscription or customer ID. Anything not known yet 
 backoff). **An event only says which subscription to look at:** the worker reads it again with
 `GET /v1/subscriptions/<id>` (PL-13 read key) and stores that answer, so the order and repeats of
 events do not matter. Stripe unreachable is an error (S-4 retry); a subscription Stripe does not
-know ends `not_ours`. Rules:
+know ends `not_ours`. An event that waits or ends `not_ours` writes nothing: its savepoint is rolled
+back, so a retry starts from the same rows. Rules:
 - `checkout.session.completed` with `mode=subscription`: marks the checkout `completed`, stores the
   customer ID on the tenant's record (creating the row) and reads the session's subscription.
   `checkout.session.expired` marks a pending checkout `expired`.
@@ -187,7 +188,8 @@ know ends `not_ours`. Rules:
 - After each event the worker derives the tenant's record from its rows alone. The **effective**
   subscription is the latest-started one in `trialing`, `active` or `past_due` with a recognised
   plan; with none, the latest-started recognised one. `payment_failed_at` is the earliest failure
-  among the effective subscription's `failed` invoices. `read_only_after` is
+  among the effective subscription's `failed` invoices while Stripe says it is `past_due` (so an
+  invoice Stripe voided or forgave never counts), else null. `read_only_after` is
   `payment_failed_at + grace` (or null) while the effective subscription is in one of those three;
   otherwise it is the `status_since` of the latest subscription in `canceled`, `unpaid`,
   `incomplete_expired` or `paused`, or null when none ever ended. So an `incomplete` replacement

@@ -18,7 +18,7 @@ const onSchema = z.object({
   // The Node worker's pause between runs.
   BILLING_INTERVAL_MS: int(1_000, 3_600_000).default(30_000),
   // plans.md PL-13: a restricted key that may only read subscriptions; without it plan events wait.
-  BILLING_STRIPE_KEY: z.string().regex(/^(rk|sk)_(test|live)_[A-Za-z0-9]{8,250}$/, "must be a Stripe restricted key").optional(),
+  BILLING_STRIPE_KEY: z.string().regex(/^rk_(test|live)_[A-Za-z0-9]{8,250}$/, "must be a Stripe restricted key").optional(),
   BILLING_STRIPE_BASE_URL: z.url({ protocol: /^https?$/ }).optional(),
   BILLING_PLAN_GRACE_DAYS: int(1, 30).default(7),
 });

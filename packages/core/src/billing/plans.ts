@@ -239,6 +239,7 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     currentPeriodEnd: iso(row?.current_period_end ?? null),
     cancelAtPeriodEnd: row?.cancel_at_period_end ?? false,
     trialAvailable: !(row?.trial_used ?? false) && input.trialDays > 0,
+    trialDays: !(row?.trial_used ?? false) ? input.trialDays : 0,
     paymentFailedAt: iso(row?.payment_failed_at ?? null),
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly: isReadOnly(row, input.now),
@@ -254,15 +255,17 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
 /** PL-11: an operator invites a tenant to the founding rate (service role). */
 export async function setFoundingInvite(tx: Transaction, input: { readonly tenantId: string; readonly invited: boolean; readonly now: Date }): Promise<{ invited: boolean; counted: number }> {
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('plan:founding-cap',0))");
+  await lockTenantPlan(tx, input.tenantId);
   const counted = (await tx.query<{ n: number }>(
     "SELECT count(*)::int AS n FROM tenant_plans WHERE (founding_invite OR founding_started_at IS NOT NULL) AND tenant_id <> $1",
     [input.tenantId])).rows[0]!.n;
+  const started = (await tx.query("SELECT 1 FROM tenant_plans WHERE tenant_id=$1 AND founding_started_at IS NOT NULL", [input.tenantId])).rowCount === 1;
   if (input.invited && counted >= FOUNDING_LIMIT) throw new Conflict("All founding places are taken", { reason: "founding_full" });
   await tx.query(
     `INSERT INTO tenant_plans (tenant_id, founding_invite, created_at, updated_at) VALUES ($1,$2,$3,$3)
      ON CONFLICT (tenant_id) DO UPDATE SET founding_invite=EXCLUDED.founding_invite, updated_at=EXCLUDED.updated_at`,
     [input.tenantId, input.invited, input.now]);
-  return { invited: input.invited, counted: counted + (input.invited ? 1 : 0) };
+  return { invited: input.invited, counted: counted + (input.invited || started ? 1 : 0) };
 }
 
 /** Every price key the API config must map (PL-13); re-exported for the entry points. */

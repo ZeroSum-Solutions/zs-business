@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanInterval } from "@zs/contracts";
+import { cannotBeApproved } from "../../src/approvals/index.js";
 import {
   createBillingWorker, createSession, createStripeSubscriptionReader, PLAN_CHECKOUT_LIFETIME_MS, planGate, setFoundingInvite,
   type Session,
@@ -164,8 +165,20 @@ describe("applying plan events (PL-10)", () => {
     expect((await worker(false).runOnce()).outcomes).toEqual({ wait: 1 });
     await b.settle();
     fake.subscriptions.delete(sub.id);
-    await b.deliver(subEvent("customer.subscription.updated", sub));
+    const invoiceId = stripeId("in");
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, invoiceId));
     expect((await worker().runOnce()).outcomes).toEqual({ not_ours: 1 });
+    // A dropped event writes nothing: no invoice row is left behind.
+    expect((await b.h.fixture.service((tx) => tx.query("SELECT 1 FROM plan_invoices WHERE tenant_id=$1 AND id=$2", [tenantId, invoiceId]))).rowCount).toBe(0);
+  });
+
+  it("a failed invoice on a subscription Stripe keeps active never starts the grace (PL-10)", async () => {
+    const tenantId = await b.tenant();
+    const { sub } = await subscribe(tenantId);
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, stripeId("in")));
+    await worker().runOnce();
+    expect(await plan(tenantId)).toMatchObject({ status: "active", read_only_after: null, payment_failed_at: null });
+    expect(cannotBeApproved(PLAN_CHECKOUT_CREATE_ACTION)).toBe(true);
   });
 
   it("a failed payment starts the grace, a paid invoice ends it, and the tenant turns read-only after grace", async () => {

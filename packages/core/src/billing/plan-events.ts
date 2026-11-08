@@ -104,13 +104,16 @@ export function createPlanEvents(deps: PlanEventDeps) {
     for (const item of items) {
       const key = record(item.price)?.lookup_key;
       const quantity = Number.isSafeInteger(item.quantity) ? Math.min(Math.max(item.quantity as number, 0), 1000) : 1;
+      if (key === PLAN_ADDON_LOOKUP_KEY) {
+        extra = quantity;
+        addonSeen = true;
+        continue;
+      }
+      // Newer API versions keep the period on the item; an unknown price still has one.
+      periodEnd ??= seconds(item.current_period_end);
       if (typeof key === "string" && PLAN_LOOKUP_KEYS[key]) {
         const named = PLAN_LOOKUP_KEYS[key]!;
         plan = { plan: named.plan, interval: named.interval, founding: named.founding };
-        periodEnd ??= seconds(item.current_period_end);
-      } else if (key === PLAN_ADDON_LOOKUP_KEY) {
-        extra = quantity;
-        addonSeen = true;
       }
     }
     if (!addonSeen && items.length > 0) extra = 0;
@@ -147,7 +150,9 @@ export function createPlanEvents(deps: PlanEventDeps) {
     const recognised = rows.filter((row) => row.plan !== null);
     const paying = recognised.filter((row) => entitled(row.status));
     const effective = paying[0] ?? recognised[0] ?? null;
-    const failed = effective ? (await tx.query<{ first: Date | null }>(
+    // PL-8: a failed invoice counts only while Stripe says the subscription is past due, so one
+    // that Stripe voided or forgave cannot make a paying tenant read-only.
+    const failed = effective?.status === "past_due" ? (await tx.query<{ first: Date | null }>(
       `SELECT min(first_failed_at) AS first FROM plan_invoices WHERE tenant_id=$1 AND provider='stripe' AND stripe_subscription_id=$2 AND status='failed'`,
       [tenantId, effective.id])).rows[0]?.first ?? null : null;
     const ended = rows.filter((row) => ENDED.has(row.status)).sort((a, b) => b.status_since.getTime() - a.status_since.getTime())[0];

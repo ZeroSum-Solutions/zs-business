@@ -96,6 +96,10 @@ export function PlanView() {
       { plan: chosen, interval, extraConnections: interval === "month" ? extra : 0 },
       { idempotencyKey: crypto.randomUUID() }),
     onSuccess: (result) => go(result.checkoutUrl),
+    // PL-4: an open checkout answers its stored URL, so the owner goes back to it.
+    onError: (error) => {
+      if (error instanceof ApiError && error.reason === "checkout_open" && typeof error.details.checkoutUrl === "string") go(error.details.checkoutUrl);
+    },
   });
   const portal = useMutation({ mutationFn: () => api.openBillingPortal(), onSuccess: (result) => go(result.url) });
 
@@ -178,7 +182,7 @@ export function PlanView() {
                   <Segmented label="Billing period" value={interval} onChange={setInterval}
                     options={[{ value: "month", label: "Monthly" }, { value: "year", label: "Yearly, 2 months free" }]} />
                 </div>
-                {data.trialAvailable ? <p className="text-sm text-muted">Every plan starts with a 14-day free trial. Your card is charged when it ends.</p> : null}
+                {data.trialAvailable ? <p className="text-sm text-muted">Every plan starts with a {data.trialDays}-day free trial. Your card is charged when it ends.</p> : null}
                 {shopify ? <p className="text-sm text-fg-2">Your business is billed through Shopify; choose a plan from your Shopify admin.</p> : null}
                 {checkout.isError ? <ErrorNote error={checkout.error} message={checkoutMessage(checkout.error)} /> : null}
                 <div className="grid grid-cols-1 gap-2 md:grid-cols-3">

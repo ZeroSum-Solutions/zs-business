@@ -27,6 +27,7 @@ export function createDemoBilling(options: { clock?: DemoClock; latencyMs?: numb
     currentPeriodEnd: ahead(9),
     cancelAtPeriodEnd: false,
     trialAvailable: false,
+    trialDays: 0,
     paymentFailedAt: null,
     readOnlyAfter: null,
     readOnly: false,

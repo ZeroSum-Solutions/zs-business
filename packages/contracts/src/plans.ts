@@ -148,6 +148,8 @@ export const billingPlanSchema = z.strictObject({
   currentPeriodEnd: z.iso.datetime().nullable(),
   cancelAtPeriodEnd: z.boolean(),
   trialAvailable: z.boolean(),
+  /** The trial a new Checkout would get, in days; 0 when none. */
+  trialDays: z.number().int().min(0).max(30),
   paymentFailedAt: z.iso.datetime().nullable(),
   readOnlyAfter: z.iso.datetime().nullable(),
   readOnly: z.boolean(),
