@@ -30,6 +30,11 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
   from this repo's work. Read them only.
 - Conventional commits on feature branches. No AI attribution lines in commits, PR bodies or
   PR comments (no "Generated with", no Co-Authored-By, no session links).
+- Push only to your own feature branch, never to `main`; `main` takes changes only through a
+  PR (branch protection enforces it, for admins too). Create worktrees with
+  `git worktree add --no-track -b <branch> <path> origin/main` and push with
+  `git push origin HEAD:refs/heads/<branch>`: a branch that tracks `origin/main` pushes to
+  `main` under `push.default=upstream`.
 
 ## Cloud sessions (Claude Code on the web / desktop cloud)
 - `scripts/cloud-setup.sh` runs at session start (`.claude/settings.json`). It installs Node 24,
