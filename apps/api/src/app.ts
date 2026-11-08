@@ -106,6 +106,8 @@ export interface AppDependencies {
   readonly stripe?: StripeClient;
   /** Hub plans (plans.md PL-4..PL-7); absent means plan checkout and the Portal are 404. Needs `stripe`. */
   readonly stripePlans?: StripePlansClient;
+  /** plans.md PL-19: the app handle in Shopify's plan selection URL; absent means no manage link. */
+  readonly shopifyAppHandle?: string;
   /** Signed Stripe events into the billing inbox (stripe.md S-3); absent means the route is off. */
   readonly stripeWebhook?: StripeWebhookConfig;
   /**
@@ -244,6 +246,7 @@ export function createApp(deps: AppDependencies) {
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
     ...(deps.stripe ? { billing: { stripe: deps.stripe, ...(deps.stripePlans ? { plans: deps.stripePlans } : {}) } } : {}),
+    ...(deps.shopifyAppHandle ? { shopifyBilling: { appHandle: deps.shopifyAppHandle } } : {}),
     ...(deps.googleCalendar ? {
       calendar: {
         google: deps.googleCalendar.google,

@@ -720,17 +720,31 @@ export function usePendingManagedConnect(canManage: boolean) {
  * plans.md PL-7. `poll` reads it again every few seconds while a finished Checkout's events land,
  * and stops once the plan holds a subscription.
  */
-export function usePlan(options: { poll?: boolean } = {}) {
+/**
+ * `poll` reads again until the plan settles (a Stripe return). `watchUntil` (epoch ms) reads again
+ * at a slower pace until then, settled or not: after a Shopify return the plan may already be
+ * active and only change when the billing runner's next pass reads the new contract (PL-18).
+ */
+export function usePlan(options: { poll?: boolean | undefined; watchUntil?: number | undefined } = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
+  const { poll, watchUntil } = options;
   return useQuery({
     enabled, queryKey: keys.plan, queryFn: ({ signal }) => api.getBillingPlan({ signal }),
-    ...(options.poll ? { refetchInterval: (query: { state: { data?: BillingPlan | undefined } }) =>
-      (query.state.data && PLAN_SETTLED.has(query.state.data.status) ? false : PLAN_POLL_MS) } : {}),
+    ...(poll || watchUntil !== undefined ? { refetchInterval: (query: { state: { data?: BillingPlan | undefined } }) =>
+      planRefetchInterval(query.state.data, { poll, watchUntil }, Date.now()) } : {}),
   });
+}
+/** The next read of the plan in ms, or false to stop (see usePlan). */
+export function planRefetchInterval(data: Pick<BillingPlan, "status"> | undefined, options: { poll?: boolean | undefined; watchUntil?: number | undefined }, now: number): number | false {
+  if (options.watchUntil !== undefined && now < options.watchUntil) return PLAN_WATCH_POLL_MS;
+  return options.poll && !(data && PLAN_SETTLED.has(data.status)) ? PLAN_POLL_MS : false;
 }
 const PLAN_SETTLED: ReadonlySet<string> = new Set(["trialing", "active", "past_due"]);
 export const PLAN_POLL_MS = 3_000;
+/** After a Shopify return: how often, and for how long, the plan is read again. */
+export const PLAN_WATCH_POLL_MS = 15_000;
+export const PLAN_WATCH_MS = 10 * 60_000;
 
 /** How often the edits are read again while the worker has one to finish. */
 export const IMAGE_POLL_MS = 2_000;

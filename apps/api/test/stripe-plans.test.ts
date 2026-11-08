@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ALL_PLAN_PRICE_KEYS, apiErrorBodySchema, billingPlanSchema, billingPortalResponseSchema, startPlanCheckoutResponseSchema } from "@zs/contracts";
-import { createStripePlansClient, parsePlanEnv } from "@zs/core";
+import { createStripePlansClient, parsePlanEnv, setShopifyBilling } from "@zs/core";
 import { parseServerEnv } from "../src/config.js";
 import { call, createApiHarness, NOW, type ApiHarness } from "./helpers.js";
 import { fakeStripe, json, STRIPE_CONFIG, stripeApp } from "./stripe-fixtures.js";
@@ -19,7 +19,7 @@ beforeAll(async () => { h = await createApiHarness({ clock }); });
 afterAll(async () => h?.close());
 beforeEach(() => { stripe = fakeStripe(); portalCalls = []; });
 
-function plansApp(on = true) {
+function plansApp(on = true, shopifyAppHandle?: string) {
   const fetch = async (url: string, init: RequestInit) => {
     if (url.endsWith("/v1/billing_portal/sessions")) {
       portalCalls.push(String(init.body));
@@ -32,6 +32,7 @@ function plansApp(on = true) {
   return stripeApp(h, {
     clock, stripe: stripe.client(),
     ...(on ? { stripePlans: createStripePlansClient({ stripe: STRIPE_CONFIG, plans: { prices: PRICES, returnUrl: RETURN_URL }, fetch }) } : {}),
+    ...(shopifyAppHandle ? { shopifyAppHandle } : {}),
   });
 }
 
@@ -59,7 +60,8 @@ describe("POST /v1/billing/plan/checkout (PL-4, PL-5)", () => {
     expect(unkeyed.status).toBe(400);
     const open = await call(app, "POST", "/v1/billing/plan/checkout", { token: h.b.token, key: randomUUID(), body: { plan: "pro", interval: "month" } });
     expect(open.status).toBe(409);
-    expect(apiErrorBodySchema.parse(open.body).error.code).toBe("Conflict");
+    expect(apiErrorBodySchema.parse(open.body).error).toMatchObject({ code: "Conflict",
+      details: { reason: "checkout_open", checkoutUrl: expect.stringMatching(/^https:\/\/checkout\.stripe\.fake\.test\//) } });
     const off = await call(plansApp(false), "POST", "/v1/billing/plan/checkout", { token: h.b.token, key: randomUUID(), body: { plan: "solo", interval: "month" } });
     expect(off.status).toBe(404);
   });
@@ -95,5 +97,37 @@ describe("plan environment (PL-13)", () => {
       JWT_SECRET: ["test", "jwt", "s".repeat(32)].join("-") };
     expect(() => parseServerEnv({ ...server, STRIPE_PLAN_PRICES: JSON.stringify(PRICES), STRIPE_PLAN_RETURN_URL: RETURN_URL }))
       .toThrow(/STRIPE_PLAN_PRICES needs the STRIPE_ top-up variables/);
+  });
+});
+
+describe("a Shopify-billed tenant (PL-19, PL-20)", () => {
+  it("gets Shopify's plan page and no Stripe Checkout, Portal or trial", async () => {
+    const shop = { id: "gid://shopify/Shop/90210", domain: "halden-rowe.myshopify.com" };
+    const link = (value: typeof shop | null) =>
+      h.fixture.service((tx) => setShopifyBilling(tx, { tenantId: h.b.tenantId, shop: value, now: clock.now(), graceDays: 7 }));
+    // The earlier tests left this tenant's checkouts open; PL-17 refuses a link while one is young.
+    await h.fixture.service((tx) => tx.query("UPDATE plan_checkouts SET status='expired' WHERE tenant_id=$1 AND status='pending'", [h.b.tenantId]));
+    await link(shop);
+    try {
+      const view = billingPlanSchema.parse((await call(plansApp(true, "zs-business-connections"), "GET", "/v1/billing/plan", { token: h.b.token })).body);
+      expect(view).toMatchObject({ billingProvider: "shopify", checkoutEnabled: false, portalEnabled: false, trialAvailable: false,
+        shopifyManageUrl: "https://admin.shopify.com/store/halden-rowe/charges/zs-business-connections/pricing_plans" });
+      expect(billingPlanSchema.parse((await call(plansApp(), "GET", "/v1/billing/plan", { token: h.b.token })).body).shopifyManageUrl).toBeNull();
+      const refused = await call(plansApp(), "POST", "/v1/billing/plan/checkout", {
+        token: h.b.token, key: randomUUID(), body: { plan: "solo", interval: "month" } });
+      expect(refused.status).toBe(409);
+      expect(apiErrorBodySchema.parse(refused.body)).toMatchObject({ error: { details: { reason: "billing_provider" } } });
+    } finally {
+      await link(null);
+    }
+  });
+
+  it("reads SHOPIFY_BILLING_APP_HANDLE as an app handle, or leaves the link off", () => {
+    const server = { DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", SESSION_CHECK: "local-stub", JWT_VERIFIER: "hs256",
+      JWT_SECRET: ["test", "jwt", "s".repeat(32)].join("-") };
+    expect(parseServerEnv(server).shopifyAppHandle).toBeNull();
+    expect(parseServerEnv({ ...server, SHOPIFY_BILLING_APP_HANDLE: "zs-business-connections" }).shopifyAppHandle).toBe("zs-business-connections");
+    for (const bad of ["", "Has Space", "https://apps.shopify.com/x", "-lead"])
+      expect(() => parseServerEnv({ ...server, SHOPIFY_BILLING_APP_HANDLE: bad })).toThrow(/SHOPIFY_BILLING_APP_HANDLE/);
   });
 });

@@ -28,6 +28,7 @@ const meta = (object: Json | null): Json => record(object?.metadata) ?? {};
 const uuid = (value: unknown) => (typeof value === "string" && UUID.test(value) ? value : null);
 
 interface SubscriptionRow {
+  provider: string;
   id: string;
   stripe_customer_id: string | null;
   status: SubscriptionStatus;
@@ -41,8 +42,50 @@ interface SubscriptionRow {
   started_at: Date;
   status_since: Date;
 }
-const SUBSCRIPTION_COLUMNS = `id, stripe_customer_id, status, plan, plan_interval, founding, extra_connections, trial_end,
+const SUBSCRIPTION_COLUMNS = `provider, id, stripe_customer_id, status, plan, plan_interval, founding, extra_connections, trial_end,
   current_period_end, cancel_at_period_end, started_at, status_since`;
+
+/**
+ * PL-10, PL-17: the tenant's record from its rows alone. The effective subscription is picked
+ * among rows of the tenant's current provider (for Shopify, its current shop); ended rows of any
+ * provider still count for read-only. True when two subscriptions both pay. Shared by the Stripe
+ * events and the Shopify pass (PL-18).
+ */
+export async function derivePlanRecord(tx: Transaction, tenantId: string, at: Date, graceMs: number): Promise<boolean> {
+  const binding = (await tx.query<{ billing_provider: string; shopify_shop_id: string | null }>(
+    "SELECT billing_provider, shopify_shop_id FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
+  const provider = binding?.billing_provider ?? "stripe";
+  const rows = (await tx.query<SubscriptionRow>(
+    `SELECT ${SUBSCRIPTION_COLUMNS} FROM plan_subscriptions WHERE tenant_id=$1 ORDER BY started_at DESC, id DESC`, [tenantId])).rows;
+  const current = rows.filter((row) => row.provider === provider && (provider !== "shopify" || row.id === binding?.shopify_shop_id));
+  const recognised = current.filter((row) => row.plan !== null);
+  const paying = recognised.filter((row) => entitled(row.status));
+  const effective = paying[0] ?? recognised[0] ?? null;
+  // PL-8: a failed invoice counts only while Stripe says the subscription is past due, so one
+  // that Stripe voided or forgave cannot make a paying tenant read-only.
+  const failed = effective?.provider === "stripe" && effective.status === "past_due" ? (await tx.query<{ first: Date | null }>(
+    `SELECT min(first_failed_at) AS first FROM plan_invoices WHERE tenant_id=$1 AND provider='stripe' AND stripe_subscription_id=$2 AND status='failed'`,
+    [tenantId, effective.id])).rows[0]?.first ?? null : null;
+  const ended = rows.filter((row) => ENDED.has(row.status)).sort((a, b) => b.status_since.getTime() - a.status_since.getTime())[0];
+  const readOnlyAfter = effective && entitled(effective.status)
+    ? (failed ? new Date(failed.getTime() + graceMs) : null)
+    : (ended?.status_since ?? null);
+  const foundingStart = rows.filter((row) => row.founding).map((row) => row.started_at.getTime()).sort((a, b) => a - b)[0];
+  const status: PlanStatus = effective ? effective.status : "none";
+  const stripeEffective = effective?.provider === "stripe" ? effective : null;
+  await tx.query(
+    `UPDATE tenant_plans SET plan=$2, plan_interval=$3, founding=$4, status=$5, extra_connections=$6,
+       stripe_customer_id=coalesce(stripe_customer_id, $7), stripe_subscription_id=$8, trial_end=$9, current_period_end=$10,
+       cancel_at_period_end=$11, trial_used=trial_used OR $12, founding_started_at=coalesce(founding_started_at, $13),
+       payment_failed_at=$14, read_only_after=$15, updated_at=$16
+     WHERE tenant_id=$1`,
+    [tenantId, effective?.plan ?? null, effective?.plan_interval ?? null, effective?.founding ?? false, status,
+      effective?.extra_connections ?? 0, stripeEffective?.stripe_customer_id ?? null, stripeEffective?.id ?? null,
+      effective?.trial_end ?? null, effective?.current_period_end ?? null, effective?.cancel_at_period_end ?? false,
+      rows.length > 0, foundingStart === undefined ? null : new Date(foundingStart),
+      effective && entitled(effective.status) ? failed : null, readOnlyAfter, at]);
+  return paying.length > 1;
+}
 
 export interface PlanEventDeps {
   readonly subscriptions?: StripeSubscriptionReader;
@@ -62,12 +105,15 @@ export function createPlanEvents(deps: PlanEventDeps) {
     return found.rowCount === 1 ? tenantId : null;
   }
   async function storedTenant(tx: Transaction, subscriptionId: string | null, customerId: string | null): Promise<string | null> {
+    // Resolved whatever the tenant's provider: the caller then ends `not_ours` under the plan lock
+    // for a tenant another provider bills (PL-14, PL-17), instead of `wait` and retries.
     if (subscriptionId) {
-      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM plan_subscriptions WHERE provider='stripe' AND id=$1", [subscriptionId])).rows[0];
+      const row = (await tx.query<{ tenant_id: string }>(
+        "SELECT tenant_id FROM plan_subscriptions WHERE provider='stripe' AND id=$1", [subscriptionId])).rows[0];
       if (row) return row.tenant_id;
     }
     if (customerId) {
-      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM tenant_plans WHERE stripe_customer_id=$1 AND billing_provider='stripe'", [customerId])).rows[0];
+      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM tenant_plans WHERE stripe_customer_id=$1", [customerId])).rows[0];
       if (row) return row.tenant_id;
     }
     return null;
@@ -79,7 +125,14 @@ export function createPlanEvents(deps: PlanEventDeps) {
   }
 
   /** Reads one subscription from Stripe and stores it; then derives the tenant's record. */
+  /** PL-14: true when another provider bills the tenant; checked under the plan lock, before any write or Stripe call. */
+  async function otherProvider(tx: Transaction, tenantId: string): Promise<boolean> {
+    const row = (await tx.query<{ billing_provider: string }>("SELECT billing_provider FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
+    return row !== undefined && row.billing_provider !== "stripe";
+  }
+
   async function sync(tx: Transaction, tenantId: string, subscriptionId: string, at: Date): Promise<PlanOutcome> {
+    if (await otherProvider(tx, tenantId)) return "not_ours";
     if (!deps.subscriptions) return "wait";
     const answer = await deps.subscriptions.retrieve(subscriptionId);
     if (!answer) return "not_ours";
@@ -145,41 +198,9 @@ export function createPlanEvents(deps: PlanEventDeps) {
     // PL-11: a founding subscription first seen ended gives up the invite; the slot stays used.
     if (plan.founding && ENDED.has(status) && !(previous && ENDED.has(previous.status)))
       await tx.query("UPDATE tenant_plans SET founding_invite=false, updated_at=$2 WHERE tenant_id=$1", [tenantId, at]);
-    const duplicate = await derive(tx, tenantId, at);
+    const duplicate = await derivePlanRecord(tx, tenantId, at, graceMs);
     if (plan.plan === null) return "mismatch";
     return duplicate ? "plan_duplicate" : "plan_synced";
-  }
-
-  /** PL-10: the tenant's record from its rows alone. True when two subscriptions both pay. */
-  async function derive(tx: Transaction, tenantId: string, at: Date): Promise<boolean> {
-    const rows = (await tx.query<SubscriptionRow>(
-      `SELECT ${SUBSCRIPTION_COLUMNS} FROM plan_subscriptions WHERE tenant_id=$1 ORDER BY started_at DESC, id DESC`, [tenantId])).rows;
-    const recognised = rows.filter((row) => row.plan !== null);
-    const paying = recognised.filter((row) => entitled(row.status));
-    const effective = paying[0] ?? recognised[0] ?? null;
-    // PL-8: a failed invoice counts only while Stripe says the subscription is past due, so one
-    // that Stripe voided or forgave cannot make a paying tenant read-only.
-    const failed = effective?.status === "past_due" ? (await tx.query<{ first: Date | null }>(
-      `SELECT min(first_failed_at) AS first FROM plan_invoices WHERE tenant_id=$1 AND provider='stripe' AND stripe_subscription_id=$2 AND status='failed'`,
-      [tenantId, effective.id])).rows[0]?.first ?? null : null;
-    const ended = rows.filter((row) => ENDED.has(row.status)).sort((a, b) => b.status_since.getTime() - a.status_since.getTime())[0];
-    const readOnlyAfter = effective && entitled(effective.status)
-      ? (failed ? new Date(failed.getTime() + graceMs) : null)
-      : (ended?.status_since ?? null);
-    const foundingStart = rows.filter((row) => row.founding).map((row) => row.started_at.getTime()).sort((a, b) => a - b)[0];
-    const status: PlanStatus = effective ? effective.status : "none";
-    await tx.query(
-      `UPDATE tenant_plans SET plan=$2, plan_interval=$3, founding=$4, status=$5, extra_connections=$6,
-         stripe_customer_id=coalesce(stripe_customer_id, $7), stripe_subscription_id=$8, trial_end=$9, current_period_end=$10,
-         cancel_at_period_end=$11, trial_used=trial_used OR $12, founding_started_at=coalesce(founding_started_at, $13),
-         payment_failed_at=$14, read_only_after=$15, updated_at=$16
-       WHERE tenant_id=$1`,
-      [tenantId, effective?.plan ?? null, effective?.plan_interval ?? null, effective?.founding ?? false, status,
-        effective?.extra_connections ?? 0, effective?.stripe_customer_id ?? null, effective?.id ?? null,
-        effective?.trial_end ?? null, effective?.current_period_end ?? null, effective?.cancel_at_period_end ?? false,
-        rows.length > 0, foundingStart === undefined ? null : new Date(foundingStart),
-        effective && entitled(effective.status) ? failed : null, readOnlyAfter, at]);
-    return paying.length > 1;
   }
 
   async function checkout(tx: Transaction, type: string, object: Json, at: Date): Promise<PlanOutcome> {
@@ -188,6 +209,15 @@ export function createPlanEvents(deps: PlanEventDeps) {
     await lockTenantPlan(tx, tenantId);
     const checkoutId = uuid(meta(object).zs_checkout)!;
     const sessionId = id(object.id, "cs_");
+    if (await otherProvider(tx, tenantId)) {
+      // The checkout row still records how the session ended, so it never looks open; nothing
+      // else is written and Stripe is not called (PL-17 known limit: the operator refunds).
+      await tx.query(
+        `UPDATE plan_checkouts SET status=$5, stripe_checkout_session_id=coalesce(stripe_checkout_session_id,$3), updated_at=$4
+          WHERE tenant_id=$1 AND id=$2 AND status='pending'`,
+        [tenantId, checkoutId, sessionId, at, type === "checkout.session.expired" ? "expired" : "completed"]);
+      return "not_ours";
+    }
     if (type === "checkout.session.expired") {
       const updated = await tx.query(
         `UPDATE plan_checkouts SET status='expired', stripe_checkout_session_id=coalesce(stripe_checkout_session_id,$3), updated_at=$4
@@ -224,6 +254,7 @@ export function createPlanEvents(deps: PlanEventDeps) {
     const tenantId = (await checkoutTenant(tx, details)) ?? (await storedTenant(tx, subscriptionId, id(object.customer, "cus_")));
     if (!tenantId) return "wait";
     await lockTenantPlan(tx, tenantId);
+    if (await otherProvider(tx, tenantId)) return "not_ours";
     const amount = Number.isSafeInteger(object.amount_due) && (object.amount_due as number) >= 0 ? object.amount_due as number : 0;
     const currency = typeof object.currency === "string" && /^[a-z]{3}$/.test(object.currency) ? object.currency : "usd";
     const when = created ?? at;

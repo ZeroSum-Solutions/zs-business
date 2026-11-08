@@ -169,6 +169,8 @@ export interface ServerEnv {
   readonly stripe: StripeEnv | null;
   /** plans.md PL-13: Hub plans; null (off) when no STRIPE_PLAN_ variable is set. Needs `stripe`. */
   readonly plans: PlanConfig | null;
+  /** plans.md PL-19, PL-20: the app handle in Shopify's plan selection URL; null when SHOPIFY_BILLING_APP_HANDLE is unset. */
+  readonly shopifyAppHandle: string | null;
   /** google-calendar.md G-12: connecting, the OAuth callback and the push webhook; null (all off) when no API GOOGLE_ variable is set. */
   readonly google: GoogleEnv | null;
   /** connections.md C-3: the managed-tier connections routes and /mcp tools; null (all off) when no API CONNECTIONS_ variable is set. */
@@ -248,12 +250,21 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
     plans: parsePlansWithStripe(env),
+    shopifyAppHandle: parseShopifyAppHandle(env),
     google: parseGoogleEnv(env),
     connections: parseConnectionsApiEnv(env),
     twilioWebhook: parseTwilioWebhook(parsed.data),
     activepieces: parseActivepieces(parsed.data),
     images: imagesWithStore(parseImageEnv(env), parsed.data.SITES_STORE),
   };
+}
+
+/** PL-20: the app handle Shopify puts in the plan selection URL (letters, digits and dashes). */
+export function parseShopifyAppHandle(env: Readonly<Record<string, string | undefined>>): string | null {
+  const value = env.SHOPIFY_BILLING_APP_HANDLE;
+  if (value === undefined) return null;
+  if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(value)) throw new Error("Invalid environment: SHOPIFY_BILLING_APP_HANDLE is the app handle (lowercase letters, digits, dashes)");
+  return value;
 }
 
 /** Images live in the site store, beside the releases that publish them (IM-14). */

@@ -1,7 +1,7 @@
 // The process that runs the M5 billing worker (docs/requirements/stripe.md S-8). One run applies
 // stored Stripe events in passes until a pass claims fewer than the limit or the budget is spent.
 // Time, ids and the database come in as dependencies.
-import { createBillingWorker, type BillingWorker, type StripeSubscriptionReader } from "@zs/core";
+import { createBillingWorker, type BillingWorker, type ShopifySyncSummary, type StripeSubscriptionReader } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
 import type { Pool } from "pg";
 
@@ -11,6 +11,16 @@ export interface BillingRunSummary {
   readonly outcomes: Record<string, number>;
   /** True when the budget ran out while events were still due. */
   readonly budgetSpent: boolean;
+  /**
+   * plans.md PL-18: the Shopify pass, present only when it is configured; null when the Stripe
+   * passes left no time for it.
+   */
+  readonly shopify?: ShopifySyncSummary | null;
+}
+
+/** The part of the Shopify pass the runner calls (core's createShopifyPlanSync). */
+export interface ShopifyPass {
+  runOnce(options: { readonly deadline?: Date }): Promise<ShopifySyncSummary>;
 }
 
 export function createBillingWorkerFromPool(deps: {
@@ -37,6 +47,8 @@ export function createBillingRunner(input: {
   readonly clock: { now(): Date };
   readonly budgetMs: number;
   readonly claimLimit: number;
+  /** PL-18: runs after the Stripe passes, inside the same budget. */
+  readonly shopify?: ShopifyPass;
 }) {
   const { worker, clock, budgetMs, claimLimit } = input;
   return {
@@ -57,7 +69,10 @@ export function createBillingRunner(input: {
         for (const [outcome, count] of Object.entries(pass.outcomes)) outcomes[outcome] = (outcomes[outcome] ?? 0) + count;
         if (pass.claimed < claimLimit) break;
       }
-      return { passes, claimed, outcomes, budgetSpent };
+      if (!input.shopify) return { passes, claimed, outcomes, budgetSpent };
+      const deadline = new Date(started + budgetMs);
+      const shopify = budgetSpent || clock.now().getTime() >= deadline.getTime() ? null : await input.shopify.runOnce({ deadline });
+      return { passes, claimed, outcomes, budgetSpent, shopify };
     },
   };
 }

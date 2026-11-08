@@ -214,6 +214,8 @@ export interface EdgeDependencies {
     /** Hub plans (plans.md PL-4..PL-7); absent means plans are off. */
     readonly plans?: StripePlansClient;
   };
+  /** plans.md PL-19: the app handle in Shopify's plan selection URL; absent means no manage link. */
+  readonly shopifyBilling?: { readonly appHandle: string };
   /**
    * Google Calendar busy sync (google-calendar.md G-1..G-3); absent means connecting is off. The
    * API holds only the public key that seals refresh tokens; the calendar worker opens them.
@@ -1162,6 +1164,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const plans = deps.billing?.plans;
       return read("billing", (tx) => getBillingPlan(tx, tenantId, {
         now: new Date(readClock(deps.clock)), trialDays: plans?.config.trialDays ?? 0, checkoutEnabled: plans !== undefined,
+        shopifyAppHandle: deps.shopifyBilling?.appHandle ?? null,
       }));
     },
     /** PL-4, PL-5: a pending plan checkout and its Stripe Checkout URL. */

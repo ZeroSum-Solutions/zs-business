@@ -21,7 +21,8 @@ process.on("SIGTERM", () => stop.abort());
 while (!stop.signal.aborted) {
   try {
     const summary = await runner.run();
-    if (summary.claimed > 0) console.log("Billing run", summary);
+    // A Shopify-only run claims no Stripe event but is still worth a line (PL-18).
+    if (summary.claimed > 0 || (summary.shopify && (summary.shopify.checked > 0 || summary.shopify.stopped))) console.log("Billing run", summary);
   } catch (error) {
     console.error("Billing run failed", error);
   }

@@ -70,6 +70,7 @@ export function stripeApp(h: ApiHarness, options: {
   stripe?: StripeClient;
   stripePlans?: StripePlansClient;
   stripeWebhook?: StripeWebhookConfig;
+  shopifyAppHandle?: string;
   db?: ScopedDatabase;
   onError?: (error: unknown) => void;
 }) {
@@ -84,6 +85,7 @@ export function stripeApp(h: ApiHarness, options: {
     ...(options.stripe ? { stripe: options.stripe } : {}),
     ...(options.stripePlans ? { stripePlans: options.stripePlans } : {}),
     ...(options.stripeWebhook ? { stripeWebhook: options.stripeWebhook } : {}),
+    ...(options.shopifyAppHandle ? { shopifyAppHandle: options.shopifyAppHandle } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
   });
 }

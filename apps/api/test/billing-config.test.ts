@@ -146,7 +146,7 @@ describe("parseBillingEnv (S-8, S-9)", () => {
       cronSecret: CRON_SECRET,
       runner: {
         serviceDatabaseUrl: LOCAL_DB, databaseCaCert: undefined, claimLimit: 50, budgetMs: 20_000, intervalMs: 30_000,
-        stripeReader: null, planGraceDays: 7,
+        stripeReader: null, planGraceDays: 7, shopify: null,
       },
     });
     expect(parseBillingEnv({ ...ON, BILLING_CLAIM_LIMIT: "10", BILLING_RUN_BUDGET_MS: "5000", BILLING_INTERVAL_MS: "60000" }).runner)
@@ -155,6 +155,41 @@ describe("parseBillingEnv (S-8, S-9)", () => {
       ["BILLING_CLAIM_LIMIT", "0"], ["BILLING_CLAIM_LIMIT", "501"], ["BILLING_RUN_BUDGET_MS", "999"],
       ["BILLING_RUN_BUDGET_MS", "600001"], ["BILLING_INTERVAL_MS", "abc"],
     ] as const) expect(billingError({ ...ON, [name]: value })).toMatch(new RegExp(name));
+  });
+
+  it("reads the Shopify pass all together or not at all (plans.md PL-20), never echoing the token", () => {
+    const token = ["shppa", "t".repeat(32)].join("_");
+    const handles = { hub_solo: "solo", hub_studio: "studio", hub_pro: "pro", hub_studio_founding: "studio-f", hub_pro_founding: "pro-f" };
+    const SHOPIFY = {
+      BILLING_SHOPIFY_PARTNER_ID: "5300652", BILLING_SHOPIFY_PARTNER_TOKEN: token, BILLING_SHOPIFY_APP_ID: "444984655873",
+      BILLING_SHOPIFY_PLAN_HANDLES: JSON.stringify(handles),
+    };
+    expect(parseBillingEnv({ ...ON, ...SHOPIFY }).runner?.shopify).toEqual({
+      syncLimit: 20,
+      reader: { partnerId: "5300652", token, appId: "444984655873", planHandles: handles, apiVersion: "2026-10", baseUrl: "https://partners.shopify.com", timeoutMs: 8_000 },
+    });
+    expect(parseBillingEnv({ ...ON, ...SHOPIFY, BILLING_SHOPIFY_SYNC_LIMIT: "5", BILLING_SHOPIFY_API_VERSION: "2027-01",
+      BILLING_SHOPIFY_BASE_URL: "http://127.0.0.1:9998" }).runner?.shopify)
+      .toMatchObject({ syncLimit: 5, reader: { apiVersion: "2027-01", baseUrl: "http://127.0.0.1:9998" } });
+    const { BILLING_SHOPIFY_APP_ID: _app, ...partial } = SHOPIFY;
+    const cases: Array<[Record<string, string>, RegExp]> = [
+      [partial, /missing BILLING_SHOPIFY_APP_ID/],
+      [{ BILLING_SHOPIFY_API_VERSION: "2026-10" }, /needs BILLING_SHOPIFY_PARTNER_ID/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_PLAN_HANDLES: "{" }, /PLAN_HANDLES is not JSON/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_PLAN_HANDLES: JSON.stringify({ ...handles, hub_pro: "solo" }) }, /distinct/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_PLAN_HANDLES: JSON.stringify({ hub_solo: "solo" }) }, /planHandles/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_PARTNER_TOKEN: `${token} x` }, /token: invalid/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "http://partners.example.test" }, /baseUrl: .*must use https/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_SYNC_LIMIT: "101" }, /BILLING_SHOPIFY_SYNC_LIMIT/],
+      [{ BILLING_SHOPIFY_SYNC_LIMIT: "5" }, /needs BILLING_SHOPIFY_PARTNER_ID/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "https://user:pw@partners.example.test" }, /credentials/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "https://partners.example.test/x?y=1" }, /origin only/],
+    ];
+    for (const [extra, expected] of cases) {
+      const message = billingError({ ...ON, ...extra });
+      expect(message).toMatch(expected);
+      expect(message).not.toContain(token);
+    }
   });
 
   it("reads the plan read key and grace (plans.md PL-13), naming variables, never values", () => {

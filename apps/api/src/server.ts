@@ -98,6 +98,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         },
       },
     }),
+    ...(env.shopifyAppHandle === null ? {} : { shopifyAppHandle: env.shopifyAppHandle }),
     ...(env.google === null ? {} : {
       googleCalendar: {
         google: createGoogleClient({ config: env.google.client }),

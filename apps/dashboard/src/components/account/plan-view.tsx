@@ -13,7 +13,7 @@ import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { ApiError } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { browserZone, usePlan } from "@/lib/queries";
+import { browserZone, PLAN_WATCH_MS, usePlan } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatMoney, formatNumber } from "@/lib/utils";
 
@@ -70,6 +70,20 @@ function limitLines(limits: NonNullable<BillingPlan["limits"]>): string[] {
 /** Sends the browser to a Stripe page. */
 const go = (url: string) => { window.location.assign(url); };
 
+/** PL-19: the words shown when the hub has no Shopify plan page URL for the business. */
+export const SHOPIFY_ADMIN_HINT = "Open your Shopify admin, then Settings > Apps.";
+
+/** PL-15, PL-19: Shopify's plan selection page, or the way to it when the URL is not known. */
+function ShopifyManage({ url }: { url: string | null }) {
+  if (!url) return <p className="text-sm text-fg-2">{SHOPIFY_ADMIN_HINT}</p>;
+  return (
+    <Button variant="secondary" asChild>
+      {/* The page lives in the Shopify admin; it opens there, not inside the hub. */}
+      <a href={url} target="_top" rel="noopener noreferrer">Manage billing in Shopify</a>
+    </Button>
+  );
+}
+
 function checkoutMessage(error: unknown): string | undefined {
   if (!(error instanceof ApiError)) return undefined;
   if (error.reason === "checkout_open") return "A checkout is already open. Finish it, or wait an hour and start again.";
@@ -80,15 +94,39 @@ function checkoutMessage(error: unknown): string | undefined {
 
 export function PlanView() {
   const api = useApi();
-  const [returned, setReturned] = useState<"success" | "cancelled" | null>(null);
-  // Stripe returns here with ?checkout=…; read it once, without a Suspense boundary.
+  const [returned, setReturned] = useState<"success" | "cancelled" | "shopify" | null>(null);
+  const [watchUntil, setWatchUntil] = useState<number | undefined>(undefined);
+  // Stripe returns here with ?checkout=…, Shopify's welcome link with ?shopify=welcome (PL-16);
+  // read it once, without a Suspense boundary.
   useEffect(() => {
-    const value = new URLSearchParams(window.location.search).get("checkout");
+    const query = new URLSearchParams(window.location.search);
+    const value = query.get("checkout");
     if (value === "success" || value === "cancelled") setReturned(value);
+    else if (query.get("shopify") === "welcome") {
+      setReturned("shopify");
+      setWatchUntil(Date.now() + PLAN_WATCH_MS);
+    }
   }, []);
-  const plan = usePlan({ poll: returned === "success" });
+  const confirming = returned === "success" || returned === "shopify";
+  // A Shopify change may leave the status as it was (one active plan for another), so the page
+  // keeps reading for a while instead of stopping at the first settled answer (PL-18).
+  const plan = usePlan({ poll: returned === "success", watchUntil });
   const holds = plan.data ? HOLDS_PLAN.has(plan.data.status) : false;
-  const settled = returned === "success" && holds;
+  // The Shopify note lasts while the page still reads the plan and nothing has changed yet.
+  const [watching, setWatching] = useState(false);
+  useEffect(() => {
+    if (watchUntil === undefined) return;
+    setWatching(true);
+    const timer = window.setTimeout(() => setWatching(false), Math.max(0, watchUntil - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [watchUntil]);
+  const shape = plan.data ? `${plan.data.status}|${plan.data.plan}|${plan.data.interval}|${plan.data.founding}` : null;
+  const [firstShape, setFirstShape] = useState<string | null>(null);
+  useEffect(() => {
+    if (returned === "shopify" && shape !== null) setFirstShape((first) => first ?? shape);
+  }, [returned, shape]);
+  const settled = returned === "success" ? holds
+    : returned === "shopify" ? !watching || (firstShape !== null && shape !== firstShape) : false;
   const zone = browserZone();
   const [interval, setInterval] = useState<PlanInterval>("month");
   const [extra, setExtra] = useState(0);
@@ -116,9 +154,12 @@ export function PlanView() {
         const shopify = data.billingProvider === "shopify";
         return (
           <div className="space-y-2">
-            {returned === "success" && !settled ? (
+            {confirming && !settled ? (
               <p role="status" className="flex items-start gap-3 rounded-md bg-info-tint p-4 text-sm text-info">
-                <Info size={20} aria-hidden className="mt-px shrink-0" />Thanks. Stripe is confirming your plan; it shows here in a moment.
+                <Info size={20} aria-hidden className="mt-px shrink-0" />
+                {returned === "shopify"
+                  ? "Thanks. Shopify is confirming your plan. A change can take a few minutes to show here; this page checks again on its own."
+                  : "Thanks. Stripe is confirming your plan; it shows here in a moment."}
               </p>
             ) : null}
             {returned === "cancelled" && !holds ? (
@@ -129,7 +170,7 @@ export function PlanView() {
                 <p className="flex items-start gap-3"><WarningCircle size={20} aria-hidden className="mt-px shrink-0" />{notice.text}</p>
                 {data.portalEnabled ? (
                   <Button variant="secondary" onClick={() => portal.mutate()} disabled={portal.isPending} aria-busy={portal.isPending}>Fix billing</Button>
-                ) : null}
+                ) : shopify && data.shopifyManageUrl ? <ShopifyManage url={data.shopifyManageUrl} /> : null}
               </div>
             ) : null}
 
@@ -164,7 +205,10 @@ export function PlanView() {
                 <Card aria-labelledby="billing-title" className="self-start">
                   <CardHeader><CardTitle id="billing-title">Billing</CardTitle></CardHeader>
                   {shopify ? (
-                    <p className="text-sm text-fg-2">Your plan is billed through Shopify. Manage it from your Shopify admin.</p>
+                    <div className="space-y-3">
+                      <p className="text-sm text-muted">Your plan is billed through Shopify. Change or cancel it on Shopify&apos;s plan page.</p>
+                      <ShopifyManage url={data.shopifyManageUrl} />
+                    </div>
                   ) : (
                     <div className="space-y-3">
                       <p className="text-sm text-muted">Change your card, see invoices, switch plans or cancel on Stripe&apos;s secure page.</p>
@@ -186,7 +230,12 @@ export function PlanView() {
                     options={[{ value: "month", label: "Monthly" }, { value: "year", label: "Yearly, 2 months free" }]} />
                 </div>
                 {data.trialAvailable ? <p className="text-sm text-muted">Every plan starts with a {data.trialDays}-day free trial. Your card is charged when it ends.</p> : null}
-                {shopify ? <p className="text-sm text-fg-2">Your business is billed through Shopify; choose a plan from your Shopify admin.</p> : null}
+                {shopify ? (
+                  <div className="flex flex-col gap-3 rounded-md bg-tray p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm text-fg-2">Your business is billed through Shopify. Choose your plan on Shopify&apos;s plan page.</p>
+                    <ShopifyManage url={data.shopifyManageUrl} />
+                  </div>
+                ) : null}
                 {checkout.isError ? <ErrorNote error={checkout.error} message={checkoutMessage(checkout.error)} /> : null}
                 <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
                   {data.catalog.map((offer) => {
@@ -212,16 +261,19 @@ export function PlanView() {
                             <li key={item} className="flex items-center gap-2 text-sm text-fg-2"><Check size={16} aria-hidden className="text-success" />{item}</li>
                           ))}
                         </ul>
-                        <Button className="w-full" onClick={() => checkout.mutate(offer.plan)} disabled={!data.checkoutEnabled || checkout.isPending}
-                          aria-busy={busy} aria-describedby={data.checkoutEnabled ? undefined : "checkout-off"}>
-                          {busy ? "Opening Stripe…" : `Choose ${offer.name}`}
-                        </Button>
+                        {shopify ? null : (
+                          <Button className="w-full" onClick={() => checkout.mutate(offer.plan)} disabled={!data.checkoutEnabled || checkout.isPending}
+                            aria-busy={busy} aria-describedby={data.checkoutEnabled ? undefined : "checkout-off"}>
+                            {busy ? "Opening Stripe…" : `Choose ${offer.name}`}
+                          </Button>
+                        )}
                       </Card>
                     );
                   })}
                 </div>
-                {data.checkoutEnabled ? null : <DisabledReason id="checkout-off">Paying for a plan is not switched on here yet.</DisabledReason>}
-                {interval === "month" ? (
+                {data.checkoutEnabled || shopify ? null : <DisabledReason id="checkout-off">Paying for a plan is not switched on here yet.</DisabledReason>}
+                {/* PL-16: the add-on is not sold to a Shopify-billed business. */}
+                {shopify ? null : interval === "month" ? (
                   <label className="flex flex-wrap items-center gap-3 text-sm text-fg-2">
                     Extra managed connections, {price(data.extraConnectionPrice)} a month each
                     <input type="number" inputMode="numeric" min={0} max={20} value={extra}

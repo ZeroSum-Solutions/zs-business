@@ -79,9 +79,10 @@ interface TenantPlanRow {
   founding_invite: boolean;
   payment_failed_at: Date | null;
   read_only_after: Date | null;
+  shopify_shop_domain: string | null;
 }
 const PLAN_COLUMNS = `billing_provider, plan, plan_interval, founding, status, extra_connections, stripe_customer_id, trial_end, current_period_end,
-  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after`;
+  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain`;
 const tenantPlan = async (tx: Transaction, tenantId: string): Promise<TenantPlanRow | null> =>
   (await tx.query<TenantPlanRow>(`SELECT ${PLAN_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0] ?? null;
 
@@ -140,14 +141,17 @@ interface StoredCheckout {
     readonly successUrl: string; readonly cancelUrl: string;
   };
   readonly checkoutUrl: string | null;
+  /** PL-15: the tenant's billing provider now. */
+  readonly billingProvider: string;
 }
 
 export async function getStoredCheckout(tx: Transaction, tenantId: string, checkoutId: string): Promise<StoredCheckout | null> {
   const row = (await tx.query<CheckoutRow & {
     plan_price_id: string; addon_price_id: string | null; stripe_customer_id: string | null;
-    success_url: string; cancel_url: string; checkout_url: string | null;
-  }>(`SELECT ${CHECKOUT_COLUMNS}, plan_price_id, addon_price_id, stripe_customer_id, success_url, cancel_url, checkout_url
-        FROM plan_checkouts WHERE tenant_id=$1 AND id=$2`, [tenantId, checkoutId])).rows[0];
+    success_url: string; cancel_url: string; checkout_url: string | null; billing_provider: string | null;
+  }>(`SELECT ${CHECKOUT_COLUMNS.split(",").map((column) => `c.${column.trim()}`).join(", ")}, c.plan_price_id, c.addon_price_id,
+        c.stripe_customer_id, c.success_url, c.cancel_url, c.checkout_url, p.billing_provider
+        FROM plan_checkouts c LEFT JOIN tenant_plans p ON p.tenant_id=c.tenant_id WHERE c.tenant_id=$1 AND c.id=$2`, [tenantId, checkoutId])).rows[0];
   if (!row) return null;
   return {
     checkout: checkoutFromRow(row),
@@ -156,6 +160,7 @@ export async function getStoredCheckout(tx: Transaction, tenantId: string, check
       successUrl: row.success_url, cancelUrl: row.cancel_url,
     },
     checkoutUrl: row.checkout_url,
+    billingProvider: row.billing_provider ?? "stripe",
   };
 }
 
@@ -178,6 +183,8 @@ export async function startPlanCheckout(input: {
   await input.dispatch(parsed);
   const found = await input.read(parsed.payload.checkoutId);
   if (!found) throw new Conflict("The checkout is not available", { reason: "checkout_closed" });
+  // PL-15: checked again before every Stripe answer, a replay included; the tenant may have been linked to Shopify since.
+  if (found.billingProvider !== "stripe") throw notStripe();
   const { checkout } = found;
   const createdAt = Date.parse(checkout.createdAt);
   if (found.checkoutUrl !== null && checkout.status === "pending" && input.now.getTime() - createdAt < PLAN_CHECKOUT_LIFETIME_MS)
@@ -223,11 +230,19 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   readonly now: Date;
   readonly trialDays: number;
   readonly checkoutEnabled: boolean;
+  /** PL-19: the app handle in Shopify's plan selection URL, when configured. */
+  readonly shopifyAppHandle?: string | null;
 }): Promise<BillingPlan> {
   const row = await tenantPlan(tx, tenantId);
   // PL-11: a new founding offer follows the invite alone; a past founding subscription is no offer.
   const invited = Boolean(row?.founding_invite);
   const stripe = (row?.billing_provider ?? "stripe") === "stripe";
+  const shopify = row?.billing_provider === "shopify";
+  // PL-15, PL-19: the store handle is the myshopify.com name.
+  const storeHandle = shopify && row?.shopify_shop_domain ? row.shopify_shop_domain.replace(/\.myshopify\.com$/, "") : null;
+  const shopifyManageUrl = storeHandle && input.shopifyAppHandle
+    ? `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/charges/${encodeURIComponent(input.shopifyAppHandle)}/pricing_plans`
+    : null;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -239,8 +254,9 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     trialEnd: iso(row?.trial_end ?? null),
     currentPeriodEnd: iso(row?.current_period_end ?? null),
     cancelAtPeriodEnd: row?.cancel_at_period_end ?? false,
-    trialAvailable: !(row?.trial_used ?? false) && input.trialDays > 0,
-    trialDays: !(row?.trial_used ?? false) ? input.trialDays : 0,
+    // PL-19: Shopify owns a Shopify tenant's trial.
+    trialAvailable: stripe && !(row?.trial_used ?? false) && input.trialDays > 0,
+    trialDays: stripe && !(row?.trial_used ?? false) ? input.trialDays : 0,
     paymentFailedAt: iso(row?.payment_failed_at ?? null),
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly: isReadOnly(row, input.now),
@@ -250,6 +266,7 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     currency: "usd",
     checkoutEnabled: input.checkoutEnabled && stripe,
     portalEnabled: input.checkoutEnabled && stripe && Boolean(row?.stripe_customer_id),
+    shopifyManageUrl,
   });
 }
 
