@@ -8,7 +8,7 @@ import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { assertBillingCronFits, parseBillingEnv } from "./billing/config.js";
 import { startBillingRunner } from "./billing/start.js";
 import { cronRoutes } from "./delivery/cron.js";
-import { createStartupRecorder, guardCronEntry } from "./cron-startup.js";
+import { createStartupAlerts, guardCronEntry } from "./cron-startup.js";
 
 const clock = { now: () => new Date() };
 
@@ -18,14 +18,14 @@ export default getRequestListener(guardCronEntry({
   cronPath: "/cron/billing",
   env: process.env,
   clock,
-  recordStartupFailure: createStartupRecorder({ env: process.env, clock, databaseUrlVariable: "BILLING_DATABASE_URL" }),
+  startupAlerts: createStartupAlerts({ env: process.env, clock, databaseUrlVariable: "BILLING_DATABASE_URL" }),
   build: () => {
     const env = parseBillingEnv(process.env);
     assertBillingCronFits(env.runner);
     const started = env.runner === null ? null : startBillingRunner(env.runner, { clock, generateId: randomUUID });
     const runner = started?.runner ?? null;
 
-    return cronRoutes({
+    return { fetch: cronRoutes({
       path: "/cron/billing",
       killSwitch: "BILLING_WORKER",
       name: "Billing",
@@ -33,6 +33,6 @@ export default getRequestListener(guardCronEntry({
       runner,
       ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.pool, clock, process.env) }),
       onError: (error) => console.error("Billing run failed", error),
-    }).fetch;
+    }).fetch, disabled: runner === null };
   },
 }));

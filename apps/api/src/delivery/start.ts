@@ -16,9 +16,15 @@ export function startDeliveryRunner(env: DeliveryRunnerEnv, deps: {
     ...(env.databaseCaCert === undefined ? {} : { ssl: { ca: env.databaseCaCert, rejectUnauthorized: true } }),
     onError: (summary) => console.error("Delivery pool error", summary),
   });
-  const worker = createDeliveryWorkerFromEnv({
-    env, pool, clock: deps.clock, generateId: deps.generateId,
-    report: (event) => console.warn("Delivery worker", event),
-  });
-  return { runner: createDeliveryRunner({ worker, clock: deps.clock, budgetMs: env.budgetMs, claimLimit: env.claimLimit }), pool };
+  // A throw after the pool exists must not leave it behind: the guarded cron entry retries the build.
+  try {
+    const worker = createDeliveryWorkerFromEnv({
+      env, pool, clock: deps.clock, generateId: deps.generateId,
+      report: (event) => console.warn("Delivery worker", event),
+    });
+    return { runner: createDeliveryRunner({ worker, clock: deps.clock, budgetMs: env.budgetMs, claimLimit: env.claimLimit }), pool };
+  } catch (error) {
+    void pool.end().catch(() => undefined);
+    throw error;
+  }
 }

@@ -665,19 +665,25 @@ carries an idempotency key from the job and its `opened_at`, so a retry cannot m
 all of these; the API project holds none.
 
 Start-up failures (`src/cron-startup.ts`): each cron entry builds its config, pools and runner on its first request, not at
-module load. When that throws (a missing or invalid variable, a pool or dependency that cannot be built), an authorised
-call answers 503 and records the failure under the job's own row as `CronStartupFailed: <job> failed to start: ...`
-(redacted like any alert, no schema change), mailed through the same path. The build is retried on every request, and the
-next good run closes the alert. The record needs the job's service database URL (`DELIVERY_DATABASE_URL`,
-`BILLING_DATABASE_URL`, `CALENDAR_DATABASE_URL`, `ACTIVEPIECES_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`,
-`CONNECTIONS_DATABASE_URL`) and, for a hosted host, `DATABASE_CA_CERT`; it never opens an unpinned connection. When the row
-cannot be written, the email alone goes out, once an hour per job. With no Resend settings either, only the 503 and the
-Vercel log show it.
+module load. The cron call is authenticated first (`CRON_SECRET` set, at least 32 characters, not the placeholder, and a
+matching bearer); an unauthorised call builds nothing, opens no pool, logs and writes nothing, and gets the 404 or 401 the
+healthy route gives. The build has an 8 s deadline (a hung build keeps running, is waited on by later calls and is used if
+it finishes). When it throws or times out, the call answers 503 and records the failure under the job's own row as
+`CronStartupFailed: <job> failed to start: ...` (redacted like any alert, no schema change), mailed through the same path.
+One recording runs at a time and the next build waits for it, so a quick recovery cannot leave a stale row. The next good run
+of the job closes the alert; a worker switched off closes a stale startup alert once per instance. One deadline (30 s less
+1.5 s from the start of the call) covers build, record and email.
+The record needs the job's service database URL (`DELIVERY_DATABASE_URL`, `BILLING_DATABASE_URL`, `CALENDAR_DATABASE_URL`,
+`ACTIVEPIECES_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `CONNECTIONS_DATABASE_URL`), with no query string, and, for a
+hosted host, a valid `DATABASE_CA_CERT`; it never opens an unpinned connection. It uses one small pool per instance. When no
+row was persisted, a separate email says so (no close promise), at most once an hour per job and deployment.
 
 Not covered: a function whose bundle cannot load or whose imports throw at module load (Vercel answers 500 itself); a
-start-up failure with `CRON_SECRET` unset (the route answers 404 by design, and the call cannot be authorised); a cron
-that Vercel never calls; and a failure while the database itself is down and no email can be sent (the alert cannot be
-told apart from a repeat). Those still show only in Vercel's logs.
+start-up failure with `CRON_SECRET` unset (the route answers 404 by design) or unusable (the call cannot be authorised, so
+it gets 401 and no alert: fix the secret); a start-up failure with no database URL and no usable Resend settings (only the
+503 and the log show it); a cron that Vercel never calls; and a database that is down while no email can be sent. The
+connections function also serves signed routes that verify themselves after the build: those start the build too (no log,
+no alert, a 10 s back-off after a failure). Those still show only in Vercel's logs.
 
 ## Database pool and request limits
 

@@ -47,8 +47,8 @@ const MAX_ERROR_LENGTH = 500;
 /** All alert work of one call, database and email together. */
 export const ALERT_CAP_MS = 3_000;
 /** A cron function lives 30 s on Vercel; the alert work leaves this much of it for the answer. */
-const FUNCTION_MS = 30_000;
-const ANSWER_RESERVE_MS = 1_500;
+export const FUNCTION_MS = 30_000;
+export const ANSWER_RESERVE_MS = 1_500;
 /** Below this the email is not started; the next failing run sends it. */
 const MIN_SEND_MS = 400;
 
@@ -60,8 +60,10 @@ const REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
   [/[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>"],
   [/\beyJ[A-Za-z0-9_-]{5,}(?:\.[A-Za-z0-9_-]{2,}){1,2}/g, "<jwt>"],
   [/\bBearer\s+\S+/gi, "Bearer <secret>"],
-  [/\b(?:sk|rk|pk|whsec|ghp|re|shpat|shpca|shpss)_[A-Za-z0-9_]{8,}/g, "<secret>"],
-  [/\b((?:[a-z0-9]+[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|key)(?:[_-][a-z0-9]+)*)\s*[=:]\s*("[^"]*"|'[^']*'|[^\s,;&]+)/gi, "$1=<secret>"],
+  [/\b(?:sk|rk|pk|whsec|ghp|re|shpat|shpca|shpss|sb_secret|sb_publishable)_[A-Za-z0-9_-]{8,}/g, "<secret>"],
+  [/\b(?:sk|csk)-[A-Za-z0-9_-]{8,}/g, "<secret>"],
+  // `NAME=value` always; `NAME: value` unless the value opens a validation message ("KEY: must be base64").
+  [/\b((?:[a-z0-9]+[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|key)(?:[_-][a-z0-9]+)*)(?:\s*=\s*|\s*:\s*(?!(?:must|is|are|invalid|required|expected|too|should|cannot|not|needs|has|missing)\b))("[^"]*"|'[^']*'|[^\s,;&]+)/gi, "$1=<secret>"],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g, "<email>"],
 ];
 
@@ -109,6 +111,8 @@ export function createCronAlerts(deps: {
   readonly report?: (message: string, error: unknown) => void;
   /** Called while an alert is open and unnotified. Resolves true when the notice was accepted. Must not throw. */
   readonly notify?: CronAlertNotifier;
+  /** Called once the alert row is written, before the email: a failed email or `notified_at` mark is then not a lost row. */
+  readonly onPersisted?: () => void;
   /** Monotonic milliseconds; tests inject one. */
   readonly monotonicMs?: () => number;
   readonly capMs?: number;
@@ -158,6 +162,7 @@ export function createCronAlerts(deps: {
           [job, text],
         ));
         const row = written.rows[0];
+        if (row) { try { deps.onPersisted?.(); } catch { /* a hook must not change the recorder */ } }
         if (!row || row.notified || !deps.notify) return;
         const sendMs = total - spent();
         if (sendMs < MIN_SEND_MS) return; // the next failing run sends it

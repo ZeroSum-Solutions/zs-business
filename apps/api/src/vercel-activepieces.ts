@@ -8,7 +8,7 @@ import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { assertActivepiecesCronFits, parseActivepiecesWorkerEnv } from "./activepieces/config.js";
 import { activepiecesCronRoutes } from "./activepieces/cron.js";
 import { startActivepiecesRunner } from "./activepieces/start.js";
-import { createStartupRecorder, guardCronEntry } from "./cron-startup.js";
+import { createStartupAlerts, guardCronEntry } from "./cron-startup.js";
 
 const clock = { now: () => new Date() };
 
@@ -18,18 +18,18 @@ export default getRequestListener(guardCronEntry({
   cronPath: "/cron/activepieces",
   env: process.env,
   clock,
-  recordStartupFailure: createStartupRecorder({ env: process.env, clock, databaseUrlVariable: "ACTIVEPIECES_DATABASE_URL" }),
+  startupAlerts: createStartupAlerts({ env: process.env, clock, databaseUrlVariable: "ACTIVEPIECES_DATABASE_URL" }),
   build: () => {
     const env = parseActivepiecesWorkerEnv(process.env);
     assertActivepiecesCronFits(env.runner);
     const started = env.runner === null ? null : startActivepiecesRunner(env.runner, { clock, generateId: randomUUID });
     const runner = started?.runner ?? null;
 
-    return activepiecesCronRoutes({
+    return { fetch: activepiecesCronRoutes({
       cronSecret: env.cronSecret,
       runner,
       ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.pool, clock, process.env) }),
       onError: (error) => console.error("Activepieces webhook run failed", error),
-    }).fetch;
+    }).fetch, disabled: runner === null };
   },
 }));

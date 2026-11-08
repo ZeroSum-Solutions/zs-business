@@ -13,7 +13,7 @@ import { createConnectionsRunner } from "./connections/runner.js";
 import { startConnectionsWorker } from "./connections/start.js";
 import { shopifyWebhookRoutes } from "./connections/shopify-webhook.js";
 import { createCronAlertsOnPool } from "./cron-alerts.js";
-import { createStartupRecorder, guardCronEntry } from "./cron-startup.js";
+import { createStartupAlerts, guardCronEntry } from "./cron-startup.js";
 import { cronRoutes } from "./delivery/cron.js";
 import { responseHeaders } from "./response-headers.js";
 
@@ -26,7 +26,8 @@ export default getRequestListener(guardCronEntry({
   cronPath: "/cron/connections",
   env: process.env,
   clock,
-  recordStartupFailure: createStartupRecorder({ env: process.env, clock, databaseUrlVariable: "CONNECTIONS_DATABASE_URL" }),
+  otherPaths: "build",
+  startupAlerts: createStartupAlerts({ env: process.env, clock, databaseUrlVariable: "CONNECTIONS_DATABASE_URL" }),
   build: () => {
     const env = parseConnectionsEnv(process.env);
     const started = env.worker === null ? null : startConnectionsWorker(env.worker, { clock });
@@ -56,6 +57,6 @@ export default getRequestListener(guardCronEntry({
     app.route("/", shopifyWebhookRoutes({ native, onError: (error) => console.error("Shopify webhook failed", error) }));
     app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));
 
-    return app.fetch;
+    return { fetch: app.fetch, disabled: worker === null };
   },
 }));

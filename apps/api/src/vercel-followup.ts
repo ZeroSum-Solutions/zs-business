@@ -8,7 +8,7 @@ import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { parseFollowUpEnv } from "./followup/config.js";
 import { followUpCronRoutes } from "./followup/cron.js";
 import { startFollowUpRunner } from "./followup/start.js";
-import { createStartupRecorder, guardCronEntry } from "./cron-startup.js";
+import { createStartupAlerts, guardCronEntry } from "./cron-startup.js";
 
 const clock = { now: () => new Date() };
 
@@ -18,17 +18,17 @@ export default getRequestListener(guardCronEntry({
   cronPath: "/cron/followup",
   env: process.env,
   clock,
-  recordStartupFailure: createStartupRecorder({ env: process.env, clock, databaseUrlVariable: "FOLLOWUP_SERVICE_DATABASE_URL" }),
+  startupAlerts: createStartupAlerts({ env: process.env, clock, databaseUrlVariable: "FOLLOWUP_SERVICE_DATABASE_URL" }),
   build: async () => {
     const env = parseFollowUpEnv(process.env);
     const started = env.runner === null ? null : await startFollowUpRunner(env.runner, { clock, generateId: randomUUID });
     const runner = started?.runner ?? null;
 
-    return followUpCronRoutes({
+    return { fetch: followUpCronRoutes({
       cronSecret: env.cronSecret,
       runner,
       ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.servicePool, clock, process.env) }),
       onError: (error) => console.error("Follow-up run failed", error),
-    }).fetch;
+    }).fetch, disabled: runner === null };
   },
 }));

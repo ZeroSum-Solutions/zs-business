@@ -8,7 +8,7 @@ import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { assertDeliveryCronFits, parseDeliveryEnv } from "./delivery/config.js";
 import { cronRoutes } from "./delivery/cron.js";
 import { startDeliveryRunner } from "./delivery/start.js";
-import { createStartupRecorder, guardCronEntry } from "./cron-startup.js";
+import { createStartupAlerts, guardCronEntry } from "./cron-startup.js";
 
 const clock = { now: () => new Date() };
 
@@ -18,18 +18,18 @@ export default getRequestListener(guardCronEntry({
   cronPath: "/cron/delivery",
   env: process.env,
   clock,
-  recordStartupFailure: createStartupRecorder({ env: process.env, clock, databaseUrlVariable: "DELIVERY_DATABASE_URL" }),
+  startupAlerts: createStartupAlerts({ env: process.env, clock, databaseUrlVariable: "DELIVERY_DATABASE_URL" }),
   build: () => {
     const env = parseDeliveryEnv(process.env);
     assertDeliveryCronFits(env.runner);
     const started = env.runner === null ? null : startDeliveryRunner(env.runner, { clock, generateId: randomUUID });
     const runner = started?.runner ?? null;
 
-    return cronRoutes({
+    return { fetch: cronRoutes({
       cronSecret: env.cronSecret,
       runner,
       ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.pool, clock, process.env) }),
       onError: (error) => console.error("Delivery run failed", error),
-    }).fetch;
+    }).fetch, disabled: runner === null };
   },
 }));
