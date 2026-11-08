@@ -12,7 +12,8 @@
  * Google Calendar connection also binds the flow to this browser, and reading or confirming a
  * staged grant sends the API the grant this browser holds (calendar-connect.ts). Of the managed-tier
  * connection routes only GET /v1/connections and POST /v1/connections/:id/disconnect are forwarded; the
- * connect flow has its own routes (connections-connect.ts).
+ * connect flow has its own routes (connections-connect.ts). Of the native Shopify routes only the owner's claim calls
+ * (/v1/shopify/claims) are forwarded.
  */
 import { DOCUMENT_INTAKE_APPLY_PATH, INTAKE_APPLY_BODY_LIMIT, MEDIA_CONTENT_TYPES, MEDIA_LIMITS, PENDING_GRANT_HEADER, type ApiErrorCode } from "@zs/contracts";
 import { demoErrorBody } from "../api/errors";
@@ -69,10 +70,22 @@ function billingRouteAllowed(method: string, rest: readonly string[]): boolean {
   return (method === "GET" && route === "plan") || (method === "POST" && (route === "plan/checkout" || route === "portal"));
 }
 
+/**
+ * Linking an installed Shopify store to this hub (connections.md C-22): an owner starts a claim, reads it, confirms it
+ * or cancels it. Nothing else under shopify; the embedded app's own calls have their own route (shopify-embedded.ts).
+ */
+function shopifyRouteAllowed(method: string, rest: readonly string[]): boolean {
+  if (rest[0] !== "claims") return false;
+  if (rest.length === 1) return method === "POST";
+  if (rest.length === 2) return (method === "GET" && rest[1] === "current") || (method === "DELETE" && rest[1] !== "current");
+  return rest.length === 3 && method === "POST" && rest[2] === "confirm";
+}
+
 function routeAllowed(method: string, path: readonly string[]): boolean {
   const [version, area, ...rest] = path;
   if (version !== "v1" || !area || !path.every((segment) => SEGMENT.test(segment))) return false;
   if (area === "connections") return connectionsRouteAllowed(method, rest);
+  if (area === "shopify") return shopifyRouteAllowed(method, rest);
   if (area === "billing") return billingRouteAllowed(method, rest);
   return rest.length === 0 ? SINGLE.has(area) : AREAS.has(area);
 }

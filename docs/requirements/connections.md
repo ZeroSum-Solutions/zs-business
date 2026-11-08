@@ -689,10 +689,10 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
 - **C-20 The embedded page and session tokens.** Route `/shopify/app` in the dashboard.
   - First script is App Bridge `https://cdn.shopify.com/shopifycloud/app-bridge.js` with
     `<meta name="shopify-api-key">` (S1 2.2.3, S5). The client id is public config read at
-    request time (`SHOPIFY_API_KEY`), not baked in.
+    request time (`SHOPIFY_CLIENT_ID`, the same name the worker uses), not baked in.
   - The page sets and reads no cookie. After load it asks `shopify.idToken()`, and sends
     that token as `Authorization: Bearer` to the dashboard's `/api/shopify/*` handlers, which
-    relay it to the API's public `/v1/shopify/embedded/*` routes (no session, no cookies, no
+    relay it to the API's public `/public/v1/shopify/embedded/*` routes (no session, no cookies, no
     CORS). A fresh token is requested per call (one-minute life). A `401` with
     `X-Shopify-Retry-Invalid-Session-Request` makes the page retry once with a new token.
   - Nothing is shown or enabled before `open` (C-21) returns: the page renders a neutral
@@ -707,7 +707,9 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     base-uri 'self'; object-src 'none'` with `<shop>` the `shop` query value only when it
     matches `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`; otherwise `frame-ancestors 'none'`.
     The route has no `X-Frame-Options`. Every other dashboard route keeps `'none'` and `DENY`.
-    The proxy sets it per request (`proxy.ts`), so the value is never static or wildcard.
+    The route handler sets it per request (not `proxy.ts`, which would buffer the body), and
+    `next.config.ts` leaves `/shopify/app` out of the general frame ban, so the value is never
+    static or wildcard. It also sends a nonce-based script and style policy.
 - **C-21 Install-to-tenant binding with no operator.** The worker holds the Shopify client
   secret, the token seal key and the Supabase service key; the API and the dashboard hold
   none of them. New signed worker operations (same signing, nonce and deadlines as C-3):
@@ -890,7 +892,7 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   with the proof, or marked Open with the reason if the recording cannot be made. Items that
   need money or a human at Shopify (the registration fee, the listing text review) stay Open
   and named.
-- **C-26 Migration and wiring (revision 4).** One forward migration: creates
+- **C-26 Migration and wiring (revision 4, built).** One forward migration: creates
   `shopify_installs`, `shopify_claims` and `shopify_webhook_events` (grants as C-22, C-21 and
   C-24; claims are a tenant table with the standard test generator); relaxes
   `connections_tier` to `composio` or `native` and the `composio_account_id` requirement to
@@ -900,7 +902,7 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   operations, the worker env (`SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`,
   `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`,
   `SHOPIFY_API_VERSION`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `HUB_SIGN_IN_URL`), the
-  dashboard env (`SHOPIFY_API_KEY`) and the `shopify/*/shopify.app.toml` files are part of the
+  dashboard env (`SHOPIFY_CLIENT_ID`, read at request time) and the `shopify/*/shopify.app.toml` files are part of the
   change. Config parsing is strict: a partial Shopify config disables the native tier
   and fails the worker's start-up check with a named variable, never half-starts it.
 - **C-27 Tests (revision 4).** An in-process fake Shopify (token endpoint with exchange,

@@ -45,6 +45,7 @@ import {
 } from "@/lib/managed-connections";
 import { useKeys, useManagedConnections, usePendingManagedConnect } from "@/lib/queries";
 import { useCan } from "@/lib/session";
+import { ShopifyClaim } from "./shopify-claim";
 import { cn, relativeTime } from "@/lib/utils";
 
 const TOOLKIT = "shopify";
@@ -173,6 +174,7 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
               </ul>
             ) : null}
             {/* One live connection per toolkit (C-7): a retired store left in view for its warning does not count. */}
+            {hasLive ? null : <ShopifyClaim />}
             {hasLive ? null : <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />}
           </>
         )

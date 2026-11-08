@@ -31,7 +31,9 @@ const config: NextConfig = {
   poweredByHeader: false,
   async headers() {
     return [
-      { source: "/:path*", headers: SECURITY_HEADERS },
+      // Not the embedded app (/shopify/app): Shopify's admin must frame it, so its route sends its own policy for the
+      // shop that asks, and no X-Frame-Options (connections.md C-21).
+      { source: "/((?!shopify/app(?:/|$)).*)", headers: SECURITY_HEADERS },
       // Google's code is in this address: the page it redirects to must not get it as a Referer.
       // Later entries win for the same header (google-calendar.md G-2).
       { source: "/api/calendar/google/callback", headers: [{ key: "Referrer-Policy", value: "no-referrer" }] },

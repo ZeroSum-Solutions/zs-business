@@ -104,6 +104,8 @@ export const keys = {
   managedConnections: ["managedConnections", "list"] as const,
   /** The grant waiting in this browser for the owner to confirm (C-5). */
   managedPending: ["managedConnections", "pending"] as const,
+  /** The open claim that links an App Store install to this hub (connections.md C-22). */
+  shopifyClaim: ["managedConnections", "claim"] as const,
   plan: ["ws", "plan"] as const,
   /** Product photos and their edits (image-port.md IM-22). */
   mediaAssets: ["media", "assets"] as const,
