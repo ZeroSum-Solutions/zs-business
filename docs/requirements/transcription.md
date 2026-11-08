@@ -90,7 +90,8 @@ Completion runs through the dispatcher as a server-built principal per tenant,
 opens no inbound port.
 
 **X-5. Tenancy and scratch.** `transcription_jobs` and `transcripts` have `tenant_id`, forced
-RLS with `tenant_scope`, tenant-qualified foreign keys, and are in the catalog isolation test.
+RLS (`tenant_scope` on `transcripts`; on `transcription_jobs` one policy per command since
+20261108800000: tenant or platform for SELECT and UPDATE, tenant only for INSERT and DELETE), tenant-qualified foreign keys, and are in the catalog isolation test.
 On the Mac, a job's files live under `<scratch_root>/<tenantId>/<jobId>/`, removed when the
 job ends (success or error) and swept at worker start. Model caches are shared because they
 hold no tenant data. A two-tenant test proves that tenant B cannot read tenant A's jobs or
