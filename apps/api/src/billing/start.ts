@@ -1,5 +1,6 @@
 // Builds the billing runner from a parsed environment: the service pool and the worker. Shared by
 // the Vercel cron function and the Node worker script, which own process.env and the clock.
+import { createStripeSubscriptionReader } from "@zs/core";
 import { createRuntimePool } from "@zs/db";
 import type { Pool } from "pg";
 import type { BillingRunnerEnv } from "./config.js";
@@ -18,9 +19,11 @@ export function startBillingRunner(env: BillingRunnerEnv, deps: {
   });
   const worker = createBillingWorkerFromPool({
     pool, clock: deps.clock, generateId: deps.generateId,
+    planGraceDays: env.planGraceDays,
+    ...(env.stripeReader === null ? {} : { subscriptions: createStripeSubscriptionReader({ config: env.stripeReader }) }),
     report: (event) => {
       // Events that need an operator; the rest are routine.
-      if (["mismatch", "orphaned", "error", "not_ours"].includes(event.outcome)) console.warn("Billing worker", event);
+      if (["mismatch", "orphaned", "error", "not_ours", "plan_duplicate"].includes(event.outcome)) console.warn("Billing worker", event);
     },
   });
   return { runner: createBillingRunner({ worker, clock: deps.clock, budgetMs: env.budgetMs, claimLimit: env.claimLimit }), pool };

@@ -2,7 +2,7 @@
 // an in-process fake of the Checkout Sessions endpoint (an injected fetch, no network), and an
 // app built over a harness's database with Stripe turned on. Fake pilot data only.
 import { randomBytes, randomUUID } from "node:crypto";
-import { createLocalStubSessionCheck, createStripeClient, type StripeClient, type StripeConfig } from "@zs/core";
+import { createLocalStubSessionCheck, createStripeClient, type StripeClient, type StripeConfig, type StripePlansClient } from "@zs/core";
 import type { ScopedDatabase } from "@zs/db";
 import { createApp, createHs256Verifier, type StripeWebhookConfig } from "../src/app.js";
 import { ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
@@ -68,6 +68,7 @@ export const json = (status: number, body: unknown) =>
 export function stripeApp(h: ApiHarness, options: {
   clock: { now(): Date };
   stripe?: StripeClient;
+  stripePlans?: StripePlansClient;
   stripeWebhook?: StripeWebhookConfig;
   db?: ScopedDatabase;
   onError?: (error: unknown) => void;
@@ -81,6 +82,7 @@ export function stripeApp(h: ApiHarness, options: {
     generateId: randomUUID,
     config: { allowedOrigins: [ORIGIN] },
     ...(options.stripe ? { stripe: options.stripe } : {}),
+    ...(options.stripePlans ? { stripePlans: options.stripePlans } : {}),
     ...(options.stripeWebhook ? { stripeWebhook: options.stripeWebhook } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
   });

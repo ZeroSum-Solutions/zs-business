@@ -5,12 +5,16 @@
 import { z } from "zod";
 import type { Transaction } from "@zs/db";
 import { creditWallet, debitWallet, minorUnits, repayOwed } from "../wallet/index.js";
+import { createPlanEvents, type PlanOutcome } from "./plan-events.js";
+import type { StripeSubscriptionReader } from "./plan-stripe.js";
 
 export const billingWorkerConfigSchema = z.strictObject({
   /** An event whose top-up is not known yet is retried this many times, then `orphaned`. */
   maxAttempts: z.number().int().min(1).max(100).default(12),
   backoffBaseMs: z.number().int().positive().default(30_000),
   backoffMaxMs: z.number().int().positive().default(60 * 60_000),
+  /** PL-10: days a failed plan payment is allowed before the tenant turns read-only. */
+  planGraceDays: z.number().int().min(1).max(30).default(7),
 });
 export type BillingWorkerConfig = z.input<typeof billingWorkerConfigSchema>;
 
@@ -19,6 +23,8 @@ export interface BillingWorkerDeps {
   readonly clock: { now(): Date };
   readonly generateId: () => string;
   readonly config?: BillingWorkerConfig;
+  /** PL-10, PL-13: reads plan subscriptions again; without it plan events wait. */
+  readonly subscriptions?: StripeSubscriptionReader;
   readonly report?: (event: { readonly eventId: string; readonly type: string; readonly outcome: string }) => void;
 }
 
@@ -28,7 +34,7 @@ const REPAY_SWEEP_LIMIT = 100;
 /** What one event did. `wait` leaves it unprocessed for a later pass. */
 export type BillingOutcome =
   | "credited" | "already_credited" | "mismatch" | "failed" | "expired" | "refund_debited" | "refund_seen"
-  | "dispute_debited" | "dispute_reinstated" | "dispute_seen" | "ignored" | "not_ours" | "wait" | "orphaned" | "error";
+  | "dispute_debited" | "dispute_reinstated" | "dispute_seen" | "ignored" | "not_ours" | "wait" | "orphaned" | "error" | PlanOutcome;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 // Stripe IDs are about 30 characters; the cap keeps ledger keys under their 200-character limit.
@@ -56,9 +62,13 @@ const metadata = (object: Record<string, unknown>) => {
   return raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
 };
 
+const createdAt = (value: unknown): Date | null =>
+  Number.isSafeInteger(value) && (value as number) > 0 ? new Date((value as number) * 1000) : null;
+
 export function createBillingWorker(deps: BillingWorkerDeps) {
   const config = billingWorkerConfigSchema.parse(deps.config ?? {});
   const now = () => new Date(deps.clock.now().getTime());
+  const plans = createPlanEvents({ graceDays: config.planGraceDays, ...(deps.subscriptions ? { subscriptions: deps.subscriptions } : {}) });
 
   const bySession = async (tx: Transaction, object: Record<string, unknown>): Promise<TopUpRow | null> => {
     const meta = metadata(object);
@@ -175,7 +185,9 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
     return "dispute_reinstated";
   }
 
-  async function apply(tx: Transaction, type: string, object: Record<string, unknown>, at: Date): Promise<BillingOutcome> {
+  async function apply(tx: Transaction, type: string, object: Record<string, unknown>, created: Date | null, at: Date): Promise<BillingOutcome> {
+    const plan = await plans.apply(tx, type, object, created, at);
+    if (plan !== null) return plan;
     switch (type) {
       case "checkout.session.completed":
       case "checkout.session.async_payment_succeeded":
@@ -198,7 +210,7 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
   /** One event: claims the oldest due one with SKIP LOCKED and applies it in a savepoint. */
   async function applyNext(at: Date): Promise<{ type: string; id: string; outcome: BillingOutcome } | null> {
     return deps.service(async (tx) => {
-      const event = (await tx.query<{ id: string; type: string; payload: { data?: { object?: unknown } }; attempts: number }>(
+      const event = (await tx.query<{ id: string; type: string; payload: { created?: unknown; data?: { object?: unknown } }; attempts: number }>(
         `SELECT id, type, payload, attempts FROM stripe_events WHERE processed_at IS NULL AND next_attempt_at <= $1
           ORDER BY received_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, [at])).rows[0];
       if (!event) return null;
@@ -206,7 +218,7 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
       let outcome: BillingOutcome;
       await tx.query("SAVEPOINT billing_event");
       try {
-        outcome = object && typeof object === "object" ? await apply(tx, event.type, object as Record<string, unknown>, at) : "ignored";
+        outcome = object && typeof object === "object" ? await apply(tx, event.type, object as Record<string, unknown>, createdAt(event.payload?.created), at) : "ignored";
         await tx.query("RELEASE SAVEPOINT billing_event");
       } catch (error) {
         await tx.query("ROLLBACK TO SAVEPOINT billing_event");

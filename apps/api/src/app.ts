@@ -24,6 +24,7 @@ import {
   type Session,
   type SessionCheck,
   type StripeClient,
+  type StripePlansClient,
   type TranscriptionConfig,
 } from "@zs/core";
 import type { SiteObjectStore } from "@zs/contracts";
@@ -103,6 +104,8 @@ export interface AppDependencies {
   readonly resendWebhook?: ResendWebhookConfig;
   /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means POST /v1/wallet/top-ups is 404. */
   readonly stripe?: StripeClient;
+  /** Hub plans (plans.md PL-4..PL-7); absent means plan checkout and the Portal are 404. Needs `stripe`. */
+  readonly stripePlans?: StripePlansClient;
   /** Signed Stripe events into the billing inbox (stripe.md S-3); absent means the route is off. */
   readonly stripeWebhook?: StripeWebhookConfig;
   /**
@@ -240,7 +243,7 @@ export function createApp(deps: AppDependencies) {
     ...(deps.publicIntake
       ? { bookingKeys: { secret: deps.publicIntake.keySecrets.current, publicBaseUrl: deps.publicIntake.publicBaseUrl } }
       : {}),
-    ...(deps.stripe ? { billing: { stripe: deps.stripe } } : {}),
+    ...(deps.stripe ? { billing: { stripe: deps.stripe, ...(deps.stripePlans ? { plans: deps.stripePlans } : {}) } } : {}),
     ...(deps.googleCalendar ? {
       calendar: {
         google: deps.googleCalendar.google,

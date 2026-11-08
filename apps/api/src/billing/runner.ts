@@ -1,7 +1,7 @@
 // The process that runs the M5 billing worker (docs/requirements/stripe.md S-8). One run applies
 // stored Stripe events in passes until a pass claims fewer than the limit or the budget is spent.
 // Time, ids and the database come in as dependencies.
-import { createBillingWorker, type BillingWorker } from "@zs/core";
+import { createBillingWorker, type BillingWorker, type StripeSubscriptionReader } from "@zs/core";
 import { asService, type Transaction } from "@zs/db";
 import type { Pool } from "pg";
 
@@ -19,12 +19,16 @@ export function createBillingWorkerFromPool(deps: {
   readonly clock: { now(): Date };
   readonly generateId: () => string;
   readonly report?: (event: { readonly eventId: string; readonly type: string; readonly outcome: string }) => void;
+  readonly subscriptions?: StripeSubscriptionReader;
+  readonly planGraceDays?: number;
 }): BillingWorker {
   return createBillingWorker({
     service: <T>(work: (tx: Transaction) => Promise<T>) => asService(deps.pool, work),
     clock: deps.clock,
     generateId: deps.generateId,
     ...(deps.report ? { report: deps.report } : {}),
+    ...(deps.subscriptions ? { subscriptions: deps.subscriptions } : {}),
+    ...(deps.planGraceDays === undefined ? {} : { config: { planGraceDays: deps.planGraceDays } }),
   });
 }
 

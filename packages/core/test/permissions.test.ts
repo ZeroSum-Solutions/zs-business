@@ -15,10 +15,11 @@ import { templatedKindHandlers } from "../src/templates/send.js";
 import {
   AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
-  parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, type DispatchContext,
+  parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, planHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
 } from "../src/index.js";
 import { encodeRgbaPng } from "../src/images/png.js";
+import { stubPlans } from "./billing/plan-helpers.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
 const clock = { now: () => new Date(NOW) };
@@ -57,6 +58,7 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "approval.approve": "approve",
   "approval.reject": "approve",
   "wallet.topup.create": "billing",
+  "plan.checkout.create": "billing",
   "calendar.google.connect": "publish",
   "calendar.google.disconnect": "publish",
   "connection.connect": "integrations",
@@ -136,7 +138,7 @@ const tokenPublicKey = parseSealPublicKey(generateSealKeyPair().publicKey);
 const calendar = { google, stateSecrets: { current: ["test", "oauth", "s".repeat(32)].join("-") }, tokenPublicKey };
 const sites = { store: createMemorySiteStore(), compiler: plainSiteCompiler };
 const images = { store: createMemorySiteStore(), config: parseImageConfig({ environment: "test", adapter: "fake" }) };
-const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, billing: { stripe }, calendar, sites, images });
+const deps = (): EdgeDependencies => ({ db: database.db, clock, generateId: randomUUID, bookingKeys, billing: { stripe, plans: stubPlans() }, calendar, sites, images });
 const siteSpec = { kind: "plain", title: "Halden & Rowe" };
 const sessionFor = (actorId: string, tenantId = tenant.tenantId): Session => createSession(deps(), { tenantId, actorId });
 
@@ -350,6 +352,15 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     // stripe.md S-1: only owners add money.
     listTopUps: { permission: "billing", run: () => session.listTopUps() },
     createTopUp: { permission: "billing", run: () => session.createTopUp({ amount: 1_000 }, randomUUID()) },
+    // plans.md PL-4..PL-7: plans are owner billing too.
+    getBillingPlan: { permission: "billing", run: () => session.getBillingPlan() },
+    startPlanCheckout: { permission: "billing", run: () => session.startPlanCheckout({ plan: "solo", interval: "month" }, randomUUID()) },
+    openBillingPortal: { permission: "billing", run: async () => {
+      await fixture.service((tx) => tx.query(
+        "INSERT INTO tenant_plans (tenant_id, stripe_customer_id, created_at, updated_at) VALUES ($1,$2,now(),now()) ON CONFLICT (tenant_id) DO NOTHING",
+        [tenant.tenantId, `cus_test_${tenant.tenantId.replaceAll("-", "")}`]));
+      return session.openBillingPortal();
+    } },
     linkIntakeItem: { permission: "intake", run: async () => session.linkIntakeItem(await intakeItem(), { contactId: tenant.contactId }, randomUUID()) },
     rejectIntakeItem: { permission: "intake", run: async () => session.rejectIntakeItem(await intakeItem(), {}, randomUUID()) },
     listIntakeItems: { permission: "intake", run: () => session.listIntakeItems({}) },
@@ -474,7 +485,7 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
       ...setupHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1); the intake worker's result and fail actions

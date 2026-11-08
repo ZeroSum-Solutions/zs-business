@@ -17,6 +17,10 @@ const onSchema = z.object({
   BILLING_RUN_BUDGET_MS: int(1_000, 600_000).default(20_000),
   // The Node worker's pause between runs.
   BILLING_INTERVAL_MS: int(1_000, 3_600_000).default(30_000),
+  // plans.md PL-13: a restricted key that may only read subscriptions; without it plan events wait.
+  BILLING_STRIPE_KEY: z.string().regex(/^(rk|sk)_(test|live)_[A-Za-z0-9]{8,250}$/, "must be a Stripe restricted key").optional(),
+  BILLING_STRIPE_BASE_URL: z.url({ protocol: /^https?$/ }).optional(),
+  BILLING_PLAN_GRACE_DAYS: int(1, 30).default(7),
 });
 
 export interface BillingRunnerEnv {
@@ -25,6 +29,9 @@ export interface BillingRunnerEnv {
   readonly claimLimit: number;
   readonly budgetMs: number;
   readonly intervalMs: number;
+  /** PL-13: reads plan subscriptions again; null means plan events wait. */
+  readonly stripeReader: { readonly secretKey: string; readonly baseUrl?: string } | null;
+  readonly planGraceDays: number;
 }
 
 export interface BillingEnv {
@@ -74,6 +81,11 @@ export function parseBillingEnv(env: Readonly<Record<string, string | undefined>
       claimLimit: data.BILLING_CLAIM_LIMIT,
       budgetMs: data.BILLING_RUN_BUDGET_MS,
       intervalMs: data.BILLING_INTERVAL_MS,
+      stripeReader: data.BILLING_STRIPE_KEY === undefined ? null : {
+        secretKey: data.BILLING_STRIPE_KEY,
+        ...(data.BILLING_STRIPE_BASE_URL === undefined ? {} : { baseUrl: data.BILLING_STRIPE_BASE_URL }),
+      },
+      planGraceDays: data.BILLING_PLAN_GRACE_DAYS,
     },
   };
 }

@@ -116,6 +116,7 @@ export * from "./delivery.js";
 export * from "./agents.js";
 export * from "./templates.js";
 export * from "./billing.js";
+export * from "./plans.js";
 export * from "./calendar.js";
 export * from "./connections.js";
 export * from "./automation.js";

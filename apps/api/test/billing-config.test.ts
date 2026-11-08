@@ -144,7 +144,10 @@ describe("parseBillingEnv (S-8, S-9)", () => {
   it("reads the switched-on environment with its defaults", () => {
     expect(parseBillingEnv({ ...ON, CRON_SECRET })).toEqual({
       cronSecret: CRON_SECRET,
-      runner: { serviceDatabaseUrl: LOCAL_DB, databaseCaCert: undefined, claimLimit: 50, budgetMs: 20_000, intervalMs: 30_000 },
+      runner: {
+        serviceDatabaseUrl: LOCAL_DB, databaseCaCert: undefined, claimLimit: 50, budgetMs: 20_000, intervalMs: 30_000,
+        stripeReader: null, planGraceDays: 7,
+      },
     });
     expect(parseBillingEnv({ ...ON, BILLING_CLAIM_LIMIT: "10", BILLING_RUN_BUDGET_MS: "5000", BILLING_INTERVAL_MS: "60000" }).runner)
       .toMatchObject({ claimLimit: 10, budgetMs: 5_000, intervalMs: 60_000 });
@@ -152,6 +155,18 @@ describe("parseBillingEnv (S-8, S-9)", () => {
       ["BILLING_CLAIM_LIMIT", "0"], ["BILLING_CLAIM_LIMIT", "501"], ["BILLING_RUN_BUDGET_MS", "999"],
       ["BILLING_RUN_BUDGET_MS", "600001"], ["BILLING_INTERVAL_MS", "abc"],
     ] as const) expect(billingError({ ...ON, [name]: value })).toMatch(new RegExp(name));
+  });
+
+  it("reads the plan read key and grace (plans.md PL-13), naming variables, never values", () => {
+    const key = ["rk", "test", "k".repeat(24)].join("_");
+    expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, BILLING_PLAN_GRACE_DAYS: "3" }).runner)
+      .toMatchObject({ stripeReader: { secretKey: key }, planGraceDays: 3 });
+    expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, BILLING_STRIPE_BASE_URL: "http://127.0.0.1:9999" }).runner)
+      .toMatchObject({ stripeReader: { secretKey: key, baseUrl: "http://127.0.0.1:9999" } });
+    const bad = billingError({ ...ON, BILLING_STRIPE_KEY: "pk_test_notasecretkey123" });
+    expect(bad).toMatch(/BILLING_STRIPE_KEY/);
+    expect(bad).not.toContain("pk_test_notasecretkey123");
+    for (const value of ["0", "31", "x"]) expect(billingError({ ...ON, BILLING_PLAN_GRACE_DAYS: value })).toMatch(/BILLING_PLAN_GRACE_DAYS/);
   });
 
   it("lets the Node worker take a long budget, but the cron entry at most 20 s inside its 30 s function", () => {

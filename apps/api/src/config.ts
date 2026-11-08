@@ -6,6 +6,7 @@ import {
   jwtEnvSchema,
   parseImageConfig,
   parseStripeEnv,
+  parsePlanEnv,
   resendWebhookSecretSchema,
   secureUrlProblem,
   sessionCheckEnvSchema,
@@ -17,6 +18,7 @@ import {
   type KeywordReplies,
   type SessionCheckConfig,
   type StripeEnv,
+  type PlanConfig,
 } from "@zs/core";
 import { IMAGE_ADAPTERS, IMAGE_PRESETS, type ImagePreset } from "@zs/contracts";
 import { assertLocalDatabaseUrl } from "@zs/db";
@@ -165,6 +167,8 @@ export interface ServerEnv {
   readonly resendWebhook: ResendWebhookEnv | null;
   /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
   readonly stripe: StripeEnv | null;
+  /** plans.md PL-13: Hub plans; null (off) when no STRIPE_PLAN_ variable is set. Needs `stripe`. */
+  readonly plans: PlanConfig | null;
   /** google-calendar.md G-12: connecting, the OAuth callback and the push webhook; null (all off) when no API GOOGLE_ variable is set. */
   readonly google: GoogleEnv | null;
   /** connections.md C-3: the managed-tier connections routes and /mcp tools; null (all off) when no API CONNECTIONS_ variable is set. */
@@ -243,6 +247,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     unsubscribe: parseUnsubscribe(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
+    plans: parsePlansWithStripe(env),
     google: parseGoogleEnv(env),
     connections: parseConnectionsApiEnv(env),
     twilioWebhook: parseTwilioWebhook(parsed.data),
@@ -471,4 +476,12 @@ export function localStubIssues(config: SessionCheckConfig, databaseUrl: string)
   } catch {
     return [{ code: "custom", path: ["SESSION_CHECK"], message: "SESSION_CHECK=local-stub needs a loopback DATABASE_URL", input: undefined }];
   }
+}
+
+/** PL-13: plans ride on the S-9 Stripe variables; plan variables alone are a mistake. */
+function parsePlansWithStripe(vars: Readonly<Record<string, string | undefined>>): PlanConfig | null {
+  const plans = parsePlanEnv(vars);
+  if (plans !== null && parseStripeEnv(vars) === null)
+    throw new Error("Invalid environment: STRIPE_PLAN_PRICES needs the STRIPE_ top-up variables (stripe.md S-9)");
+  return plans;
 }

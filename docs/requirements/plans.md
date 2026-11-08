@@ -1,7 +1,8 @@
 # Hub plans: paid subscriptions through Stripe Billing
 
-Status: draft contract, revision 1 (2026-11-07). Code follows this file; a change to a numbered
-rule needs a new revision of this file first. Extends `stripe.md` (revision 5): the same Stripe
+Status: draft contract, revision 1 (2026-11-07), after a GPT-6.1 Sol review of the first draft
+(mixed intervals, event order, stale checkouts, unpaid replacements, worker serialization). Code
+follows this file; a change to a numbered rule needs a new revision of this file first. Extends `stripe.md` (revision 5): the same Stripe
 account, webhook endpoint, event inbox (`stripe_events`) and billing worker carry plan events.
 Prices come from `zs-agency-site/design/PRICING.md` (final, 2026-11-07), section 1B and section 5.
 
@@ -43,8 +44,11 @@ billing, and requiring a plan of a tenant that never had one (Known limits).
   Invoice events (`invoice.paid`, `invoice.payment_failed`) carry `id`, `customer`, the
   subscription (`subscription` in older versions, `parent.subscription_details.subscription` and
   its `metadata` in newer ones), `amount_due` and `currency`. Every event has `created` (Unix
-  seconds). Events may repeat and arrive in any order. The Portal cannot change a subscription
-  that has more than one item.
+  seconds), but Stripe does not promise order, and `created` has one-second resolution, so it
+  cannot order two updates. `GET /v1/subscriptions/<id>` answers the subscription as it is now,
+  for a canceled one too. One Checkout Session cannot mix a yearly and a monthly price. The Portal
+  cannot change a subscription that has more than one item. A restricted key can be limited to
+  reading subscriptions.
 - Tenants that exist today (Zero Sum, tenant 1, and the pilot tenants) never subscribed. They keep
   working as they do: this revision limits and locks only tenants that have had a subscription.
 
@@ -66,7 +70,8 @@ API, the worker and the dashboard). Amounts are USD cents.
 | Agent daily model cap, cents | 100 | 100 | 300 |
 | Emails a month | 1,000 | 4,000 | 15,000 |
 
-Each extra-connection add-on unit adds one managed connection. Where PRICING.md is silent this
+Each extra-connection add-on unit adds one managed connection. The add-on is monthly, so it is
+sold with monthly plans only (Stripe cannot mix intervals in one Checkout). Where PRICING.md is silent this
 revision picked: resources and seats count every row the tenant has; tokens count unrevoked
 tokens whose expiry has not passed. Enforced in this revision (PL-8): seats on `member.invite`,
 managed connections on `connection.connect`, tokens on `automation.token.create`. The other rows
@@ -75,23 +80,29 @@ are stated for the dashboard and later rules (Known limits).
 **PL-2. Stripe catalog.** Each price carries the `lookup_key` from PRICING.md section 5:
 `hub_{solo,studio,pro}_{month,year}`, `hub_{studio,pro}_founding_{month,year}` and
 `hub_connection_month`, with metadata `zs_plan`, `zs_interval` (and `founding=true`). The API
-holds a map from lookup key to price ID (PL-12). The worker never needs it: it reads the plan from
+holds a map from lookup key to price ID (PL-13). The worker never needs it: it reads the plan from
 the subscription item's `price.lookup_key`. An item whose lookup key is not in the catalog makes
-the event `mismatch` and changes nothing.
+the subscription keep the plan it last had (lookup keys can move between prices); a subscription
+whose plan was never recognised ends `mismatch` and gives no plan, but its status is still kept.
 
-**PL-3. The plan record.** `tenant_plans` holds one row per tenant that has had a subscription
-or a founding invite: plan, interval, founding, status (`none` until the first subscription event,
-then Stripe's), extra connections, Stripe customer and subscription IDs (each unique), trial end,
-period end, `cancel_at_period_end`, `trial_used`, `founding_invite`, `founding_started_at`,
-`payment_failed_at`, `read_only_after` and the `created` of the last applied subscription event.
-A tenant with no row, or with status `none`, is **comped**: no plan limits and never read-only.
+**PL-3. The plan record.** `plan_subscriptions` holds one row per Stripe subscription of a
+tenant, as Stripe last answered it: status, plan, interval, founding, extra connections, trial
+end, period end, `cancel_at_period_end`, start and end times, and `status_since` (when this
+status was first seen). `tenant_plans` holds one row per tenant that has had a checkout, a
+subscription or a founding invite: the Stripe customer ID (unique), `founding_invite`, and what
+PL-10 derives from the subscriptions: the **effective** subscription and its fields, status
+(`none` while there is no recognised subscription), `trial_used`, `founding_started_at`,
+`payment_failed_at` and `read_only_after`. A tenant with no row, or with status `none` and no
+`read_only_after`, is **comped**: no plan limits and never read-only.
 `plan_checkouts` holds each started Checkout like `wallet_topups` holds top-ups.
 `plan_invoices` holds one row per Stripe invoice the worker saw: `paid` or `failed`, and when it
 first failed.
 
 **PL-4. Starting Checkout.** `POST /v1/billing/plan/checkout { plan, interval, extraConnections }`
 with an `Idempotency-Key`, owners only (`billing`), runs the action `plan.checkout.create` through
-the dispatcher. `extraConnections` is 0 to 20. The action inserts one `plan_checkouts` row
+the dispatcher. `extraConnections` is 0 to 20, and above 0 only with `interval=month` (else 400).
+The handler first takes the tenant's plan lock (a transaction advisory lock, PL-10). The action
+inserts one `plan_checkouts` row
 (`pending`) whose ID derives from the key. The price IDs, return URL and trial length reach the
 handler as dispatch config from this route, never in the payload, so a caller cannot choose them
 and the action cannot run from anywhere else (without the config it is 404). The handler picks,
@@ -99,6 +110,10 @@ from the tenant's own row: the founding price when `founding_invite` is set and 
 or Pro (Solo never has one); a 14-day trial only when `trial_used` is false; and the stored
 customer ID when there is one. It stores all of them with the checkout. A tenant whose plan is
 `trialing`, `active` or `past_due` is refused (409 `plan_exists`): it changes plan in the Portal.
+**One open checkout per tenant:** while another of the tenant's checkouts is `pending` and less
+than an hour old, a new one is refused (409 `checkout_open`, with that checkout's stored URL when
+there is one, so the dashboard can reopen it). So no second session carries a trial or a founding
+price the first one already used.
 Off (404) without plan config.
 
 **PL-5. The Checkout Session.** After the action commits, the route asks Stripe for a session with
@@ -134,7 +149,7 @@ injected clock. A read-only tenant may run only: `plan.checkout.create`, `wallet
 `suppression.record`, the inbound and worker records (`sms.status.record`, `sms.reply.record`,
 `voice.call.record`, `voice.voicemail.record`, `voice.textback.optin`, `transcription.job.complete`,
 `transcription.job.fail`, `catalog.intake.result`, `catalog.intake.fail`, `media.variant.stage`,
-`media.variant.fail`), the stops (`agent.kill`, `agent.kind.kill`, `browser.kill`,
+`media.variant.fail`; not `voice.textback.optin`, which starts an outbound text), the stops (`agent.kill`, `agent.kind.kill`, `browser.kill`,
 `agent.run.finish`, `agent.run.stall`, `agent.kind.run.finish`, `agent.cost.warn`) and the
 removals (`member.remove`, `connection.disconnect`, `calendar.google.disconnect`,
 `automation.token.revoke`, `approval.reject`, `approval.revoke`, `inbox.reply.discard`). Anything
@@ -150,48 +165,57 @@ check and inbox. The Stripe endpoint adds `customer.subscription.created`,
 `invoice.payment_failed`.
 
 **PL-10. Applying events, in any order.** The billing worker (service role) applies plan events
-under `stripe.md` S-4 (one event per transaction, savepoint, backoff, `orphaned`). The tenant
-always comes from our own rows: through `metadata.zs_tenant` and `zs_checkout` naming a
-`plan_checkouts` row of that tenant, or through the stored customer ID. An invoice for a customer
-not known yet waits (S-4 backoff). Rules:
-- `checkout.session.completed` with `mode=subscription`: marks the checkout `completed` and stores
-  the customer ID on the tenant's record (creating the row). `checkout.session.expired` marks a
-  pending checkout `expired`.
-- A subscription event is a snapshot. It is applied only when its `created` is at or after the
-  last applied one for the tenant, and never to a subscription already `canceled` (terminal). It
-  sets plan, interval, founding (from the plan item's lookup key), extra connections (the add-on
-  item's quantity), status, trial end, period end and `cancel_at_period_end`; sets `trial_used`;
-  and sets `founding_started_at` the first time a founding price starts. A different subscription
-  for a tenant whose tracked one is still `trialing`, `active` or `past_due` ends `duplicate` for an
-  operator and changes nothing.
+under `stripe.md` S-4 (one event per transaction, savepoint, backoff, `orphaned`), and first takes
+the tenant's plan lock, so two events of one tenant never interleave. The tenant always comes from
+our own rows: through `metadata.zs_tenant` and `zs_checkout` naming a `plan_checkouts` row of that
+tenant, or through a stored subscription or customer ID. Anything not known yet waits (S-4
+backoff). **An event only says which subscription to look at:** the worker reads it again with
+`GET /v1/subscriptions/<id>` (PL-13 read key) and stores that answer, so the order and repeats of
+events do not matter. Stripe unreachable is an error (S-4 retry); a subscription Stripe does not
+know ends `not_ours`. Rules:
+- `checkout.session.completed` with `mode=subscription`: marks the checkout `completed`, stores the
+  customer ID on the tenant's record (creating the row) and reads the session's subscription.
+  `checkout.session.expired` marks a pending checkout `expired`.
+- `customer.subscription.*`: reads that subscription.
 - `invoice.paid` marks the invoice `paid` (terminal: a later failure of the same invoice changes
   nothing). `invoice.payment_failed` marks it `failed` and keeps the earliest failure time (the
-  event's `created`).
-- After each event the worker recomputes, from the rows alone: `payment_failed_at` is the earliest
-  failure among the tracked subscription's `failed` invoices (none: null), and `read_only_after` is
-  `payment_failed_at + grace` while the status is `trialing`, `active` or `past_due`; for `canceled`,
-  `unpaid`, `incomplete_expired` or `paused` it is the earliest of that and when the status was
-  first seen (`ended_at` when given, else the event's `created`); otherwise null. A paid invoice or a
-  new subscription therefore lifts read-only, and replaying any event changes nothing.
+  event's `created`). Both then read the invoice's subscription.
+- Storing a subscription sets its row from Stripe's answer. `status_since` changes only when the
+  status does (to the end time Stripe gives for an ended one, else the worker's clock).
+- After each event the worker derives the tenant's record from its rows alone. The **effective**
+  subscription is the latest-started one in `trialing`, `active` or `past_due` with a recognised
+  plan; with none, the latest-started recognised one. `payment_failed_at` is the earliest failure
+  among the effective subscription's `failed` invoices. `read_only_after` is
+  `payment_failed_at + grace` (or null) while the effective subscription is in one of those three;
+  otherwise it is the `status_since` of the latest subscription in `canceled`, `unpaid`,
+  `incomplete_expired` or `paused`, or null when none ever ended. So an `incomplete` replacement
+  never lifts read-only, a paid invoice or a new paying subscription does, and replaying any event
+  changes nothing. A second paying subscription is reported (`duplicate`) and the latest one wins.
+- `trial_used` is true once the tenant has any subscription; `founding_started_at` is the start of
+  its first founding subscription. When a founding subscription is first seen ended, the tenant
+  loses `founding_invite`.
 
-**PL-11. Founding.** An operator (service role, `setFoundingInvite`) sets `founding_invite` on a
-tenant; it refuses a 26th tenant counted by `founding_invite` or `founding_started_at`. The server
+**PL-11. Founding.** An operator (service role, `setFoundingInvite`, like the other operator
+scripts) sets `founding_invite` on a tenant; under a global advisory lock it refuses a 26th tenant
+counted by `founding_invite` or `founding_started_at`. The server
 alone chooses a founding price (PL-4); no founding price ID ever reaches a browser. When a
 founding subscription is deleted, the tenant loses `founding_invite` and pays list price on its
 next Checkout; its `founding_started_at` stays, so the slot stays used.
 
-**PL-12. Tenancy and roles.** `tenant_plans`, `plan_checkouts` and `plan_invoices` have
+**PL-12. Tenancy and roles.** `tenant_plans`, `plan_subscriptions`, `plan_checkouts` and `plan_invoices` have
 `tenant_id`, forced RLS, the tenant policy and are in the catalog isolation test, with a
 two-tenant denial test under the runtime role. The runtime role reads its own tenant's rows; it may
 insert a pending checkout through the action and update only its stored session URL; it never
-writes `tenant_plans` or `plan_invoices`. The worker names `tenant_id` in every statement.
+writes `tenant_plans`, `plan_subscriptions` or `plan_invoices`. The worker names `tenant_id` in every statement.
 
 **PL-13. Configuration.** API function (beside S-9): `STRIPE_PLAN_PRICES`, a JSON object from
 every PL-2 lookup key to its `price_…` ID (all eleven, or the variable is refused);
 `STRIPE_PLAN_RETURN_URL` (https, the dashboard's plan page); optional `STRIPE_PLAN_TRIAL_DAYS`
 (0 to 30, default 14); optional `STRIPE_PORTAL_CONFIGURATION` (`bpc_…`). Plans are on only when
 the S-9 Stripe variables and these are set; none of them is set on the workers project. Billing
-function: optional `BILLING_PLAN_GRACE_DAYS` (1 to 30, default 7). Core reads none of them from
+function: `BILLING_STRIPE_KEY`, a restricted key that may only read subscriptions (`rk_…`, same
+mode as `STRIPE_LIVEMODE`); without it plan events wait and end `orphaned`. Optional
+`BILLING_STRIPE_BASE_URL` and `BILLING_PLAN_GRACE_DAYS` (1 to 30, default 7). Core reads none of them from
 the environment; the entry points parse them and pass them in, with the clock.
 
 ## Known limits (revision 1)
@@ -202,4 +226,7 @@ the environment; the entry points parse them and pass them in, with the clock.
 - The add-on quantity is chosen at Checkout; the Portal cannot change a two-item subscription, so
   an owner with the add-on changes plan or quantity through support until a rule adds a route.
 - Messages queued before a tenant turns read-only may still be sent by the delivery worker.
+- Media uploads and transcription upload tickets that do not go through the dispatcher are not
+  refused by PL-8; nothing they store is used until an action runs, and that action is refused.
+- A second paying subscription (possible only through Stripe itself) is reported, not cancelled.
 - The founding cap counts invites, not sign-ups; the operator invites.

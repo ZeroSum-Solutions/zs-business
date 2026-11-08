@@ -85,6 +85,9 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         // Industry templates (industry-templates.md IT-3): a listed template id. The FK to actions
         // keeps this row waiting until the tenant's actions row is seeded.
         else if (name === "tenant_setups" && field.name === "template_id") row[field.name] = "agency";
+        // Hub plans (plans.md PL-3): a Stripe invoice ID.
+        else if (name === "plan_invoices" && field.name === "id") row[field.name] = `in_fixture_${randomInt(0, 1_000_000_000)}`;
+        else if (name === "plan_subscriptions" && field.name === "id") row[field.name] = `sub_fixture_${randomInt(0, 1_000_000_000)}`;
         else if (field.enum_value !== null) row[field.name] = field.enum_value;
         else if (field.type in values) row[field.name] = values[field.type];
         else throw new Error(`Cannot construct ${name}.${field.name} (${field.type})`);
