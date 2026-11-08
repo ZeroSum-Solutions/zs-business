@@ -230,6 +230,16 @@ describe("the embedded routes (C-21, C-22)", () => {
     expect(shopifyOpenResponseSchema.safeParse({ outcome: "ok", shop: { domain: SHOP, name: "x" }, link: { state: "none" } }).success).toBe(true);
   });
 
+  it("accepts an open answer from a newer worker with a field it does not know, and drops that field (either deploy order)", () => {
+    const newer = { outcome: "ok", shop: { domain: SHOP, name: "x" }, plan: { state: "none" }, link: { state: "none" }, future: { anything: 1 } };
+    const parsed = shopifyOpenResponseSchema.safeParse(newer);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).not.toHaveProperty("future");
+    // The fields it reads stay strict.
+    expect(shopifyOpenResponseSchema.safeParse({ ...newer, plan: { state: "active", name: "Solo", extra: 1 } }).success).toBe(false);
+    expect(shopifyOpenResponseSchema.safeParse({ ...newer, link: { state: "none", extra: 1 } }).success).toBe(false);
+  });
+
   it("a forged token is a 401 (so the page retries with a fresh one), not a crash", async () => {
     const forged = await embedded(on, "open", mintIdToken(nativeClock.now(), {}, "z".repeat(48)));
     expect(forged.status).toBe(401);

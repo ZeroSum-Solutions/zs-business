@@ -366,23 +366,23 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
   }
 
   /**
-   * C-29: the shop's plan as the billing runner last stored it (plans.md PL-18), read with the link in one transaction.
+   * C-29: the shop's plan as the billing runner last stored it (plans.md PL-18), read with the link in one statement.
    * Only a store linked to a hub has a plan to show (a disconnected or uninstalled store keeps its row but shows none).
    * Trialing and active (past due keeps the plan, PL-4) count; all else is none.
    */
   async function linkAndPlanOf(shopId: string): Promise<{ link: ShopLink; plan: ShopPlan }> {
-    return service(async (tx) => {
-      const linked = (await tx.query<{ tenant_id: string; name: string; status: "active" | "reauthorize" }>(
-        `SELECT c.tenant_id, t.name, c.status::text AS status FROM connections c JOIN tenants t ON t.tenant_id=c.tenant_id
-          WHERE c.tier='native' AND c.external_account_id=$1 AND c.status IN ('active','reauthorize')`, [shopId])).rows[0];
-      if (!linked) return { link: { state: "none" }, plan: { state: "none" } };
-      const link: ShopLink = { state: "linked", businessName: linked.name, connection: linked.status };
-      const row = (await tx.query<{ plan: HubPlan | null; status: string }>(
-        "SELECT plan, status::text AS status FROM tenant_plans WHERE tenant_id=$1 AND billing_provider='shopify' AND shopify_shop_id=$2", [linked.tenant_id, shopId])).rows[0];
-      if (!row?.plan || !PLAN_CATALOG[row.plan]) return { link, plan: { state: "none" } };
-      if (row.status === "trialing") return { link, plan: { state: "trial", name: PLAN_CATALOG[row.plan].name } };
-      return { link, plan: row.status === "active" || row.status === "past_due" ? { state: "active", name: PLAN_CATALOG[row.plan].name } : { state: "none" } };
-    });
+    // One statement, so one snapshot: under READ COMMITTED two queries could see a disconnect between them.
+    const linked = (await service((tx) => tx.query<{ name: string; status: "active" | "reauthorize"; plan: HubPlan | null; plan_status: string | null }>(
+      `SELECT t.name, c.status::text AS status, p.plan, p.status::text AS plan_status
+         FROM connections c JOIN tenants t ON t.tenant_id=c.tenant_id
+         LEFT JOIN tenant_plans p ON p.tenant_id=c.tenant_id AND p.billing_provider='shopify' AND p.shopify_shop_id=c.external_account_id
+        WHERE c.tier='native' AND c.external_account_id=$1 AND c.status IN ('active','reauthorize')`, [shopId]))).rows[0];
+    if (!linked) return { link: { state: "none" }, plan: { state: "none" } };
+    const link: ShopLink = { state: "linked", businessName: linked.name, connection: linked.status };
+    const entry = linked.plan ? PLAN_CATALOG[linked.plan] : undefined;
+    if (!entry) return { link, plan: { state: "none" } };
+    if (linked.plan_status === "trialing") return { link, plan: { state: "trial", name: entry.name } };
+    return { link, plan: linked.plan_status === "active" || linked.plan_status === "past_due" ? { state: "active", name: entry.name } : { state: "none" } };
   }
 
   async function open(input: { idToken: string }): Promise<OpenResult> {

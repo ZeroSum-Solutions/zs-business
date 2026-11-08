@@ -157,20 +157,25 @@ class FakeNode {
   }
 }
 
-function runClient(options: { framed?: boolean; search?: string; answers: Array<{ status: number; body: unknown }> }) {
+type Answer = { status: number; body: unknown; headers?: Record<string, string>; wait?: Promise<unknown> } | { hang: true };
+interface FakeTimer { id: number; at: number; ms: number; fn: () => void }
+
+/** Runs the page script against a fake document, a fake clock and a timer queue that honours delays and clearTimeout. */
+function runClient(options: { framed?: boolean; search?: string; hidden?: boolean; answers: Answer[] }) {
   const app = new FakeNode("main");
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const opened: Array<{ href: string | null }> = [];
-  const document = { getElementById: () => app, createElement: (tag: string) => new FakeNode(tag) };
-  const timers: Array<() => void> = [];
+  const document = { getElementById: () => app, createElement: (tag: string) => new FakeNode(tag), visibilityState: options.hidden ? "hidden" : "visible" };
+  const timers: FakeTimer[] = [];
   const clock = { ms: 1_000_000 };
-  const win: { top: object | undefined; self: object | undefined; Date: { now: () => number }; location: { reload: ReturnType<typeof vi.fn>; search: string }; open: ReturnType<typeof vi.fn>; setTimeout: (fn: () => void, ms: number) => number; clearTimeout: () => void } = {
+  let nextId = 0;
+  const win: { top: object | undefined; self: object | undefined; Date: { now: () => number }; location: { reload: ReturnType<typeof vi.fn>; search: string }; open: ReturnType<typeof vi.fn>; setTimeout: (fn: () => void, ms: number) => number; clearTimeout: (id: number) => void } = {
     top: options.framed === false ? undefined : {},
     self: undefined,
     location: { reload: vi.fn(), search: options.search ?? "?shop=halden-rowe.myshopify.com&host=abc" },
     Date: { now: () => clock.ms },
-    setTimeout: (fn) => { timers.push(fn); return timers.length; },
-    clearTimeout: () => undefined,
+    setTimeout: (fn, ms) => { nextId += 1; timers.push({ id: nextId, at: clock.ms + ms, ms, fn }); return nextId; },
+    clearTimeout: (id) => { const at = timers.findIndex((timer) => timer.id === id); if (at >= 0) timers.splice(at, 1); },
     open: vi.fn(() => { const tab = { opener: {}, location: { href: null as string | null }, close: vi.fn() }; opened.push(tab.location); return tab; }),
   };
   if (options.framed === false) { win.top = win.self; }
@@ -178,11 +183,30 @@ function runClient(options: { framed?: boolean; search?: string; answers: Array<
   const fetchImpl = async (url: string, init: RequestInit) => {
     calls.push({ url, init });
     const next = queue.shift() ?? { status: 503, body: {} };
-    return { status: next.status, ok: next.status >= 200 && next.status < 300, json: async () => next.body };
+    if ("hang" in next) return new Promise<never>(() => undefined);
+    if (next.wait) await next.wait;
+    const headers = new Headers(next.headers ?? {});
+    return { status: next.status, ok: next.status >= 200 && next.status < 300, headers, json: async () => next.body };
   };
   const shopify = { idToken: async () => TOKEN };
   new Function(...EMBEDDED_CLIENT_PARAMS, EMBEDDED_CLIENT_SOURCE)(document, win, fetchImpl, shopify);
-  return { app, calls, win, opened, timers, clock };
+  /** Moves the clock forward, firing every due timer in order and letting its promises settle. */
+  const advance = async (ms: number) => {
+    const target = clock.ms + ms;
+    for (;;) {
+      timers.sort((a, b) => a.at - b.at);
+      const due = timers[0];
+      if (!due || due.at > target) break;
+      timers.shift();
+      clock.ms = due.at;
+      due.fn();
+      await settle();
+    }
+    clock.ms = target;
+    await settle();
+  };
+  const polls = () => timers.filter((timer) => timer.fn.name === "refreshPlan");
+  return { app, calls, win, opened, timers, clock, advance, polls };
 }
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const texts = (app: FakeNode) => app.all().map((node) => node.text).join(" | ");
@@ -247,12 +271,12 @@ describe("the plan on the page (C-29)", () => {
 
   it("shows no plan, no Choose a plan and no confirming state for a store without a hub, even after the welcome redirect", async () => {
     for (const search of [undefined, WELCOME]) {
-      const { app, timers } = runClient({ ...(search ? { search } : {}), answers: [ok({ state: "none" }, PLAN_URL, { state: "none" })] });
+      const { app, polls } = runClient({ ...(search ? { search } : {}), answers: [ok({ state: "none" }, PLAN_URL, { state: "none" })] });
       await settle();
       expect(texts(app)).toContain("Not linked to a ZS Hub yet");
       expect(app.all().some((node) => node.attrs["data-testid"] === "plan-state")).toBe(false);
       expect(texts(app)).not.toContain("Confirming your plan");
-      expect(timers).toHaveLength(0);
+      expect(polls()).toHaveLength(0);
     }
   });
 
@@ -270,77 +294,211 @@ describe("the plan on the page (C-29)", () => {
     expect(texts(app)).not.toContain("Confirming your plan");
   });
 
+  it("keeps Choose a plan on the created screen when Open ZS Hub is clicked while the plan is read", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { app, calls } = runClient({ answers: [
+      ok({ state: "none" }, PLAN_URL, { state: "none" }),
+      { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+      { ...ok({ state: "none" }, PLAN_URL), wait: gate },
+      { status: 200, body: { outcome: "ok", url: "https://hub.example.test/sign-in" } },
+    ] });
+    await settle();
+    button(app, "Create my ZS Hub").click();
+    await settle();
+    button(app, "Open ZS Hub").click();
+    await settle();
+    expect(texts(app)).toContain("Your hub opened in a new tab.");
+    release();
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/create-hub", "/api/shopify/open", "/api/shopify/sign-in"]);
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
+    expect(texts(app)).toContain("Your hub opened in a new tab.");
+  });
+
+  it("offers Try again when the read after creating the hub fails, and shows Choose a plan once it works", async () => {
+    const { app, calls } = runClient({ answers: [
+      ok({ state: "none" }, PLAN_URL, { state: "none" }),
+      { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+      { status: 503, body: {} },
+      ok({ state: "none" }, PLAN_URL),
+    ] });
+    await settle();
+    button(app, "Create my ZS Hub").click();
+    await settle();
+    expect(texts(app)).toContain("Your plan could not be loaded just now.");
+    button(app, "Try again").click();
+    await settle();
+    expect(calls).toHaveLength(4);
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
+  });
+
+  it("shows the unlinked screen, not a plan block, when the read after creating the hub finds the store unlinked", async () => {
+    const { app } = runClient({ answers: [
+      ok({ state: "none" }, PLAN_URL, { state: "none" }),
+      { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+      ok({ state: "none" }, PLAN_URL, { state: "none" }),
+    ] });
+    await settle();
+    button(app, "Create my ZS Hub").click();
+    await settle();
+    expect(texts(app)).toContain("Not linked to a ZS Hub yet");
+    expect(link(app, "Choose a plan")).toBeUndefined();
+  });
+
+  it("does not confirm a plan after already_linked on a welcome page that first saw no hub", async () => {
+    const { app, polls } = runClient({ search: WELCOME, answers: [
+      ok({ state: "none" }, PLAN_URL, { state: "none" }),
+      { status: 200, body: { outcome: "already_linked" } },
+      ok({ state: "none" }, PLAN_URL),
+    ] });
+    await settle();
+    button(app, "Create my ZS Hub").click();
+    await settle();
+    await settle();
+    expect(texts(app)).toContain("Connected");
+    expect(texts(app)).not.toContain("Confirming your plan");
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
+    expect(polls()).toHaveLength(0);
+  });
+
   it("shows the current plan, not a confirming state, when the welcome link brings back a merchant who already has one", async () => {
-    const { app, timers } = runClient({ search: WELCOME, answers: [ok({ state: "active", name: "Solo" }, PLAN_URL)] });
+    const { app, polls } = runClient({ search: WELCOME, answers: [ok({ state: "active", name: "Solo" }, PLAN_URL)] });
     await settle();
     expect(texts(app)).toContain("Plan: Solo");
     expect(texts(app)).not.toContain("Confirming your plan");
-    expect(timers).toHaveLength(0);
+    expect(polls()).toHaveLength(0);
   });
 
   it("reads plan=welcome even when Shopify appends plan_handle, shop, host and embedded, and shows the new plan when it arrives", async () => {
-    const { app, calls, timers } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), ok({ state: "active", name: "Pro" }, PLAN_URL)] });
+    const { app, calls, polls, advance } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), ok({ state: "active", name: "Pro" }, PLAN_URL)] });
     await settle();
     expect(texts(app)).toContain("Confirming your plan");
     expect(link(app, "Choose a plan")).toBeUndefined();
-    expect(timers).toHaveLength(1);
-    timers.shift()!();
-    await settle();
+    expect(polls().map((timer) => timer.ms)).toEqual([30_000]);
+    await advance(29_999);
+    expect(calls).toHaveLength(1);
+    await advance(1);
     expect(calls).toHaveLength(2);
     expect(texts(app)).toContain("Plan: Pro");
+    expect(polls()).toHaveLength(0);
   });
 
-  it("keeps trying after failed reads, then shows Choose a plan once ten minutes have passed (elapsed time, not a count)", async () => {
-    const { app, calls, timers, clock } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), { status: 503, body: {} }, { status: 429, body: {} }, { status: 503, body: {} }] });
+  it("keeps trying after failed reads, then shows Choose a plan ten minutes after load", async () => {
+    const { app, calls, advance } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), { status: 503, body: {} }, { status: 503, body: {} }] });
     await settle();
-    for (const step of [15_000, 15_000]) {
-      clock.ms += step;
-      timers.shift()!();
-      await settle();
-      expect(texts(app)).toContain("Confirming your plan");
-      expect(timers).toHaveLength(1);
-    }
+    await advance(60_000);
     expect(calls).toHaveLength(3);
-    clock.ms += 600_000;
-    timers.shift()!();
+    expect(texts(app)).toContain("Confirming your plan");
+    await advance(540_000);
+    expect(texts(app)).not.toContain("Confirming your plan");
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
+    // One read per 30 seconds within the window, and none after it: at most 21 in all.
+    expect(calls.length).toBeLessThanOrEqual(21);
+    await advance(120_000);
+    expect(calls.length).toBeLessThanOrEqual(21);
+  });
+
+  it("ends the confirming state at the deadline even while a read hangs, and starts no second read meanwhile", async () => {
+    const { app, calls, advance } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), { hang: true }] });
     await settle();
-    expect(calls).toHaveLength(4);
+    await advance(30_000);
+    expect(calls).toHaveLength(2);
+    await advance(569_999);
+    expect(calls).toHaveLength(2);
+    expect(texts(app)).toContain("Confirming your plan");
+    await advance(1);
     expect(texts(app)).not.toContain("Confirming your plan");
     expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
   });
 
-  it("polls past forty reads while the ten minutes last", async () => {
-    const answers = [ok({ state: "none" }, PLAN_URL), ...Array.from({ length: 45 }, () => ok({ state: "none" }, PLAN_URL))];
-    const { app, calls, timers, clock } = runClient({ search: WELCOME, answers });
+  it("measures the ten minutes from load, not from the first good read", async () => {
+    const { app, advance } = runClient({ search: WELCOME, answers: [{ status: 503, body: {} }, ok({ state: "none" }, PLAN_URL)] });
     await settle();
-    for (let i = 0; i < 45; i += 1) { clock.ms += 5_000; timers.shift()!(); await settle(); }
-    expect(calls).toHaveLength(46);
-    expect(texts(app)).toContain("Confirming your plan");
+    expect(texts(app)).toContain("not reachable");
+    await advance(720_000);
+    button(app, "Try again").click();
+    await settle();
+    expect(texts(app)).toContain("Connected");
+    expect(texts(app)).not.toContain("Confirming your plan");
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
   });
 
-  it("drops a poll answer that lands after the merchant opened the hub, and leaves the screen alone", async () => {
-    const { app, calls, timers } = runClient({ search: WELCOME, answers: [
+  it("waits at least Retry-After after a 429", async () => {
+    const { calls, polls, advance } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), { status: 429, body: {}, headers: { "retry-after": "90" } }] });
+    await settle();
+    await advance(30_000);
+    expect(calls).toHaveLength(2);
+    expect(polls().map((timer) => timer.ms)).toEqual([90_000]);
+  });
+
+  it("stops polling and asks for a reload when the session cannot be renewed", async () => {
+    const { app, calls, polls, advance } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), { status: 401, body: {} }, { status: 401, body: {} }] });
+    await settle();
+    await advance(30_000);
+    expect(calls).toHaveLength(3);
+    expect(texts(app)).toContain("Your Shopify session expired");
+    expect(button(app, "Reload")).toBeDefined();
+    expect(polls()).toHaveLength(0);
+    await advance(600_000);
+    expect(calls).toHaveLength(3);
+    expect(texts(app)).toContain("Your Shopify session expired");
+  });
+
+  it("updates only the plan block on a poll, without moving focus or redrawing an unchanged block", async () => {
+    const { app, advance } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL), ok({ state: "none" }, PLAN_URL), ok({ state: "active", name: "Pro" }, PLAN_URL)] });
+    await settle();
+    const heading = app.all().find((node) => node.tag === "h1")!;
+    const open = button(app, "Open ZS Hub");
+    const plan = app.all().find((node) => node.attrs["data-testid"] === "plan-state")!;
+    const confirming = plan.children[0];
+    heading.focused = false;
+    await advance(30_000);
+    expect(plan.children[0]).toBe(confirming);
+    await advance(30_000);
+    expect(texts(app)).toContain("Plan: Pro");
+    expect(button(app, "Open ZS Hub")).toBe(open);
+    expect(app.all().find((node) => node.tag === "h1")).toBe(heading);
+    expect(heading.focused).toBe(false);
+  });
+
+  it("skips reads while the tab is hidden", async () => {
+    const { calls, polls, advance } = runClient({ search: WELCOME, hidden: true, answers: [ok({ state: "none" }, PLAN_URL)] });
+    await settle();
+    await advance(90_000);
+    expect(calls).toHaveLength(1);
+    expect(polls()).toHaveLength(1);
+  });
+
+  it("pauses polling while Open ZS Hub runs, then goes on and still reaches Choose a plan at the deadline", async () => {
+    const { app, calls, advance } = runClient({ search: WELCOME, answers: [
       ok({ state: "none" }, PLAN_URL),
-      ok({ state: "active", name: "Pro" }, PLAN_URL),
-      { status: 200, body: { outcome: "ok", url: "https://hub.example.test/sign-in" } },
+      { hang: true },
     ] });
     await settle();
-    timers.shift()!();
     button(app, "Open ZS Hub").click();
-    await settle();
-    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/open", "/api/shopify/sign-in"]);
-    expect(texts(app)).not.toContain("Plan: Pro");
-    expect(timers).toHaveLength(0);
+    await advance(30_000);
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/sign-in"]);
+    expect(texts(app)).toContain("Confirming your plan");
+    await advance(570_000);
+    expect(texts(app)).not.toContain("Confirming your plan");
+    expect(link(app, "Choose a plan")!.attrs.href).toBe(PLAN_URL);
   });
 
-  it("does not poll again once an action is running", async () => {
-    const { app, calls, timers } = runClient({ search: WELCOME, answers: [ok({ state: "none" }, PLAN_URL)] });
+  it("goes on polling after Open ZS Hub finishes, and applies the plan when it arrives", async () => {
+    const { app, calls, advance } = runClient({ search: WELCOME, answers: [
+      ok({ state: "none" }, PLAN_URL),
+      { status: 200, body: { outcome: "not_owner" } },
+      ok({ state: "active", name: "Pro" }, PLAN_URL),
+    ] });
     await settle();
     button(app, "Open ZS Hub").click();
     await settle();
-    timers.shift()!();
-    await settle();
-    expect(calls.filter((call) => call.url === "/api/shopify/open")).toHaveLength(1);
+    expect(texts(app)).toContain("Only the store owner can open the hub");
+    await advance(30_000);
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/sign-in", "/api/shopify/open"]);
+    expect(texts(app)).toContain("Plan: Pro");
+    expect(texts(app)).toContain("Only the store owner can open the hub");
   });
 });
 
@@ -429,6 +587,26 @@ describe("the page script", () => {
     expect(calls[1]!.url).toBe("/api/shopify/redeem-claim");
     expect(JSON.parse(calls[1]!.init.body as string)).toEqual({ code: "abcde fghj2" });
     expect(texts(app)).toContain("Confirm link");
+  });
+
+  it("drops a code answer that lands after the merchant chose Back", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { app } = runClient({
+      answers: [
+        { status: 200, body: { outcome: "ok", shop: SHOP, link: { state: "none" } } },
+        { status: 200, body: { outcome: "redeemed", businessName: "Halden & Rowe" }, wait: gate },
+      ],
+    });
+    await settle();
+    button(app, "I already have a hub").click();
+    button(app, "Link this store").click();
+    await settle();
+    button(app, "Back").click();
+    release();
+    await settle();
+    expect(texts(app)).toContain("Not linked to a ZS Hub yet");
+    expect(texts(app)).not.toContain("Almost done");
   });
 
   it("tells a locked-out caller how long to wait", async () => {

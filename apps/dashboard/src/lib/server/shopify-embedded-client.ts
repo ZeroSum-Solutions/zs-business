@@ -21,13 +21,16 @@ function el(tag, text, attrs) {
   if (attrs) for (var key in attrs) node.setAttribute(key, attrs[key]);
   return node;
 }
+// Each show() is a new screen. A late answer for an earlier screen is dropped by comparing this number.
 var screen = 0;
-var frozen = false;
-// A person's action in place (typing a code, creating a hub) ends the plan polling and drops any read still in flight.
-function interact() { screen += 1; frozen = true; }
+// The plan block on the current screen, or null. Only show() replaces the screen; a plan read updates this node alone,
+// so polling never moves focus or re-announces the page (C-29).
+var planNode = null;
+// Actions running in place (opening the hub). Plan polling waits while one runs.
+var acting = 0;
 function show() {
   screen += 1;
-  frozen = false;
+  planNode = null;
   var nodes = Array.prototype.slice.call(arguments);
   root.replaceChildren.apply(root, nodes);
   var heading = root.querySelector ? root.querySelector("h1") : null;
@@ -40,6 +43,7 @@ function button(label, onClick, kind) {
 }
 function note(text, tone) { return el("p", text, { class: "note " + (tone || "info"), role: tone === "error" ? "alert" : "status" }); }
 function title(text) { return el("h1", text, { tabindex: "-1" }); }
+function reload() { window.location.reload(); }
 
 function send(op, body) {
   return Promise.resolve(shopify.idToken()).then(function (token) {
@@ -54,13 +58,18 @@ function send(op, body) {
   });
 }
 
+function retryAfterMs(response) {
+  var value = response.headers && response.headers.get ? response.headers.get("retry-after") : null;
+  return value && /^\d{1,6}$/.test(value) ? Number(value) * 1000 : 0;
+}
+
 // A 401 means the session token was stale: ask App Bridge for a fresh one and retry once (shopify.dev session-tokens).
 function call(op, body) {
   return send(op, body).then(function (response) {
     return response.status === 401 ? send(op, body) : response;
   }).then(function (response) {
     if (response.status === 401) return { outcome: "invalid_token" };
-    if (response.status === 429) return { outcome: "unavailable" };
+    if (response.status === 429) return { outcome: "unavailable", retryAfterMs: retryAfterMs(response) };
     if (!response.ok) return { outcome: "unavailable" };
     return response.json();
   }).catch(function () { return { outcome: "unavailable" }; });
@@ -75,7 +84,7 @@ var SHOP_TROUBLE = {
 
 function trouble(outcome) {
   var message = SHOP_TROUBLE[outcome] || SHOP_TROUBLE.unavailable;
-  var again = outcome === "invalid_token" ? button("Reload", function () { window.location.reload(); }) : button("Try again", start);
+  var again = outcome === "invalid_token" ? button("Reload", reload) : button("Try again", start);
   show(title("ZS Business Connections"), note(message, "error"), again);
 }
 
@@ -87,12 +96,13 @@ function shopBlock(shop) {
 }
 
 function openHub(status) {
-  interact();
+  acting += 1;
   // Open the tab first, while the click still counts as a person's action, and point it at the link when it arrives.
   var tab = window.open("", "_blank");
   if (tab) { try { tab.opener = null; } catch (error) { /* a cross-origin tab refuses; the link below still works */ } }
   status.textContent = "Opening your hub...";
   call("sign-in").then(function (result) {
+    acting -= 1;
     if (result.outcome === "ok") {
       if (tab) { tab.location.href = result.url; status.textContent = "Your hub opened in a new tab."; }
       else {
@@ -110,71 +120,109 @@ function openHub(status) {
   });
 }
 
-// C-29: Shopify's plan selection page, only when the API sent a Shopify admin address (never a URL from anywhere else).
+// ---- C-29: the plan ------------------------------------------------------------------------------
+// Shopify's plan selection page, only when the API sent a Shopify admin address (never a URL from anywhere else).
 var PLAN_URL_PREFIX = "https://admin.shopify.com/store/";
-var WELCOME_POLL_MS = 15000;
+var WELCOME_POLL_MS = 30000;
 var WELCOME_WINDOW_MS = 600000;
-var welcomeDeadline = null;
-var welcomeTimer = null;
-var lastOpen = null;
 function nowMs() { return (window.Date || Date).now(); }
+// Shopify appends plan_handle, shop, host and embedded to the welcome link; only the plan=welcome pair matters.
+function cameFromPlanPage() {
+  var search = (window.location && window.location.search) || "";
+  return /(^|[?&])plan=welcome(&|$)/.test(search);
+}
+// One absolute deadline, taken at load. A timer ends the confirming state at the deadline even while a read hangs.
+var welcome = cameFromPlanPage();
+var welcomeDeadline = nowMs() + WELCOME_WINDOW_MS;
+var welcomeTimer = null;
+var reading = false;
+var lastOpen = null;
+if (welcome) window.setTimeout(endWelcome, WELCOME_WINDOW_MS);
+
+function confirmingPlan() { return welcome && nowMs() < welcomeDeadline; }
+// A store seen without a hub on this page cannot have chosen a plan the hub tracks (plans.md PL-17, PL-18):
+// the welcome link is void for the rest of the page, whatever the later answers say.
+function noteLink(open) { if (open.link.state !== "linked") welcome = false; }
+function endWelcome() {
+  welcome = false;
+  stopPolling();
+  // Only a block still saying "Confirming" turns into the last good answer; a reload prompt stays.
+  if (planNode && lastOpen && typeof planNode.planKey === "string" && planNode.planKey.indexOf("confirming|") === 0) setPlan(planNode, lastOpen);
+}
+function stopPolling() {
+  if (welcomeTimer !== null) window.clearTimeout(welcomeTimer);
+  welcomeTimer = null;
+}
+function schedulePlan(waitMs) {
+  stopPolling();
+  if (!confirmingPlan() || !planNode) return;
+  welcomeTimer = window.setTimeout(refreshPlan, Math.max(WELCOME_POLL_MS, waitMs || 0));
+}
+
 function planLink(open, label, kind) {
   var url = open.planUrl;
   if (typeof url !== "string" || url.indexOf(PLAN_URL_PREFIX) !== 0) return null;
   // target _top leaves the admin iframe; Shopify allows it from a click.
   return el("a", label, { href: url, target: "_top", class: kind === "secondary" ? "btn secondary" : "btn", "data-testid": "plan-link" });
 }
-// Shopify appends plan_handle, shop, host and embedded to the welcome link; only the plan=welcome pair matters.
-function cameFromPlanPage() {
-  var search = (window.location && window.location.search) || "";
-  return /(^|[?&])plan=welcome(&|$)/.test(search);
+function withLink(nodes, link) {
+  if (link) { var row = el("div", null, { class: "actions" }); row.appendChild(link); nodes.push(row); }
+  return nodes;
 }
-function confirmingPlan() {
-  if (!cameFromPlanPage()) return false;
-  if (welcomeDeadline === null) welcomeDeadline = nowMs() + WELCOME_WINDOW_MS;
-  return nowMs() < welcomeDeadline;
-}
-function scheduleWelcome() {
-  if (welcomeTimer !== null) window.clearTimeout(welcomeTimer);
-  welcomeTimer = window.setTimeout(refreshPlan, WELCOME_POLL_MS);
-}
-// Only a store linked to a hub has a plan to show: the hub tracks the plan from the link on (plans.md PL-17, PL-18).
-// canConfirm is false right after the hub is made, because the welcome link cannot belong to a plan chosen before the hub existed.
-function planBlock(open, canConfirm) {
-  lastOpen = open;
+// Fills a plan block from an open answer and says which state it shows. An unchanged state leaves the DOM alone.
+function setPlan(node, open) {
   var plan = open.plan || { state: "none" };
-  var block = el("div", null, { class: "plan", "data-testid": "plan-state" });
+  var nodes;
+  var state;
   if (plan.state === "active" || plan.state === "trial") {
-    block.appendChild(el("p", plan.state === "trial" ? "Plan: " + plan.name + " (free trial)" : "Plan: " + plan.name, { class: "plan-name" }));
-    var change = planLink(open, "Change plan", "secondary");
-    if (change) { var row = el("div", null, { class: "actions" }); row.appendChild(change); block.appendChild(row); }
-    return block;
+    state = "plan";
+    nodes = withLink([el("p", plan.state === "trial" ? "Plan: " + plan.name + " (free trial)" : "Plan: " + plan.name, { class: "plan-name" })], planLink(open, "Change plan", "secondary"));
+  } else if (confirmingPlan()) {
+    state = "confirming";
+    nodes = [
+      el("p", "Confirming your plan...", { class: "badge neutral", "data-testid": "plan-confirming" }),
+      el("p", "Shopify has your choice. It can take a few minutes to show here.", { class: "help" })
+    ];
+  } else {
+    state = "none";
+    nodes = withLink([el("p", "No plan yet", { class: "badge warn" })], planLink(open, "Choose a plan"));
   }
-  if (canConfirm !== false && confirmingPlan()) {
-    block.appendChild(el("p", "Confirming your plan...", { class: "badge neutral", "data-testid": "plan-confirming" }));
-    block.appendChild(el("p", "Shopify has your choice. It can take a few minutes to show here.", { class: "help" }));
-    scheduleWelcome();
-    return block;
-  }
-  block.appendChild(el("p", "No plan yet", { class: "badge warn" }));
-  var choose = planLink(open, "Choose a plan");
-  if (choose) { var actions = el("div", null, { class: "actions" }); actions.appendChild(choose); block.appendChild(actions); }
-  return block;
+  var key = state + "|" + (plan.name || "") + "|" + (open.planUrl || "");
+  if (node.planKey !== key) { node.planKey = key; node.replaceChildren.apply(node, nodes); }
+  return state;
 }
+function setPlanNote(node, text, action) {
+  node.planKey = null;
+  var nodes = [el("p", text, { class: "help" })];
+  if (action) nodes.push(action);
+  node.replaceChildren.apply(node, nodes);
+}
+function planShell() { return el("div", null, { class: "plan", "data-testid": "plan-state" }); }
+
+// The welcome poll: one read at a time, waiting while an action runs or the tab is hidden, until the deadline.
 function refreshPlan() {
   welcomeTimer = null;
-  // Only while the "confirming" screen is on show and untouched; a form or a running action stops the polling.
-  if (frozen || !root.querySelector || !root.querySelector(".plan")) return;
-  var generation = screen;
+  var node = planNode;
+  if (!node || !confirmingPlan() || reading) return;
+  if (acting > 0 || document.visibilityState === "hidden") return schedulePlan();
+  reading = true;
   call("open").then(function (open) {
-    if (generation !== screen || frozen) return;
-    if (open.outcome === "ok") return showOpen(open);
-    // A failed read keeps the last good result and tries again; past the deadline the same result renders as "Choose a plan".
-    if (confirmingPlan()) scheduleWelcome();
-    else if (lastOpen) showOpen(lastOpen);
+    reading = false;
+    if (node !== planNode) return;
+    if (open.outcome === "ok") {
+      if (open.link.state !== "linked") { noteLink(open); stopPolling(); if (acting === 0) showOpen(open); else node.replaceChildren(); return; }
+      lastOpen = open;
+      if (setPlan(node, open) === "confirming") schedulePlan();
+      return;
+    }
+    // A session App Bridge cannot renew does not heal by waiting: stop and ask for a reload.
+    if (open.outcome === "invalid_token") { welcome = false; stopPolling(); if (acting === 0) trouble("invalid_token"); else setPlanNote(node, SHOP_TROUBLE.invalid_token, button("Reload", reload)); return; }
+    // A failed read keeps the last good answer and tries again, no sooner than Retry-After.
+    schedulePlan(open.retryAfterMs);
   });
 }
 function showOpen(open) {
+  noteLink(open);
   if (open.link.state === "linked") return renderLinked(open);
   renderChoice(open);
 }
@@ -182,10 +230,12 @@ function showOpen(open) {
 function renderLinked(open) {
   var status = el("p", null, { class: "note info", role: "status" });
   var needsRenewal = open.link.connection === "reauthorize";
+  var plan = planShell();
+  lastOpen = open;
   show(
     title("ZS Business Connections"),
     shopBlock(open.shop),
-    planBlock(open),
+    plan,
     el("p", needsRenewal ? "Reconnect needed" : "Connected", { class: "badge " + (needsRenewal ? "warn" : "ok"), "data-testid": "link-state" }),
     el("p", needsRenewal
       ? "Shopify access for " + open.link.businessName + " needs to be renewed. Open your hub to reconnect."
@@ -193,24 +243,36 @@ function renderLinked(open) {
     button("Open ZS Hub", function () { openHub(status); }),
     status
   );
+  planNode = plan;
+  if (setPlan(plan, open) === "confirming") schedulePlan();
 }
 
+// The hub now tracks this store's plan (PL-17): read it again and offer Choose a plan next to the hub link.
+function loadCreatedPlan(node) {
+  call("open").then(function (open) {
+    if (node !== planNode) return;
+    if (open.outcome === "ok" && open.link.state === "linked") { lastOpen = open; setPlan(node, open); return; }
+    // Unlinked again (another session disconnected it): show the store as it is, not a plan block.
+    if (open.outcome === "ok") { if (acting === 0) showOpen(open); else node.replaceChildren(); return; }
+    if (open.outcome === "invalid_token") { setPlanNote(node, SHOP_TROUBLE.invalid_token, button("Reload", reload)); return; }
+    setPlanNote(node, "Your plan could not be loaded just now.", button("Try again", function () {
+      setPlanNote(node, "Checking your plan...");
+      loadCreatedPlan(node);
+    }, "secondary"));
+  });
+}
 function renderCreated(result) {
+  var status = el("p", null, { class: "note info", role: "status" });
+  var plan = planShell();
   show(
     title("Your hub is ready"),
     note("We made a ZS Hub called " + result.businessName + " for " + result.ownerEmail + ". Open it to sign in with that address.", "info"),
-    button("Open ZS Hub", function () {
-      var status = el("p", null, { class: "note info", role: "status" });
-      openHub(status);
-      root.appendChild(status);
-    })
+    button("Open ZS Hub", function () { openHub(status); }),
+    status,
+    plan
   );
-  // The hub now tracks this store's plan (PL-17): read it again and offer Choose a plan next to the hub link.
-  var generation = screen;
-  call("open").then(function (open) {
-    if (generation !== screen || open.outcome !== "ok") return;
-    root.appendChild(planBlock(open, false));
-  });
+  planNode = plan;
+  loadCreatedPlan(plan);
 }
 
 var CREATE_TROUBLE = {
@@ -223,10 +285,11 @@ var CREATE_TROUBLE = {
 };
 
 function createHub(statusNode, buttons) {
-  interact();
+  var generation = screen;
   buttons.forEach(function (node) { node.disabled = true; });
   statusNode.textContent = "Creating your hub...";
   call("create-hub").then(function (result) {
+    if (generation !== screen) return;
     if (result.outcome === "created" || result.outcome === "relinked") return renderCreated(result);
     if (result.outcome === "already_linked") return start();
     buttons.forEach(function (node) { node.disabled = false; });
@@ -238,10 +301,12 @@ function renderCode(open) {
   var input = el("input", null, { id: "claim-code", type: "text", inputmode: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: "false", maxlength: "16", "aria-describedby": "claim-help" });
   var status = el("p", null, { class: "note info", role: "status" });
   var submit = button("Link this store", function () {
-    interact();
+    var generation = screen;
     submit.disabled = true;
     status.textContent = "Checking the code...";
     call("redeem-claim", { code: input.value }).then(function (result) {
+      // The merchant chose Back while the code was checked: that screen is gone, so is this answer.
+      if (generation !== screen) return;
       submit.disabled = false;
       if (result.outcome === "redeemed") {
         show(title("Almost done"), note("The code worked for " + result.businessName + ". Now go back to your hub, open Account, then Connections, and choose Confirm link.", "info"));
@@ -298,10 +363,11 @@ function start() {
     return;
   }
   show(title("ZS Business Connections"), note("Connecting to your store...", "info"));
+  var generation = screen;
   call("open").then(function (open) {
+    if (generation !== screen) return;
     if (open.outcome !== "ok") return trouble(open.outcome);
-    if (open.link.state === "linked") return renderLinked(open);
-    renderChoice(open);
+    showOpen(open);
   });
 }
 
