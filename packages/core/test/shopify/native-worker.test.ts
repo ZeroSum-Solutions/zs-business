@@ -512,6 +512,8 @@ describe("webhooks (C-24)", () => {
         { connectionId, toolkit: "shopify", externalAccountId: SHOP_GID, accountDomain: SHOP, accountLabel: NAME }, connection(SHOP, NAME, connectionId), null);
       const disconnect = await seedAction(bound.tenant_id, a.userId, connectionId, "connection.disconnect",
         { connectionId }, { ...connection(SHOP, NAME, connectionId), status: "disconnecting", extra: shopCopies(1) }, { connectionId, toolkit: "shopify", store: SHOP, name: NAME });
+      await database.pool.query("UPDATE actions SET idempotency_key=$2 WHERE id=$1", [disconnect, `disconnect:${SHOP}`]);
+      await database.pool.query("INSERT INTO shopify_locks (shop_domain, held_until, holder) VALUES ($1,$2,$3)", [SHOP, new Date(T0 - 1000), randomUUID()]);
       const bAction = await seedAction(b.tenantId, b.userId, connectionId, "connection.disconnect",
         { connectionId }, connection(OTHER_SHOP, "Other Store", connectionId), { connectionId, toolkit: "shopify" });
       const bBefore = (await database.pool.query("SELECT payload, result FROM actions WHERE id=$1", [bAction])).rows[0];
@@ -527,6 +529,8 @@ describe("webhooks (C-24)", () => {
       expect(byId[connect].payload).toMatchObject({ connectionId, toolkit: "shopify", accountDomain: "redacted.invalid", externalAccountId: "redacted", accountLabel: null });
       expect(byId[connect].result).toMatchObject({ id: connectionId, accountDomain: "redacted.invalid", accountLabel: null, status: "active" });
       expect(byId[disconnect].result).toMatchObject({ status: "disconnecting", accountDomain: "redacted.invalid", accountLabel: null });
+      expect((await database.pool.query("SELECT id, idempotency_key FROM actions WHERE id=$1", [disconnect])).rows[0]).toEqual({ id: disconnect, idempotency_key: `redacted:${disconnect}` });
+      expect(byId[connect].idempotency_key ?? (await database.pool.query("SELECT idempotency_key FROM actions WHERE id=$1", [connect])).rows[0].idempotency_key).toBe(`k-${connect}`);
       expect(byId[disconnect].result.extra.note).toBe("store redacted.invalid (redacted)");
       expect((await database.pool.query("SELECT payload FROM outbox WHERE action_id=$1", [disconnect])).rows[0].payload).toEqual({ connectionId, toolkit: "shopify", store: "redacted.invalid", name: "redacted" });
       // Tenant B's other shop: rows and connection untouched, byte for byte.
@@ -537,6 +541,20 @@ describe("webhooks (C-24)", () => {
       // A repeat is harmless.
       expect((await send("shop/redact", redactBody)).status).toBe(200);
       expect(await leaks([SHOP, NAME, SHOP_GID])).toEqual([]);
+    });
+    it("a redact that raced a delete and a reinstall (same generation, new incarnation) leaves the fresh install and its history alone", async () => {
+      const connectionId = (await database.pool.query<{ id: string }>("SELECT id FROM connections WHERE external_account_id=$1", [SHOP_GID])).rows[0]!.id;
+      const tenantId = (await connections())[0]!.tenant_id;
+      const id = await seedAction(tenantId, a.userId, connectionId, "connection.connect", { accountDomain: SHOP }, connection(SHOP, NAME, connectionId), null);
+      fake.uninstalled = true;
+      // Between the probe and the lock another redact deleted the install and a reinstall recreated it at generation 1.
+      worker = makeNative({ fetch: afterNextGraphql(async () => {
+        await database.pool.query("UPDATE shopify_installs SET created_at=created_at + interval '1 minute'");
+      }) });
+      expect((await send("shop/redact", redactBody)).status).toBe(200);
+      expect(await install()).toMatchObject({ shop_id: SHOP_GID });
+      expect((await database.pool.query("SELECT payload FROM actions WHERE id=$1", [id])).rows[0].payload).toEqual({ accountDomain: SHOP });
+      expect(reports).toContainEqual({ kind: "redact_skipped_reinstall", shop: SHOP });
     });
     it("a live shop's history is not touched (the redact is skipped)", async () => {
       const connectionId = (await database.pool.query<{ id: string }>("SELECT id FROM connections WHERE external_account_id=$1", [SHOP_GID])).rows[0]!.id;

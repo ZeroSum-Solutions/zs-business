@@ -98,8 +98,9 @@ interface InstallRow {
   claim_failures: number;
   claim_locked_until: Date | null;
   generation: string | number;
+  created_at: Date;
 }
-const INSTALL_COLUMNS = "shop_id, shop_domain, shop_name, scopes, status, access_sealed, access_key_id, refresh_sealed, refresh_key_id, access_expires_at, refresh_expires_at, claim_failures, claim_locked_until, generation";
+const INSTALL_COLUMNS = "shop_id, shop_domain, shop_name, scopes, status, access_sealed, access_key_id, refresh_sealed, refresh_key_id, access_expires_at, refresh_expires_at, claim_failures, claim_locked_until, generation, created_at";
 
 export interface NativeConnectionRow {
   readonly tenant_id: string;
@@ -722,8 +723,10 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       if (!(await record_(tx))) return null;
       // The probe ran outside this transaction: lock the row and confirm it is still the one the probe saw. A store
       // that reinstalled meanwhile (a new generation, or a row where there was none) keeps its fresh credentials and binding.
-      const now_ = (await tx.query<{ status: string; generation: string | number }>("SELECT status::text AS status, generation FROM shopify_installs WHERE shop_domain=$1 FOR UPDATE", [shopDomain])).rows[0];
-      const reinstalled = install === null ? now_ !== undefined && now_.status !== "uninstalled" : now_ !== undefined && Number(now_.generation) !== gen(install);
+      const now_ = (await tx.query<{ status: string; generation: string | number; created_at: Date }>("SELECT status::text AS status, generation, created_at FROM shopify_installs WHERE shop_domain=$1 FOR UPDATE", [shopDomain])).rows[0];
+      // A reinstall after another redact deleted the row restarts at generation 1, so the row's creation time names the incarnation the probe saw.
+      const reinstalled = install === null ? now_ !== undefined && now_.status !== "uninstalled"
+        : now_ !== undefined && (Number(now_.generation) !== gen(install) || new Date(now_.created_at).getTime() !== new Date(install.created_at).getTime());
       if (reinstalled) return false;
       // The action history keeps the connection's domain and store name in `result` and `payload` (and an outbox event may echo
       // them). Scope: this shop's native connections only, matched by tenant and connection id; no search across tenants.
@@ -733,13 +736,16 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
         const identity = { domain: shopDomain, shopId, names: [install?.shop_name, ...bound.map((row) => row.account_label)].filter((name): name is string => typeof name === "string") };
         const tenantIds = bound.map((row) => row.tenant_id);
         const connectionIds = bound.map((row) => row.id);
-        const history = (await tx.query<{ tenant_id: string; id: string; payload: unknown; result: unknown }>(
-          `SELECT a.tenant_id, a.id, a.payload, a.result FROM actions a
+        const history = (await tx.query<{ tenant_id: string; id: string; idempotency_key: string; payload: unknown; result: unknown }>(
+          `SELECT a.tenant_id, a.id, a.idempotency_key, a.payload, a.result FROM actions a
             WHERE a.target->>'type'='connection' AND (a.tenant_id, a.target->>'id') IN (SELECT t, i::text FROM unnest($1::uuid[], $2::uuid[]) AS x(t, i)) FOR UPDATE`,
           [tenantIds, connectionIds])).rows;
-        for (const row of history)
-          await tx.query("UPDATE actions SET payload=$3::jsonb, result=$4::jsonb WHERE tenant_id=$1 AND id=$2",
-            [row.tenant_id, row.id, JSON.stringify(redactStoreIdentity(row.payload, identity)), JSON.stringify(redactStoreIdentity(row.result, identity))]);
+        for (const row of history) {
+          // A client-chosen idempotency key can carry the domain (for example `disconnect:<shop>`); the action id keeps it unique per tenant.
+          const key = redactStoreIdentity(row.idempotency_key, identity) === row.idempotency_key ? row.idempotency_key : `redacted:${row.id}`;
+          await tx.query("UPDATE actions SET idempotency_key=$3, payload=$4::jsonb, result=$5::jsonb WHERE tenant_id=$1 AND id=$2",
+            [row.tenant_id, row.id, key, JSON.stringify(redactStoreIdentity(row.payload, identity)), JSON.stringify(redactStoreIdentity(row.result, identity))]);
+        }
         const events = (await tx.query<{ tenant_id: string; id: string; payload: unknown }>(
           `SELECT tenant_id, id, payload FROM outbox WHERE (tenant_id, action_id) IN (SELECT t, i FROM unnest($1::uuid[], $2::uuid[]) AS x(t, i)) FOR UPDATE`,
           [history.map((row) => row.tenant_id), history.map((row) => row.id)])).rows;
@@ -752,6 +758,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       await tx.query("UPDATE connections SET account_domain='redacted.invalid', external_account_id='redacted' WHERE tier='native' AND external_account_id=$1 AND status='disconnected'", [shopId]);
       await tx.query("DELETE FROM shopify_claims WHERE shop_id=$1 OR shop_domain=$2", [shopId, shopDomain]);
       await tx.query("DELETE FROM shopify_installs WHERE shop_domain=$1", [shopDomain]);
+      await tx.query("DELETE FROM shopify_locks WHERE shop_domain=$1", [shopDomain]);
       // No row may keep the shop's name after a redact; this delivery's own row stays, anonymised, so a repeat is still dropped.
       await tx.query("DELETE FROM shopify_webhook_events WHERE shop_domain=$1 AND webhook_id<>$2", [shopDomain, webhookId]);
       await tx.query("UPDATE shopify_webhook_events SET shop_domain='redacted.myshopify.com' WHERE webhook_id=$1", [webhookId]);

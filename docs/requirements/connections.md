@@ -875,7 +875,9 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     connection (matched by tenant id and connection id, never by a text search across tenants) the
     `connection.connect` and `connection.disconnect` rows in `actions` and the linked `outbox` events keep
     their row but have the shop domain, shop id and store name replaced in `payload` and `result` with the
-    same placeholders (`redacted.invalid`, `redacted`; name keys become null). The worker's `service_role`
+    same placeholders (`redacted.invalid`, `redacted`; name keys become null; a client-chosen idempotency key that
+    carries the domain becomes `redacted:<action id>`). The store name is matched in name fields only, never in
+    machine fields or free text. The shop's lease row in `shopify_locks` is deleted too. The worker's `service_role`
     already holds UPDATE on both tables, so no migration is needed. Tenant B's actions for another shop stay
     untouched (tests). The business name (`tenants.name`, first taken from the shop name) and the owner's
     email belong to the business and stay.

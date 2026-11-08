@@ -6,8 +6,10 @@
 export const REDACTED_DOMAIN = "redacted.invalid";
 export const REDACTED = "redacted";
 
-/** Keys that hold a store's display name wherever they appear. */
-const NAME_KEYS = new Set(["accountLabel", "account_label", "shopName", "shop_name"]);
+/** Keys that hold a store's display name. `NULL_KEYS` become null; the others are replaced when the value is the name. Any other key is
+ *  left alone, so a store called "Disconnecting" cannot rewrite a `status`. A name written inside free text is not found (documented). */
+const NULL_KEYS = new Set(["accountLabel", "account_label", "shopName", "shop_name"]);
+const NAME_KEYS = new Set(["name", "label", "store", "storeName", "shop"]);
 
 export interface StoreIdentity {
   readonly domain: string;
@@ -23,18 +25,17 @@ export function redactStoreIdentity(value: unknown, identity: StoreIdentity): un
   const names = new Set(identity.names.map((name) => name.trim().toLowerCase()).filter((name) => name !== ""));
   const domain = new RegExp(escapeRegExp(identity.domain), "gi");
   const gid = new RegExp(escapeRegExp(identity.shopId), "g");
-  const walk = (node: unknown): unknown => {
-    if (typeof node === "string") {
-      if (names.has(node.trim().toLowerCase())) return REDACTED;
-      return node.replace(domain, REDACTED_DOMAIN).replace(gid, REDACTED);
-    }
-    if (Array.isArray(node)) return node.map(walk);
+  const text = (node: string, key: string | null): string => (key !== null && NAME_KEYS.has(key) && names.has(node.trim().toLowerCase()))
+    ? REDACTED : node.replace(domain, REDACTED_DOMAIN).replace(gid, REDACTED);
+  const walk = (node: unknown, key: string | null): unknown => {
+    if (typeof node === "string") return text(node, key);
+    if (Array.isArray(node)) return node.map((child) => walk(child, key));
     if (typeof node === "object" && node !== null) {
       const out: Record<string, unknown> = {};
-      for (const [key, child] of Object.entries(node)) out[key] = NAME_KEYS.has(key) && typeof child === "string" ? null : walk(child);
+      for (const [k, child] of Object.entries(node)) out[k] = NULL_KEYS.has(k) && typeof child === "string" ? null : walk(child, k);
       return out;
     }
     return node;
   };
-  return walk(value);
+  return walk(value, null);
 }
