@@ -8,8 +8,8 @@ import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 import { assertServiceKey } from "../supabase-auth-admin.js";
+import { LOOPBACK } from "../env-schema.js";
 
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 const REQUIRED = "is required when any CONNECTIONS_ variable is set";
 const secret = () => z.string({ error: REQUIRED }).min(32, "must be at least 32 characters");
 const httpsUrl = (what: string) => z.string({ error: REQUIRED }).max(2000).superRefine((value, ctx) => {

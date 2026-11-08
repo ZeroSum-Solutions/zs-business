@@ -5,9 +5,7 @@
 import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { parseImageEnv, type ImageEnv } from "../config.js";
-
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
+import { int, LOOPBACK, problems } from "../env-schema.js";
 
 const onSchema = z.object({
   // The API's kind of login: unprivileged, under RLS. The worker's stage and fail actions run
@@ -32,8 +30,6 @@ export interface ImageRunnerEnv {
   readonly intervalMs: number;
   readonly images: ImageEnv;
 }
-
-const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
 /** Off loopback a login needs DATABASE_CA_CERT and no query string, as the API's does. */
 function assertPinnedTls(name: string, url: string, caCert: string | undefined): void {

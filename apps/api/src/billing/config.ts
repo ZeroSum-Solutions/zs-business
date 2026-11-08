@@ -5,9 +5,7 @@ import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { shopifyBillingConfigSchema, type ShopifyBillingConfig } from "@zs/core";
 import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
-
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
+import { int, LOOPBACK, problems } from "../env-schema.js";
 
 const onSchema = z.object({
   // A login that may SET ROLE service_role: only the worker moves wallet money (delivery.md D-4).
@@ -84,8 +82,6 @@ export function assertBillingCronFits(runner: BillingRunnerEnv | null): void {
   if (runner !== null && runner.budgetMs > DELIVERY_CRON_BUDGET_LIMIT_MS)
     throw new Error(`Invalid environment: BILLING_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
-
-const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
 export function parseBillingEnv(env: Readonly<Record<string, string | undefined>>): BillingEnv {
   const cron = z.string().min(32, "CRON_SECRET must be at least 32 characters")

@@ -6,12 +6,9 @@ import { z } from "zod";
 import { parseResendEnv, parseTwilioEnv, type ResendConfig, type TwilioConfig } from "@zs/core";
 import { PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../config.js";
 import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
+import { int, LOOPBACK, problems, switchSchema } from "../env-schema.js";
 
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 export { PLACEHOLDER_CRON_SECRET, DELIVERY_CRON_BUDGET_LIMIT_MS };
-
-const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
-const switchSchema = z.enum(["on", "off"]).default("off");
 
 const onSchema = z.object({
   // A login that may SET ROLE service_role (postgres on hosted Supabase): the worker is the
@@ -78,8 +75,6 @@ export function assertDeliveryCronFits(runner: DeliveryRunnerEnv | null): void {
   if (runner !== null && runner.budgetMs > DELIVERY_CRON_BUDGET_LIMIT_MS)
     throw new Error(`Invalid environment: DELIVERY_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
-
-const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
 export function parseDeliveryEnv(env: Readonly<Record<string, string | undefined>>): DeliveryEnv {
   const cron = z.string().min(32, "CRON_SECRET must be at least 32 characters")

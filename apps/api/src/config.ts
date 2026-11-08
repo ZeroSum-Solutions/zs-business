@@ -25,6 +25,7 @@ import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 import { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
 import { parseConnectionsApiEnv, type ConnectionsApiEnv } from "./connections/api-env.js";
+import { LOOPBACK } from "./env-schema.js";
 
 // The JWT_* variables (signing method, secret or JWKS URL, issuer, lifetime, skew) are parsed
 // by the schema in @zs/core, shared with the MCP server.
@@ -32,8 +33,6 @@ export { jwtSecretSchema, PLACEHOLDER_JWT_SECRET } from "@zs/core";
 export { assertLocalDatabaseUrl, assertLocalPool, describeDatabase, type LocalDatabaseTarget } from "@zs/db";
 export { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
 export { parseConnectionsApiEnv, type ConnectionsApiEnv } from "./connections/api-env.js";
-
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 
 /** The .env.example value for the booking key secret; a server that still uses it must not start. */
 export const PLACEHOLDER_BOOKING_KEY_SECRET = "replace-with-a-booking-key-secret-of-32-or-more-chars";
