@@ -18,6 +18,7 @@
 // Prints one JSON report and exits 1 if any check fails.
 import { randomUUID } from "node:crypto";
 import process from "node:process";
+import { SIGN_IN_ADMIT_PATH } from "@zs/contracts";
 import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { readMigrationTables, runDataApiProbes, tablesToProbe, type DataApiTable } from "../data-api-probe.js";
 import { signDevToken } from "../dev-token.js";
@@ -293,6 +294,18 @@ try {
     }));
     const bad = rows.filter((row) => (row.a ? row.status !== 200 || row.items <= 0 : row.status !== 403));
     return { ok: bad.length === 0, detail: { total: rows.length, bad: bad.slice(0, 5) } };
+  });
+
+  // The dashboard's sign-in limiter call. With no credential the route answers 401 before it charges any bucket,
+  // so this proves SIGN_IN_LIMITER_SECRET is set on this API deployment (an API without it answers 404, and a
+  // dashboard that holds the secret then fails closed: every sign-in link request gets 502).
+  await check("API: the sign-in limit route is deployed, and refuses a call with no or a wrong secret (401, charges nothing)", async () => {
+    const call = async (headers: Record<string, string>) => (await fetch(apiUrl + SIGN_IN_ADMIT_PATH, {
+      method: "POST", headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ address: "direct", perAddress: 5, global: 30 }),
+    })).status;
+    const statuses = { none: await call({}), wrong: await call({ Authorization: `Bearer ${"x".repeat(48)}` }) };
+    return { ok: Object.values(statuses).every((status) => status === 401), detail: statuses };
   });
 
   // --- Dashboard proxy (Supabase cookie session only; a bearer is ignored) ---------------

@@ -315,7 +315,6 @@ export default async function globalSetup() {
       // One address for every test (no trusted proxy): lift the sign-in limits for the run.
       DASHBOARD_SIGN_IN_PER_ADDRESS: "10000",
       DASHBOARD_SIGN_IN_GLOBAL: "10000",
-      DASHBOARD_SIGN_IN_PER_EMAIL: "10000",
       DASHBOARD_SIGN_IN_LIMITER_SECRET: signInLimiterSecret,
       NEXT_TELEMETRY_DISABLED: "1",
     });

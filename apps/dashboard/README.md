@@ -132,13 +132,21 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
     the host the browser used (after the same-origin check), so the Supabase redirect allow
     list must hold only this dashboard's URL. Requests are rate limited in the API's shared
     Postgres limiter (`POST /public/v1/sign-in/admit`, so the limits hold across server
-    instances): 5 per address, 30 in total and 5 per email address per 15 minutes by default
-    (`DASHBOARD_SIGN_IN_PER_ADDRESS`, `DASHBOARD_SIGN_IN_GLOBAL`, `DASHBOARD_SIGN_IN_PER_EMAIL`),
-    then 429 with `Retry-After`. The email is charged by its SHA-256, so the raw address keys no
-    bucket and unknown addresses count like known ones. It needs `DASHBOARD_SIGN_IN_LIMITER_SECRET`
-    (32+ characters, the same value as `SIGN_IN_LIMITER_SECRET` on the API project) and fails
-    closed: when the limiter is unset, unreachable or down, no link is sent and the answer is 502
-    `unavailable`. The body may be 2 KiB and must
+    instances): 5 per address and 30 in total per 15 minutes by default
+    (`DASHBOARD_SIGN_IN_PER_ADDRESS`, `DASHBOARD_SIGN_IN_GLOBAL`), then 429 with `Retry-After`. Both
+    buckets are charged in one atomic call; there is no per-email bucket, so the email never
+    reaches the limiter, nobody can lock a known address out, and unknown addresses count like known
+    ones. A forwarded address that is empty, over 64 characters or not an address is counted under the
+    shared `direct` key, never refused. If Supabase itself answers 429 for an address, the dashboard
+    still answers 204 (and logs it), so a provider limit does not tell who has an account. It needs
+    `DASHBOARD_SIGN_IN_LIMITER_SECRET` (trimmed, 32+ characters, no whitespace, the same value as
+    `SIGN_IN_LIMITER_SECRET` on the API project; `SIGN_IN_LIMITER_PREVIOUS_SECRET` on the API covers a
+    rotation) and fails closed: when the secret is missing or invalid, `ZS_API_URL` is not https (plain
+    http is allowed only for localhost), or the limiter is unreachable or down, no link is sent and the
+    answer is 502 `unavailable`; a missing or invalid setting is logged once. **Activation order: deploy
+    the API with `SIGN_IN_LIMITER_SECRET` first** (check it with `pnpm check:hosted`), then the
+    dashboard, or sign-in answers 502 in between. The call to the limiter follows the browser request's
+    abort signal and ends after 5 seconds on its own. The body may be 2 KiB and must
     arrive within 10 seconds, read the same bounded way (413 `too_large`, 408 `timeout`).
     Each attempt is charged before its body is read, so parallel requests cannot outrun
     the limit, and a refused body still counts; so does one Supabase could not take.

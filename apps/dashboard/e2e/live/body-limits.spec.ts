@@ -152,7 +152,6 @@ test.describe("request body limits on a running server", () => {
         SUPABASE_ANON_KEY: anonKey,
         DASHBOARD_SIGN_IN_PER_ADDRESS: "10000",
         DASHBOARD_SIGN_IN_GLOBAL: "10000",
-        DASHBOARD_SIGN_IN_PER_EMAIL: "10000",
         DASHBOARD_SIGN_IN_LIMITER_SECRET: randomBytes(32).toString("hex"),
         NEXT_TELEMETRY_DISABLED: "1",
       }) as NodeJS.ProcessEnv,

@@ -53,4 +53,10 @@ describe("bundle secret check", () => {
     // The Supabase anon key stays on the server too.
     expect(secretValues({ SUPABASE_ANON_KEY: `${secret}-anon` })).toEqual([`${secret}-anon`]);
   });
+
+  it("collects the sign-in limiter secrets, the dashboard's and the API's names for them", () => {
+    expect(secretValues({
+      DASHBOARD_SIGN_IN_LIMITER_SECRET: `${secret}-dash`, SIGN_IN_LIMITER_SECRET: `${secret}-api`, SIGN_IN_LIMITER_PREVIOUS_SECRET: `${secret}-old`,
+    })).toEqual([`${secret}-dash`, `${secret}-api`, `${secret}-old`]);
+  });
 });

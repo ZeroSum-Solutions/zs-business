@@ -98,10 +98,24 @@ describe("parseServerEnv", () => {
   });
 
   it("keeps the sign-in limit route off until SIGN_IN_LIMITER_SECRET is set, and refuses a short one", () => {
-    expect(parseServerEnv(base).signInLimiterSecret).toBeNull();
+    expect(parseServerEnv(base).signInLimiterSecrets).toBeNull();
     const secret = ["sign", "in", "limiter", "s".repeat(32)].join("-");
-    expect(parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: secret }).signInLimiterSecret).toBe(secret);
+    expect(parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: secret }).signInLimiterSecrets).toEqual({ current: secret });
     expect(() => parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: "short" })).toThrow(/SIGN_IN_LIMITER_SECRET/);
+  });
+
+  it("trims the sign-in secret, refuses inner whitespace, and takes a previous secret only next to a current one", () => {
+    const secret = ["sign", "in", "limiter", "s".repeat(32)].join("-");
+    const old = ["sign", "in", "limiter", "o".repeat(32)].join("-");
+    // A trailing newline from a pasted env value must not change the secret.
+    expect(parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: `  ${secret}\n` }).signInLimiterSecrets).toEqual({ current: secret });
+    expect(() => parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: `${secret} ${secret}` })).toThrow(/SIGN_IN_LIMITER_SECRET/);
+    expect(() => parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: ` ${"x".repeat(20)} ` })).toThrow(/SIGN_IN_LIMITER_SECRET/);
+    expect(parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: secret, SIGN_IN_LIMITER_PREVIOUS_SECRET: old }).signInLimiterSecrets)
+      .toEqual({ current: secret, previous: old });
+    expect(() => parseServerEnv({ ...base, SIGN_IN_LIMITER_PREVIOUS_SECRET: old })).toThrow(/needs SIGN_IN_LIMITER_SECRET/);
+    expect(() => parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: secret, SIGN_IN_LIMITER_PREVIOUS_SECRET: secret })).toThrow(/must differ/);
+    expect(() => parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: secret, SIGN_IN_LIMITER_PREVIOUS_SECRET: "short" })).toThrow(/SIGN_IN_LIMITER_PREVIOUS_SECRET/);
   });
 
   it("keeps the unsubscribe routes off until a token secret is set", () => {

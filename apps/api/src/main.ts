@@ -12,7 +12,7 @@ const { app, pool } = await createServer(env, { now: () => new Date() }, { enric
 const server = serve({ fetch: app.fetch, port: env.port }, (info) => {
   console.log(`zs-business API listening on http://localhost:${info.port}`);
   if (env.publicIntake === null) console.log("Public booking routes are off: PUBLIC_BOOKING_KEY_SECRET is not set");
-  if ((env.publicIntake !== null || env.unsubscribe !== null) && env.rateLimitStore === "memory")
+  if ((env.publicIntake !== null || env.unsubscribe !== null || env.signInLimiterSecrets !== null) && env.rateLimitStore === "memory")
     console.log("Public route limits count in this process only (PUBLIC_RATE_LIMIT_STORE=memory)");
 });
 const shutdown = () => {

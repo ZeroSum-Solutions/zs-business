@@ -46,7 +46,12 @@ export function publicBuildFiles(distDir: string): string[] {
 }
 
 export function secretValues(env: Record<string, string | undefined> = process.env): string[] {
-  const values = [env.SUPABASE_ANON_KEY, env.ZS_API_TOKEN, env.JWT_SECRET, ...(env.ZS_BUNDLE_SECRETS ?? "").split("\n")];
+  const values = [
+    env.SUPABASE_ANON_KEY, env.ZS_API_TOKEN, env.JWT_SECRET,
+    // The sign-in limiter's shared secret (dashboard side, and the API's names for it if the build host holds both).
+    env.DASHBOARD_SIGN_IN_LIMITER_SECRET, env.SIGN_IN_LIMITER_SECRET, env.SIGN_IN_LIMITER_PREVIOUS_SECRET,
+    ...(env.ZS_BUNDLE_SECRETS ?? "").split("\n"),
+  ];
   // Very short values would match by chance; real tokens and secrets are long.
   return values.map((value) => value?.trim() ?? "").filter((value) => value.length >= 16);
 }

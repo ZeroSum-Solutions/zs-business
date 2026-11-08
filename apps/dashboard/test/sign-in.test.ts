@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { proxyApiRequest } from "../src/lib/server/api-proxy";
-import { attemptLimitsFromEnv, clientAddress, createSharedSignInLimiter, DIRECT_ADDRESS } from "../src/lib/server/rate-limit";
+import {
+  attemptLimitsFromEnv, clientAddress, createSharedSignInLimiter, DIRECT_ADDRESS, limiterApiUrl, resetSignInLimiterReports, signInLimiterFromEnv,
+} from "../src/lib/server/rate-limit";
 import { confirmSignIn, requestSignInLink, signOut } from "../src/lib/server/sign-in";
 import { AUTH_COOKIE, PILOT_COOKIE } from "../src/lib/server/supabase";
 import { createLiveHarness, Jar, linkRequest, ORIGIN, sameOrigin, setCookies, signInThroughLink } from "./helpers/live";
@@ -9,8 +10,8 @@ import { LIMITER_SECRET, sharedLimiterStore } from "./helpers/shared-limiter";
 import { chunkedBody, chunks, manualTimer, settle } from "./helpers/streams";
 
 const WINDOW_MS = 15 * 60 * 1000;
-const LIMITS = { perAddress: 5, global: 30, perEmail: 5 };
-/** A fresh limiter on its own store; the address and global limits are the defaults, email is loose unless a test sets it. */
+const LIMITS = { perAddress: 5, global: 30 };
+/** A fresh limiter on its own store, with the default address and global limits unless a test sets them. */
 const fresh = (limits: Partial<typeof LIMITS> = {}) => sharedLimiterStore().limiter(limits);
 const ask = (email: string, headers: Record<string, string> = {}, limiter = fresh(), harness = createLiveHarness()) =>
   requestSignInLink(linkRequest(email, undefined, headers), harness.setup, limiter);
@@ -118,18 +119,40 @@ describe("email sign-in link", () => {
     expect(harness.gotrue.calls).toHaveLength(0);
   });
 
-  it("says Supabase is unavailable, and passes its rate limit on", async () => {
+  it("says Supabase is unavailable, and answers a Supabase rate limit like a sent link", async () => {
     const harness = createLiveHarness();
     const store = sharedLimiterStore();
     const limiter = store.limiter({ perAddress: 3 });
-    harness.config.fetch = async () => { throw new TypeError("fetch failed"); };
-    expect((await ask("owner@example.com", {}, limiter, harness)).status).toBe(502);
-    // Nothing was sent, but the attempt stays charged: the shared limiter has no refund.
-    harness.config.fetch = async () => Response.json({ code: 429, error_code: "over_email_send_rate_limit", msg: "slow down" }, { status: 429 });
-    const limited = await ask("owner@example.com", {}, limiter, harness);
-    expect(limited.status).toBe(429);
-    expect(limited.headers.get("retry-after")).toBe("60");
-    expect(store.calls.filter((call) => (call.body as { scope: string }).scope === "address")).toHaveLength(2);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      harness.config.fetch = async () => { throw new TypeError("fetch failed"); };
+      expect((await ask("owner@example.com", {}, limiter, harness)).status).toBe(502);
+      // Nothing was sent, but the attempt stays charged: the shared limiter has no refund.
+      harness.config.fetch = async () => Response.json({ code: 429, error_code: "over_email_send_rate_limit", msg: "slow down" }, { status: 429 });
+      const limited = await ask("owner@example.com", {}, limiter, harness);
+      // Same answer as an unknown address, so a provider limit on one address does not tell who has an account.
+      expect(limited.status).toBe(204);
+      expect(await limited.text()).toBe("");
+      expect(limited.headers.get("retry-after")).toBeNull();
+      expect(limited.headers.get("cache-control")).toMatch(/\bno-store\b/);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/Supabase rate-limited/);
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/example\.com/);
+      expect(store.calls).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("refuses an email the repo's contact schema refuses, such as one that only folds to ASCII (U+212A)", async () => {
+    const harness = createLiveHarness();
+    const limiter = fresh({ perAddress: 100 });
+    // "K" (Kelvin sign) lowercases to a plain "k"; the contact schema checks ASCII before it folds.
+    expect((await ask("\u212Aelvin@example.com", {}, limiter, harness)).status).toBe(400);
+    expect((await ask(`${"a".repeat(250)}@example.com`, {}, limiter, harness)).status).toBe(400);
+    expect(harness.gotrue.calls).toHaveLength(0);
+    expect((await ask(" Kelvin@Example.COM ", {}, limiter, harness)).status).toBe(204);
+    expect(harness.gotrue.calls.filter((call) => call.path === "/auth/v1/otp")).toHaveLength(1);
   });
 
   it("has nothing to sign in to in demo mode and refuses when live mode is not set up", async () => {
@@ -267,31 +290,66 @@ describe("sign-in rate limits", () => {
     const statuses = [];
     for (let index = 0; index < LIMITS.perAddress + 2; index += 1) statuses.push(await from(index, "203.0.113.50", `p${index}@example.com`));
     expect(statuses).toEqual([204, 204, 204, 204, 204, 429, 429]);
-    // The per-email limit holds across them too, for any address.
-    const emailLimited = sharedLimiterStore();
-    const pair = [emailLimited.limiter({ perEmail: 2 }), emailLimited.limiter({ perEmail: 2 })];
-    const viaPair = (index: number) => requestSignInLink(linkRequest("owner@example.com", "/", { "X-Forwarded-For": `198.51.100.${index + 1}` }), harness.setup, pair[index % 2]!).then((response) => response.status);
-    expect([await viaPair(0), await viaPair(1), await viaPair(2), await viaPair(3)]).toEqual([204, 204, 429, 429]);
+    // The same email from other addresses is not limited by anything but those addresses and the global bucket.
+    const others = [];
+    for (let index = 0; index < 8; index += 1) others.push(await from(index, `198.51.100.${index + 1}`));
+    expect(others).toEqual(Array(8).fill(204));
   });
 
-  it("limits one email address however many addresses ask, answering 429 with Retry-After, and still answers 204 for an unknown one", async () => {
+  it("charges address and global in one call and sends no email-derived value to the limiter", async () => {
     const harness = proxied();
     const store = sharedLimiterStore();
-    const limiter = store.limiter({ perEmail: 2 });
-    const ask429 = (email: string, index: number) =>
-      requestSignInLink(linkRequest(email, "/", { "X-Forwarded-For": `192.0.2.${index + 1}` }), harness.setup, limiter);
-    expect((await ask429("nobody@example.com", 0)).status).toBe(204);
-    expect((await ask429("NoBody@example.com ", 1)).status).toBe(204);
-    const limited = await ask429("nobody@example.com", 2);
-    expect(limited.status).toBe(429);
-    expect(await limited.json()).toEqual({ error: "rate_limited" });
-    expect(Number(limited.headers.get("retry-after"))).toBe(15 * 60);
-    // Another email address is untouched, known or not.
-    expect((await ask429("owner@example.com", 3)).status).toBe(204);
-    // Only the hash of the lowercased address reaches the limiter.
-    const emailCalls = store.calls.filter((call) => (call.body as { scope: string }).scope === "email");
-    expect(emailCalls.map((call) => call.body)).toContainEqual({ scope: "email", emailHash: createHash("sha256").update("nobody@example.com").digest("hex"), perEmail: 2 });
-    expect(JSON.stringify(store.calls.map((call) => call.body))).not.toMatch(/example\.com/);
+    const limiter = store.limiter();
+    const response = await requestSignInLink(linkRequest("Nobody@Example.com", "/", { "X-Forwarded-For": "192.0.2.9" }), harness.setup, limiter);
+    expect(response.status).toBe(204);
+    expect(store.calls.map((call) => call.body)).toEqual([{ address: "192.0.2.9", perAddress: 5, global: 30 }]);
+    expect(JSON.stringify(store.calls.map((call) => call.body))).not.toMatch(/nobody|example\.com/i);
+    // Unknown and known addresses spend the same and answer the same; a limited caller sees one 429 shape for both.
+    const limited = store.limiter({ perAddress: 1 });
+    expect((await requestSignInLink(linkRequest("nobody@example.com", "/", { "X-Forwarded-For": "192.0.2.10" }), harness.setup, limited)).status).toBe(204);
+    const refused = await requestSignInLink(linkRequest("owner@example.com", "/", { "X-Forwarded-For": "192.0.2.10" }), harness.setup, limited);
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toEqual({ error: "rate_limited" });
+    expect(Number(refused.headers.get("retry-after"))).toBe(15 * 60);
+  });
+
+  it("sends an empty or oversize forwarded address to the shared 'direct' key instead of failing", async () => {
+    const harness = proxied();
+    const store = sharedLimiterStore();
+    const limiter = store.limiter();
+    const long = "9".repeat(65);
+    for (const address of ["", long, DIRECT_ADDRESS]) {
+      const response = await requestSignInLink(linkRequest("owner@example.com", "/", { "X-Forwarded-For": address }), harness.setup, limiter);
+      expect(response.status, address).toBe(204);
+    }
+    expect(store.calls.map((call) => (call.body as { address: string }).address)).toEqual([DIRECT_ADDRESS, DIRECT_ADDRESS, DIRECT_ADDRESS]);
+    // A 64-character value is still passed on; the API decides whether it is an address.
+    await requestSignInLink(linkRequest("owner@example.com", "/", { "X-Forwarded-For": "8".repeat(64) }), harness.setup, limiter);
+    expect((store.calls.at(-1)?.body as { address: string }).address).toBe("8".repeat(64));
+  });
+
+  it("links the incoming request's signal into the limiter call, so a dropped request stops it", async () => {
+    const harness = createLiveHarness();
+    const store = sharedLimiterStore();
+    const controller = new AbortController();
+    const hanging = createSharedSignInLimiter({
+      apiUrl: "http://api.internal:8787", secret: LIMITER_SECRET, limits: LIMITS,
+      fetch: ((_url: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      })) as typeof fetch,
+    });
+    const request = new Request(linkRequest("owner@example.com"), { signal: controller.signal });
+    const pending = requestSignInLink(request, harness.setup, hanging);
+    controller.abort();
+    const answer = await pending;
+    expect(answer.status).toBe(502);
+    expect(harness.gotrue.calls).toHaveLength(0);
+    // And the signal reaches fetch (with the limiter's own timeout joined in).
+    const live = new AbortController();
+    await store.limiter().admit("192.0.2.1", live.signal);
+    expect(store.calls[0]?.signal?.aborted).toBe(false);
+    live.abort();
+    expect(store.calls[0]?.signal?.aborted).toBe(true);
   });
 
   it("fails closed: sends no link and answers 502 when the limiter is down, unreachable, unconfigured or refuses the secret", async () => {
@@ -321,8 +379,60 @@ describe("sign-in rate limits", () => {
 
   it("reads its limits from env, falling back on bad values", () => {
     expect(attemptLimitsFromEnv({})).toEqual(LIMITS);
-    expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "50", DASHBOARD_SIGN_IN_GLOBAL: "200", DASHBOARD_SIGN_IN_PER_EMAIL: "9" })).toEqual({ perAddress: 50, global: 200, perEmail: 9 });
-    expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "0", DASHBOARD_SIGN_IN_GLOBAL: "lots", DASHBOARD_SIGN_IN_PER_EMAIL: "-1" })).toEqual(LIMITS);
+    expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "50", DASHBOARD_SIGN_IN_GLOBAL: "200" })).toEqual({ perAddress: 50, global: 200 });
+    expect(attemptLimitsFromEnv({ DASHBOARD_SIGN_IN_PER_ADDRESS: "0", DASHBOARD_SIGN_IN_GLOBAL: "lots" })).toEqual(LIMITS);
+  });
+});
+
+describe("sign-in limiter settings", () => {
+  const secret = ["dash", "limiter", "d".repeat(32)].join("-");
+  const good = { ZS_API_URL: "https://api.example.com/", DASHBOARD_SIGN_IN_LIMITER_SECRET: secret };
+  beforeEach(() => resetSignInLimiterReports());
+  afterEach(() => vi.restoreAllMocks());
+
+  it("logs one clear error, once, when the secret is missing or invalid, and fails closed", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const lines: string[] = [];
+    const report = (line: string) => lines.push(line);
+    for (const vars of [{ ZS_API_URL: good.ZS_API_URL }, { ...good, DASHBOARD_SIGN_IN_LIMITER_SECRET: "short" }, { ...good, DASHBOARD_SIGN_IN_LIMITER_SECRET: `${secret} ${secret}` }]) {
+      expect(await signInLimiterFromEnv(vars, report).admit("203.0.113.1")).toEqual({ ok: false, unavailable: true });
+    }
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(/DASHBOARD_SIGN_IN_LIMITER_SECRET is not set.*SIGN_IN_LIMITER_SECRET on the API/);
+    expect(lines[1]).toMatch(/at least 32/);
+    expect(lines[2]).toMatch(/whitespace/);
+    // The same problem is not logged again on the next request.
+    await signInLimiterFromEnv({ ZS_API_URL: good.ZS_API_URL }, report).admit("203.0.113.1");
+    expect(lines).toHaveLength(3);
+    expect(lines.join("\n")).not.toContain(secret);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("trims the secret the way the API does and sends it as a bearer token", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const lines: string[] = [];
+    expect(await signInLimiterFromEnv({ ...good, DASHBOARD_SIGN_IN_LIMITER_SECRET: `${secret}\n` }, (line) => lines.push(line)).admit("203.0.113.1")).toEqual({ ok: true });
+    expect(lines).toEqual([]);
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(String(url)).toBe("https://api.example.com/public/v1/sign-in/admit");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${secret}`);
+  });
+
+  it("refuses a ZS_API_URL that would send the secret over plain http beyond this machine", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const lines: string[] = [];
+    for (const url of ["http://api.example.com", "http://10.0.0.5:8787", "http://127.0.0.1.evil.example", "ftp://api.example.com", "not a url", ""]) {
+      expect(await signInLimiterFromEnv({ ...good, ZS_API_URL: url }, (line) => lines.push(line)).admit("203.0.113.1"), url).toEqual({ ok: false, unavailable: true });
+    }
+    // One line per distinct problem: plain http, a wrong scheme, not a URL, not set.
+    expect(lines).toHaveLength(4);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(limiterApiUrl("http://api.example.com")).toEqual({ problem: expect.stringMatching(/https/) });
+    for (const url of ["http://localhost:8787", "http://127.0.0.1:8787/", "http://[::1]:8787", "https://api.example.com"])
+      expect(limiterApiUrl(url), url).toHaveProperty("url");
+    expect(limiterApiUrl("http://127.0.0.1:8787/")).toEqual({ url: "http://127.0.0.1:8787" });
+    expect(await signInLimiterFromEnv({ ...good, ZS_API_URL: "http://127.0.0.1:8787" }, (line) => lines.push(line)).admit("203.0.113.1")).toEqual({ ok: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
 

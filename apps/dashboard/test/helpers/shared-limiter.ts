@@ -15,18 +15,16 @@ export function sharedLimiterStore() {
     now: Date.parse("2026-10-18T12:00:00.000Z"),
     /** "down": the API answers 503; "unreachable": the request fails. */
     outage: null as null | "down" | "unreachable",
-    calls: [] as { url: string; headers: Headers; body: unknown }[],
+    calls: [] as { url: string; headers: Headers; body: unknown; signal: AbortSignal | null | undefined }[],
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       const body: unknown = JSON.parse(String(init?.body));
-      store.calls.push({ url: String(input), headers, body });
+      store.calls.push({ url: String(input), headers, body, signal: init?.signal });
       if (store.outage === "unreachable") throw new TypeError("fetch failed");
       if (store.outage === "down") return Response.json({ error: { code: "Unavailable" } }, { status: 503, headers: { "Retry-After": "1" } });
       if (String(input) !== `${API_URL}${SIGN_IN_ADMIT_PATH}` || headers.get("authorization") !== `Bearer ${LIMITER_SECRET}`) return new Response(null, { status: 401 });
       const parsed = signInAdmitBodySchema.parse(body);
-      const charges = parsed.scope === "address"
-        ? [{ key: `address:${parsed.address}`, limit: parsed.perAddress }, { key: "global", limit: parsed.global }]
-        : [{ key: `email:${parsed.emailHash}`, limit: parsed.perEmail }];
+      const charges = [{ key: `address:${parsed.address}`, limit: parsed.perAddress }, { key: "global", limit: parsed.global }];
       let wait = 0;
       for (const { key, limit } of charges) {
         const bucket = buckets.get(key);
@@ -45,7 +43,7 @@ export function sharedLimiterStore() {
       return createSharedSignInLimiter({
         apiUrl: API_URL,
         secret,
-        limits: { perAddress: 5, global: 30, perEmail: 100, ...limits },
+        limits: { perAddress: 5, global: 30, ...limits },
         fetch: store.fetch,
       });
     },
