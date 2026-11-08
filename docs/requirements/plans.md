@@ -1,7 +1,8 @@
-# Hub plans: paid subscriptions through Stripe Billing
+# Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 2 (2026-11-07: PL-14, a billing provider per tenant and per
-subscription, so Shopify merchants can move to Shopify Billing later). Revision 1 followed a
+Status: draft contract, revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
+Shopify App Pricing, read back from the Partner API). Revision 2 added PL-14, a billing provider
+per tenant and per subscription. Revision 1 followed a
 GPT-6.1 Sol review of the first draft (mixed intervals, event order, stale checkouts, unpaid
 replacements, worker serialization). Code
 follows this file; a change to a numbered rule needs a new revision of this file first. Extends `stripe.md` (revision 5): the same Stripe
@@ -239,17 +240,145 @@ assumes Stripe:
   `billingProvider` and reports Checkout and the Portal as off for it. The Stripe worker
   (PL-10) never resolves such a tenant from a stored customer or subscription, and a Stripe
   answer for it ends `not_ours`.
-- Who sets `billing_provider`: an operator (service role), for now by hand when a tenant arrives
-  through the Shopify listing.
+- Who sets `billing_provider`: an operator (service role), through `setShopifyBilling` (PL-17).
 
-**Follow-up, not built in this revision: Shopify Billing.** A `shopify` tenant has no way to pay
-yet. A later revision adds the Shopify Billing API (app subscriptions and the usage or recurring
-charge for the add-on), its webhooks into the same records, and the rule that sets
-`billing_provider` when a merchant installs from the Shopify App Store.
+## Shopify billing (revision 3)
 
-## Known limits (revision 2)
+Evidence (shopify.dev, read 2026-11-07, in our own words; sources at the end of this section):
+- App Store requirement 1.2: an app in the Shopify App Store bills every app charge through
+  Shopify App Pricing or the Billing API. Off-platform billing is not allowed "unless you've
+  been notified otherwise by Shopify". No published exemption covers an app that connects an
+  outside service the merchant already pays for. The listing may link a page that describes
+  charges billed outside Shopify, but that is a listing field, not an exemption. 1.2.3: the
+  merchant changes plan without support and without reinstalling.
+- Shopify App Pricing (renamed from Managed Pricing) is the default for new public apps. Plans,
+  prices and the trial are set in the Partner Dashboard (listing > Pricing content). Shopify
+  hosts the plan selection page at
+  `https://admin.shopify.com/store/<store handle>/charges/<app handle>/pricing_plans`, creates
+  the charge, and handles trials, proration, upgrades and downgrades. The app must not call
+  `appSubscriptionCreate`. Up to eight public plans and any number of private plans (a store
+  can be authorised for up to eight). Each plan can have a monthly and a yearly price, and a
+  per-plan welcome link (an outside URL gets `plan_handle` and `shop` appended).
+- Usage meters (App Events API, fixed, graduated or volume price) bill monthly only, cannot sit
+  on a yearly-only plan, and have no usage cap. Events are accepted with 202 and any billing
+  error shows only in the Dev Dashboard.
+- Subscription state comes from the Partner API: `activeSubscription(appId, shopId)` answers the
+  shop's current contract (billing period, `trialEndsAt`, `currentBillingCycle`,
+  `cancelAtEndOfCycle`, `items[].handle`, `pendingUpdate`) or `null` when there is none. It needs
+  a Partner API client with the **Manage apps** permission; the token is scoped to the Partner
+  organisation, not to a store. Rate limit: four requests a second per client. Errors arrive as
+  GraphQL errors (for example "Shop not found"), throttling as 429.
+- Apps enrolled in App Pricing after 2026-04-28 get no `APP_SUBSCRIPTIONS_UPDATE` webhook and no
+  `charge_id` on the redirect. Changes outside a redirect (cancel, freeze, uninstall) are read
+  from the Partner API.
+- Billing API (now "Manual Pricing", legacy): our own plan page and `appSubscriptionCreate`
+  calls with the shop's Admin API token, and webhooks for status. Once an app opts in to App
+  Pricing it cannot create new Billing API recurring charges.
+- Our setup: the shop's OAuth token lives in Composio (connections.md), so our code holds no
+  Admin API token. The prod app "ZS Business Connections" (Partner org 5300652, app
+  444984655873) is set to Public distribution.
 
-- Shopify Billing is not built (PL-14): a tenant set to `shopify` cannot buy a plan until it is.
+**PL-15. Shopify App Pricing, not the Billing API.** A tenant whose `billing_provider` is
+`shopify` buys and changes its plan only on Shopify's hosted plan selection page. Our code never
+creates a Shopify charge. Reasons: it is the default and recommended path for new public apps;
+it needs no Admin API token, which Composio holds and which we would otherwise reach only
+through its proxy; plan changes without support (1.2.3) are Shopify's page; and the Partner API
+token is ours. No Stripe charge is made for such a tenant (PL-14).
+
+**PL-16. The Shopify catalog.** Set in the Partner Dashboard, from PL-1:
+- Three public plans, Solo, Studio and Pro, each with the monthly and yearly list price of PL-1
+  ($49 / $490, $99 / $990, $199 / $1,990), and a 14-day free trial.
+- Two private plans, Studio Founding and Pro Founding ($69 / $690 and $139 / $1,390), each
+  authorised by the operator for one store only after `setFoundingInvite` (PL-11) accepted that
+  tenant, so the 25-place cap still counts it.
+- The extra-connection add-on is **not sold** to Shopify tenants in this revision. A Shopify
+  tenant that needs more managed connections moves up a plan. An App Pricing usage meter can
+  carry the add-on later (a new rule here first); it would be monthly only, with no cap.
+- Each plan's welcome link is the dashboard plan page with `?shopify=welcome`.
+- The Shopify plan handles map to our plans by configuration (PL-20): the five keys `hub_solo`,
+  `hub_studio`, `hub_pro`, `hub_studio_founding` and `hub_pro_founding`, each to one handle. The
+  interval comes from the contract's billing period: `EVERY_30_DAYS` is `month`, `ANNUAL` is
+  `year`.
+
+**PL-17. Linking a tenant to its shop.** An operator (service role, `setShopifyBilling`) sets a
+tenant's `billing_provider` to `shopify` with the shop's GID (`gid://shopify/Shop/<n>`, unique
+across tenants) and its `<name>.myshopify.com` domain, under the tenant's plan lock. It is
+refused (409 `stripe_plan_active`) while the tenant has a Stripe subscription in `trialing`,
+`active` or `past_due`, so no tenant pays twice. Setting the provider back to `stripe` (shop
+cleared) is refused (409 `shopify_plan_active`) while a Shopify subscription of the tenant is
+`trialing` or `active`. A link does not change a comped tenant: it stays comped until a
+Shopify contract is seen. `tenant_plans` gains `shopify_shop_id`, `shopify_shop_domain` and
+`shopify_synced_at` (PL-18); a Shopify row in `plan_subscriptions` must have a shop GID as its ID.
+
+**PL-18. Reading the Shopify plan.** The billing runner (`/cron/billing`, stripe.md S-8), after
+its Stripe passes, runs one Shopify pass when PL-20 is configured: up to
+`BILLING_SHOPIFY_SYNC_LIMIT` linked tenants, least recently synced first. For each tenant, in its
+own transaction under the tenant's plan lock, it asks `activeSubscription` for the tenant's shop
+and stores the answer as the tenant's one Shopify row in `plan_subscriptions` (provider
+`shopify`, ID the shop GID), then derives the record with the PL-10 derivation (the same code).
+- A contract whose `trialEndsAt` is after the clock is `trialing`; any other contract is
+  `active`. `trial_end` is `trialEndsAt`, `current_period_end` is the end of
+  `currentBillingCycle`, `cancel_at_period_end` is `cancelAtEndOfCycle`, and
+  `extra_connections` is 0.
+- The plan is the first item whose handle is in the PL-16 map. An unknown handle keeps the
+  plan the row had; a row whose plan was never recognised ends `mismatch` and gives no plan.
+  An unknown billing period keeps the interval the row had.
+- `null` (no contract) turns a stored row that is not ended into `canceled`, with `ended_at`
+  and `status_since` the clock. With no stored row, nothing is written. A contract seen after
+  the row ended is a new one: `started_at` is the clock.
+- The pass never takes an error for `null`: an unreachable Partner API, a GraphQL error or a
+  non-JSON answer writes nothing for that tenant and is reported; 429 or 5xx also ends the pass.
+  `shopify_synced_at` moves only after a stored answer.
+- Shopify handles failed payments itself (it freezes the store). The hub adds no grace for a
+  Shopify tenant: a contract that disappears makes the tenant read-only as an ended Stripe
+  subscription does (PL-10), and a contract seen again lifts it.
+- Founding: a Shopify founding plan sets `founding_started_at` like a Stripe one; when it is
+  first seen ended the tenant loses `founding_invite` (PL-11).
+- The PL-1 limits and the PL-8 gate read the same `tenant_plans` fields, so nothing else changes.
+  The record lags Shopify by at most one cron interval.
+
+**PL-19. API and dashboard for a Shopify tenant.** GET /v1/billing/plan (PL-7) adds
+`shopifyManageUrl`: the plan selection page of PL-15 for the tenant's shop domain, when the
+tenant is Shopify-billed, has a domain and `SHOPIFY_BILLING_APP_HANDLE` is set; otherwise null.
+For a Shopify tenant, `checkoutEnabled` and `portalEnabled` are false and `trialAvailable` is
+false (Shopify owns the trial). The dashboard plan page then shows no Stripe plan buttons and no
+add-on field. It shows a **Manage billing in Shopify** link to `shopifyManageUrl` (with the plan
+and without one), or, when it is null, the words "Open your Shopify admin, then Settings > Apps".
+After `?shopify=welcome` it polls the plan until it holds one, as after a Stripe Checkout.
+
+**PL-20. Configuration.** Billing runner (workers project), all four or none (a partial set is
+refused at start): `BILLING_SHOPIFY_PARTNER_ID` (the number in the Partner Dashboard URL),
+`BILLING_SHOPIFY_PARTNER_TOKEN` (a Partner API client token with only Manage apps),
+`BILLING_SHOPIFY_APP_ID` (the numeric app ID) and `BILLING_SHOPIFY_PLAN_HANDLES` (JSON from the
+five PL-16 keys to handles, all five, distinct). Optional: `BILLING_SHOPIFY_SYNC_LIMIT` (1 to 100,
+default 20), `BILLING_SHOPIFY_API_VERSION` (default `2026-10`) and `BILLING_SHOPIFY_BASE_URL`
+(https, for tests; default `https://partners.shopify.com`). API function: optional
+`SHOPIFY_BILLING_APP_HANDLE` (the app handle in the plan selection URL). No Stripe variable
+changes. Core reads none of them from the environment.
+
+Sources (fetched 2026-11-07):
+- https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements (1.2, 1.2.1-1.2.3)
+- https://shopify.dev/docs/apps/launch/billing
+- https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing (plan page, welcome links,
+  Partner API status, no webhooks after 2026-04-28, limitations)
+- https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing/plans
+- https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing/subscription-billing/setup-usage-charges
+- https://shopify.dev/docs/apps/launch/billing/shopify-app-pricing/redirect-plan-selection-page
+- https://shopify.dev/docs/api/partner/2026-07/active-subscription and
+  https://shopify.dev/docs/api/partner/2026-07/objects/ActiveSubscription
+- https://shopify.dev/docs/api/partner (authentication, Partner API clients, rate limits)
+- https://shopify.dev/docs/api/app-events (client-credentials token for usage events)
+- https://shopify.dev/docs/apps/launch/shopify-app-store/best-practices (C. Pricing)
+
+## Known limits (revision 3)
+
+- Shopify tenants cannot buy the extra-connection add-on (PL-16); they move up a plan.
+- Linking a tenant to its shop is an operator step (PL-17). A merchant who installs from the App
+  Store does not get a tenant or a link by itself; that needs a rule in connections.md first.
+- A linked Shopify tenant that never chooses a plan is comped, as any tenant without a plan.
+- A Shopify freeze is not told apart from a cancellation: both read as no contract (PL-18).
+- `pendingUpdate` (a plan change at the next cycle) is not stored; the record changes when the
+  contract does.
 
 - A tenant that never subscribed is comped. Requiring a plan of new tenants needs a rule here.
 - Bookable resources, model-assisted agents, voice, the agent daily cap and the email allowance
