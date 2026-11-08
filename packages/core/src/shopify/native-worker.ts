@@ -14,6 +14,7 @@ import { shopifyListWindow } from "../connections/catalog.js";
 import { verifyIdToken, SHOP_DOMAIN } from "./id-token.js";
 import { getOrderQuery, listOrdersQuery, listOrdersSearch, orderToRest } from "./orders.js";
 import { openToken, sealToken, SealError, type SealKeys } from "./seal.js";
+import { redactStoreIdentity } from "./redact.js";
 import { verifyWebhookHmac } from "./webhook.js";
 import type { ShopifyClient, ShopifyFailure, ShopifyTokens } from "./client.js";
 
@@ -724,6 +725,27 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       const now_ = (await tx.query<{ status: string; generation: string | number }>("SELECT status::text AS status, generation FROM shopify_installs WHERE shop_domain=$1 FOR UPDATE", [shopDomain])).rows[0];
       const reinstalled = install === null ? now_ !== undefined && now_.status !== "uninstalled" : now_ !== undefined && Number(now_.generation) !== gen(install);
       if (reinstalled) return false;
+      // The action history keeps the connection's domain and store name in `result` and `payload` (and an outbox event may echo
+      // them). Scope: this shop's native connections only, matched by tenant and connection id; no search across tenants.
+      const bound = (await tx.query<{ tenant_id: string; id: string; account_label: string | null }>(
+        "SELECT tenant_id, id, account_label FROM connections WHERE tier='native' AND external_account_id=$1 FOR UPDATE", [shopId])).rows;
+      if (bound.length > 0) {
+        const identity = { domain: shopDomain, shopId, names: [install?.shop_name, ...bound.map((row) => row.account_label)].filter((name): name is string => typeof name === "string") };
+        const tenantIds = bound.map((row) => row.tenant_id);
+        const connectionIds = bound.map((row) => row.id);
+        const history = (await tx.query<{ tenant_id: string; id: string; payload: unknown; result: unknown }>(
+          `SELECT a.tenant_id, a.id, a.payload, a.result FROM actions a
+            WHERE a.target->>'type'='connection' AND (a.tenant_id, a.target->>'id') IN (SELECT t, i::text FROM unnest($1::uuid[], $2::uuid[]) AS x(t, i)) FOR UPDATE`,
+          [tenantIds, connectionIds])).rows;
+        for (const row of history)
+          await tx.query("UPDATE actions SET payload=$3::jsonb, result=$4::jsonb WHERE tenant_id=$1 AND id=$2",
+            [row.tenant_id, row.id, JSON.stringify(redactStoreIdentity(row.payload, identity)), JSON.stringify(redactStoreIdentity(row.result, identity))]);
+        const events = (await tx.query<{ tenant_id: string; id: string; payload: unknown }>(
+          `SELECT tenant_id, id, payload FROM outbox WHERE (tenant_id, action_id) IN (SELECT t, i FROM unnest($1::uuid[], $2::uuid[]) AS x(t, i)) FOR UPDATE`,
+          [history.map((row) => row.tenant_id), history.map((row) => row.id)])).rows;
+        for (const row of events)
+          await tx.query("UPDATE outbox SET payload=$3::jsonb WHERE tenant_id=$1 AND id=$2", [row.tenant_id, row.id, JSON.stringify(redactStoreIdentity(row.payload, identity))]);
+      }
       await tx.query(
         `UPDATE connections SET status='disconnected', account_label=NULL, revoke_outcome=coalesce(revoke_outcome,'revoked'), updated_at=$2
           WHERE tier='native' AND external_account_id=$1 AND status<>'disconnected'`, [shopId, now()]);
