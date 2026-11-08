@@ -64,7 +64,7 @@ function addressOf(form: BusinessForm): { address: PostalAddress | null; errors:
   if (values.city === "") errors.city = BUSINESS_MESSAGES.city;
   if (values.country === "") errors.country = BUSINESS_MESSAGES.country;
   for (const field of ["line1", "line2", "city", "region", "postalCode"] as const) {
-    if (values[field].length > LINE_MAX) errors[field] = BUSINESS_MESSAGES.tooLong;
+    if ([...values[field]].length > LINE_MAX) errors[field] = BUSINESS_MESSAGES.tooLong;
   }
   if (Object.keys(errors).length > 0) return { address: null, errors };
   const address: PostalAddress = { line1: values.line1, city: values.city, country: values.country };
@@ -86,11 +86,11 @@ export function readBusinessForm(profile: BusinessProfile, form: BusinessForm): 
   const changes: BusinessProfileChanges = {};
 
   const displayName = form.displayName.trim();
-  if (displayName === "" || displayName.length > LINE_MAX) errors.displayName = BUSINESS_MESSAGES.displayName;
+  if (displayName === "" || [...displayName].length > LINE_MAX) errors.displayName = BUSINESS_MESSAGES.displayName;
   else if (displayName !== profile.displayName) changes.displayName = displayName;
 
   const legalName = form.legalName.trim();
-  if (legalName.length > LEGAL_NAME_MAX) errors.legalName = BUSINESS_MESSAGES.legalName;
+  if ([...legalName].length > LEGAL_NAME_MAX) errors.legalName = BUSINESS_MESSAGES.legalName;
   else if (legalName !== (profile.legalName ?? "")) changes.legalName = legalName === "" ? null : legalName;
 
   // Empty means clear; text that strips down to nothing ("---") is a typo, never a clear.

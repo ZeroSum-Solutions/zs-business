@@ -69,8 +69,9 @@ interface Checked {
 export function checkTenantCreateInput(input: TenantCreateInput): Checked {
   if (!TENANT_KEY_PATTERN.test(input.key)) refuse("--key must match ^[a-z0-9][a-z0-9-]{2,39}$");
   const name = input.name.trim();
-  // The tenant trigger trims and cuts a name to 120 characters; refuse one it would change.
-  if (name.length < 1 || name.length > 120 || name !== input.name) refuse("--name must be 1 to 120 characters with no outer spaces");
+  // The tenant trigger trims and cuts a name to 120 characters (code points, as Postgres counts them, not UTF-16
+  // units: a name of emoji is 120 characters at 240 units); refuse one it would change.
+  if (name.length < 1 || [...name].length > 120 || name !== input.name) refuse("--name must be 1 to 120 characters with no outer spaces");
   const email = memberEmailSchema.safeParse(input.ownerEmail);
   if (!email.success) refuse("--owner-email is not a valid address");
   // An explicit empty zone is a bad zone, not an omitted one.
@@ -174,15 +175,31 @@ const lockNames = (input: Checked) => [`tenant-create:email:${input.email}`, `te
  * then insert the tenant (with the intended owner email) and set the zone where missing. Phase 2:
  * provisionOwner.
  */
-export async function createTenant(deps: ProvisionOwnerDeps, raw: TenantCreateInput): Promise<TenantCreateSummary> {
+export async function createTenant(deps: ProvisionOwnerDeps, raw: TenantCreateInput, hooks: TenantCreateHooks = {}): Promise<TenantCreateSummary> {
   const input = checkTenantCreateInput(raw);
   if (raw.dryRun) return execute(deps, input, true);
-  return withSessionLocks(deps.service, lockNames(input), () => execute(deps, input, false));
+  return withSessionLocks(deps.service, lockNames(input), () => execute(deps, input, false, hooks));
 }
 
-async function execute(deps: ProvisionOwnerDeps, input: Checked, dryRun: boolean): Promise<TenantCreateSummary> {
+export interface TenantCreateHooks {
+  /**
+   * Makes the owner's Auth user. It runs under the run's locks, after every refusal that does not depend on the user
+   * has been checked, and only when the user does not exist yet: a rerun that would refuse (another owner email stored,
+   * another name, another tenant's member) creates no Auth user.
+   */
+  readonly createOwnerUser?: () => Promise<void>;
+}
+
+async function execute(deps: ProvisionOwnerDeps, input: Checked, dryRun: boolean, hooks: TenantCreateHooks = {}): Promise<TenantCreateSummary> {
   // Read under the locks (an apply): another run may have claimed the user since any earlier look.
-  const found = await deps.auth.findUser(input.email);
+  let found = await deps.auth.findUser(input.email);
+  if (!dryRun && hooks.createOwnerUser) {
+    await asService(deps.service, async (tx) => refuseUnsafe(input, await readExisting(tx, input), found));
+    if (found === null) {
+      await hooks.createOwnerUser();
+      found = await deps.auth.findUser(input.email);
+    }
+  }
 
   const phase1 = await asService(deps.service, async (tx) => {
     const existing = await readExisting(tx, input);

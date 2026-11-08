@@ -30,12 +30,14 @@ const countryCodes: ReadonlySet<string> = new Set(COUNTRY_CODES);
 export const countryCodeSchema = z.string().refine((code) => countryCodes.has(code), "Expected an ISO 3166-1 alpha-2 country code such as US");
 
 const postgresText = (value: string) => isPostgresText(value);
-const line = () => z.string().trim().min(1).max(120).refine(postgresText, "Text is not valid in Postgres");
+/** Postgres `char_length` counts code points, so the length rule does too (an emoji is one, not two UTF-16 units). */
+const codePointsAtMost = (max: number) => (value: string) => [...value].length <= max;
+const line = () => z.string().trim().min(1).refine(codePointsAtMost(120), "Expected at most 120 characters").refine(postgresText, "Text is not valid in Postgres");
 
 /** BP-2: `display_name`, 1..120 characters after trimming. */
 export const businessDisplayNameSchema = line();
 /** BP-2: `legal_name`, 1..200 characters after trimming (null clears it in `changes`). */
-export const businessLegalNameSchema = z.string().trim().min(1).max(200).refine(postgresText, "Text is not valid in Postgres");
+export const businessLegalNameSchema = z.string().trim().min(1).refine(codePointsAtMost(200), "Expected at most 200 characters").refine(postgresText, "Text is not valid in Postgres");
 /** BP-2: an E.164 number, `+` and 8..15 digits. */
 export const businessPhoneSchema = z.string().regex(/^\+[0-9]{8,15}$/, "Expected an international number such as +14155550123");
 /** BP-3: `UTC` or an IANA name; the database trigger checks it against `pg_timezone_names`. */

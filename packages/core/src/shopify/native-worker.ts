@@ -10,7 +10,7 @@ import { createHmac, randomInt } from "node:crypto";
 import { z } from "zod";
 import {
   Conflict, PLAN_CATALOG, SHOPIFY_RECENT_ORDERS_DAYS, SHOPIFY_RECENT_ORDERS_FETCHED, SHOPIFY_RECENT_ORDERS_SHOWN,
-  normalizeAccountLabel, shopifyRecentOrderSchema, type HubPlan, type ShopifyOrdersResponse, type ShopifyRecentOrder,
+  memberEmailSchema, normalizeAccountLabel, shopifyRecentOrderSchema, type HubPlan, type ShopifyOrdersResponse, type ShopifyRecentOrder,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { setShopifyBilling } from "../billing/shopify-plans.js";
@@ -54,7 +54,7 @@ export interface ShopifyNativeConfig {
 /** What the worker needs from the API's Supabase Auth and tenant code (apps/api), injected so core stays free of it. */
 export interface HubPort {
   /** Idempotent by key and email: creates the user, the tenant and the owner member, or finds them. */
-  createHub(input: { key: string; name: string; ownerEmail: string }): Promise<{ kind: "ok"; tenantId: string } | { kind: "email_has_hub" } | { kind: "failed" }>;
+  createHub(input: { key: string; name: string; ownerEmail: string }): Promise<{ kind: "ok"; tenantId: string; /** The name the tenant holds (a retry keeps the first one). */ name?: string } | { kind: "email_has_hub" } | { kind: "failed" }>;
   /** A one-time sign-in link for a hub user, nothing emailed; null when none can be made. */
   signInLink(email: string): Promise<string | null>;
 }
@@ -347,7 +347,10 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       if (shop.kind === "failed") return { kind: "unavailable" };
       if (shop.shop.domain !== domain) return { kind: "invalid" };
       const s = sealed(shop.shop.id, answer.tokens);
-      const name = shop.shop.name.slice(0, 120);
+      // The store's name is text an outsider chose: C-14's clean form (no NUL, control, bidirectional or unpaired
+      // surrogate characters; 1 to 120 code points), else the domain. Postgres refuses a NUL byte, and a plain
+      // UTF-16 cut can split a surrogate pair or leave a space at the end.
+      const name = normalizeAccountLabel(shop.shop.name) ?? shop.shop.domain;
       // The row seen before the Shopify calls fences the write: an uninstall or redact that ran meanwhile moved the
       // generation or removed the row, and this exchange must not bring the store back to life behind it.
       const observed = existing === null ? null : gen(existing);
@@ -438,7 +441,8 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     if (auth.kind === "refused") return { outcome: "not_supported" };
     if (auth.kind !== "ok") return { outcome: auth.kind === "not_installed" ? "unavailable" : auth.kind };
     const { link, plan } = await linkAndPlanOf(auth.row.shop_id);
-    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, plan, link };
+    // Rows written before the label rule hold the raw Shopify name; what the browser sees is always the normalized form.
+    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: normalizeAccountLabel(auth.row.shop_name) ?? auth.row.shop_domain }, plan, link };
   }
 
   /**
@@ -502,7 +506,10 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     const answer = await client.exchangeOnline(domain, idToken);
     if (answer.kind === "failed") return { kind: answer.reason === "invalid_grant" ? "invalid_token" : "unavailable" };
     if (!answer.user.accountOwner || !answer.user.emailVerified || answer.user.email === null) return { kind: "not_owner" };
-    return { kind: "ok", email: answer.user.email.trim().toLowerCase() };
+    // Same rule as every member email: ASCII is checked before case folding, so a non-ASCII address (the Kelvin sign
+    // folds to "k") cannot alias an ASCII owner. A shape the member rules refuse cannot be an owner we know.
+    const email = memberEmailSchema.safeParse(answer.user.email);
+    return email.success ? { kind: "ok", email: email.data } : { kind: "not_owner" };
   }
 
   /** True while any live connection of any tier holds this store (C-21 isolation across tiers). */
@@ -573,7 +580,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     }
 
     const key = `shopify-${SHOP_GID_RE.exec(row.shop_id)![1]}`;
-    const name = row.shop_name.trim().slice(0, 120) || key;
+    const name = normalizeAccountLabel(row.shop_name) ?? key; // the tenant refuses an outer space or more than 120 characters
     const made = await deps.hub.createHub({ key, name, ownerEmail: owner.email });
     if (made.kind === "email_has_hub") return { outcome: "email_has_hub" };
     if (made.kind === "failed") { report({ kind: "hub_failed", shop: domain }); return { outcome: "unavailable" }; }
@@ -600,7 +607,8 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       if (error instanceof Conflict) { report({ kind: "hub_failed", shop: domain }); return { outcome: "unavailable" }; }
       throw error;
     }
-    return { outcome: "created", businessName: name, ownerEmail: owner.email };
+    // A retry keeps the tenant's first name; report that one, not this attempt's (the shop may have been renamed since).
+    return { outcome: "created", businessName: made.name ?? name, ownerEmail: owner.email };
   }
 
   // ---- claims (existing hub) ----------------------------------------------------------------------
@@ -658,7 +666,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       if (counter.claim_locked_until !== null && counter.claim_locked_until.getTime() > now().getTime()) return { kind: "locked", until: counter.claim_locked_until };
       const claim = (await tx.query<{ tenant_id: string; id: string }>(
         `UPDATE shopify_claims SET status='redeemed', shop_id=$2, shop_domain=$3, shop_name=$4, redeemed_at=$5, updated_at=$5
-          WHERE code_hash=$1 AND status='open' AND expires_at > $5 RETURNING tenant_id, id`, [hash, row.shop_id, domain, row.shop_name, now()])).rows[0];
+          WHERE code_hash=$1 AND status='open' AND expires_at > $5 RETURNING tenant_id, id`, [hash, row.shop_id, domain, normalizeAccountLabel(row.shop_name) ?? domain, now()])).rows[0];
       if (claim) {
         await tx.query("UPDATE shopify_installs SET claim_failures=0, claim_locked_until=NULL WHERE shop_id=$1", [row.shop_id]);
         const name = (await tx.query<{ name: string }>("SELECT name FROM tenants WHERE tenant_id=$1", [claim.tenant_id])).rows[0]?.name ?? "";
