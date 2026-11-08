@@ -17,6 +17,6 @@ const runner = env.runner === null ? null : startDeliveryRunner(env.runner, { cl
 export default getRequestListener(cronRoutes({
   cronSecret: env.cronSecret,
   runner,
-  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock) }),
+  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock, process.env) }),
   onError: (error) => console.error("Delivery run failed", error),
 }).fetch);

@@ -16,6 +16,6 @@ const runner = env.runner === null ? null : (await startFollowUpRunner(env.runne
 export default getRequestListener(followUpCronRoutes({
   cronSecret: env.cronSecret,
   runner,
-  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock) }),
+  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock, process.env) }),
   onError: (error) => console.error("Follow-up run failed", error),
 }).fetch);

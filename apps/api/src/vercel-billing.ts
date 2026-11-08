@@ -20,6 +20,6 @@ export default getRequestListener(cronRoutes({
   name: "Billing",
   cronSecret: env.cronSecret,
   runner,
-  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock) }),
+  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock, process.env) }),
   onError: (error) => console.error("Billing run failed", error),
 }).fetch);

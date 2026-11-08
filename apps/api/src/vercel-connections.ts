@@ -30,7 +30,7 @@ app.route("/", cronRoutes({
   name: "Connections",
   cronSecret: env.cronSecret,
   runner: worker === null ? null : createConnectionsRunner(worker),
-  ...(env.worker === null ? {} : { alerts: createCronAlertsForEnv(env.worker, clock) }),
+  ...(env.worker === null ? {} : { alerts: createCronAlertsForEnv(env.worker, clock, process.env) }),
   onError: (error) => console.error("Connections run failed", error),
 }));
 app.route("/", connectionsInternalRoutes({

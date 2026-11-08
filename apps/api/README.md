@@ -630,15 +630,25 @@ default, as before. `check:hosted` probes the headers on `/healthz` and `/v1`.
 
 ## Cron failure alerts (`src/cron-alerts.ts`)
 
-A cron function that fails (503) writes a row to `cron_alerts` (migration `20261108300000_cron_alerts.sql`, a
+A cron function that fails (503) writes a row to `cron_alerts` (migration `20261108400000_cron_alerts.sql`, a
 platform table the workers' service role alone can use), so a stopped job does not wait for someone to read Vercel
 logs. One row per job: a repeat failure raises `failure_count` and keeps `opened_at`; the next good run sets
 `resolved_at`; a later failure opens the row again. The error text keeps the class and message only, with URLs and
 key-shaped tokens replaced, cut to 500 characters. A write that fails (the database is the failure) goes to the
 operator log and never changes the cron's answer. Open alerts are `SELECT * FROM cron_alerts WHERE resolved_at IS
 NULL`, or `listOpenCronAlerts`; `check:hosted` fails while any is open. Each cron function writes through its own
-`*_DATABASE_URL` login, so no new variable is needed. Not covered: a function that dies before its handler runs
-(a bad environment at start-up) and a cron that Vercel never calls; those still show only in Vercel.
+`*_DATABASE_URL` login.
+
+An alert also sends one plain email (`src/cron-alert-mail.ts`) when it opens and when it reopens after a fix, not on
+each repeat failure. It goes to `OPS_ALERT_EMAIL` through the Resend account the delivery worker already uses
+(`RESEND_API_KEY`, `RESEND_FROM`, optional `RESEND_BASE_URL`; no outbox row, no wallet charge). Without
+`OPS_ALERT_EMAIL`, or with unusable Resend settings, nothing is sent and the log says so once per instance. A send
+that fails or times out (4 s) is logged and never changes the cron's answer; the send carries an idempotency key from
+the job and its `opened_at`. The workers project holds all of these; the API project holds none.
+
+Not covered: a function that dies before its handler runs (a bad environment at start-up), a cron that Vercel never
+calls, and a failure while the database itself is down (the alert cannot be written, so it cannot be told apart from a
+repeat and no email is sent); those still show only in Vercel.
 
 ## Database pool and request limits
 
@@ -825,6 +835,7 @@ against the pinned Supabase Root 2021 CA.
    | `CRON_SECRET` | **no** | yes |
    | `DELIVERY_WORKER`, `DELIVERY_WORKER_ID`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `SMS_PROVIDER` | **no** | yes |
    | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | **no** | yes |
+   | `OPS_ALERT_EMAIL` | **no** | yes (one address; without it a cron failure is recorded in `cron_alerts` but not emailed) |
    | `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | **no** | only with `SMS_PROVIDER=twilio` (`TWILIO_API_KEY_SID` and `TWILIO_API_KEY_SECRET` come together) |
    | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS`, `BILLING_STRIPE_KEY`, `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS`, `BILLING_SHOPIFY_*` | **no** | yes |
    | `SHOPIFY_BILLING_APP_HANDLE` | yes | no |

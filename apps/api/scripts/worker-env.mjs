@@ -50,6 +50,8 @@ export const WORKER_ONLY_ENV = [
   // variables. The API reads them (parseEnrichmentEnv in src/vercel.ts) as the service gate; they hold no secret.
   // image worker (src/images/config.ts); the API keeps IMAGE_ADAPTER and the adapter settings (parseImageEnv)
   "IMAGE_WORKER", "IMAGE_DATABASE_URL", "IMAGE_SERVICE_DATABASE_URL", "IMAGE_INTERVAL_MS",
+  // cron failure alert email (src/cron-alert-mail.ts); it sends with the RESEND_* sender above
+  "OPS_ALERT_EMAIL",
   // build variables of the workers project
   ...CRON_SCHEDULE_VARIABLES,
 ];

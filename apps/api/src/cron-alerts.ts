@@ -1,10 +1,13 @@
 // Cron failure alerts: a failed scheduled run leaves a visible row in `cron_alerts` (migration
-// 20261108300000), so nobody has to read Vercel logs to learn a job stopped. One row per job:
+// 20261108400000), so nobody has to read Vercel logs to learn a job stopped. One row per job:
 // a repeat failure raises the counter on the open row, the next good run closes it, a later
 // failure opens it again. The recorder never throws: an alert that cannot be written (the database
 // is the very thing that failed) is reported to the operator log and the cron answers as before.
+// A new alert and a reopened one also call the `notify` hook (an email to the operator, see
+// cron-alert-mail.ts); a repeat failure on an open alert does not.
 import { asService, createRuntimePool, type Transaction } from "@zs/db";
 import type { Pool } from "pg";
+import { createOpsAlertMailer, type CronAlertNotifier } from "./cron-alert-mail.js";
 
 /** Runs `work` in one service-role transaction. */
 export type ServiceRun = <T>(work: (tx: Transaction) => Promise<T>) => Promise<T>;
@@ -46,13 +49,17 @@ export function createCronAlerts(deps: {
   readonly clock: { now(): Date };
   /** The operator log, for an alert that could not be written. */
   readonly report?: (message: string, error: unknown) => void;
+  /** Called once when an alert opens or reopens, never for a repeat failure. Must not throw. */
+  readonly notify?: CronAlertNotifier;
 }): CronAlerts {
   const report = deps.report ?? ((message, error) => console.error(message, error));
   return {
     async failed(job, error) {
       const at = deps.clock.now().toISOString();
+      const text = describeCronError(error);
+      let count: number;
       try {
-        await deps.service((tx) => tx.query(
+        const written = await deps.service((tx) => tx.query<{ failure_count: number }>(
           `INSERT INTO cron_alerts (job, opened_at, last_failed_at, failure_count, last_error)
            VALUES ($1, $2, $2, 1, $3)
            ON CONFLICT (job) DO UPDATE SET
@@ -60,11 +67,21 @@ export function createCronAlerts(deps: {
              failure_count = CASE WHEN cron_alerts.resolved_at IS NULL THEN cron_alerts.failure_count + 1 ELSE 1 END,
              last_failed_at = EXCLUDED.last_failed_at,
              last_error = EXCLUDED.last_error,
-             resolved_at = NULL`,
-          [job, at, describeCronError(error)],
+             resolved_at = NULL
+           RETURNING failure_count`,
+          [job, at, text],
         ));
+        count = written.rows[0]?.failure_count ?? 0;
       } catch (writeError) {
         report(`Cron alert for ${job} not recorded`, writeError);
+        return;
+      }
+      // Count 1 is exactly a first insert or a reopen: a repeat on an open alert is 2 or more.
+      if (count !== 1 || !deps.notify) return;
+      try {
+        await deps.notify({ job, openedAt: at, failureCount: count, error: text });
+      } catch (notifyError) {
+        report(`Cron alert notice for ${job} failed`, notifyError);
       }
     },
     async succeeded(job) {
@@ -87,6 +104,8 @@ export function createCronAlerts(deps: {
 export function createCronAlertsForEnv(
   env: { readonly serviceDatabaseUrl: string; readonly databaseCaCert: string | undefined },
   clock: { now(): Date },
+  /** The process environment, for OPS_ALERT_EMAIL and the Resend settings; the entry point passes it. */
+  source: Readonly<Record<string, string | undefined>>,
 ): CronAlerts {
   let pool: Pool | null = null;
   const service: ServiceRun = (work) => {
@@ -99,7 +118,7 @@ export function createCronAlertsForEnv(
     });
     return asService(pool, work);
   };
-  return createCronAlerts({ service, clock });
+  return createCronAlerts({ service, clock, notify: createOpsAlertMailer({ env: source }) });
 }
 
 /** The jobs that are failing now, newest failure first. */
