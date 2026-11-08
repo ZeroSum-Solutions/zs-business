@@ -559,6 +559,20 @@ describe("the plan on the page (C-29)", () => {
   });
 });
 
+describe("Open ZS Hub when the hub owner's email differs from the store owner's (C-21 sign-in)", () => {
+  it("does not claim the store is unlinked: the page says it is linked, so the message names the email rule", async () => {
+    const linked = { state: "linked", businessName: "Halden", connection: "active" };
+    const opened = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "active", name: "Solo" }, link: linked } };
+    const { app } = runClient({ answers: [opened, { status: 200, body: { outcome: "not_available" } }] });
+    await settle();
+    button(app, "Open ZS Hub").click();
+    await settle();
+    expect(texts(app)).not.toContain("not linked to a hub yet");
+    expect(texts(app)).toContain("owner's email");
+    expect(texts(app)).toContain("Sign in to the hub directly");
+  });
+});
+
 describe("recent orders on the page (C-30)", () => {
   const LINKED = { state: "linked", businessName: "Halden", connection: "active" };
   const opened = (link: unknown = LINKED) => ({ status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "active", name: "Solo" }, link } });
