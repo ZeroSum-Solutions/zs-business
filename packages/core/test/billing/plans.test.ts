@@ -3,11 +3,12 @@
 // limits, founding, the Portal and tenancy under the runtime role. All data is synthetic.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanInterval } from "@zs/contracts";
+import { CONNECTION_CONNECT_ACTION, PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanInterval } from "@zs/contracts";
 import { cannotBeApproved } from "../../src/approvals/index.js";
-import { mapError } from "../../src/edge/index.js";
+import { derivedId, mapError, memberDispatch } from "../../src/edge/index.js";
 import {
-  createBillingWorker, createSession, createStripeSubscriptionReader, PLAN_CHECKOUT_LIFETIME_MS, planGate, setFoundingInvite,
+  connectIdempotencyKey, createAutomationAdmin, createBillingWorker, createSession, createStripeSubscriptionReader, PLAN_CHECKOUT_LIFETIME_MS,
+  PLAN_CHECKOUT_RETRY_LIMIT_MS, planGate, setFoundingInvite,
   setShopifyBilling, SHOPIFY_LINK_CHECKOUT_GATE_MS, type Session,
 } from "../../src/index.js";
 import { startFakeStripePlans, type FakeStripePlans } from "./fake-stripe-plans.js";
@@ -127,6 +128,40 @@ describe("starting a plan checkout (PL-4, PL-5)", () => {
     expect(lastForm().form.customer).toBe(customer);
     expect(lastForm().form["subscription_data[trial_period_days]"]).toBeUndefined();
   });
+
+  // PL-5: a first request Stripe could not answer stores no URL, so a retry asks again for 25 minutes.
+  it("a retry up to the retry limit still asks Stripe; one later is checkout_closed and Stripe is not called", async () => {
+    const sessionCalls = () => fake.received.filter((r) => r.path === "/v1/checkout/sessions").length;
+    const tenantId = await b.tenant();
+    fake.fail(503);
+    await expect((await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-retry"))
+      .rejects.toMatchObject({ name: "StripeRequestFailed" });
+    b.h.clock.advance(PLAN_CHECKOUT_RETRY_LIMIT_MS);
+    const calls = sessionCalls();
+    const retried = await (await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-retry");
+    expect(sessionCalls()).toBe(calls + 1);
+    expect((await checkoutRow(tenantId, retried.checkout.id)).checkout_url).toBe(retried.checkoutUrl);
+
+    const late = await b.tenant();
+    fake.fail(503);
+    await expect((await planSession(late)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-late")).rejects.toBeDefined();
+    b.h.clock.advance(PLAN_CHECKOUT_RETRY_LIMIT_MS + 1);
+    const before = sessionCalls();
+    await expect((await planSession(late)).startPlanCheckout({ plan: "solo", interval: "month" }, "plan-late"))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "checkout_closed" } });
+    expect(sessionCalls()).toBe(before);
+  });
+
+  // PL-5: Stripe unreachable, 409, 429 or 5xx is 503; any other refusal is 500.
+  it.each([[409, 503], [429, 503], [500, 503], [503, 503], [400, 500], [402, 500]])(
+    "maps a Stripe %i on the Checkout Session to HTTP %i", async (stripeStatus, httpStatus) => {
+      const tenantId = await b.tenant();
+      fake.fail(stripeStatus);
+      const error = await (await planSession(tenantId)).startPlanCheckout({ plan: "solo", interval: "month" }, `plan-${randomUUID()}`)
+        .then(() => null, (e: unknown) => e);
+      expect(error).toMatchObject({ name: "StripeRequestFailed" });
+      expect(mapError(error).status).toBe(httpStatus);
+    });
 });
 
 describe("applying plan events (PL-10)", () => {
@@ -274,6 +309,36 @@ describe("applying plan events (PL-10)", () => {
     expect((await worker().runOnce()).outcomes).toEqual({ plan_duplicate: 1 });
     expect(await plan(tenantId)).toMatchObject({ plan: "pro", stripe_subscription_id: second.id });
   });
+
+  it("a first-seen subscription with an unknown price lookup key ends mismatch, sets no plan and keeps its status (PL-2)", async () => {
+    const tenantId = await b.tenant();
+    const started = await (await planSession(tenantId)).startPlanCheckout({ plan: "studio", interval: "month" }, `plan-${randomUUID()}`);
+    const sub = subscription({ id: stripeId("sub"), customer: stripeId("cus"), tenantId, checkoutId: started.checkout.id, status: "active",
+      at: b.h.clock.now(), lookupKey: "hub_unknown_month" });
+    fake.subscriptions.set(sub.id, sub);
+    await b.deliver(subEvent("customer.subscription.created", sub));
+    expect((await worker().runOnce()).outcomes).toEqual({ mismatch: 1 });
+    expect(await plan(tenantId)).toMatchObject({ plan: null, status: "none", read_only_after: null });
+    expect((await b.h.rows<Record<string, any>>("SELECT plan, status FROM plan_subscriptions WHERE tenant_id=$1 AND id=$2", [tenantId, sub.id]))[0])
+      .toEqual({ plan: null, status: "active" });
+    // No plan means no limits: the tenant stays comped.
+    expect(await (await planSession(tenantId)).getBillingPlan()).toMatchObject({ status: "none", plan: null });
+  });
+
+  it("checkout.session.expired marks a pending plan checkout expired, and a repeat changes nothing (PL-10)", async () => {
+    const tenantId = await b.tenant();
+    const started = await (await planSession(tenantId)).startPlanCheckout({ plan: "pro", interval: "month" }, `plan-${randomUUID()}`);
+    expect((await checkoutRow(tenantId, started.checkout.id)).status).toBe("pending");
+    const expired = () => b.event("checkout.session.expired", { id: stripeId("cs"), object: "checkout.session", mode: "subscription", status: "expired",
+      customer: null, subscription: null, metadata: { zs_tenant: tenantId, zs_checkout: started.checkout.id } });
+    await b.deliver(expired());
+    expect((await worker().runOnce()).outcomes).toEqual({ expired: 1 });
+    expect((await checkoutRow(tenantId, started.checkout.id)).status).toBe("expired");
+    // An expired checkout no longer blocks a new one, and a repeated event finds nothing pending.
+    await b.deliver(expired());
+    expect((await worker().runOnce()).outcomes).toEqual({ ignored: 1 });
+    expect((await checkoutRow(tenantId, started.checkout.id)).status).toBe("expired");
+  });
 });
 
 describe("plan limits (PL-8)", () => {
@@ -290,6 +355,99 @@ describe("plan limits (PL-8)", () => {
     const owner = await planSession(comped);
     for (let i = 0; i < 3; i += 1)
       await expect(owner.inviteMember({ email: `${randomUUID()}@haldenrowe.example`, role: "staff" }, randomUUID())).resolves.toBeDefined();
+  });
+
+  describe("connections and tokens", () => {
+    const memberOf = async (tenantId: string) =>
+      (await b.h.rows<{ id: string }>("SELECT id FROM tenant_members WHERE tenant_id=$1 AND role='owner' LIMIT 1", [tenantId]))[0]!.id;
+    const SHOP = "testshop.myshopify.com";
+    /** A connection row as the worker leaves it; the catalog toolkit is not needed for a counted row. */
+    async function seedConnection(tenantId: string, toolkit: string, status = "active") {
+      await b.h.service(async (tx) => tx.query(
+        `INSERT INTO connections (tenant_id,id,tier,toolkit,composio_account_id,external_account_id,account_domain,account_label,status,connected_by,last_checked_at,created_at,updated_at)
+         VALUES ($1,$2,'composio',$3,$4,'1',$5,$6,$7,$8,$9,$9,$9)`,
+        [tenantId, randomUUID(), toolkit, `ca_${randomUUID().slice(0, 8)}`, SHOP, status === "disconnected" ? null : "Shop", status,
+          await memberOf(tenantId), b.h.clock.now()]));
+    }
+    /** C-5: the connect action under its reserved key, after the worker verified an attempt. */
+    async function connect(tenantId: string) {
+      const connectionId = randomUUID();
+      await b.h.service(async (tx) => tx.query(
+        `INSERT INTO connection_attempts (tenant_id,id,connection_id,toolkit,composio_account_id,auth_config_id,account_domain,created_by,browser_hash,status,external_account_id,expires_at,created_at,updated_at)
+         VALUES ($1,$2,$3,'shopify',$4,'ac_shopify',$5,$6,$7,'verified','1',$8,$9,$9)`,
+        [tenantId, randomUUID(), connectionId, `ca_${randomUUID().slice(0, 8)}`, SHOP, await memberOf(tenantId), "x".repeat(43),
+          new Date(b.h.clock.now().getTime() + 600_000), b.h.clock.now()]));
+      const key = connectIdempotencyKey(connectionId);
+      return memberDispatch(b.deps(), { tenantId, actorId: await b.owner(tenantId) })({
+        actionType: CONNECTION_CONNECT_ACTION, target: { tenantId, type: "connection", id: connectionId },
+        approvalReference: { tenantId, id: derivedId(tenantId, key, "approval") }, idempotencyKey: key,
+        payload: { connectionId, toolkit: "shopify", externalAccountId: "1", accountDomain: SHOP, accountLabel: "Shop" },
+      });
+    }
+    async function seedToken(tenantId: string, input: { revoked?: boolean; expiresInMs?: number | null } = {}) {
+      const actor = await b.owner(tenantId);
+      const now = b.h.clock.now();
+      await b.h.service(async (tx) => tx.query(
+        `INSERT INTO automation_tokens (tenant_id,id,name,scopes,created_by,created_at,expires_at,revoked_at,revoked_by)
+         VALUES ($1,$2,'seed','{contacts:propose}',$3,$4,$5,$6,$7)`,
+        [tenantId, randomUUID(), actor, new Date(now.getTime() - 2 * DAY),
+          input.expiresInMs === undefined || input.expiresInMs === null ? null : new Date(now.getTime() + input.expiresInMs),
+          input.revoked ? now : null, input.revoked ? actor : null]));
+    }
+    /** W-9: the owner's token create, through the integrations dispatcher. */
+    const createToken = async (tenantId: string) =>
+      createAutomationAdmin(b.deps(), { keySecrets: { current: ["test", "plans", "k".repeat(32)].join("-") } }, { tenantId, actorId: await b.owner(tenantId) })
+        .createToken({ name: "flow", scopes: ["contacts:propose"] }, `token-${randomUUID()}`);
+    const limitError = (reason: unknown) => ({ code: "Conflict", details: { reason } });
+
+    it("counts live connections only: a disconnected one is free, and the add-on raises the limit by one", async () => {
+      const solo = await b.tenant();
+      await subscribe(solo, { plan: "solo" });
+      await seedConnection(solo, "gmail", "disconnected");
+      await seedConnection(solo, "slack");
+      await expect(connect(solo)).rejects.toMatchObject({ ...limitError("plan_limit"), details: { resource: "managedConnections", limit: 1, used: 1 } });
+
+      const withAddon = await b.tenant();
+      await subscribe(withAddon, { plan: "solo", extraConnections: 1 });
+      await seedConnection(withAddon, "gmail", "disconnected");
+      await seedConnection(withAddon, "slack");
+      await expect(connect(withAddon)).resolves.toBeDefined();
+      await expect(connect(withAddon)).rejects.toMatchObject({ details: { reason: "plan_limit", resource: "managedConnections", limit: 2, used: 2 } });
+    });
+
+    it("two concurrent connects cannot both take the last slot", async () => {
+      const tenantId = await b.tenant();
+      await subscribe(tenantId, { plan: "solo" });
+      const results = await Promise.allSettled([connect(tenantId), connect(tenantId)]);
+      expect(results.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+      const lost = results.find((r): r is PromiseRejectedResult => r.status === "rejected")!;
+      expect(lost.reason).toMatchObject(limitError("plan_limit"));
+      expect((await b.h.rows("SELECT 1 FROM connections WHERE tenant_id=$1", [tenantId]))).toHaveLength(1);
+    });
+
+    it("counts unrevoked, unexpired tokens only, and refuses at the limit", async () => {
+      const tenantId = await b.tenant();
+      await subscribe(tenantId, { plan: "studio" });
+      await seedToken(tenantId, { revoked: true });
+      await seedToken(tenantId, { expiresInMs: -DAY });
+      await seedToken(tenantId, { expiresInMs: 30 * DAY });
+      await expect(createToken(tenantId)).resolves.toBeDefined();
+      await expect(createToken(tenantId)).rejects.toMatchObject({ details: { reason: "plan_limit", resource: "automationTokens", limit: 2, used: 2 } });
+      // Solo has no tokens at all.
+      const solo = await b.tenant();
+      await subscribe(solo, { plan: "solo" });
+      await expect(createToken(solo)).rejects.toMatchObject({ details: { reason: "plan_limit", resource: "automationTokens", limit: 0, used: 0 } });
+    });
+
+    it("two concurrent token creates cannot both take the last slot", async () => {
+      const tenantId = await b.tenant();
+      await subscribe(tenantId, { plan: "studio" });
+      await seedToken(tenantId);
+      const results = await Promise.allSettled([createToken(tenantId), createToken(tenantId)]);
+      expect(results.map((r) => r.status).sort()).toEqual(["fulfilled", "rejected"]);
+      expect((results.find((r): r is PromiseRejectedResult => r.status === "rejected")!).reason).toMatchObject(limitError("plan_limit"));
+      expect((await b.h.rows("SELECT 1 FROM automation_tokens WHERE tenant_id=$1 AND revoked_at IS NULL", [tenantId]))).toHaveLength(2);
+    });
   });
 
   it("allows only the listed actions while read-only", async () => {
