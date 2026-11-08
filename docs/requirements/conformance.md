@@ -4,7 +4,7 @@ Loop 076, the product contract conformance loop (2026-11-08). For every numbered
 
 Status values: `conforms` (code and test found, the test asserts the stated behaviour), `fixed` (a gap was found and closed in this change, with a test), `partial` (a verified gap that is too large or risky for this change; the note states it), `deferred` (needs Devin, a paid or hosted service, or is out of scope; the reason is in the note). Paths are relative to the repository root. Line numbers were taken before the last merge of main and may be off by a few lines.
 
-Counts: 34 conforms, 20 fixed, 3 partial, 4 deferred (61 rules). Each partial row states its gap and is on the L9 queue. Terminal state: every rule has a status; every gap was closed with a test, or is a stated partial, or is deferred with a reason.
+Counts: 35 conforms, 20 fixed, 2 partial, 4 deferred (61 rules). Each partial row states its gap and is on the L9 queue. Terminal state: every rule has a status; every gap was closed with a test, or is a stated partial, or is deferred with a reason.
 
 ## Matrix
 
