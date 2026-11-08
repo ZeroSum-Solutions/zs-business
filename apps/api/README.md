@@ -440,7 +440,11 @@ redelivery with the same `svix-id` replays the stored action (one suppression, o
 Stripe posts events here (stripe.md S-3). On only when the `STRIPE_*` variables are set.
 Subscribe the endpoint to `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
 `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`,
-`charge.dispute.funds_withdrawn` and `charge.dispute.funds_reinstated`.
+`charge.dispute.funds_withdrawn` and `charge.dispute.funds_reinstated` (wallet top-ups), and, for plans,
+`customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`,
+`invoice.paid` and `invoice.payment_failed`. An event type the endpoint does not list never arrives: without
+the two dispute events a chargeback never debits the wallet. Check the live endpoint's enabled events against
+this list after any change to it (Stripe dashboard, Developers, Webhooks).
 
 The route checks `Stripe-Signature` over the raw body (current or previous secret, 5 minutes of
 tolerance) before it parses anything or touches the database, then stores the event once by
