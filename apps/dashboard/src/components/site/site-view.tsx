@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
 import { Input, Label, Textarea } from "@/components/ui/input";
-import { DisabledReason } from "@/components/ui/sample";
+import { DisabledReason } from "@/components/ui/disabled-reason";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { useClearToasts, useToast } from "@/components/ui/toast";
 import {

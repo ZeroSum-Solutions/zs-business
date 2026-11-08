@@ -248,6 +248,8 @@ export function useTenantId(): string | null {
 export const APPROVE_REPLIES: Permission = "approve";
 /** The permission that reads Home results (owners only). */
 export const READ_RESULTS: Permission = "reports";
+/** Reads the prepaid wallet (delivery.md D-4, `GET /v1/wallet`): owners only. */
+export const READ_BILLING: Permission = "billing";
 /** Reads the follow-up agent and stops it (agents.md G-3, G-11): owners and staff. */
 export const STOP_AGENTS: Permission = "inbox.drafts";
 /** Changes the follow-up agent's settings, resumes it and runs it now (G-2, G-3): owners only. */

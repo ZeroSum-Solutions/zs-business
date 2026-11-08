@@ -38,16 +38,16 @@ async function connect(page: Page, name: string, button?: string) {
   await expect(row(page, name).getByTestId("gcal-status")).toHaveText("Connected");
 }
 
-test("lists each booking calendar as live data, with the sample accounts below", async ({ page }) => {
+test("lists each booking calendar as live data, and no sample accounts", async ({ page }) => {
   await openConnections(page);
   await expect(card(page).getByTestId("sample-badge")).toHaveCount(0);
   for (const name of [SHOWROOM, REPAIR]) {
     await expect(row(page, name).getByTestId("gcal-status")).toHaveText("Not connected");
     await expect(row(page, name).getByRole("button", { name: `Connect ${name}` })).toBeEnabled();
   }
-  await expect(page.getByRole("heading", { level: 2, name: "Other accounts" })).toBeVisible();
-  await expect(page.getByRole("main").getByText("Instagram", { exact: true })).toBeVisible();
-  // The sample Google Calendar row is gone: the live card replaces it.
+  await expect(page.getByRole("heading", { level: 2, name: "Other accounts" })).toHaveCount(0);
+  await expect(page.getByRole("main").getByText("Instagram", { exact: true })).toHaveCount(0);
+  // One Google Calendar card: the live one.
   await expect(page.getByRole("main").getByRole("heading", { name: "Google Calendar" })).toHaveCount(1);
 });
 
