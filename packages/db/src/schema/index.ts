@@ -3,9 +3,8 @@ import {
   check,
   bigint,
   foreignKey,
+  index,
   jsonb,
-  pgPolicy,
-  pgRole,
   pgTable,
   primaryKey,
   text,
@@ -14,36 +13,28 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import type { ApprovalReference, JsonValue, Target } from "@zs/contracts";
+import { tenantPolicy } from "./tenant-policy.js";
 
-const authenticated = pgRole("authenticated").existing();
-const dispatcher = pgRole("zs_dispatcher").existing();
-const tenantPolicy = (tenantId: AnyPgColumn, history = false) =>
-  pgPolicy("tenant_scope", {
-    for: "all",
-    to: history ? [authenticated, dispatcher] : authenticated,
-    using: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-    withCheck: sql`${tenantId} = nullif(current_setting('app.tenant_id', true), '')::uuid`,
-  });
-// SQL migrations also FORCE RLS and specify grants; Drizzle exposes ENABLE RLS only.
 export const tenants = pgTable(
   "tenants",
   {
     tenantId: uuid("tenant_id").primaryKey(),
     name: text("name").notNull(),
+    /** Set while a tenant is provisioned with an owner invite; see 20261107100000_industry_templates.sql. */
+    provisioningOwnerEmail: text("provisioning_owner_email"),
   },
   (table) => [
     check("tenants_name_nonempty", sql`length(${table.name}) > 0`),
-    tenantPolicy(table.tenantId),
+    check("tenants_provisioning_owner_email_shape",
+      sql`${table.provisioningOwnerEmail} IS NULL OR (length(${table.provisioningOwnerEmail}) BETWEEN 3 AND 320 AND ${table.provisioningOwnerEmail} = lower(${table.provisioningOwnerEmail}))`),
+    tenantPolicy(table.tenantId, true),
   ],
 ).enableRLS();
 export const actions = pgTable(
   "actions",
   {
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.tenantId),
+    tenantId: uuid("tenant_id").notNull(),
     id: uuid("id").notNull(),
     actorId: uuid("actor_id").notNull(),
     actionType: text("action_type").notNull(),
@@ -56,6 +47,7 @@ export const actions = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
+    foreignKey({ name: "actions_tenant_id_fkey", columns: [table.tenantId], foreignColumns: [tenants.tenantId] }),
     unique("actions_tenant_key").on(table.tenantId, table.idempotencyKey),
     uniqueIndex("actions_tenant_approval")
       .on(table.tenantId, sql`((${table.approvalReference}->>'id')::uuid)`)
@@ -68,25 +60,28 @@ export const actions = pgTable(
 export const outbox = pgTable(
   "outbox",
   {
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.tenantId),
+    tenantId: uuid("tenant_id").notNull(),
     id: uuid("id").notNull(),
     actionId: uuid("action_id").notNull(),
-    seq: bigint("seq", { mode: "bigint" }).generatedAlwaysAsIdentity().notNull(),
-    processedAt: timestamp("processed_at", { withTimezone: true }),
     eventType: text("event_type").notNull(),
     payload: jsonb("payload").$type<JsonValue>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    // seq and processed_at come last: that is their column order in the database.
+    seq: bigint("seq", { mode: "bigint" }).generatedAlwaysAsIdentity().notNull(),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
     unique("outbox_one_per_action").on(table.tenantId, table.actionId),
+    foreignKey({ name: "outbox_tenant_id_fkey", columns: [table.tenantId], foreignColumns: [tenants.tenantId] }),
     foreignKey({
+      name: "outbox_tenant_id_action_id_fkey",
       columns: [table.tenantId, table.actionId],
       foreignColumns: [actions.tenantId, actions.id],
     }),
     check("outbox_type_nonempty", sql`length(${table.eventType}) > 0`),
+    index("outbox_unprocessed").on(table.eventType, table.seq).where(sql`${table.processedAt} IS NULL`),
+    index("outbox_tenant_type_created").on(table.tenantId, table.eventType, table.createdAt, table.id),
     tenantPolicy(table.tenantId, true),
   ],
 ).enableRLS();
