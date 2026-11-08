@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { apiErrorBody, type ShopifyNativeWorker } from "@zs/core";
 import { readCapped } from "./internal.js";
 
-const MAX_WEBHOOK_BYTES = 64 * 1024;
+const MAX_WEBHOOK_BYTES = 256 * 1024;
 const READ_BUDGET_MS = 5_000;
 
 export function shopifyWebhookRoutes(config: {

@@ -7,7 +7,7 @@ limits and usage rules. Reuses the connect shapes of `google-calendar.md` (G-1, 
 
 Revision 4 (2026-11-07, Track K of the four-verticals goal): the public Shopify app needs an
 embedded page, session tokens, expiring offline tokens, install-to-tenant binding with no
-operator and the compliance webhooks. Added: a native Shopify tier and C-18 to C-27 (at the end
+operator and the compliance webhooks. Added: a native Shopify tier and C-18 to C-28 (at the end
 of "Evidence and decisions"). Changed: C-4 (no typed shop domain once the native tier is on),
 C-7 (`tier` also `native`), C-13 (a native disconnect deletes the sealed tokens and asks Shopify
 to uninstall with the stored token (`appUninstall`, as today), then marks the row `disconnected`; the uninstall webhook that follows is idempotent), C-14 (the
@@ -915,6 +915,17 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   cases above; billing provider is `shopify` after each bind; webhook HMAC good and bad
   (401), repeats, all topics, uninstall wipes tokens, redact removes the shop rows, a live
   shop is not redacted; CSP value per shop and `'none'` for a bad shop; the page sets no cookie.
+
+- **C-28 IP allowlist for the Admin API (added 2026-11-07).** Shopify requires an IP allowlist
+  on every public app: bulk operations are blocked from 2026-11-12, and apps without one are
+  delisted and blocked from new installs from 2026-11-20
+  (https://shopify.dev/docs/apps/build/dev-dashboard/ip-allowlist). The workers project is the
+  only caller of the Admin API with app tokens, and Vercel functions have no fixed address, so
+  the allowlist names the hosting provider's ASN with the countries the functions run in. It is
+  set per app in the Dev Dashboard (no CLI or toml field), tested against recent traffic, then
+  enforced. A 403 from the shop probe still counts as "live" (a missing scope also gives 403),
+  so a misconfigured allowlist never uninstalls anything; the E2E run proves a call from
+  outside the allowlist fails with 403.
 
 
 ## Acceptance

@@ -24,6 +24,12 @@ describe("Shopify client (C-22)", () => {
     expect(out).toEqual({ kind: "failed", reason: "non_expiring" });
     void real;
   });
+  it("treats an invalid_client answer as a fault on our side, not a dead grant", async () => {
+    fake.failNextToken = { status: 401, body: { error: "invalid_client" } };
+    expect(await client().exchangeOffline(SHOP, mintIdToken(NOW))).toEqual({ kind: "failed", reason: "unauthorized" });
+    fake.failNextToken = { status: 400, body: { error: "invalid_request" } };
+    expect(await client().exchangeOffline(SHOP, mintIdToken(NOW))).toEqual({ kind: "failed", reason: "invalid_grant" });
+  });
   it("reads the online user: owner flag and verified email", async () => {
     const out = await client().exchangeOnline(SHOP, mintIdToken(NOW));
     expect(out).toEqual({ kind: "ok", user: { id: "77", email: "owner@example.com", emailVerified: true, accountOwner: true } });

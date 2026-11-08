@@ -79,6 +79,9 @@ export function createShopifyClient(config: ShopifyClientConfig) {
     }
     return Buffer.concat(chunks).toString("utf8");
   }
+  /** 400/401 from the token endpoint means the grant is dead, unless Shopify names our own client credentials as the fault. */
+  const grantDead = (answer: { status: number; json: unknown }): boolean =>
+    (answer.status === 400 || answer.status === 401) && record(answer.json)?.["error"] !== "invalid_client";
   const failure = (status: number): ShopifyFailure => status === 401 ? "unauthorized" : status === 403 ? "forbidden" : status === 429 ? "rate_limited" : "unavailable";
 
   async function token(shop: string, body: Record<string, unknown>, signal?: AbortSignal) {
@@ -99,7 +102,7 @@ export function createShopifyClient(config: ShopifyClientConfig) {
     async exchangeOffline(shop: string, idToken: string, signal?: AbortSignal): Promise<ShopifyResult<{ tokens: ShopifyTokens }>> {
       const answer = await token(shop, { grant_type: TOKEN_EXCHANGE, subject_token: idToken, subject_token_type: ID_TOKEN, requested_token_type: OFFLINE, expiring: 1 }, signal);
       if (answer === "network") return { kind: "failed", reason: "unavailable" };
-      if (answer.status === 400 || answer.status === 401) return { kind: "failed", reason: "invalid_grant" };
+      if (grantDead(answer)) return { kind: "failed", reason: "invalid_grant" };
       if (answer.status !== 200) return { kind: "failed", reason: failure(answer.status) };
       const tokens = offlineTokens(answer.json);
       return tokens ? { kind: "ok", tokens } : { kind: "failed", reason: "non_expiring" };
@@ -108,7 +111,7 @@ export function createShopifyClient(config: ShopifyClientConfig) {
     async exchangeOnline(shop: string, idToken: string, signal?: AbortSignal): Promise<ShopifyResult<{ user: ShopifyUser }>> {
       const answer = await token(shop, { grant_type: TOKEN_EXCHANGE, subject_token: idToken, subject_token_type: ID_TOKEN, requested_token_type: ONLINE }, signal);
       if (answer === "network") return { kind: "failed", reason: "unavailable" };
-      if (answer.status === 400 || answer.status === 401) return { kind: "failed", reason: "invalid_grant" };
+      if (grantDead(answer)) return { kind: "failed", reason: "invalid_grant" };
       if (answer.status !== 200) return { kind: "failed", reason: failure(answer.status) };
       const user = record(record(answer.json)?.["associated_user"]);
       const id = user?.["id"];
@@ -120,7 +123,7 @@ export function createShopifyClient(config: ShopifyClientConfig) {
     async refresh(shop: string, refreshToken: string, signal?: AbortSignal): Promise<ShopifyResult<{ tokens: ShopifyTokens }>> {
       const answer = await token(shop, { grant_type: "refresh_token", refresh_token: refreshToken }, signal);
       if (answer === "network") return { kind: "failed", reason: "unavailable" };
-      if (answer.status === 400 || answer.status === 401) return { kind: "failed", reason: "invalid_grant" };
+      if (grantDead(answer)) return { kind: "failed", reason: "invalid_grant" };
       if (answer.status !== 200) return { kind: "failed", reason: failure(answer.status) };
       const tokens = offlineTokens(answer.json);
       return tokens ? { kind: "ok", tokens } : { kind: "failed", reason: "unavailable" };

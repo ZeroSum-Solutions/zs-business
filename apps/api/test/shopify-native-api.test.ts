@@ -421,7 +421,7 @@ describe("POST /webhooks/shopify (C-24)", () => {
   });
 
   it("refuses a body over 64 KiB with 413 and is off (404) without the native tier", async () => {
-    const big = "x".repeat(64 * 1024 + 1);
+    const big = "x".repeat(256 * 1024 + 1);
     expect((await post(big, { "content-length": String(big.length), ...(await signed(big, "customers/redact")) })).status).toBe(413);
     const off = shopifyWebhookRoutes({ native: null });
     expect((await off.request(`https://${HOST}/webhooks/shopify`, { method: "POST", body: "{}" })).status).toBe(404);

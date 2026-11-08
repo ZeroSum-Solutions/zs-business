@@ -453,6 +453,11 @@ describe("webhooks (C-24)", () => {
     expect((await send("app/uninstalled", uninstallBody, { id })).status).toBe(200);
     expect(fake.calls.length).toBe(before);
   });
+  it("answers 401 to a shop/redact body that names a customer (the topic header is not signed)", async () => {
+    const id = "wh-relabelled";
+    expect((await send("shop/redact", { ...redactBody, customer: { id: 1 }, orders_to_redact: [1] }, { id })).status).toBe(401);
+    expect((await install()).status).toBe("live");
+  });
   it("answers 401 to a compliance payload without a numeric shop id or with another shop's id", async () => {
     expect((await send("shop/redact", { shop_domain: SHOP })).status).toBe(401);
     expect((await send("shop/redact", { shop_id: "abc", shop_domain: SHOP })).status).toBe(401);

@@ -31,7 +31,7 @@ const CLAIM_LIFETIME_MS = 15 * MINUTE;
 const CLAIM_MAX_WRONG = 5;
 const CLAIM_LOCK_MS = HOUR;
 const EVENT_KEEP_MS = 30 * DAY;
-const MAX_WEBHOOK_BYTES = 64 * 1024;
+const MAX_WEBHOOK_BYTES = 256 * 1024;
 /** Shopify wants a webhook answered within 5 s (verify-deliveries); the probe gets less, and a slow one answers 500 so Shopify retries. */
 const WEBHOOK_PROBE_MS = 3500;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -440,12 +440,18 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       const done = await service(async (tx) => {
         const memberId = await ownerMember(tx, made.tenantId, owner.email);
         if (memberId === null) throw new Error("The new hub has no owner member");
-        // The store's own live row means a retry already finished the bind.
-        if (await storeInUse(tx, row.shop_id, domain)) return false;
+        if (await storeInUse(tx, row.shop_id, domain)) {
+          // This hub's own live row means a retry already finished the bind; anyone else's row means the store is taken.
+          const mine = await tx.query(
+            `SELECT 1 FROM connections WHERE tenant_id=$1 AND tier='native' AND toolkit='shopify' AND external_account_id=$2
+               AND status IN ('active','reauthorize','disconnecting') LIMIT 1`, [made.tenantId, row.shop_id]);
+          return (mine.rowCount ?? 0) > 0 ? "retry" : "taken";
+        }
         await bind(tx, { tenantId: made.tenantId, memberId, row });
-        return true;
+        return "bound";
       });
-      if (done) report({ kind: "bound", tenantId: made.tenantId, shop: domain, via: "create_hub" });
+      if (done === "taken") return { outcome: "store_in_use" };
+      if (done === "bound") report({ kind: "bound", tenantId: made.tenantId, shop: domain, via: "create_hub" });
     } catch (error) {
       if (isDup(error)) return { outcome: "store_in_use" };
       if (error instanceof Conflict) { report({ kind: "hub_failed", shop: domain }); return { outcome: "unavailable" }; }
@@ -668,6 +674,8 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     const bodyShop = String(body[topic === "app/uninstalled" ? "myshopify_domain" : "shop_domain"] ?? "").toLowerCase();
     if (!TOPICS.has(topic)) return done(200, topic, shopDomain);
     if (bodyShop !== shopDomain) return done(401, topic, shopDomain);
+    // The topic header is not signed. A signed customers/* body (it names a customer) must not drive a shop-wide erase.
+    if (topic === "shop/redact" && ("customer" in body || "orders_to_redact" in body || "orders_requested" in body)) return done(401, topic, shopDomain);
     const record_ = (tx: Transaction) => tx.query("INSERT INTO shopify_webhook_events (webhook_id, topic, shop_domain, received_at) VALUES ($1,$2,$3,$4) ON CONFLICT (webhook_id) DO NOTHING",
       [webhookId, topic, shopDomain, now()]).then((r) => r.rowCount === 1);
 
