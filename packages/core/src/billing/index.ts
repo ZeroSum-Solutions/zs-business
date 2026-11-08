@@ -55,7 +55,7 @@ export {
   startPlanCheckout,
 } from "./plans.js";
 export { lockTenantPlan, planGate, planLimits, READ_ONLY_ALLOWED_ACTIONS } from "./plan-gate.js";
-export { createPlanEvents, type PlanOutcome } from "./plan-events.js";
+export { createPlanEvents, PLAN_PRICE_ALERT_JOB, type PlanOutcome } from "./plan-events.js";
 export { derivePlanRecord } from "./plan-events.js";
 export {
   createShopifySubscriptionReader,

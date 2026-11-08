@@ -124,6 +124,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   approval_not_pending: "Someone already decided this. The list now shows what is left.",
   approval_expired: "This expired before anyone decided it. Look up the company again for fresh details.",
   template_already_applied: "This business already has a setup. It cannot be changed here.",
+  plan_price_hold: "Your plan is being checked with our billing provider. Try again later or contact support.",
   plan_read_only: "Your business is read-only until billing is fixed. Open Account, then Plan.",
   plan_limit: "Your plan's limit is reached. Choose a bigger plan in Account, then Plan.",
   no_customer: "There is no billing account yet. Choose a plan first.",
