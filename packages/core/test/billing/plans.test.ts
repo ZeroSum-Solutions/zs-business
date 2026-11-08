@@ -392,8 +392,32 @@ describe("applying plan events (PL-10)", () => {
       fake.subscriptions.set(sub.id, ended);
       await b.deliver(subEvent("customer.subscription.deleted", ended));
       expect((await worker().runOnce()).outcomes).toEqual({ mismatch: 1 });
+      expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.resolved_at).toEqual(b.h.clock.now());
+      expect((await (await planSession(tenantId)).getBillingPlan()).readOnly).toBe(true);
       b.h.clock.advance(PLAN_CHECKOUT_LIFETIME_MS); // the checkout that started it is no longer open
       expect(await (await planSession(tenantId)).startPlanCheckout({ plan: "pro", interval: "month" }, `plan-${randomUUID()}`)).toHaveProperty("checkoutUrl");
+    });
+
+    it("two held tenants reconciling at once leave the alert closed", async () => {
+      const a = await holdTenant();
+      await worker().runOnce();
+      // A second tenant held too; holdTenant would end the first, so build it by hand.
+      const tenantId = await b.tenant();
+      const started = await (await planSession(tenantId)).startPlanCheckout({ plan: "studio", interval: "month" }, `plan-${randomUUID()}`);
+      const other = subscription({ id: stripeId("sub"), customer: stripeId("cus"), tenantId, checkoutId: started.checkout.id, status: "active",
+        at: b.h.clock.now(), lookupKey: "hub_unknown_month" });
+      fake.subscriptions.set(other.id, other);
+      await b.deliver(subEvent("customer.subscription.created", other));
+      await worker().runOnce();
+      expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.resolved_at).toBeNull();
+      b.h.clock.advance(1_000);
+      for (const held of [{ ...a, plan: "pro" as const }, { sub: other, tenantId, plan: "solo" as const }]) {
+        const fixed = subscription({ id: held.sub.id, customer: held.sub.customer, tenantId: held.tenantId, status: "active", at: b.h.clock.now(), plan: held.plan });
+        fake.subscriptions.set(held.sub.id, fixed);
+        await b.deliver(subEvent("customer.subscription.updated", fixed));
+      }
+      await Promise.all([worker().runOnce(), worker().runOnce()]);
+      expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.resolved_at).not.toBeNull();
     });
 
     it("a known key never opens an alert or a hold", async () => {

@@ -90,8 +90,8 @@ subscription whose plan was never recognised (first sight with an unknown key) i
 no plan and status as Stripe answered, the tenant gets the limits of the lowest paid plan (`solo`,
 monthly; never unlimited), the event ends `plan_held`, and the checkout action refuses a new
 Checkout with 409 `plan_price_hold`. The worker opens the `cron_alerts` row `billing-plan-price`
-in the same transaction (PL-10 text, no secret); the billing cron mails it to `OPS_ALERT_EMAIL`
-once. The hold is reconciled, and the alert closes when no tenant is held, as soon as a later
+in the same transaction (PL-10 text, no secret); every billing cron run mails it to `OPS_ALERT_EMAIL`
+until a send is accepted. The hold is reconciled, and the alert closes when no tenant is held, as soon as a later
 answer for that subscription names a known lookup key (Stripe is read again on every event for it)
 or the subscription ends. An ended subscription with an unknown key still ends `mismatch` with no
 plan. There is no operator action: fix the price's lookup key in Stripe, then any event for the

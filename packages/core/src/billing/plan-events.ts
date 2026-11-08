@@ -110,6 +110,9 @@ async function openPlanPriceAlert(tx: Transaction, tenantId: string, subscriptio
 }
 /** PL-2: closes the alert once no live Stripe subscription is held any more. */
 async function closePlanPriceAlert(tx: Transaction, at: Date): Promise<void> {
+  // The holder check is platform-wide, so tenant locks do not serialise it: two tenants reconciling at once
+  // would each see the other's uncommitted hold. This lock is taken before the check (a fresh statement).
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [PLAN_PRICE_ALERT_JOB]);
   await tx.query(
     `UPDATE cron_alerts SET resolved_at=$2 WHERE job=$1 AND resolved_at IS NULL AND NOT EXISTS (
        SELECT 1 FROM plan_subscriptions WHERE provider='stripe' AND plan IS NULL
@@ -228,12 +231,13 @@ export function createPlanEvents(deps: PlanEventDeps) {
     if (plan.founding && ENDED.has(status) && !(previous && ENDED.has(previous.status)))
       await tx.query("UPDATE tenant_plans SET founding_invite=false, updated_at=$2 WHERE tenant_id=$1", [tenantId, at]);
     const duplicate = await derivePlanRecord(tx, tenantId, at, graceMs);
-    if (plan.plan === null) {
-      if (ENDED.has(status)) return "mismatch";
+    if (plan.plan === null && !ENDED.has(status)) {
       await openPlanPriceAlert(tx, tenantId, subscriptionId, at);
       return "plan_held";
     }
+    // Reconciled, or the held subscription ended: close the alert when no tenant is held any more.
     await closePlanPriceAlert(tx, at);
+    if (plan.plan === null) return "mismatch";
     return duplicate ? "plan_duplicate" : "plan_synced";
   }
 

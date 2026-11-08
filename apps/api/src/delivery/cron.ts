@@ -46,8 +46,8 @@ export function cronRoutes(config: {
       await config.alerts?.failed(job, error, run);
       return c.json(apiErrorBody("Unavailable", `${name} run failed`), 503);
     }
-    // PL-2: core wrote an unknown-price alert row; this run mails it once.
-    if (job === "billing" && n((result as { outcomes?: Record<string, unknown> }).outcomes?.plan_held) > 0) await config.alerts?.notifyOpen(PLAN_PRICE_ALERT_JOB, run);
+    // PL-2: core writes the unknown-price alert row; every billing run mails it until a send is accepted.
+    if (job === "billing") await config.alerts?.notifyOpen(PLAN_PRICE_ALERT_JOB, run);
     // A run whose work items all failed is a failure too, though it answers 200 (cron-outcome.ts).
     const failure = runFailure(job, result);
     if (failure === null) await config.alerts?.succeeded(job, run);
@@ -58,4 +58,3 @@ export function cronRoutes(config: {
   return app;
 }
 
-const n = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
