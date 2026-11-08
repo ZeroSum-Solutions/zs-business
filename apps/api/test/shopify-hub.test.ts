@@ -47,10 +47,10 @@ describe("createHub failure injection (C-21, C-27)", () => {
   it("a clean run creates one user, one tenant and one owner; a repeat changes nothing and creates no second user", async () => {
     const key = "shopify-1000";
     const { gotrue, hub, calls } = harness(null);
-    expect(await hub.createHub(input(key))).toEqual({ kind: "ok", tenantId: tenantIdForKey(key) });
+    expect(await hub.createHub(input(key))).toMatchObject({ kind: "ok", tenantId: tenantIdForKey(key), name: "Halden Rowe" });
     expect(calls.filter((c) => c === "createUser")).toHaveLength(1);
     const before = calls.length;
-    expect(await hub.createHub(input(key))).toEqual({ kind: "ok", tenantId: tenantIdForKey(key) });
+    expect(await hub.createHub(input(key))).toMatchObject({ kind: "ok", tenantId: tenantIdForKey(key), name: "Halden Rowe" });
     expect(calls.slice(before)).not.toContain("createUser");
     expect([...gotrue.users.values()]).toHaveLength(1);
     expect(await stateOf(key)).toEqual({ tenants: 1, members: [{ email: `owner@${key}.example.test`, role: "owner" }] });
@@ -67,7 +67,7 @@ describe("createHub failure injection (C-21, C-27)", () => {
       const first = await run.hub.createHub(input(key));
       expect(first, `call ${failAt} (${run.calls[failAt - 1]})`).toEqual({ kind: "failed" });
       expect(run.steps).toHaveLength(1);
-      expect(await run.hub.createHub(input(key)), `retry after call ${failAt}`).toEqual({ kind: "ok", tenantId: tenantIdForKey(key) });
+      expect(await run.hub.createHub(input(key)), `retry after call ${failAt}`).toMatchObject({ kind: "ok", tenantId: tenantIdForKey(key), name: "Halden Rowe" });
       const users = [...run.gotrue.users.values()];
       expect(users, `users after call ${failAt}`).toHaveLength(1);
       // The failed call itself is attempted again; any other createUser must not repeat once the user exists.

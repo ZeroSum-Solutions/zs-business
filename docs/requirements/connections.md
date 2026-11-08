@@ -173,8 +173,6 @@ role for workers (all workers share one pattern today; Known limits).
   `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`).
   - Refused with 409 `already_connected` while the tenant has a row for that toolkit in
     `active`, `reauthorize` or `disconnecting`. Reconnect is disconnect, then connect (C-13).
-  - The connect limit is charged before the worker call and given back (`rate_limit_refund`, inside the same
-    window) when the worker refuses the link or the call fails; a link that was made keeps its charge.
   - Limits before the worker call: `conn-connect:<tenantId>` 10 per hour, in the shared
     store, all or nothing.
   - The API makes a random attempt ID and a random connection ID and asks the worker to

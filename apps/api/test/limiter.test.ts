@@ -58,41 +58,6 @@ describe.each([
     now = Date.parse("2026-10-19T08:00:10.000Z");
     expect((await limiter.take([{ key: k("t"), rule: large }])).ok).toBe(true);
   });
-
-  // connections.md C-4: a charge for work that did not happen is given back, and only inside its own window.
-  it("refunds one unit in a live window, never below zero, never into a later window", async () => {
-    const run = randomUUID();
-    const k = (name: string) => `${run}:${name}`;
-    const T0 = Date.parse("2026-10-19T08:00:00.000Z");
-    let now = T0;
-    const limiter = create({ now: () => new Date(now) });
-    const two = { limit: 2, windowMs: 1000 };
-    const charges = [{ key: k("a"), rule: two }, { key: k("b"), rule: two }];
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(false);
-    // One refund frees one unit in both buckets.
-    await limiter.refund!(charges, { chargedAt: new Date(now) });
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(false);
-    // Refunding more than was charged stops at zero: the window is then empty, not negative.
-    for (let i = 0; i < 5; i++) await limiter.refund!(charges, { chargedAt: new Date(now) });
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(false);
-    // A charge from a window that has ended does not reduce the next window's count.
-    now = T0 + 1500;
-    expect((await limiter.take(charges)).ok).toBe(true);
-    await limiter.refund!(charges, { chargedAt: new Date(T0 + 500) });
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(false);
-    // An expired window is left alone, and an unknown bucket is not created.
-    now = T0 + 5000;
-    await limiter.refund!([{ key: k("never"), rule: two }, ...charges], { chargedAt: new Date(T0 + 1600) });
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(true);
-    expect((await limiter.take(charges)).ok).toBe(false);
-  });
 });
 
 describe("shared Postgres limiter", () => {
@@ -204,14 +169,6 @@ describe("shared Postgres limiter", () => {
         await tx.query("SELECT set_config($1, 'x', true)", [setting]);
         return tx.query(call, params);
       }), setting).rejects.toMatchObject({ code: "42501" });
-    // The refund function has the same guard.
-    const refund = `SELECT public.rate_limit_refund($1, $1, $2::jsonb)`;
-    for (const setting of ["request.jwt.claims", "request.jwt.claim.sub"])
-      await expect(database.db.withoutTenant(async (tx) => {
-        await tx.query("SELECT set_config($1, 'x', true)", [setting]);
-        return tx.query(refund, [params[0], JSON.stringify(["b".repeat(64)])]);
-      }), `refund ${setting}`).rejects.toMatchObject({ code: "42501" });
-    await expect(database.db.withoutTenant((tx) => tx.query(refund, [params[0], JSON.stringify(["not a key"])])), "malformed").rejects.toMatchObject({ code: "22023" });
     // Nothing was charged or swept by the refused calls.
     expect((await createPostgresRateLimiter(database.db, at(0)).take([{ key: `refused:${randomUUID()}`, rule: rule(1) }])).ok).toBe(true);
   });

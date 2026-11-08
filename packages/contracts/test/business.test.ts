@@ -120,6 +120,13 @@ describe("the update request (BP-2, BP-6)", () => {
     expect(issuePaths(request({ displayName: "x".repeat(121) }))).toEqual(["changes.displayName"]);
   });
 
+  it("counts code points, as the database CHECK does, at the 120 and 200 boundaries", () => {
+    expect(issuePaths(request({ displayName: "😀".repeat(120) }))).toEqual([]);
+    expect(issuePaths(request({ displayName: "😀".repeat(121) }))).toEqual(["changes.displayName"]);
+    expect(issuePaths(request({ legalName: "😀".repeat(200) }))).toEqual([]);
+    expect(issuePaths(request({ legalName: "😀".repeat(201) }))).toEqual(["changes.legalName"]);
+  });
+
   it("checks the legal name, phone and Postgres text", () => {
     expect(issuePaths(request({ legalName: "y".repeat(201) }))).toEqual(["changes.legalName"]);
     expect(issuePaths(request({ legalName: "a\u0000b" }))).toEqual(["changes.legalName"]);

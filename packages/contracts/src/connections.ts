@@ -64,11 +64,14 @@ export type ConfirmConnectionRequest = z.infer<typeof confirmConnectionRequestSc
 
 /** C-14: NFC; control, format and bidirectional characters removed; whitespace collapsed; 1..120 (longer is cut). */
 export function normalizeAccountLabel(raw: string): string | null {
-  const label = raw.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD").normalize("NFC")
+  // Remove first, compose last: a format character between a base and its mark would otherwise leave the result
+  // decomposed after the strip, and a second pass would compose it (not idempotent).
+  const label = raw.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
     .replace(/[\p{Cc}\u2028\u2029]/gu, " ")
     .replace(/[\p{Cf}\p{Cs}\p{Co}\p{Cn}]/gu, "")
+    .normalize("NFC")
     .replace(/\s+/gu, " ").trim();
-  const cut = [...label].slice(0, 120).join("").trim();
+  const cut = [...label].slice(0, 120).join("").trim().normalize("NFC");
   return cut.length > 0 ? cut : null;
 }
 

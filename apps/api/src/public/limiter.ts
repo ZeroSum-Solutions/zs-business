@@ -30,11 +30,6 @@ export interface TakeOptions {
 }
 export interface RateLimiter {
   take(charges: readonly Charge[], options?: TakeOptions): Promise<TakeResult>;
-  /**
-   * Gives back one unit in each bucket a `take` at `chargedAt` accepted, for work that did not happen
-   * (connections.md C-4). A bucket whose window ended or was reopened since is left alone.
-   */
-  refund?(charges: readonly Charge[], options: { readonly chargedAt: Date }): Promise<void>;
 }
 
 /** Whole seconds a refused caller waits, at least one. */
@@ -65,13 +60,6 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
         else buckets.set(key, { windowStart: now, windowMs: rule.windowMs, count: 1 });
       }
       return { ok: true };
-    },
-    async refund(charges, { chargedAt }) {
-      const now = clock.now().getTime();
-      for (const { key } of charges) {
-        const bucket = buckets.get(key);
-        if (live(bucket, now) && bucket!.count > 0 && bucket!.windowStart <= chargedAt.getTime()) bucket!.count -= 1;
-      }
     },
   };
 }
