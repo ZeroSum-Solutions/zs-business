@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
+import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { assertBillingCronFits, parseBillingEnv } from "./billing/config.js";
 import { startBillingRunner } from "./billing/start.js";
 import { cronRoutes } from "./delivery/cron.js";
@@ -11,7 +12,8 @@ import { cronRoutes } from "./delivery/cron.js";
 const env = parseBillingEnv(process.env);
 assertBillingCronFits(env.runner);
 const clock = { now: () => new Date() };
-const runner = env.runner === null ? null : startBillingRunner(env.runner, { clock, generateId: randomUUID }).runner;
+const started = env.runner === null ? null : startBillingRunner(env.runner, { clock, generateId: randomUUID });
+const runner = started?.runner ?? null;
 
 export default getRequestListener(cronRoutes({
   path: "/cron/billing",
@@ -19,5 +21,6 @@ export default getRequestListener(cronRoutes({
   name: "Billing",
   cronSecret: env.cronSecret,
   runner,
+  ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.pool, clock, process.env) }),
   onError: (error) => console.error("Billing run failed", error),
 }).fetch);

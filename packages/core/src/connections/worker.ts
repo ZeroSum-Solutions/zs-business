@@ -117,6 +117,10 @@ export interface ConnectionsPassResult {
   readonly swept: number;
   readonly checked: number;
   readonly composioCalls: number;
+  /** Work items this pass could not finish (a provider outage, a failed removal); they are retried next pass. */
+  readonly failed: number;
+  /** Work items this pass finished (disconnects, sweeps, health checks that read the provider). */
+  readonly succeeded: number;
   readonly stopped: "time" | "calls" | "budget" | null;
 }
 
@@ -221,7 +225,17 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   const config = connectionsWorkerConfigSchema.parse(deps.config);
   const { service, composio } = deps;
   const now = () => deps.clock.now();
-  const report = (event: ConnectionsWorkerReport) => { try { deps.report?.(event); } catch { /* a reporter never breaks the worker */ } };
+  // Work items that failed and were retried later (a provider outage, a failed removal). A configuration gap
+  // (`not_configured`) is a standing condition, not a failed run, so it is not counted. `pass` reads the deltas.
+  let failedItems = 0;
+  let failedChecks = 0;
+  const report = (event: ConnectionsWorkerReport) => {
+    if ((event.kind === "sweep_failed" || event.kind === "disconnect_retry" || event.kind === "health_failed") && event.code !== "not_configured") {
+      failedItems += 1;
+      if (event.kind === "health_failed") failedChecks += 1;
+    }
+    try { deps.report?.(event); } catch { /* a reporter never breaks the worker */ }
+  };
   const userIdOf = (tenantId: string) => composioUserId(config.env, tenantId);
 
   /** C-12: one unit of `composio-org:<env>`; the number of milliseconds to wait, or 0. */
@@ -819,6 +833,8 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
 
   async function pass(callerSignal?: AbortSignal): Promise<ConnectionsPassResult> {
     const start = now().getTime();
+    const failedBefore = failedItems;
+    const failedChecksBefore = failedChecks;
     const ctx: PassContext = { deadline: start + config.passMs, calls: 0, maxCalls: config.passMaxCalls };
     // C-9: the pass allows `passMs` in all. The time check runs before each call, so a call's own 6 s timeout could
     // overrun it; every provider call of this pass also carries the pass deadline as an abort.
@@ -855,7 +871,9 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     }
     // 4. nonces past their expiry: one statement and no Composio call, so it runs even after a limit.
     await service((tx) => tx.query("DELETE FROM connector_request_nonces WHERE expires_at < $1", [now()]));
-    return { ...result, composioCalls: ctx.calls, stopped };
+    const failed = failedItems - failedBefore;
+    const succeeded = result.disconnected + result.swept + result.checked - (failedChecks - failedChecksBefore);
+    return { ...result, composioCalls: ctx.calls, failed, succeeded: Math.max(0, succeeded), stopped };
   }
 
   /**

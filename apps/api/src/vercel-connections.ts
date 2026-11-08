@@ -12,7 +12,9 @@ import { connectionsInternalRoutes } from "./connections/internal.js";
 import { createConnectionsRunner } from "./connections/runner.js";
 import { startConnectionsWorker } from "./connections/start.js";
 import { shopifyWebhookRoutes } from "./connections/shopify-webhook.js";
+import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { cronRoutes } from "./delivery/cron.js";
+import { responseHeaders } from "./response-headers.js";
 
 const env = parseConnectionsEnv(process.env);
 const clock = { now: () => new Date() };
@@ -21,12 +23,14 @@ const worker = started?.worker ?? null;
 const native = started?.native ?? null;
 
 const app = new Hono();
+app.use("*", responseHeaders);
 app.route("/", cronRoutes({
   path: "/cron/connections",
   killSwitch: "the CONNECTIONS_ variables",
   name: "Connections",
   cronSecret: env.cronSecret,
   runner: worker === null ? null : createConnectionsRunner(worker),
+  ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.pool, clock, process.env) }),
   onError: (error) => console.error("Connections run failed", error),
 }));
 app.route("/", connectionsInternalRoutes({

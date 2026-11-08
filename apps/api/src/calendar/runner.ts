@@ -63,8 +63,9 @@ export function createCalendarRunner(input: {
         const pass = numericCounts(await worker.runOnce({ deadline }));
         passes += 1;
         for (const [name, count] of pass) counts[name] = (counts[name] ?? 0) + count;
-        // A pass that moved nothing means nothing more is due now.
-        if (pass.every(([, count]) => count === 0)) break;
+        // A pass that moved nothing means nothing more is due now. A swallowed failure is not movement:
+        // counting it would repeat a failing pass until the budget is spent.
+        if (pass.every(([name, count]) => count === 0 || name === "stepsFailed")) break;
       }
       return { passes, counts, budgetSpent };
     },

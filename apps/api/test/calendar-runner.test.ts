@@ -120,6 +120,13 @@ describe("createCalendarRunner", () => {
     expect(await createCalendarRunner({ worker, clock, budgetMs: 20_000 }).run()).toEqual({ passes: 2, counts: { synced: 1 }, budgetSpent: false });
   });
 
+  it("a pass whose only count is a swallowed failure ends the run: failures are not movement", async () => {
+    const { worker, calls } = stubWorker([{ counts: { synced: 0, stepsFailed: 2 } }]);
+    const result = await createCalendarRunner({ worker, clock, budgetMs: 20_000 }).run();
+    expect(calls()).toBe(1);
+    expect(result).toMatchObject({ passes: 1, counts: { stepsFailed: 2 } });
+  });
+
   it("stops at the budget with budgetSpent true, though passes still move work", async () => {
     const { worker, calls } = stubWorker([
       { counts: { synced: 1 }, takesMs: 3_000 },

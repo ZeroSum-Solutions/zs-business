@@ -6,6 +6,7 @@
 // A body, a tag or a customer value never reaches a log.
 import { Hono } from "hono";
 import { apiErrorBody, type ShopifyNativeWorker } from "@zs/core";
+import { responseHeaders } from "../response-headers.js";
 import { readCapped } from "./internal.js";
 
 const MAX_WEBHOOK_BYTES = 256 * 1024;
@@ -17,6 +18,7 @@ export function shopifyWebhookRoutes(config: {
   readonly readTimeoutMs?: number;
 }) {
   const app = new Hono();
+  app.use("*", responseHeaders);
   app.post("/webhooks/shopify", async (c) => {
     const native = config.native;
     if (!native) return c.json(apiErrorBody("NotFound", "Route not found"), 404);

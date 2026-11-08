@@ -18,6 +18,7 @@ import {
   type ConnectorEnv,
   type ShopifyWorkerOps,
 } from "@zs/core";
+import { responseHeaders } from "../response-headers.js";
 
 /** Request bodies are small (an order query); anything larger is not ours. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -81,6 +82,7 @@ export function connectionsInternalRoutes(config: {
   readonly readTimeoutMs?: number;
 }) {
   const app = new Hono();
+  app.use("*", responseHeaders);
   const notFound = (c: { json: (body: unknown, status: 404) => Response }) => c.json(apiErrorBody("NotFound", "Route not found"), 404);
 
   /**

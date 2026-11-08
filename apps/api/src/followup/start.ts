@@ -14,6 +14,7 @@ import {
   type FollowUpModel,
 } from "@zs/core";
 import { asService, assertRuntimeLogin, createRuntimePool, createScopedDatabase } from "@zs/db";
+import type { Pool } from "pg";
 import type { FollowUpRunnerEnv } from "./config.js";
 import { createScheduledFollowUps, type ScheduledFollowUps } from "./runner.js";
 
@@ -29,7 +30,7 @@ export async function startFollowUpRunner(env: FollowUpRunnerEnv, deps: {
   readonly generateId: () => string;
   /** The vendor transport; unset, the platform's fetch. */
   readonly fetch?: FetchLike;
-}): Promise<{ runner: ScheduledFollowUps; close(): Promise<void> }> {
+}): Promise<{ runner: ScheduledFollowUps; /** The service-login pool the runner uses; the cron alerts share it. */ servicePool: Pool; close(): Promise<void> }> {
   // Fail closed before any pool opens: the parse refuses these too, but an env built by hand must not
   // start the templated kinds without a booking key or base URL.
   if (env.templated !== null) {
@@ -88,5 +89,5 @@ export async function startFollowUpRunner(env: FollowUpRunnerEnv, deps: {
     perTenantMs: env.maxCandidatesPerRun * env.modelTimeoutMs,
     report: (event) => console.error("Follow-up tenant run failed", event),
   });
-  return { runner, close };
+  return { runner, servicePool, close };
 }

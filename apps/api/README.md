@@ -616,6 +616,59 @@ signed attempt token and the browser key, both forwarded by the dashboard in hea
 URL. `invalid` is a 400; everything else is a 303 to `CONNECTIONS_RETURN_URL?connection=connected|confirm|pending|error`
 (with `&reason=` on error). All answers are `Cache-Control: no-store` with `Referrer-Policy: no-referrer`.
 
+## Response headers (`src/response-headers.ts`)
+
+One middleware, first in `createApp`, in every cron function's Hono app, and inside `connectionsInternalRoutes` and
+`shopifyWebhookRoutes`, covers the answers of the Hono apps in this package, errors and CORS preflights included:
+
+- `X-Content-Type-Options: nosniff` on every answer that does not carry it already.
+- `Cache-Control: no-store` on private paths: `/v1/*`, `/worker/v1/*`, `/browser-runner/v1/*`,
+  `/integrations/activepieces/v1/*`, `/mcp`, `/cron/*`, `/internal/*`, `/webhooks/*`. It fails closed: a private
+  answer becomes `no-store` unless the route already says `no-store` (`private, no-store` counts), so no route can make
+  one cacheable by setting some other value. Without it Vercel adds `public, max-age=0, must-revalidate`.
+- `/oauth/*` (callbacks carry a one-time code): every answer, errors included, is `no-store` with
+  `Referrer-Policy: no-referrer`; a route that set them keeps them.
+
+Outside those paths a route keeps the cache header it chose: the booking script and style (`public,
+max-age=300`), the booking page and the public pages that set `no-store` with their own CSP and Referrer-Policy,
+public media. `/healthz` and a public page with no header of their own are left to the platform default, as
+before. The middleware does not touch what is not a Hono answer: a function that fails before its handler runs, or
+a response Vercel itself produces (platform 404, 5xx, a timeout), carries no header from this code. `check:hosted`
+probes `/healthz` and `/v1`.
+
+## Cron failure alerts (`src/cron-alerts.ts`)
+
+A cron run counts as failed when it throws (the answer is 503) or when it returns with work items that failed and
+none that succeeded (the answer stays 200; `src/cron-outcome.ts` holds the one rule, tested per job: delivery,
+billing, calendar, Activepieces, follow-up, connections). A run with no work, or with at least one item done, is a
+success. A failed run writes a row to `cron_alerts` (migration `20261108400000_cron_alerts.sql`, a platform table the
+workers' service role alone can use), so a stopped job does not wait for someone to read Vercel logs. One row per
+job: a repeat failure raises `failure_count` and keeps `opened_at`; the next good run sets `resolved_at` (unless a
+failure newer than that run's start is on the row); a later failure opens the row again. Every time on the row is the
+database's (`clock_timestamp()`), and the row has no ordering constraint. The error text keeps the class and message
+only, with URLs, JWTs, bearer tokens, Resend, Shopify and Stripe keys, `password`/`token`/`secret`/`key` pairs and
+email addresses replaced, cut to 500 characters. A write that fails (the database is the failure) goes to the operator
+log and never changes the cron's answer. All alert work (the write and the email) shares one deadline of at most 3 s
+and of what is left of the function's 30 s, with a matching `statement_timeout` on the write, so it cannot delay the
+cron's answer past its budget. It reuses the service pool the cron's runner already holds. Open alerts are
+`SELECT * FROM cron_alerts WHERE resolved_at IS NULL`, or `listOpenCronAlerts`; `check:hosted` reads them through
+`asService` and fails while any is open.
+
+While an open alert has no `notified_at`, a failing run sends one plain email (`src/cron-alert-mail.ts`) and sets
+`notified_at` once the provider answered 2xx. A send that failed is therefore tried again on the next failing run,
+and a repeat failure after a delivered email sends nothing; a reopen after a fix mails again. It goes to
+`OPS_ALERT_EMAIL` through the Resend account the delivery worker already uses (`RESEND_API_KEY`, `RESEND_FROM`,
+optional `RESEND_BASE_URL`; no outbox row, no wallet charge). The subject and body name the environment
+(`VERCEL_ENV`) and the project host (`VERCEL_PROJECT_PRODUCTION_URL`, else `VERCEL_URL`), both set by Vercel. Without
+`OPS_ALERT_EMAIL`, or with unusable Resend settings, nothing is sent and the log says so once per instance. The send
+carries an idempotency key from the job and its `opened_at`, so a retry cannot mail twice. The workers project holds
+all of these; the API project holds none.
+
+Not covered: a function that dies before its handler runs (a bad environment at start-up, a failed import, a pool that
+cannot open) raises no alert and no email, because the recorder is wired in that same start-up; a cron that Vercel
+never calls; and a failure while the database itself is down (the alert cannot be written, so it cannot be told
+apart from a repeat and no email is sent). Those still show only in Vercel's logs.
+
 ## Database pool and request limits
 
 `createServer` (`src/server.ts`) builds the runtime pool with `createRuntimePool` from
@@ -802,6 +855,7 @@ against the pinned Supabase Root 2021 CA.
    | `CRON_SECRET` | **no** | yes |
    | `DELIVERY_WORKER`, `DELIVERY_WORKER_ID`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `SMS_PROVIDER` | **no** | yes |
    | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | **no** | yes |
+   | `OPS_ALERT_EMAIL` | **no** | yes (one address; without it a cron failure is recorded in `cron_alerts` but not emailed) |
    | `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | **no** | only with `SMS_PROVIDER=twilio` (`TWILIO_API_KEY_SID` and `TWILIO_API_KEY_SECRET` come together) |
    | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS`, `BILLING_STRIPE_KEY`, `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS`, `BILLING_SHOPIFY_*` | **no** | yes |
    | `SHOPIFY_BILLING_APP_HANDLE` | yes | no |
