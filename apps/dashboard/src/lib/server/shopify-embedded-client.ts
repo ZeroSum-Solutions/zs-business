@@ -234,11 +234,11 @@ function orderStatus(value) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 function orderDate(value) { return typeof value === "string" ? value.slice(0, 10) : "-"; }
+// The amount stays a decimal string: Intl formats a string exactly, where Number() would round large amounts.
 function money(total) {
   if (!total) return "-";
-  var amount = Number(total.amount);
   try {
-    return new Intl.NumberFormat("en-US", { style: "currency", currency: total.currency }).format(amount);
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: total.currency }).format(String(total.amount));
   } catch (error) {
     return String(total.amount) + " " + String(total.currency);
   }
@@ -276,10 +276,12 @@ function ordersBlock(result) {
   block.appendChild(wrap);
   return block;
 }
-// Read after open, only for a linked store. The screen number at the time of the call must still be the current one
-// when the answer lands, so a late answer never overwrites another screen.
+function ordersShell() { return el("section", null, { class: "orders-slot" }); }
+// Read once a linked store is on screen. Only show() moves to another screen (Open ZS Hub does not), so an answer
+// whose screen is still current always settles the slot; an answer for a screen that is gone is dropped.
 function loadOrders(slot) {
   var generation = screen;
+  slot.replaceChildren(el("p", "Loading recent orders...", { class: "help", role: "status" }));
   call("orders").then(function (result) {
     if (generation !== screen) return;
     slot.replaceChildren(ordersBlock(result));
@@ -291,8 +293,7 @@ function renderLinked(open) {
   var needsRenewal = open.link.connection === "reauthorize";
   var plan = planShell();
   lastOpen = open;
-  var ordersSlot = el("section", null, { class: "orders-slot" });
-  ordersSlot.appendChild(el("p", "Loading recent orders...", { class: "help", role: "status" }));
+  var ordersSlot = ordersShell();
   show(
     title("ZS Business Connections"),
     shopBlock(open.shop),
@@ -310,32 +311,35 @@ function renderLinked(open) {
   loadOrders(ordersSlot);
 }
 
-// The hub now tracks this store's plan (PL-17): read it again and offer Choose a plan next to the hub link.
-function loadCreatedPlan(node) {
+// The hub now tracks this store's plan (PL-17): read it again and offer Choose a plan next to the hub link. The same
+// read confirms the link, so the recent orders (C-30) load from here too.
+function loadCreatedPlan(node, ordersSlot) {
   call("open").then(function (open) {
     if (node !== planNode) return;
-    if (open.outcome === "ok" && open.link.state === "linked") { lastOpen = open; setPlan(node, open); return; }
+    if (open.outcome === "ok" && open.link.state === "linked") { lastOpen = open; setPlan(node, open); loadOrders(ordersSlot); return; }
     // Unlinked again (another session disconnected it): show the store as it is, not a plan block.
     if (open.outcome === "ok") { if (acting === 0) showOpen(open); else node.replaceChildren(); return; }
     if (open.outcome === "invalid_token") { setPlanNote(node, SHOP_TROUBLE.invalid_token, button("Reload", reload)); return; }
     setPlanNote(node, "Your plan could not be loaded just now.", button("Try again", function () {
       setPlanNote(node, "Checking your plan...");
-      loadCreatedPlan(node);
+      loadCreatedPlan(node, ordersSlot);
     }, "secondary"));
   });
 }
 function renderCreated(result) {
   var status = el("p", null, { class: "note info", role: "status" });
   var plan = planShell();
+  var ordersSlot = ordersShell();
   show(
     title("Your hub is ready"),
     note("We made a ZS Hub called " + result.businessName + " for " + result.ownerEmail + ". Open it to sign in with that address.", "info"),
     button("Open ZS Hub", function () { openHub(status); }),
     status,
-    plan
+    plan,
+    ordersSlot
   );
   planNode = plan;
-  loadCreatedPlan(plan);
+  loadCreatedPlan(plan, ordersSlot);
 }
 
 var CREATE_TROUBLE = {

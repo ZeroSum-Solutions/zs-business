@@ -4,7 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { asService } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { createShopifyClient, createShopifyNativeWorker, parseSealKeys, type HubPort, type ShopifyNativeReport } from "../../src/index.js";
+import { shopifyOrdersResponseSchema } from "@zs/contracts";
+import { createLocalShopifyPort, createShopifyClient, createShopifyNativeWorker, handleShopifyOperation, parseSealKeys, type HubPort, type ShopifyNativeReport, type ShopifyWorkerOps } from "../../src/index.js";
 import { createConnectionsWorker, createComposioClient } from "../../src/index.js";
 import { addMember, makeClock, T0, type TestClock } from "../connections/harness.js";
 import { FakeComposio } from "../connections/fake-composio.js";
@@ -681,13 +682,50 @@ describe("shopify_orders: recent orders for the embedded page (C-30)", () => {
   const lastQuery = () => fake.calls.filter((c) => c.url.endsWith("/graphql.json")).at(-1)!.body as { query: string; variables: { first: number; query: string } };
   const link = async () => { await worker.open({ idToken: token() }); await worker.createHub({ idToken: token() }); };
 
-  it("answers not_linked, without asking Shopify for orders, for a store with no hub", async () => {
+  it("answers not_linked with no Shopify call at all for a store that was never opened", async () => {
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    expect(fake.calls).toHaveLength(0);
+    expect(await install()).toBeUndefined();
+  });
+
+  it("answers not_linked with no Shopify call for an installed store without a hub, even with its token near the end", async () => {
     await worker.open({ idToken: token() });
+    const before = await install();
+    clock.ms += 56 * 60_000;
+    const seen = fake.calls.length;
     expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
-    expect(fake.calls.filter((c) => String(c.body?.query).includes("orders("))).toHaveLength(0);
+    expect(fake.calls).toHaveLength(seen);
+    expect((await install()).access_sealed).toBe(before.access_sealed);
+  });
+
+  it("answers not_linked with no Shopify call after a disconnect, and stores no token again", async () => {
     await link();
-    await database.pool.query("UPDATE connections SET status='disconnected', account_label=NULL");
+    const connectionId = (await database.pool.query("SELECT tenant_id, id FROM connections")).rows[0];
+    await database.pool.query("UPDATE connections SET status='disconnecting'");
+    const row = { tenant_id: connectionId.tenant_id, id: connectionId.id, external_account_id: SHOP_GID, account_domain: SHOP, status: "disconnecting", last_error_code: null, revoke_outcome: null };
+    expect(await worker.finishDisconnect(row)).toBe("disconnected");
+    const seen = fake.calls.length;
     expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    clock.ms += 56 * 60_000;
+    expect(await worker.orders({ idToken: token() })).toEqual({ outcome: "not_linked" });
+    expect(fake.calls).toHaveLength(seen);
+    expect(await install()).toMatchObject({ status: "uninstalled", access_sealed: null, refresh_sealed: null });
+  });
+
+  it("for a linked store gets the access token once and makes one Shopify call", async () => {
+    await link();
+    const seen = fake.calls.length;
+    expect(await worker.orders({ idToken: token() })).toMatchObject({ outcome: "ok" });
+    expect(fake.calls.slice(seen).map((c) => c.url.split("/").at(-1))).toEqual(["graphql.json"]);
+  });
+
+  it("hands the caller's abort signal to the worker through the route handler and the local port", async () => {
+    const seen: Array<AbortSignal | undefined> = [];
+    const stub = { orders: async (_input: { idToken: string }, signal?: AbortSignal) => { seen.push(signal); return { outcome: "not_linked" as const }; } } as unknown as ShopifyWorkerOps;
+    const controller = new AbortController();
+    expect(await handleShopifyOperation(stub, "orders", JSON.stringify({ idToken: "aaaa.bbbb.cccc" }), controller.signal)).toEqual({ status: 200, body: { outcome: "not_linked" } });
+    expect(await createLocalShopifyPort(stub).orders({ idToken: "aaaa.bbbb.cccc" }, controller.signal)).toEqual({ outcome: "not_linked" });
+    expect(seen).toEqual([controller.signal, controller.signal]);
   });
 
   it("authenticates like open: a bad token is invalid_token before any request", async () => {
@@ -724,6 +762,30 @@ describe("shopify_orders: recent orders for the embedded page (C-30)", () => {
     expect(JSON.stringify(out)).not.toMatch(/customer|email|55/i);
     if (out.outcome !== "ok") throw new Error("unreachable");
     expect(Object.keys(out.orders[0]!).sort()).toEqual(["createdAt", "displayFinancialStatus", "displayFulfillmentStatus", "name", "total"]);
+  });
+
+  it("skips an order that does not fit the contract instead of cutting it, and keeps the rest", async () => {
+    await link();
+    fake.orders = [
+      { id: 1, name: "#1", created_at: iso(1) },
+      { id: 2, name: "x".repeat(101), created_at: iso(2) },
+      { id: 3, name: "#3", created_at: "+010000-01-01T00:00:00.000Z" },
+      { id: 4, name: "#4", created_at: iso(3), currency: "usd" },
+      { id: 5, name: "#5", created_at: iso(4), total: "1234567890123456.00" },
+    ];
+    const out = await worker.orders({ idToken: token() });
+    expect(shopifyOrdersResponseSchema.safeParse(out).success).toBe(true);
+    if (out.outcome !== "ok") throw new Error("unreachable");
+    expect(out.orders.map((o) => o.name)).toEqual(["#1"]);
+    expect(out.summary.count).toBe(1);
+  });
+
+  it("sums the largest valid amounts into a total the contract still accepts", async () => {
+    await link();
+    fake.orders = Array.from({ length: 50 }, (_, i) => ({ id: 3000 + i, name: `#${3000 + i}`, created_at: iso(1 + i / 100), total: "999999999999999.99" }));
+    const out = await worker.orders({ idToken: token() });
+    expect(shopifyOrdersResponseSchema.safeParse(out).success).toBe(true);
+    expect(out).toMatchObject({ outcome: "ok", summary: { count: 50, total: { amount: "49999999999999999.50", currency: "USD" } } });
   });
 
   it("is empty with a null total when there are no orders, and has no total across currencies", async () => {

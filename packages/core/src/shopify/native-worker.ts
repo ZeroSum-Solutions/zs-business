@@ -9,7 +9,7 @@
 import { createHmac, randomInt } from "node:crypto";
 import {
   Conflict, PLAN_CATALOG, SHOPIFY_RECENT_ORDERS_DAYS, SHOPIFY_RECENT_ORDERS_FETCHED, SHOPIFY_RECENT_ORDERS_SHOWN,
-  normalizeAccountLabel, type HubPlan, type ShopifyOrdersResponse, type ShopifyRecentOrder,
+  normalizeAccountLabel, shopifyRecentOrderSchema, type HubPlan, type ShopifyOrdersResponse, type ShopifyRecentOrder,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { setShopifyBilling } from "../billing/shopify-plans.js";
@@ -410,19 +410,23 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
 
   /**
    * C-30: the newest orders of the last 60 days for the embedded page, read-only and without customer data. It
-   * authenticates like `open`, answers only for a linked store, and reuses the order reader and token path of `run`.
+   * verifies the ID token, then checks the store's live link from the database, and only then gets an access token
+   * (refresh under the lease, as in `run`). An unlinked, disconnected or uninstalled store gets `not_linked` with no
+   * Shopify call. It never exchanges a token: the page calls `open` first, which does.
    */
   async function orders(input: { idToken: string }, signal?: AbortSignal): Promise<OrdersResult> {
-    const auth = await authenticate(input.idToken);
-    if (auth.kind === "refused") return { outcome: "not_supported" };
-    if (auth.kind !== "ok") return { outcome: auth.kind === "not_installed" ? "unavailable" : auth.kind };
-    if ((await linkOf(auth.row.shop_id)).state !== "linked") return { outcome: "not_linked" };
-    const access = await ensureAccess(auth.domain, signal);
+    const verified = verifyIdToken(idConfig(), input.idToken);
+    if (!verified.ok) return { outcome: "invalid_token" };
+    const domain = verified.shopDomain;
+    const install = await installByDomain(domain);
+    if (install === null || install.status === "uninstalled") return { outcome: "not_linked" };
+    if ((await linkOf(install.shop_id)).state !== "linked") return { outcome: "not_linked" };
+    const access = await ensureAccess(domain, signal);
     if (access.kind === "busy") return { outcome: "busy" };
-    if (access.kind !== "ok" || access.row.shop_id !== auth.row.shop_id) return { outcome: "unavailable" };
+    if (access.kind !== "ok" || access.row.shop_id !== install.shop_id) return { outcome: "unavailable" };
     const end = now();
     const start = new Date(end.getTime() - SHOPIFY_RECENT_ORDERS_DAYS * DAY);
-    const answer = await client.graphql(auth.domain, access.token, listOrdersQuery(),
+    const answer = await client.graphql(domain, access.token, listOrdersQuery(),
       { first: SHOPIFY_RECENT_ORDERS_FETCHED, query: listOrdersSearch({ start, end, status: "any" }) }, signal);
     if (answer.kind === "failed") {
       // Only the install that is current may be marked; a stale 401 just means: try again.
@@ -436,16 +440,16 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       const o = orderToRest(node);
       const created = typeof o["created_at"] === "string" ? new Date(o["created_at"]) : null;
       const micro = typeof o["total_price"] === "string" ? toMicro(o["total_price"]) : null;
-      if (typeof o["name"] !== "string" || o["name"] === "" || created === null || Number.isNaN(created.getTime()) || micro === null
-        || typeof o["currency"] !== "string" || !/^[A-Z]{3}$/.test(o["currency"])) continue;
-      seen.push({
-        name: o["name"].slice(0, 100),
+      if (created === null || Number.isNaN(created.getTime()) || micro === null) continue;
+      // The contract decides what is shown: an order that does not fit it is skipped, never cut to fit (C-30).
+      const shaped = shopifyRecentOrderSchema.safeParse({
+        name: o["name"],
         createdAt: created.toISOString(),
         displayFinancialStatus: typeof o["financial_status"] === "string" ? o["financial_status"].slice(0, 60) : null,
         displayFulfillmentStatus: typeof o["fulfillment_status"] === "string" ? o["fulfillment_status"].slice(0, 60) : null,
         total: { amount: fromMicro(micro), currency: o["currency"] },
-        micro,
       });
+      if (shaped.success) seen.push({ ...shaped.data, micro });
     }
     seen.sort((x, y) => y.createdAt.localeCompare(x.createdAt));
     const currencies = new Set(seen.map((order) => order.total.currency));

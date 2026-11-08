@@ -106,6 +106,8 @@ export const shopifyClaimConfirmResponseSchema = z.discriminatedUnion("outcome",
  * would reject one): an order is its name, time, two status words and a total.
  */
 const moneyAmount = z.string().regex(/^[0-9]{1,15}(\.[0-9]{1,6})?$/);
+/** The summary adds up to 50 amounts of at most 15 integer digits each, so the sum needs up to 17. */
+const summedAmount = z.string().regex(/^[0-9]{1,17}(\.[0-9]{1,6})?$/);
 const currencyCode = z.string().regex(/^[A-Z]{3}$/);
 export const SHOPIFY_RECENT_ORDERS_DAYS = 60;
 export const SHOPIFY_RECENT_ORDERS_SHOWN = 10;
@@ -126,7 +128,7 @@ export const shopifyOrdersResponseSchema = z.discriminatedUnion("outcome", [
     /** Counted over the orders fetched (at most 50); `total` is null when their currencies differ. */
     summary: z.strictObject({
       count: z.number().int().min(0).max(SHOPIFY_RECENT_ORDERS_FETCHED),
-      total: z.strictObject({ amount: moneyAmount, currency: currencyCode }).nullable(),
+      total: z.strictObject({ amount: summedAmount, currency: currencyCode }).nullable(),
     }),
   }),
   z.strictObject({ outcome: z.enum(["invalid_token", "unavailable", "busy", "not_supported", "not_linked"]) }),

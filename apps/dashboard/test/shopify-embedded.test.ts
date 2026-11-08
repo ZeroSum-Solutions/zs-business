@@ -577,17 +577,75 @@ describe("recent orders on the page (C-30)", () => {
     expect(EMBEDDED_CLIENT_SOURCE).not.toMatch(/innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
   });
 
-  it("drops an orders answer that lands after the merchant opened the hub", async () => {
+  it("formats a large amount exactly, without rounding it through a float", async () => {
+    const big = { amount: "999999999999999.99", currency: "USD" };
+    const { app } = runClient({ answers: [opened()], orders: [okOrders([order("#1", { total: big })], { count: 2, total: { amount: "1000000000000000.00", currency: "USD" } })] });
+    await settle();
+    expect(cells(app)).toContain("$999,999,999,999,999.99");
+    expect(texts(app)).toContain("total $1,000,000,000,000,000.00");
+  });
+
+  it("still shows the orders when Open ZS Hub is clicked while they are read (Open ZS Hub keeps the screen)", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const { app } = runClient({ gate, answers: [opened(), { status: 200, body: { outcome: "ok", url: "https://hub.example.test/sign-in" } }], orders: [okOrders([order("#LATE")])] });
     await settle();
     expect(texts(app)).toContain("Loading recent orders");
     button(app, "Open ZS Hub").click();
+    await settle();
+    release();
+    await settle();
+    expect(cells(app)).toContain("#LATE");
+    expect(texts(app)).not.toContain("Loading recent orders");
+    expect(texts(app)).toContain("Your hub opened in a new tab.");
+  });
+
+  it("drops an orders answer that lands after the page moved to another screen", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const confirming = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: LINKED } };
+    const unlinked = { status: 200, body: { outcome: "ok", shop: SHOP, plan: { state: "none" }, link: { state: "none" } } };
+    const { app, advance } = runClient({ search: "?plan=welcome", gate, answers: [confirming, unlinked], orders: [okOrders([order("#LATE")])] });
+    await settle();
+    expect(texts(app)).toContain("Loading recent orders");
+    await advance(30_000);
+    expect(texts(app)).toContain("Not linked to a ZS Hub yet");
     release();
     await settle();
     expect(cells(app)).not.toContain("#LATE");
     expect(texts(app)).not.toContain("Recent orders");
+  });
+
+  it("loads the orders on the screen shown after the hub is made, once the read confirms the link", async () => {
+    const { app, calls, orderCalls } = runClient({ answers: [
+      opened({ state: "none" }),
+      { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+      opened(),
+    ], orders: [okOrders([order("#NEW")])] });
+    await settle();
+    expect(orderCalls).toHaveLength(0);
+    button(app, "Create my ZS Hub").click();
+    await settle();
+    expect(calls.map((call) => call.url)).toEqual(["/api/shopify/open", "/api/shopify/create-hub", "/api/shopify/open"]);
+    expect(orderCalls).toHaveLength(1);
+    expect(texts(app)).toContain("Your hub is ready");
+    expect(cells(app)).toContain("#NEW");
+  });
+
+  it("reads no orders after the hub is made when the read finds the store unlinked or fails", async () => {
+    for (const third of [opened({ state: "none" }), { status: 503, body: {} }]) {
+      const { app, calls, orderCalls } = runClient({ answers: [
+        opened({ state: "none" }),
+        { status: 200, body: { outcome: "created", businessName: "Halden & Rowe", ownerEmail: "owner@example.com" } },
+        third,
+      ] });
+      await settle();
+      button(app, "Create my ZS Hub").click();
+      await settle();
+      expect(calls, JSON.stringify(third)).toHaveLength(3);
+      expect(orderCalls).toHaveLength(0);
+      expect(texts(app)).not.toContain("Recent orders");
+    }
   });
 });
 

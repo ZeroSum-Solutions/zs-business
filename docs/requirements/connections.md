@@ -1001,32 +1001,40 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   last 60 days, newest first, and a one-line summary: "N orders in the last 60 days, total
   <money>", computed over the orders returned (up to 50 fetched). The view is read-only and has
   no customer fields.
-  - Worker operation `orders` (`POST /internal/shopify/orders`, body `{idToken}`) authenticates
-    exactly like `open` (verified ID token, install, shop; refresh, the `shopify_locks` lease and
-    the `busy`, `unavailable`, `invalid_token`, `not_supported` outcomes are the same). It answers
-    only for a store whose connection is `active` or `reauthorize`; any other store gets
-    `not_linked` and no Shopify call is made. It reads with `listOrdersQuery` and
+  - Worker operation `orders` (`POST /internal/shopify/orders`, body `{idToken}`) verifies the ID
+    token (`invalid_token`), then reads the store's install and link from the database. It answers
+    only for a store with a live install whose connection is `active` or `reauthorize`; any other
+    store (never opened, no hub, disconnected, uninstalled) gets `not_linked` and no Shopify call
+    is made. Only then does it get the access token, once (refresh under the `shopify_locks`
+    lease; `busy`, `unavailable` as in `open`). It never exchanges a token: the page calls `open`
+    first, which does. The route passes the caller's abort signal (B-6) to the Shopify calls. It reads with `listOrdersQuery` and
     `listOrdersSearch` (window = injected clock now minus 60 days, status any, first 50) and
     shapes each order with `orderToRest`. The query never selects the `customer` object (C-23).
     A Shopify failure answers `unavailable`; a 401 marks the current install as needing reauth,
-    as in C-22. Orders whose name, time, total or currency do not fit the contract are skipped.
+    as in C-22. Each shaped order is checked with `shopifyRecentOrderSchema`; one that does not
+    fit (name, time, total or currency) is skipped, never cut to fit.
   - Response (`shopifyOrdersResponseSchema`): `{outcome:"ok", orders:[{name, createdAt,
     displayFinancialStatus, displayFulfillmentStatus, total:{amount,currency}}] (at most 10),
     summary:{count, total:{amount,currency}|null}}`. `total` is the exact decimal sum and is null
-    when no order was returned or the currencies differ. Strict objects: a customer field cannot
+    when no order was returned or the currencies differ. An order amount has at most 15 integer
+    digits; the summary total allows 17 (50 such amounts). Strict objects: a customer field cannot
     pass the contract.
   - API route `POST /public/v1/shopify/embedded/orders` beside `open`: same bearer token, same
     `shopify-embedded` guard (240 per 10 minutes per address), same mapping (`invalid_token` is a
     401, a dead worker is `unavailable`). The dashboard proxy allows the `orders` operation.
   - Page: after `open`, for a linked store only, it reads `orders` and shows a **Recent orders**
-    table (Order, Date, Payment, Fulfillment, Total) and the summary line. Empty: "No orders in
+    table (Order, Date, Payment, Fulfillment, Total) and the summary line. The screen shown after
+    the hub is made or relinked reads them too, once its `open` read confirms the link. Amounts
+    are formatted from the decimal string, never through a float. Empty: "No orders in
     the last 60 days". Any failure: "Orders are not available right now". All values are set
     with `textContent`; the CSP and the no-cookie model are unchanged. An answer that lands
-    after the merchant moved to another screen is dropped (the C-29 generation guard).
-  - Tests: `packages/core/test/shopify/native-worker.test.ts` (linked, not linked, 60-day window,
-    no customer fields, refresh, busy), `apps/api/test/shopify-native-api.test.ts` (auth, rate
-    limit, mapping), `apps/dashboard/test/shopify-embedded.test.ts` (table, empty, error, safe
-    rendering, stale answer).
+    after the page moved to another screen is dropped (the C-29 generation guard; only a new
+    screen moves it, so Open ZS Hub during the read still settles the orders).
+  - Tests: `packages/core/test/shopify/native-worker.test.ts` (linked, not linked with zero
+    Shopify calls, 60-day window, no customer fields, skipped orders, largest total, refresh,
+    busy, abort signal), `apps/api/test/shopify-native-api.test.ts` (auth, rate limit key and
+    rule, mapping), `apps/dashboard/test/shopify-embedded.test.ts` (table, empty, error, safe
+    rendering, exact amounts, Open ZS Hub mid-read, stale answer, orders after hub creation).
 
 
 ## Acceptance

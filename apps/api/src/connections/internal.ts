@@ -149,7 +149,8 @@ export function connectionsInternalRoutes(config: {
     const signed = await signedBody(c, `shopify:${operation}`, worker);
     if (signed instanceof Response) return signed;
     try {
-      const out = await handleShopifyOperation(native, operation, signed.body);
+      // B-6: only `orders` takes the signal; a caller that goes away stops its Shopify calls too.
+      const out = await handleShopifyOperation(native, operation, signed.body, AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(OPERATION_BUDGET_MS)]));
       return c.json(out.body, out.status);
     } catch (error) {
       config.onError?.(error);

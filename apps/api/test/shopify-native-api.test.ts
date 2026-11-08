@@ -106,7 +106,8 @@ let hubKeys: string[];
 let limiterRefuses = false;
 let ownerB: { memberId: string; userId: string };
 
-const limiter: ConnectionLimiter = { async take() { return limiterRefuses ? { ok: false, retryAfterSeconds: 31 } : { ok: true }; } };
+let charged: Array<Parameters<ConnectionLimiter["take"]>[0]> = [];
+const limiter: ConnectionLimiter = { async take(charges) { charged.push(charges); return limiterRefuses ? { ok: false, retryAfterSeconds: 31 } : { ok: true }; } };
 
 function fakeHub(): HubPort {
   return {
@@ -176,6 +177,7 @@ beforeEach(async () => {
   fake.now = () => nativeClock.now();
   fake.email = OWNER_EMAIL;
   hubKeys = [];
+  charged = [];
   limiterRefuses = false;
   native = makeNative();
   on = build(createLocalShopifyPort(native));
@@ -259,11 +261,19 @@ describe("the embedded routes (C-21, C-22)", () => {
 
   it("orders (C-30): a forged token is a 401, the rate limit is a 429, and busy and a dead worker map like open", async () => {
     expect((await embedded(on, "orders", mintIdToken(nativeClock.now(), {}, "z".repeat(48)))).status).toBe(401);
+    // Open and orders spend the same per-address budget: 240 per 10 minutes.
+    charged = [];
+    await embedded(on, "open", token());
+    await embedded(on, "orders", token());
+    expect(charged).toHaveLength(2);
+    expect(charged[1]).toEqual(charged[0]);
+    expect(charged[1]).toEqual([{ key: expect.stringMatching(/^shopify-embedded:.+/), rule: { limit: 240, windowMs: 600_000 } }]);
+    const seen = fake.calls.length;
     limiterRefuses = true;
     const limited = await embedded(on, "orders", token());
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toBe("31");
-    expect(fake.calls).toHaveLength(0);
+    expect(fake.calls).toHaveLength(seen);
     limiterRefuses = false;
     const busy: ShopifyPort = { ...createLocalShopifyPort(native), orders: async () => ({ outcome: "busy" }) };
     expect(await json(await embedded(build(busy), "orders", token()))).toEqual({ outcome: "busy" });
