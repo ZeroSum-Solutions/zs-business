@@ -174,7 +174,12 @@ role for workers (all workers share one pattern today; Known limits).
   - Refused with 409 `already_connected` while the tenant has a row for that toolkit in
     `active`, `reauthorize` or `disconnecting`. Reconnect is disconnect, then connect (C-13).
   - Limits before the worker call: `conn-connect:<tenantId>` 10 per hour, in the shared
-    store, all or nothing.
+    store, all or nothing. The charge returns a receipt. The API gives the unit back (once, in
+    the window it was taken in, never below zero) only when the worker marks a refused link
+    `nothingCreated`: its own checks before any provider call, its own budget refusal, or a
+    Composio 400, 401, 402, 403, 404, 422 or 429, which refuse the request before it is
+    processed. A timeout, network error, 5xx, 408, 409, 410, 425, an unreadable answer, or any
+    failure after the provider returned an account keeps the charge: the link may exist.
   - The API makes a random attempt ID and a random connection ID and asks the worker to
     `link`. The worker inserts `connection_attempts` (`tenant_id`, `id`, `connection_id`,
     `toolkit`, `composio_account_id`, `auth_config_id`, `created_by` (the member's

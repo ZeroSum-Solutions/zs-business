@@ -33,7 +33,7 @@ GRANT SELECT, DELETE ON public.rate_limit_receipts TO service_role;
 -- A refusal is { "retryMs": n, "receipt": null } and charged nothing.
 -- It calls rate_limit_take in the same transaction. That call leaves every bucket it charged
 -- row-locked, so the windows read afterwards are the ones this charge joined or opened.
-CREATE FUNCTION public.rate_limit_take_receipt(p_now timestamptz, p_charges jsonb) RETURNS jsonb
+CREATE FUNCTION public.rate_limit_receipt_take(p_now timestamptz, p_charges jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   retry_ms bigint;
@@ -107,16 +107,16 @@ END $$;
 
 -- Ownership transfer requires CREATE briefly; the role cannot create replacements afterward.
 GRANT CREATE ON SCHEMA public TO zs_rate_limiter;
-ALTER FUNCTION public.rate_limit_take_receipt(timestamptz, jsonb) OWNER TO zs_rate_limiter;
+ALTER FUNCTION public.rate_limit_receipt_take(timestamptz, jsonb) OWNER TO zs_rate_limiter;
 ALTER FUNCTION public.rate_limit_refund(timestamptz, uuid) OWNER TO zs_rate_limiter;
 REVOKE CREATE ON SCHEMA public FROM zs_rate_limiter;
-REVOKE ALL ON FUNCTION public.rate_limit_take_receipt(timestamptz, jsonb) FROM PUBLIC, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.rate_limit_receipt_take(timestamptz, jsonb) FROM PUBLIC, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.rate_limit_refund(timestamptz, uuid) FROM PUBLIC, authenticated, service_role;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
-    REVOKE ALL ON FUNCTION public.rate_limit_take_receipt(timestamptz, jsonb) FROM anon;
+    REVOKE ALL ON FUNCTION public.rate_limit_receipt_take(timestamptz, jsonb) FROM anon;
     REVOKE ALL ON FUNCTION public.rate_limit_refund(timestamptz, uuid) FROM anon;
   END IF;
 END $$;
-GRANT EXECUTE ON FUNCTION public.rate_limit_take_receipt(timestamptz, jsonb) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.rate_limit_receipt_take(timestamptz, jsonb) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.rate_limit_refund(timestamptz, uuid) TO authenticated;

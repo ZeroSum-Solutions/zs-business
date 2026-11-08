@@ -44,13 +44,13 @@ export function createPostgresRateLimiter(db: ScopedDatabase, clock: { now(): Da
       });
       return retryAfterMs > 0 ? { ok: false, retryAfterSeconds: retryAfterSeconds(retryAfterMs) } : { ok: true };
     },
-    // C-4: the same charge as `take`, through rate_limit_take_receipt, which also stores a receipt of the
+    // C-4: the same charge as `take`, through rate_limit_receipt_take, which also stores a receipt of the
     // buckets and windows it charged (supabase/migrations/20261108700000_rate_limit_receipt_refund.sql).
     async takeWithReceipt(charges, options = {}): Promise<TakeReceiptResult> {
       const payload = charges.map(({ key, rule }) => ({ key: bucketKey(key), limit: rule.limit, windowMs: rule.windowMs }));
       const answer = await db.withoutTenant(async (tx) => {
         const { rows } = await tx.query<{ answer: unknown }>(
-          "SELECT public.rate_limit_take_receipt($1, $2::jsonb) AS answer",
+          "SELECT public.rate_limit_receipt_take($1, $2::jsonb) AS answer",
           [clock.now().toISOString(), JSON.stringify(payload)],
         );
         return rows[0]?.answer;
@@ -58,9 +58,9 @@ export function createPostgresRateLimiter(db: ScopedDatabase, clock: { now(): Da
         throw transient(error) ?? error;
       });
       const { retryMs, receipt } = (answer ?? {}) as { retryMs?: unknown; receipt?: { id?: unknown } | null };
-      if (typeof retryMs !== "number") throw new Error("rate_limit_take_receipt answered something unexpected");
+      if (typeof retryMs !== "number") throw new Error("rate_limit_receipt_take answered something unexpected");
       if (retryMs > 0) return { ok: false, retryAfterSeconds: retryAfterSeconds(retryMs) };
-      if (typeof receipt?.id !== "string" || !UUID.test(receipt.id)) throw new Error("rate_limit_take_receipt answered no receipt");
+      if (typeof receipt?.id !== "string" || !UUID.test(receipt.id)) throw new Error("rate_limit_receipt_take answered no receipt");
       return { ok: true, receipt: { id: receipt.id } };
     },
     async refund(receipt: ChargeReceipt, options = {}) {

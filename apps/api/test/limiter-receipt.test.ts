@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createScopedDatabase, type ScopedDatabase } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { createMemoryRateLimiter, type RateLimit, type RateLimiter } from "../src/public/limiter.js";
+import { createMemoryRateLimiter, type ChargeReceipt, type RateLimit, type RateLimiter } from "../src/public/limiter.js";
 import { createPostgresRateLimiter } from "../src/public/postgres-limiter.js";
 
 let database: TestDatabase;
@@ -41,15 +41,15 @@ function clocked(create: (clock: { now(): Date }) => RateLimiter) {
   const limiter = create({ now: () => new Date(now) });
   return { limiter, set: (ms: number) => { now = NOW + ms; } };
 }
-async function receiptOf(limiter: RateLimiter, charges: Parameters<RateLimiter["take"]>[0]) {
+async function receiptOf(limiter: RateLimiter, charges: Parameters<RateLimiter["take"]>[0]): Promise<ChargeReceipt> {
   const taken = await limiter.takeWithReceipt!(charges);
   if (!taken.ok) throw new Error("expected the charge to be accepted");
   return taken.receipt;
 }
 
 describe.each([
-  ["in memory", (clock: { now(): Date }) => createMemoryRateLimiter(clock), (name: string) => name, async (_: string) => undefined],
-  ["in Postgres", (clock: { now(): Date }) => createPostgresRateLimiter(database.db, clock), (name: string) => name, countOf],
+  ["in memory", (clock: { now(): Date }) => createMemoryRateLimiter(clock)],
+  ["in Postgres", (clock: { now(): Date }) => createPostgresRateLimiter(database.db, clock)],
 ] as const)("charge receipt and refund %s", (_, create) => {
   it("gives the charge back in its own window, and the freed unit can be charged again", async () => {
     const key = `conn-connect:${randomUUID()}`;
@@ -157,7 +157,7 @@ describe("shared Postgres limiter: receipts in the database", () => {
   it("a concurrent charge and refund on several instances keep the count exact", async () => {
     const key = `conn-connect:${randomUUID()}`;
     const dbs = [instance(), instance(), database.db];
-    const [a, b, c] = dbs.map((db) => limiterOn(db));
+    const [a, b, c] = dbs.map((db) => limiterOn(db)) as [RateLimiter, RateLimiter, RateLimiter];
     const held = [];
     for (let i = 0; i < 4; i++) held.push(await receiptOf(a, [{ key, rule: rule(6) }]));
     const takers = [a, b, c];
@@ -201,13 +201,13 @@ describe("shared Postgres limiter: receipts in the database", () => {
       "INSERT INTO rate_limit_receipts (id,charges,expires_at) VALUES (gen_random_uuid(),'[]',now())",
       "DELETE FROM rate_limit_receipts",
     ]) await expect(database.db.withoutTenant((tx) => tx.query(statement)), statement).rejects.toMatchObject({ code: "42501" });
-    for (const fn of ["rate_limit_take_receipt(timestamptz,jsonb)", "rate_limit_refund(timestamptz,uuid)"]) {
+    for (const fn of ["rate_limit_receipt_take(timestamptz,jsonb)", "rate_limit_refund(timestamptz,uuid)"]) {
       const row = await fixture.service(async (tx) => (await tx.query<{ owner: string; definer: boolean; path: string[] }>(
         "SELECT proowner::regrole::text AS owner, prosecdef AS definer, proconfig AS path FROM pg_proc WHERE oid=$1::regprocedure", [`public.${fn}`])).rows[0]);
       expect(row).toEqual({ owner: "zs_rate_limiter", definer: true, path: ["search_path=pg_catalog, pg_temp"] });
     }
     const calls: [string, unknown[]][] = [
-      ["SELECT public.rate_limit_take_receipt($1, $2::jsonb)", [new Date(NOW).toISOString(), JSON.stringify([{ key: "b".repeat(64), limit: 1, windowMs: 1000 }])]],
+      ["SELECT public.rate_limit_receipt_take($1, $2::jsonb)", [new Date(NOW).toISOString(), JSON.stringify([{ key: "b".repeat(64), limit: 1, windowMs: 1000 }])]],
       ["SELECT public.rate_limit_refund($1, $2::uuid)", [new Date(NOW).toISOString(), randomUUID()]],
     ];
     for (const [call, params] of calls) {
@@ -222,7 +222,7 @@ describe("shared Postgres limiter: receipts in the database", () => {
   });
 
   it("refuses malformed charges like rate_limit_take does", async () => {
-    await expect(database.db.withoutTenant((tx) => tx.query("SELECT public.rate_limit_take_receipt($1, $2::jsonb)", [new Date(NOW).toISOString(), "[]"])))
+    await expect(database.db.withoutTenant((tx) => tx.query("SELECT public.rate_limit_receipt_take($1, $2::jsonb)", [new Date(NOW).toISOString(), "[]"])))
       .rejects.toMatchObject({ code: "22023" });
   });
 });
