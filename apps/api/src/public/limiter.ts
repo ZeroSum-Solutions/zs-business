@@ -53,10 +53,14 @@ export const retryAfterSeconds = (retryAfterMs: number) => Math.max(1, Math.ceil
 
 /** Above this many buckets, expired ones are swept before the next charge. */
 const SWEEP_AT = 10_000;
+/** The most unconsumed receipts the memory limiter holds. */
+export const MAX_MEMORY_RECEIPTS = 10_000;
 
 export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
   const buckets = new Map<string, { windowStart: number; windowMs: number; count: number }>();
-  const receipts = new Map<string, { key: string; windowStart: number }[]>();
+  // Receipts live to the end of the latest window they touch (a refund after that changes nothing) and the
+  // table is capped: an overflow drops the oldest receipt, which only means that charge cannot be refunded.
+  const receipts = new Map<string, { expires: number; windows: { key: string; windowStart: number }[] }>();
   let nextReceipt = 0;
   const live = (bucket: { windowStart: number; windowMs: number } | undefined, now: number) =>
     bucket !== undefined && now - bucket.windowStart < bucket.windowMs;
@@ -85,21 +89,28 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
     async takeWithReceipt(charges) {
       const taken = take(charges);
       if (!taken.ok) return taken;
+      const now = clock.now().getTime();
+      for (const [key, held] of receipts) if (held.expires <= now) receipts.delete(key);
+      while (receipts.size >= MAX_MEMORY_RECEIPTS) receipts.delete(receipts.keys().next().value as string);
       const id = `memory-receipt-${nextReceipt++}`;
-      receipts.set(id, charges.map(({ key }) => ({ key, windowStart: buckets.get(key)!.windowStart })));
+      const windows = charges.map(({ key }) => ({ key, windowStart: buckets.get(key)!.windowStart }));
+      receipts.set(id, { expires: Math.max(...charges.map(({ key }) => buckets.get(key)!.windowStart + buckets.get(key)!.windowMs)), windows });
       return { ok: true, receipt: { id } };
     },
     async refund(receipt) {
-      const windows = receipts.get(receipt.id);
-      if (!windows) return 0;
+      const held = receipts.get(receipt.id);
+      if (!held) return 0;
       receipts.delete(receipt.id);
       const now = clock.now().getTime();
+      const windows = held.windows;
       let given = 0;
       for (const { key, windowStart } of windows) {
         const bucket = buckets.get(key);
         if (bucket && live(bucket, now) && bucket.windowStart === windowStart && bucket.count > 0) {
           bucket.count -= 1;
           given += 1;
+          // As in the shared store, a count of 0 holds no window: the next charge opens a new one.
+          if (bucket.count === 0) buckets.delete(key);
         }
       }
       return given;

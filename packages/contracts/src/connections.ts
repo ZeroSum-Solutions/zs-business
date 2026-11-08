@@ -233,11 +233,6 @@ export const connectorLinkResponseSchema = z.strictObject({
   outcome: z.literal("refused"),
   code: z.enum(["provider_unavailable", "provider_rate_limited", "not_found"]),
   retryAfterSeconds: z.number().int().positive().max(86_400).optional(),
-  /**
-   * C-4: set only when the worker knows no provider account exists for this link (see `confirmedNothingCreated` in
-   * worker.ts for the one allow-list). Absent means unknown, and the API keeps the connect charge.
-   */
-  nothingCreated: z.literal(true).optional(),
 }));
 export type ConnectorLinkResponse = z.infer<typeof connectorLinkResponseSchema>;
 

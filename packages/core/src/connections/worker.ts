@@ -23,10 +23,10 @@ import {
   CONNECTION_RESULT_MAX_BYTES,
   normalizeAccountLabel,
   type ConnectorCompleteResponse,
-  type ConnectorLinkResponse,
   type ConnectorRunResponse,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import type { ConnectorLinkResult } from "./port.js";
 import { catalogTool, catalogToolkit, OVERRIDE_KEYS, type CatalogTool } from "./catalog.js";
 import {
   completeDecision,
@@ -87,6 +87,8 @@ export type ConnectionsWorkerReport =
   | { readonly kind: "pass_stopped"; readonly why: "time" | "calls" | "budget" }
   | { readonly kind: "cooldown"; readonly env: string }
   | { readonly kind: "key_refused"; readonly env: string; readonly status: number }
+  /** C-4: Composio failed a link call. The class and its request ID (Composio's own identifier), never provider text. */
+  | { readonly kind: "link_refused"; readonly env: string; readonly status: number; readonly errorClass: "provider_refused" | "transient" | "unknown"; readonly requestId?: string }
   /** A database call the worker cannot recover from; the SQLSTATE only (`unknown` when the error has none), never the message. */
   | { readonly kind: "database_error"; readonly op: "budget"; readonly code: string };
 
@@ -282,22 +284,17 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   const retryAfterOf = (error: unknown) => (error instanceof BudgetRefused ? error.retryAfterSeconds : COOLDOWN_SECONDS);
 
   /**
-   * C-4: the only link failures that prove the provider created no connected account, so the API may give the
-   * connect charge back. An explicit allow-list; everything else (a timeout, a network error, a 5xx, a 3xx, an
-   * answer we could not read, a status outside the list, any error that names an account, any non-Composio
-   * error) keeps the charge, because the provider may have made the link and a refund would let a tenant make
-   * links without limit.
-   *   - Our own budget said no before the call left (BudgetRefused).
-   *   - Composio answered with one of these HTTP statuses, which refuse the request before it is processed: 400
-   *     and 422 (the request is invalid), 401 and 403 (our key or project is refused), 402 and 429 (a limit),
-   *     404 (the auth config is unknown). 408, 409, 410, 425 and every 5xx are left out: they can follow work
-   *     the provider already did or started.
+   * C-4: the one link failure that proves the provider created no connected account, so the API may give the
+   * connect charge back (still capped per tenant, see `connectRefund`). Composio's own error envelope must
+   * classify the answer `provider_refused` (composio.ts `classifyHttpError`: a 400, 404 or 422 with its
+   * documented envelope, a request id and no named account), and the error must come from this operation's
+   * single, un-retried `composio.link` call, so it is attributable to this request. Everything else keeps the
+   * charge: 401/403 and a 404 from our own config are systemic, not this tenant's (the `link_refused` report
+   * lets an operator see a run of them), and a timeout, network error, 429, 5xx, 409, an unreadable or foreign
+   * body, or an error that names an account may follow work the provider did.
    */
-  const REFUSED_BEFORE_CREATE = new Set([400, 401, 402, 403, 404, 422, 429]);
   const confirmedNothingCreated = (error: unknown): boolean =>
-    error instanceof BudgetRefused
-    || (error instanceof ComposioError && error.kind !== "unavailable" && error.detail === undefined && error.accountId === undefined
-      && error.status !== undefined && REFUSED_BEFORE_CREATE.has(error.status));
+    error instanceof ComposioError && error.errorClass === "provider_refused" && error.accountId === undefined && error.namedAccountId === undefined;
 
   const accountMatches = (account: ComposioAccount | null, expected: { id: string; tenantId: string; toolkit: string; authConfigId: string }): account is ComposioAccount =>
     account !== null && account.id === expected.id && account.userId === userIdOf(expected.tenantId)
@@ -405,13 +402,12 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     recordAttemptRevoke(attempt), pass, signal);
 
   // ---- link --------------------------------------------------------------------------------
-  async function link(input: { tenantId: string; toolkit: string; attemptId: string; connectionId: string; shopDomain: string; createdBy: string; browserHash: string }, signal?: AbortSignal): Promise<ConnectorLinkResponse> {
+  async function link(input: { tenantId: string; toolkit: string; attemptId: string; connectionId: string; shopDomain: string; createdBy: string; browserHash: string }, signal?: AbortSignal): Promise<ConnectorLinkResult> {
     const toolkit = catalogToolkit(input.toolkit);
     const authConfigId = config.authConfigIds[input.toolkit];
-    // C-4: these three refusals come from our own checks before any provider call: nothing can exist.
-    if (!toolkit || !authConfigId) return { outcome: "refused", code: "not_found", nothingCreated: true };
+    if (!toolkit || !authConfigId) return { outcome: "refused", code: "not_found" };
     // C-18: with the native tier on, Shopify is installed from the App Store; no typed shop domain starts a Composio link (S1 2.3.1).
-    if (input.toolkit === "shopify" && deps.native) return { outcome: "refused", code: "not_found", nothingCreated: true };
+    if (input.toolkit === "shopify" && deps.native) return { outcome: "refused", code: "not_found" };
     const started = now();
     const expiresAt = new Date(started.getTime() + config.attemptLifetimeMs);
     const row = (accountId: string, status: "started" | "cancelling") => service((tx) => tx.query(
@@ -447,6 +443,9 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     } catch (error) {
       if (error instanceof ComposioError && error.accountId !== undefined) await compensate(error.accountId);
       const nothingCreated = confirmedNothingCreated(error) ? { nothingCreated: true as const } : {};
+      if (error instanceof ComposioError && error.kind !== "rate_limited") {
+        report({ kind: "link_refused", env: config.env, status: error.status ?? 0, errorClass: error.errorClass, ...(error.requestId === undefined ? {} : { requestId: error.requestId }) });
+      }
       return isRateLimit(error)
         ? { outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: retryAfterOf(error), ...nothingCreated }
         : { outcome: "refused", code: "provider_unavailable", ...nothingCreated };

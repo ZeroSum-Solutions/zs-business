@@ -79,7 +79,7 @@ describe("native tier link (C-4, C-18)", () => {
     });
     const linked = await nativeWorker.link({ tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(),
       shopDomain: "testshop.myshopify.com", createdBy: a.memberId, browserHash: "b".repeat(43) });
-    expect(linked).toEqual({ outcome: "refused", code: "not_found", nothingCreated: true });
+    expect(linked).toEqual({ outcome: "refused", code: "not_found" });
     expect(fake.calls).toHaveLength(0);
     expect((await database.pool.query("SELECT 1 FROM connection_attempts")).rowCount).toBe(0);
     // Without the native tier the same call links.
@@ -107,34 +107,50 @@ describe("link (C-3, C-5)", () => {
 
   it("refuses an unknown toolkit and a missing auth config without calling Composio", async () => {
     const out = await worker.link(linkInput({ toolkit: "nope", shopDomain: "x.myshopify.com" }));
-    expect(out).toEqual({ outcome: "refused", code: "not_found", nothingCreated: true });
+    expect(out).toEqual({ outcome: "refused", code: "not_found" });
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("C-4: marks a link refusal nothingCreated only for the explicit pre-creation statuses", async () => {
-    for (const status of [400, 401, 402, 403, 404, 422, 429]) {
+  it("C-4: marks a link refusal nothingCreated only for Composio's own refusal envelope with no account named", async () => {
+    const envelope = (status: number, extra: Record<string, unknown> = {}) => ({ error: { message: "x", status, request_id: "req_1", ...extra } });
+    const link = async (status: number, json: unknown) => {
       fake.clearOverrides();
-      fake.override(/POST \/connected_accounts\/link/, { status, json: {}, times: 1 });
-      expect(await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() })), String(status)).toMatchObject({ outcome: "refused", nothingCreated: true });
-      clock.ms += 120_000; // a 429 or 402 opens the organization cooldown
+      fake.override(/POST \/connected_accounts\/link/, { status, json, times: 1 });
+      return worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }));
+    };
+    for (const status of [400, 404, 422]) {
+      expect(await link(status, envelope(status)), String(status)).toEqual({ outcome: "refused", code: "provider_unavailable", nothingCreated: true });
     }
-    for (const status of [408, 409, 410, 425, 500, 502, 503, 504]) {
-      fake.clearOverrides();
-      fake.override(/POST \/connected_accounts\/link/, { status, json: {}, times: 1 });
-      const out = await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }));
-      expect(out, String(status)).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    // Not a provider_refused answer: unreadable or foreign bodies, our key, a conflict, 5xx, a limit, a named account.
+    for (const [status, json] of [
+      [400, {}], [422, "not an envelope"], [400, envelope(422)], [400, { error: { message: "x", status: 400 } }],
+      [401, envelope(401)], [403, envelope(403)], [409, envelope(409)], [410, envelope(410)], [408, envelope(408)],
+      [500, envelope(500)], [503, envelope(503)], [400, envelope(400, { connected_account_id: "ca_x" })],
+    ] as const) {
+      expect(await link(status, json), `${status} ${JSON.stringify(json)}`).toEqual({ outcome: "refused", code: "provider_unavailable" });
+      clock.ms += 120_000;
     }
+    // A 429 or 402 is a limit, never a refusal to refund (and opens the organization cooldown).
+    expect(await link(429, envelope(429))).toEqual({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 60 });
+    clock.ms += 120_000;
+    expect(await link(402, envelope(402))).toEqual({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 60 });
+    clock.ms += 120_000;
     // A 200 we cannot use, and a timeout: the account may exist.
-    fake.clearOverrides();
-    fake.override(/POST \/connected_accounts\/link/, { status: 200, json: { connected_account_id: "ca_x" }, times: 1 });
-    expect(await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    expect(await link(200, { connected_account_id: "ca_x" })).toEqual({ outcome: "refused", code: "provider_unavailable" });
     fake.override(/POST \/connected_accounts\/link/, { hang: true, times: 1 });
     expect(await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
   });
 
+  it("C-4: reports a failed link as a class and a request id, never provider text", async () => {
+    fake.override(/POST \/connected_accounts\/link/, { status: 404, json: { error: { message: "SECRET words", status: 404, request_id: "req_77" } }, times: 1 });
+    await worker.link(linkInput());
+    expect(reports).toContainEqual({ kind: "link_refused", env: ENV, status: 404, errorClass: "provider_refused", requestId: "req_77" });
+    expect(JSON.stringify(reports)).not.toContain("SECRET");
+  });
+
   it("opens the cooldown on a Composio 429 and says when to retry, then refuses without a call", async () => {
     fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
-    expect(await worker.link(linkInput())).toEqual({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 60, nothingCreated: true });
+    expect(await worker.link(linkInput())).toEqual({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 60 });
     const calls = fake.calls.length;
     const second = await worker.link(linkInput());
     expect(second).toMatchObject({ outcome: "refused", code: "provider_rate_limited" });

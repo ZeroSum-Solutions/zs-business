@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   CONNECTION_CONNECT_ACTION,
+  connectorLinkResponseSchema,
   Conflict,
   NotFound,
   TenantDenied,
@@ -26,6 +27,7 @@ import {
   createLocalConnectorPort,
   derivedId,
   handleConnectorOperation,
+  NOTHING_CREATED_HEADER,
   mapError,
   memberDispatch,
   signConnectAttempt,
@@ -778,7 +780,7 @@ describe("the signed connector port (C-3, C-10)", () => {
     if (!verified.ok) return new Response("{}", { status: 401 });
     const operation = url.pathname.split("/").pop()!;
     const out = await handleConnectorOperation(worker, operation as never, String(init?.body ?? ""), init?.signal ?? undefined);
-    return new Response(JSON.stringify(out.body), { status: out.status, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(out.body), { status: out.status, headers: { "content-type": "application/json", ...out.headers } });
   };
   const http = (doFetch: typeof fetch, extra: { timeoutMs?: number; secret?: string } = {}) => createHttpConnectorPort({
     workerUrl: "https://worker.example.test", env: ENV, secrets: { current: extra.secret ?? INTERNAL }, clock, fetch: doFetch, ...(extra.timeoutMs ? { timeoutMs: extra.timeoutMs } : {}),
@@ -788,6 +790,28 @@ describe("the signed connector port (C-3, C-10)", () => {
     const attemptId = randomUUID();
     const out = await http(route(() => clock.now())).link({ tenantId: a.tenantId, toolkit: "shopify", attemptId, connectionId: randomUUID(), shopDomain: SHOP, createdBy: a.owner.memberId, browserHash: BINDING });
     expect(out).toMatchObject({ outcome: "linked", authConfigId: "ac_shopify" });
+  });
+
+  it("C-4: `nothingCreated` rides in a response header, so the body stays the strict contract an older API parses", async () => {
+    const refusal = { error: { message: "x", status: 422, request_id: "req_1" } };
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: refusal, times: 1 });
+    const input = { tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: SHOP, createdBy: a.owner.memberId, browserHash: BINDING };
+    const raw = await handleConnectorOperation(worker, "link", JSON.stringify(input));
+    expect(raw.body).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    expect(raw.headers).toEqual({ [NOTHING_CREATED_HEADER]: "1" });
+    expect(connectorLinkResponseSchema.safeParse(raw.body).success).toBe(true);
+    // The new API reads the header.
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: refusal, times: 1 });
+    const via = await http(route(() => clock.now())).link({ ...input, attemptId: randomUUID(), connectionId: randomUUID() });
+    expect(via).toEqual({ outcome: "refused", code: "provider_unavailable", nothingCreated: true });
+    // An older worker sends no header, and an unmarked refusal stays unmarked.
+    fake.override(/POST \/connected_accounts\/link/, { status: 503, json: {}, times: 1 });
+    expect(await http(route(() => clock.now())).link({ ...input, attemptId: randomUUID(), connectionId: randomUUID() })).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    const older = http(async () => new Response(JSON.stringify({ outcome: "refused", code: "provider_unavailable" }), { status: 200 }));
+    expect(await older.link(input)).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    // A header on a linked answer means nothing.
+    const odd = http(async () => new Response(JSON.stringify({ outcome: "refused", code: "not_found" }), { status: 200, headers: { [NOTHING_CREATED_HEADER]: "yes" } }));
+    expect(await odd.link(input)).toEqual({ outcome: "refused", code: "not_found" });
   });
 
   it("the route refuses a wrong secret, a stale clock and a replayed request", async () => {
@@ -833,14 +857,23 @@ describe("attempt token", () => {
   });
 });
 
-// C-4: the connect charge is given back only where the provider is known to have created nothing.
+// C-4: the connect charge is given back only where Composio itself refused the request (provider_refused).
 describe("connect quota refund (C-4)", () => {
   /** A limiter that issues receipts and records what is refunded; `refundFails` makes the refund throw. */
   let issued: string[];
   let refunded: string[];
+  let reported: { outcome: string }[];
   let refundFails = false;
+  let allowanceFull = false;
+  let refundSignal: AbortSignal | undefined;
   const receiptLimiter: ConnectionLimiter = {
-    ...limiter,
+    async take(charges, options) {
+      if (charges[0]!.key.startsWith("conn-connect-refund:")) {
+        taken.push("conn-connect-refund");
+        return allowanceFull ? { ok: false, retryAfterSeconds: 3000 } : { ok: true };
+      }
+      return limiter.take(charges, options);
+    },
     async takeWithReceipt(charges) {
       const taken = await limiter.take(charges);
       if (!taken.ok) return taken;
@@ -848,49 +881,72 @@ describe("connect quota refund (C-4)", () => {
       issued.push(id);
       return { ok: true, receipt: { id } };
     },
-    async refund(receipt) {
+    async refund(receipt, options) {
+      refundSignal = options?.signal;
       if (refundFails) throw new Error("store down");
       refunded.push(receipt.id);
       return 1;
     },
   };
-  beforeEach(() => { issued = []; refunded = []; refundFails = false; });
-  const start = (connector: ConnectorPort = port, who = a) =>
-    createConnectionsSession({ ...deps(), connections: { connector, stateSecrets: { current: STATE }, limiter: receiptLimiter } }, { tenantId: who.tenantId, actorId: who.owner.userId })
-      .start("shopify", { shopDomain: SHOP, browserBinding: BINDING }).catch((e: unknown) => e);
+  beforeEach(() => { issued = []; refunded = []; reported = []; refundFails = false; allowanceFull = false; refundSignal = undefined; });
+  const start = (connector: ConnectorPort = port, who = a, signal?: AbortSignal) =>
+    createConnectionsSession({ ...deps(), connections: { connector, stateSecrets: { current: STATE }, limiter: receiptLimiter, report: (event) => reported.push(event) } }, { tenantId: who.tenantId, actorId: who.owner.userId })
+      .start("shopify", { shopDomain: SHOP, browserBinding: BINDING }, signal).catch((e: unknown) => e);
   const stub = (answer: () => Promise<Awaited<ReturnType<ConnectorPort["link"]>>>): ConnectorPort => ({ ...port, link: answer });
+  const envelope = (status: number, extra: Record<string, unknown> = {}) => ({ error: { message: "x", status, request_id: "req_1", ...extra } });
 
-  // The allow-list: explicit provider answers that refuse the request before it is processed.
-  it.each([400, 401, 402, 403, 404, 422, 429])("a Composio %i is an explicit refusal: the charge is given back, once", async (status) => {
-    fake.override(/POST \/connected_accounts\/link/, { status, json: {}, times: 1 });
-    const error = await start();
-    expect(error).toBeInstanceOf(Error);
+  it.each([400, 404, 422])("a Composio %i refusal envelope gives the charge back, once", async (status) => {
+    fake.override(/POST \/connected_accounts\/link/, { status, json: envelope(status), times: 1 });
+    expect(await start()).toBeInstanceOf(Error);
     expect(issued).toEqual(["receipt-0"]);
     expect(refunded).toEqual(["receipt-0"]);
+    expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "refunded" }]);
     expect((await database.pool.query("SELECT 1 FROM connection_attempts")).rowCount).toBe(0);
   });
 
-  it("the organization's own budget refusing before any call is refunded, and so is the 429 that opened it", async () => {
-    fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
-    expect(await start()).toMatchObject({ kind: "rate_limited" });
-    const callsBefore = fake.calls.length;
-    // The 429 opened a cooldown on the organization's budget: this link never leaves the worker.
-    expect(await start()).toMatchObject({ kind: "rate_limited" });
-    expect(fake.calls.length).toBe(callsBefore);
-    expect(refunded).toEqual(["receipt-0", "receipt-1"]);
+  it("the refund runs under the request's signal and its own short budget", async () => {
+    const controller = new AbortController();
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: envelope(422), times: 1 });
+    await start(port, a, controller.signal);
+    expect(refundSignal).toBeDefined();
+    expect(refundSignal!.aborted).toBe(false);
+    controller.abort();
+    expect(refundSignal!.aborted).toBe(true);
   });
 
-  it("a worker refusal from its own checks before any provider call (nothingCreated) is refunded", async () => {
-    const error = await start(stub(async () => ({ outcome: "refused", code: "not_found", nothingCreated: true })));
-    expect(error).toBeInstanceOf(NotFound);
-    expect(refunded).toEqual(["receipt-0"]);
+  it("the per-tenant refund allowance caps refunds: a full allowance keeps the charge and says so", async () => {
+    allowanceFull = true;
+    fake.override(/POST \/connected_accounts\/link/, { status: 400, json: envelope(400), times: 1 });
+    expect(await start()).toBeInstanceOf(Error);
+    expect(taken).toContain("conn-connect-refund");
+    expect(refunded).toEqual([]);
+    expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "capped" }]);
   });
 
-  // Everything else may have left a provider account behind: the charge stands.
-  it.each([408, 409, 410, 425, 500, 502, 503, 504])("a Composio %i keeps the charge", async (status) => {
-    fake.override(/POST \/connected_accounts\/link/, { status, json: {}, times: 1 });
+  // Everything else may have left a provider account behind, or is not this request's doing: the charge stands.
+  it.each([401, 403, 409, 410, 408, 425, 429, 500, 502, 503, 504])("a Composio %i keeps the charge", async (status) => {
+    fake.override(/POST \/connected_accounts\/link/, { status, json: envelope(status), times: 1 });
     expect(await start()).toBeInstanceOf(Error);
     expect(issued).toHaveLength(1);
+    expect(refunded).toEqual([]);
+    expect(taken).not.toContain("conn-connect-refund");
+    expect(reported).toEqual([]);
+  });
+
+  it("a refusal with an unreadable, empty or foreign body, or one that names an account, keeps the charge", async () => {
+    for (const json of [{}, "text", { error: "plain" }, envelope(422), envelope(400, { connected_account_id: "ca_made" })]) {
+      fake.override(/POST \/connected_accounts\/link/, { status: 400, json, times: 1 });
+      expect(await start()).toBeInstanceOf(Error);
+    }
+    expect(refunded).toEqual([]);
+  });
+
+  it("the organization's own budget refusing keeps the charge", async () => {
+    fake.override(/POST \/connected_accounts\/link/, { status: 429, json: envelope(429), times: 1 });
+    expect(await start()).toMatchObject({ kind: "rate_limited" });
+    const callsBefore = fake.calls.length;
+    expect(await start()).toMatchObject({ kind: "rate_limited" });
+    expect(fake.calls.length).toBe(callsBefore);
     expect(refunded).toEqual([]);
   });
 
@@ -912,7 +968,6 @@ describe("connect quota refund (C-4)", () => {
     expect(await start(stub(async () => { throw new ConnectorUnavailable("timeout"); }))).toMatchObject({ kind: "unavailable" });
     expect(await start(stub(async () => { throw new ConnectorUnavailable("network"); }))).toMatchObject({ kind: "unavailable" });
     expect(await start(stub(async () => { throw new Error("boom"); }))).toMatchObject({ message: "boom" });
-    // `nothingCreated` is absent: the worker could not tell, so the API cannot assume.
     expect(await start(stub(async () => ({ outcome: "refused", code: "provider_unavailable" })))).toMatchObject({ kind: "unavailable" });
     expect(await start(stub(async () => ({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 5 })))).toMatchObject({ kind: "rate_limited" });
     expect(await start(stub(async () => ({ outcome: "refused", code: "not_found" })))).toBeInstanceOf(NotFound);
@@ -920,10 +975,14 @@ describe("connect quota refund (C-4)", () => {
     expect(refunded).toEqual([]);
   });
 
+  it("a marked refusal from the worker refunds; the same refusal unmarked does not", async () => {
+    expect(await start(stub(async () => ({ outcome: "refused", code: "provider_unavailable", nothingCreated: true })))).toMatchObject({ kind: "unavailable" });
+    expect(refunded).toEqual(["receipt-0"]);
+  });
+
   it("a link that succeeds, or that fails after the provider returned an account, keeps the charge", async () => {
     expect(await start()).toMatchObject({ authorizeUrl: expect.stringMatching(/^https:\/\/connect\.composio\.test\//) });
     expect(refunded).toEqual([]);
-    // The provider made the account; our attempt row could not be written: the worker removes it, the charge stands.
     await database.pool.query("ALTER TABLE connection_attempts ADD CONSTRAINT refund_test_block CHECK (false) NOT VALID");
     try {
       expect(await start()).toMatchObject({ kind: "unavailable" });
@@ -934,17 +993,18 @@ describe("connect quota refund (C-4)", () => {
     expect(refunded).toEqual([]);
   });
 
-  it("a refund that fails never changes the answer", async () => {
+  it("a refund that fails never changes the answer, keeps the charge, and is reported", async () => {
     refundFails = true;
-    fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
-    expect(await start()).toMatchObject({ kind: "rate_limited", retryAfterSeconds: 60 });
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: envelope(422), times: 1 });
+    expect(await start()).toMatchObject({ kind: "unavailable" });
     expect(refunded).toEqual([]);
+    expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "failed" }]);
   });
 
   it("a limiter without receipts charges and never refunds", async () => {
-    fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: envelope(422), times: 1 });
     const error = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING }).catch((e: unknown) => e);
-    expect(error).toMatchObject({ kind: "rate_limited" });
+    expect(error).toMatchObject({ kind: "unavailable" });
     expect(taken).toEqual(["conn-connect"]);
   });
 

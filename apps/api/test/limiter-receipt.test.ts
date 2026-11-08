@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createScopedDatabase, type ScopedDatabase } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { createMemoryRateLimiter, type ChargeReceipt, type RateLimit, type RateLimiter } from "../src/public/limiter.js";
+import { createMemoryRateLimiter, MAX_MEMORY_RECEIPTS, type ChargeReceipt, type RateLimit, type RateLimiter } from "../src/public/limiter.js";
 import { createPostgresRateLimiter } from "../src/public/postgres-limiter.js";
 
 let database: TestDatabase;
@@ -121,6 +121,37 @@ describe.each([
     const { limiter } = clocked(create);
     expect(await limiter.refund!({ id: randomUUID() })).toBe(0);
     expect(await limiter.refund!({ id: "not-a-receipt" })).toBe(0);
+  });
+});
+
+describe("memory limiter receipts are bounded", () => {
+  it("holds at most MAX_MEMORY_RECEIPTS: the oldest is dropped, and that charge simply cannot be refunded", async () => {
+    const { limiter } = clocked((clock) => createMemoryRateLimiter(clock));
+    const first = await receiptOf(limiter, [{ key: "k:first", rule: rule(1_000_000) }]);
+    for (let i = 0; i < MAX_MEMORY_RECEIPTS; i++) await receiptOf(limiter, [{ key: `k:${i}`, rule: rule(10) }]);
+    expect(await limiter.refund!(first)).toBe(0);
+    const last = await receiptOf(limiter, [{ key: "k:last", rule: rule(10) }]);
+    expect(await limiter.refund!(last)).toBe(1);
+  });
+
+  it("sweeps a receipt whose window ended, and a late refund changes nothing", async () => {
+    const { limiter, set } = clocked((clock) => createMemoryRateLimiter(clock));
+    const old = await receiptOf(limiter, [{ key: "k:old", rule: rule(5, 1_000) }]);
+    set(2_000);
+    await receiptOf(limiter, [{ key: "k:new", rule: rule(5) }]);
+    expect(await limiter.refund!(old)).toBe(0);
+  });
+
+  it("a refund to zero holds no window, as in the shared store: the next charge opens a fresh one", async () => {
+    const { limiter, set } = clocked((clock) => createMemoryRateLimiter(clock));
+    const key = "k:zero";
+    const receipt = await receiptOf(limiter, [{ key, rule: rule(1, 10_000) }]);
+    set(6_000);
+    expect(await limiter.refund!(receipt)).toBe(1);
+    expect((await limiter.take([{ key, rule: rule(1, 10_000) }])).ok).toBe(true);
+    // The new window started at 6 s, so it is still full at 12 s (the old one would have ended at 10 s).
+    set(12_000);
+    expect((await limiter.take([{ key, rule: rule(1, 10_000) }])).ok).toBe(false);
   });
 });
 

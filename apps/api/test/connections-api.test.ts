@@ -159,26 +159,43 @@ describe("off without the config (C-3, C-15)", () => {
 });
 
 describe("the connect quota against the shared limiter (C-4)", () => {
+  const quota: { outcome: string }[] = [];
+  beforeEach(() => { quota.length = 0; });
   const countOfConnect = async () => Number((await h.database.pool.query<{ count: number }>(
     "SELECT coalesce(sum(count),0)::int AS count FROM rate_limit_buckets WHERE key = sha256(convert_to($1, 'UTF8'))", [`conn-connect:${h.a.tenantId}`])).rows[0]!.count);
   const buildShared = () => createApp({
     verifier: createHs256Verifier(SECRET, { clock }), sessionCheck: createLocalStubSessionCheck(h.database.db, clock), clock,
     db: h.database.db, generateId: randomUUID, config: { allowedOrigins: [ORIGIN] }, activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } },
-    connections: { connector: port, stateSecrets: { current: STATE }, returnUrl: RETURN_URL, limiter: createPostgresRateLimiter(h.database.db, clock), report: (event) => reports.push(event) },
+    connections: { connector: port, stateSecrets: { current: STATE }, returnUrl: RETURN_URL, limiter: createPostgresRateLimiter(h.database.db, clock), report: (event) => reports.push(event), reportQuota: (event) => quota.push(event) },
   });
 
-  it("a link the provider refused gives its unit back; a link that may exist does not", async () => {
+  it("a link Composio refused gives its unit back, up to the hourly refund allowance; a link that may exist does not", async () => {
     const shared = buildShared();
-    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: {}, times: 1 });
+    const refusal = { error: { message: "x", status: 422, request_id: "req_9" } };
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: refusal, times: 1 });
     expect((await start(shared, h.a.token)).response.status).toBeGreaterThanOrEqual(400);
+    expect(quota).toEqual([{ kind: "connect_refund", tenantId: h.a.tenantId, outcome: "refunded" }]);
     expect(await countOfConnect()).toBe(0);
     // A 503 from the provider: the account may exist, so the unit stays spent.
     fake.override(/POST \/connected_accounts\/link/, { status: 503, json: {}, times: 1 });
     expect((await start(shared, h.a.token)).response.status).toBe(503);
     expect(await countOfConnect()).toBe(1);
+    // A refusal that is not Composio's envelope keeps the unit too.
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: {}, times: 1 });
+    await start(shared, h.a.token);
+    expect(await countOfConnect()).toBe(2);
+    // The refund allowance is 3 an hour: two more refusals are refunded, the next one is not.
+    for (const expected of [2, 2]) {
+      fake.override(/POST \/connected_accounts\/link/, { status: 422, json: refusal, times: 1 });
+      await start(shared, h.a.token);
+      expect(await countOfConnect()).toBe(expected);
+    }
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: refusal, times: 1 });
+    await start(shared, h.a.token);
+    expect(await countOfConnect()).toBe(3);
     // A link that worked is a spent unit too.
     expect((await start(shared, h.a.token)).response.status).toBe(200);
-    expect(await countOfConnect()).toBe(2);
+    expect(await countOfConnect()).toBe(4);
   });
 });
 

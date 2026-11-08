@@ -2,21 +2,25 @@
 -- receipt naming exactly what it charged (bucket key and window start); the refund consumes the
 -- receipt, so a charge is refunded at most once, in the window it was taken in, and never below zero.
 -- rate_limit_take is not touched: sign-in admit and the public routes behave as before.
+-- Idempotent and short: it creates one new table and two new functions, so no statement waits on a
+-- lock the running API holds (the hosted runner applies all pending files in one transaction with
+-- lock_timeout 5s and statement_timeout 15s). A re-run changes nothing.
 -- Same ownership and access rule as rate_limit_take (20261020400000): the functions run as
 -- zs_rate_limiter, and only the API's runtime login may call them.
 
 -- One row per issued, unconsumed receipt. charges is [{ key: 64 hex, windowStart: ISO instant }].
 -- expires_at is the end of the latest window the receipt touches: past it a refund can change
 -- nothing, so later takes sweep the row.
-CREATE TABLE public.rate_limit_receipts (
+CREATE TABLE IF NOT EXISTS public.rate_limit_receipts (
   id uuid PRIMARY KEY,
   charges jsonb NOT NULL CONSTRAINT rate_limit_receipts_charges CHECK (jsonb_typeof(charges) = 'array'),
   expires_at timestamptz NOT NULL
 );
-CREATE INDEX rate_limit_receipts_expires ON public.rate_limit_receipts (expires_at);
+CREATE INDEX IF NOT EXISTS rate_limit_receipts_expires ON public.rate_limit_receipts (expires_at);
 
 ALTER TABLE public.rate_limit_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.rate_limit_receipts FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS rate_limiter ON public.rate_limit_receipts;
 CREATE POLICY rate_limiter ON public.rate_limit_receipts TO zs_rate_limiter USING (true) WITH CHECK (true);
 REVOKE ALL ON public.rate_limit_receipts FROM PUBLIC, authenticated, service_role;
 DO $$ BEGIN
@@ -33,7 +37,7 @@ GRANT SELECT, DELETE ON public.rate_limit_receipts TO service_role;
 -- A refusal is { "retryMs": n, "receipt": null } and charged nothing.
 -- It calls rate_limit_take in the same transaction. That call leaves every bucket it charged
 -- row-locked, so the windows read afterwards are the ones this charge joined or opened.
-CREATE FUNCTION public.rate_limit_receipt_take(p_now timestamptz, p_charges jsonb) RETURNS jsonb
+CREATE OR REPLACE FUNCTION public.rate_limit_receipt_take(p_now timestamptz, p_charges jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   retry_ms bigint;
@@ -70,7 +74,7 @@ END $$;
 --     already refunded, or swept after its windows ended).
 --   - Never below zero: only a count above 0 is decremented.
 -- Buckets are locked in key order, as in rate_limit_take, so the two cannot deadlock.
-CREATE FUNCTION public.rate_limit_refund(p_now timestamptz, p_receipt uuid) RETURNS integer
+CREATE OR REPLACE FUNCTION public.rate_limit_refund(p_now timestamptz, p_receipt uuid) RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   windows jsonb;

@@ -38,8 +38,17 @@ export type ConnectorDisconnectRequest = z.infer<typeof connectorDisconnectReque
 export type ConnectorCancelResponse = z.infer<typeof connectorCancelResponseSchema>;
 export type ConnectorDisconnectResponse = z.infer<typeof connectorDisconnectResponseSchema>;
 
+/**
+ * C-4: what `link` hands its caller. `nothingCreated` is not part of the wire body (the strict contract is
+ * unchanged, so API and worker deploy in either order): the worker route sends it in the
+ * `NOTHING_CREATED_HEADER` response header, an older API ignores that header, and an older worker never sends it.
+ * Absent means unknown, and the caller keeps the connect charge.
+ */
+export type ConnectorLinkResult = ConnectorLinkResponse & { readonly nothingCreated?: true };
+export const NOTHING_CREATED_HEADER = "x-zs-link-nothing-created";
+
 export interface ConnectorPort {
-  link(request: ConnectorLinkRequest, signal?: AbortSignal): Promise<ConnectorLinkResponse>;
+  link(request: ConnectorLinkRequest, signal?: AbortSignal): Promise<ConnectorLinkResult>;
   complete(request: ConnectorCompleteRequest, signal?: AbortSignal): Promise<ConnectorCompleteResponse>;
   cancel(request: ConnectorCancelRequest, signal?: AbortSignal): Promise<ConnectorCancelResponse>;
   run(request: ConnectorRunRequest, signal?: AbortSignal): Promise<ConnectorRunResponse>;
@@ -96,7 +105,7 @@ export function createHttpConnectorPort(config: HttpConnectorPortConfig): Connec
   const origin = new URL(config.workerUrl);
   const doFetch = config.fetch ?? fetch;
   const timeoutMs = config.timeoutMs ?? CONNECTOR_TIMEOUT_MS;
-  async function call<Out>(operation: ConnectorOperation, request: unknown, schema: z.ZodType<Out>, signal?: AbortSignal): Promise<Out> {
+  async function call<Out>(operation: ConnectorOperation, request: unknown, schema: z.ZodType<Out>, signal?: AbortSignal, onHeaders?: (headers: Headers, out: Out) => Out): Promise<Out> {
     const path = `${CONNECTOR_PATH_PREFIX}${operation}`;
     const body = JSON.stringify(request);
     const headers = signConnectorRequest({ secret: config.secrets.current, env: config.env, host: origin.host, path, body, now: config.clock.now() });
@@ -123,14 +132,15 @@ export function createHttpConnectorPort(config: HttpConnectorPortConfig): Connec
       try { json = JSON.parse(text); } catch { throw new ConnectorUnavailable("malformed"); }
       const parsed = schema.safeParse(json);
       if (!parsed.success) throw new ConnectorUnavailable("malformed");
-      return parsed.data;
+      return onHeaders ? onHeaders(response.headers, parsed.data) : parsed.data;
     } catch (error) {
       if (error instanceof ConnectorUnavailable) throw error;
       throw new ConnectorUnavailable(timeout.aborted ? "timeout" : "network");
     }
   }
   return {
-    link: (request, signal) => call("link", request, connectorLinkResponseSchema, signal),
+    link: (request, signal) => call<ConnectorLinkResult>("link", request, connectorLinkResponseSchema, signal,
+      (headers, out) => (out.outcome === "refused" && headers.get(NOTHING_CREATED_HEADER) === "1" ? { ...out, nothingCreated: true as const } : out)),
     complete: (request, signal) => call("complete", request, connectorCompleteResponseSchema, signal),
     cancel: (request, signal) => call("cancel", request, connectorCancelResponseSchema, signal),
     run: (request, signal) => call("run", request, connectorRunResponseSchema, signal),
@@ -162,14 +172,20 @@ export async function handleConnectorOperation(
   operation: ConnectorOperation,
   rawBody: string,
   signal?: AbortSignal,
-): Promise<{ readonly status: 200 | 400 | 502; readonly body: unknown }> {
+): Promise<{ readonly status: 200 | 400 | 502; readonly body: unknown; readonly headers?: Readonly<Record<string, string>> }> {
   let json: unknown;
   try { json = JSON.parse(rawBody); } catch { return { status: 400, body: { error: "invalid_body" } }; }
   const port = createLocalConnectorPort(worker);
   const bad = { status: 400 as const, body: { error: "invalid_body" } };
   try {
     switch (operation) {
-      case "link": { const r = connectorLinkRequestSchema.safeParse(json); return r.success ? { status: 200, body: await port.link(r.data, signal) } : bad; }
+      case "link": {
+        const r = connectorLinkRequestSchema.safeParse(json);
+        if (!r.success) return bad;
+        // C-4: the body stays the strict contract; the "nothing was created" fact rides in a header.
+        const { nothingCreated, ...body } = await port.link(r.data, signal);
+        return { status: 200, body, ...(nothingCreated === true ? { headers: { [NOTHING_CREATED_HEADER]: "1" } } : {}) };
+      }
       case "complete": { const r = connectorCompleteRequestSchema.safeParse(json); return r.success ? { status: 200, body: await port.complete(r.data, signal) } : bad; }
       case "cancel": { const r = connectorCancelRequestSchema.safeParse(json); return r.success ? { status: 200, body: await port.cancel(r.data, signal) } : bad; }
       case "run": { const r = connectorRunRequestSchema.safeParse(json); return r.success ? { status: 200, body: await port.run(r.data, signal) } : bad; }

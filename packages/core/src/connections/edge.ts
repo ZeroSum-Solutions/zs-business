@@ -38,7 +38,7 @@ import { memberDispatch, parseInput, type EdgeDependencies, type Principal } fro
 import { requireMember } from "../members/access.js";
 import { catalogTool, catalogToolkit, OVERRIDE_KEYS } from "./catalog.js";
 import { countTokensWithAccess, getConnection, listConnections, listLiveConnections } from "./handlers.js";
-import { callbackCharges, callbackStatusCharges, connectCharges, runCharges, type ConnectionLimiter, type ConnectionReceipt } from "./limits.js";
+import { callbackCharges, callbackStatusCharges, connectCharges, connectRefundCharges, runCharges, type ConnectionLimiter, type ConnectionReceipt } from "./limits.js";
 import { ComposioError } from "./composio.js";
 import { ConnectorUnavailable, type ConnectorPort } from "./port.js";
 import {
@@ -57,6 +57,8 @@ import {
 
 /** C-5: the worker call inside the callback has 7 of the request's 10 seconds. */
 export const CALLBACK_WORKER_BUDGET_MS = 7_000;
+/** C-4: a connect refund (two quick limiter calls) has this long, and never outlives the request's own deadline. */
+export const REFUND_BUDGET_MS = 1_500;
 
 function config(deps: EdgeDependencies) {
   const connections = deps.connections;
@@ -138,17 +140,25 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
       });
       const receipt = await chargeWithReceipt(connections.limiter, connectCharges(tenantId), signal);
       /**
-       * C-4: gives the connect charge back, but only where the worker says the provider created nothing
-       * (`nothingCreated`, set from an explicit allow-list in worker.ts). Never on a thrown error: a timeout,
-       * a transport failure or any other exception leaves the provider link possibly alive. A failed refund
-       * keeps the charge and never changes the answer.
+       * C-4: gives the connect charge back, but only where the worker says Composio itself refused the request
+       * and created nothing (`nothingCreated`: a `provider_refused` answer, see worker.ts). Fail closed: the
+       * refund needs the charge's receipt, a unit of the tenant's refund allowance (`connectRefund`, because a
+       * refusal still spent the shared org budget) and a refund that finishes inside the request's deadline. If
+       * any step fails or is refused the charge stands, and the outcome is reported, never swallowed.
        */
       const refundCharge = async (): Promise<void> => {
-        if (!receipt || !connections.limiter.refund) return;
+        const outcome = async (): Promise<"refunded" | "no_receipt" | "capped" | "nothing_to_give"> => {
+          if (!receipt || !connections.limiter.refund) return "no_receipt";
+          const options = { signal: withDeadline(signal, REFUND_BUDGET_MS) };
+          const allowance = await connections.limiter.take(connectRefundCharges(tenantId), options);
+          if (!allowance.ok) return "capped";
+          return (await connections.limiter.refund(receipt, options)) > 0 ? "refunded" : "nothing_to_give";
+        };
         try {
-          await connections.limiter.refund(receipt);
+          connections.report?.({ kind: "connect_refund", tenantId, outcome: await outcome() });
         } catch {
-          // The charge stands; its window ends within the hour.
+          // The charge stands. The window ends within the hour, and the report tells an operator.
+          try { connections.report?.({ kind: "connect_refund", tenantId, outcome: "failed" }); } catch { /* a reporter never breaks the request */ }
         }
       };
       const attemptId = deps.generateId().toLowerCase();

@@ -176,10 +176,19 @@ role for workers (all workers share one pattern today; Known limits).
   - Limits before the worker call: `conn-connect:<tenantId>` 10 per hour, in the shared
     store, all or nothing. The charge returns a receipt. The API gives the unit back (once, in
     the window it was taken in, never below zero) only when the worker marks a refused link
-    `nothingCreated`: its own checks before any provider call, its own budget refusal, or a
-    Composio 400, 401, 402, 403, 404, 422 or 429, which refuse the request before it is
-    processed. A timeout, network error, 5xx, 408, 409, 410, 425, an unreadable answer, or any
-    failure after the provider returned an account keeps the charge: the link may exist.
+    `nothingCreated`, which it does for one case: Composio answered the link call with its own
+    error envelope (a 400, 404 or 422 whose body has `error.message`, an integer `error.status`
+    equal to the HTTP status and `error.request_id`) and named no account (class
+    `provider_refused`, composio.ts). A 401, 403, 409, 410, 429, other 4xx, 5xx, timeout,
+    network error, unreadable or foreign body, or any failure after an account exists keeps the
+    charge. Our own checks and the org budget never refund. A refund also takes one unit of
+    `conn-connect-refund:<tenantId>` (3 an hour) first, because a refusal still spent the shared
+    org budget: a tenant makes at most 13 link attempts an hour however many refusals it
+    provokes. The refund runs inside the request deadline (1.5 s); a refused allowance, a failed
+    refund or a timeout leaves the charge in place and is reported (`connect_refund`: `capped` or
+    `failed`). `nothingCreated` is not in the wire body (the strict contract is unchanged): the
+    worker sets the response header `x-zs-link-nothing-created: 1`, so the API and the worker
+    deploy in either order (an older API ignores it, an older worker never sends it).
   - The API makes a random attempt ID and a random connection ID and asks the worker to
     `link`. The worker inserts `connection_attempts` (`tenant_id`, `id`, `connection_id`,
     `toolkit`, `composio_account_id`, `auth_config_id`, `created_by` (the member's
