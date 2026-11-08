@@ -938,6 +938,64 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   so a misconfigured allowlist never uninstalls anything; the E2E run proves a call from
   outside the allowlist fails with 403.
 
+- **C-29 Plan state and plan selection on the embedded page (added 2026-11-07; Shopify
+  requirement 1.2.2, Managed Pricing).** A merchant without an active subscription must reach
+  Shopify's plan selection page.
+  - `open` (C-21) adds `plan`, read by the worker from `tenant_plans` by `shopify_shop_id`
+    (what the billing runner stored, plans.md PL-18; no Shopify call, no `customer` object):
+    `{state:"active", name}` for status `active` or `past_due`, `{state:"trial", name}` for
+    `trialing`, else `{state:"none"}`. It is read in the same SQL statement as the link (one
+    snapshot, so a disconnect cannot land between the two reads) and is
+    `none` unless the shop has a live native connection (`active` or `reauthorize`): the hub
+    tracks a shop's plan only from the link on (plans.md PL-17, PL-18), so a plan chosen before
+    the hub exists is not seen, and a disconnected or uninstalled shop shows none. `plan` may be
+    missing (an older worker during a deploy); that reads as no plan. `name` is the PL-1
+    catalog name (Solo, Studio, Pro). The API route adds `planUrl`:
+    `https://admin.shopify.com/store/<store>/charges/<SHOPIFY_BILLING_APP_HANDLE>/pricing_plans`
+    (plans.md PL-15, PL-19), or null when the handle is unset. The handle is config, never code.
+  - A plan is chosen after the hub exists. A shop with no hub (link `none`) sees no plan block
+    at all: no plan, no **Choose a plan**, no confirming state, even after the welcome
+    redirect. Once the page has seen the shop without a hub, the welcome link is void for the
+    rest of that page (an `already_linked` answer to **Create my ZS Hub** included). The screen
+    shown right after **Create my ZS Hub** reads `open` again and then shows **Choose a plan**
+    next to the hub link; **Open ZS Hub** clicked meanwhile does not drop it. If that read fails
+    the block says so with **Try again** (or **Reload** for an expired session), and if it
+    finds the shop unlinked again the page shows the unlinked screen.
+  - For a linked shop the page shows the plan name (with "free trial" for a trial). With no plan it shows
+    **Choose a plan**, a link to `planUrl` with `target="_top"` so it leaves the admin iframe.
+    With a plan it shows a secondary **Change plan** link to the same URL. With `planUrl` null
+    (or not a `https://admin.shopify.com/store/` address) it shows no plan link.
+  - Welcome link: the relative path `/?plan=welcome` on all five Managed Pricing plans, so
+    Shopify opens the app at `/shopify/app?plan=welcome` and appends `plan_handle`, `shop`,
+    `host` and `embedded`. The page reads `plan=welcome` from the query string whatever else is
+    there. For a linked shop with no plan yet it shows "Confirming your plan..." and reads
+    `open` every 30 seconds until an absolute deadline ten minutes after load (the billing
+    runner runs every 5 minutes), then shows **Choose a plan**. The deadline is taken when the
+    script starts and a timer of its own ends the confirming state, so a slow or hung read, or
+    a first read that failed, does not stretch it. One read at a time. A failed read (busy,
+    429, 5xx, network) keeps the last good answer and tries again, no sooner than `Retry-After`
+    after a 429. An `invalid_token` read stops polling and shows the **Reload** prompt. The
+    poll skips its read while the tab is hidden or an action (**Open ZS Hub**) runs, and goes
+    on when it ends. With a plan already active (a **Change plan** return) the page shows that
+    plan and does not poll. A poll answer changes only the plan block, and only when the state
+    changed: it never redraws the screen or moves focus. A read that comes back after the
+    merchant has moved to another screen is dropped. At most 21 reads per page in ten minutes,
+    so the 240 per 10 minutes per-address budget (C-21) holds about eleven welcome pages
+    behind one address.
+  - Footer, outside the script's reach: Privacy `https://zerosumsolutions.com/privacy#shopify`,
+    Terms `https://zerosumsolutions.com/terms#shopify` and Support `mailto:devin@zerosumsolutions.com`.
+  - Unchanged: per-shop frame-ancestors (C-20), no cookie, bearer token per call, no token or
+    customer data in logs.
+  - Deploy order for this change: the API first, then the workers. The API on `main` before
+    C-29 parsed the worker's `open` answer with a strict object and answered 503 to a `plan`
+    field it did not know, so a workers-first deploy would break `open` until the API caught up.
+    The new API accepts an answer without `plan` (old worker) and drops a top-level field it
+    does not know (newer worker), so from this change on either order is safe; the fields it
+    reads stay strict.
+  - Tests: `apps/dashboard/test/shopify-embedded.test.ts` (no plan, plan, trial, handle unset,
+    confirming, deadline, polling, footer), `packages/core/test/shopify/native-worker.test.ts` (plan states),
+    `apps/api/test/shopify-native-api.test.ts` (`planUrl`).
+
 
 ## Acceptance
 
@@ -1023,7 +1081,8 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   session pooler, port 5432, no query string), `CONNECTIONS_CRON_SCHEDULE=*/5 * * * *`. API:
   `CONNECTIONS_WORKER_URL=https://zs-business-workers.vercel.app`,
   `CONNECTIONS_RETURN_URL=https://app.zerosumsolutions.com/account/connections`. Then deploy the
-  workers first, then the API and the dashboard, with `--prod`. Check with
+  workers first, then the API and the dashboard, with `--prod` (the C-29 change is the
+  exception: API first, then the workers; see C-29). Check with
   `zsvault run --env COMPOSIO_API_KEY=zs_business_prod_composio_key -- pnpm connections:check-catalog`
   and `GET /cron/connections` with the production `CRON_SECRET` (`ran: true`).
 - Worker project (preview and production): `COMPOSIO_API_KEY`, `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`,

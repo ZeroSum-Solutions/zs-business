@@ -7,7 +7,7 @@
 //     when an uninstall ran changes nothing.
 //   - Nothing in a log, report or error carries a token, an ID token, a code or a customer value.
 import { createHmac, randomInt } from "node:crypto";
-import { Conflict, normalizeAccountLabel } from "@zs/contracts";
+import { Conflict, PLAN_CATALOG, normalizeAccountLabel, type HubPlan } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { setShopifyBilling } from "../billing/shopify-plans.js";
 import { shopifyListWindow } from "../connections/catalog.js";
@@ -116,8 +116,9 @@ export type ShopLink =
   | { readonly state: "none" }
   | { readonly state: "linked"; readonly businessName: string; readonly connection: "active" | "reauthorize" };
 
+export type ShopPlan = { readonly state: "none" } | { readonly state: "active" | "trial"; readonly name: string };
 export type OpenResult =
-  | { readonly outcome: "ok"; readonly shop: { readonly domain: string; readonly name: string }; readonly link: ShopLink }
+  | { readonly outcome: "ok"; readonly shop: { readonly domain: string; readonly name: string }; readonly plan: ShopPlan; readonly link: ShopLink }
   | { readonly outcome: "invalid_token" | "unavailable" | "busy" | "not_supported" };
 export type CreateHubResult =
   | { readonly outcome: "created" | "relinked"; readonly businessName: string; readonly ownerEmail: string }
@@ -364,11 +365,32 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     return exchanged.kind === "invalid" ? { kind: "invalid_token" } : { kind: exchanged.kind };
   }
 
+  /**
+   * C-29: the shop's plan as the billing runner last stored it (plans.md PL-18), read with the link in one statement.
+   * Only a store linked to a hub has a plan to show (a disconnected or uninstalled store keeps its row but shows none).
+   * Trialing and active (past due keeps the plan, PL-4) count; all else is none.
+   */
+  async function linkAndPlanOf(shopId: string): Promise<{ link: ShopLink; plan: ShopPlan }> {
+    // One statement, so one snapshot: under READ COMMITTED two queries could see a disconnect between them.
+    const linked = (await service((tx) => tx.query<{ name: string; status: "active" | "reauthorize"; plan: HubPlan | null; plan_status: string | null }>(
+      `SELECT t.name, c.status::text AS status, p.plan, p.status::text AS plan_status
+         FROM connections c JOIN tenants t ON t.tenant_id=c.tenant_id
+         LEFT JOIN tenant_plans p ON p.tenant_id=c.tenant_id AND p.billing_provider='shopify' AND p.shopify_shop_id=c.external_account_id
+        WHERE c.tier='native' AND c.external_account_id=$1 AND c.status IN ('active','reauthorize')`, [shopId]))).rows[0];
+    if (!linked) return { link: { state: "none" }, plan: { state: "none" } };
+    const link: ShopLink = { state: "linked", businessName: linked.name, connection: linked.status };
+    const entry = linked.plan ? PLAN_CATALOG[linked.plan] : undefined;
+    if (!entry) return { link, plan: { state: "none" } };
+    if (linked.plan_status === "trialing") return { link, plan: { state: "trial", name: entry.name } };
+    return { link, plan: linked.plan_status === "active" || linked.plan_status === "past_due" ? { state: "active", name: entry.name } : { state: "none" } };
+  }
+
   async function open(input: { idToken: string }): Promise<OpenResult> {
     const auth = await authenticate(input.idToken);
     if (auth.kind === "refused") return { outcome: "not_supported" };
     if (auth.kind !== "ok") return { outcome: auth.kind === "not_installed" ? "unavailable" : auth.kind };
-    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, link: await linkOf(auth.row.shop_id) };
+    const { link, plan } = await linkAndPlanOf(auth.row.shop_id);
+    return { outcome: "ok", shop: { domain: auth.row.shop_domain, name: auth.row.shop_name }, plan, link };
   }
 
   /** The store owner behind a token: the online exchange must name an account owner with a verified email. */

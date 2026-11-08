@@ -68,10 +68,21 @@ input:focus-visible, .btn:focus-visible, a:focus-visible { outline: 2px solid va
 .badge.warn { background: var(--warn-tint); color: var(--warn-ink); }
 .badge.neutral { background: var(--inset); color: var(--fg-2); }
 .note { margin: 12px 0; padding: 12px 16px; border-radius: 10px; background: var(--inset); }
+.plan { margin: 0 0 8px; }
+.plan-name { margin: 0; font-weight: 700; color: var(--fg); }
+.plan .actions { margin: 8px 0 12px; }
+.legal { max-width: 34rem; margin: 0 auto; padding: 0 16px 32px; display: flex; flex-wrap: wrap; gap: 16px; font-size: 0.875rem; }
+.legal a { color: var(--meta); display: inline-flex; align-items: center; min-height: 44px; }
 .note:empty { display: none; }
 .note.error { background: var(--danger-tint); color: var(--danger); }
 .note.error + .btn { margin-top: 4px; }
 `;
+
+/** C-29: the legal and support links under the app, outside `#app` so the script never replaces them. */
+export const PRIVACY_URL = "https://zerosumsolutions.com/privacy#shopify";
+export const TERMS_URL = "https://zerosumsolutions.com/terms#shopify";
+export const SUPPORT_EMAIL = "devin@zerosumsolutions.com";
+const FOOTER = `<footer class="legal"><a href="${PRIVACY_URL}" target="_blank" rel="noopener noreferrer">Privacy</a> <a href="${TERMS_URL}" target="_blank" rel="noopener noreferrer">Terms</a> <a href="mailto:${SUPPORT_EMAIL}" target="_blank" rel="noopener noreferrer">Support</a></footer>`;
 
 export interface EmbeddedPageInput {
   readonly clientId: string;
@@ -97,6 +108,7 @@ export function renderEmbeddedPage({ clientId, nonce }: EmbeddedPageInput): stri
     "</head>",
     "<body>",
     '<main id="app" aria-live="polite"><h1 tabindex="-1">ZS Business Connections</h1><p>Connecting to your store...</p></main>',
+    FOOTER,
     `<script nonce="${nonce}">(function (document, window, fetch, shopify) {${EMBEDDED_CLIENT_SOURCE}})(document, window, window.fetch.bind(window), window.shopify);</script>`,
     "</body>",
     "</html>",

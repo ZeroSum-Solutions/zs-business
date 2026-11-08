@@ -225,6 +225,15 @@ const offer = (entry: PlanCatalogEntry, founding: boolean) => ({
   limits: { ...entry.limits },
 });
 
+/** PL-15, PL-19, connections.md C-29:Shopify's plan selection page for a store; null without a store or an app handle. `store` is the myshopify.com name or the full domain. */
+export function shopifyPricingUrl(store: string | null | undefined, appHandle: string | null | undefined): string | null {
+  // Both handles are checked here, not trusted from the caller: "." and ".." would pass encodeURIComponent.
+  const storeHandle = store?.replace(/\.myshopify\.com$/, "");
+  if (!storeHandle || !appHandle) return null;
+  if (!/^[a-z0-9][a-z0-9-]{0,59}$/.test(storeHandle) || !/^[a-z0-9][a-z0-9-]{0,99}$/.test(appHandle)) return null;
+  return `https://admin.shopify.com/store/${storeHandle}/charges/${appHandle}/pricing_plans`;
+}
+
 /** PL-7. */
 export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   readonly now: Date;
@@ -239,10 +248,7 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   const stripe = (row?.billing_provider ?? "stripe") === "stripe";
   const shopify = row?.billing_provider === "shopify";
   // PL-15, PL-19: the store handle is the myshopify.com name.
-  const storeHandle = shopify && row?.shopify_shop_domain ? row.shopify_shop_domain.replace(/\.myshopify\.com$/, "") : null;
-  const shopifyManageUrl = storeHandle && input.shopifyAppHandle
-    ? `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/charges/${encodeURIComponent(input.shopifyAppHandle)}/pricing_plans`
-    : null;
+  const shopifyManageUrl = shopify ? shopifyPricingUrl(row?.shopify_shop_domain, input.shopifyAppHandle) : null;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",

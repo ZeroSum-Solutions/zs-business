@@ -100,10 +100,42 @@ function afterNextGraphql(hook: () => Promise<void>): typeof fetch {
 }
 const bumpGeneration = () => database.pool.query("UPDATE shopify_installs SET generation=generation+1").then(() => undefined);
 
+describe("shopify_open: the plan state (C-29)", () => {
+  /** Links the store to a new hub (which stores the Shopify billing row), then sets what the billing runner would have stored. */
+  const storePlan = async (plan: string, status: string) => {
+    await worker.open({ idToken: token() });
+    expect(await worker.createHub({ idToken: token() })).toMatchObject({ outcome: "created" });
+    await database.pool.query("UPDATE tenant_plans SET plan=$1, plan_interval='month', status=$2 WHERE shopify_shop_id=$3", [plan, status, SHOP_GID]);
+  };
+
+  it("is none for a store that is not linked, and for a linked one until the billing runner has stored a plan", async () => {
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" }, link: { state: "none" } });
+    await worker.createHub({ idToken: token() });
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" }, link: { state: "linked" } });
+  });
+
+  it("shows no plan once the connection is disconnected, although the plan row stays", async () => {
+    await storePlan("studio", "active");
+    await database.pool.query("UPDATE connections SET status='disconnected', account_label=NULL");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" }, link: { state: "none" } });
+  });
+
+  it("names the plan when active or past due, calls a trialing one a trial, and treats a canceled one as none", async () => {
+    await storePlan("studio", "active");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "active", name: "Studio" } });
+    await database.pool.query("UPDATE tenant_plans SET status='trialing', plan='solo'");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "trial", name: "Solo" } });
+    await database.pool.query("UPDATE tenant_plans SET status='past_due', plan='pro'");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "active", name: "Pro" } });
+    await database.pool.query("UPDATE tenant_plans SET status='canceled'");
+    expect(await worker.open({ idToken: token() })).toMatchObject({ plan: { state: "none" } });
+  });
+});
+
 describe("shopify_open: authenticate, exchange once, store sealed (C-21, C-22)", () => {
   it("exchanges for an expiring offline token, seals it and shows 90 day and 1 hour expiries", async () => {
     const out = await worker.open({ idToken: token() });
-    expect(out).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, link: { state: "none" } });
+    expect(out).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, plan: { state: "none" }, link: { state: "none" } });
     expect(exchanges()).toHaveLength(1);
     expect(exchanges()[0]!.body).toMatchObject({ expiring: 1 });
     const row = await install();

@@ -46,6 +46,7 @@ export {
 export {
   FOUNDING_LIMIT,
   getBillingPlan,
+  shopifyPricingUrl,
   PLAN_CHECKOUT_LIFETIME_MS,
   PLAN_CHECKOUT_RETRY_LIMIT_MS,
   planCheckoutHandler,

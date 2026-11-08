@@ -3,7 +3,7 @@
 // `Authorization: Bearer`; no cookie is read or set. The route checks nothing about the token: it rate-limits by the
 // caller's address and forwards it to the worker, which verifies it. Every answer is no-store.
 import { ValidationFailed, shopifyClaimCodeSchema, shopifyIdTokenSchema } from "@zs/contracts";
-import { createShopifyEmbedded, type EdgeDependencies } from "@zs/core";
+import { createShopifyEmbedded, shopifyPricingUrl, type EdgeDependencies } from "@zs/core";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { apiErrorBody } from "@zs/core";
@@ -15,7 +15,7 @@ interface NodeBindings {
 }
 
 export function shopifyEmbeddedRoutes(
-  config: { readonly clientIp?: ClientIpConfig | undefined },
+  config: { readonly clientIp?: ClientIpConfig | undefined; readonly shopifyAppHandle?: string | null | undefined },
   requestEdge: (c: Context<AppEnv>) => EdgeDependencies,
 ) {
   const clientAddress = createClientAddress(config.clientIp);
@@ -31,7 +31,7 @@ export function shopifyEmbeddedRoutes(
   };
   const refused = (c: Context<AppEnv>) => c.json(apiErrorBody("Unauthorized", "Invalid session token"), 401);
   /** A session token the worker rejects (expired, wrong app, forged) is a 401 too, so the page can ask App Bridge for a fresh one and retry once. */
-  const answer = (c: Context<AppEnv>, result: { readonly outcome: string }) => (result.outcome === "invalid_token" ? refused(c) : c.json(result));
+  const answer = (c: Context<AppEnv>, result: { readonly outcome: string; readonly planUrl?: string | null }) => (result.outcome === "invalid_token" ? refused(c) : c.json(result));
   return new Hono<AppEnv>()
     .use("*", async (c, next) => {
       await next();
@@ -41,7 +41,10 @@ export function shopifyEmbeddedRoutes(
     .use("*", bodyLimit({ maxSize: 2048, onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413) }))
     .post("/open", async (c) => {
       const token = tokenOf(c);
-      return token === null ? refused(c) : answer(c, await session(c).open(token, c.var.signal));
+      if (token === null) return refused(c);
+      const opened = await session(c).open(token, c.var.signal);
+      // C-29: the worker knows the plan; only the API holds the app handle, so it adds Shopify's plan selection page.
+      return answer(c, opened.outcome === "ok" ? { ...opened, planUrl: shopifyPricingUrl(opened.shop.domain, config.shopifyAppHandle) } : opened);
     })
     .post("/create-hub", async (c) => {
       const token = tokenOf(c);

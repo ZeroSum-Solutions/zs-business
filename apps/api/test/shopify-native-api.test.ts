@@ -17,6 +17,7 @@ import {
   type HubPort,
   type ShopifyPort,
 } from "@zs/core";
+import { shopifyOpenResponseSchema } from "@zs/contracts";
 import { asService } from "@zs/db";
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
 import { parseConnectionsEnv, parseShopifyNativeEnv } from "../src/connections/config.js";
@@ -135,8 +136,9 @@ function makeNative() {
   });
 }
 
-function build(shopify: ShopifyPort | null): App {
+function build(shopify: ShopifyPort | null, shopifyAppHandle?: string): App {
   return createApp({
+    ...(shopifyAppHandle ? { shopifyAppHandle } : {}),
     verifier: createHs256Verifier(SECRET, { clock }),
     sessionCheck: createLocalStubSessionCheck(h.database.db, clock),
     clock,
@@ -207,9 +209,35 @@ describe("the embedded routes (C-21, C-22)", () => {
   it("open shows the store, never sets a cookie, and is not cacheable", async () => {
     const response = await embedded(on, "open", token());
     expect(response.status).toBe(200);
-    expect(await json(response)).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, link: { state: "none" } });
+    expect(await json(response)).toEqual({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, plan: { state: "none" }, planUrl: null, link: { state: "none" } });
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("open adds Shopify's plan selection page when the app handle is configured (C-29)", async () => {
+    const withHandle = build(createLocalShopifyPort(native), "zs-business-connections");
+    const body = await json(await embedded(withHandle, "open", token())) as { planUrl: string };
+    expect(body.planUrl).toBe(`https://admin.shopify.com/store/${SHOP.replace(".myshopify.com", "")}/charges/zs-business-connections/pricing_plans`);
+  });
+
+  it("accepts an open answer from an older worker that has no plan, and still adds planUrl (deploy overlap)", async () => {
+    const older: ShopifyPort = { ...createLocalShopifyPort(native), open: async () => ({ outcome: "ok", shop: { domain: SHOP, name: "ZS Test Store" }, link: { state: "none" } }) };
+    const response = await embedded(build(older, "zs-business-connections"), "open", token());
+    expect(response.status).toBe(200);
+    const body = await json(response) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("plan");
+    expect(body.planUrl).toContain("/charges/zs-business-connections/pricing_plans");
+    expect(shopifyOpenResponseSchema.safeParse({ outcome: "ok", shop: { domain: SHOP, name: "x" }, link: { state: "none" } }).success).toBe(true);
+  });
+
+  it("accepts an open answer from a newer worker with a field it does not know, and drops that field (either deploy order)", () => {
+    const newer = { outcome: "ok", shop: { domain: SHOP, name: "x" }, plan: { state: "none" }, link: { state: "none" }, future: { anything: 1 } };
+    const parsed = shopifyOpenResponseSchema.safeParse(newer);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).not.toHaveProperty("future");
+    // The fields it reads stay strict.
+    expect(shopifyOpenResponseSchema.safeParse({ ...newer, plan: { state: "active", name: "Solo", extra: 1 } }).success).toBe(false);
+    expect(shopifyOpenResponseSchema.safeParse({ ...newer, link: { state: "none", extra: 1 } }).success).toBe(false);
   });
 
   it("a forged token is a 401 (so the page retries with a fresh one), not a crash", async () => {

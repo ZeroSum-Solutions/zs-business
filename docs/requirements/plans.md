@@ -301,7 +301,10 @@ adds a Shopify usage meter; a wallet balance it already holds is still spent.
   tenant that needs more managed connections moves up a plan. Each plan's listing text names its
   connection limit (PL-1). An App Pricing usage meter can
   carry the add-on later (a new rule here first); it would be monthly only, with no cap.
-- Each plan's welcome link is the dashboard plan page with `?shopify=welcome`.
+- Each plan's welcome link is the relative path `/?plan=welcome` (2026-11-07), so Shopify opens
+  the embedded app at `/shopify/app?plan=welcome` (connections.md C-29); the app reads the plan
+  there. The dashboard's `?shopify=welcome` handling (PL-19) stays for a merchant who opens the
+  hub's plan page.
 - The Shopify plan handles map to our plans by configuration (PL-20): the five keys `hub_solo`,
   `hub_studio`, `hub_pro`, `hub_studio_founding` and `hub_pro_founding`, each to one handle. The
   interval comes from the contract's billing period: `EVERY_30_DAYS` is `month`, `ANNUAL` is
@@ -408,7 +411,7 @@ PL-15), checked again before each Stripe call, a replay included. The plan confl
 `founding_full`, `billing_provider`) leave the API as documented reasons. The dashboard plan page
 shows a Shopify tenant no Stripe plan buttons and no add-on field. It shows a **Manage billing in Shopify** link to `shopifyManageUrl` (with the plan
 and without one), or, when it is null, the words "Open your Shopify admin, then Settings > Apps".
-After `?shopify=welcome` it reads the plan every 15 seconds for ten minutes, even when the plan
+After `?shopify=welcome` (Shopify's own welcome link opens the embedded app instead, C-29) it reads the plan every 15 seconds for ten minutes, even when the plan
 is already active (a change from one active plan to another keeps the status), and says a change
 can take a few minutes to show. `plan_read_only` and `plan_limit` (PL-8, with `resource`,
 `limit` and `used` when valid) also leave the API as documented reasons.

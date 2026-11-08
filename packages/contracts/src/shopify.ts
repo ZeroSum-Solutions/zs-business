@@ -33,10 +33,23 @@ export const shopifyClaimConfirmRequestSchema = z.strictObject({ tenantId: idSch
 const instant = z.iso.datetime({ precision: 3 });
 const shopSchema = z.strictObject({ domain: shopDomainSchema, name: z.string().max(300) });
 
+/** C-29: what the hub knows of the shop's Shopify subscription, read from `tenant_plans` (plans.md PL-18). */
+export const shopifyPlanStateSchema = z.discriminatedUnion("state", [
+  z.strictObject({ state: z.literal("none") }),
+  z.strictObject({ state: z.enum(["active", "trial"]), name: z.string().max(60) }),
+]);
+export type ShopifyPlanState = z.infer<typeof shopifyPlanStateSchema>;
+
 export const shopifyOpenResponseSchema = z.discriminatedUnion("outcome", [
-  z.strictObject({
+  // Not strict at the top level: a field a newer worker adds is dropped, not a 503, so either deploy order is safe
+  // from here on (C-29). Every field it does read stays strict.
+  z.object({
     outcome: z.literal("ok"),
     shop: shopSchema,
+    /** Optional so a new API accepts an older worker's answer during a deploy; missing means unknown and renders as no plan. */
+    plan: shopifyPlanStateSchema.optional(),
+    /** C-29: Shopify's plan selection page; the API route adds it (the worker does not know the app handle). Null when the handle is unset. */
+    planUrl: z.url({ protocol: /^https$/ }).max(500).nullable().optional(),
     link: z.discriminatedUnion("state", [
       z.strictObject({ state: z.literal("none") }),
       z.strictObject({ state: z.literal("linked"), businessName: z.string().max(300), connection: z.enum(["active", "reauthorize"]) }),
