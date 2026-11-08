@@ -5,6 +5,7 @@ import { basename } from "node:path";
 import { promisify } from "node:util";
 import type { Pool } from "pg";
 import { z } from "zod";
+import { resolvePgTool } from "./pg-tools.js";
 
 /** One row of zs_internal.schema_migrations. */
 export interface LedgerEntry {
@@ -22,6 +23,13 @@ export interface BackupFacts {
 export type RunProgram = (file: string, args: string[], options: { env?: Record<string, string>; maxBuffer: number }) => Promise<{ stdout: string }>;
 
 export const MANIFEST_FORMAT = "zs-backup-manifest/1";
+/**
+ * Extensions the schema needs, dumped as CREATE EXTENSION IF NOT EXISTS. pg_dump --schema skips
+ * every extension, so without this a restore into a fresh database fails at the first object
+ * that needs one (the bookings exclusion constraint needs btree_gist). Every CREATE EXTENSION in
+ * supabase/migrations must be listed (test/hosted-backup.test.ts checks).
+ */
+export const BACKUP_EXTENSIONS = ["btree_gist"] as const;
 /** A backup older than this cannot gate an apply. */
 export const MAX_BACKUP_AGE_MS = 2 * 3600_000;
 const FUTURE_SLACK_MS = 60_000;
@@ -106,8 +114,9 @@ export async function takeBackup(options: TakeBackupOptions): Promise<BackupMani
     PGHOST: host, PGPORT: port, PGUSER: user, PGPASSWORD: password, PGDATABASE: database,
     ...(options.rootCertFile === null ? { PGSSLMODE: "disable" } : { PGSSLMODE: "verify-full", PGSSLROOTCERT: options.rootCertFile }),
   };
-  await (options.run ?? defaultRun)(options.pgDump ?? "pg_dump", [
-    "--format=custom", "--no-password", "--schema=public", "--schema=zs_internal", "--schema=extensions", `--file=${options.out}`,
+  await (options.run ?? defaultRun)(options.pgDump ?? resolvePgTool("pg_dump"), [
+    "--format=custom", "--no-password", "--schema=public", "--schema=zs_internal", "--schema=extensions",
+    ...BACKUP_EXTENSIONS.map((name) => `--extension=${name}`), `--file=${options.out}`,
   ], { env, maxBuffer: 1 << 20 });
   const after = await readLedger(options.pool);
   if (!sameLedger(before, after)) throw new Error("Refusing to back up: the migration ledger changed during the dump; take a new backup");
@@ -130,6 +139,43 @@ export async function takeBackup(options: TakeBackupOptions): Promise<BackupMani
   return manifest;
 }
 
+async function parseManifestFile(archivePath: string, fail: (reason: string) => never): Promise<BackupManifest> {
+  const manifestPath = manifestPathFor(archivePath);
+  let text: string;
+  try {
+    text = await readFile(manifestPath, "utf8");
+  } catch {
+    fail(`the backup has no manifest (${basename(manifestPath)}); take it with db:hosted-backup`);
+  }
+  let parsed: ReturnType<typeof manifestSchema.safeParse>;
+  try {
+    parsed = manifestSchema.safeParse(JSON.parse(text));
+  } catch {
+    fail("the backup manifest is not JSON");
+  }
+  if (!parsed.success) fail("the backup manifest is malformed");
+  return parsed.data;
+}
+
+function assertManifestDescribes(manifest: BackupManifest, archivePath: string, archive: Buffer, fail: (reason: string) => never): void {
+  if (manifest.archive !== basename(archivePath)) fail("the backup manifest describes another archive file");
+  if (manifest.bytes !== archive.length || manifest.sha256 !== sha256Hex(archive))
+    fail("the archive's sha256 does not match its manifest");
+}
+
+/**
+ * The manifest next to the archive, checked only against the file itself (name, size,
+ * sha256), with no age or live-ledger gate: for a restore test of any earlier backup.
+ */
+export async function readBackupManifest(archivePath: string, archive: Buffer): Promise<BackupManifest> {
+  const fail = (reason: string): never => {
+    throw new Error(`Refusing to restore: ${reason}`);
+  };
+  const manifest = await parseManifestFile(archivePath, fail);
+  assertManifestDescribes(manifest, archivePath, archive, fail);
+  return manifest;
+}
+
 /**
  * The manifest next to the archive must name this project, this exact file (sha256 and
  * size), a start time within MAX_BACKUP_AGE_MS, and the live ledger, name and checksum.
@@ -140,26 +186,10 @@ export async function verifyBackupManifest(
   archive: Buffer,
   expected: { projectRef: string; ledger: readonly LedgerEntry[]; now: Date },
 ): Promise<BackupManifest> {
-  const manifestPath = manifestPathFor(archivePath);
-  let text: string;
-  try {
-    text = await readFile(manifestPath, "utf8");
-  } catch {
-    refuse(`the backup has no manifest (${basename(manifestPath)}); take it with db:hosted-backup`);
-  }
-  let parsed: ReturnType<typeof manifestSchema.safeParse>;
-  try {
-    parsed = manifestSchema.safeParse(JSON.parse(text));
-  } catch {
-    refuse("the backup manifest is not JSON");
-  }
-  if (!parsed.success) refuse("the backup manifest is malformed");
-  const manifest = parsed.data;
+  const manifest = await parseManifestFile(archivePath, refuse);
   if (manifest.projectRef !== expected.projectRef)
     refuse(`the backup was taken from project ${manifest.projectRef}, not ZS_TARGET_REF ${expected.projectRef}`);
-  if (manifest.archive !== basename(archivePath)) refuse("the backup manifest describes another archive file");
-  if (manifest.bytes !== archive.length || manifest.sha256 !== sha256Hex(archive))
-    refuse("the archive's sha256 does not match its manifest");
+  assertManifestDescribes(manifest, archivePath, archive, refuse);
   const age = expected.now.getTime() - Date.parse(manifest.createdAt);
   if (age < -FUTURE_SLACK_MS || age > MAX_BACKUP_AGE_MS)
     refuse(`the backup must be made within the last two hours (manifest created at ${manifest.createdAt})`);
@@ -190,7 +220,7 @@ export async function checkBackup(path: string, options: CheckBackupOptions): Pr
   if (bytes.subarray(0, 5).toString("latin1") !== "PGDMP") refuse("the backup is not a pg_dump -Fc archive");
   const manifest = await verifyBackupManifest(path, bytes, { projectRef: options.projectRef, ledger: options.ledger, now: options.now });
   const run = options.run ?? defaultRun;
-  const restore = options.pgRestore ?? "pg_restore";
+  const restore = options.pgRestore ?? resolvePgTool("pg_restore");
   await run(restore, ["--file=/dev/null", path], { maxBuffer: 1 << 20 });
   const { stdout: toc } = await run(restore, ["--list", path], { maxBuffer: 16 << 20 });
   const created = /^;\s+Archive created at (.+)$/m.exec(toc)?.[1]?.trim() ?? "";
