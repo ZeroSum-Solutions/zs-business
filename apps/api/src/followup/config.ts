@@ -6,12 +6,9 @@ import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { bookingKeySecretSchema, publicBaseUrlSchema } from "../config.js";
 import { PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
+import { int, LOOPBACK, problems, switchSchema } from "../env-schema.js";
 
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 export { PLACEHOLDER_CRON_SECRET };
-
-const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
-const switchSchema = z.enum(["on", "off"]).default("off");
 
 const onSchema = z.object({
   // The API's kind of login: unprivileged, member of authenticated only. Every agent action
@@ -92,8 +89,6 @@ export interface FollowUpEnv {
   /** Null when CRON_SECRET is unset: the cron route answers 404. */
   readonly cronSecret: string | null;
 }
-
-const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
 /**
  * Throws unless `url` can be used with pinned TLS: off loopback it needs DATABASE_CA_CERT and no

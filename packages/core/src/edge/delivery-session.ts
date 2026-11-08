@@ -10,7 +10,6 @@ import {
   SMS_REPLY_RECORD_ACTION,
   SUPPRESSION_LIFT_ACTION,
   SUPPRESSION_RECORD_ACTION,
-  TenantDenied,
   uuidSchema,
   type DeliveryChannel,
   type InboundSms,
@@ -23,13 +22,10 @@ import { liftSuppression, recordSmsReply, recordSuppression, smsKeyword, suppres
 import { verifyUnsubscribeToken, type UnsubscribeSecrets } from "../delivery/unsubscribe.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, parseInput, type Authorize, type EdgeDependencies } from "./session.js";
+import { only } from "./dispatch-util.js";
 
 export const unsubscribeActorId = (tenantId: string) => derivedId(tenantId, "public-unsubscribe", "actor");
 export const inboundSmsActorId = (tenantId: string) => derivedId(tenantId, "inbound-sms", "actor");
-
-const only = (...actionTypes: string[]): Authorize => async (_tx, binding) => {
-  if (!actionTypes.includes(binding.actionType)) throw new TenantDenied();
-};
 
 export function createUnsubscribeSession(deps: EdgeDependencies, secrets: UnsubscribeSecrets) {
   /** The delivery a token names and where it went; a forged token and an unknown delivery look the same. */

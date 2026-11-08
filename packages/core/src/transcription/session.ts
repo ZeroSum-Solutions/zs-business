@@ -26,7 +26,6 @@ import {
   transcriptBodySchema,
   uuidSchema,
   type ActionResult,
-  type JsonValue,
   type ClaimedJob,
   type CompleteResult,
   type EnqueueResult,
@@ -45,6 +44,7 @@ import { iso } from "../crm/rows.js";
 import { requireMember } from "../members/access.js";
 import { transcriptionActorId, voicemailJobId } from "./handlers.js";
 import { audioPath, type AudioObject, type TranscriptionAudioStore, type VoicemailSource } from "./ports.js";
+import { only, toJson } from "../edge/dispatch-util.js";
 
 export interface TranscriptionConfig {
   readonly audio: TranscriptionAudioStore;
@@ -62,10 +62,6 @@ interface Lease {
   readonly sourceId: string | null;
 }
 
-const only = (...actionTypes: string[]): Authorize => async (_tx, binding) => {
-  if (!actionTypes.includes(binding.actionType)) throw new TenantDenied();
-};
-
 /** A member enqueues an owner upload only: a voicemail job is the server's. */
 const memberUploads = (tenantId: string, actorId: string): Authorize => async (tx, binding) => {
   if (binding.actionType !== TRANSCRIPTION_ENQUEUE_ACTION) throw new TenantDenied();
@@ -74,8 +70,6 @@ const memberUploads = (tenantId: string, actorId: string): Authorize => async (t
   await requireMember(tx, tenantId, actorId, "inbox.drafts");
 };
 
-/** The payload as the JSON the dispatcher stores. */
-const toJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 const approvalFor = (tenantId: string, key: string) => ({ tenantId, id: derivedId(tenantId, key, "approval") });
 
 type DetailTranscript = NonNullable<TranscriptionDetail["transcript"]>;

@@ -6,10 +6,7 @@ import { parse } from "pg-connection-string";
 import { z } from "zod";
 import { activepiecesKeySecretSchema, activepiecesLoopbackSchema, assertLoopbackOnly } from "../config.js";
 import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
-
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
-const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
-const switchSchema = z.enum(["on", "off"]).default("off");
+import { int, LOOPBACK, problems, switchSchema } from "../env-schema.js";
 
 const onSchema = z.object({
   // A login that may SET ROLE service_role (postgres on hosted Supabase), like the delivery
@@ -58,8 +55,6 @@ export function assertActivepiecesCronFits(runner: ActivepiecesRunnerEnv | null)
   if (runner !== null && runner.budgetMs > DELIVERY_CRON_BUDGET_LIMIT_MS)
     throw new Error(`Invalid environment: ACTIVEPIECES_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
-
-const problems = (error: z.ZodError) => error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
 
 export function parseActivepiecesWorkerEnv(env: Readonly<Record<string, string | undefined>>): ActivepiecesWorkerEnv {
   const cron = z.string().min(32, "CRON_SECRET must be at least 32 characters")

@@ -15,6 +15,7 @@ import { MANAGE_CATALOG, useCan } from "@/lib/session";
 import { singleFlight } from "@/lib/single-flight";
 import { formatDay, formatTime } from "@/lib/time";
 import { cn, currencyDigits, formatMoney } from "@/lib/utils";
+import { plural } from "@/lib/plural";
 
 /** Job states as the owner reads them (document-intake.md DL-4). */
 export const INTAKE_STATUS: Record<IntakeJob["status"], { label: string; tone: "neutral" | "info" | "success" | "danger" | "warn" }> = {
@@ -48,8 +49,6 @@ const INVALID_TEXT: Record<NonNullable<IntakeRow["invalidReason"]>, string> = {
   duplicate_key: "The item number is repeated",
   field_too_long: "A value is too long",
 };
-
-const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 /** "2 new, 1 changed" for a job's counts. */
 export function countsLine(job: Pick<IntakeJob, "counts">): string {

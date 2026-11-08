@@ -40,10 +40,10 @@ import { MANAGE_AGENTS, useCan, useSession } from "@/lib/session";
 import { singleFlight } from "@/lib/single-flight";
 import { formatDay, formatTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
+import { plural } from "@/lib/plural";
 
 const linkClass = "inline-flex min-h-11 items-center font-medium text-accent underline-offset-4 hover:underline";
 const when = (instant: string, zone: string) => `${formatDay(instant, zone)}, ${formatTime(instant, zone)}`;
-const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 /** A stop note longer than this shows three lines until the reader asks for the rest. */
 const LONG_NOTE = 140;
 

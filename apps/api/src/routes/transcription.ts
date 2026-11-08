@@ -1,11 +1,10 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { LEASE_TOKEN_HEADER, idempotencyKeySchema, listTranscriptionsQuerySchema, type TranscriptBody } from "@zs/contracts";
 import { apiErrorBody, parseInput, type TranscriptionSession } from "@zs/core";
-import { Unauthenticated } from "../auth.js";
 import type { AppEnv } from "../app.js";
 import { idempotencyKey, jsonBody } from "./request.js";
+import { workerBearerAuth } from "./worker-auth.js";
 
 // transcription.md X-1, X-4, X-7: the owner's routes under /v1/transcriptions (member auth, the
 // inbox.drafts permission) and the worker's routes under /worker/v1/transcription (a bearer token
@@ -28,17 +27,9 @@ export function transcriptionRoutes(sessionFor: (c: Context<AppEnv>) => Transcri
     .get("/:id", async (c) => c.json(await member(c).get(c.req.param("id"))));
 }
 
-const digest = (value: string) => createHash("sha256").update(value).digest();
-
 /** The worker's bearer token, compared in constant time over fixed-length digests. */
 export function workerAuth(config: TranscriptionApiConfig): MiddlewareHandler<AppEnv> {
-  if (config.workerToken.length < 32) throw new Error("TRANSCRIPTION_WORKER_TOKEN must be at least 32 characters");
-  const expected = digest(config.workerToken);
-  return async (c, next) => {
-    const match = /^Bearer (\S+)$/.exec(c.req.header("Authorization") ?? "");
-    if (!match || !timingSafeEqual(digest(match[1]!), expected)) throw new Unauthenticated();
-    await next();
-  };
+  return workerBearerAuth("TRANSCRIPTION_WORKER_TOKEN", config.workerToken);
 }
 
 /** Room for a 1500-segment transcript, with the shared JSON text limit on top. */

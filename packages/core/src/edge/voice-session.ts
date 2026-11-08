@@ -6,7 +6,6 @@ import {
   ActionError,
   IdempotencyConflict,
   MISSED_DIAL_STATUSES,
-  TenantDenied,
   VOICE_CALL_RECORD_ACTION,
   VOICE_TEXTBACK_OPTIN_ACTION,
   VOICE_VOICEMAIL_RECORD_ACTION,
@@ -29,12 +28,9 @@ import { dial, gather, hangup, record, say, voiceResponse } from "../voice/twiml
 import { retryableAsUnavailable } from "./errors.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, trimTrailingSlashes, type Authorize, type EdgeDependencies } from "./session.js";
+import { only } from "./dispatch-util.js";
 
 export const voiceActorId = (tenantId: string) => derivedId(tenantId, "twilio-voice", "actor");
-
-const only = (...actionTypes: string[]): Authorize => async (_tx, binding) => {
-  if (!actionTypes.includes(binding.actionType)) throw new TenantDenied();
-};
 
 /** T-14: a bucket and its rule. The API adapts its rate limiter to this port. */
 export interface VoiceCharge {
