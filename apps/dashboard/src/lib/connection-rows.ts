@@ -2,6 +2,7 @@ import type { QueryStatus } from "@tanstack/react-query";
 import type { CalendarConnection, ManagedConnection } from "./api";
 import { currentConnection, disconnectingStatus, syncErrorMessage } from "./calendar-sync";
 import { currentConnections, REAUTHORIZE_HOME_LINE } from "./managed-connections";
+import { plural } from "./plural";
 
 /**
  * Home's connections list, read from the same routes the Connections page reads: Google Calendar
@@ -27,7 +28,6 @@ export interface ChecklistItem {
 
 const LABELS: Record<ChecklistItem["id"], string> = { google_calendar: "Google Calendar", shopify: "Shopify" };
 
-const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 const calendars = (count: number) => plural(count, "booking calendar", "booking calendars");
 /** "a, b and c" */
 const listed = (names: readonly string[]) => (names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);

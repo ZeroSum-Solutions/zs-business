@@ -30,10 +30,9 @@ import { MANAGE_AGENTS, useCan } from "@/lib/session";
 import { singleFlight } from "@/lib/single-flight";
 import { formatDay, formatTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
+import { plural } from "@/lib/plural";
 
 const when = (instant: string, zone: string) => `${formatDay(instant, zone)}, ${formatTime(instant, zone)}`;
-const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-
 /**
  * Website tasks (browser-tasks.md): a helper that signs in to a supplier's site you allowed and
  * saves last month's invoices. It only reads. Owners start a run; the team can stop it.
