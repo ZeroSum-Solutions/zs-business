@@ -10,6 +10,7 @@ import {
   ConnectionsRefused,
   createBrowserSession,
   createConnectionsSession,
+  createShopifyClaimsSession,
   createDocumentIntakeSession,
   createEnrichmentSession,
   createFollowUpAgent,
@@ -39,6 +40,8 @@ import { billingRoutes } from "./routes/billing.js";
 import { approvalRoutes } from "./routes/approvals.js";
 import { calendarRoutes } from "./routes/calendar.js";
 import { connectionsRoutes } from "./routes/connections.js";
+import { shopifyClaimsRoutes } from "./routes/shopify-claims.js";
+import { shopifyEmbeddedRoutes } from "./public/shopify-embedded.js";
 import { bookingRoutes } from "./routes/booking.js";
 import { crmRoutes } from "./routes/crm.js";
 import { enrichmentRoutes } from "./routes/enrichment.js";
@@ -259,6 +262,7 @@ export function createApp(deps: AppDependencies) {
         connector: deps.connections.connector,
         stateSecrets: deps.connections.stateSecrets,
         limiter: deps.connections.limiter ?? createPostgresRateLimiter(deps.db, deps.clock),
+        ...(deps.connections.shopify ? { shopify: deps.connections.shopify } : {}),
       },
     } : {}),
     ...(deps.sites ? { sites: deps.sites } : {}),
@@ -280,6 +284,8 @@ export function createApp(deps: AppDependencies) {
   if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
   if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
   if (deps.connections) app.route("/", connectionsCallbackRoutes(deps.connections, requestEdge));
+  // C-21, C-22: the embedded app's anonymous calls; absent the Shopify port they are unknown routes (404).
+  if (deps.connections?.shopify) app.route("/public/v1/shopify/embedded", shopifyEmbeddedRoutes({ clientIp: deps.connections.clientIp }, requestEdge));
   if (deps.twilioWebhook) app.route("/", twilioWebhookRoutes(edge, deps.twilioWebhook, requestEdge));
   if (deps.activepieces) app.route(ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes(deps.activepieces, requestEdge));
   // hub-access.md H-5: the remote MCP endpoint rides on the automation key, so it is off without it (404).
@@ -354,6 +360,8 @@ export function createApp(deps: AppDependencies) {
   // Off without the connections config: /v1/connections is then an unknown route (404), like sites.
   if (deps.connections)
     app.route("/v1/connections", connectionsRoutes((c) => createConnectionsSession(requestEdge(c), c.var.session.principal)));
+  if (deps.connections?.shopify)
+    app.route("/v1/shopify/claims", shopifyClaimsRoutes((c) => createShopifyClaimsSession(requestEdge(c), c.var.session.principal)));
   if (deps.activepieces) app.route("/v1/integrations/activepieces", activepiecesRoutes(deps.activepieces, requestEdge));
   const followUp = deps.followUp;
   app.route("/v1/agents/followup", followUpRoutes(followUp && ((c) => createFollowUpAgent(requestEdge(c), followUp))));

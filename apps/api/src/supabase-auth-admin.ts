@@ -72,6 +72,11 @@ export interface SupabaseAuthAdmin extends AuthAdmin {
   /** A confirmed user with a password (no email is sent); returns its id. */
   createUser(input: { email: string; password: string; appMetadata?: Record<string, unknown> }): Promise<string>;
   deleteUser(userId: string): Promise<void>;
+  /**
+   * A one-time magic link for an existing user, nothing emailed (POST /auth/v1/admin/generate_link). Opening it signs
+   * the user in and lands on `redirectTo`, which must be on the project's redirect allow-list. Null when none is made.
+   */
+  generateLink(input: { email: string; redirectTo: string }): Promise<string | null>;
 }
 
 function tenantClaimOf(user: AdminUser, operation: string): string | null {
@@ -168,6 +173,21 @@ export function createSupabaseAuthAdmin(options: SupabaseAuthAdminOptions): Supa
       });
       if (reply.status !== 200 && reply.status !== 201) throw failure("create user", reply);
       return parseUser("create user", reply.body).id;
+    },
+
+    async generateLink(input) {
+      const reply = await request("generate link", `https://${options.projectRef}.supabase.co/auth/v1/admin/generate_link`, {
+        method: "POST",
+        body: { type: "magiclink", email: input.email, redirect_to: input.redirectTo },
+      });
+      if (reply.status !== 200) return null;
+      const link = (reply.body as { action_link?: unknown } | null)?.action_link;
+      if (typeof link !== "string") return null;
+      try {
+        return new URL(link).protocol === "https:" ? link : null;
+      } catch {
+        return null;
+      }
     },
 
     async deleteUser(userId) {

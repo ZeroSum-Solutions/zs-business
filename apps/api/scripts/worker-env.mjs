@@ -39,6 +39,10 @@ export const WORKER_ONLY_ENV = [
   // previous value are not here: the API reads them to sign its calls to the worker (C-3). COMPOSIO_API_KEY
   // is listed with the agent variables above.
   "CONNECTIONS_DATABASE_URL", "CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID", "CONNECTIONS_CALLBACK_URL",
+  // the native Shopify tier (src/connections/config.ts, C-22): the app's secret, the token seal keys and the hub login
+  "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET", "SHOPIFY_CLIENT_SECRET_PREVIOUS", "SHOPIFY_TOKEN_SEAL_KEY", "SHOPIFY_TOKEN_SEAL_KEY_ID",
+  "SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS", "SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS_ID", "SHOPIFY_API_VERSION", "SHOPIFY_PLAN_GRACE_DAYS",
+  "SUPABASE_SERVICE_ROLE_KEY", "HUB_SIGN_IN_URL",
   // enrichment worker (src/enrichment/config.ts, @zs/core enrichment/config.ts)
   "ENRICHMENT_WORKER", "ENRICHMENT_DATABASE_URL", "ENRICHMENT_WORKER_ID", "ENRICHMENT_CLAIM_LIMIT", "ENRICHMENT_MAX_ATTEMPTS",
   "ENRICHMENT_PROVIDER_TIMEOUT_MS", "ENRICHMENT_INTERVAL_MS", "TREG_TOKEN", "TREG_BASE_URL",

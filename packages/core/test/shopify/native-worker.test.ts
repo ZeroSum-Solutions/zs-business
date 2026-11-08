@@ -50,6 +50,7 @@ function makeNative(over: { fetch?: typeof fetch } = {}) {
     clock,
     config: { clientId: CLIENT_ID, secrets: { current: CLIENT_SECRET }, sealKeys: parseSealKeys({ current: KEY_A, currentId: "k1" }), graceDays: 7 },
     hub: fakeHub(),
+    newId: randomUUID,
     report: (event) => reports.push(event),
   });
 }

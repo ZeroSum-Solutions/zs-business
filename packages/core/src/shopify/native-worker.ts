@@ -6,7 +6,7 @@
 //   - A token write is conditional on the install `generation` read under the lease, so a write in flight
 //     when an uninstall ran changes nothing.
 //   - Nothing in a log, report or error carries a token, an ID token, a code or a customer value.
-import { createHmac, randomInt, randomUUID } from "node:crypto";
+import { createHmac, randomInt } from "node:crypto";
 import { Conflict, normalizeAccountLabel } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { setShopifyBilling } from "../billing/shopify-plans.js";
@@ -72,8 +72,8 @@ export interface ShopifyNativeDeps {
   readonly config: ShopifyNativeConfig;
   readonly hub: HubPort;
   readonly report?: (event: ShopifyNativeReport) => void;
-  /** Tests inject; production uses crypto. */
-  readonly newId?: () => string;
+  /** Injected so core holds no ambient randomness; production passes crypto.randomUUID. */
+  readonly newId: () => string;
   readonly randomCode?: () => string;
 }
 
@@ -150,7 +150,7 @@ const isDup = (error: unknown) => typeof error === "object" && error !== null &&
 export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
   const { service, client, config } = deps;
   const now = () => deps.clock.now();
-  const newId = deps.newId ?? randomUUID;
+  const newId = deps.newId;
   const report = (event: ShopifyNativeReport) => { try { deps.report?.(event); } catch { /* a reporter never breaks the worker */ } };
   const claimKey = createHmac("sha256", config.sealKeys.current.key).update("shopify-claim-code-v1").digest();
   const codeHash = (code: string) => createHmac("sha256", claimKey).update(code.replace(/[\s-]/g, "").toUpperCase()).digest("hex");

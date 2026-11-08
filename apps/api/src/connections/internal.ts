@@ -5,15 +5,18 @@
 // after the tag verified); a body that does not fit the operation's strict schema -> 400. Domain outcomes
 // are 200 with an `outcome` (core's handleConnectorOperation). Logs carry the operation and a reason code,
 // never a body, a signature or a header.
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import {
   apiErrorBody,
   CONNECTOR_NONCE_TTL_MS,
   handleConnectorOperation,
+  handleShopifyOperation,
   isConnectorOperation,
+  isShopifyOperation,
   verifyConnectorRequest,
   type ConnectionsWorker,
   type ConnectorEnv,
+  type ShopifyWorkerOps,
 } from "@zs/core";
 
 /** Request bodies are small (an order query); anything larger is not ours. */
@@ -29,7 +32,7 @@ const READ_BUDGET_MS = 5_000;
  * without being buffered. Null when the body is larger than `max`. The read also ends (it throws) when `signal`
  * aborts: the caller went away or the read budget ran out, so a body that trickles in cannot hold the function.
  */
-async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number, signal: AbortSignal): Promise<Uint8Array | null> {
+export async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number, signal: AbortSignal): Promise<Uint8Array | null> {
   if (stream === null) return new Uint8Array(0);
   const reader = stream.getReader();
   let onAbort: () => void = () => {};
@@ -67,6 +70,8 @@ async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number
 export function connectionsInternalRoutes(config: {
   /** Null when the worker is not configured: every route is 404. */
   readonly worker: Pick<ConnectionsWorker, "link" | "complete" | "cancel" | "run" | "disconnect" | "takeNonce"> | null;
+  /** The native Shopify tier's eight operations under /internal/shopify/<operation> (C-21 to C-24); null when it is off. */
+  readonly native?: ShopifyWorkerOps | null;
   readonly env: ConnectorEnv;
   readonly secrets: { readonly current: string; readonly previous?: string };
   readonly clock: { now(): Date };
@@ -77,10 +82,12 @@ export function connectionsInternalRoutes(config: {
 }) {
   const app = new Hono();
   const notFound = (c: { json: (body: unknown, status: 404) => Response }) => c.json(apiErrorBody("NotFound", "Route not found"), 404);
-  app.post("/internal/connections/:operation", async (c) => {
-    const worker = config.worker;
-    const operation = c.req.param("operation");
-    if (!worker || !isConnectorOperation(operation)) return notFound(c);
+
+  /**
+   * The shared front of both signed routes: no query string, a capped body read, the signature check on the raw bytes
+   * (the nonce is taken only after the tag verified). A Response means the request ended here.
+   */
+  async function signedBody(c: Context, operation: string, worker: Pick<ConnectionsWorker, "takeNonce">): Promise<{ readonly body: string } | Response> {
     c.header("Cache-Control", "no-store");
     const url = new URL(c.req.url);
     if (url.search !== "") return c.json(apiErrorBody("ValidationFailed", "No query string is accepted"), 400);
@@ -114,9 +121,35 @@ export function connectionsInternalRoutes(config: {
       config.onRefused?.(operation, verified.reason);
       return c.json(apiErrorBody("Unauthorized", "Invalid internal credentials"), 401);
     }
+    return { body };
+  }
+
+  app.post("/internal/connections/:operation", async (c) => {
+    const worker = config.worker;
+    const operation = c.req.param("operation");
+    if (!worker || !isConnectorOperation(operation)) return notFound(c);
+    const signed = await signedBody(c, operation, worker);
+    if (signed instanceof Response) return signed;
     try {
       // B-6: a caller that goes away (the API gave up at 7 s) stops the Composio calls too.
-      const out = await handleConnectorOperation(worker, operation, body, AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(OPERATION_BUDGET_MS)]));
+      const out = await handleConnectorOperation(worker, operation, signed.body, AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(OPERATION_BUDGET_MS)]));
+      return c.json(out.body, out.status);
+    } catch (error) {
+      config.onError?.(error);
+      return c.json(apiErrorBody("Unavailable", "Connections are unavailable"), 503);
+    }
+  });
+
+  // C-21 to C-24: the native Shopify tier. Same signature, same refusals; the operations never see a Shopify token.
+  app.post("/internal/shopify/:operation", async (c) => {
+    const worker = config.worker;
+    const native = config.native;
+    const operation = c.req.param("operation");
+    if (!worker || !native || !isShopifyOperation(operation)) return notFound(c);
+    const signed = await signedBody(c, `shopify:${operation}`, worker);
+    if (signed instanceof Response) return signed;
+    try {
+      const out = await handleShopifyOperation(native, operation, signed.body);
       return c.json(out.body, out.status);
     } catch (error) {
       config.onError?.(error);

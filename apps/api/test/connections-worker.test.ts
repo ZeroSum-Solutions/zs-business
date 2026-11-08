@@ -54,6 +54,7 @@ describe("parseConnectionsEnv", () => {
       databaseCaCert: undefined,
       authConfigIds: { shopify: "ac_shopify" },
       callbackUrl: ENV.CONNECTIONS_CALLBACK_URL,
+      shopify: null,
     });
   });
 

@@ -119,6 +119,7 @@ export * from "./billing.js";
 export * from "./plans.js";
 export * from "./calendar.js";
 export * from "./connections.js";
+export * from "./shopify.js";
 export * from "./automation.js";
 export * from "./browser.js";
 export * from "./voice.js";

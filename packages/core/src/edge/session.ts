@@ -191,6 +191,7 @@ import { getBillingPlan, getStoredCheckout, planHandlers, portalCustomer, rememb
 import type { StripePlansClient } from "../billing/plan-stripe.js";
 import { connectionHandlers } from "../connections/handlers.js";
 import type { ConnectorPort } from "../connections/port.js";
+import type { ShopifyPort } from "../shopify/port.js";
 import type { ConnectionLimiter } from "../connections/limits.js";
 import type { ConnectionStateSecrets } from "../connections/tokens.js";
 import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, listCalendarConnections, resourceInTenant } from "../calendar/connections.js";
@@ -233,6 +234,8 @@ export interface EdgeDependencies {
     readonly connector: ConnectorPort;
     readonly stateSecrets: ConnectionStateSecrets;
     readonly limiter: ConnectionLimiter;
+    /** The native Shopify tier's port (C-21 to C-24); absent means the embedded app and claims are off (404). */
+    readonly shopify?: ShopifyPort;
   };
   /**
    * Site publishing (M4b): the object store releases go to and the compiler; absent means off.
