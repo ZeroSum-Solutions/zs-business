@@ -55,7 +55,9 @@ describe("backfill (BP-1)", () => {
     const earlier = await mkdtemp(join(tmpdir(), "zs-before-profiles-"));
     const source = new URL("../../../supabase/migrations/", import.meta.url);
     try {
-      for (const name of (await readdir(source)).filter((file) => file.endsWith(".sql") && file !== "20261023100000_business_profiles.sql")) {
+      // Only the files before the profiles migration: a later one may touch business_profiles
+      // (20261108300000 rewrites its policy), and migrate() applies them all afterwards.
+      for (const name of (await readdir(source)).filter((file) => file.endsWith(".sql") && file < "20261023100000_business_profiles.sql")) {
         await copyFile(new URL(name, source), join(earlier, name));
       }
       const old = await createTestDatabase(undefined, { migrations: pathToFileURL(`${earlier}/`) });
