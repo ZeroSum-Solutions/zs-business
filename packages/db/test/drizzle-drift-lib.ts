@@ -108,7 +108,7 @@ export async function collectDrift(db: Pool): Promise<string[]> {
         const row = dbColumns.get(name);
         if (!row) { problems.push(at(`column ${name} is in Drizzle, not in the database`)); continue; }
         if (row.type !== column.getSQLType()) problems.push(at(`column ${name} type: Drizzle ${column.getSQLType()}, database ${row.type}`));
-        if (row.notnull !== (column.notNull || column.primary)) problems.push(at(`column ${name} not null: Drizzle ${column.notNull || column.primary}, database ${row.notnull}`));
+        if (row.notnull !== (column.notNull || column.primary)) problems.push(at(`column ${name} not null: Drizzle ${column.notNull || column.primary} (${column.primary ? "primary key" : column.notNull ? "notNull()" : "nullable"}), database ${row.notnull}`));
         const identity = column.generatedIdentity?.type === "always" ? "a" : column.generatedIdentity?.type === "byDefault" ? "d" : "";
         if (row.identity !== identity) problems.push(at(`column ${name} identity: Drizzle '${identity}', database '${row.identity}'`));
         if ((row.generated !== "") !== (column.generated !== undefined)) problems.push(at(`column ${name} generated: Drizzle ${column.generated !== undefined}, database ${row.generated !== ""}`));
