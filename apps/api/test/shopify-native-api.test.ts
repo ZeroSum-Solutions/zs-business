@@ -527,7 +527,7 @@ describe("POST /webhooks/shopify (C-24)", () => {
     expect((await h.database.pool.query("SELECT status FROM shopify_installs")).rows[0].status).toBe("uninstalled");
   });
 
-  it("refuses a body over 64 KiB with 413 and is off (404) without the native tier", async () => {
+  it("refuses a body over 256 KiB with 413 and is off (404) without the native tier", async () => {
     const big = "x".repeat(256 * 1024 + 1);
     expect((await post(big, { "content-length": String(big.length), ...(await signed(big, "customers/redact")) })).status).toBe(413);
     const off = shopifyWebhookRoutes({ native: null });

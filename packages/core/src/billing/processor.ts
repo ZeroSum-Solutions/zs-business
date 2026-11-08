@@ -219,8 +219,11 @@ export function createBillingWorker(deps: BillingWorkerDeps) {
       await tx.query("SAVEPOINT billing_event");
       try {
         outcome = object && typeof object === "object" ? await apply(tx, event.type, object as Record<string, unknown>, createdAt(event.payload?.created), at) : "ignored";
-        // A plan event that waits or is not ours writes nothing: a retry starts from the same rows.
-        await tx.query(outcome === "wait" || outcome === "not_ours" ? "ROLLBACK TO SAVEPOINT billing_event" : "RELEASE SAVEPOINT billing_event");
+        // A plan event that waits or is not ours writes nothing: a retry starts from the same rows. The one exception
+        // (PL-17) is the close of a pending plan checkout of a tenant another provider bills: that write stays.
+        const keepWrite = outcome === "not_ours_closed";
+        if (keepWrite) outcome = "not_ours";
+        await tx.query(!keepWrite && (outcome === "wait" || outcome === "not_ours") ? "ROLLBACK TO SAVEPOINT billing_event" : "RELEASE SAVEPOINT billing_event");
       } catch (error) {
         await tx.query("ROLLBACK TO SAVEPOINT billing_event");
         outcome = "error";

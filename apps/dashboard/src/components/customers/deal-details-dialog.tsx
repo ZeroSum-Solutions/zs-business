@@ -8,7 +8,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input, Label, Select } from "@/components/ui/input";
 import { ErrorNote } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isApiError, isDealChanged, type DealDetailsChange, type DealSummary, type LeadSource } from "@/lib/api";
+import { isDealChanged, type DealDetailsChange, type DealSummary, type LeadSource } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
@@ -44,6 +44,11 @@ export function amountHint(currency: string): string {
 
 /** The currency a deal with no value starts at when the business profile is not known (an older API, or not yet loaded). */
 export const FALLBACK_CURRENCY = "USD";
+
+/** The business's own currency from its profile, or null when there is none to use (not loaded, failed, 404 from an older API, or a code the business may not use). */
+export function businessCurrency(profile: { currency: string } | undefined): string | null {
+  return profile && isActiveCurrencyCode(profile.currency) ? profile.currency : null;
+}
 
 export interface DetailsForm {
   amount: string;
@@ -89,15 +94,17 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
   const generation = useDialogGeneration(open);
   const profile = useBusinessProfile();
   // A stored profile currency outside the list cannot start a deal; fall back rather than offer it.
-  const profileCurrency = profile.data && isActiveCurrencyCode(profile.data.currency) ? profile.data.currency : FALLBACK_CURRENCY;
-  // The business currency is "known" once the profile arrives, or the API has none (404, the older-API fallback).
-  const profileKnown = profile.isSuccess || (profile.isError && isApiError(profile.error, "not_found"));
+  const profileCurrency = businessCurrency(profile.data) ?? FALLBACK_CURRENCY;
+  // IT-10: the business currency is "known" only when the profile holds a usable code. Loading, failed, a 404 from an
+  // older API and a code the business may not use all leave the owner to pick one: a shown USD is a guess, not a currency.
+  const profileKnown = businessCurrency(profile.data) !== null;
   const [form, setForm] = useState(() => initialForm(deal, profileCurrency));
   // What the form was opened (or last rebased) from: a save sends this revision, never a newer
   // one a reload brought in, so a change made elsewhere always comes back as stale_revision.
   const [base, setBase] = useState(() => ({ revision: deal.revision, form: initialForm(deal, profileCurrency) }));
   // Whether the owner chose a currency; until then a profile that arrives late still sets the start.
   const [currencyChosen, setCurrencyChosen] = useState(false);
+  const currencyPending = !deal.value && !currencyChosen && !profileKnown;
   const [rebasing, setRebasing] = useState(false);
   const [problem, setProblem] = useState<"amount" | "currency" | null>(null);
   const [stale, setStale] = useState<"reloaded" | "failed" | null>(null);
@@ -205,7 +212,7 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
               <Select
                 id={`${prefix}-currency`}
                 className="w-full"
-                value={form.currency}
+                value={currencyPending ? "" : form.currency}
                 aria-invalid={problem === "currency" || undefined}
                 aria-describedby={problem === "currency" ? `${prefix}-problem` : undefined}
                 onChange={(event) => {
@@ -213,6 +220,7 @@ export function DealDetailsDialog({ deal, open, onOpenChange, onSaved }: {
                   setForm({ ...form, currency: event.target.value });
                 }}
               >
+                {currencyPending ? <option value="" disabled>Choose a currency</option> : null}
                 {isCurrencyCode(form.currency) ? null : <option value={form.currency}>{form.currency} · not supported</option>}
                 {CURRENCIES.filter((currency) => isActiveCurrencyCode(currency.code) || currency.code === form.currency).map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
               </Select>

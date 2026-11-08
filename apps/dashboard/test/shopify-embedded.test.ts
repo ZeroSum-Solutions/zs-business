@@ -1,9 +1,10 @@
 // The embedded Shopify app on the dashboard side (docs/requirements/connections.md C-21): the page's HTML and policy,
 // the session-token proxy, the claim routes through the generic proxy, and the page script run against a fake document.
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SHOPIFY_EMBEDDED_ADDRESS_HEADER, SHOPIFY_EMBEDDED_ADDRESS_SIGNATURE_HEADER, shopifyEmbeddedAddressMessage } from "@zs/contracts";
 import nextConfig from "../next.config";
+import { GET as embeddedGet } from "../src/app/shopify/app/route";
 import { proxyApiRequest } from "../src/lib/server/api-proxy";
 import { EMBEDDED_CLIENT_PARAMS, EMBEDDED_CLIENT_SOURCE } from "../src/lib/server/shopify-embedded-client";
 import { APP_BRIDGE_URL, embeddedPolicy, frameAncestors, renderEmbeddedPage, shopFromQuery } from "../src/lib/server/shopify-embedded-page";
@@ -54,6 +55,17 @@ describe("the page and its policy", () => {
     const matches = (path: string) => new RegExp(`^${general.source}$`).test(path);
     for (const path of ["/", "/sign-in", "/account/connections", "/api/shopify/open", "/shopify", "/shopify/application", "/shopify/app-two"]) expect(matches(path), path).toBe(true);
     for (const path of ["/shopify/app", "/shopify/app/", "/shopify/app/extra"]) expect(matches(path), path).toBe(false);
+  });
+
+  it("adds no framing header of its own to /shopify/app through any rule in next.config", async () => {
+    const rules = await nextConfig.headers!();
+    const framing = new Set(["content-security-policy", "x-frame-options"]);
+    const unmatched = rules.filter((rule) => {
+      // Rule sources are path patterns; the general one is a negative-lookahead regex, the others are literal paths.
+      const hit = rule.source.includes("(") ? new RegExp(`^${rule.source}$`).test("/shopify/app") : rule.source === "/shopify/app";
+      return hit && rule.headers.some((header) => framing.has(header.key.toLowerCase()));
+    });
+    expect(unmatched).toEqual([]);
   });
 });
 
@@ -871,5 +883,49 @@ describe("the page script", () => {
     await settle();
     expect(app.all().some((node) => node.tag === "img")).toBe(false);
     expect(texts(app)).toContain('<img src=x onerror="alert(1)">');
+  });
+});
+
+// ---- the route handler (C-20, S6) --------------------------------------------------------------
+describe("GET /shopify/app (C-20 headers)", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+  const get = (query: string) => Promise.resolve(embeddedGet(new Request(`https://hub.example.test/shopify/app${query}`)));
+
+  it("frames only that shop's admin and admin.shopify.com, with no X-Frame-Options and no Set-Cookie", async () => {
+    vi.stubEnv("SHOPIFY_CLIENT_ID", CLIENT_ID.replace(/a/g, "b"));
+    const response = await get("?shop=halden-rowe.myshopify.com&host=abc");
+    expect(response.status).toBe(200);
+    const csp = response.headers.get("content-security-policy")!;
+    // The whole value, with the per-request nonce read back from it: an extra ancestor or source cannot pass.
+    const nonce = /script-src 'nonce-([A-Za-z0-9_-]{24})' /.exec(csp)?.[1];
+    expect(nonce).toBeDefined();
+    expect(csp).toBe([
+      "default-src 'none'",
+      `script-src 'nonce-${nonce}' https://cdn.shopify.com`,
+      `style-src 'nonce-${nonce}'`,
+      "connect-src 'self' https://*.shopify.com https://*.shopifycloud.com",
+      "img-src 'self' data: https://cdn.shopify.com",
+      "font-src 'self'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "object-src 'none'",
+      "frame-ancestors https://halden-rowe.myshopify.com https://admin.shopify.com",
+    ].join("; "));
+    expect(response.headers.get("x-frame-options")).toBeNull();
+    expect(response.headers.has("set-cookie")).toBe(false);
+    expect(await response.text()).toContain('name="shopify-api-key" content="' + "b".repeat(32) + '"');
+  });
+
+  it("frames nobody when the shop is missing or not a myshopify.com name", async () => {
+    vi.stubEnv("SHOPIFY_CLIENT_ID", "b".repeat(32));
+    for (const query of ["", "?shop=evil.example.com", "?shop=x.myshopify.com.evil.com"])
+      expect((await get(query)).headers.get("content-security-policy"), query).toContain("frame-ancestors 'none'");
+  });
+
+  it("answers 404 when SHOPIFY_CLIENT_ID is unset or malformed", async () => {
+    vi.stubEnv("SHOPIFY_CLIENT_ID", "");
+    expect((await get("?shop=halden-rowe.myshopify.com")).status).toBe(404);
+    vi.stubEnv("SHOPIFY_CLIENT_ID", "not-a-client-id");
+    expect((await get("?shop=halden-rowe.myshopify.com")).status).toBe(404);
   });
 });

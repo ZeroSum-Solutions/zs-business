@@ -260,8 +260,14 @@ export function createShopifyPlanSync(deps: {
           deps.report?.({ tenantId: picked.tenant_id, outcome: "error", detail: "failure not recorded" });
         }
       };
+      // PL-18: the pause follows a call, never a skip, and comes before the re-read, so the re-read is the last thing before the call.
+      let pausePending = false;
       for (const picked of due.rows) {
         if (left() < SHOPIFY_MIN_CALL_BUDGET_MS) break;
+        if (pausePending) {
+          pausePending = false;
+          await sleep(SHOPIFY_CALL_SPACING_MS);
+        }
         // Another run may have synced this tenant, or stored a failure backoff, since it was
         // picked: then this call would be spent twice (PL-18). The read takes no lock.
         let stillDue: boolean;
@@ -284,12 +290,11 @@ export function createShopifyPlanSync(deps: {
           count("skipped");
           continue;
         }
-        // The pause follows only a call, never a skip (PL-18).
-        if (checked > 0) await sleep(SHOPIFY_CALL_SPACING_MS);
         // Checked after the pause and the re-read, so no call starts without its budget.
         const budget = left() - SHOPIFY_COMMIT_RESERVE_MS;
         if (budget < SHOPIFY_MIN_CALL_BUDGET_MS - SHOPIFY_COMMIT_RESERVE_MS) break;
         checked += 1;
+        pausePending = true;
         // The Partner API call holds no transaction, connection or plan lock (PL-18).
         let contract: ShopifyContract | null;
         try {

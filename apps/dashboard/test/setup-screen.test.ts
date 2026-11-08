@@ -9,7 +9,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { createElement as h } from "react";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { ConnectionsView } from "../src/components/account/connections-view";
-import { createDealWithValue, NewDealButton, NO_OPEN_STAGE_REASON, NO_PIPELINE_REASON, PIPELINES_NOT_LOADED, SETUP_NOT_LOADED } from "../src/components/customers/new-deal-dialog";
+import { createDealWithValue, dealValueFor, NewDealButton, NO_OPEN_STAGE_REASON, NO_PIPELINE_REASON, PIPELINES_NOT_LOADED, SETUP_NOT_LOADED } from "../src/components/customers/new-deal-dialog";
 import { SetupLine } from "../src/components/home/setup-line";
 import { ApplyTemplate, CALENDAR_CLASH_ADVICE, OWNER_ONLY_TOGGLE, SENDING_OFF, SetupView, STAFF_SETUP_DESCRIPTION } from "../src/components/setup/setup-view";
 import { ApiError } from "../src/lib/api";
@@ -216,6 +216,22 @@ describe("recommended connections (IT-8)", () => {
   });
 });
 
+describe("recommended connections when a refetch fails with cached setup (IT-8)", () => {
+  it("shows no recommended lines and keeps the default order once the setup read has failed, even with cached data", () => {
+    const html = render(h(ConnectionsView), (client) => {
+      client.setQueryData(keys.setup, applied("jewelry"));
+      client.getQueryCache().find({ queryKey: keys.setup })!.setState({
+        status: "error", fetchStatus: "idle", error: new ApiError("server", "Something went wrong on our side. Try again."), errorUpdateCount: 1, errorUpdatedAt: Date.now(),
+        fetchFailureCount: 1, fetchFailureReason: new ApiError("server", "Something went wrong on our side. Try again."),
+      });
+      expect(client.getQueryData(keys.setup)).toBeDefined();
+    });
+    expect(html).toContain('data-testid="gcal-card"');
+    expect(html).not.toContain("Recommended for");
+    expect(html.indexOf('data-testid="gcal-card"')).toBeLessThan(html.indexOf('data-testid="shopify-card"'));
+  });
+});
+
 describe("New deal (IT-10)", () => {
   const SEED_AND_TEMPLATE = (applyId: string | null) => (client: QueryClient) => {
     client.setQueryData(keys.pipelines, [
@@ -285,6 +301,16 @@ describe("New deal (IT-10)", () => {
     });
     expect(html).toContain(NO_OPEN_STAGE_REASON);
     expect(html).not.toContain(NO_PIPELINE_REASON);
+  });
+
+  it("asks for a currency instead of guessing one when a value is typed before the profile currency is known (IT-10)", () => {
+    // Profile not read and none picked: the typed value is a currency problem, never a USD value.
+    expect(dealValueFor("1250", false, "USD")).toEqual({ problem: "currency" });
+    // No value typed: nothing to price, so no currency is needed.
+    expect(dealValueFor("  ", false, "USD")).toEqual({ value: null });
+    // The profile currency, or one the owner picked, is used as it is.
+    expect(dealValueFor("1250", true, "EUR")).toEqual({ value: { amountMinor: 125_000, currency: "EUR" } });
+    expect(dealValueFor("12x", true, "EUR")).toEqual({ problem: "amount" });
   });
 
   it("creates the deal in the template pipeline's first open stage, then saves its value", async () => {

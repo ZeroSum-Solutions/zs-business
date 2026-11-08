@@ -398,6 +398,36 @@ describe("the Shopify pass (PL-18)", () => {
     expect(await plan(tenants[1]!)).toMatchObject({ shopify_sync_failures: 1, shopify_synced_at: null });
   });
 
+  // PL-18: "Just before each call it re-reads the tenant": the 500 ms pause comes first, so a change during it is seen.
+  it("re-reads the next tenant after the pause between calls, so a backoff stored during the pause skips it", async () => {
+    partner = fakePartner();
+    const tenants = [await b.tenant(), await b.tenant()].sort();
+    for (const tenantId of tenants) {
+      const shop = newShop();
+      await link(tenantId, shop);
+      partner.contracts.set(shop.id, { handles: [HANDLES.hub_solo] });
+    }
+    await b.h.service((tx) => tx.query(
+      "UPDATE tenant_plans SET shopify_next_sync_at=$1 WHERE billing_provider='shopify' AND shopify_shop_id IS NOT NULL",
+      [new Date(b.h.clock.now().getTime() + 365 * DAY)]));
+    await b.h.service((tx) => tx.query("UPDATE tenant_plans SET shopify_next_sync_at=NULL WHERE tenant_id = ANY($1::uuid[])", [tenants]));
+    const pauses: number[] = [];
+    const pass = createShopifyPlanSync({
+      service: b.h.service, clock: b.h.clock, reader: reader(), limit: 100, graceDays: 7,
+      sleep: async (ms) => {
+        pauses.push(ms);
+        // Another runner fails on the second tenant while this pass pauses.
+        await b.h.service((tx) => tx.query(
+          "UPDATE tenant_plans SET shopify_sync_failures=1, shopify_next_sync_at=$2 WHERE tenant_id=$1",
+          [tenants[1], new Date(b.h.clock.now().getTime() + 60_000)]));
+      },
+    });
+    expect(await pass.runOnce()).toEqual({ checked: 1, outcomes: { plan_synced: 1, skipped: 1 }, stopped: false });
+    expect(pauses).toEqual([500]);
+    expect(partner.requests).toHaveLength(1);
+    expect(await plan(tenants[1]!)).toMatchObject({ shopify_sync_failures: 1, shopify_synced_at: null });
+  });
+
   it("skips a tenant whose plan lock wait runs out and goes on with the next", async () => {
     partner = fakePartner();
     const tenants = [await b.tenant(), await b.tenant()].sort();

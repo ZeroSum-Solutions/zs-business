@@ -131,12 +131,23 @@ export function ShopifyClaim() {
   );
 }
 
-/** True once the server answered the claim route, which exists only with the native Shopify tier (C-18). */
-export function useNativeShopify(enabled: boolean): { native: boolean; pending: boolean } {
+/**
+ * Whether the native Shopify tier is on (C-18). Only an answer counts: data (even `null`, "no claim") says on; a 404
+ * says off; any other failure says nothing, so no screen falls back to asking for a typed shop domain, which the
+ * native worker refuses. The demo has no native tier, so it is off there.
+ */
+export type NativeShopify = "native" | "off" | "unknown" | "pending";
+export function nativeShopifyState(live: boolean, claim: { data: unknown; isError: boolean; error: unknown }): NativeShopify {
+  if (claim.data !== undefined) return "native";
+  if (claim.isError) return claim.error instanceof ClaimsUnavailable && claim.error.status === 404 ? "off" : "unknown";
+  return live ? "pending" : "off";
+}
+
+export function useNativeShopify(enabled: boolean): { state: NativeShopify; retry: () => void } {
   const live = useApiRuntime().mode === "live";
   const claim = useClaimState(live && enabled);
-  // The claim route is only ever read on the live app; a cached answer (success) is what says the native tier is on.
-  return { native: claim.isSuccess, pending: live && enabled && claim.isPending };
+  // The claim route is only ever read on the live app.
+  return { state: nativeShopifyState(live, claim), retry: () => void claim.refetch() };
 }
 
 function useClaimState(live: boolean) {

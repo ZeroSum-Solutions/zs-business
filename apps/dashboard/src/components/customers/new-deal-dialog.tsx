@@ -16,7 +16,7 @@ import { useDialogGeneration } from "@/lib/dialog-generation";
 import { useIntentKey } from "@/lib/intent-key";
 import { useBusinessProfile, useKeys, usePipelines, useSetup } from "@/lib/queries";
 import { dealTarget } from "@/lib/setup";
-import { amountHint, FALLBACK_CURRENCY, parseAmount } from "./deal-details-dialog";
+import { amountHint, businessCurrency, FALLBACK_CURRENCY, parseAmount } from "./deal-details-dialog";
 
 export const NO_PIPELINE_REASON = "There is no pipeline for deals yet. An owner adds one in Setup.";
 export const NO_OPEN_STAGE_REASON = "The pipeline has no open stage for a new deal. Add a stage that is not Won or Lost in the pipeline.";
@@ -24,6 +24,22 @@ export const PIPELINES_NOT_LOADED = "Your pipelines didn't load, so a deal can't
 export const SETUP_NOT_LOADED = "Your setup didn't load, so a deal can't be added yet. Reload the page to try again.";
 export const VALUE_NOT_SAVED = "The deal was added, but its value was not saved. Save the value again, or add it later in the deal's details.";
 export const CHOOSE_CURRENCY = "Choose a currency for the value.";
+
+/**
+ * IT-10: a value needs the business's currency or one the owner picked, never a guessed USD. An empty
+ * amount is no value; a typed amount with no known currency is the `currency` problem.
+ */
+export function dealValueFor(
+  amount: string,
+  currencyKnown: boolean,
+  currency: string,
+): { value: DealValue | null } | { problem: "currency" | "amount" } {
+  if (amount.trim() === "") return { value: null };
+  if (!currencyKnown) return { problem: "currency" };
+  const amountMinor = parseAmount(amount, currency);
+  if (amountMinor === null) return { problem: "amount" };
+  return { value: { amountMinor, currency } };
+}
 
 /** The deal a failed value step left behind, so a retry saves the value and never adds a second deal. */
 export interface CreatedDeal { id: string; revision: number; title: string }
@@ -100,7 +116,7 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
   const intents = useIntentKey();
   const generation = useDialogGeneration(open);
   const profile = useBusinessProfile();
-  const profileCurrency = profile.data && isActiveCurrencyCode(profile.data.currency) ? profile.data.currency : FALLBACK_CURRENCY;
+  const profileCurrency = businessCurrency(profile.data) ?? FALLBACK_CURRENCY;
   const [title, setTitle] = useState("");
   const [amount, setAmount] = useState("");
   const [currency, setCurrency] = useState<string | null>(null);
@@ -108,7 +124,7 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
   // The deal the first attempt added when only its value failed: the retry saves the value alone.
   const [created, setCreated] = useState<CreatedDeal | null>(null);
   // A value needs the business's currency, or one the owner picked: never a guessed USD.
-  const currencyKnown = currency !== null || profile.isSuccess;
+  const currencyKnown = currency !== null || businessCurrency(profile.data) !== null;
   const shownCurrency = currency ?? profileCurrency;
 
   const create = useMutation({
@@ -143,13 +159,9 @@ function NewDealDialog({ contactId, target, open, onOpenChange }: {
     event.preventDefault();
     const name = title.trim();
     if (!name) return setProblem("title");
-    let value: DealValue | null = null;
-    if (amount.trim() !== "") {
-      if (!currencyKnown) return setProblem("currency");
-      const amountMinor = parseAmount(amount, shownCurrency);
-      if (amountMinor === null) return setProblem("amount");
-      value = { amountMinor, currency: shownCurrency };
-    }
+    const decided = dealValueFor(amount, currencyKnown, shownCurrency);
+    if ("problem" in decided) return setProblem(decided.problem);
+    const value = decided.value;
     setProblem(null);
     create.mutate({
       input: { contactId, pipelineId: target.pipelineId, stageId: target.stageId, title: name }, value, created, generation: generation.current(),

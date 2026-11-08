@@ -36,7 +36,8 @@ export function ConnectionsView() {
   // keep their default order with no recommended lines.
   // A read that is not running (no session yet) has nothing to wait for.
   const settled = !(setup.isPending && setup.fetchStatus === "fetching");
-  const template = setup.data?.templates.find((item) => item.id === setup.data?.applied?.templateId);
+  // A failed read recommends nothing, even when an earlier answer is still cached.
+  const template = setup.isError ? undefined : setup.data?.templates.find((item) => item.id === setup.data?.applied?.templateId);
   const cards: Record<(typeof OFFERED_CONNECTIONS)[number], ReactNode> = {
     google_calendar: <GoogleCalendarCard notice={notice} onNotice={setNotice} />,
     shopify: <ShopifyCard notice={shopifyNotice} onNotice={setShopifyNotice} waiting={shopifyWaiting} onSettled={settleShopify} />,

@@ -222,6 +222,23 @@ describe("api proxy", () => {
     expect(harness.apiCalls.at(-1)!.init.method).toBe("DELETE");
   });
 
+  it("forwards the setup routes in both route lists: /v1/setup, apply and a booking page's published flag (industry-templates.md IT-6)", async () => {
+    const { harness, get, post } = await signedIn();
+    const read = ["v1", "setup"];
+    expect((await proxyApiRequest(get(read.join("/")), read, harness.setup)).status).toBe(200);
+    expect(harness.apiCalls.at(-1)!.url).toBe("http://api.internal:8787/v1/setup");
+    for (const path of [["v1", "setup", "apply"], ["v1", "setup", "booking-pages", "p-1", "published"]]) {
+      const response = await proxyApiRequest(post(path.join("/"), { x: 1 }, { "Idempotency-Key": "k-setup", Origin: ORIGIN }), path, harness.setup);
+      expect(response.status, path.join("/")).toBe(200);
+      expect(harness.apiCalls.at(-1)!.url).toBe(`http://api.internal:8787/${path.join("/")}`);
+    }
+    const calls = harness.apiCalls.length;
+    for (const path of [["v1", "setup", ".."], ["v2", "setup"]]) {
+      expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(404);
+    }
+    expect(harness.apiCalls).toHaveLength(calls);
+  });
+
   it("forwards the owner's website-task routes under /v1/browser, never the runner's", async () => {
     const { harness, jar, get, post } = await signedIn();
     for (const path of [

@@ -7,6 +7,7 @@ import { CONNECTION_RETENTION_LINE, READ_SCOPE_DISCLOSURES } from "@zs/contracts
 import { ShopifyCard } from "../src/components/account/shopify-card";
 import { ReconnectNotice } from "../src/components/home/reconnect-notice";
 import { ApiError } from "../src/lib/api/errors";
+import { ClaimsUnavailable } from "../src/lib/shopify-claims";
 import type { ManagedConnection, PendingManagedConnection } from "../src/lib/api";
 import { READ_BLOCKED_MESSAGE, REAUTHORIZE_HOME_LINE, REVOKE_FAILED_MESSAGE, STAFF_ERROR } from "../src/lib/managed-connections";
 import { failQuery, keys, renderScreen } from "./helpers/render";
@@ -62,6 +63,20 @@ describe("Shopify card: connect form", () => {
     const html = card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error" })], fill: (client) => client.setQueryData(keys.shopifyClaim, null) });
     expect(text(html)).toContain("open ZS Business Connections in your Shopify admin");
     expect(text(html)).not.toContain("Reconnect Halden Rowe");
+  });
+
+  it("never asks for a store address when the claim read failed for a reason other than 'no native tier' (C-18)", () => {
+    for (const error of [new Error("claim status failed"), new ClaimsUnavailable(403)]) {
+      const html = card({ fill: (client) => failQuery(client, keys.shopifyClaim, error) });
+      expect(html, error.message).not.toContain('data-testid="shopify-connect-form"');
+      expect(html, error.message).not.toContain("your-store.myshopify.com");
+      expect(html, error.message).toContain('data-testid="shopify-native-unknown"');
+    }
+  });
+
+  it("asks for the store address only when the server answered that it has no native tier (404), or in the demo", () => {
+    expect(card({ fill: (client) => failQuery(client, keys.shopifyClaim, new ClaimsUnavailable(404)) })).toContain('data-testid="shopify-connect-form"');
+    expect(card()).toContain('data-testid="shopify-connect-form"');
   });
 
   it("describes a read-only connection and nothing else", () => {
