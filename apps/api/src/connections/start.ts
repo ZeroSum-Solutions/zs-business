@@ -59,35 +59,41 @@ export function startConnectionsWorker(env: ConnectionsWorkerRuntimeEnv, deps: {
     ...(env.databaseCaCert === undefined ? {} : { ssl: { ca: env.databaseCaCert, rejectUnauthorized: true } }),
     onError: (summary) => console.error("Connections pool error", summary),
   });
-  const service = <T>(work: Parameters<typeof asService<T>>[1]) => asService(pool, work);
-  const shopify = env.shopify;
-  const native = shopify === null ? null : createShopifyNativeWorker({
-    service,
-    newId: randomUUID,
-    client: createShopifyClient({
-      clientId: shopify.clientId,
-      clientSecret: shopify.secrets.current,
-      apiVersion: shopify.apiVersion,
-      ...(deps.fetch ? { fetch: deps.fetch } : {}),
-    }),
-    clock: deps.clock,
-    config: { clientId: shopify.clientId, secrets: shopify.secrets, sealKeys: shopify.sealKeys, graceDays: shopify.graceDays },
-    hub: createShopifyHub({
-      pool,
-      auth: createSupabaseAuthAdmin({ projectRef: shopify.projectRef, serviceKey: shopify.serviceKey, ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
+  // A throw after the pool exists must not leave it behind: the guarded cron entry retries the build.
+  try {
+    const service = <T>(work: Parameters<typeof asService<T>>[1]) => asService(pool, work);
+    const shopify = env.shopify;
+    const native = shopify === null ? null : createShopifyNativeWorker({
+      service,
+      newId: randomUUID,
+      client: createShopifyClient({
+        clientId: shopify.clientId,
+        clientSecret: shopify.secrets.current,
+        apiVersion: shopify.apiVersion,
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      }),
       clock: deps.clock,
-      signInUrl: shopify.signInUrl,
-      report: (event) => console.warn("Shopify hub", event),
-    }),
-    report: shopifyNativeReporter(console),
-  });
-  const worker = createConnectionsWorker({
-    service,
-    composio: createComposioClient({ apiKey: env.composioApiKey, ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
-    clock: deps.clock,
-    config: { env: env.env, callbackUrl: env.callbackUrl, authConfigIds: { ...env.authConfigIds } },
-    ...(native === null ? {} : { native: { run: native.run, finishDisconnect: native.finishDisconnect, pass: native.pass } }),
-    report: connectionsWorkerReporter(console),
-  });
-  return { worker, pool, native };
+      config: { clientId: shopify.clientId, secrets: shopify.secrets, sealKeys: shopify.sealKeys, graceDays: shopify.graceDays },
+      hub: createShopifyHub({
+        pool,
+        auth: createSupabaseAuthAdmin({ projectRef: shopify.projectRef, serviceKey: shopify.serviceKey, ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
+        clock: deps.clock,
+        signInUrl: shopify.signInUrl,
+        report: (event) => console.warn("Shopify hub", event),
+      }),
+      report: shopifyNativeReporter(console),
+    });
+    const worker = createConnectionsWorker({
+      service,
+      composio: createComposioClient({ apiKey: env.composioApiKey, ...(deps.fetch ? { fetch: deps.fetch } : {}) }),
+      clock: deps.clock,
+      config: { env: env.env, callbackUrl: env.callbackUrl, authConfigIds: { ...env.authConfigIds } },
+      ...(native === null ? {} : { native: { run: native.run, finishDisconnect: native.finishDisconnect, pass: native.pass } }),
+      report: connectionsWorkerReporter(console),
+    });
+    return { worker, pool, native };
+  } catch (error) {
+    void pool.end().catch(() => undefined);
+    throw error;
+  }
 }

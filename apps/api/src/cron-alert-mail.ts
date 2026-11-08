@@ -12,6 +12,11 @@ export interface CronAlertMessage {
   readonly failureCount: number;
   /** Already redacted by describeCronError. */
   readonly error: string;
+  /**
+   * A start-up failure that could not be written to cron_alerts (cron-startup.ts). `openedAt` is then the start of the
+   * hour. The text says so, says it repeats hourly, and promises no close; the idempotency key names the deployment.
+   */
+  readonly unrecorded?: boolean;
 }
 /** Resolves true only when the provider accepted the mail (a 2xx); false when it was skipped, refused or failed. */
 export type CronAlertNotifier = (message: CronAlertMessage, options?: { readonly timeoutMs?: number }) => Promise<boolean>;
@@ -71,29 +76,44 @@ export function createOpsAlertMailer(deps: {
       const mail = configured();
       if (mail === "off") return false;
       const where = origin();
+      const unrecorded = message.unrecorded === true;
       const response = await doFetch(mail.endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${mail.apiKey}`,
           "Content-Type": "application/json",
-          "Idempotency-Key": `cron-alert:${message.job}:${message.openedAt}`,
+          "Idempotency-Key": unrecorded
+            ? `cron-alert:unrecorded:${where.environment}:${where.project}:${message.job}:${message.openedAt}`
+            : `cron-alert:${message.job}:${message.openedAt}`,
           "User-Agent": "zs-business-cron-alerts",
         },
         body: JSON.stringify({
           from: mail.from,
           to: [mail.to],
-          subject: `[ZS Hub ${where.environment}] Cron job "${message.job}" is failing`,
-          text: [
-            `The scheduled job "${message.job}" failed at ${message.openedAt}.`,
-            `Environment: ${where.environment}. Project: ${where.project}.`,
-            "",
-            `Error: ${message.error}`,
-            "",
-            "You get this email when an alert opens (again later only if the send did not go through), and again only if it is fixed and then fails again.",
-            `To see every open alert, run in the ${where.environment} database:`,
-            "  SELECT job, failure_count, last_failed_at, last_error FROM cron_alerts WHERE resolved_at IS NULL;",
-            "The alert closes by itself on the next good run.",
-          ].join("\n"),
+          subject: unrecorded
+            ? `[ZS Hub ${where.environment}] Cron job "${message.job}" failed to start (not recorded)`
+            : `[ZS Hub ${where.environment}] Cron job "${message.job}" is failing`,
+          text: unrecorded
+            ? [
+              `The scheduled job "${message.job}" failed to start (seen in the hour of ${message.openedAt}).`,
+              `Environment: ${where.environment}. Project: ${where.project}.`,
+              "",
+              `Error: ${message.error}`,
+              "",
+              "This failure could not be written to cron_alerts (the database URL is missing or unusable, or the database did not answer), so no alert row exists and nothing closes it.",
+              "While the job keeps failing to start you get this email at most once an hour. Check the function log in Vercel for the job.",
+            ].join("\n")
+            : [
+              `The scheduled job "${message.job}" failed at ${message.openedAt}.`,
+              `Environment: ${where.environment}. Project: ${where.project}.`,
+              "",
+              `Error: ${message.error}`,
+              "",
+              "You get this email when an alert opens (again later only if the send did not go through), and again only if it is fixed and then fails again.",
+              `To see every open alert, run in the ${where.environment} database:`,
+              "  SELECT job, failure_count, last_failed_at, last_error FROM cron_alerts WHERE resolved_at IS NULL;",
+              "The alert closes by itself on the next good run.",
+            ].join("\n"),
         }),
         redirect: "manual",
         signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(SEND_TIMEOUT_MS, options?.timeoutMs ?? SEND_TIMEOUT_MS)))),

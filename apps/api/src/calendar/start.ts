@@ -21,20 +21,26 @@ export function startCalendarRunner(env: CalendarRunnerEnv, deps: {
     ...(env.databaseCaCert === undefined ? {} : { ssl: { ca: env.databaseCaCert, rejectUnauthorized: true } }),
     onError: (summary) => console.error("Calendar pool error", summary),
   });
-  const worker = createCalendarWorkerFromPool({
-    pool,
-    google: createGoogleClient({ config: env.client }),
-    clock: deps.clock,
-    generateId: deps.generateId,
-    config: {
-      privateKey: env.privateKey,
-      channelSecret: env.channelSecret,
-      ...(env.webhookUrl === undefined ? {} : { webhookUrl: env.webhookUrl }),
-      ...(env.eventTitle === undefined ? {} : { eventTitle: env.eventTitle }),
-    },
-    report: (event) => {
-      if (NOTEWORTHY.has(event.kind)) console.warn("Calendar worker", event);
-    },
-  });
-  return { runner: createCalendarRunner({ worker, clock: deps.clock, budgetMs: env.budgetMs }), pool };
+  // A throw after the pool exists must not leave it behind: the guarded cron entry retries the build.
+  try {
+    const worker = createCalendarWorkerFromPool({
+      pool,
+      google: createGoogleClient({ config: env.client }),
+      clock: deps.clock,
+      generateId: deps.generateId,
+      config: {
+        privateKey: env.privateKey,
+        channelSecret: env.channelSecret,
+        ...(env.webhookUrl === undefined ? {} : { webhookUrl: env.webhookUrl }),
+        ...(env.eventTitle === undefined ? {} : { eventTitle: env.eventTitle }),
+      },
+      report: (event) => {
+        if (NOTEWORTHY.has(event.kind)) console.warn("Calendar worker", event);
+      },
+    });
+    return { runner: createCalendarRunner({ worker, clock: deps.clock, budgetMs: env.budgetMs }), pool };
+  } catch (error) {
+    void pool.end().catch(() => undefined);
+    throw error;
+  }
 }
