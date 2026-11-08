@@ -4,6 +4,7 @@
 // environment or the system clock.
 import { z } from "zod";
 import { secureUrlProblem } from "../edge/auth.js";
+import { connectionCode, parseJson, readLimited, type Fetch } from "./http.js";
 import type { DeliveryProvider, ProviderLookupOutcome, ProviderSendOutcome, ProviderSendRequest } from "./provider.js";
 
 export const TWILIO_DEFAULT_BASE_URL = "https://api.twilio.com";
@@ -54,8 +55,6 @@ export const twilioConfigSchema = z.strictObject({
     ctx.addIssue({ code: "custom", path: ["authToken"], message: "give authToken or apiKeySid with apiKeySecret" });
 });
 export type TwilioConfig = z.input<typeof twilioConfigSchema>;
-
-type Fetch = (input: string, init: RequestInit) => Promise<Response>;
 
 /** The tenant's own sending number in E.164 (`sms_numbers`, T-7), or null when it has none. */
 export type TwilioSenderLookup = (tenantId: string, options: { readonly signal: AbortSignal }) => Promise<string | null>;
@@ -109,47 +108,6 @@ function requestProblem(request: ProviderSendRequest): string | null {
   if (!UUID_PATTERN.test(request.tenantId) || !UUID_PATTERN.test(request.deliveryId)) return "twilio_invalid_id";
   if (!E164_PATTERN.test(request.to)) return "twilio_invalid_recipient";
   if (request.text.length === 0 || request.text.length > TWILIO_BODY_MAX || request.text.includes("\u0000")) return "twilio_invalid_body";
-  return null;
-}
-
-/** Reads at most `limit` bytes of the body; a longer body is cut, which parses as unreadable. */
-async function readLimited(response: Response, limit: number): Promise<string> {
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > limit) {
-        await reader.cancel();
-        return "";
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-const parseJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-};
-
-function connectionCode(error: unknown): string | null {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
-    const code = (current as { code?: unknown }).code;
-    if (typeof code === "string") return code;
-    current = (current as { cause?: unknown }).cause;
-  }
   return null;
 }
 
