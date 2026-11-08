@@ -576,6 +576,22 @@ describe("cancel and disconnect (C-5, C-13)", () => {
     expect((await s.list()).items[0]).toMatchObject({ id, status: "disconnected" });
   });
 
+  it("C-13: disconnect emits one outbox event; a repeat under a new key on a retired row emits none; the list keeps the newest 20 disconnected", async () => {
+    const accountId = "ca_ev";
+    fake.seed({ id: accountId, userId: composioUserId(ENV, a.tenantId), authConfigId: "ac_shopify" });
+    const id = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.owner.memberId, accountId });
+    const s = session(a.tenantId, a.owner.userId);
+    const events = async () => (await database.pool.query("SELECT 1 FROM outbox WHERE tenant_id=$1 AND event_type='connection.disconnect_requested' AND payload->>'connectionId'=$2", [a.tenantId, id])).rowCount;
+    await s.disconnect(id, `k-${randomUUID()}`);
+    expect(await events()).toBe(1);
+    expect((await s.disconnect(id, `k-${randomUUID()}`)).result.status).toBe("disconnected");
+    expect(await events()).toBe(1);
+    for (let i = 0; i < 22; i++)
+      await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.owner.memberId, accountId: `ca_old_${i}`, toolkit: `tk${i}`, status: "disconnected" });
+    const listed = (await s.list()).items.filter((c) => c.status === "disconnected");
+    expect(listed).toHaveLength(20);
+  });
+
   it("a worker that is down leaves it disconnecting for the pass; a revoke failure is shown", async () => {
     const accountId = "ca_live2";
     fake.seed({ id: accountId, userId: composioUserId(ENV, a.tenantId), authConfigId: "ac_shopify" });
@@ -619,6 +635,12 @@ describe("tools (C-10)", () => {
     const out = await tools(a.tenantId).run({ connectionId: idA, tool: "shopify_list_orders", arguments: { limit: 1 } });
     expect(out).toMatchObject({ ok: true, truncated: false });
     expect(taken).toEqual(expect.arrayContaining(["conn-minute", "conn-day"]));
+  });
+
+  it("C-10: list returns at most 20 connections when 21 live rows exist", async () => {
+    for (let i = 0; i < 21; i++)
+      await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.owner.memberId, accountId: `ca_many_${i}`, toolkit: `tk${i}`, domain: `s${i}.myshopify.com` });
+    expect(await tools(a.tenantId).list()).toHaveLength(20);
   });
 
   it("tenant A's token cannot run tenant B's connection: not_found, no limit charge, no connector call", async () => {
