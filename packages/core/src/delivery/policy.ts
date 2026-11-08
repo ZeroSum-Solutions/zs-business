@@ -2,6 +2,7 @@
 // counting, the content digest an approval binds, and the consent rule.
 import { createHash } from "node:crypto";
 import type { DeliveryChannel, DeliveryFinalReason, DeliveryPurpose } from "@zs/contracts";
+import { isHardSuppressed } from "../outreach/hard-suppression.js";
 
 // GSM 03.38 default alphabet and its extension table (extension characters take two septets).
 const GSM_BASIC = new Set(
@@ -73,8 +74,14 @@ export function consentBlock(input: {
   readonly suppressed: boolean;
   /** Where the recorded consent came from (D-6 rev 5); a voice opt-in never counts for marketing. */
   readonly source?: string | null;
+  /** Recipient address. A marketing email to a hard-suppressed domain or person is always blocked (Devin, 2026-11-07). */
+  readonly address?: string | null;
+  /** The contact's recorded display name, checked against the known-people list. */
+  readonly name?: string | null;
 }): DeliveryFinalReason | null {
   if (input.suppressed) return "suppressed";
+  if (input.purpose === "marketing" && input.channel === "email" && input.address && isHardSuppressed({ email: input.address, name: input.name ?? null }))
+    return "suppressed";
   if (input.consent === "denied") return "consent_denied";
   if (input.purpose === "marketing" && input.consent === "granted" && isVoiceGrant(input.source)) return "consent_missing";
   if ((input.purpose === "marketing" || input.channel === "sms") && input.consent !== "granted") return "consent_missing";
