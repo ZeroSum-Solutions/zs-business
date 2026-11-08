@@ -15,8 +15,13 @@
 --    The three policies the advisor does not flag (USING (true)) are left alone.
 -- 2) One plain CREATE INDEX per foreign key that no index covers. The runner applies a file in a
 --    transaction, so CREATE INDEX CONCURRENTLY is not possible. Every table is under 5 rows on
---    hosted (largest 96 kB incl. indexes on 2026-11-08), so the build locks for milliseconds.
+--    hosted (largest 96 kB incl. indexes on 2026-11-08), so each build itself is short.
 --    A table that grows past about 1M rows needs its index built CONCURRENTLY by hand instead.
+-- Locks: DROP/CREATE POLICY takes ACCESS EXCLUSIVE on 85 tables, and the runner holds every lock
+--    until the file commits, so reads and writes on those tables queue for the whole apply, and
+--    the dry run takes the same locks. Apply in a quiet window (no cron run due, no live traffic):
+--    the runner's lock_timeout (5 s) aborts and rolls back everything if any lock is contended;
+--    then re-run in a quieter moment. Never raise lock_timeout for this file.
 
 DROP POLICY IF EXISTS tenant_scope ON public.actions;
 CREATE POLICY tenant_scope ON public.actions
