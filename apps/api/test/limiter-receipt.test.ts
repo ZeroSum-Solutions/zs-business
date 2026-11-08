@@ -153,6 +153,20 @@ describe("memory limiter receipts are bounded", () => {
     set(12_000);
     expect((await limiter.take([{ key, rule: rule(1, 10_000) }])).ok).toBe(false);
   });
+
+  it("an aborted signal throws before anything changes (take, takeWithReceipt, refund)", async () => {
+    const { limiter } = clocked((clock) => createMemoryRateLimiter(clock));
+    const key = "k:abort";
+    const receipt = await receiptOf(limiter, [{ key, rule: rule(2) }]);
+    const aborted = AbortSignal.abort();
+    await expect(limiter.take([{ key, rule: rule(2) }], { signal: aborted })).rejects.toThrow();
+    await expect(limiter.takeWithReceipt!([{ key, rule: rule(2) }], { signal: aborted })).rejects.toThrow();
+    await expect(limiter.refund!(receipt, { signal: aborted })).rejects.toThrow();
+    // Nothing moved: one slot is left, and the receipt is still good.
+    expect((await limiter.take([{ key, rule: rule(2) }])).ok).toBe(true);
+    expect((await limiter.take([{ key, rule: rule(2) }])).ok).toBe(false);
+    expect(await limiter.refund!(receipt)).toBe(1);
+  });
 });
 
 describe("shared Postgres limiter: receipts in the database", () => {

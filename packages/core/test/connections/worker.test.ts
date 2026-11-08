@@ -141,6 +141,75 @@ describe("link (C-3, C-5)", () => {
     expect(await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
   });
 
+  describe("C-4: an error envelope is not proof, so the worker lists the tenant's accounts first", () => {
+    const refusal = { error: { message: "x", status: 422, request_id: "req_1" } };
+    const LIST = /GET \/connected_accounts$/;
+    const refuse = () => fake.override(/POST \/connected_accounts\/link/, { status: 422, json: refusal, times: 1 });
+    const unverified = () => reports.filter((r) => r.kind === "link_unverified");
+    const attemptRows = async () => (await database.pool.query<{ composio_account_id: string; status: string }>("SELECT composio_account_id, status FROM connection_attempts")).rows;
+
+    it("an account for this user and auth config created since the attempt began: no marker, the account is marked for the sweep, an alert is raised", async () => {
+      refuse();
+      const created = new Date(clock.now().getTime() + 1000).toISOString();
+      fake.override(LIST, { status: 200, json: { items: [{ id: "ca_made", user_id: "u", created_at: created }], next_cursor: null }, times: 1 });
+      const out = await worker.link(linkInput());
+      expect(out).toEqual({ outcome: "refused", code: "provider_unavailable" });
+      expect(unverified()).toEqual([{ kind: "link_unverified", tenantId: a.tenantId, attemptId: expect.any(String), reason: "account_present", count: 1 }]);
+      expect(await attemptRows()).toEqual([{ composio_account_id: "ca_made", status: "cancelling" }]);
+      const query = fake.callsTo(LIST)[0]!.query;
+      expect(query.getAll("user_ids")).toEqual([composioUserId(ENV, a.tenantId)]);
+      expect(query.getAll("auth_config_ids")).toEqual([AUTH_CONFIG]);
+    });
+
+    it("no account since the attempt began (older ones do not count): the marker is set and nothing is marked", async () => {
+      refuse();
+      const old = new Date(clock.now().getTime() - 3_600_000).toISOString();
+      fake.override(LIST, { status: 200, json: { items: [{ id: "ca_old", created_at: old }], next_cursor: null }, times: 1 });
+      expect(await worker.link(linkInput())).toEqual({ outcome: "refused", code: "provider_unavailable", nothingCreated: true });
+      expect(unverified()).toEqual([]);
+      expect(await attemptRows()).toEqual([]);
+      expect(fake.callsTo(LIST)).toHaveLength(1);
+      // An empty list is the same.
+      refuse();
+      fake.override(LIST, { status: 200, json: { items: [], next_cursor: null }, times: 1 });
+      expect(await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }))).toMatchObject({ nothingCreated: true });
+    });
+
+    it("a list call that fails, times out or answers something unreadable: no marker, an alert, and no row (no account is known)", async () => {
+      for (const override of [{ status: 500, json: {} }, { status: 200, json: { nope: true } }, { hang: true }] as const) {
+        refuse();
+        fake.override(LIST, { ...override, times: 1 });
+        const out = await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }));
+        expect(out).toEqual({ outcome: "refused", code: "provider_unavailable" });
+      }
+      expect(unverified().map((r) => (r as { reason: string }).reason)).toEqual(["check_failed", "check_failed", "check_failed"]);
+      expect(await attemptRows()).toEqual([]);
+    }, 15_000);
+
+    it("a list that cannot settle it (no created_at, or a full page that never reaches back) keeps the charge", async () => {
+      refuse();
+      fake.override(LIST, { status: 200, json: { items: [{ id: "ca_x" }], next_cursor: null }, times: 1 });
+      expect(await worker.link(linkInput())).toEqual({ outcome: "refused", code: "provider_unavailable" });
+      refuse();
+      const old = new Date(clock.now().getTime() - 3_600_000).toISOString();
+      const recentEnough = new Date(clock.now().getTime() - 30_000).toISOString();
+      void old;
+      // Every item is within the skew window, so it counts as present, not ambiguous.
+      fake.override(LIST, { status: 200, json: { items: [{ id: "ca_y", created_at: recentEnough }], next_cursor: "more" }, times: 1 });
+      expect(await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }))).toEqual({ outcome: "refused", code: "provider_unavailable" });
+      refuse();
+      fake.override(LIST, { status: 200, json: { items: [{ id: "ca_z", created_at: old }], next_cursor: "more" }, times: 1 });
+      expect(await worker.link(linkInput({ attemptId: randomUUID(), connectionId: randomUUID() }))).toMatchObject({ nothingCreated: true });
+      expect(unverified().map((r) => (r as { reason: string }).reason)).toEqual(["check_ambiguous", "account_present"]);
+    });
+
+    it("no list call is made for a failure that was not a provider_refused answer", async () => {
+      fake.override(/POST \/connected_accounts\/link/, { status: 503, json: {}, times: 1 });
+      await worker.link(linkInput());
+      expect(fake.callsTo(LIST)).toHaveLength(0);
+    });
+  });
+
   it("C-4: reports a failed link as a class and a request id, never provider text", async () => {
     fake.override(/POST \/connected_accounts\/link/, { status: 404, json: { error: { message: "SECRET words", status: 404, request_id: "req_77" } }, times: 1 });
     await worker.link(linkInput());

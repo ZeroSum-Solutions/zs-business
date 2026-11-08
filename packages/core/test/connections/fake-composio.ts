@@ -45,6 +45,8 @@ export class FakeComposio {
   readonly sessions = new Map<string, { accountId: string; used: boolean }>();
   readonly calls: FakeCall[] = [];
   deferredVerification = true;
+  /** `created_at` the fake lists its accounts with (C-4). */
+  listedCreatedAt = "2000-01-01T00:00:00.000Z";
   /** The shop the identity tool answers for, by account. */
   readonly shops = new Map<string, FakeShop>();
   orders: unknown[] = [fakeOrder(1001), fakeOrder(1002)];
@@ -153,6 +155,15 @@ export class FakeComposio {
       if (account.revoked) return { status: 200, body: { status: 401, data: { errors: "[API] Invalid API key or access token" } } };
       account.revoked = true;
       return { status: 200, body: { status: 200, data: { data: { appUninstall: { app: { id: "gid://shopify/App/1" }, userErrors: [] } } }, headers: {} } };
+    }
+    if (method === "GET" && path === "/connected_accounts") {
+      // C-4: the list the worker reads to check that a refused link made nothing. Accounts the fake holds are listed with
+      // `listedCreatedAt` (long ago by default, so a seeded account is not "new"); a test overrides the path for other cases.
+      const users = query.getAll("user_ids");
+      const configs = query.getAll("auth_config_ids");
+      const items = [...this.accounts.values()].filter((a) => !a.deleted && (users.length === 0 || users.includes(a.userId)) && (configs.length === 0 || configs.includes(a.authConfigId)))
+        .map((a) => ({ id: a.id, user_id: a.userId, created_at: this.listedCreatedAt }));
+      return { status: 200, body: { items, next_cursor: null, total_items: items.length } };
     }
     const match = /^\/connected_accounts\/([^/]+)$/.exec(path);
     if (match) {

@@ -20,7 +20,7 @@ import { createShopifyHub } from "./shopify-hub.js";
 
 /** Events worth an operator's attention. Never arguments, output, labels or provider text (C-14). */
 const NOTEWORTHY = new Set<ConnectionsWorkerReport["kind"]>([
-  "reauthorize", "disconnect_retry", "sweep_failed", "health_failed", "pass_stopped", "cooldown", "account_mismatch", "link_orphan", "key_refused", "link_refused", "database_error",
+  "reauthorize", "disconnect_retry", "sweep_failed", "health_failed", "pass_stopped", "cooldown", "account_mismatch", "link_orphan", "key_refused", "link_refused", "link_unverified", "database_error",
 ]);
 
 /**

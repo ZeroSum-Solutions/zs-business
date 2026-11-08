@@ -865,11 +865,13 @@ describe("connect quota refund (C-4)", () => {
   let reported: { outcome: string }[];
   let refundFails = false;
   let allowanceFull = false;
+  let allowanceFails = false;
   let refundSignal: AbortSignal | undefined;
   const receiptLimiter: ConnectionLimiter = {
     async take(charges, options) {
       if (charges[0]!.key.startsWith("conn-connect-refund:")) {
         taken.push("conn-connect-refund");
+        if (allowanceFails) throw new Error("store down");
         return allowanceFull ? { ok: false, retryAfterSeconds: 3000 } : { ok: true };
       }
       return limiter.take(charges, options);
@@ -888,7 +890,7 @@ describe("connect quota refund (C-4)", () => {
       return 1;
     },
   };
-  beforeEach(() => { issued = []; refunded = []; reported = []; refundFails = false; allowanceFull = false; refundSignal = undefined; });
+  beforeEach(() => { issued = []; refunded = []; reported = []; refundFails = false; allowanceFull = false; allowanceFails = false; refundSignal = undefined; });
   const start = (connector: ConnectorPort = port, who = a, signal?: AbortSignal) =>
     createConnectionsSession({ ...deps(), connections: { connector, stateSecrets: { current: STATE }, limiter: receiptLimiter, report: (event) => reported.push(event) } }, { tenantId: who.tenantId, actorId: who.owner.userId })
       .start("shopify", { shopDomain: SHOP, browserBinding: BINDING }, signal).catch((e: unknown) => e);
@@ -993,8 +995,16 @@ describe("connect quota refund (C-4)", () => {
     expect(refunded).toEqual([]);
   });
 
-  it("a refund that fails never changes the answer, keeps the charge, and is reported", async () => {
+  it("a refund call that throws is reported as commit_unknown (it may have committed), and the answer is unchanged", async () => {
     refundFails = true;
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: envelope(422), times: 1 });
+    expect(await start()).toMatchObject({ kind: "unavailable" });
+    expect(refunded).toEqual([]);
+    expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "commit_unknown" }]);
+  });
+
+  it("an allowance check that throws is reported as failed (nothing was refunded), and the answer is unchanged", async () => {
+    allowanceFails = true;
     fake.override(/POST \/connected_accounts\/link/, { status: 422, json: envelope(422), times: 1 });
     expect(await start()).toMatchObject({ kind: "unavailable" });
     expect(refunded).toEqual([]);

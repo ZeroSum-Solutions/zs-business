@@ -133,7 +133,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         embeddedAddressSecret: env.connections.embeddedAddressSecret,
         // C-4: a refund that failed or hit its cap needs an operator's eye; a made refund is routine.
         reportQuota: (event) => {
-          if (event.outcome === "failed" || event.outcome === "capped") console.warn("Connections connect refund", event);
+          if (event.outcome === "failed" || event.outcome === "capped" || event.outcome === "commit_unknown") console.warn("Connections connect refund", event);
         },
         report: (event) => {
           // A refused callback may need an operator; the routine outcomes are not logged.

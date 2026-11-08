@@ -277,6 +277,12 @@ export interface ComposioClient {
    * which Shopify is.
    */
   proxy(input: { connectedAccountId: string; userId: string; request: ProxyRequest }, signal?: AbortSignal): Promise<ProxyAnswer>;
+  /**
+   * C-4: the connected accounts for one Composio user and auth config (GET /connected_accounts with `user_ids` and
+   * `auth_config_ids`, newest first, one page of at most 50). Used only to check that a refused link created nothing.
+   * `hasMore` is true when Composio says another page exists.
+   */
+  listConnectedAccounts(input: { userId: string; authConfigId: string }, signal?: AbortSignal): Promise<ComposioAccountList>;
   /** A 404 counts as done. */
   deleteAccount(id: string, signal?: AbortSignal): Promise<void>;
   execute(input: ExecuteInput, signal?: AbortSignal): Promise<ExecuteOutcome>;
@@ -286,6 +292,14 @@ export interface ComposioClient {
    */
   getTool(slug: string, signal?: AbortSignal, version?: string): Promise<ComposioTool | null>;
 }
+export interface ComposioAccountList {
+  readonly items: readonly { readonly id: string; readonly createdAt: string | null }[];
+  readonly hasMore: boolean;
+}
+const accountListSchema = z.object({
+  items: z.array(z.object({ id: z.string().min(1).max(128), created_at: z.string().max(64).nullish() })).max(200),
+  next_cursor: z.string().max(2048).nullish(),
+});
 export interface ComposioTool {
   readonly slug: string;
   readonly toolkit: string | null;
@@ -490,6 +504,12 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
       }, signal);
       const out = parse(proxySchema, json);
       return { status: out.status, data: out.data };
+    },
+    async listConnectedAccounts(input, signal) {
+      const query = `user_ids=${enc(input.userId)}&auth_config_ids=${enc(input.authConfigId)}&order_by=created_at&order_direction=desc&limit=50`;
+      const { json } = await call("GET", `/connected_accounts?${query}`, undefined, signal);
+      const out = parse(accountListSchema, json);
+      return { items: out.items.map((item) => ({ id: item.id, createdAt: item.created_at ?? null })), hasMore: out.next_cursor !== undefined && out.next_cursor !== null && out.next_cursor !== "" };
     },
     async deleteAccount(id, signal) {
       try {

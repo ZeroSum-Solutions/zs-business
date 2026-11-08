@@ -83,10 +83,12 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
     return { ok: true };
   };
   return {
-    async take(charges) {
+    async take(charges, options) {
+      options?.signal?.throwIfAborted();
       return take(charges);
     },
-    async takeWithReceipt(charges) {
+    async takeWithReceipt(charges, options) {
+      options?.signal?.throwIfAborted();
       const taken = take(charges);
       if (!taken.ok) return taken;
       const now = clock.now().getTime();
@@ -97,7 +99,8 @@ export function createMemoryRateLimiter(clock: { now(): Date }): RateLimiter {
       receipts.set(id, { expires: Math.max(...charges.map(({ key }) => buckets.get(key)!.windowStart + buckets.get(key)!.windowMs)), windows });
       return { ok: true, receipt: { id } };
     },
-    async refund(receipt) {
+    async refund(receipt, options) {
+      options?.signal?.throwIfAborted();
       const held = receipts.get(receipt.id);
       if (!held) return 0;
       receipts.delete(receipt.id);

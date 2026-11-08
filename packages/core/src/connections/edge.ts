@@ -38,7 +38,7 @@ import { memberDispatch, parseInput, type EdgeDependencies, type Principal } fro
 import { requireMember } from "../members/access.js";
 import { catalogTool, catalogToolkit, OVERRIDE_KEYS } from "./catalog.js";
 import { countTokensWithAccess, getConnection, listConnections, listLiveConnections } from "./handlers.js";
-import { callbackCharges, callbackStatusCharges, connectCharges, connectRefundCharges, runCharges, type ConnectionLimiter, type ConnectionReceipt } from "./limits.js";
+import { callbackCharges, callbackStatusCharges, connectCharges, connectRefundCharges, runCharges, type ConnectionLimiter, type ConnectionReceipt, type ConnectionsQuotaReport } from "./limits.js";
 import { ComposioError } from "./composio.js";
 import { ConnectorUnavailable, type ConnectorPort } from "./port.js";
 import {
@@ -147,19 +147,26 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
        * any step fails or is refused the charge stands, and the outcome is reported, never swallowed.
        */
       const refundCharge = async (): Promise<void> => {
-        const outcome = async (): Promise<"refunded" | "no_receipt" | "capped" | "nothing_to_give"> => {
-          if (!receipt || !connections.limiter.refund) return "no_receipt";
-          const options = { signal: withDeadline(signal, REFUND_BUDGET_MS) };
-          const allowance = await connections.limiter.take(connectRefundCharges(tenantId), options);
-          if (!allowance.ok) return "capped";
-          return (await connections.limiter.refund(receipt, options)) > 0 ? "refunded" : "nothing_to_give";
-        };
+        // `commit_unknown`: the refund call itself threw or was cut off, so the store may or may not have applied it.
+        // `failed`: the allowance check failed before any refund was tried, so nothing was refunded.
+        let phase: "allowance" | "refund" = "allowance";
+        let result: ConnectionsQuotaReport["outcome"];
         try {
-          connections.report?.({ kind: "connect_refund", tenantId, outcome: await outcome() });
+          if (!receipt || !connections.limiter.refund) result = "no_receipt";
+          else {
+            const options = { signal: withDeadline(signal, REFUND_BUDGET_MS) };
+            const allowance = await connections.limiter.take(connectRefundCharges(tenantId), options);
+            if (!allowance.ok) result = "capped";
+            else {
+              phase = "refund";
+              result = (await connections.limiter.refund(receipt, options)) > 0 ? "refunded" : "nothing_to_give";
+            }
+          }
         } catch {
-          // The charge stands. The window ends within the hour, and the report tells an operator.
-          try { connections.report?.({ kind: "connect_refund", tenantId, outcome: "failed" }); } catch { /* a reporter never breaks the request */ }
+          // The charge stands as far as we know. The window ends within the hour, and the report tells an operator.
+          result = phase === "refund" ? "commit_unknown" : "failed";
         }
+        try { connections.report?.({ kind: "connect_refund", tenantId, outcome: result }); } catch { /* a reporter never breaks the request */ }
       };
       const attemptId = deps.generateId().toLowerCase();
       const connectionId = deps.generateId().toLowerCase();

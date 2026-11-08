@@ -87,6 +87,12 @@ export type ConnectionsWorkerReport =
   | { readonly kind: "pass_stopped"; readonly why: "time" | "calls" | "budget" }
   | { readonly kind: "cooldown"; readonly env: string }
   | { readonly kind: "key_refused"; readonly env: string; readonly status: number }
+  /**
+   * C-4: a refused link could not be shown to have created nothing, so the connect charge stays. `account_present`: the
+   * account list showed an account for this user and auth config since the attempt began; `check_failed`: the list
+   * call failed or timed out; `check_ambiguous`: the list could not settle it. An operator reconciles it.
+   */
+  | { readonly kind: "link_unverified"; readonly tenantId: string; readonly attemptId: string; readonly reason: "account_present" | "check_failed" | "check_ambiguous"; readonly count: number }
   /** C-4: Composio failed a link call. The class and its request ID (Composio's own identifier), never provider text. */
   | { readonly kind: "link_refused"; readonly env: string; readonly status: number; readonly errorClass: "provider_refused" | "transient" | "unknown"; readonly requestId?: string }
   /** A database call the worker cannot recover from; the SQLSTATE only (`unknown` when the error has none), never the message. */
@@ -222,6 +228,9 @@ export function trimToSize(value: unknown, listPath: readonly string[], maxBytes
   list.push(...original.slice(0, low));
   return size(copy) <= maxBytes ? { data: copy, truncated: true } : null;
 }
+
+/** C-4: an account created this long before the attempt began still counts as new (clock skew between us and Composio). */
+const LIST_SKEW_MS = 60_000;
 
 export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   const config = connectionsWorkerConfigSchema.parse(deps.config);
@@ -435,6 +444,37 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
         report({ kind: "link_orphan", tenantId: input.tenantId, attemptId: input.attemptId, composioAccountId: accountId });
       }
     };
+    /**
+     * C-4: true only when the account list call succeeded inside the deadline and shows no account for this tenant's
+     * Composio user and this auth config created at or after the attempt began (less 60 s of clock skew), on a page
+     * that settles it. Otherwise false, with a `link_unverified` report; an account that was found is also marked
+     * `cancelling` so the sweep removes it (the newest one: an attempt row holds one account, and an account has
+     * no row to hold when the call failed, so then the report is the mark).
+     */
+    const verifyNothingCreated = async (): Promise<boolean> => {
+      const unverified = (reason: "account_present" | "check_failed" | "check_ambiguous", count: number) => {
+        report({ kind: "link_unverified", tenantId: input.tenantId, attemptId: input.attemptId, reason, count });
+        return false;
+      };
+      let list;
+      try {
+        list = await spend(undefined, () => composio.listConnectedAccounts({ userId: userIdOf(input.tenantId), authConfigId }, signal));
+      } catch {
+        return unverified("check_failed", 0);
+      }
+      const cutoff = started.getTime() - LIST_SKEW_MS;
+      const times = list.items.map((item) => ({ id: item.id, at: item.createdAt === null ? Number.NaN : Date.parse(item.createdAt) }));
+      if (times.some((item) => Number.isNaN(item.at))) return unverified("check_ambiguous", list.items.length);
+      const fresh = times.filter((item) => item.at >= cutoff);
+      if (fresh.length > 0) {
+        const newest = fresh.reduce((a, b) => (b.at > a.at ? b : a));
+        try { await row(newest.id, "cancelling"); } catch { /* already recorded by another attempt, or the row could not be written: the report stands */ }
+        return unverified("account_present", fresh.length);
+      }
+      // Newest first: another page matters only if this one never reaches back before the cutoff.
+      if (list.hasMore && !times.some((item) => item.at < cutoff)) return unverified("check_ambiguous", list.items.length);
+      return true;
+    };
     let made;
     try {
       made = await spend(undefined, () => composio.link({
@@ -442,7 +482,9 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       }, signal));
     } catch (error) {
       if (error instanceof ComposioError && error.accountId !== undefined) await compensate(error.accountId);
-      const nothingCreated = confirmedNothingCreated(error) ? { nothingCreated: true as const } : {};
+      // C-4: an error envelope is not proof that nothing was created. Ask Composio for this user's accounts for this auth
+      // config since the attempt began; only an answer that clearly shows none lets the API refund.
+      const nothingCreated = confirmedNothingCreated(error) && await verifyNothingCreated() ? { nothingCreated: true as const } : {};
       if (error instanceof ComposioError && error.kind !== "rate_limited") {
         report({ kind: "link_refused", env: config.env, status: error.status ?? 0, errorClass: error.errorClass, ...(error.requestId === undefined ? {} : { requestId: error.requestId }) });
       }

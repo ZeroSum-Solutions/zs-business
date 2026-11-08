@@ -19,7 +19,7 @@ export type ConnectionTakeReceipt = { readonly ok: true; readonly receipt: Conne
 export interface ConnectionsQuotaReport {
   readonly kind: "connect_refund";
   readonly tenantId: string;
-  readonly outcome: "refunded" | "no_receipt" | "capped" | "nothing_to_give" | "failed";
+  readonly outcome: "refunded" | "no_receipt" | "capped" | "nothing_to_give" | "failed" | "commit_unknown";
 }
 export interface ConnectionLimiter {
   take(charges: readonly ConnectionCharge[], options?: ConnectionTakeOptions): Promise<ConnectionTake>;

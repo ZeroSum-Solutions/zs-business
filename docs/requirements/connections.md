@@ -183,10 +183,17 @@ role for workers (all workers share one pattern today; Known limits).
     network error, unreadable or foreign body, or any failure after an account exists keeps the
     charge. Our own checks and the org budget never refund. A refund also takes one unit of
     `conn-connect-refund:<tenantId>` (3 an hour) first, because a refusal still spent the shared
-    org budget: a tenant makes at most 13 link attempts an hour however many refusals it
-    provokes. The refund runs inside the request deadline (1.5 s); a refused allowance, a failed
-    refund or a timeout leaves the charge in place and is reported (`connect_refund`: `capped` or
-    `failed`). `nothingCreated` is not in the wire body (the strict contract is unchanged): the
+    org budget. That bounds refunds to 3 per refund window per tenant; it is not a flat cap on
+    attempts, since the charge and refund windows are separate and a boundary can allow a burst
+    across two windows. Before the API refunds, the worker asks Composio for the accounts of this
+    tenant's user and auth config (GET `/connected_accounts`, `user_ids`, `auth_config_ids`) and
+    marks `nothingCreated` only when that call succeeds inside the deadline and shows no account
+    created since the attempt began (less 60 s of skew). An account found is marked `cancelling`
+    for the sweep; a failed, timed-out or ambiguous list keeps the charge; both raise a
+    `link_unverified` worker report (a warning in the logs). The refund only gives back a
+    rate-limit unit; no money or billing credit moves. The refund runs inside the request deadline (1.5 s); a refused allowance
+    or a failed refund keeps the charge and is reported (`connect_refund`: `capped`, `failed`, or
+    `commit_unknown` when the refund call itself was cut off). `nothingCreated` is not in the wire body (the strict contract is unchanged): the
     worker sets the response header `x-zs-link-nothing-created: 1`, so the API and the worker
     deploy in either order (an older API ignores it, an older worker never sends it).
   - The API makes a random attempt ID and a random connection ID and asks the worker to
