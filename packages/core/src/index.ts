@@ -44,6 +44,7 @@ export {
 } from "./approvals/index.js";
 export { isFresh, listSourceRecords, requireFresh, SOURCE_SUBJECTS, sourceHandlers } from "./sources/index.js";
 export * from "./delivery/index.js";
+export * from "./outreach/index.js";
 export * from "./billing/index.js";
 export * from "./business/index.js";
 export * from "./setup/index.js";

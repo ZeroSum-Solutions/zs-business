@@ -313,8 +313,8 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
 
   /** D-6: the first reason the send may not happen now, or null. */
   async function recheck(tx: Transaction, row: DeliveryRow): Promise<{ reason: DeliveryFinalReason | null; address: string | null }> {
-    const contact = (await tx.query<{ normalized_email: string | null; e164_phone: string | null }>(
-      "SELECT normalized_email, e164_phone FROM crm_contacts WHERE tenant_id=$1 AND id=$2",
+    const contact = (await tx.query<{ normalized_email: string | null; e164_phone: string | null; display_name: string | null }>(
+      "SELECT normalized_email, e164_phone, display_name FROM crm_contacts WHERE tenant_id=$1 AND id=$2",
       [row.tenant_id, row.contact_id])).rows[0];
     const address = row.channel === "email" ? usableEmail(contact?.normalized_email ?? null) : contact?.e164_phone ?? null;
     if (!contact || !address) return { reason: "no_address", address: null };
@@ -329,7 +329,7 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
       "SELECT status, source FROM crm_contact_consent WHERE tenant_id=$1 AND contact_id=$2 AND channel=$3::crm_consent_channel",
       [row.tenant_id, row.contact_id, row.channel])).rows[0];
     const consent = consentRow?.status ?? null;
-    const blocked = consentBlock({ channel: row.channel, purpose: row.purpose, consent, suppressed, source: consentRow?.source ?? null });
+    const blocked = consentBlock({ channel: row.channel, purpose: row.purpose, consent, suppressed, source: consentRow?.source ?? null, address, name: contact.display_name });
     if (blocked) return { reason: blocked, address };
     const standing = await deps.approvals.check(tx, {
       tenantId: row.tenant_id,
