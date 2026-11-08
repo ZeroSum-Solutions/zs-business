@@ -11,7 +11,7 @@ import {
 } from "../src/testing.js";
 
 /** Tenant tables only the worker's service role reads (connections.md C-7). */
-const WORKER_ONLY = new Set(["connection_attempts"]);
+const WORKER_ONLY = new Set(["connection_attempts", "shopify_claims"]);
 let harness: TestDatabase;
 let fixture: TwoTenantFixture;
 beforeAll(async () => {

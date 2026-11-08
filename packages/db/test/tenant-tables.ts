@@ -94,6 +94,7 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
       }
       // Connections (connections.md C-7): an active row names a label and a numeric store ID; an attempt a browser hash.
       if (name === "connections") Object.assign(row, { account_label: "fixture", external_account_id: "1", account_domain: "fixture.myshopify.com", composio_account_id: `ca_${randomUUID()}` });
+      if (name === "shopify_claims") Object.assign(row, { code_hash: randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "") });
       if (name === "connection_attempts") Object.assign(row, { browser_hash: "a".repeat(43), account_domain: "fixture.myshopify.com", composio_account_id: `ca_${randomUUID()}` });
       // Document intake (document-intake.md DL-1): a job needs a real hash, and its rows need a page count.
       // A row is written only into a job in review, which holds a page count, a parser and a digest.

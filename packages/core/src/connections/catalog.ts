@@ -118,7 +118,7 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
  * C-6, C-9: at most 50 orders, each projected on its own, so one order that does not fit is left out
  * instead of failing the answer.
  */
-const projectOrders = (data: unknown): unknown => {
+export const projectOrders = (data: unknown): unknown => {
   const list = Array.isArray(data) ? data : record(data)?.["orders"];
   if (!Array.isArray(list)) return undefined;
   const orders: unknown[] = [];
@@ -129,7 +129,7 @@ const projectOrders = (data: unknown): unknown => {
   }
   return { orders };
 };
-const projectOrder = (data: unknown): unknown => {
+export const projectOrder = (data: unknown): unknown => {
   const parsed = order.safeParse(data);
   return parsed.success ? { order: parsed.data } : undefined;
 };
@@ -138,6 +138,14 @@ const projectOrder = (data: unknown): unknown => {
 // only its number, the same account id the REST API gives.
 const SHOP_GID = /^gid:\/\/shopify\/Shop\/([0-9]{1,20})$/;
 const shopDetails = z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(500), myshopifyDomain: z.string().min(1).max(253) });
+
+
+/** C-6: a range of at most 92 days, whichever bounds the caller gave. Shared by both tiers. */
+export function shopifyListWindow(parsed: { createdAfter?: string | undefined; createdBefore?: string | undefined }, now: Date): { start: Date; end: Date } {
+  const end = parsed.createdBefore ? Date.parse(parsed.createdBefore) : parsed.createdAfter ? Math.min(Date.parse(parsed.createdAfter) + SHOPIFY_MAX_RANGE_MS, Math.max(now.getTime(), Date.parse(parsed.createdAfter) + 1)) : now.getTime();
+  const start = parsed.createdAfter ? Date.parse(parsed.createdAfter) : end - SHOPIFY_MAX_RANGE_MS;
+  return { start: new Date(start), end: new Date(end) };
+}
 
 const SHOPIFY_VERSION = "20261104_00";
 
@@ -183,12 +191,10 @@ const shopify: CatalogToolkit = {
       input: shopifyListOrdersInputSchema as unknown as z.ZodType<Record<string, unknown>>,
       toArguments(input, now) {
         const parsed = shopifyListOrdersInputSchema.parse(input);
-        // C-6: a range of at most 92 days, whichever bounds the caller gave.
-        const end = parsed.createdBefore ? Date.parse(parsed.createdBefore) : parsed.createdAfter ? Math.min(Date.parse(parsed.createdAfter) + SHOPIFY_MAX_RANGE_MS, Math.max(now.getTime(), Date.parse(parsed.createdAfter) + 1)) : now.getTime();
-        const start = parsed.createdAfter ? Date.parse(parsed.createdAfter) : end - SHOPIFY_MAX_RANGE_MS;
+        const { start, end } = shopifyListWindow(parsed, now);
         return {
-          created_at_min: new Date(start).toISOString(),
-          created_at_max: new Date(end).toISOString(),
+          created_at_min: start.toISOString(),
+          created_at_max: end.toISOString(),
           status: parsed.status ?? "any",
           limit: parsed.limit ?? 50,
         };

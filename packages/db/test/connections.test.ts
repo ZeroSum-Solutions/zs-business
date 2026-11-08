@@ -130,9 +130,9 @@ describe("connections: runtime role rules (C-7)", () => {
   // C-3, C-5: the insert binds the row to its verified attempt's toolkit, Composio account and store; no role
   // the application runs as can change that binding afterwards, so a reload's account check covers the store.
   it.each(["toolkit", "composio_account_id", "external_account_id", "account_domain"])(
-    "refuses a worker (service role) update of %s (42501, no column grant)", async (column) => {
+    "refuses a worker (service role) change of %s (42501: no column grant, or the native guard for the store columns)", async (column) => {
       const id = await runtimeInsert(fixture.a, memberA, { toolkit: "shopify" });
-      await expect(serviceUpdate(fixture.a.tenantId, id, `${column}=${column}`)).rejects.toMatchObject({ code: "42501" });
+      await expect(serviceUpdate(fixture.a.tenantId, id, `${column}=${column} || 'x'`)).rejects.toMatchObject({ code: "42501" });
       await serviceUpdate(fixture.a.tenantId, id, "status='disconnected', account_label=NULL");
     });
 
