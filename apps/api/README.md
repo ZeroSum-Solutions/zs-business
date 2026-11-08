@@ -667,8 +667,13 @@ against the pinned Supabase Root 2021 CA.
    ```sh
    mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/<ref>-<date>.dump
    ```
-   It runs `pg_dump -Fc` of `public`, `zs_internal` and `extensions` (`PG_DUMP` or `PATH`;
-   credentials only in pg_dump's own environment, `sslmode=verify-full` with the pinned CA),
+   It runs `pg_dump -Fc` of `public`, `zs_internal` and `extensions`, plus the
+   `CREATE EXTENSION` of every extension in `BACKUP_EXTENSIONS` (`btree_gist`; `--schema`
+   alone skips extensions, and a restore then fails at the bookings exclusion constraint). The
+   program is `PG_DUMP`, else the newest installed versioned copy (`pg-tools.ts`: Homebrew
+   `postgresql@N`, Debian `/usr/lib/postgresql/N`), else `PATH`, because a PostgreSQL 16 on
+   `PATH` refuses the hosted 17 server. Credentials go only in pg_dump's own environment, with
+   `sslmode=verify-full` and the pinned CA. It
    reads the migration ledger before and after (it must not move), and writes
    `<dump>.manifest.json`: project ref, archive name, size, sha256, start time and the full
    ledger with checksums. Neither file may exist yet. Then, with `ZS_TARGET_REF` and
@@ -685,7 +690,7 @@ against the pinned Supabase Root 2021 CA.
    ledger that differs from the live one by name or checksum, an archive pg_restore cannot
    read end to end, one that lacks the definition or data of any table now in `public` or
    `zs_internal`, or (for an upgrade) one whose own ledger differs; `pg_restore` comes from
-   `PG_RESTORE` or `PATH`. The apply rolls back unless it runs exactly the migrations and
+   `PG_RESTORE`, else the newest installed versioned copy, else `PATH`. The apply rolls back unless it runs exactly the migrations and
    checksums the dry run reported. Every outcome lands in the receipt: `result`
    (`committed` or `failed`), `failedPhase` (`login-check`, `dry-run`, `backup-check`,
    `apply` or `ledger-check`), the error with connection strings and passwords redacted,
@@ -965,6 +970,53 @@ Hosted settings that the scripts do not manage:
   `x-vercel-protection-bypass` header for automated checks.
 - The dashboard's sign-in attempt limiter is in memory, so on Vercel each serverless
   instance counts on its own; Supabase Auth's own email rate limit still bounds the links sent.
+
+### Restore test (recovery proof)
+
+A backup counts only once a restore of it has passed. Run this after any change to the
+backup, the roles or the RLS setup, and at least once a month. It reads production only
+through `db:hosted-backup` and restores only into a throwaway database on this Mac; never
+restore an archive into a hosted database.
+
+```sh
+# 1. A fresh backup of production (step 2 above; ZS_TARGET_REF and SERVICE_DATABASE_URL from ZS Vault).
+mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/<ref>-<date>-recovery-proof.dump
+# 2. A throwaway PostgreSQL 17 cluster on loopback (not the shared test cluster on 55432:
+#    the restore creates Supabase's platform roles, such as supabase_admin, cluster-wide).
+docker run -d --rm --name zs-restore-proof -p 127.0.0.1:55433:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17
+# 3. Restore, check, drop. The report goes to the receipts folder; exit 1 on any failed check.
+RESTORE_ADMIN_URL=postgres://postgres@127.0.0.1:55433/postgres \
+  mise exec -- pnpm -s --filter @zs/api db:restore-proof --backup ~/Backups/zs-business/<ref>-<date>-recovery-proof.dump \
+  > ~/Backups/zs-business/receipts/restore-proof-<date>.json
+# 4. Remove the cluster.
+docker stop zs-restore-proof
+```
+
+`db:restore-proof` (`src/restore-proof.ts`) refuses an admin URL that is not loopback, names
+another database than `postgres` or is not a superuser, and an archive whose manifest does not
+match it by name, size and sha256 (it applies no age or live-ledger gate, so any earlier backup
+can be tested). It creates the roles the archive names as owner, grantee or policy target
+(NOLOGIN) and `zs_runtime` (a LOGIN member of `authenticated` only, as `bootstrap-roles.sql`),
+creates a new `zs_restore_proof_<time>_<id>` database from `template0`, drops its empty `public`
+schema (the archive creates it, with its owner and grants), and runs `pg_restore --exit-on-error
+--single-transaction` with the PostgreSQL 17 `pg_restore`. Then it checks, and the report lists
+each check with its detail:
+
+| Check | Passes when |
+|---|---|
+| `pg_restore exits 0 in one transaction` | Every object, grant and row restored, or nothing did. |
+| restored migration ledger | `zs_internal.schema_migrations` equals the manifest's ledger, name and checksum. |
+| row counts | Every table in `public` and `zs_internal` holds exactly as many rows as its COPY block in the archive, and no archived table is missing. |
+| RLS | Every `public` table with `tenant_id` enables and forces RLS and has a policy, and the restored policies number as many as the archive's. |
+| runtime login | `zs_runtime` passes the API's startup guard (`assertRuntimeLogin`), belongs to `authenticated` only, and `authenticated` may use `public` and read tenant tables. |
+| two-tenant denial | Through `createScopedDatabase` on the `zs_runtime` login: the two tenants with the most rows (a random empty tenant if there is only one) each read their own rows. Neither sees any row of another tenant in any tenant table or can update one (each update runs and rolls back), and with no tenant set nothing is visible. A table without a SELECT grant counts as denied (42501). |
+
+The database is dropped at the end (`--keep` leaves it for inspection; drop it by hand). The
+report holds the archive's name, size and sha256, the roles created and the check results, never
+credentials. On 2026-11-08 a fresh production backup restored with all checks passing: 92 tables,
+83 tenant tables, 92 policies, no denial leaks. The first two tries had failed. Archives up to
+`ubzyxrflvxymikpijnto-20261107-shopify-native.dump` lack `CREATE EXTENSION btree_gist`; to test
+one, create the extension in a new `extensions` schema of the target first, or take a new backup.
 
 ## Delivery runner (`/cron/delivery`, `pnpm delivery:worker`)
 

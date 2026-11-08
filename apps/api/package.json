@@ -18,6 +18,7 @@
     "db:hosted-tenant-create": "tsx src/scripts/hosted-tenant-create.ts",
     "db:hosted-migrate": "tsx src/scripts/hosted-migrate.ts",
     "db:hosted-backup": "tsx src/scripts/hosted-backup.ts",
+    "db:restore-proof": "tsx src/scripts/restore-proof.ts",
     "seed:hosted": "tsx src/scripts/hosted-seed.ts",
     "build:vercel": "node scripts/build-vercel.mjs api",
     "build:vercel:worker": "node scripts/build-vercel.mjs worker",

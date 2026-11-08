@@ -26,7 +26,7 @@ Each deploy uses only its own database: the preview API's `DATABASE_URL` names t
 ref, and the preview dashboard's `ZS_API_URL` is the preview API. DNS is on Cloudflare
 (`app`/`api` CNAMEs to Vercel, DNS only; Resend DKIM, SPF, MX and DMARC under `mail`).
 Secrets live in ZS Vault (`zs_business_<prod|preview>_*`) and in Vercel env vars, never in
-the repo. The runbook (roles, migrations, seed, tokens, deploy, checks) is in
+the repo. The runbook (roles, migrations, seed, tokens, deploy, checks, restore test) is in
 `apps/api/README.md`, "Hosted deploy".
 
 The API and the cron workers are two Vercel projects built from the same `apps/api` source,
