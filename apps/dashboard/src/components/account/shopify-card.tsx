@@ -50,7 +50,7 @@ import {
 } from "@/lib/managed-connections";
 import { useKeys, useManagedConnections, usePendingManagedConnect } from "@/lib/queries";
 import { useCan } from "@/lib/session";
-import { ShopifyClaim, useNativeShopify } from "./shopify-claim";
+import { ShopifyClaim, useNativeShopify, type NativeShopify } from "./shopify-claim";
 import { cn, relativeTime } from "@/lib/utils";
 
 const TOOLKIT = "shopify";
@@ -179,7 +179,7 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
           <>
             {items.length > 0 ? (
               <ul className="-mx-4 divide-y divide-border-soft border-y border-border-soft lg:-mx-6" aria-label="Shopify stores">
-                {items.map((connection) => <ShopRow key={connection.id} connection={connection} native={native} onAction={clearNotice} onNativeInstall={() => setRelink(true)} />)}
+                {items.map((connection) => <ShopRow key={connection.id} connection={connection} nativeState={nativeState} onAction={clearNotice} onRelink={setRelink} />)}
               </ul>
             ) : null}
             {/* One live connection per toolkit (C-7): a retired store left in view for its warning does not count. */}
@@ -400,7 +400,7 @@ function NativeUnknownNote({ retry }: { retry: () => void }) {
   );
 }
 
-function ShopRow({ connection, native, onAction, onNativeInstall }: { connection: ManagedConnection; native: boolean; onAction: () => void; onNativeInstall: () => void }) {
+function ShopRow({ connection, nativeState, onAction, onRelink }: { connection: ManagedConnection; nativeState: NativeShopify; onAction: () => void; onRelink: (active: boolean) => void }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
@@ -457,13 +457,15 @@ function ShopRow({ connection, native, onAction, onNativeInstall }: { connection
 
   // C-18: a legacy Composio row under the native tier cannot be re-linked (the worker refuses it): Reconnect disconnects it and
   // starts the native install's link code instead.
-  const path = reconnectPath(connection, native);
+  const path = reconnectPath(connection, nativeState);
   const nativeInstall = useMutation({
     mutationFn: async () => {
+      // The claim card makes the code by itself once the old link is gone; set before the disconnect so a manual start cannot overlap it.
+      onRelink(true);
       await disconnectForNativeInstall(api, connection, intentKeys.keyFor(payload));
-      onNativeInstall();
     },
     onError: (error) => {
+      onRelink(false);
       if (error instanceof DisconnectPendingError) toast(error.message, "info");
     },
     onSettled: async (_result, error) => {
@@ -491,7 +493,7 @@ function ShopRow({ connection, native, onAction, onNativeInstall }: { connection
       </div>
       {live ? (
         <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
-          {connection.status === "reauthorize" && path === "reopen" ? (
+          {connection.status === "reauthorize" && path === "none" ? null : connection.status === "reauthorize" && path === "reopen" ? (
             <p className="max-w-xs text-xs text-meta" data-testid="shopify-reopen-note">To reconnect, open ZS Business Connections in your Shopify admin.</p>
           ) : connection.status === "reauthorize" ? (
             <Button variant="primary" onClick={() => { reconnect.reset(); nativeInstall.reset(); setDialog("reconnect"); }} disabled={leaving} aria-busy={leaving}>

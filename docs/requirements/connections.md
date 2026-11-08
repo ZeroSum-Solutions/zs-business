@@ -687,6 +687,10 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     holds a live or `disconnecting` Shopify row). A `native` row in `reauthorize` shows no
     Reconnect, only the note to reopen the app in the Shopify admin. With no native tier,
     Reconnect stays the Composio disconnect-then-connect (C-13).
+    While the native read is pending or failed, no Reconnect shows for any row (a Composio re-link
+    would be refused after the disconnect). Deploy order: the dashboard first, then the API. The
+    contract object is strict, so a dashboard built before this field rejects an API answer that
+    carries it; a newer dashboard reads an older API (no `tier`) without change.
   - Why not Composio's `BEARER_TOKEN` import: Composio would hold our token and not refresh it,
     and order data would still pass through a subprocessor.
 - **C-19 App configuration.** One app per environment: preview `ZS Business Conn (preview)` (Shopify caps names at 30 characters)

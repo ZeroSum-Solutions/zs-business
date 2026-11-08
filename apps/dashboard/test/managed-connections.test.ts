@@ -305,11 +305,16 @@ describe("reconnect waits for the old link to go (C-4, C-13)", () => {
 
 describe("reconnect path (C-18)", () => {
   it("sends a legacy row to the native install under the native tier, and every other case to the path the worker allows", () => {
-    expect(reconnectPath({ tier: "composio" }, true)).toBe("native_install");
-    expect(reconnectPath({ tier: "native" }, true)).toBe("reopen");
-    expect(reconnectPath({}, true)).toBe("reopen");
-    expect(reconnectPath({ tier: "composio" }, false)).toBe("composio");
-    expect(reconnectPath({}, false)).toBe("composio");
+    expect(reconnectPath({ tier: "composio" }, "native")).toBe("native_install");
+    expect(reconnectPath({ tier: "native" }, "native")).toBe("reopen");
+    expect(reconnectPath({}, "native")).toBe("reopen");
+    expect(reconnectPath({ tier: "composio" }, "off")).toBe("composio");
+    expect(reconnectPath({}, "off")).toBe("composio");
+  });
+
+  it("offers no Reconnect while the native read is pending or failed: a Composio re-link would be refused after the disconnect", () => {
+    for (const state of ["pending", "unknown"] as const) for (const tier of ["composio", "native", undefined] as const)
+      expect(reconnectPath(tier ? { tier } : {}, state)).toBe("none");
   });
 
   it("disconnects the legacy row and waits until it is gone before the link code is made", async () => {
@@ -320,5 +325,13 @@ describe("reconnect path (C-18)", () => {
     };
     await disconnectForNativeInstall(api, { id: connection("active").id }, "key", { sleep: async () => undefined });
     expect(calls).toEqual(["disconnect", "list"]);
+  });
+
+  it("stops with DisconnectPendingError when the old link never reaches disconnected", async () => {
+    const api = {
+      disconnectManagedConnection: async () => connection("disconnecting"),
+      listManagedConnections: async () => [connection("disconnecting")],
+    };
+    await expect(disconnectForNativeInstall(api, { id: connection("active").id }, "key", { sleep: async () => undefined, polls: 2, delayMs: 0 })).rejects.toBeInstanceOf(DisconnectPendingError);
   });
 });

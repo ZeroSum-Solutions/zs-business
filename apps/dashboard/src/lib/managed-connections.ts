@@ -265,10 +265,12 @@ export const RECONNECT_NATIVE_CONFIRM = "You confirm the store here when it has 
  * a link code for the App Store app); `composio` is the hosted re-link, only while no native tier exists; `reopen` is a row the
  * native app owns, or one the API did not label (an older server): the owner reopens the app in Shopify admin.
  */
-export type ReconnectPath = "composio" | "native_install" | "reopen";
-export function reconnectPath(connection: Pick<ManagedConnection, "tier">, native: boolean): ReconnectPath {
+export type ReconnectPath = "composio" | "native_install" | "reopen" | "none";
+/** `state` is the four-state native read (C-18): only a confirmed `off` may use the Composio re-link; while it is unknown or pending, no Reconnect shows. */
+export function reconnectPath(connection: Pick<ManagedConnection, "tier">, state: "native" | "off" | "unknown" | "pending"): ReconnectPath {
+  if (state === "unknown" || state === "pending") return "none";
   if (connection.tier === "native") return "reopen";
-  if (!native) return "composio";
+  if (state === "off") return "composio";
   return connection.tier === "composio" ? "native_install" : "reopen";
 }
 

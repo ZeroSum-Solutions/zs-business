@@ -203,6 +203,12 @@ describe("Shopify card: rows", () => {
     expect(text(unconfirmed)).not.toMatch(/Disconnect Halden Rowe|Reconnect Halden Rowe|Disconnect halden-rowe/);
   });
 
+  it("shows no Reconnect for a legacy row while the native read is pending or failed (C-18)", () => {
+    const items = [connection({ status: "reauthorize", reauthorizeReason: "auth_error", tier: "composio" })];
+    expect(text(card({ items, live: true }))).not.toContain("Reconnect Halden Rowe");
+    expect(text(card({ items, live: true, fill: (client) => failQuery(client, keys.shopifyClaim, new ClaimsUnavailable(500)) }))).not.toContain("Reconnect Halden Rowe");
+  });
+
   it("with no native tier, Reconnect shows for a composio row, and for an unlabelled one (C-18)", () => {
     for (const tier of ["composio", undefined] as const) {
       expect(text(card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error", ...(tier ? { tier } : {}) })] }))).toContain("Reconnect Halden Rowe");
