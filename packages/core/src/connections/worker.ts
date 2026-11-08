@@ -377,6 +377,8 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     const toolkit = catalogToolkit(input.toolkit);
     const authConfigId = config.authConfigIds[input.toolkit];
     if (!toolkit || !authConfigId) return { outcome: "refused", code: "not_found" };
+    // C-18: with the native tier on, Shopify is installed from the App Store; no typed shop domain starts a Composio link (S1 2.3.1).
+    if (input.toolkit === "shopify" && deps.native) return { outcome: "refused", code: "not_found" };
     const started = now();
     const expiresAt = new Date(started.getTime() + config.attemptLifetimeMs);
     const row = (accountId: string, status: "started" | "cancelling") => service((tx) => tx.query(

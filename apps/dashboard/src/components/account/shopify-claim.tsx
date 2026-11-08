@@ -131,6 +131,14 @@ export function ShopifyClaim() {
   );
 }
 
+/** True once the server answered the claim route, which exists only with the native Shopify tier (C-18). */
+export function useNativeShopify(enabled: boolean): { native: boolean; pending: boolean } {
+  const live = useSampleOnly();
+  const claim = useClaimState(live && enabled);
+  // The claim route is only ever read on the live app; a cached answer (success) is what says the native tier is on.
+  return { native: claim.isSuccess, pending: live && enabled && claim.isPending };
+}
+
 function useClaimState(live: boolean) {
   const { keys, enabled } = useKeys();
   const query = useQuery({

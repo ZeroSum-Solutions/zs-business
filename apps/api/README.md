@@ -586,7 +586,7 @@ required ones, and the `CONNECTIONS_` variables above. Errors name the variable,
 | `SHOPIFY_API_VERSION` | Pinned Admin API version, default `2026-10` (a quarterly release). |
 | `SHOPIFY_PLAN_GRACE_DAYS` | Days of grace on a Shopify-billed plan (1 to 30, default 7). |
 | `ZS_TARGET_REF`, `SUPABASE_SERVICE_ROLE_KEY` | The Supabase project and its `service_role` key, for the hub the worker makes for a new merchant. |
-| `HUB_SIGN_IN_URL` | The dashboard page a one-time sign-in link lands on (must be on the project's redirect allow-list). |
+| `HUB_SIGN_IN_URL` | The dashboard's `/auth/confirm` URL (`https://<dashboard>/auth/confirm`). The worker builds the one-time sign-in link from it: `?token_hash=<generated>&type=magiclink&next=/`. |
 
 ### Connections on the API (`/v1/connections`, `/oauth/connections/callback`, three `/mcp` tools)
 

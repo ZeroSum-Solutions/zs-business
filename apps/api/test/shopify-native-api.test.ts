@@ -50,7 +50,7 @@ const NATIVE_ENV = {
   SHOPIFY_TOKEN_SEAL_KEY_ID: "k1",
   ZS_TARGET_REF: PROJECT_REF,
   SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
-  HUB_SIGN_IN_URL: "https://app.haldenrowe.example/auth/callback",
+  HUB_SIGN_IN_URL: "https://app.haldenrowe.example/auth/confirm",
 };
 const errorOf = (vars: Record<string, string | undefined>): string => {
   try { parseConnectionsEnv(vars); } catch (error) { return (error as Error).message; }
@@ -212,8 +212,9 @@ describe("the embedded routes (C-21, C-22)", () => {
     expect(response.headers.get("set-cookie")).toBeNull();
   });
 
-  it("a forged token is an invalid_token outcome, not a crash", async () => {
-    expect(await json(await embedded(on, "open", mintIdToken(nativeClock.now(), {}, "z".repeat(48))))).toEqual({ outcome: "invalid_token" });
+  it("a forged token is a 401 (so the page retries with a fresh one), not a crash", async () => {
+    const forged = await embedded(on, "open", mintIdToken(nativeClock.now(), {}, "z".repeat(48)));
+    expect(forged.status).toBe(401);
   });
 
   it("create-hub makes the hub, then open shows it linked; a second create-hub says already_linked", async () => {
@@ -402,7 +403,7 @@ describe("POST /webhooks/shopify (C-24)", () => {
   };
 
   it("answers 200 to a correctly signed compliance webhook and 401 to a bad tag", async () => {
-    const body = JSON.stringify({ shop_domain: SHOP, customer: { id: 1 }, orders_requested: [] });
+    const body = JSON.stringify({ shop_id: 9001, shop_domain: SHOP, customer: { id: 1 }, orders_requested: [] });
     expect((await post(body, await signed(body, "customers/data_request"))).status).toBe(200);
     expect((await post(body, { ...(await signed(body, "customers/data_request")), "x-shopify-hmac-sha256": "AAAA" })).status).toBe(401);
     expect((await post(body, { "x-shopify-topic": "customers/redact" })).status).toBe(401);

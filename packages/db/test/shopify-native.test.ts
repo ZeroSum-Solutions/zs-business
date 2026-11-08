@@ -100,6 +100,24 @@ describe("install ledger, claims, webhook events (C-22, C-21, C-24)", () => {
       await expect(fixture.a.run((tx) => tx.query(`DELETE FROM ${table}`)), table).rejects.toMatchObject({ code: "42501" });
     }
   });
+  it("scopes claims by tenant even if the runtime role were granted the table (the policy is the second wall)", async () => {
+    await fixture.service((tx) => tx.query("UPDATE shopify_claims SET status='cancelled'"));
+    await claimInsert(fixture.a.tenantId, memberA);
+    await claimInsert(fixture.b.tenantId, memberB);
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("GRANT SELECT, UPDATE ON public.shopify_claims TO authenticated");
+      await client.query("SET LOCAL ROLE authenticated");
+      await client.query("SELECT set_config('app.tenant_id', $1, true)", [fixture.a.tenantId]);
+      expect((await client.query("SELECT tenant_id FROM shopify_claims WHERE status='open'")).rows).toEqual([{ tenant_id: fixture.a.tenantId }]);
+      expect((await client.query("UPDATE shopify_claims SET status='cancelled' WHERE tenant_id=$1", [fixture.b.tenantId])).rowCount).toBe(0);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
+    await fixture.service((tx) => tx.query("UPDATE shopify_claims SET status='cancelled'"));
+  });
   it("keeps tokens exactly while an install is not uninstalled (23514)", async () => {
     const insert = (status: string, sealed: string | null) => fixture.service((tx) => tx.query(
       `INSERT INTO shopify_installs (shop_id,shop_domain,shop_name,scopes,status,access_sealed,access_key_id,refresh_sealed,refresh_key_id,access_expires_at,refresh_expires_at,installed_at,uninstalled_at,created_at,updated_at)

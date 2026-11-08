@@ -1,6 +1,6 @@
 // Connections C-21, C-22: the hub side of the native Shopify tier, for the worker. `createHub` makes (or finds) the
 // tenant `shopify-<numeric shop id>`, its Supabase user and its owner member, all idempotent for the same key and
-// email, so a retry after any crash resumes. `signInLink` asks Supabase Auth for a one-time magic link; nothing is
+// email, so a retry after any crash resumes. `signInLink` asks Supabase Auth for a one-time token and builds the dashboard's /auth/confirm link from it; nothing is
 // emailed. It uses the service pool the worker already holds and the Supabase Auth admin API.
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
@@ -13,7 +13,7 @@ export function createShopifyHub(deps: {
   readonly pool: Pool;
   readonly auth: SupabaseAuthAdmin;
   readonly clock: { now(): Date };
-  /** The hub page a magic link lands on (HUB_SIGN_IN_URL). */
+  /** The dashboard's `/auth/confirm` page (HUB_SIGN_IN_URL): it trades the link's one-time token for session cookies. */
   readonly signInUrl: string;
   readonly generateId?: () => string;
   readonly report?: (event: { readonly kind: "hub_error"; readonly step: string }) => void;
@@ -52,7 +52,7 @@ export function createShopifyHub(deps: {
 
     async signInLink(email) {
       try {
-        return await deps.auth.generateLink({ email: email.trim().toLowerCase(), redirectTo: deps.signInUrl });
+        return await deps.auth.generateLink({ email: email.trim().toLowerCase(), confirmUrl: deps.signInUrl });
       } catch {
         return null;
       }

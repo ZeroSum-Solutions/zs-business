@@ -35,7 +35,7 @@ function button(label, onClick, kind) {
 function note(text, tone) { return el("p", text, { class: "note " + (tone || "info"), role: tone === "error" ? "alert" : "status" }); }
 function title(text) { return el("h1", text, { tabindex: "-1" }); }
 
-function call(op, body) {
+function send(op, body) {
   return Promise.resolve(shopify.idToken()).then(function (token) {
     return fetch(API + op, {
       method: "POST",
@@ -45,6 +45,13 @@ function call(op, body) {
       cache: "no-store",
       referrerPolicy: "no-referrer"
     });
+  });
+}
+
+// A 401 means the session token was stale: ask App Bridge for a fresh one and retry once (shopify.dev session-tokens).
+function call(op, body) {
+  return send(op, body).then(function (response) {
+    return response.status === 401 ? send(op, body) : response;
   }).then(function (response) {
     if (response.status === 401) return { outcome: "invalid_token" };
     if (response.status === 429) return { outcome: "unavailable" };

@@ -286,8 +286,9 @@ describe("the page script", () => {
   });
 
   it("maps a 401 to a reload prompt and an outage to a retry, and never throws", async () => {
-    const expired = runClient({ answers: [{ status: 401, body: {} }] });
+    const expired = runClient({ answers: [{ status: 401, body: {} }, { status: 401, body: {} }] });
     await settle();
+    expect(expired.calls).toHaveLength(2);
     expect(texts(expired.app)).toContain("Your Shopify session expired");
     button(expired.app, "Reload").click();
     expect(expired.win.location.reload).toHaveBeenCalled();
@@ -295,6 +296,14 @@ describe("the page script", () => {
     await settle();
     expect(texts(down.app)).toContain("not reachable right now");
     expect(button(down.app, "Try again")).toBeDefined();
+  });
+
+  it("retries once with a fresh session token after a 401 and carries on when the retry works", async () => {
+    const { app, calls } = runClient({ answers: [{ status: 401, body: {} }, { status: 200, body: { outcome: "ok", shop: SHOP, link: { state: "none" } } }] });
+    await settle();
+    expect(calls).toHaveLength(2);
+    expect(texts(app)).not.toContain("session expired");
+    expect(texts(app)).toContain("Halden & Rowe");
   });
 
   it("writes text only: markup in a store name is never parsed", async () => {

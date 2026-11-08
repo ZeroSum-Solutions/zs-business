@@ -32,6 +32,8 @@ const CLAIM_MAX_WRONG = 5;
 const CLAIM_LOCK_MS = HOUR;
 const EVENT_KEEP_MS = 30 * DAY;
 const MAX_WEBHOOK_BYTES = 64 * 1024;
+/** Shopify wants a webhook answered within 5 s (verify-deliveries); the probe gets less, and a slow one answers 500 so Shopify retries. */
+const WEBHOOK_PROBE_MS = 3500;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 10;
 const SHOP_GID_RE = /^gid:\/\/shopify\/Shop\/([0-9]{1,20})$/;
@@ -61,6 +63,7 @@ export type ShopifyNativeReport =
   | { readonly kind: "uninstalled"; readonly shop: string }
   | { readonly kind: "delayed_uninstall_dropped"; readonly shop: string }
   | { readonly kind: "redacted"; readonly shop: string }
+  | { readonly kind: "redact_skipped_reinstall"; readonly shop: string }
   | { readonly kind: "webhook"; readonly topic: string; readonly shop: string; readonly status: number }
   | { readonly kind: "claim_locked"; readonly shop: string }
   | { readonly kind: "hub_failed"; readonly shop: string };
@@ -145,6 +148,11 @@ export interface WebhookInput {
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+/** `gid://shopify/Shop/<id>` from a webhook's numeric (or digit-string) shop id; null when it is not a positive integer. */
+const shopGid = (value: unknown): string | null => {
+  const text = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : typeof value === "string" ? value : "";
+  return /^[1-9][0-9]{0,19}$/.test(text) ? `gid://shopify/Shop/${text}` : null;
+};
 const isDup = (error: unknown) => typeof error === "object" && error !== null && (error as { code?: unknown }).code === "23505";
 
 export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
@@ -199,7 +207,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
   }
 
   /** Marks the install and its native connection as needing the merchant to reopen the app (C-22). Conditional on the generation. */
-  async function markNeedsReauth(row: InstallRow): Promise<void> {
+  async function markNeedsReauth(row: InstallRow): Promise<boolean> {
     const moved = await service(async (tx) => {
       const updated = await tx.query(
         "UPDATE shopify_installs SET status='needs_reauth', updated_at=$3 WHERE shop_id=$1 AND generation=$2 AND status='live'", [row.shop_id, gen(row), now()]);
@@ -210,12 +218,13 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       return updated.rowCount === 1;
     });
     if (moved) report({ kind: "needs_reauth", shop: row.shop_domain });
+    return moved;
   }
 
   type Access = { kind: "ok"; row: InstallRow; token: string } | { kind: "none" } | { kind: "reauth" } | { kind: "unavailable" } | { kind: "busy" };
 
   /** Refreshes under the lease; `force` refreshes even when the access token still has time (the cron pass). */
-  async function refreshInstall(domain: string, force: boolean): Promise<Access> {
+  async function refreshInstall(domain: string, force: boolean, signal?: AbortSignal): Promise<Access> {
     const locked = await withShopLock(domain, async (): Promise<Access> => {
       const row = await installByDomain(domain);
       if (row === null || row.status === "uninstalled") return { kind: "none" };
@@ -228,7 +237,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
         await markNeedsReauth(row);
         return { kind: "reauth" };
       }
-      const answer = await client.refresh(row.shop_domain, refresh);
+      const answer = await client.refresh(row.shop_domain, refresh, signal);
       if (answer.kind === "failed") {
         if (answer.reason === "invalid_grant") { await markNeedsReauth(row); return { kind: "reauth" }; }
         return stillGood ? { kind: "ok", row, token: access } : { kind: "unavailable" };
@@ -247,21 +256,21 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
   }
 
   /** A usable access token for a live install, refreshing first when it is near its end. */
-  async function ensureAccess(domain: string): Promise<Access> {
+  async function ensureAccess(domain: string, signal?: AbortSignal): Promise<Access> {
     const row = await installByDomain(domain);
     if (row === null || row.status === "uninstalled") return { kind: "none" };
     if (row.status === "needs_reauth") return { kind: "reauth" };
     const access = unseal(row, "access");
     if (access !== null && row.access_expires_at !== null && row.access_expires_at.getTime() - now().getTime() > REFRESH_AHEAD_MS) return { kind: "ok", row, token: access };
-    return refreshInstall(domain, false);
+    return refreshInstall(domain, false, signal);
   }
 
   /** Ask Shopify whether the stored credentials still work: live, gone (uninstalled or revoked) or unknown. */
-  async function probe(domain: string): Promise<"live" | "gone" | "unknown"> {
-    const access = await ensureAccess(domain);
+  async function probe(domain: string, signal?: AbortSignal): Promise<"live" | "gone" | "unknown"> {
+    const access = await ensureAccess(domain, signal);
     if (access.kind === "none" || access.kind === "reauth") return "gone";
     if (access.kind !== "ok") return "unknown";
-    const shop = await client.readShop(domain, access.token);
+    const shop = await client.readShop(domain, access.token, signal);
     if (shop.kind === "ok") return "live";
     if (shop.reason === "unauthorized") return "gone";
     if (shop.reason === "forbidden") return "live";
@@ -288,28 +297,41 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       if (shop.shop.domain !== domain) return { kind: "invalid" };
       const s = sealed(shop.shop.id, answer.tokens);
       const name = shop.shop.name.slice(0, 120);
+      // The row seen before the Shopify calls fences the write: an uninstall or redact that ran meanwhile moved the
+      // generation or removed the row, and this exchange must not bring the store back to life behind it.
+      const observed = existing === null ? null : gen(existing);
+      const columns = `shop_id, shop_domain, shop_name, scopes, status, access_sealed, access_key_id, refresh_sealed, refresh_key_id,
+              access_expires_at, refresh_expires_at, installed_at, created_at, updated_at`;
+      const values = [shop.shop.id, domain, name, answer.tokens.scope.slice(0, 1000), s.access.text, s.access.keyId, s.refresh.text, s.refresh.keyId, s.accessExpires, s.refreshExpires, now()];
       let row: InstallRow | undefined;
       try {
-        row = (await service((tx) => tx.query<InstallRow>(
-          `INSERT INTO shopify_installs (shop_id, shop_domain, shop_name, scopes, status, access_sealed, access_key_id, refresh_sealed, refresh_key_id,
-              access_expires_at, refresh_expires_at, installed_at, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,'live',$5,$6,$7,$8,$9,$10,$11,$11,$11)
-           ON CONFLICT (shop_id) DO UPDATE SET shop_domain=EXCLUDED.shop_domain, shop_name=EXCLUDED.shop_name, scopes=EXCLUDED.scopes, status='live',
-              access_sealed=EXCLUDED.access_sealed, access_key_id=EXCLUDED.access_key_id, refresh_sealed=EXCLUDED.refresh_sealed, refresh_key_id=EXCLUDED.refresh_key_id,
-              access_expires_at=EXCLUDED.access_expires_at, refresh_expires_at=EXCLUDED.refresh_expires_at, generation=shopify_installs.generation + 1,
-              installed_at=CASE WHEN shopify_installs.status='uninstalled' THEN EXCLUDED.installed_at ELSE shopify_installs.installed_at END,
-              uninstalled_at=NULL, updated_at=EXCLUDED.updated_at
-           RETURNING ${INSTALL_COLUMNS}`,
-          [shop.shop.id, domain, name, answer.tokens.scope.slice(0, 1000), s.access.text, s.access.keyId, s.refresh.text, s.refresh.keyId, s.accessExpires, s.refreshExpires, now()]))).rows[0];
+        row = await service(async (tx) => {
+          const written = observed === null
+            ? await tx.query<InstallRow>(
+              `INSERT INTO shopify_installs (${columns}) VALUES ($1,$2,$3,$4,'live',$5,$6,$7,$8,$9,$10,$11,$11,$11)
+               ON CONFLICT (shop_id) DO NOTHING RETURNING ${INSTALL_COLUMNS}`, values)
+            : await tx.query<InstallRow>(
+              `INSERT INTO shopify_installs (${columns}) VALUES ($1,$2,$3,$4,'live',$5,$6,$7,$8,$9,$10,$11,$11,$11)
+               ON CONFLICT (shop_id) DO UPDATE SET shop_domain=EXCLUDED.shop_domain, shop_name=EXCLUDED.shop_name, scopes=EXCLUDED.scopes, status='live',
+                  access_sealed=EXCLUDED.access_sealed, access_key_id=EXCLUDED.access_key_id, refresh_sealed=EXCLUDED.refresh_sealed, refresh_key_id=EXCLUDED.refresh_key_id,
+                  access_expires_at=EXCLUDED.access_expires_at, refresh_expires_at=EXCLUDED.refresh_expires_at, generation=shopify_installs.generation + 1,
+                  installed_at=CASE WHEN shopify_installs.status='uninstalled' THEN EXCLUDED.installed_at ELSE shopify_installs.installed_at END,
+                  uninstalled_at=NULL, updated_at=EXCLUDED.updated_at
+                WHERE shopify_installs.generation = $12
+               RETURNING ${INSTALL_COLUMNS}`, [...values, observed]);
+          const inserted = written.rows[0];
+          if (!inserted) return undefined;
+          // A merchant who reopens the app after a failed refresh recovers the connection too (C-22), in the same transaction.
+          await tx.query(
+            `UPDATE connections SET status='active', reauthorize_reason=NULL, last_error_code=NULL, last_checked_at=$2, updated_at=$2
+              WHERE tier='native' AND external_account_id=$1 AND status='reauthorize' AND reauthorize_reason='auth_error'`, [inserted.shop_id, now()]);
+          return inserted;
+        });
       } catch (error) {
         if (isDup(error)) return { kind: "invalid" };
         throw error;
       }
       if (!row) return { kind: "unavailable" };
-      // A merchant who reopens the app after a failed refresh recovers the connection too (C-22).
-      await service((tx) => tx.query(
-        `UPDATE connections SET status='active', reauthorize_reason=NULL, last_error_code=NULL, last_checked_at=$2, updated_at=$2
-          WHERE tier='native' AND external_account_id=$1 AND status='reauthorize' AND reauthorize_reason='auth_error'`, [row!.shop_id, now()]));
       report({ kind: "exchanged", shop: domain, generation: gen(row) });
       return { kind: "ok", row };
     });
@@ -478,23 +500,33 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     const owner = await storeOwner(domain, input.idToken);
     if (owner.kind !== "ok") return { outcome: owner.kind };
     const hash = codeHash(input.code);
-    const found = await service(async (tx) => {
+    // The lockout counter is read and written under a row lock: concurrent wrong guesses each count, and a slow
+    // request cannot reset a lock another one just set.
+    const found = await service(async (tx): Promise<{ kind: "redeemed"; name: string } | { kind: "wrong" } | { kind: "locked"; until: Date }> => {
+      const counter = (await tx.query<{ claim_failures: number; claim_locked_until: Date | null }>(
+        "SELECT claim_failures, claim_locked_until FROM shopify_installs WHERE shop_id=$1 FOR UPDATE", [row.shop_id])).rows[0];
+      if (!counter) return { kind: "wrong" };
+      if (counter.claim_locked_until !== null && counter.claim_locked_until.getTime() > now().getTime()) return { kind: "locked", until: counter.claim_locked_until };
       const claim = (await tx.query<{ tenant_id: string; id: string }>(
         `UPDATE shopify_claims SET status='redeemed', shop_id=$2, shop_domain=$3, shop_name=$4, redeemed_at=$5, updated_at=$5
           WHERE code_hash=$1 AND status='open' AND expires_at > $5 RETURNING tenant_id, id`, [hash, row.shop_id, domain, row.shop_name, now()])).rows[0];
       if (claim) {
         await tx.query("UPDATE shopify_installs SET claim_failures=0, claim_locked_until=NULL WHERE shop_id=$1", [row.shop_id]);
         const name = (await tx.query<{ name: string }>("SELECT name FROM tenants WHERE tenant_id=$1", [claim.tenant_id])).rows[0]?.name ?? "";
-        return name;
+        return { kind: "redeemed", name };
       }
-      const failures = row.claim_failures + 1;
+      const failures = Number(counter.claim_failures) + 1;
       const lock = failures >= CLAIM_MAX_WRONG;
       await tx.query("UPDATE shopify_installs SET claim_failures=$2, claim_locked_until=$3, updated_at=$4 WHERE shop_id=$1",
         [row.shop_id, lock ? 0 : failures, lock ? new Date(now().getTime() + CLAIM_LOCK_MS) : null, now()]);
-      return null;
+      return { kind: "wrong" };
     });
-    if (found === null) return { outcome: "invalid_code" };
-    return { outcome: "redeemed", businessName: found };
+    if (found.kind === "locked") {
+      report({ kind: "claim_locked", shop: domain });
+      return { outcome: "locked", retryAfterSeconds: Math.max(1, Math.ceil((found.until.getTime() - now().getTime()) / SECOND)) };
+    }
+    if (found.kind === "wrong") return { outcome: "invalid_code" };
+    return { outcome: "redeemed", businessName: found.name };
   }
 
   async function claimConfirm(input: { tenantId: string; claimId: string; memberId: string }): Promise<ConfirmResult> {
@@ -532,7 +564,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     if (owner.kind !== "ok") return { outcome: owner.kind };
     const member = (await service((tx) => tx.query<{ email: string }>(
       `SELECT m.email FROM connections c JOIN tenant_members m ON m.tenant_id=c.tenant_id AND m.role='owner' AND lower(m.email)=$2
-        WHERE c.tier='native' AND c.external_account_id=$1 AND c.status='active' LIMIT 1`, [auth.row.shop_id, owner.email]))).rows[0];
+        WHERE c.tier='native' AND c.external_account_id=$1 AND c.status IN ('active','reauthorize') LIMIT 1`, [auth.row.shop_id, owner.email]))).rows[0];
     if (!member) return { outcome: "not_available" };
     const url = await deps.hub.signInLink(owner.email);
     return url === null ? { outcome: "not_available" } : { outcome: "ok", url };
@@ -569,9 +601,9 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     switch (reason) {
       case "unauthorized":
       case "invalid_grant":
-        await markNeedsReauth(install);
-        await reauthConnection(row);
-        return { kind: "error", code: "connection_needs_reconnect" };
+        // Only the install that is current may invalidate the connection; a stale 401 (the pair was rotated or the
+        // store was reinstalled meanwhile) just means: try again with the fresh token.
+        return (await markNeedsReauth(install)) ? { kind: "error", code: "connection_needs_reconnect" } : { kind: "error", code: "provider_unavailable" };
       case "forbidden":
         // C-8, C-10: the credential works but a permission blocks this read; reconnecting cannot fix it.
         await service((tx) => tx.query(
@@ -604,6 +636,9 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
         }
       } else if (access.kind === "busy" || access.kind === "unavailable") {
         return "pending";
+      } else if (access.kind === "reauth") {
+        // The stored token no longer works, so the app cannot be removed from here: say so (the owner uninstalls it in Shopify admin).
+        outcome = "failed";
       }
     }
     await service(async (tx) => {
@@ -636,57 +671,80 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     const record_ = (tx: Transaction) => tx.query("INSERT INTO shopify_webhook_events (webhook_id, topic, shop_domain, received_at) VALUES ($1,$2,$3,$4) ON CONFLICT (webhook_id) DO NOTHING",
       [webhookId, topic, shopDomain, now()]).then((r) => r.rowCount === 1);
 
+    // A signed body that names a shop id must name the stored shop's id (the headers are not signed).
+    const bodyId = topic === "app/uninstalled" ? body["id"] : body["shop_id"];
+    const bodyGid = shopGid(bodyId);
+    if (topic !== "app/uninstalled" && bodyGid === null) return done(401, topic, shopDomain);
+
+    // A delivery already handled is acknowledged before any call to Shopify (at-least-once delivery).
+    const seen = await service((tx) => tx.query("SELECT 1 FROM shopify_webhook_events WHERE webhook_id=$1", [webhookId]));
+    if ((seen.rowCount ?? 0) > 0) return done(200, topic, shopDomain);
+
+    const install = await installByDomain(shopDomain);
+    if (install !== null && bodyGid !== null && install.shop_id !== bodyGid) return done(401, topic, shopDomain);
     if (topic === "customers/data_request" || topic === "customers/redact") {
       // C-14: the hub holds no Shopify customer data, so there is nothing to export or erase.
       await service(async (tx) => { await record_(tx); });
       return done(200, topic, shopDomain);
     }
-    const install = await installByDomain(shopDomain);
+    // The whole probe shares one budget that ends before Shopify's 5 s limit; a slow store answers 500 and Shopify retries.
+    const budget = () => AbortSignal.timeout(WEBHOOK_PROBE_MS);
     if (topic === "app/uninstalled") {
       if (install === null || install.status === "uninstalled") { await service(async (tx) => { await record_(tx); }); return done(200, topic, shopDomain); }
       // Shopify guarantees neither order nor delivery: ask it whether the credentials still work (C-24).
-      const state = await probe(shopDomain);
+      const state = await probe(shopDomain, budget());
       if (state === "unknown") return done(500, topic, shopDomain);
       if (state === "live") {
         report({ kind: "delayed_uninstall_dropped", shop: shopDomain });
         await service(async (tx) => { await record_(tx); });
         return done(200, topic, shopDomain);
       }
-      await applyUninstall(install, record_);
-      report({ kind: "uninstalled", shop: shopDomain });
+      if (await applyUninstall(install, record_)) report({ kind: "uninstalled", shop: shopDomain });
       return done(200, topic, shopDomain);
     }
     // shop/redact
     if (install !== null && install.status !== "uninstalled") {
-      const state = await probe(shopDomain);
+      const state = await probe(shopDomain, budget());
       if (state === "unknown") return done(500, topic, shopDomain);
       if (state === "live") { await service(async (tx) => { await record_(tx); }); return done(200, topic, shopDomain); }
     }
-    const shopId = install?.shop_id ?? `gid://shopify/Shop/${String(body["shop_id"] ?? "").replace(/\D/g, "")}`;
-    await service(async (tx) => {
-      if (!(await record_(tx))) return;
+    const shopId = install?.shop_id ?? bodyGid!;
+    const erased = await service(async (tx) => {
+      if (!(await record_(tx))) return null;
+      // The probe ran outside this transaction: lock the row and confirm it is still the one the probe saw. A store
+      // that reinstalled meanwhile (a new generation, or a row where there was none) keeps its fresh credentials and binding.
+      const now_ = (await tx.query<{ status: string; generation: string | number }>("SELECT status::text AS status, generation FROM shopify_installs WHERE shop_domain=$1 FOR UPDATE", [shopDomain])).rows[0];
+      const reinstalled = install === null ? now_ !== undefined && now_.status !== "uninstalled" : now_ !== undefined && Number(now_.generation) !== gen(install);
+      if (reinstalled) return false;
       await tx.query(
         `UPDATE connections SET status='disconnected', account_label=NULL, revoke_outcome=coalesce(revoke_outcome,'revoked'), updated_at=$2
           WHERE tier='native' AND external_account_id=$1 AND status<>'disconnected'`, [shopId, now()]);
       await tx.query("UPDATE connections SET account_domain='redacted.invalid', external_account_id='redacted' WHERE tier='native' AND external_account_id=$1 AND status='disconnected'", [shopId]);
       await tx.query("DELETE FROM shopify_claims WHERE shop_id=$1 OR shop_domain=$2", [shopId, shopDomain]);
       await tx.query("DELETE FROM shopify_installs WHERE shop_domain=$1", [shopDomain]);
+      // No row may keep the shop's name after a redact; this delivery's own row stays, anonymised, so a repeat is still dropped.
       await tx.query("DELETE FROM shopify_webhook_events WHERE shop_domain=$1 AND webhook_id<>$2", [shopDomain, webhookId]);
+      await tx.query("UPDATE shopify_webhook_events SET shop_domain='redacted.myshopify.com' WHERE webhook_id=$1", [webhookId]);
+      return true;
     });
-    report({ kind: "redacted", shop: shopDomain });
+    if (erased === true) report({ kind: "redacted", shop: shopDomain });
+    else if (erased === false) report({ kind: "redact_skipped_reinstall", shop: shopDomain });
     return done(200, topic, shopDomain);
   }
 
-  async function applyUninstall(install: InstallRow, record_: (tx: Transaction) => Promise<boolean>): Promise<void> {
-    await service(async (tx) => {
-      await record_(tx);
-      await tx.query(
+  /** Marks the install uninstalled and its connection disconnected, only when the install is still the generation the probe saw. */
+  async function applyUninstall(install: InstallRow, record_: (tx: Transaction) => Promise<boolean>): Promise<boolean> {
+    return service(async (tx) => {
+      if (!(await record_(tx))) return false;
+      const moved = await tx.query(
         `UPDATE shopify_installs SET status='uninstalled', access_sealed=NULL, access_key_id=NULL, refresh_sealed=NULL, refresh_key_id=NULL, access_expires_at=NULL,
             refresh_expires_at=NULL, generation=generation+1, uninstalled_at=$3, updated_at=$3 WHERE shop_id=$1 AND generation=$2 AND status<>'uninstalled'`,
         [install.shop_id, gen(install), now()]);
+      if (moved.rowCount !== 1) return false;
       await tx.query(
         `UPDATE connections SET status='disconnected', account_label=NULL, revoke_outcome='revoked', last_error_code=NULL, last_checked_at=$2, claimed_until=NULL, updated_at=$2
           WHERE tier='native' AND external_account_id=$1 AND status IN ('active','reauthorize','disconnecting')`, [install.shop_id, now()]);
+      return true;
     });
   }
 

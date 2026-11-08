@@ -755,7 +755,7 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     Tests inject failures between each pair of steps and re-run.
   - **Sign-in without a mailbox.** The page shows "Open ZS Hub" for the verified store
     owner. The worker asks Supabase Auth admin for a one-time sign-in link for the hub
-    owner member's email (`generate_link`, type `magiclink`, redirect to `HUB_SIGN_IN_URL`) and
+    owner member's email (`generate_link`, type `magiclink`; the link is built from the returned `hashed_token` as `HUB_SIGN_IN_URL?token_hash=…&type=magiclink&next=/`, where `HUB_SIGN_IN_URL` is the dashboard's `/auth/confirm`, because Supabase's own `action_link` returns the session in a URL fragment that the server-side confirmation cannot read) and
     returns it; nothing is emailed. It does this only for the account owner of a shop whose
     native connection is active and whose hub owner member's email equals the verified
     store owner's email. This is the independent reviewer path of S1 4.5.4 and 4.5.5: a

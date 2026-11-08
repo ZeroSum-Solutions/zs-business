@@ -30,6 +30,8 @@ export function shopifyEmbeddedRoutes(
     return parsed.success ? parsed.data : null;
   };
   const refused = (c: Context<AppEnv>) => c.json(apiErrorBody("Unauthorized", "Invalid session token"), 401);
+  /** A session token the worker rejects (expired, wrong app, forged) is a 401 too, so the page can ask App Bridge for a fresh one and retry once. */
+  const answer = (c: Context<AppEnv>, result: { readonly outcome: string }) => (result.outcome === "invalid_token" ? refused(c) : c.json(result));
   return new Hono<AppEnv>()
     .use("*", async (c, next) => {
       await next();
@@ -39,15 +41,15 @@ export function shopifyEmbeddedRoutes(
     .use("*", bodyLimit({ maxSize: 2048, onError: (c) => c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413) }))
     .post("/open", async (c) => {
       const token = tokenOf(c);
-      return token === null ? refused(c) : c.json(await session(c).open(token, c.var.signal));
+      return token === null ? refused(c) : answer(c, await session(c).open(token, c.var.signal));
     })
     .post("/create-hub", async (c) => {
       const token = tokenOf(c);
-      return token === null ? refused(c) : c.json(await session(c).createHub(token, c.var.signal));
+      return token === null ? refused(c) : answer(c, await session(c).createHub(token, c.var.signal));
     })
     .post("/sign-in", async (c) => {
       const token = tokenOf(c);
-      return token === null ? refused(c) : c.json(await session(c).signIn(token, c.var.signal));
+      return token === null ? refused(c) : answer(c, await session(c).signIn(token, c.var.signal));
     })
     .post("/redeem-claim", async (c) => {
       const token = tokenOf(c);
@@ -56,6 +58,6 @@ export function shopifyEmbeddedRoutes(
       try { body = await c.req.json(); } catch { throw new ValidationFailed("Invalid request"); }
       const code = shopifyClaimCodeSchema.safeParse((body as { code?: unknown } | null)?.code);
       if (!code.success) return c.json({ outcome: "invalid_code" });
-      return c.json(await session(c).redeemClaim(token, code.data, c.var.signal));
+      return answer(c, await session(c).redeemClaim(token, code.data, c.var.signal));
     });
 }

@@ -192,5 +192,5 @@ END $$;
 -- Only the worker's service role. No runtime grants on any of the three.
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.shopify_installs TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.shopify_claims TO service_role;
-GRANT SELECT, INSERT, DELETE ON public.shopify_webhook_events TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.shopify_webhook_events TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.shopify_locks TO service_role;
