@@ -532,8 +532,8 @@ function ShopRow({ connection, nativeState, onAction, onRelink }: { connection: 
           </DialogContent>
         ) : null}
       </Dialog>
-      <Dialog open={connection.status === "reauthorize" && dialog === "reconnect"} onOpenChange={(open) => { if (!busy) setDialog(open ? "reconnect" : null); }}>
-        {connection.status === "reauthorize" && dialog === "reconnect" ? (
+      <Dialog open={connection.status === "reauthorize" && (path === "composio" || path === "native_install") && dialog === "reconnect"} onOpenChange={(open) => { if (!busy) setDialog(open ? "reconnect" : null); }}>
+        {connection.status === "reauthorize" && (path === "composio" || path === "native_install") && dialog === "reconnect" ? (
           <DialogContent title={RECONNECT_TITLE} description={`${name} (${connection.accountDomain})`}>
             <ul className="mb-4 list-disc space-y-1 pl-5 text-sm text-fg-2" data-testid="shopify-reconnect-copy">
               {path === "native_install" ? (
@@ -555,7 +555,7 @@ function ShopRow({ connection, nativeState, onAction, onRelink }: { connection: 
             {path !== "native_install" && reconnect.isError ? <div className="mb-4"><p role="alert" className="text-sm text-danger" data-testid="shopify-reconnect-error">{connectErrorMessage(reconnect.error)}</p></div> : null}
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <DialogClose asChild><Button variant="ghost" disabled={busy}>Not now</Button></DialogClose>
-              <Button onClick={() => { onAction(); if (path === "native_install") nativeInstall.mutate(); else reconnect.mutate(); }} disabled={busy} aria-busy={busy}>
+              <Button onClick={() => { onAction(); if (path === "native_install") nativeInstall.mutate(); else if (path === "composio") reconnect.mutate(); }} disabled={busy} aria-busy={busy}>
                 <ArrowsClockwise aria-hidden />{busy ? "Reconnecting…" : "Reconnect"}
               </Button>
             </div>
