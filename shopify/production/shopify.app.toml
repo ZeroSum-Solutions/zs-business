@@ -1,0 +1,27 @@
+# ZS Business Connections. No secrets: the client ID is public. Deploy with `shopify app deploy` from this directory's
+# config (docs/requirements/connections.md C-19). Managed installation: scopes are declared here, not requested at
+# install time, and the app authenticates with session tokens (token exchange), never an OAuth redirect.
+client_id = "adc380d0312483cd9ab82a09d9f0e267"
+name = "ZS Business Connections"
+application_url = "https://app.zerosumsolutions.com/shopify/app"
+embedded = true
+
+[access_scopes]
+# The minimum for reading orders (S1 3.2): not read_all_orders, and no customer scope.
+scopes = "read_orders"
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = ["https://app.zerosumsolutions.com/shopify/app"]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/uninstalled"]
+  uri = "https://zs-business-workers.vercel.app/webhooks/shopify"
+
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "https://zs-business-workers.vercel.app/webhooks/shopify"
+

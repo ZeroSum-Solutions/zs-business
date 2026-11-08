@@ -26,10 +26,11 @@ const pending: PendingManagedConnection = {
   expiresAt: "2026-11-06T12:10:00.000Z", tokensWithAccess: 2,
 };
 
-interface CardOptions { items?: ManagedConnection[]; pending?: PendingManagedConnection | null; notice?: Parameters<typeof ShopifyCard>[0]["notice"]; waiting?: boolean; staff?: boolean; fill?: (client: QueryClient) => void }
-function card({ items = [], pending: waiting = null, notice = null, waiting: polling = false, staff = false, fill }: CardOptions = {}) {
+interface CardOptions { items?: ManagedConnection[]; pending?: PendingManagedConnection | null; notice?: Parameters<typeof ShopifyCard>[0]["notice"]; waiting?: boolean; staff?: boolean; live?: boolean; fill?: (client: QueryClient) => void }
+function card({ items = [], pending: waiting = null, notice = null, waiting: polling = false, staff = false, live = false, fill }: CardOptions = {}) {
   return renderScreen(h(ShopifyCard, { notice, onNotice: () => undefined, waiting: polling, onSettled: () => undefined }), {
     staff,
+    live,
     fill: (client) => {
       client.setQueryData(keys.managedConnections, items);
       client.setQueryData(keys.managedPending, waiting);
@@ -48,6 +49,19 @@ describe("Shopify card: connect form", () => {
     expect(text(html)).toContain("Store address");
     expect(text(html)).toContain("Connect Shopify");
     expect(html).not.toContain('data-testid="shopify-confirm"');
+  });
+
+  it("with the native tier on (the claim route answers) asks for no store address: it points to the Shopify App Store (C-18, S1 2.3.1)", () => {
+    const html = card({ fill: (client) => client.setQueryData(keys.shopifyClaim, null) });
+    expect(html).not.toContain('data-testid="shopify-connect-form"');
+    expect(html).not.toContain("your-store.myshopify.com");
+    expect(text(html)).toContain("install ZS Business Connections from the Shopify App Store");
+  });
+
+  it("with the native tier on, a store that needs the owner is reopened in Shopify admin, not reconnected by address", () => {
+    const html = card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error" })], fill: (client) => client.setQueryData(keys.shopifyClaim, null) });
+    expect(text(html)).toContain("open ZS Business Connections in your Shopify admin");
+    expect(text(html)).not.toContain("Reconnect Halden Rowe");
   });
 
   it("describes a read-only connection and nothing else", () => {

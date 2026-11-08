@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createGoogleClient, createHttpConnectorPort, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, createStripePlansClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
+import { createGoogleClient, createHttpConnectorPort, createHttpShopifyPort, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, createStripePlansClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
@@ -120,6 +120,13 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
           secrets: { current: env.connections.internalSecret },
           clock,
         }),
+        shopify: createHttpShopifyPort({
+          workerUrl: env.connections.workerUrl,
+          env: env.connections.env,
+          secrets: { current: env.connections.internalSecret },
+          clock,
+        }),
+        ...(env.publicIntake === null ? {} : { clientIp: env.publicIntake.clientIp }),
         stateSecrets: env.connections.stateSecrets,
         returnUrl: env.connections.returnUrl,
         report: (event) => {

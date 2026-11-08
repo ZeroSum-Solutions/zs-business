@@ -568,6 +568,26 @@ checks the health of live connections.
 | `CRON_SECRET` | Bearer secret Vercel Cron sends, 32+ characters. Unset: the cron route is 404. |
 | `CONNECTIONS_CRON_SCHEDULE` | Build time, workers project: adds the Vercel cron, for example `*/5 * * * *`. Unset: no cron. |
 
+### Native Shopify tier on the worker (`/internal/shopify/<operation>`, `/webhooks/shopify`)
+
+docs/requirements/connections.md C-21 to C-24. The App Store app "ZS Business Connections" installs through
+Shopify's managed install, signs in the embedded page with App Bridge session tokens and reads orders with
+expiring offline tokens that only the worker holds, sealed with AES-256-GCM. All or none: with no `SHOPIFY_`
+variable set (below) the eight signed operations and the webhook endpoint answer 404; one set requires the
+required ones, and the `CONNECTIONS_` variables above. Errors name the variable, never the value.
+
+| Variable | Meaning |
+|---|---|
+| `SHOPIFY_CLIENT_ID` | The app's client ID (32 hex characters). Public: the dashboard shows it to App Bridge as `shopify-api-key`. |
+| `SHOPIFY_CLIENT_SECRET` | Worker only: signs the webhooks and the ID tokens, and authenticates the token exchange. |
+| `SHOPIFY_CLIENT_SECRET_PREVIOUS` | Optional, during a rotation; also accepted when verifying. |
+| `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_ID` | 32 random bytes in base64, and its short id (1 to 32 letters, digits, `-`, `_`). Seals the stored tokens. |
+| `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS_ID` | Optional pair, during a rotation: opens rows sealed with the old key. |
+| `SHOPIFY_API_VERSION` | Pinned Admin API version, default `2026-10` (a quarterly release). |
+| `SHOPIFY_PLAN_GRACE_DAYS` | Days of grace on a Shopify-billed plan (1 to 30, default 7). |
+| `ZS_TARGET_REF`, `SUPABASE_SERVICE_ROLE_KEY` | The Supabase project and its `service_role` key, for the hub the worker makes for a new merchant. |
+| `HUB_SIGN_IN_URL` | The dashboard's `/auth/confirm` URL (`https://<dashboard>/auth/confirm`). The worker builds the one-time sign-in link from it: `?token_hash=<generated>&type=magiclink&next=/`. |
+
 ### Connections on the API (`/v1/connections`, `/oauth/connections/callback`, three `/mcp` tools)
 
 docs/requirements/connections.md C-3 to C-5, C-10. The API project holds only the signing side. With none of
@@ -778,6 +798,7 @@ against the pinned Supabase Root 2021 CA.
    | `ENRICHMENT_WORKER`, `ENRICHMENT_DATABASE_URL`, `ENRICHMENT_WORKER_ID`, `ENRICHMENT_CLAIM_LIMIT`, `ENRICHMENT_MAX_ATTEMPTS`, `ENRICHMENT_PROVIDER_TIMEOUT_MS`, `ENRICHMENT_INTERVAL_MS`, `TREG_TOKEN`, `TREG_BASE_URL` | **no** | no (the Mac's enrichment worker) |
    | `IMAGE_WORKER`, `IMAGE_DATABASE_URL`, `IMAGE_SERVICE_DATABASE_URL`, `IMAGE_INTERVAL_MS` | **no** | no (the Mac's image worker) |
    | `CONNECTIONS_DATABASE_URL`, `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL` (with `COMPOSIO_API_KEY`, listed above) | **no** | yes |
+   | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_ID`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS_ID`, `SHOPIFY_API_VERSION`, `SHOPIFY_PLAN_GRACE_DAYS`, `SUPABASE_SERVICE_ROLE_KEY`, `HUB_SIGN_IN_URL` (the native Shopify tier) | **no** | yes |
    | `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`, `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (the signing secrets and environment; the same values in both projects) | yes (the API signs with them) | yes |
    | `CONNECTIONS_WORKER_URL`, `CONNECTIONS_STATE_SECRET`, `CONNECTIONS_STATE_PREVIOUS_SECRET`, `CONNECTIONS_RETURN_URL` (the API side only) | yes | no |
    | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |

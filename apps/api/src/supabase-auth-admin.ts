@@ -72,6 +72,13 @@ export interface SupabaseAuthAdmin extends AuthAdmin {
   /** A confirmed user with a password (no email is sent); returns its id. */
   createUser(input: { email: string; password: string; appMetadata?: Record<string, unknown> }): Promise<string>;
   deleteUser(userId: string): Promise<void>;
+  /**
+   * A one-time sign-in link for an existing user, nothing emailed (POST /auth/v1/admin/generate_link, type magiclink).
+   * Supabase's own `action_link` returns the session in a URL fragment, which the dashboard's server-side
+   * confirmation cannot read, so the link is built from the generated `hashed_token`: `confirmUrl` (the dashboard's
+   * `/auth/confirm`) with `token_hash`, `type=magiclink` and `next=/`. Null when none is made.
+   */
+  generateLink(input: { email: string; confirmUrl: string }): Promise<string | null>;
 }
 
 function tenantClaimOf(user: AdminUser, operation: string): string | null {
@@ -168,6 +175,29 @@ export function createSupabaseAuthAdmin(options: SupabaseAuthAdminOptions): Supa
       });
       if (reply.status !== 200 && reply.status !== 201) throw failure("create user", reply);
       return parseUser("create user", reply.body).id;
+    },
+
+    async generateLink(input) {
+      let target: URL;
+      try {
+        target = new URL(input.confirmUrl);
+      } catch {
+        return null;
+      }
+      if (target.protocol !== "https:") return null;
+      const reply = await request("generate link", `https://${options.projectRef}.supabase.co/auth/v1/admin/generate_link`, {
+        method: "POST",
+        body: { type: "magiclink", email: input.email },
+      });
+      if (reply.status !== 200) return null;
+      const hashed = (reply.body as { hashed_token?: unknown } | null)?.hashed_token;
+      if (typeof hashed !== "string" || hashed.length === 0 || hashed.length > 512) return null;
+      target.search = "";
+      target.hash = "";
+      target.searchParams.set("token_hash", hashed);
+      target.searchParams.set("type", "magiclink");
+      target.searchParams.set("next", "/");
+      return target.toString();
     },
 
     async deleteUser(userId) {

@@ -45,6 +45,7 @@ import {
 } from "@/lib/managed-connections";
 import { useKeys, useManagedConnections, usePendingManagedConnect } from "@/lib/queries";
 import { useCan } from "@/lib/session";
+import { ShopifyClaim, useNativeShopify } from "./shopify-claim";
 import { cn, relativeTime } from "@/lib/utils";
 
 const TOOLKIT = "shopify";
@@ -114,6 +115,7 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
   const hasLive = items.some((item) => item.status !== "disconnected");
   // A server without connections settings answers 404 for the list: Shopify is not offered at all.
   const notSetUp = connections.isError && isApiError(connections.error, "not_found");
+  const { native, pending: nativePending } = useNativeShopify(canManage);
 
   return (
     <Card aria-labelledby="shopify-title" data-testid="shopify-card" className="mb-6">
@@ -169,11 +171,13 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
           <>
             {items.length > 0 ? (
               <ul className="-mx-4 divide-y divide-border-soft border-y border-border-soft lg:-mx-6" aria-label="Shopify stores">
-                {items.map((connection) => <ShopRow key={connection.id} connection={connection} onAction={clearNotice} />)}
+                {items.map((connection) => <ShopRow key={connection.id} connection={connection} native={native} onAction={clearNotice} />)}
               </ul>
             ) : null}
             {/* One live connection per toolkit (C-7): a retired store left in view for its warning does not count. */}
-            {hasLive ? null : <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />}
+            {hasLive ? null : <ShopifyClaim />}
+            {/* C-18, S1 2.3.1: with the native tier on, no screen asks for a shop domain; the store is installed from the Shopify App Store. */}
+            {hasLive || nativePending ? null : native ? <AppStoreNote /> : <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />}
           </>
         )
       ) : (
@@ -369,7 +373,16 @@ function ConnectForm({ hasStores, onAction }: { hasStores: boolean; onAction: ()
   );
 }
 
-function ShopRow({ connection, onAction }: { connection: ManagedConnection; onAction: () => void }) {
+/** Where a store comes from once the native tier is on (C-18): the App Store, never a typed address. */
+function AppStoreNote() {
+  return (
+    <p className="mt-4 text-sm text-fg-2" data-testid="shopify-app-store-note">
+      To connect a store, install ZS Business Connections from the Shopify App Store. Open it in your Shopify admin, then link the store to this hub there or with the link code above.
+    </p>
+  );
+}
+
+function ShopRow({ connection, native, onAction }: { connection: ManagedConnection; native: boolean; onAction: () => void }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
@@ -442,7 +455,9 @@ function ShopRow({ connection, onAction }: { connection: ManagedConnection; onAc
       </div>
       {live ? (
         <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
-          {connection.status === "reauthorize" ? (
+          {connection.status === "reauthorize" && native ? (
+            <p className="max-w-xs text-xs text-meta" data-testid="shopify-reopen-note">To reconnect, open ZS Business Connections in your Shopify admin.</p>
+          ) : connection.status === "reauthorize" ? (
             <Button variant="primary" onClick={() => { reconnect.reset(); setDialog("reconnect"); }} disabled={leaving} aria-busy={leaving}>
               <ArrowsClockwise aria-hidden />Reconnect<span className="sr-only"> {name}</span>
             </Button>

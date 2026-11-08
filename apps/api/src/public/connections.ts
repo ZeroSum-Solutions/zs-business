@@ -11,7 +11,9 @@ import {
   type ConnectionStateSecrets,
   type ConnectorPort,
   type EdgeDependencies,
+  type ShopifyPort,
 } from "@zs/core";
+import type { ClientIpConfig } from "./client-ip.js";
 import type { AppEnv } from "../app.js";
 
 export interface ConnectionsApiConfig {
@@ -23,6 +25,10 @@ export interface ConnectionsApiConfig {
   readonly returnUrl: string;
   /** The shared limiter (C-4, C-5, C-12); defaults to the Postgres one on the app's database. */
   readonly limiter?: ConnectionLimiter;
+  /** The native Shopify tier's signed client (C-21 to C-24); absent: the embedded routes and claims are off (404). */
+  readonly shopify?: ShopifyPort;
+  /** Where the caller's address comes from for the embedded app's rate limits (P-10). */
+  readonly clientIp?: ClientIpConfig;
   /** Receives what each callback did, for logs (C-14): the attempt's tenant and connection ID, never a token or an account ID. */
   readonly report?: (event: { readonly route: "callback" | "status"; readonly outcome: string; readonly tenantId?: string; readonly connectionId?: string }) => void;
 }

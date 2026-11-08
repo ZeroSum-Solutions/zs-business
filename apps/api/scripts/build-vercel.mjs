@@ -5,7 +5,8 @@
 //          no crons, so worker-only secrets are never set on that project.
 //   worker (`pnpm build:vercel:worker`): /cron/delivery, /cron/billing, /cron/calendar,
 //          /cron/activepieces, /cron/followup and /cron/connections, plus the five signed
-//          /internal/connections/<operation> routes, each its own function. No API app: every other
+//          /internal/connections/<operation> routes, the eight /internal/shopify/<operation> routes and
+//          POST /webhooks/shopify, each its own function. No API app: every other
 //          path is a 404 (a request that matches no route).
 // The esbuild options are in bundle-options.mjs. Run from apps/api; the optional second argument
 // is the output directory. The default (.vercel/output) is cleaned before each build; an explicit
@@ -31,7 +32,13 @@ const cronEntries = [
 // The connections worker's signed operations (connections.md C-3): the same entry file as the cron, one
 // function per path, so each is its own anchored route and no function answers another's path.
 const connectionOperations = ["link", "complete", "cancel", "run", "disconnect"];
-const internalEntries = connectionOperations.map((operation) => ({ path: `/internal/connections/${operation}`, entry: "../src/vercel-connections.ts" }));
+// The native Shopify tier (C-21 to C-24): its eight signed operations and Shopify's webhook endpoint, same entry file.
+const shopifyOperations = ["open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm"];
+const internalEntries = [
+  ...connectionOperations.map((operation) => ({ path: `/internal/connections/${operation}`, entry: "../src/vercel-connections.ts" })),
+  ...shopifyOperations.map((operation) => ({ path: `/internal/shopify/${operation}`, entry: "../src/vercel-connections.ts" })),
+  { path: "/webhooks/shopify", entry: "../src/vercel-connections.ts" },
+];
 const target = process.argv[2];
 if (!targets.includes(target)) throw new Error(`Usage: node scripts/build-vercel.mjs <${targets.join("|")}> [empty-output-dir]`);
 // The API project carries no crons. A schedule variable left on it would silently drop a live cron
