@@ -19,7 +19,7 @@ beforeAll(async () => { h = await createApiHarness({ clock }); });
 afterAll(async () => h?.close());
 beforeEach(() => { stripe = fakeStripe(); portalCalls = []; });
 
-function plansApp(on = true, shopifyAppHandle?: string) {
+function plansApp(on = true, shopifyAppHandle?: string, portalConfiguration?: string) {
   const fetch = async (url: string, init: RequestInit) => {
     if (url.endsWith("/v1/billing_portal/sessions")) {
       portalCalls.push(String(init.body));
@@ -31,7 +31,7 @@ function plansApp(on = true, shopifyAppHandle?: string) {
   };
   return stripeApp(h, {
     clock, stripe: stripe.client(),
-    ...(on ? { stripePlans: createStripePlansClient({ stripe: STRIPE_CONFIG, plans: { prices: PRICES, returnUrl: RETURN_URL }, fetch }) } : {}),
+    ...(on ? { stripePlans: createStripePlansClient({ stripe: STRIPE_CONFIG, plans: { prices: PRICES, returnUrl: RETURN_URL, ...(portalConfiguration ? { portalConfiguration } : {}) }, fetch }) } : {}),
     ...(shopifyAppHandle ? { shopifyAppHandle } : {}),
   });
 }
@@ -78,6 +78,30 @@ describe("POST /v1/billing/portal (PL-6)", () => {
     expect(opened.status).toBe(200);
     expect(billingPortalResponseSchema.parse(opened.body).url).toMatch(/^https:\/\/billing\.stripe\.fake\.test\//);
     expect(new URLSearchParams(portalCalls[0]).get("customer")).toBe("cus_test_portal1");
+    expect(new URLSearchParams(portalCalls[0]).get("return_url")).toBe(RETURN_URL);
+    // No configuration is sent unless STRIPE_PORTAL_CONFIGURATION is set.
+    expect(new URLSearchParams(portalCalls[0]).has("configuration")).toBe(false);
+  });
+
+  const storeCustomer = () => h.fixture.service((tx) => tx.query(
+    "INSERT INTO tenant_plans (tenant_id, stripe_customer_id, created_at, updated_at) VALUES ($1,'cus_test_portal1',now(),now()) ON CONFLICT (tenant_id) DO UPDATE SET stripe_customer_id=EXCLUDED.stripe_customer_id",
+    [h.a.tenantId]));
+
+  it("is 404 when plans are off, even for a tenant with a customer", async () => {
+    await storeCustomer();
+    const off = await call(plansApp(false), "POST", "/v1/billing/portal", { token: h.a.token });
+    expect(off.status).toBe(404);
+    expect(portalCalls).toEqual([]);
+  });
+
+  it("forwards the configured Portal configuration ID to Stripe (STRIPE_PORTAL_CONFIGURATION)", async () => {
+    await storeCustomer();
+    const configured = await call(plansApp(true, undefined, "bpc_test_config1"), "POST", "/v1/billing/portal", { token: h.a.token });
+    expect(configured.status).toBe(200);
+    expect(new URLSearchParams(portalCalls[0]).get("configuration")).toBe("bpc_test_config1");
+    // The environment variable reaches the plan config the client is built from.
+    expect(parsePlanEnv({ STRIPE_PLAN_PRICES: JSON.stringify(PRICES), STRIPE_PLAN_RETURN_URL: RETURN_URL, STRIPE_PORTAL_CONFIGURATION: "bpc_test_config1" }))
+      .toMatchObject({ portalConfiguration: "bpc_test_config1" });
   });
 });
 
@@ -92,6 +116,15 @@ describe("plan environment (PL-13)", () => {
     expect(() => parsePlanEnv({ STRIPE_PLAN_PRICES: JSON.stringify(PRICES) })).toThrow(/STRIPE_PLAN_RETURN_URL/);
     expect(parsePlanEnv({ STRIPE_PLAN_PRICES: JSON.stringify(PRICES), STRIPE_PLAN_RETURN_URL: RETURN_URL, STRIPE_PLAN_TRIAL_DAYS: "0" }))
       .toMatchObject({ returnUrl: RETURN_URL, trialDays: 0 });
+    // PL-13: STRIPE_PLAN_TRIAL_DAYS is 0 to 30 and defaults to 14 (left out of the env, the client's schema supplies the default).
+    const base = { STRIPE_PLAN_PRICES: JSON.stringify(PRICES), STRIPE_PLAN_RETURN_URL: RETURN_URL };
+    expect(parsePlanEnv(base)?.trialDays).toBeUndefined();
+    const plansClient = (trialDays?: number) => createStripePlansClient({
+      stripe: STRIPE_CONFIG, plans: { prices: PRICES, returnUrl: RETURN_URL, ...(trialDays === undefined ? {} : { trialDays }) } });
+    expect(plansClient().config.trialDays).toBe(14);
+    expect(parsePlanEnv({ ...base, STRIPE_PLAN_TRIAL_DAYS: "30" })).toMatchObject({ trialDays: 30 });
+    for (const bad of ["31", "-1", "1.5", "x"]) expect(() => parsePlanEnv({ ...base, STRIPE_PLAN_TRIAL_DAYS: bad }), bad).toThrow(/STRIPE_PLAN_TRIAL_DAYS/);
+    expect(() => plansClient(31)).toThrow(/trialDays/);
     // Plan variables without the S-9 Stripe variables are a mistake, not a quiet "off".
     const server = { DATABASE_URL: "postgres://zs_runtime@127.0.0.1:55432/zs_dev", SESSION_CHECK: "local-stub", JWT_VERIFIER: "hs256",
       JWT_SECRET: ["test", "jwt", "s".repeat(32)].join("-") };

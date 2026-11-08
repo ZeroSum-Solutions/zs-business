@@ -99,6 +99,10 @@ export function parseBillingEnv(env: Readonly<Record<string, string | undefined>
   const parsed = onSchema.safeParse(env);
   if (!parsed.success) throw new Error(`Invalid environment: ${problems(parsed.error)}`);
   const data = parsed.data;
+  // plans.md PL-13: the read key is the same mode as STRIPE_LIVEMODE (checked only when that variable is set).
+  if (data.BILLING_STRIPE_KEY !== undefined && (env.STRIPE_LIVEMODE === "true" || env.STRIPE_LIVEMODE === "false")
+    && data.BILLING_STRIPE_KEY.startsWith("rk_live_") !== (env.STRIPE_LIVEMODE === "true"))
+    throw new Error("Invalid environment: STRIPE_LIVEMODE does not match the mode of BILLING_STRIPE_KEY");
   const shopify = parseShopify(env);
   let host: string;
   try {

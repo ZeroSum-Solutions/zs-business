@@ -204,6 +204,23 @@ describe("parseBillingEnv (S-8, S-9)", () => {
     for (const value of ["0", "31", "x"]) expect(billingError({ ...ON, BILLING_PLAN_GRACE_DAYS: value })).toMatch(/BILLING_PLAN_GRACE_DAYS/);
   });
 
+  it("refuses a read key whose mode differs from STRIPE_LIVEMODE, and checks nothing when it is unset (plans.md PL-13)", () => {
+    const test = ["rk", "test", "k".repeat(24)].join("_");
+    const live = ["rk", "live", "k".repeat(24)].join("_");
+    for (const [key, livemode] of [[test, "true"], [live, "false"]] as const) {
+      const message = billingError({ ...ON, BILLING_STRIPE_KEY: key, STRIPE_LIVEMODE: livemode });
+      expect(message).toMatch(/STRIPE_LIVEMODE does not match the mode of BILLING_STRIPE_KEY/);
+      expect(message).not.toContain(key);
+    }
+    for (const [key, livemode] of [[test, "false"], [live, "true"]] as const)
+      expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, STRIPE_LIVEMODE: livemode }).runner).toMatchObject({ stripeReader: { secretKey: key } });
+    // Unset or empty STRIPE_LIVEMODE (the workers project holds none) leaves the key unchecked; so does no key.
+    for (const livemode of [undefined, ""])
+      expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: live, ...(livemode === undefined ? {} : { STRIPE_LIVEMODE: livemode }) }).runner)
+        .toMatchObject({ stripeReader: { secretKey: live } });
+    expect(parseBillingEnv({ ...ON, STRIPE_LIVEMODE: "true" }).runner).toMatchObject({ stripeReader: null });
+  });
+
   it("lets the Node worker take a long budget, but the cron entry at most 20 s inside its 30 s function", () => {
     const long = parseBillingEnv({ ...ON, BILLING_RUN_BUDGET_MS: "60000" }).runner;
     expect(long).toMatchObject({ budgetMs: 60_000 });
