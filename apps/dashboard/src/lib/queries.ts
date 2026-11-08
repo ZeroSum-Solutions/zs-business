@@ -716,11 +716,16 @@ export function usePendingManagedConnect(canManage: boolean) {
   });
 }
 
-export function usePlan() {
+/** plans.md PL-7. `poll` reads it again every few seconds, while a finished Checkout's events land. */
+export function usePlan(options: { poll?: boolean } = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.plan, queryFn: () => api.getPlan() });
+  return useQuery({
+    enabled, queryKey: keys.plan, queryFn: ({ signal }) => api.getBillingPlan({ signal }),
+    ...(options.poll ? { refetchInterval: PLAN_POLL_MS } : {}),
+  });
 }
+export const PLAN_POLL_MS = 3_000;
 
 /** How often the edits are read again while the worker has one to finish. */
 export const IMAGE_POLL_MS = 2_000;

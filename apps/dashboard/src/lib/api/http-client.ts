@@ -1,5 +1,8 @@
 import { z } from "zod";
 import {
+  billingPlanSchema,
+  billingPortalResponseSchema,
+  startPlanCheckoutResponseSchema,
   agentKindStatusOutputSchema,
   agentKindStatusSchema,
   approvalOutputSchema,
@@ -109,6 +112,7 @@ import {
   type ApprovalsApi,
   type MediaApi,
   type SetupApi,
+  type BillingApi,
   type SitesApi,
   type TranscriptionApi,
   type WriteOptions,
@@ -178,7 +182,7 @@ const PAGE_LIMIT = 100;
  */
 export const MAX_PAGES = 20;
 
-export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
+export type HttpApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi & BillingApi;
 
 export function createHttpClient(config: HttpClientConfig): HttpApi {
   const doFetch = config.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
@@ -292,6 +296,19 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
   const BROWSER = "/v1/browser";
 
   return {
+    getBillingPlan(options = {}) {
+      return request({ method: "GET", path: "/v1/billing/plan", schema: billingPlanSchema, signal: options.signal });
+    },
+
+    startPlanCheckout(input, options) {
+      return write("/v1/billing/plan/checkout", input, startPlanCheckoutResponseSchema, options);
+    },
+
+    openBillingPortal() {
+      // Each call asks Stripe for a fresh, short-lived Portal session; nothing of ours changes.
+      return request({ method: "POST", path: "/v1/billing/portal", body: {}, keyless: "read_only", schema: billingPortalResponseSchema });
+    },
+
     async listResources(options = {}) {
       return (await request({ method: "GET", path: "/v1/booking/resources", schema: resourceListSchema, signal: options.signal })).items;
     },

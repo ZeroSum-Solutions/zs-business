@@ -3,6 +3,7 @@ import { createDemoMedia, type DemoMediaControls } from "./demo/media";
 import { createDemoSites, type DemoSiteControls } from "./demo/sites";
 import { createDemoDocumentIntake } from "./demo/document-intake";
 import { createDemoTranscripts } from "./demo/transcripts";
+import { createDemoBilling } from "./demo/billing";
 import { createDemoWorkspace } from "./demo/workspace";
 import { createHttpClient } from "./http-client";
 import type { ZsApi } from "./types";
@@ -38,14 +39,14 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
     const sites = createDemoSites({ latencyMs: 180 });
     const media = createDemoMedia({ latencyMs: 180 });
     return {
-      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoDocumentIntake({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }) },
+      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoDocumentIntake({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }), ...createDemoBilling({ latencyMs: 180 }) },
       mode: "demo",
       demo: { ...demo, ...sites.controls, ...media.controls },
     };
   }
   // No token here: the proxy adds it on the server.
   const http = createHttpClient({ baseUrl: API_PROXY_PATH });
-  // TODO(api): wallet and usage, the connections checklist and plan have no routes yet. Inbox and
+  // TODO(api): wallet and usage and the connections checklist have no routes yet. The plan (plans.md) is live. Inbox and
   // Home results (inbox-home.md), the follow-up agent (agents.md), the site, its images
   // (image-port.md IM-22), Google Calendar connections (google-calendar.md) and Shopify
   // connections (connections.md) are live.

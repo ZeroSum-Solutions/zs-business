@@ -6,7 +6,6 @@
 import type {
   ChecklistItem,
   Connection,
-  Plan,
   Usage,
   WorkspaceApi,
 } from "../workspace-types";
@@ -45,29 +44,9 @@ export function createDemoWorkspace(options: { clock?: DemoClock; latencyMs?: nu
     { id: "domain", name: "haldenrowe.example", purpose: "Your website address", status: "verifying", detail: "DNS change seen, finishing checks" },
   ];
 
-  let plan: Plan = {
-    name: "Studio",
-    currency: "USD",
-    pricePerMonth: 149,
-    renewsOn: ahead(30),
-    status: "active",
-    endsOn: null,
-    includes: ["Six areas, all features", "Two team seats", "Website and booking pages", "Agents with approval"],
-    caps: [
-      { label: "Agent replies", value: "2,000 a month, then from your wallet" },
-      { label: "Wallet", value: "Prepaid, so no surprise bills. A message the balance can't cover waits for a top-up, and fails if none comes in time." },
-    ],
-  };
-
   return {
     async getUsage() { await wait(); return structuredClone(usage); },
     async getChecklist() { await wait(); return structuredClone(checklist); },
     async listConnections() { await wait(); return structuredClone(connections); },
-    async getPlan() { await wait(); return structuredClone(plan); },
-    async cancelPlan() {
-      await wait();
-      plan = { ...plan, status: "cancelled", endsOn: plan.renewsOn };
-      return structuredClone(plan);
-    },
   };
 }

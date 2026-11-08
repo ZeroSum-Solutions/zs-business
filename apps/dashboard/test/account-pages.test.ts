@@ -4,22 +4,22 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { cancelTerms, cancelledNote, PLAN_BADGE, planDateLine, PlanView } from "../src/components/account/plan-view";
+import { billingNotice, PLAN_BADGE, planDateLine, PlanView } from "../src/components/account/plan-view";
 import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
-import type { BusinessProfile } from "@zs/contracts";
+import type { BillingPlan, BusinessProfile } from "@zs/contracts";
 import { ApiError, createApi } from "../src/lib/api";
 import { DEMO_BUSINESS, DEMO_TENANT_ID } from "../src/lib/api/demo/seed";
+import { createDemoBilling } from "../src/lib/api/demo/billing";
 import { createDemoWorkspace } from "../src/lib/api/demo/workspace";
 import { ApiProvider } from "../src/lib/api/react";
-import type { Plan } from "../src/lib/api/workspace-types";
 import { scopeKeys } from "../src/lib/queries";
 import { SessionProvider } from "../src/lib/session";
 
 const NEAR_MIDNIGHT_UTC = "2026-11-21T03:30:00.000Z";
-const plan = (change: Partial<Plan> = {}): Plan => ({
-  name: "Studio", currency: "USD", pricePerMonth: 149, renewsOn: NEAR_MIDNIGHT_UTC, status: "active", endsOn: null,
-  includes: ["Six areas"], caps: [], ...change,
+const base = await createDemoBilling().getBillingPlan();
+const plan = (change: Partial<BillingPlan> = {}): BillingPlan => ({
+  ...base, status: "active", trialEnd: null, currentPeriodEnd: NEAR_MIDNIGHT_UTC, ...change,
 });
 
 function render(node: ReactNode, mode: "demo" | "live", seed?: (client: QueryClient) => void, prepare?: (runtime: ReturnType<typeof createApi>) => void): string {
@@ -36,30 +36,36 @@ function render(node: ReactNode, mode: "demo" | "live", seed?: (client: QueryCli
 }
 
 describe("plan", () => {
-  it("dates the renewal and the end in the zone it is given, not New York", () => {
+  it("dates the renewal, the trial and the end in the zone it is given, not New York", () => {
     expect(planDateLine(plan(), "Pacific/Honolulu")).toBe("Renews Friday, November 20");
     expect(planDateLine(plan(), "Asia/Tokyo")).toBe("Renews Saturday, November 21");
-    expect(planDateLine(plan({ status: "cancelled", endsOn: NEAR_MIDNIGHT_UTC }), "Pacific/Honolulu")).toBe("Ends Friday, November 20");
+    expect(planDateLine(plan({ cancelAtPeriodEnd: true }), "Pacific/Honolulu")).toBe("Ends Friday, November 20. Nothing more is charged.");
+    expect(planDateLine(plan({ status: "trialing", trialEnd: NEAR_MIDNIGHT_UTC }), "Asia/Tokyo")).toBe("Trial ends Saturday, November 21. Your card is charged then.");
+    expect(planDateLine(plan({ status: "canceled" }), "UTC")).toBeNull();
   });
 
-  it("promises no wallet refund and no export the product does not offer", () => {
-    expect(cancelTerms(NEAR_MIDNIGHT_UTC, "Asia/Tokyo")).toBe("Your plan stays on until Saturday, November 21. After that, nothing more is charged.");
-    expect(cancelTerms(NEAR_MIDNIGHT_UTC, "UTC")).not.toMatch(/refund/i);
-    expect(cancelledNote(NEAR_MIDNIGHT_UTC, "Asia/Tokyo")).toBe("Your plan is cancelled. It stays on until Saturday, November 21, and nothing more will be charged.");
+  it("warns after a failed payment and says when the business is read-only (PL-8)", () => {
+    expect(billingNotice(plan(), "UTC")).toBeNull();
+    const failed = billingNotice(plan({ status: "past_due", paymentFailedAt: "2026-11-14T00:00:00.000Z", readOnlyAfter: NEAR_MIDNIGHT_UTC }), "Asia/Tokyo");
+    expect(failed).toEqual({ tone: "warn", text: expect.stringContaining("Update your card by Saturday, November 21") });
+    expect(billingNotice(plan({ status: "unpaid", readOnly: true }), "UTC")?.tone).toBe("danger");
+    expect(JSON.stringify(failed)).not.toMatch(/refund/i);
   });
 
-  it("calls a cancelled plan cancelled", async () => {
-    expect(PLAN_BADGE.cancelled.label).toBe("Cancelled");
-    const cancelled = await createDemoWorkspace().cancelPlan();
-    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, cancelled));
-    expect(html).toContain(">Cancelled<");
-    expect(html).not.toContain("Ends soon");
-    expect(html).toMatch(/role="status"[^>]*tabindex="-1"|tabindex="-1"[^>]*role="status"/);
+  it("shows the demo plan and keeps Stripe off in demo mode", () => {
+    expect(PLAN_BADGE.past_due.label).toBe("Payment failed");
+    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, base));
+    expect(html).toContain("Studio plan");
+    expect(html).toContain(">Trial<");
+    expect(html).toContain("Billing is not available here yet.");
+    const picker = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, { ...base, status: "none", plan: null, limits: null }));
+    expect(picker).toContain("Choose Solo");
+    expect(picker).toContain("Paying for a plan is not switched on here yet.");
   });
 
   it("describes the wallet and the providers as the contracts do", async () => {
     const workspace = createDemoWorkspace();
-    const text = JSON.stringify([await workspace.getPlan(), await workspace.listConnections(), await workspace.getChecklist(), await workspace.getUsage()]);
+    const text = JSON.stringify([await createDemoBilling().getBillingPlan(), await workspace.listConnections(), await workspace.getChecklist(), await workspace.getUsage()]);
     expect(text).not.toMatch(/deposit|payout|refund/i);
     // twilio.md: nothing in v1 sends texts; resend.md: email goes out through the email provider, not a mailbox.
     expect(text).not.toMatch(/text message|text number|\bsms\b|gmail/i);

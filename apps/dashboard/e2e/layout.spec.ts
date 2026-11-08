@@ -21,13 +21,12 @@ test.describe("sheets", () => {
   }
 });
 
-test("keeps Confirm cancel clear of the bottom tabs", async ({ page }) => {
+test("keeps Manage billing clear of the bottom tabs", async ({ page }) => {
   await page.goto("/");
   await openAccountItem(page, "Plan");
-  await page.getByRole("button", { name: "Cancel plan" }).click();
-  const confirm = page.getByRole("button", { name: "Confirm cancel" });
-  await expectUnobscured(confirm, "Confirm cancel");
-  await expect(confirm).toBeFocused();
+  const manage = page.getByRole("button", { name: "Manage billing" });
+  await manage.scrollIntoViewIfNeeded();
+  await expectUnobscured(manage, "Manage billing");
 });
 
 // One test per page, so a slow page cannot spend the others' time budget.
