@@ -190,7 +190,7 @@ role for workers (all workers share one pattern today; Known limits).
     runs inside the request deadline (1.5 s); a refused allowance or a failed allowance check keeps the
     charge and is reported (`connect_refund`: `capped` or `failed`). A refund call that throws or
     is cut off is reported `commit_unknown`: it may still have committed, so the charge may or
-    may not have come back. Every Composio link failure except a 429 (which raises the `cooldown` report) raises a
+    may not have come back. Every Composio link failure except a 402 or 429 (which raise the `cooldown` report) raises a
     `link_refused` worker
     report (class and request id only) so an operator sees a run of them; no report claims or
     removes an account. `beforeProvider` is not in the wire body (the strict contract is
