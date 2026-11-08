@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label, Select } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
-import { DisabledReason } from "@/components/ui/disabled-reason";
+import { DisabledReason } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";

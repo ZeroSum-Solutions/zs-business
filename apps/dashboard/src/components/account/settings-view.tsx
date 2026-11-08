@@ -6,9 +6,10 @@ import { ACTIVE_CURRENCIES, currencyLabel, type BusinessProfile, type UpdateBusi
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
-import { DisabledReason } from "@/components/ui/disabled-reason";
+import { DisabledReason } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Segmented } from "@/components/ui/segmented";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/toast";
 import { isApiError, isSettingsChanged } from "@/lib/api";
 import { useApi, useApiRuntime } from "@/lib/api/react";
@@ -35,6 +36,13 @@ const THEME_OPTIONS = [
   { value: "dark", label: "Dark" },
   { value: "system", label: "Match device" },
 ] as const satisfies readonly { value: Theme; label: string }[];
+
+// Nothing sends these yet, so they stay off and say so.
+const NOTIFY = [
+  { id: "booking", label: "New booking", hint: "When someone books." },
+  { id: "approval", label: "Agent needs approval", hint: "When a draft is waiting." },
+  { id: "digest", label: "Monday results", hint: "Last week's numbers." },
+];
 
 export const STALE_BUSINESS_MESSAGE = "Someone else saved the business details while you were editing. The latest details are loaded below. Check them and save again.";
 export const BUSINESS_OWNER_ONLY = "Only an owner can change business details.";
@@ -79,7 +87,7 @@ export function SettingsView() {
   const theme = useTheme();
   return (
     <>
-      <PageHeader title="Settings" description="Business details and how the hub looks." />
+      <PageHeader title="Settings" description="Business details and how we reach you." />
       <div className="tray grid max-w-3xl gap-1.5 lg:gap-2">
         <Card aria-labelledby="appearance-title">
           <CardHeader>
@@ -90,8 +98,26 @@ export function SettingsView() {
           </CardHeader>
           <Segmented label="Theme" value={theme} options={THEME_OPTIONS} onChange={setTheme} />
         </Card>
-        {/* No notification settings: nothing sends them, so the card is left out until an API does. */}
         <BusinessCard />
+        <Card aria-labelledby="notify-title">
+          <CardHeader>
+            <div>
+              <CardTitle id="notify-title">Notifications</CardTitle>
+              <p id="notify-unavailable" className="text-sm text-muted">Coming soon. Nothing sends these yet.</p>
+            </div>
+          </CardHeader>
+          <ul className="divide-y divide-border-soft">
+            {NOTIFY.map((item) => (
+              <li key={item.id} className="flex items-center gap-4 py-2">
+                <div className="flex-1">
+                  <p id={`n-${item.id}`} className="text-sm font-medium text-fg">{item.label}</p>
+                  <p className="text-sm text-muted">{item.hint}</p>
+                </div>
+                <Switch aria-labelledby={`n-${item.id}`} disabled aria-describedby="notify-unavailable" checked={false} />
+              </li>
+            ))}
+          </ul>
+        </Card>
       </div>
     </>
   );

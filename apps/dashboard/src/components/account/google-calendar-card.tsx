@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
-import { DisabledReason } from "@/components/ui/disabled-reason";
+import { DisabledReason } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import type { CalendarConnection, PendingGoogleConnect, ResourceSummary } from "@/lib/api";

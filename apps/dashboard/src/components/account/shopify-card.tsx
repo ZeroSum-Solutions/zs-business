@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogClose, DialogContent } from "@/components/ui/dialog";
 import { Input, Label } from "@/components/ui/input";
-import { DisabledReason } from "@/components/ui/disabled-reason";
+import { DisabledReason } from "@/components/ui/sample";
 import { ErrorNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import { isApiError, type ManagedConnection, type PendingManagedConnection } from "@/lib/api";

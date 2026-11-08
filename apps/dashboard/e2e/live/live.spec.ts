@@ -421,16 +421,17 @@ test("retries a booking whose answer was lost with the same key, and the API rep
   expect(keys[1]).toBe(keys[0]);
 });
 
-test("shows no sample data anywhere and turns off writes that would not reach the API", async ({ page }) => {
+test("labels sample areas and turns off writes that would not reach the API", async ({ page }, info) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
-  // The wallet (GET /v1/wallet) and the connections (calendar and Shopify routes) are live; nothing says sample.
-  await expect(page.getByRole("region", { name: "Wallet" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Connections" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Wallet and usage" })).toHaveCount(0);
-  await expect(page.getByTestId("sample-badge")).toHaveCount(0);
-  await expect(page.getByText(/sample data/i)).toHaveCount(0);
-  await expect(page.getByTestId("demo-note")).toHaveCount(0);
+  // Usage and the connections checklist still read the sample workspace; results are live.
+  for (const card of ["Wallet and usage", "Connections"]) {
+    await expect(page.getByRole("region", { name: card }).getByTestId("sample-badge")).toBeVisible();
+  }
+  for (const card of ["Next appointments", "Revenue this week"]) {
+    await expect(page.getByRole("region", { name: card }).getByTestId("sample-badge")).toHaveCount(0);
+  }
+  if (info.project.name === "desktop") await expect(page.getByTestId("sample-note")).toHaveText("Some areas show sample data until their API ships.");
 
   // Bookings, customers, the Inbox, Agents and the site are live: no sample marker.
   for (const path of ["/calendar", "/customers", "/inbox", "/agents", "/site"]) {
@@ -448,8 +449,6 @@ test("shows no sample data anywhere and turns off writes that would not reach th
   // Settings holds the live business profile (business-profile.md), and the plan is live (plans.md PL-7).
   await page.goto("/account/settings");
   await expect(header("Settings").getByTestId("sample-badge")).toHaveCount(0);
-  // No notification settings: nothing sends them.
-  await expect(page.getByText("Coming soon")).toHaveCount(0);
   await page.goto("/account/plan");
   await expect(header("Plan").getByTestId("sample-badge")).toHaveCount(0);
   // A comped tenant sees the picker; one on a plan sees Manage billing.

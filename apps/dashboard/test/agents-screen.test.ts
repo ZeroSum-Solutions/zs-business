@@ -9,7 +9,7 @@ import { AgentsView } from "../src/components/agents/agents-view";
 import { ConnectionsView } from "../src/components/account/connections-view";
 import { ToastProvider } from "../src/components/ui/toast";
 import { agentState, blockedSentence, quietHoursLabel, STOP_REASONS, zoneName } from "../src/lib/agents";
-import { createApi, type CalendarConnection, type ResourceSummary } from "../src/lib/api";
+import { createApi, type CalendarConnection, type Connection, type ResourceSummary } from "../src/lib/api";
 import { DEMO_TENANT_ID } from "../src/lib/api/demo/seed";
 import { ApiProvider } from "../src/lib/api/react";
 import { scopeKeys } from "../src/lib/queries";
@@ -141,16 +141,17 @@ describe("connections screen", () => {
     client.setQueryData(keys.resources, [SHOWROOM, REPAIR]);
     client.setQueryData<CalendarConnection[]>(keys.calendarConnections, []);
     client.setQueryData(keys.calendarPending, null);
+    client.setQueryData<Connection[]>(keys.connections, [
+      { id: "instagram", name: "Instagram", status: "needs_reconnect", purpose: "Brings messages into your inbox", detail: "Access expired" },
+    ]);
   });
 
   it("U3-7: promises only what works on this page", () => {
     const html = textOf(renderConnections());
     expect(html).not.toContain("Fix anything marked here");
-    expect(html).toContain("Connect Google Calendar and Shopify here.");
-    // No read-only rows for accounts the hub does not serve.
-    expect(html).not.toContain("The other accounts can't be changed here yet.");
-    expect(html).not.toContain("You can't change this here yet.");
-    expect(html).not.toContain("Instagram");
+    expect(html).toContain("Connect Google Calendar and Shopify here. The other accounts can't be changed here yet.");
+    expect(html).toContain("Reconnect");
+    expect(html).toContain("You can't change this here yet.");
     expect(html).not.toContain("go live");
   });
 });

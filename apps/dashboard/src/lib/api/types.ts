@@ -1,7 +1,6 @@
 import type { Connection, ConnectionStatus, PendingConnection } from "@zs/contracts";
 import type {
   BillingPlan,
-  WalletSummary,
   BillingPortalResponse,
   StartPlanCheckoutRequest,
   StartPlanCheckoutResponse,
@@ -81,10 +80,10 @@ import type {
   BookingPagePublished,
   SetupRead,
 } from "@zs/contracts";
+import type { WorkspaceApi } from "./workspace-types";
 
 export type {
   AgentKindStatus,
-  WalletSummary,
   ApprovalRecord,
   ApproveApprovalResponse,
   BusinessProfile,
@@ -727,21 +726,16 @@ export interface SetupApi {
   setBookingPagePublished(pageId: string, published: boolean, options: WriteOptions): Promise<BookingPagePublished>;
 }
 
-/**
- * Hub plans (plans.md PL-4..PL-7): the plan, a Stripe Checkout for one, and the Billing Portal; and the
- * prepaid wallet (delivery.md D-4). Owners only (`billing`).
- */
+/** Hub plans (plans.md PL-4..PL-7): the plan, a Stripe Checkout for one, and the Billing Portal. */
 export interface BillingApi {
   getBillingPlan(options?: ReadOptions): Promise<BillingPlan>;
-  /** The wallet in integer minor units (`GET /v1/wallet`); a business that never had a credit has an empty one. */
-  getWallet(options?: ReadOptions): Promise<WalletSummary>;
   /** Throws a conflict with reason `checkout_open`, `plan_exists` or `billing_provider`; not_found while plans are off. */
   startPlanCheckout(input: StartPlanCheckoutRequest, options: WriteOptions): Promise<StartPlanCheckoutResponse>;
   /** Throws a conflict with reason `no_customer` before the first Checkout. */
   openBillingPortal(): Promise<BillingPortalResponse>;
 }
 
-export type ZsApi = BillingApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
+export type ZsApi = BillingApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & SitesApi & CalendarSyncApi & ManagedConnectionsApi & WorkspaceApi & TranscriptionApi & DocumentIntakeApi & MediaApi & ApprovalsApi & SetupApi;
 
 
 /** Strip the formatting people type into phone fields; the API wants E.164. */

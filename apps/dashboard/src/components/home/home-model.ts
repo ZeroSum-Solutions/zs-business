@@ -1,6 +1,6 @@
 import type { BookingListQuery, BookingView, ListResult } from "@/lib/api";
 import { addDays, formatDateKey, formatDay, formatTime, startOfZonedDay, zonedDateKey } from "@/lib/time";
-import { currencyDigits, formatMoney, formatNumber } from "@/lib/utils";
+import { formatMoney, formatNumber } from "@/lib/utils";
 
 /** Home's pure parts: what the screen decides, apart from how it draws it. */
 
@@ -184,11 +184,6 @@ export function appointmentsPhrase(day: StripDay): string {
  * The wallet's caption (delivery.md D-5): a send waits whenever the balance cannot cover its
  * price, not only at zero, and after the attempt cap it fails instead of overdrawing.
  */
-export const WALLET_CAPTION = "Prepaid, so no surprise bills: a message the balance can't cover waits for a top-up, and fails if none comes in time.";
-
-/** A wallet amount (integer minor units, delivery.md D-4) with its cents: "$38.68". */
-export function walletAmount(amountMinor: number, currency: string): string {
-  const code = currency.toUpperCase();
-  const digits = currencyDigits(code);
-  return formatMoney(amountMinor / 10 ** digits, code, digits);
+export function walletCaption(topUp: number, currency: string): string {
+  return `Of your ${formatMoney(topUp, currency)} top-up. Prepaid, so no surprise bills: a message the balance can't cover waits for a top-up, and fails if none comes in time.`;
 }

@@ -4,12 +4,14 @@ import { createDemoSites, type DemoSiteControls } from "./demo/sites";
 import { createDemoDocumentIntake } from "./demo/document-intake";
 import { createDemoTranscripts } from "./demo/transcripts";
 import { createDemoBilling } from "./demo/billing";
+import { createDemoWorkspace } from "./demo/workspace";
 import { createHttpClient } from "./http-client";
 import type { ZsApi } from "./types";
 
 export * from "./errors";
 export type * from "./types";
 export { bookingCustomerName, byContactName, CONTACT_IDS_PER_CALL, CONTACT_PAGE_SIZE, matchesSearch, normalizePhone, RUN_PAGE_SIZE, THREAD_PAGE_SIZE } from "./types";
+export type * from "./workspace-types";
 
 /** Where the browser sends API calls in live mode: the same-origin proxy in app/api. */
 export const API_PROXY_PATH = "/api";
@@ -37,13 +39,16 @@ export function createApi(config: ApiRuntimeConfig = readEnvConfig()): ApiRuntim
     const sites = createDemoSites({ latencyMs: 180 });
     const media = createDemoMedia({ latencyMs: 180 });
     return {
-      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoDocumentIntake({ latencyMs: 180 }), ...createDemoBilling({ latencyMs: 180 }) },
+      api: { ...demo, ...sites.api, ...media.api, ...createDemoTranscripts({ latencyMs: 180 }), ...createDemoDocumentIntake({ latencyMs: 180 }), ...createDemoWorkspace({ latencyMs: 180 }), ...createDemoBilling({ latencyMs: 180 }) },
       mode: "demo",
       demo: { ...demo, ...sites.controls, ...media.controls },
     };
   }
   // No token here: the proxy adds it on the server.
   const http = createHttpClient({ baseUrl: API_PROXY_PATH });
-  // Live mode reads only the API: no area falls back to the demo workspace.
-  return { api: http, mode: "live", demo: null };
+  // TODO(api): wallet and usage and the connections checklist have no routes yet. The plan (plans.md) is live. Inbox and
+  // Home results (inbox-home.md), the follow-up agent (agents.md), the site, its images
+  // (image-port.md IM-22), Google Calendar connections (google-calendar.md) and Shopify
+  // connections (connections.md) are live.
+  return { api: { ...createDemoWorkspace(), ...http }, mode: "live", demo: null };
 }

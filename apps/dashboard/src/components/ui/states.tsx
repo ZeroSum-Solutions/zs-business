@@ -61,3 +61,5 @@ export function EmptyState({ title, children, action }: { title: string; childre
     </div>
   );
 }
+
+/** `sample` marks a page whose content is the built-in sample workspace in live mode. */

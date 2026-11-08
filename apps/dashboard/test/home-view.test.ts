@@ -1,6 +1,6 @@
 // Home's words and states from the UI audit (U3-8) and its visual review (UV-1, UV-22, UV-23, UV-25).
 import { describe, expect, it } from "vitest";
-import { formatWeekChange, needsState, nextTitle, readStatus, resourceTone, WALLET_CAPTION, walletAmount } from "../src/components/home/home-model";
+import { formatWeekChange, needsState, nextTitle, readStatus, resourceTone, walletCaption } from "../src/components/home/home-model";
 
 const NEW_YORK = "America/New_York";
 // Thursday Oct 22, 9:00 AM in New York.
@@ -44,14 +44,9 @@ describe("calendar chips", () => {
 describe("the wallet caption", () => {
   // delivery.md D-5: a send waits whenever the balance cannot cover its price, not only at zero,
   // and gives up after the attempt cap.
-  it("says what happens when the balance runs short, and names no top-up amount the API does not give", () => {
-    expect(WALLET_CAPTION).toBe("Prepaid, so no surprise bills: a message the balance can't cover waits for a top-up, and fails if none comes in time.");
-    expect(WALLET_CAPTION).not.toMatch(/\$|€|\d/);
-  });
-
-  it("shows the wallet's minor units in its own currency, with cents", () => {
-    expect(walletAmount(3868, "usd")).toBe("$38.68");
-    expect(walletAmount(0, "usd")).toBe("$0.00");
-    expect(walletAmount(500, "eur")).toBe("€5.00");
+  it("says what happens when the balance runs short, in the wallet's currency", () => {
+    const caption = walletCaption(20, "EUR");
+    expect(caption).toBe("Of your €20 top-up. Prepaid, so no surprise bills: a message the balance can't cover waits for a top-up, and fails if none comes in time.");
+    expect(caption).not.toContain("$0");
   });
 });

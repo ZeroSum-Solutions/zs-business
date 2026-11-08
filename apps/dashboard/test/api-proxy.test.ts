@@ -160,8 +160,8 @@ describe("api proxy", () => {
       ["v1", "sites"], ["v1", "sites", "s-1", "releases"], ["v1", "transcriptions"], ["v1", "transcriptions", "j-1"], ["v1", "document-intake", "jobs"], ["v1", "document-intake", "jobs", "j-1"], ["v1", "calendar", "connections"], ["v1", "business"],
       // enrichment.md E-17: a customer's company details and the proposals waiting for an owner.
       ["v1", "contacts", "c-1", "enrichment"], ["v1", "enrichment", "proposals"], ["v1", "enrichment", "requests", "r-1"],
-      // plans.md PL-7: the plan. delivery.md D-4: the wallet.
-      ["v1", "billing", "plan"], ["v1", "wallet"],
+      // plans.md PL-7: the plan.
+      ["v1", "billing", "plan"],
     ])
       expect((await proxyApiRequest(get(path.join("/")), path, harness.setup)).status, path.join("/")).toBe(200);
     const approve = await proxyApiRequest(post("v1/approvals/a-1/approve", {}, { "Idempotency-Key": "k-a", Origin: ORIGIN }), ["v1", "approvals", "a-1", "approve"], harness.setup);
@@ -173,13 +173,6 @@ describe("api proxy", () => {
       const response = await proxyApiRequest(path[2] === "portal" ? post(path.join("/"), {}, { Origin: ORIGIN }) : get(path.join("/")), path, harness.setup);
       expect(response.status, path.join("/")).toBe(path[2] === "invoices" ? 404 : 200);
       expect(harness.apiCalls.length - before, path.join("/")).toBe(path[2] === "invoices" ? 0 : 1);
-    }
-    // delivery.md D-4: only the wallet read passes; top-ups and writes to the wallet do not.
-    for (const [method, path] of [["GET", ["v1", "wallet", "top-ups"]], ["POST", ["v1", "wallet", "top-ups"]], ["POST", ["v1", "wallet"]]] as const) {
-      const before = harness.apiCalls.length;
-      const request = method === "GET" ? get(path.join("/")) : post(path.join("/"), {}, { "Idempotency-Key": "k-wallet", Origin: ORIGIN });
-      expect((await proxyApiRequest(request, path, harness.setup)).status, `${method} ${path.join("/")}`).toBe(404);
-      expect(harness.apiCalls.length - before, `${method} ${path.join("/")}`).toBe(0);
     }
     for (const path of [["v1", "billing", "plan", "checkout"], ["v1", "approvals"], ["v1", "sources"], ["v1", "enrichment", "requests"], ["v1", "contacts", "c-1", "enrichment", "block"]]) {
       const response = await proxyApiRequest(post(path.join("/"), {}, { "Idempotency-Key": `k-${path[1]}`, Origin: ORIGIN }), path, harness.setup);

@@ -7,7 +7,7 @@ import { CURRENCIES, currencyLabel, isActiveCurrencyCode } from "@zs/contracts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input, Label, Select } from "@/components/ui/input";
-import { DisabledReason } from "@/components/ui/disabled-reason";
+import { DisabledReason } from "@/components/ui/sample";
 import { ErrorNote } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
 import type { DealDetailsChange, DealValue, NewDeal, ZsApi } from "@/lib/api";

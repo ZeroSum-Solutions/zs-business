@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
-import { DisabledReason } from "@/components/ui/disabled-reason";
+import { DisabledReason } from "@/components/ui/sample";
 import { EmptyState, ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { Switch } from "@/components/ui/switch";
 import { TemplatedKinds } from "./template-cards";
