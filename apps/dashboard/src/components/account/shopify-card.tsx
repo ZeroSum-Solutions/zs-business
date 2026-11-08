@@ -32,6 +32,11 @@ import {
   STAFF_ERROR,
   STILL_WAITING_MESSAGE,
   DisconnectPendingError,
+  RECONNECT_NATIVE_CONFIRM,
+  RECONNECT_NATIVE_NEXT,
+  RECONNECT_NATIVE_WHAT,
+  disconnectForNativeInstall,
+  reconnectPath,
   cancelNotice,
   confirmErrorNotice,
   connectErrorMessage,
@@ -45,7 +50,7 @@ import {
 } from "@/lib/managed-connections";
 import { useKeys, useManagedConnections, usePendingManagedConnect } from "@/lib/queries";
 import { useCan } from "@/lib/session";
-import { ShopifyClaim, useNativeShopify } from "./shopify-claim";
+import { ShopifyClaim, useNativeShopify, type NativeShopify } from "./shopify-claim";
 import { cn, relativeTime } from "@/lib/utils";
 
 const TOOLKIT = "shopify";
@@ -117,6 +122,8 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
   const notSetUp = connections.isError && isApiError(connections.error, "not_found");
   const { state: nativeState, retry: retryNative } = useNativeShopify(canManage);
   const native = nativeState === "native";
+  // C-18: set once a legacy row is disconnected for the native install; the claim card then makes the link code by itself.
+  const [relink, setRelink] = useState(false);
 
   return (
     <Card aria-labelledby="shopify-title" data-testid="shopify-card" className="mb-6">
@@ -172,11 +179,11 @@ export function ShopifyCard({ notice, onNotice, waiting, onSettled }: {
           <>
             {items.length > 0 ? (
               <ul className="-mx-4 divide-y divide-border-soft border-y border-border-soft lg:-mx-6" aria-label="Shopify stores">
-                {items.map((connection) => <ShopRow key={connection.id} connection={connection} native={native} onAction={clearNotice} />)}
+                {items.map((connection) => <ShopRow key={connection.id} connection={connection} nativeState={nativeState} onAction={clearNotice} onRelink={setRelink} />)}
               </ul>
             ) : null}
             {/* One live connection per toolkit (C-7): a retired store left in view for its warning does not count. */}
-            {hasLive ? null : <ShopifyClaim />}
+            {hasLive ? null : <ShopifyClaim autoStart={relink} onAutoStarted={() => setRelink(false)} />}
             {/* C-18, S1 2.3.1: with the native tier on, no screen asks for a shop domain; the store is installed from the Shopify App Store. */}
             {hasLive || nativeState === "pending" ? null : native ? <AppStoreNote /> : nativeState === "unknown" ? <NativeUnknownNote retry={retryNative} /> : <ConnectForm hasStores={items.length > 0} onAction={clearNotice} />}
           </>
@@ -393,7 +400,7 @@ function NativeUnknownNote({ retry }: { retry: () => void }) {
   );
 }
 
-function ShopRow({ connection, native, onAction }: { connection: ManagedConnection; native: boolean; onAction: () => void }) {
+function ShopRow({ connection, nativeState, onAction, onRelink }: { connection: ManagedConnection; nativeState: NativeShopify; onAction: () => void; onRelink: (active: boolean) => void }) {
   const api = useApi();
   const queryClient = useQueryClient();
   const { keys } = useKeys();
@@ -448,7 +455,27 @@ function ShopRow({ connection, native, onAction }: { connection: ManagedConnecti
     },
   });
 
-  const busy = disconnect.isPending || reconnect.isPending;
+  // C-18: a legacy Composio row under the native tier cannot be re-linked (the worker refuses it): Reconnect disconnects it and
+  // starts the native install's link code instead.
+  const path = reconnectPath(connection, nativeState);
+  const nativeInstall = useMutation({
+    mutationFn: async () => {
+      // The claim card makes the code by itself once the old link is gone; set before the disconnect so a manual start cannot overlap it.
+      onRelink(true);
+      await disconnectForNativeInstall(api, connection, intentKeys.keyFor(payload));
+    },
+    onError: (error) => {
+      onRelink(false);
+      if (error instanceof DisconnectPendingError) toast(error.message, "info");
+    },
+    onSettled: async (_result, error) => {
+      intentKeys.settle(payload, error);
+      await refresh();
+    },
+    onSuccess: () => setDialog(null),
+  });
+
+  const busy = disconnect.isPending || reconnect.isPending || nativeInstall.isPending;
 
   return (
     <li aria-labelledby={`${rowId}-name`} data-testid="shopify-row" className="flex flex-wrap items-start gap-3 px-4 py-4 sm:flex-nowrap lg:px-6">
@@ -466,10 +493,10 @@ function ShopRow({ connection, native, onAction }: { connection: ManagedConnecti
       </div>
       {live ? (
         <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:flex-nowrap sm:justify-end">
-          {connection.status === "reauthorize" && native ? (
+          {connection.status === "reauthorize" && path === "none" ? null : connection.status === "reauthorize" && path === "reopen" ? (
             <p className="max-w-xs text-xs text-meta" data-testid="shopify-reopen-note">To reconnect, open ZS Business Connections in your Shopify admin.</p>
           ) : connection.status === "reauthorize" ? (
-            <Button variant="primary" onClick={() => { reconnect.reset(); setDialog("reconnect"); }} disabled={leaving} aria-busy={leaving}>
+            <Button variant="primary" onClick={() => { reconnect.reset(); nativeInstall.reset(); setDialog("reconnect"); }} disabled={leaving} aria-busy={leaving}>
               <ArrowsClockwise aria-hidden />Reconnect<span className="sr-only"> {name}</span>
             </Button>
           ) : null}
@@ -505,19 +532,31 @@ function ShopRow({ connection, native, onAction }: { connection: ManagedConnecti
           </DialogContent>
         ) : null}
       </Dialog>
-      <Dialog open={connection.status === "reauthorize" && dialog === "reconnect"} onOpenChange={(open) => { if (!busy) setDialog(open ? "reconnect" : null); }}>
-        {connection.status === "reauthorize" && dialog === "reconnect" ? (
+      <Dialog open={connection.status === "reauthorize" && (path === "composio" || path === "native_install") && dialog === "reconnect"} onOpenChange={(open) => { if (!busy) setDialog(open ? "reconnect" : null); }}>
+        {connection.status === "reauthorize" && (path === "composio" || path === "native_install") && dialog === "reconnect" ? (
           <DialogContent title={RECONNECT_TITLE} description={`${name} (${connection.accountDomain})`}>
             <ul className="mb-4 list-disc space-y-1 pl-5 text-sm text-fg-2" data-testid="shopify-reconnect-copy">
-              <li>{RECONNECT_WHAT}</li>
-              <li>{DISCONNECT_WHAT}</li>
-              <li>You confirm the store again when you come back.</li>
+              {path === "native_install" ? (
+                <>
+                  <li>{RECONNECT_NATIVE_WHAT}</li>
+                  <li>{DISCONNECT_WHAT}</li>
+                  <li>{RECONNECT_NATIVE_NEXT}</li>
+                  <li>{RECONNECT_NATIVE_CONFIRM}</li>
+                </>
+              ) : (
+                <>
+                  <li>{RECONNECT_WHAT}</li>
+                  <li>{DISCONNECT_WHAT}</li>
+                  <li>You confirm the store again when you come back.</li>
+                </>
+              )}
             </ul>
-            {reconnect.isError ? <div className="mb-4"><p role="alert" className="text-sm text-danger" data-testid="shopify-reconnect-error">{connectErrorMessage(reconnect.error)}</p></div> : null}
+            {path === "native_install" && nativeInstall.isError ? <div className="mb-4"><p role="alert" className="text-sm text-danger" data-testid="shopify-reconnect-error">{connectErrorMessage(nativeInstall.error)}</p></div> : null}
+            {path !== "native_install" && reconnect.isError ? <div className="mb-4"><p role="alert" className="text-sm text-danger" data-testid="shopify-reconnect-error">{connectErrorMessage(reconnect.error)}</p></div> : null}
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <DialogClose asChild><Button variant="ghost" disabled={reconnect.isPending}>Not now</Button></DialogClose>
-              <Button onClick={() => { onAction(); reconnect.mutate(); }} disabled={reconnect.isPending} aria-busy={reconnect.isPending}>
-                <ArrowsClockwise aria-hidden />{reconnect.isPending ? "Reconnecting…" : "Reconnect"}
+              <DialogClose asChild><Button variant="ghost" disabled={busy}>Not now</Button></DialogClose>
+              <Button onClick={() => { onAction(); if (path === "native_install") nativeInstall.mutate(); else if (path === "composio") reconnect.mutate(); }} disabled={busy} aria-busy={busy}>
+                <ArrowsClockwise aria-hidden />{busy ? "Reconnecting…" : "Reconnect"}
               </Button>
             </div>
           </DialogContent>

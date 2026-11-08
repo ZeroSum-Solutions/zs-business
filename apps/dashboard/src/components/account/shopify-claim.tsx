@@ -2,7 +2,7 @@
 
 import { CheckCircle, Clock, LinkSimple, WarningCircle } from "@phosphor-icons/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useApiRuntime } from "@/lib/api/react";
 import { useToast } from "@/components/ui/toast";
@@ -27,7 +27,7 @@ export const CLAIM_POLL_MS = 5_000;
  * once, right after it is made; a reload shows the claim's state but not the code. Nothing links until the owner
  * confirms the store the merchant entered it from. Live app only, and absent when the server has no native tier.
  */
-export function ShopifyClaim() {
+export function ShopifyClaim({ autoStart = false, onAutoStarted }: { autoStart?: boolean; onAutoStarted?: () => void } = {}) {
   const live = useApiRuntime().mode === "live";
   const api = useClaimState(live);
   const [shown, setShown] = useState<{ claimId: string; code: string } | null>(null);
@@ -69,6 +69,15 @@ export function ShopifyClaim() {
     onSuccess: () => { setShown(null); setMessage(null); },
     onError: () => setMessage({ tone: "error", text: "We could not cancel the link. Try again in a minute." }),
     onSettled: () => api.refetch(),
+  });
+
+  // C-18: an owner who chose Reconnect on a legacy row has already asked for a code: make it once the old link is gone.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!autoStart || !live || api.unavailable || api.isPending || autoStarted.current) return;
+    autoStarted.current = true;
+    if (api.data === null || api.data === undefined) start.mutate();
+    onAutoStarted?.();
   });
 
   if (!live || api.unavailable || api.isPending) return null;

@@ -255,3 +255,32 @@ export function reauthorizeMessage(reason: ManagedConnection["reauthorizeReason"
 
 export const RECONNECT_TITLE = "Reconnect Shopify?";
 export const RECONNECT_WHAT = "Reconnect disconnects the current link first, then sends you to Shopify to approve the app again.";
+/** C-18: a legacy (Composio) Shopify row while the native tier is on. The worker refuses a new Composio link then, so the only reconnect is the native install. */
+export const RECONNECT_NATIVE_WHAT = "Reconnect disconnects the old link first. The old link was made before the Shopify App Store app, and Shopify cannot reauthorize it.";
+export const RECONNECT_NATIVE_NEXT = "Then you get a code here. Install ZS Business Connections from the Shopify App Store, open it in your Shopify admin and enter the code there.";
+export const RECONNECT_NATIVE_CONFIRM = "You confirm the store here when it has entered the code.";
+
+/**
+ * C-18: how a connection in `reauthorize` is reconnected. `native_install` is the legacy row under the native tier (disconnect, then
+ * a link code for the App Store app); `composio` is the hosted re-link, only while no native tier exists; `reopen` is a row the
+ * native app owns, or one the API did not label (an older server): the owner reopens the app in Shopify admin.
+ */
+export type ReconnectPath = "composio" | "native_install" | "reopen" | "none";
+/** `state` is the four-state native read (C-18): only a confirmed `off` may use the Composio re-link; while it is unknown or pending, no Reconnect shows. */
+export function reconnectPath(connection: Pick<ManagedConnection, "tier">, state: "native" | "off" | "unknown" | "pending"): ReconnectPath {
+  if (state === "unknown" || state === "pending") return "none";
+  if (connection.tier === "native") return "reopen";
+  if (state === "off") return "composio";
+  return connection.tier === "composio" ? "native_install" : "reopen";
+}
+
+/** C-18: disconnect a legacy row and wait until it is gone, so the claim that links the native install is not refused for a store the tenant still holds. */
+export async function disconnectForNativeInstall(
+  api: Pick<ManagedConnectionsApi, "disconnectManagedConnection" | "listManagedConnections">,
+  connection: Pick<ManagedConnection, "id">,
+  idempotencyKey: string,
+  wait: Pick<PollOptions, "sleep" | "polls" | "delayMs"> = {},
+): Promise<void> {
+  const result = await api.disconnectManagedConnection(connection.id, { idempotencyKey });
+  if (result.status !== "disconnected") await waitUntilDisconnected(connection.id, () => api.listManagedConnections(), wait);
+}
