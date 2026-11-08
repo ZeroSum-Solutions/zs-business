@@ -268,6 +268,7 @@ export function createApp(deps: AppDependencies) {
         connector: deps.connections.connector,
         stateSecrets: deps.connections.stateSecrets,
         limiter: deps.connections.limiter ?? createPostgresRateLimiter(deps.db, deps.clock),
+        ...(deps.connections.reportQuota ? { report: deps.connections.reportQuota } : {}),
         ...(deps.connections.shopify ? { shopify: deps.connections.shopify } : {}),
       },
     } : {}),

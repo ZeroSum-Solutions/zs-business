@@ -23,10 +23,10 @@ import {
   CONNECTION_RESULT_MAX_BYTES,
   normalizeAccountLabel,
   type ConnectorCompleteResponse,
-  type ConnectorLinkResponse,
   type ConnectorRunResponse,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import type { ConnectorLinkResult } from "./port.js";
 import { catalogTool, catalogToolkit, OVERRIDE_KEYS, type CatalogTool } from "./catalog.js";
 import {
   completeDecision,
@@ -87,6 +87,8 @@ export type ConnectionsWorkerReport =
   | { readonly kind: "pass_stopped"; readonly why: "time" | "calls" | "budget" }
   | { readonly kind: "cooldown"; readonly env: string }
   | { readonly kind: "key_refused"; readonly env: string; readonly status: number }
+  /** C-4: Composio failed a link call. The class and its request ID (Composio's own identifier), never provider text. The connect charge stays. */
+  | { readonly kind: "link_refused"; readonly env: string; readonly status: number; readonly errorClass: "provider_refused" | "transient" | "unknown"; readonly requestId?: string }
   /** A database call the worker cannot recover from; the SQLSTATE only (`unknown` when the error has none), never the message. */
   | { readonly kind: "database_error"; readonly op: "budget"; readonly code: string };
 
@@ -387,12 +389,15 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     recordAttemptRevoke(attempt), pass, signal);
 
   // ---- link --------------------------------------------------------------------------------
-  async function link(input: { tenantId: string; toolkit: string; attemptId: string; connectionId: string; shopDomain: string; createdBy: string; browserHash: string }, signal?: AbortSignal): Promise<ConnectorLinkResponse> {
+  async function link(input: { tenantId: string; toolkit: string; attemptId: string; connectionId: string; shopDomain: string; createdBy: string; browserHash: string }, signal?: AbortSignal): Promise<ConnectorLinkResult> {
+    // C-4: `beforeProvider` marks a refusal that came before the first Composio call, so the API may give the connect charge
+    // back. Only a refusal where `composio.link` was never invoked may carry it; after that call starts, whatever the outcome
+    // (any error envelope, a timeout, a 5xx), the provider may hold state we cannot see, and the charge stands.
     const toolkit = catalogToolkit(input.toolkit);
     const authConfigId = config.authConfigIds[input.toolkit];
-    if (!toolkit || !authConfigId) return { outcome: "refused", code: "not_found" };
+    if (!toolkit || !authConfigId) return { outcome: "refused", code: "not_found", beforeProvider: true };
     // C-18: with the native tier on, Shopify is installed from the App Store; no typed shop domain starts a Composio link (S1 2.3.1).
-    if (input.toolkit === "shopify" && deps.native) return { outcome: "refused", code: "not_found" };
+    if (input.toolkit === "shopify" && deps.native) return { outcome: "refused", code: "not_found", beforeProvider: true };
     const started = now();
     const expiresAt = new Date(started.getTime() + config.attemptLifetimeMs);
     const row = (accountId: string, status: "started" | "cancelling") => service((tx) => tx.query(
@@ -421,15 +426,23 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       }
     };
     let made;
+    // Set the moment the call to Composio starts and never cleared. A refusal from our own organization budget (or a failed
+    // budget read) happens inside `spend` before this closure runs, so it leaves the flag false.
+    let providerCalled = false;
     try {
-      made = await spend(undefined, () => composio.link({
-        authConfigId, userId: userIdOf(input.tenantId), callbackUrl: config.callbackUrl,
-      }, signal));
+      made = await spend(undefined, () => {
+        providerCalled = true;
+        return composio.link({ authConfigId, userId: userIdOf(input.tenantId), callbackUrl: config.callbackUrl }, signal);
+      });
     } catch (error) {
       if (error instanceof ComposioError && error.accountId !== undefined) await compensate(error.accountId);
+      if (error instanceof ComposioError && error.kind !== "rate_limited") {
+        report({ kind: "link_refused", env: config.env, status: error.status ?? 0, errorClass: error.errorClass, ...(error.requestId === undefined ? {} : { requestId: error.requestId }) });
+      }
+      const before = providerCalled ? {} : { beforeProvider: true as const };
       return isRateLimit(error)
-        ? { outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: retryAfterOf(error) }
-        : { outcome: "refused", code: "provider_unavailable" };
+        ? { outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: retryAfterOf(error), ...before }
+        : { outcome: "refused", code: "provider_unavailable", ...before };
     }
     try {
       await row(made.connectedAccountId, "started");

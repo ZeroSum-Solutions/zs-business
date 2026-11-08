@@ -135,7 +135,7 @@ export function connectionsInternalRoutes(config: {
     try {
       // B-6: a caller that goes away (the API gave up at 7 s) stops the Composio calls too.
       const out = await handleConnectorOperation(worker, operation, signed.body, AbortSignal.any([c.req.raw.signal, AbortSignal.timeout(OPERATION_BUDGET_MS)]));
-      return c.json(out.body, out.status);
+      return c.json(out.body, out.status, out.headers);
     } catch (error) {
       config.onError?.(error);
       return c.json(apiErrorBody("Unavailable", "Connections are unavailable"), 503);

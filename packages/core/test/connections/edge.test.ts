@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   CONNECTION_CONNECT_ACTION,
+  connectorLinkResponseSchema,
   Conflict,
   NotFound,
   TenantDenied,
@@ -26,6 +27,7 @@ import {
   createLocalConnectorPort,
   derivedId,
   handleConnectorOperation,
+  BEFORE_PROVIDER_HEADER,
   mapError,
   memberDispatch,
   signConnectAttempt,
@@ -39,6 +41,7 @@ import {
   type EdgeDependencies,
 } from "../../src/index.js";
 import { NEVER_APPROVED_ACTIONS } from "../../src/approvals/policy.js";
+import { REFUND_BUDGET_MS } from "../../src/connections/edge.js";
 import { FakeComposio } from "./fake-composio.js";
 import { addMember, ENV, makeClock, makeWorker, newTenant, seedConnection, T0, type TestClock } from "./harness.js";
 
@@ -778,7 +781,7 @@ describe("the signed connector port (C-3, C-10)", () => {
     if (!verified.ok) return new Response("{}", { status: 401 });
     const operation = url.pathname.split("/").pop()!;
     const out = await handleConnectorOperation(worker, operation as never, String(init?.body ?? ""), init?.signal ?? undefined);
-    return new Response(JSON.stringify(out.body), { status: out.status, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify(out.body), { status: out.status, headers: { "content-type": "application/json", ...out.headers } });
   };
   const http = (doFetch: typeof fetch, extra: { timeoutMs?: number; secret?: string } = {}) => createHttpConnectorPort({
     workerUrl: "https://worker.example.test", env: ENV, secrets: { current: extra.secret ?? INTERNAL }, clock, fetch: doFetch, ...(extra.timeoutMs ? { timeoutMs: extra.timeoutMs } : {}),
@@ -788,6 +791,38 @@ describe("the signed connector port (C-3, C-10)", () => {
     const attemptId = randomUUID();
     const out = await http(route(() => clock.now())).link({ tenantId: a.tenantId, toolkit: "shopify", attemptId, connectionId: randomUUID(), shopDomain: SHOP, createdBy: a.owner.memberId, browserHash: BINDING });
     expect(out).toMatchObject({ outcome: "linked", authConfigId: "ac_shopify" });
+  });
+
+  it("C-4: `beforeProvider` rides in a response header, so the body stays the strict contract an older API parses", async () => {
+    const nativeTier = { run: async () => { throw new Error("unused"); }, finishDisconnect: async () => "disconnected" as const, pass: async () => ({ refreshed: 0 }) };
+    const before = makeWorker(database, fake, clock, {}, [], nativeTier);
+    const input = { tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: SHOP, createdBy: a.owner.memberId, browserHash: BINDING };
+    const raw = await handleConnectorOperation(before, "link", JSON.stringify(input));
+    expect(raw.body).toEqual({ outcome: "refused", code: "not_found" });
+    expect(raw.headers).toEqual({ [BEFORE_PROVIDER_HEADER]: "1" });
+    expect(connectorLinkResponseSchema.safeParse(raw.body).success).toBe(true);
+    // The new API reads the header.
+    const routeFor = (w: typeof worker): typeof fetch => async (input2, init) => {
+      const out = await handleConnectorOperation(w, String(input2).split("/").pop()!  as never, String(init?.body ?? ""), init?.signal ?? undefined);
+      return new Response(JSON.stringify(out.body), { status: out.status, headers: { "content-type": "application/json", ...out.headers } });
+    };
+    expect(await http(routeFor(before)).link(input)).toEqual({ outcome: "refused", code: "not_found", beforeProvider: true });
+    // A Composio answer, even a documented refusal envelope, is after the provider call: no header, no marker.
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: { error: { message: "x", status: 422, request_id: "req_1" } }, times: 1 });
+    const after = await handleConnectorOperation(worker, "link", JSON.stringify({ ...input, attemptId: randomUUID(), connectionId: randomUUID() }));
+    expect(after.body).toEqual({ outcome: "refused", code: "provider_unavailable" });
+    expect(after.headers).toBeUndefined();
+    // An older worker sends no header, and an unmarked refusal stays unmarked.
+    const older = http(async () => new Response(JSON.stringify({ outcome: "refused", code: "not_found" }), { status: 200 }));
+    expect(await older.link(input)).toEqual({ outcome: "refused", code: "not_found" });
+    // A header on a linked answer means nothing.
+    fake.override(/POST \/connected_accounts\/link/, { status: 200, json: { connected_account_id: "ca_h", redirect_url: "https://connect.composio.test/h" }, times: 1 });
+    const linked = await http(async (url, init) => {
+      const r = await routeFor(worker)(url, init);
+      return new Response(await r.text(), { status: 200, headers: { [BEFORE_PROVIDER_HEADER]: "1" } });
+    }).link({ ...input, attemptId: randomUUID(), connectionId: randomUUID() });
+    expect(linked.outcome).toBe("linked");
+    expect(linked).not.toHaveProperty("beforeProvider");
   });
 
   it("the route refuses a wrong secret, a stale clock and a replayed request", async () => {
@@ -830,5 +865,266 @@ describe("attempt token", () => {
     });
     expect(verifyConnectAttempt({ current: STATE }, token, clock.now())).not.toBeNull();
     expect(verifyConnectAttempt({ current: "other-secret-other-secret-other-secret" }, token, clock.now())).toBeNull();
+  });
+});
+
+// C-4: the connect charge is given back only when we refused before any call to Composio. After a provider call it never is.
+describe("connect quota refund (C-4)", () => {
+  /** A limiter that issues receipts and records what is refunded; `refundFails` makes the refund throw. */
+  let issued: string[];
+  let refunded: string[];
+  let reported: { outcome: string }[];
+  let refundFails = false;
+  let allowanceFull = false;
+  let allowanceFails = false;
+  let refundSignal: AbortSignal | undefined;
+  /** Makes the allowance check or the refund wait until its signal aborts, as a stalled store would. */
+  let stall: "allowance" | "refund" | null = null;
+  const untilAborted = (signal: AbortSignal | undefined) => new Promise<never>((_, reject) => {
+    if (signal?.aborted) reject(signal.reason);
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  const receiptLimiter: ConnectionLimiter = {
+    async take(charges, options) {
+      if (charges[0]!.key.startsWith("conn-connect-refund:")) {
+        taken.push("conn-connect-refund");
+        options?.signal?.throwIfAborted(); // as the shared limiter does
+        if (stall === "allowance") return untilAborted(options?.signal);
+        if (allowanceFails) throw new Error("store down");
+        return allowanceFull ? { ok: false, retryAfterSeconds: 3000 } : { ok: true };
+      }
+      return limiter.take(charges, options);
+    },
+    async takeWithReceipt(charges) {
+      const taken = await limiter.take(charges);
+      if (!taken.ok) return taken;
+      const id = `receipt-${issued.length}`;
+      issued.push(id);
+      return { ok: true, receipt: { id } };
+    },
+    async refund(receipt, options) {
+      refundSignal = options?.signal;
+      options?.signal?.throwIfAborted();
+      if (stall === "refund") return untilAborted(options?.signal);
+      if (refundFails) throw new Error("store down");
+      refunded.push(receipt.id);
+      return 1;
+    },
+  };
+  beforeEach(() => { issued = []; refunded = []; reported = []; refundFails = false; allowanceFull = false; allowanceFails = false; refundSignal = undefined; stall = null; });
+  const start = (connector: ConnectorPort = port, who = a, signal?: AbortSignal) =>
+    createConnectionsSession({ ...deps(), connections: { connector, stateSecrets: { current: STATE }, limiter: receiptLimiter, report: (event) => reported.push(event) } }, { tenantId: who.tenantId, actorId: who.owner.userId })
+      .start("shopify", { shopDomain: SHOP, browserBinding: BINDING }, signal).catch((e: unknown) => e);
+  const stub = (answer: () => Promise<Awaited<ReturnType<ConnectorPort["link"]>>>): ConnectorPort => ({ ...port, link: answer });
+  const envelope = (status: number, extra: Record<string, unknown> = {}) => ({ error: { message: "x", status, request_id: "req_1", ...extra } });
+  const nativeTier = { run: async () => { throw new Error("unused"); }, finishDisconnect: async () => "disconnected" as const, pass: async () => ({ refreshed: 0 }) };
+  const exhaustBudget = () => database.pool.query(
+    `INSERT INTO rate_limit_buckets (key, window_start, expires_at, count) VALUES (sha256(convert_to('composio-org:preview','UTF8')), $1, $2, 500)
+     ON CONFLICT (key) DO UPDATE SET count = 500, window_start = $1, expires_at = $2`, [new Date(T0), new Date(T0 + 60_000)]);
+  const LINK = /POST \/connected_accounts\/link/;
+
+  describe("a refusal before any Composio call gives the charge back, once", () => {
+    it("the native tier refuses a Composio Shopify link", async () => {
+      const via = createLocalConnectorPort(makeWorker(database, fake, clock, {}, [], nativeTier));
+      expect(await start(via)).toBeInstanceOf(NotFound);
+      expect(issued).toEqual(["receipt-0"]);
+      expect(refunded).toEqual(["receipt-0"]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "refunded" }]);
+      expect(fake.calls).toHaveLength(0);
+      expect((await database.pool.query("SELECT 1 FROM connection_attempts")).rowCount).toBe(0);
+    });
+
+    it("a toolkit with no auth config (our own configuration) is refused as not found", async () => {
+      const via = createLocalConnectorPort(makeWorker(database, fake, clock, { authConfigIds: {} }));
+      expect(await start(via)).toBeInstanceOf(NotFound);
+      expect(refunded).toEqual(["receipt-0"]);
+      expect(fake.calls).toHaveLength(0);
+    });
+
+    it("our own organization budget refusing the call", async () => {
+      await exhaustBudget();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(refunded).toEqual(["receipt-0"]);
+      expect(fake.calls).toHaveLength(0);
+    });
+
+    it("the refund runs under the request's signal and its own short budget", async () => {
+      const controller = new AbortController();
+      await exhaustBudget();
+      await start(port, a, controller.signal);
+      expect(refundSignal).toBeDefined();
+      expect(refundSignal!.aborted).toBe(false);
+      controller.abort();
+      expect(refundSignal!.aborted).toBe(true);
+    });
+
+    it("the per-tenant refund allowance caps refunds: a full allowance keeps the charge and says so", async () => {
+      allowanceFull = true;
+      await exhaustBudget();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(taken).toContain("conn-connect-refund");
+      expect(refunded).toEqual([]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "capped" }]);
+    });
+
+    it("a refund call that throws is reported as commit_unknown (it may have committed), and the answer is unchanged", async () => {
+      refundFails = true;
+      await exhaustBudget();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(refunded).toEqual([]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "commit_unknown" }]);
+    });
+
+    it("an allowance check that throws is reported as failed (nothing was refunded), and the answer is unchanged", async () => {
+      allowanceFails = true;
+      await exhaustBudget();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(refunded).toEqual([]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "failed" }]);
+    });
+
+    it("a stalled allowance check is cut off at the refund budget, the charge stands, and the connect still answers", async () => {
+      stall = "allowance";
+      await exhaustBudget();
+      const began = Date.now();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(REFUND_BUDGET_MS - 100);
+      expect(Date.now() - began).toBeLessThan(REFUND_BUDGET_MS + 1500);
+      expect(refunded).toEqual([]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "failed" }]);
+    });
+
+    it("a stalled refund is cut off at the refund budget and reported as commit_unknown; no later refund starts", async () => {
+      stall = "refund";
+      await exhaustBudget();
+      const began = Date.now();
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(Date.now() - began).toBeGreaterThanOrEqual(REFUND_BUDGET_MS - 100);
+      expect(Date.now() - began).toBeLessThan(REFUND_BUDGET_MS + 1500);
+      expect(refundSignal!.aborted).toBe(true);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "commit_unknown" }]);
+      stall = null;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(refunded).toEqual([]);
+    });
+
+    it("a request cancelled before the refund starts keeps the charge and is reported failed", async () => {
+      await exhaustBudget();
+      const controller = new AbortController();
+      const gone: ConnectionLimiter = { ...receiptLimiter, async takeWithReceipt(charges, options) {
+        const result = await receiptLimiter.takeWithReceipt!(charges, options);
+        controller.abort(); // the caller leaves right after the charge
+        return result;
+      } };
+      const error = await createConnectionsSession({ ...deps(), connections: { connector: port, stateSecrets: { current: STATE }, limiter: gone, report: (event) => reported.push(event) } },
+        { tenantId: a.tenantId, actorId: a.owner.userId }).start("shopify", { shopDomain: SHOP, browserBinding: BINDING }, controller.signal).catch((e: unknown) => e);
+      expect(error).toBeDefined();
+      expect(refunded).toEqual([]);
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "failed" }]);
+    });
+
+    it("a refund that finds the receipt already used gives nothing and is reported", async () => {
+      const spent: ConnectionLimiter = { ...receiptLimiter, async refund() { return 0; } };
+      await exhaustBudget();
+      const error = await createConnectionsSession({ ...deps(), connections: { connector: port, stateSecrets: { current: STATE }, limiter: spent, report: (event) => reported.push(event) } },
+        { tenantId: a.tenantId, actorId: a.owner.userId }).start("shopify", { shopDomain: SHOP, browserBinding: BINDING }).catch((e: unknown) => e);
+      expect(error).toMatchObject({ kind: "rate_limited" });
+      expect(reported).toEqual([{ kind: "connect_refund", tenantId: a.tenantId, outcome: "nothing_to_give" }]);
+    });
+  });
+
+  describe("a refusal after a provider call never refunds, whatever the outcome", () => {
+    // Composio may hold state we cannot see after any answer to a call it received, a documented envelope included.
+    it.each([400, 401, 403, 404, 408, 409, 410, 422, 425, 429, 500, 502, 503, 504])("a Composio %i answer", async (status) => {
+      fake.override(LINK, { status, json: envelope(status), times: 1 });
+      expect(await start()).toBeInstanceOf(Error);
+      expect(fake.callsTo(LINK)).toHaveLength(1);
+      expect(issued).toHaveLength(1);
+      expect(refunded).toEqual([]);
+      expect(taken).not.toContain("conn-connect-refund");
+      expect(reported).toEqual([]);
+    });
+
+    it("an empty, unreadable, foreign or account-naming error body", async () => {
+      for (const json of [{}, "text", { error: "plain" }, envelope(400, { connected_account_id: "ca_made" })]) {
+        fake.override(LINK, { status: 400, json, times: 1 });
+        expect(await start()).toBeInstanceOf(Error);
+      }
+      expect(refunded).toEqual([]);
+    });
+
+    it("a Composio call that times out", async () => {
+      fake.override(LINK, { hang: true, times: 1 });
+      expect(await start()).toMatchObject({ kind: "unavailable" });
+      expect(fake.callsTo(LINK)).toHaveLength(1);
+      expect(refunded).toEqual([]);
+    });
+
+    it("an answer we cannot read, even when it names the account it made", async () => {
+      fake.override(LINK, { status: 200, json: { connected_account_id: "ca_made", redirect_url: "not a url" }, times: 1 });
+      expect(await start()).toMatchObject({ kind: "unavailable" });
+      fake.override(LINK, { status: 200, json: { unexpected: true }, times: 1 });
+      expect(await start()).toMatchObject({ kind: "unavailable" });
+      expect(refunded).toEqual([]);
+    });
+
+    it("a refusal by the organization budget that follows a Composio 429 is ours and refunds; the 429 itself does not", async () => {
+      fake.override(LINK, { status: 429, json: envelope(429), times: 1 });
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(refunded).toEqual([]);
+      const callsBefore = fake.calls.length;
+      expect(await start()).toMatchObject({ kind: "rate_limited" });
+      expect(fake.calls.length).toBe(callsBefore);
+      expect(refunded).toEqual(["receipt-1"]);
+    });
+
+    it("a link that succeeds, or that fails after the provider returned an account", async () => {
+      expect(await start()).toMatchObject({ authorizeUrl: expect.stringMatching(/^https:\/\/connect\.composio\.test\//) });
+      expect(refunded).toEqual([]);
+      await database.pool.query("ALTER TABLE connection_attempts ADD CONSTRAINT refund_test_block CHECK (false) NOT VALID");
+      try {
+        expect(await start()).toMatchObject({ kind: "unavailable" });
+      } finally {
+        await database.pool.query("ALTER TABLE connection_attempts DROP CONSTRAINT refund_test_block");
+      }
+      expect(fake.callsTo(LINK).length).toBe(2);
+      expect(refunded).toEqual([]);
+    });
+
+    it("a worker that cannot be reached, an unknown error, and a refusal that is not marked", async () => {
+      expect(await start(stub(async () => { throw new ConnectorUnavailable("timeout"); }))).toMatchObject({ kind: "unavailable" });
+      expect(await start(stub(async () => { throw new ConnectorUnavailable("network"); }))).toMatchObject({ kind: "unavailable" });
+      expect(await start(stub(async () => { throw new Error("boom"); }))).toMatchObject({ message: "boom" });
+      expect(await start(stub(async () => ({ outcome: "refused", code: "provider_unavailable" })))).toMatchObject({ kind: "unavailable" });
+      expect(await start(stub(async () => ({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 5 })))).toMatchObject({ kind: "rate_limited" });
+      expect(await start(stub(async () => ({ outcome: "refused", code: "not_found" })))).toBeInstanceOf(NotFound);
+      expect(issued).toHaveLength(6);
+      expect(refunded).toEqual([]);
+    });
+  });
+
+  it("a marked refusal from the worker refunds; the same refusal unmarked does not", async () => {
+    expect(await start(stub(async () => ({ outcome: "refused", code: "provider_unavailable", beforeProvider: true })))).toMatchObject({ kind: "unavailable" });
+    expect(refunded).toEqual(["receipt-0"]);
+  });
+
+  it("a marker on an answer that is not a refusal means nothing", async () => {
+    const linked = { outcome: "linked" as const, redirectUrl: "https://connect.composio.test/x", composioAccountId: "ca_x", authConfigId: "ac_shopify", expiresAt: new Date(clock.ms + 60_000).toISOString() };
+    await start(stub(async () => ({ ...linked, beforeProvider: true }) as never));
+    expect(refunded).toEqual([]);
+  });
+
+  it("a limiter without receipts charges and never refunds", async () => {
+    await exhaustBudget();
+    const error = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "rate_limited" });
+    expect(taken).toEqual(["conn-connect"]);
+  });
+
+  it("a refused charge is not refunded because it was never taken", async () => {
+    limiterRefuses = true;
+    expect(await start()).toMatchObject({ kind: "rate_limited", retryAfterSeconds: 42 });
+    expect(issued).toEqual([]);
+    expect(refunded).toEqual([]);
   });
 });
