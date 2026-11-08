@@ -63,11 +63,11 @@ export function createPlanEvents(deps: PlanEventDeps) {
   }
   async function storedTenant(tx: Transaction, subscriptionId: string | null, customerId: string | null): Promise<string | null> {
     if (subscriptionId) {
-      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM plan_subscriptions WHERE id=$1", [subscriptionId])).rows[0];
+      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM plan_subscriptions WHERE provider='stripe' AND id=$1", [subscriptionId])).rows[0];
       if (row) return row.tenant_id;
     }
     if (customerId) {
-      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM tenant_plans WHERE stripe_customer_id=$1", [customerId])).rows[0];
+      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM tenant_plans WHERE stripe_customer_id=$1 AND billing_provider='stripe'", [customerId])).rows[0];
       if (row) return row.tenant_id;
     }
     return null;
@@ -86,14 +86,16 @@ export function createPlanEvents(deps: PlanEventDeps) {
     const customerId = id(answer.customer, "cus_");
     const claimed = uuid(meta(answer).zs_tenant);
     if (claimed !== null && claimed !== tenantId) return "not_ours";
-    const stored = (await tx.query<{ stripe_customer_id: string | null }>(
-      "SELECT stripe_customer_id FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
+    const stored = (await tx.query<{ stripe_customer_id: string | null; billing_provider: string }>(
+      "SELECT stripe_customer_id, billing_provider FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
+    // PL-14: Stripe events never change a tenant another provider bills.
+    if (stored && stored.billing_provider !== "stripe") return "not_ours";
     if (stored?.stripe_customer_id && customerId && stored.stripe_customer_id !== customerId) return "not_ours";
     const status = SUBSCRIPTION_STATUSES.find((value) => value === answer.status);
     if (!status) return "ignored";
 
     const previous = (await tx.query<SubscriptionRow>(
-      `SELECT ${SUBSCRIPTION_COLUMNS} FROM plan_subscriptions WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, [tenantId, subscriptionId])).rows[0];
+      `SELECT ${SUBSCRIPTION_COLUMNS} FROM plan_subscriptions WHERE tenant_id=$1 AND provider='stripe' AND id=$2 FOR UPDATE`, [tenantId, subscriptionId])).rows[0];
     const items = (Array.isArray(record(answer.items)?.data) ? record(answer.items)!.data as unknown[] : []).map(record).filter((item): item is Json => item !== null);
     let plan = previous ? { plan: previous.plan, interval: previous.plan_interval, founding: previous.founding } : { plan: null, interval: null, founding: false };
     let extra = previous?.extra_connections ?? 0;
@@ -120,9 +122,9 @@ export function createPlanEvents(deps: PlanEventDeps) {
 
     await ensureRecord(tx, tenantId, at);
     await tx.query(
-      `INSERT INTO plan_subscriptions (tenant_id, id, stripe_customer_id, status, plan, plan_interval, founding, extra_connections,
+      `INSERT INTO plan_subscriptions (tenant_id, provider, id, stripe_customer_id, status, plan, plan_interval, founding, extra_connections,
          trial_end, current_period_end, cancel_at_period_end, started_at, ended_at, status_since, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
+       VALUES ($1,'stripe',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)
        ON CONFLICT (tenant_id, id) DO UPDATE SET stripe_customer_id=coalesce(EXCLUDED.stripe_customer_id, plan_subscriptions.stripe_customer_id),
          status=EXCLUDED.status, plan=EXCLUDED.plan, plan_interval=EXCLUDED.plan_interval, founding=EXCLUDED.founding,
          extra_connections=EXCLUDED.extra_connections, trial_end=EXCLUDED.trial_end, current_period_end=EXCLUDED.current_period_end,
@@ -146,7 +148,7 @@ export function createPlanEvents(deps: PlanEventDeps) {
     const paying = recognised.filter((row) => entitled(row.status));
     const effective = paying[0] ?? recognised[0] ?? null;
     const failed = effective ? (await tx.query<{ first: Date | null }>(
-      `SELECT min(first_failed_at) AS first FROM plan_invoices WHERE tenant_id=$1 AND stripe_subscription_id=$2 AND status='failed'`,
+      `SELECT min(first_failed_at) AS first FROM plan_invoices WHERE tenant_id=$1 AND provider='stripe' AND stripe_subscription_id=$2 AND status='failed'`,
       [tenantId, effective.id])).rows[0]?.first ?? null : null;
     const ended = rows.filter((row) => ENDED.has(row.status)).sort((a, b) => b.status_since.getTime() - a.status_since.getTime())[0];
     const readOnlyAfter = effective && entitled(effective.status)

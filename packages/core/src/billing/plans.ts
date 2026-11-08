@@ -19,6 +19,7 @@ import {
   type ActionCommand,
   type ActionResult,
   type BillingPlan,
+  type BillingProvider,
   type HubPlan,
   type PlanCatalogEntry,
   type PlanCheckout,
@@ -64,6 +65,7 @@ const checkoutFromRow = (row: CheckoutRow): PlanCheckout => planCheckoutSchema.p
 });
 
 interface TenantPlanRow {
+  billing_provider: BillingProvider;
   plan: HubPlan | null;
   plan_interval: PlanInterval | null;
   founding: boolean;
@@ -78,7 +80,7 @@ interface TenantPlanRow {
   payment_failed_at: Date | null;
   read_only_after: Date | null;
 }
-const PLAN_COLUMNS = `plan, plan_interval, founding, status, extra_connections, stripe_customer_id, trial_end, current_period_end,
+const PLAN_COLUMNS = `billing_provider, plan, plan_interval, founding, status, extra_connections, stripe_customer_id, trial_end, current_period_end,
   cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after`;
 const tenantPlan = async (tx: Transaction, tenantId: string): Promise<TenantPlanRow | null> =>
   (await tx.query<TenantPlanRow>(`SELECT ${PLAN_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0] ?? null;
@@ -102,6 +104,7 @@ export const planCheckoutHandler: ActionHandler<PlanDispatchConfig> = {
       throw new ValidationFailed("Extra connections are monthly; choose a monthly plan to add them");
     await lockTenantPlan(tx, binding.tenantId);
     const row = await tenantPlan(tx, binding.tenantId);
+    if (row && row.billing_provider !== "stripe") throw notStripe();
     if (row && entitled(row.status)) throw new Conflict("The business already has a plan; change it in billing", { reason: "plan_exists" });
     const open = (await tx.query<{ id: string; checkout_url: string | null }>(
       `SELECT id, checkout_url FROM plan_checkouts WHERE tenant_id=$1 AND status='pending' AND created_at > $2
@@ -197,9 +200,13 @@ export async function startPlanCheckout(input: {
   return { checkout, checkoutUrl: session.url };
 }
 
+/** PL-14: a tenant another provider bills never gets a Stripe Checkout or Portal. */
+const notStripe = () => new Conflict("This business is billed through another provider", { reason: "billing_provider" });
+
 /** PL-6: the stored customer, or 409 no_customer. */
 export async function portalCustomer(tx: Transaction, tenantId: string): Promise<string> {
   const row = await tenantPlan(tx, tenantId);
+  if (row && row.billing_provider !== "stripe") throw notStripe();
   if (!row?.stripe_customer_id) throw new Conflict("There is no billing account yet; choose a plan first", { reason: "no_customer" });
   return row.stripe_customer_id;
 }
@@ -219,7 +226,9 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
 }): Promise<BillingPlan> {
   const row = await tenantPlan(tx, tenantId);
   const invited = Boolean(row?.founding_invite || row?.founding);
+  const stripe = (row?.billing_provider ?? "stripe") === "stripe";
   return billingPlanSchema.parse({
+    billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
     plan: row?.plan ?? null,
     interval: row?.plan_interval ?? null,
@@ -237,8 +246,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",
-    checkoutEnabled: input.checkoutEnabled,
-    portalEnabled: input.checkoutEnabled && Boolean(row?.stripe_customer_id),
+    checkoutEnabled: input.checkoutEnabled && stripe,
+    portalEnabled: input.checkoutEnabled && stripe && Boolean(row?.stripe_customer_id),
   });
 }
 

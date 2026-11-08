@@ -1,7 +1,9 @@
 # Hub plans: paid subscriptions through Stripe Billing
 
-Status: draft contract, revision 1 (2026-11-07), after a GPT-6.1 Sol review of the first draft
-(mixed intervals, event order, stale checkouts, unpaid replacements, worker serialization). Code
+Status: draft contract, revision 2 (2026-11-07: PL-14, a billing provider per tenant and per
+subscription, so Shopify merchants can move to Shopify Billing later). Revision 1 followed a
+GPT-6.1 Sol review of the first draft (mixed intervals, event order, stale checkouts, unpaid
+replacements, worker serialization). Code
 follows this file; a change to a numbered rule needs a new revision of this file first. Extends `stripe.md` (revision 5): the same Stripe
 account, webhook endpoint, event inbox (`stripe_events`) and billing worker carry plan events.
 Prices come from `zs-agency-site/design/PRICING.md` (final, 2026-11-07), section 1B and section 5.
@@ -218,7 +220,32 @@ mode as `STRIPE_LIVEMODE`); without it plan events wait and end `orphaned`. Opti
 `BILLING_STRIPE_BASE_URL` and `BILLING_PLAN_GRACE_DAYS` (1 to 30, default 7). Core reads none of them from
 the environment; the entry points parse them and pass them in, with the clock.
 
-## Known limits (revision 1)
+**PL-14. Billing provider.** Shopify App Store policy requires a Shopify merchant to pay every
+app-related fee, the extra-connection add-on included, through the Shopify Billing API. Other
+tenants keep Stripe. So the plan record names its provider and nothing outside the Stripe code
+assumes Stripe:
+- `tenant_plans.billing_provider` is `stripe` (the default) or `shopify`. `plan_subscriptions`
+  and `plan_invoices` carry a `provider` too; a subscription or invoice ID is unique per
+  provider, and only a `stripe` row must look like a Stripe ID (`sub_…`, `in_…`).
+- The PL-1 limits, the PL-8 gate and the PL-10 derivation read the plan, status and
+  `read_only_after`, never the provider, so a later Shopify worker fills the same rows and the
+  rest of the hub keeps working unchanged.
+- A tenant whose provider is not `stripe` gets no Stripe Checkout (PL-4) and no Stripe Portal
+  (PL-6): both answer 409 `billing_provider`. GET /v1/billing/plan (PL-7) shows
+  `billingProvider` and reports Checkout and the Portal as off for it. The Stripe worker
+  (PL-10) never resolves such a tenant from a stored customer or subscription, and a Stripe
+  answer for it ends `not_ours`.
+- Who sets `billing_provider`: an operator (service role), for now by hand when a tenant arrives
+  through the Shopify listing.
+
+**Follow-up, not built in this revision: Shopify Billing.** A `shopify` tenant has no way to pay
+yet. A later revision adds the Shopify Billing API (app subscriptions and the usage or recurring
+charge for the add-on), its webhooks into the same records, and the rule that sets
+`billing_provider` when a merchant installs from the Shopify App Store.
+
+## Known limits (revision 2)
+
+- Shopify Billing is not built (PL-14): a tenant set to `shopify` cannot buy a plan until it is.
 
 - A tenant that never subscribed is comped. Requiring a plan of new tenants needs a rule here.
 - Bookable resources, model-assisted agents, voice, the agent daily cap and the email allowance

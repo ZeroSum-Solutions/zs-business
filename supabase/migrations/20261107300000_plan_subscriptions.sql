@@ -16,6 +16,8 @@ END $$;
 -- read_only_after, is a comped tenant: no plan limits and never read-only.
 CREATE TABLE public.tenant_plans (
   tenant_id uuid PRIMARY KEY REFERENCES public.tenants(tenant_id),
+  -- PL-14: who bills this tenant's plan. Stripe now; Shopify merchants move to Shopify Billing later.
+  billing_provider text NOT NULL DEFAULT 'stripe' CONSTRAINT tenant_plans_provider CHECK (billing_provider IN ('stripe', 'shopify')),
   plan public.hub_plan,
   plan_interval public.hub_plan_interval,
   founding boolean NOT NULL DEFAULT false,
@@ -42,7 +44,9 @@ CREATE UNIQUE INDEX tenant_plans_customer_once ON public.tenant_plans (stripe_cu
 -- PL-3, PL-10: each Stripe subscription of a tenant, as Stripe last answered it.
 CREATE TABLE public.plan_subscriptions (
   tenant_id uuid NOT NULL REFERENCES public.tenants(tenant_id),
-  id text NOT NULL CONSTRAINT plan_subscriptions_id CHECK (id ~ '^sub_[A-Za-z0-9_]{1,250}$'),
+  -- PL-14: the provider that holds the subscription; its ID format follows the provider.
+  provider text NOT NULL DEFAULT 'stripe' CONSTRAINT plan_subscriptions_provider CHECK (provider IN ('stripe', 'shopify')),
+  id text NOT NULL CONSTRAINT plan_subscriptions_id CHECK (char_length(id) BETWEEN 1 AND 300 AND (provider <> 'stripe' OR id ~ '^sub_[A-Za-z0-9_]{1,250}$')),
   stripe_customer_id text CONSTRAINT plan_subscriptions_customer CHECK (stripe_customer_id ~ '^cus_[A-Za-z0-9_]{1,250}$'),
   status text NOT NULL DEFAULT 'incomplete' CONSTRAINT plan_subscriptions_status CHECK (status IN
     ('trialing', 'active', 'past_due', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired', 'paused')),
@@ -62,8 +66,8 @@ CREATE TABLE public.plan_subscriptions (
   PRIMARY KEY (tenant_id, id),
   CONSTRAINT plan_subscriptions_named CHECK ((plan IS NULL) = (plan_interval IS NULL))
 );
--- Stripe subscription IDs are global.
-CREATE UNIQUE INDEX plan_subscriptions_id_once ON public.plan_subscriptions (id);
+-- A provider's subscription IDs are global.
+CREATE UNIQUE INDEX plan_subscriptions_id_once ON public.plan_subscriptions (provider, id);
 
 -- PL-4, PL-5: one row per Checkout an owner starts; the terms are stored so a retry repeats them.
 CREATE TABLE public.plan_checkouts (
@@ -95,7 +99,8 @@ CREATE UNIQUE INDEX plan_checkouts_session_once ON public.plan_checkouts (stripe
 -- PL-10: each invoice the worker saw; `paid` is terminal.
 CREATE TABLE public.plan_invoices (
   tenant_id uuid NOT NULL REFERENCES public.tenants(tenant_id),
-  id text NOT NULL CONSTRAINT plan_invoices_id CHECK (id ~ '^in_[A-Za-z0-9_]{1,250}$'),
+  provider text NOT NULL DEFAULT 'stripe' CONSTRAINT plan_invoices_provider CHECK (provider IN ('stripe', 'shopify')),
+  id text NOT NULL CONSTRAINT plan_invoices_id CHECK (char_length(id) BETWEEN 1 AND 300 AND (provider <> 'stripe' OR id ~ '^in_[A-Za-z0-9_]{1,250}$')),
   stripe_subscription_id text CONSTRAINT plan_invoices_subscription CHECK (stripe_subscription_id ~ '^sub_[A-Za-z0-9_]{1,250}$'),
   status text NOT NULL DEFAULT 'failed' CONSTRAINT plan_invoices_status CHECK (status IN ('paid', 'failed')),
   amount_due bigint NOT NULL DEFAULT 0 CONSTRAINT plan_invoices_amount CHECK (amount_due >= 0),
@@ -107,8 +112,8 @@ CREATE TABLE public.plan_invoices (
   PRIMARY KEY (tenant_id, id),
   CONSTRAINT plan_invoices_paid_state CHECK ((status = 'paid') = (paid_at IS NOT NULL))
 );
--- Stripe invoice IDs are global.
-CREATE UNIQUE INDEX plan_invoices_id_once ON public.plan_invoices (id);
+-- A provider's invoice IDs are global.
+CREATE UNIQUE INDEX plan_invoices_id_once ON public.plan_invoices (provider, id);
 
 DO $$
 DECLARE t text;

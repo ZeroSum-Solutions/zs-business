@@ -301,6 +301,28 @@ describe("founding (PL-11)", () => {
   });
 });
 
+describe("billing provider (PL-14)", () => {
+  it("a tenant another provider bills gets no Stripe Checkout or Portal, and Stripe events leave it alone", async () => {
+    const tenantId = await b.tenant();
+    await b.h.service((tx) => tx.query(
+      "INSERT INTO tenant_plans (tenant_id, billing_provider, created_at, updated_at) VALUES ($1,'shopify',$2,$2)", [tenantId, b.h.clock.now()]));
+    const session = await planSession(tenantId);
+    expect(await session.getBillingPlan()).toMatchObject({ billingProvider: "shopify", checkoutEnabled: false, portalEnabled: false });
+    await expect(session.startPlanCheckout({ plan: "studio", interval: "month" }, `plan-${randomUUID()}`))
+      .rejects.toMatchObject({ code: "Conflict", details: { reason: "billing_provider" } });
+    await expect(session.openBillingPortal()).rejects.toMatchObject({ code: "Conflict", details: { reason: "billing_provider" } });
+    const sub = subscription({ id: stripeId("sub"), customer: stripeId("cus"), tenantId, status: "active", at: b.h.clock.now() });
+    fake.subscriptions.set(sub.id, sub);
+    await b.h.service((tx) => tx.query(
+      `INSERT INTO plan_checkouts (tenant_id, id, plan, plan_interval, plan_price_id, success_url, cancel_url, created_by, created_at, updated_at)
+       VALUES ($1,$2,'studio','month','price_x','https://a.test/','https://a.test/',$2,$3,$3)`, [tenantId, randomUUID(), b.h.clock.now()]));
+    await b.deliver(subEvent("customer.subscription.updated", { ...sub, metadata: { zs_tenant: tenantId } }));
+    await b.h.service((tx) => tx.query("UPDATE tenant_plans SET stripe_customer_id=$2 WHERE tenant_id=$1", [tenantId, sub.customer]));
+    expect((await worker().runOnce()).outcomes).toEqual({ wait: 1 });
+    expect(await plan(tenantId)).toMatchObject({ billing_provider: "shopify", status: "none" });
+  });
+});
+
 describe("the Billing Portal (PL-6)", () => {
   it("opens for the stored customer and refuses before there is one", async () => {
     const tenantId = await b.tenant();

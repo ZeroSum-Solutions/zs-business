@@ -68,6 +68,10 @@ export const PLAN_LOOKUP_KEYS: Readonly<Record<string, PlanPrice>> = Object.free
 /** PL-13: every key STRIPE_PLAN_PRICES must map. */
 export const ALL_PLAN_PRICE_KEYS: readonly string[] = Object.freeze([...Object.keys(PLAN_LOOKUP_KEYS), PLAN_ADDON_LOOKUP_KEY].sort());
 
+/** PL-14: who bills a tenant's plan. Only Stripe is built; Shopify Billing is a follow-up. */
+export const billingProviderSchema = z.enum(["stripe", "shopify"]);
+export type BillingProvider = z.infer<typeof billingProviderSchema>;
+
 export const planStatusSchema = z.enum(["none", "trialing", "active", "past_due", "unpaid", "canceled", "incomplete", "incomplete_expired", "paused"]);
 export type PlanStatus = z.infer<typeof planStatusSchema>;
 /** PL-4: statuses in which the tenant holds its plan. */
@@ -133,6 +137,7 @@ const offerSchema = z.strictObject({
 
 /** PL-7: 200 body of GET /v1/billing/plan. */
 export const billingPlanSchema = z.strictObject({
+  billingProvider: billingProviderSchema,
   status: planStatusSchema,
   plan: hubPlanSchema.nullable(),
   interval: planIntervalSchema.nullable(),
