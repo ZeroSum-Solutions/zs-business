@@ -32,6 +32,11 @@ import {
   type CalendarConnectionList,
   type ConnectGoogleCalendarResponse,
   createTopUpRequestSchema,
+  PLAN_CHECKOUT_CREATE_ACTION,
+  startPlanCheckoutRequestSchema,
+  type BillingPlan,
+  type BillingPortalResponse,
+  type StartPlanCheckoutResponse,
   type CreateTopUpResponse,
   type TopUp,
   ValidationFailed,
@@ -182,6 +187,8 @@ import { getWallet } from "../wallet/index.js";
 import { listSourceRecords, SOURCE_SUBJECTS, sourceHandlers, subjectExists } from "../sources/index.js";
 import { getTopUpForCheckout, listTopUps, rememberCheckoutUrl, startTopUp, topUpHandlers, type TopUpDispatchConfig } from "../billing/topups.js";
 import type { StripeClient } from "../billing/stripe.js";
+import { getBillingPlan, getStoredCheckout, planHandlers, portalCustomer, rememberPlanCheckoutUrl, startPlanCheckout, type PlanDispatchConfig } from "../billing/plans.js";
+import type { StripePlansClient } from "../billing/plan-stripe.js";
 import { connectionHandlers } from "../connections/handlers.js";
 import type { ConnectorPort } from "../connections/port.js";
 import type { ConnectionLimiter } from "../connections/limits.js";
@@ -202,7 +209,11 @@ export interface EdgeDependencies {
   /** Signs public booking keys for the owner's page list (public-intake.md P-2, P-12). */
   readonly bookingKeys?: { readonly secret: string; readonly publicBaseUrl: string };
   /** Stripe Checkout for wallet top-ups (stripe.md S-1, S-2); absent means top-ups are off. */
-  readonly billing?: { readonly stripe: StripeClient };
+  readonly billing?: {
+    readonly stripe: StripeClient;
+    /** Hub plans (plans.md PL-4..PL-7); absent means plans are off. */
+    readonly plans?: StripePlansClient;
+  };
   /**
    * Google Calendar busy sync (google-calendar.md G-1..G-3); absent means connecting is off. The
    * API holds only the public key that seals refresh tokens; the calendar worker opens them.
@@ -278,7 +289,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
-  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
+  ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
 });
@@ -321,6 +332,7 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "approval.reject": "approve",
   // stripe.md S-1: only owners add money.
   "wallet.topup.create": "billing",
+  [PLAN_CHECKOUT_CREATE_ACTION]: "billing",
   // google-calendar.md G-1, G-5: a connected calendar decides what the public pages offer.
   "calendar.google.connect": "publish",
   "calendar.google.disconnect": "publish",
@@ -534,7 +546,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "calendar_connection" | "site" | "media_asset" | "media_variant" | "tenant_setup" | "booking_page";
+  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "plan_checkout" | "calendar_connection" | "site" | "media_asset" | "media_variant" | "tenant_setup" | "booking_page";
   const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
     keyedEnvelope(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
   /** The envelope for a key the server built itself, such as a reserved `inbox:` step key. */
@@ -1143,6 +1155,43 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
         now: new Date(readClock(deps.clock)),
         ...(signal ? { signal } : {}),
       });
+    },
+
+    /** plans.md PL-7: the plan, its limits and what can be bought. */
+    getBillingPlan: (): Promise<BillingPlan> => {
+      const plans = deps.billing?.plans;
+      return read("billing", (tx) => getBillingPlan(tx, tenantId, {
+        now: new Date(readClock(deps.clock)), trialDays: plans?.config.trialDays ?? 0, checkoutEnabled: plans !== undefined,
+      }));
+    },
+    /** PL-4, PL-5: a pending plan checkout and its Stripe Checkout URL. */
+    async startPlanCheckout(body: unknown, key: unknown, signal?: AbortSignal): Promise<StartPlanCheckoutResponse> {
+      const plans = deps.billing?.plans;
+      if (!plans) throw new NotFound();
+      const request = parseInput(startPlanCheckoutRequestSchema, body);
+      const { id, ...rest } = envelope(key, "plan_checkout");
+      // PL-4: the terms travel as dispatch config, never in the stored payload.
+      const terms: PlanDispatchConfig = { plans: { prices: plans.config.prices, returnUrl: plans.config.returnUrl, trialDays: plans.config.trialDays } };
+      return startPlanCheckout({
+        command: {
+          actionType: PLAN_CHECKOUT_CREATE_ACTION, ...rest,
+          payload: { checkoutId: id, plan: request.plan, interval: request.interval, extraConnections: request.extraConnections },
+        },
+        dispatch: directDispatch(deps, tenantId, actorId, memberAuthorize(tenantId, actorId), terms),
+        read: (checkoutId) => read("billing", (tx) => getStoredCheckout(tx, tenantId, checkoutId)),
+        remember: (checkoutId, url) => read("billing", (tx) => rememberPlanCheckoutUrl(tx, tenantId, checkoutId, url)),
+        stripe: plans,
+        tenantId,
+        now: new Date(readClock(deps.clock)),
+        ...(signal ? { signal } : {}),
+      });
+    },
+    /** PL-6: a Billing Portal session for the stored customer. */
+    async openBillingPortal(signal?: AbortSignal): Promise<BillingPortalResponse> {
+      const plans = deps.billing?.plans;
+      if (!plans) throw new NotFound();
+      const customerId = await read("billing", (tx) => portalCustomer(tx, tenantId));
+      return plans.createPortalSession({ customerId }, signal ? { signal } : {});
     },
 
     /** google-calendar.md G-5: the tenant's connections, never a token. */

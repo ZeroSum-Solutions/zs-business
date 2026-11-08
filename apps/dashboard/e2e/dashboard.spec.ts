@@ -143,17 +143,16 @@ test("moves a deal, and reloads when someone else changed it", async ({ page }, 
   await expect(page.getByRole("status").getByText("Moved to Delivered.")).toBeVisible();
 });
 
-test("cancels the plan in two clicks", async ({ page }, info) => {
+test("shows the demo plan, with billing off and the reason on screen (plans.md PL-7)", async ({ page }, info) => {
   await page.goto("/");
   await openAccountItem(page, "Plan");
-  await page.getByRole("button", { name: "Cancel plan" }).click();
-  await page.getByRole("button", { name: "Confirm cancel" }).click();
-  await expect(page.getByText(/Your plan is cancelled/)).toBeVisible();
-  await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
-  // The pressed button is gone, so focus moves to the outcome instead of falling to the page.
-  await expect(page.getByRole("status").filter({ hasText: "Your plan is cancelled" })).toBeFocused();
+  await expect(page.getByText("Studio plan")).toBeVisible();
+  await expect(page.getByText("Trial", { exact: true })).toBeVisible();
+  const manage = page.getByRole("button", { name: "Manage billing" });
+  await expect(manage).toBeDisabled();
+  await expect(manage).toHaveAccessibleDescription(/Billing is not available here yet/);
   await expect(page.getByRole("main")).not.toContainText(/refund|export/i);
-  await shot(page, "16-plan-cancelled", info.project.name);
+  await shot(page, "16-plan", info.project.name);
 });
 
 test("shows the pipeline setup states, and switches between several pipelines", async ({ page }) => {

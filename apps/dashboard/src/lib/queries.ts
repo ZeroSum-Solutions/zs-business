@@ -22,7 +22,7 @@ import {
   type SlotQuery,
   type ThreadSummary,
 } from "./api";
-import type { BookingRecord, BusinessProfile, ImageVariant, SlotsResponse, TemplatedKind } from "@zs/contracts";
+import type { BillingPlan, BookingRecord, BusinessProfile, ImageVariant, SlotsResponse, TemplatedKind } from "@zs/contracts";
 import { preferNewerDeals } from "./deal-merge";
 import { newerProfile } from "./business-profile";
 
@@ -716,11 +716,21 @@ export function usePendingManagedConnect(canManage: boolean) {
   });
 }
 
-export function usePlan() {
+/**
+ * plans.md PL-7. `poll` reads it again every few seconds while a finished Checkout's events land,
+ * and stops once the plan holds a subscription.
+ */
+export function usePlan(options: { poll?: boolean } = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled, queryKey: keys.plan, queryFn: () => api.getPlan() });
+  return useQuery({
+    enabled, queryKey: keys.plan, queryFn: ({ signal }) => api.getBillingPlan({ signal }),
+    ...(options.poll ? { refetchInterval: (query: { state: { data?: BillingPlan | undefined } }) =>
+      (query.state.data && PLAN_SETTLED.has(query.state.data.status) ? false : PLAN_POLL_MS) } : {}),
+  });
 }
+const PLAN_SETTLED: ReadonlySet<string> = new Set(["trialing", "active", "past_due"]);
+export const PLAN_POLL_MS = 3_000;
 
 /** How often the edits are read again while the worker has one to finish. */
 export const IMAGE_POLL_MS = 2_000;

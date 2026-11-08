@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createGoogleClient, createHttpConnectorPort, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
+import { createGoogleClient, createHttpConnectorPort, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, createStripePlansClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
@@ -90,6 +90,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
     }),
     ...(env.stripe === null ? {} : {
       stripe: createStripeClient({ config: env.stripe.client }),
+      ...(env.plans === null ? {} : { stripePlans: createStripePlansClient({ stripe: env.stripe.client, plans: env.plans }) }),
       stripeWebhook: {
         ...env.stripe.webhook,
         report: ({ id, type, outcome }) => {

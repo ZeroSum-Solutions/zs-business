@@ -446,18 +446,13 @@ test("labels sample areas and turns off writes that would not reach the API", as
   await expect(header("Connections").getByTestId("sample-badge")).toHaveCount(0);
   await expect(page.getByTestId("gcal-card").getByTestId("sample-badge")).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Other accounts" })).toHaveCount(0);
-  // Settings holds the live business profile (business-profile.md); only Plan is still a sample.
+  // Settings holds the live business profile (business-profile.md), and the plan is live (plans.md PL-7).
   await page.goto("/account/settings");
   await expect(header("Settings").getByTestId("sample-badge")).toHaveCount(0);
-  // Plan comes last: the checks below run on it.
   await page.goto("/account/plan");
-  await expect(header("Plan").getByTestId("sample-badge")).toBeVisible();
-
-  // Plan: no cancel that only changes the sample, and the reason is on screen.
-  const cancel = page.getByRole("button", { name: "Cancel plan" });
-  await expect(cancel).toBeDisabled();
-  await expect(cancel).toHaveAccessibleDescription(/Not available yet/);
-  await expect(page.getByText(/^Not available yet/)).toBeVisible();
+  await expect(header("Plan").getByTestId("sample-badge")).toHaveCount(0);
+  // A comped tenant sees the picker; one on a plan sees Manage billing.
+  await expect(page.getByRole("button", { name: /^(Choose Studio|Opening Stripe…|Manage billing)$/ })).toBeVisible();
 
   // Agents reads the follow-up agent from the API (agents.md G-11): its state, and that its
   // drafts wait for an owner's approval.

@@ -63,10 +63,17 @@ function connectionsRouteAllowed(method: string, rest: readonly string[]): boole
   return method === "POST" && rest.length === 2 && rest[1] === "disconnect";
 }
 
+/** plans.md PL-4, PL-6, PL-7: read the plan, start a plan Checkout, open the Portal. Nothing else under billing. */
+function billingRouteAllowed(method: string, rest: readonly string[]): boolean {
+  const route = rest.join("/");
+  return (method === "GET" && route === "plan") || (method === "POST" && (route === "plan/checkout" || route === "portal"));
+}
+
 function routeAllowed(method: string, path: readonly string[]): boolean {
   const [version, area, ...rest] = path;
   if (version !== "v1" || !area || !path.every((segment) => SEGMENT.test(segment))) return false;
   if (area === "connections") return connectionsRouteAllowed(method, rest);
+  if (area === "billing") return billingRouteAllowed(method, rest);
   return rest.length === 0 ? SINGLE.has(area) : AREAS.has(area);
 }
 

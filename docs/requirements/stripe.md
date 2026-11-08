@@ -1,7 +1,15 @@
 # M5: Stripe wallet top-ups
 
-Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 4 (audit B3-02: S-2, S-7). Code follows this file;
-a change to a numbered rule needs a new revision of this file first.
+Status: draft contract for M5, provider 2 of 5 (2026-10-20), revision 5 (2026-11-07: S-4 and S-9
+carry Hub plan subscriptions, `plans.md`). Revision 4: audit B3-02, S-2, S-7. Code follows this
+file; a change to a numbered rule needs a new revision of this file first.
+
+Revision 5: paid Hub plans (`plans.md` PL-1..PL-13) use this file's Stripe account, webhook
+endpoint, event inbox and billing worker. S-4 now hands plan events to PL-10, and a
+`checkout.session.completed` in `subscription` mode is a plan checkout, not `not_ours`. S-9
+gains the plan variables of PL-13. No top-up rule changed. Plans name a billing provider per
+tenant and subscription (`plans.md` PL-14): Shopify merchants must pay app fees through Shopify
+Billing (a follow-up), so this file's plan rules apply only to tenants billed by `stripe`.
 
 Scope: owners add money to the M3d prepaid wallet (`delivery.md` D-4) through Stripe Checkout,
 and Stripe's signed events move the wallet: a paid top-up credits it once, a refund or a
@@ -78,7 +86,9 @@ means parallel passes never hold one top-up's or wallet's lock while waiting on 
 must exist in that tenant), or through the stored `stripe_payment_intent_id` for charge and
 dispute events. An event whose top-up is not known yet (a refund that arrives before its
 payment) waits with backoff and is retried, up to `maxAttempts`, then ends `orphaned` for an
-operator. Unknown event types end `ignored`.
+operator. Unknown event types end `ignored`. Plan events (`plans.md` PL-10: a Checkout Session in
+`subscription` mode, `customer.subscription.*`, `invoice.paid`, `invoice.payment_failed`) are
+applied by the same worker under the same claim, savepoint, backoff and outcome rules.
 
 **S-5. Paid: credit once.** `checkout.session.completed` with `payment_status` `paid`, or
 `checkout.session.async_payment_succeeded`, for a `pending` top-up: the session's `amount_total`
@@ -123,7 +133,8 @@ budget over 20 s, since Vercel stops its function at 30 s (the Node loop may run
 `STRIPE_BASE_URL`; none of them is set on the workers project. Billing function (workers
 project only): `BILLING_WORKER=on`, `CRON_SECRET`,
 `BILLING_DATABASE_URL` (a login that may `SET ROLE service_role`). In Stripe: a webhook
-endpoint at `https://<api host>/webhooks/stripe` for the events listed above.
+endpoint at `https://<api host>/webhooks/stripe` for the events listed above and the plan events of
+`plans.md` PL-9. Plan variables: `plans.md` PL-13.
 
 ## Known limits (revision 3)
 

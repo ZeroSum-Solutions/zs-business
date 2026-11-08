@@ -1,6 +1,6 @@
 /**
  * Read models for areas that have no HTTP route yet (wallet and usage, the connections
- * checklist, connections, plan). TODO(api): move each to a route as it is built.
+ * checklist, connections). The plan moved to `BillingApi` (plans.md). TODO(api): move each to a route as it is built.
  * Inbox and Home results moved to `InboxApi` and `HomeApi` (inbox-home.md), Agents to
  * `AgentsApi` (agents.md), and the site to `SitesApi`.
  */
@@ -43,22 +43,8 @@ export interface Connection {
   detail: string;
 }
 
-export interface Plan {
-  name: string;
-  currency: string;
-  pricePerMonth: number;
-  renewsOn: string;
-  status: "active" | "cancelled";
-  endsOn: string | null;
-  includes: string[];
-  caps: { label: string; value: string }[];
-}
-
 export interface WorkspaceApi {
   getUsage(): Promise<Usage>;
   getChecklist(): Promise<ChecklistItem[]>;
   listConnections(): Promise<Connection[]>;
-  getPlan(): Promise<Plan>;
-  /** Ends the plan at the end of the paid period. */
-  cancelPlan(): Promise<Plan>;
 }

@@ -77,7 +77,7 @@ export function checkoutSessionForm(request: CheckoutSessionRequest): string {
   ]);
 }
 
-async function readLimited(response: Response): Promise<unknown> {
+export async function readLimited(response: Response): Promise<unknown> {
   if (!response.body) return null;
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
