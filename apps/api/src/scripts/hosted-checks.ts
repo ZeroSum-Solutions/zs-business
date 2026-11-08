@@ -18,7 +18,7 @@
 // Prints one JSON report and exits 1 if any check fails.
 import { randomUUID } from "node:crypto";
 import process from "node:process";
-import { assertRuntimeLogin, createScopedDatabase } from "@zs/db";
+import { asService, assertRuntimeLogin, createScopedDatabase } from "@zs/db";
 import { readMigrationTables, runDataApiProbes, tablesToProbe, type DataApiTable } from "../data-api-probe.js";
 import { signDevToken } from "../dev-token.js";
 import { temporaryMember } from "../hosted-check-member.js";
@@ -228,11 +228,15 @@ try {
 
   // A failed cron run leaves an open row here (cron-alerts.ts); a table the migration has not made yet is not a failure.
   await check("no cron job has an open failure alert", async () => {
-    const table = await service.query<{ present: string | null }>("SELECT to_regclass('public.cron_alerts') AS present");
-    if (table.rows[0]?.present == null) return { ok: true, detail: "cron_alerts is not migrated yet" };
-    const open = await service.query<{ job: string; failure_count: number; last_failed_at: Date; last_error: string }>(
-      "SELECT job, failure_count, last_failed_at, last_error FROM public.cron_alerts WHERE resolved_at IS NULL ORDER BY last_failed_at DESC");
-    return { ok: open.rows.length === 0, detail: open.rows.map((row) => ({ ...row, last_error: redactSecrets(row.last_error) })) };
+    // The table grants only `service_role` (the pool's login holds no table grant), so the read runs through asService.
+    const open = await asService(service, async (tx) => {
+      const table = await tx.query<{ present: string | null }>("SELECT to_regclass('public.cron_alerts') AS present");
+      if (table.rows[0]?.present == null) return null;
+      return (await tx.query<{ job: string; failure_count: number; last_failed_at: Date; last_error: string }>(
+        "SELECT job, failure_count, last_failed_at, last_error FROM public.cron_alerts WHERE resolved_at IS NULL ORDER BY last_failed_at DESC")).rows;
+    });
+    if (open === null) return { ok: true, detail: "cron_alerts is not migrated yet" };
+    return { ok: open.length === 0, detail: open.map((row) => ({ ...row, last_error: redactSecrets(row.last_error) })) };
   });
 
   // --- HTTP API -------------------------------------------------------------------------

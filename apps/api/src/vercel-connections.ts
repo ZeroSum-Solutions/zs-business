@@ -12,7 +12,7 @@ import { connectionsInternalRoutes } from "./connections/internal.js";
 import { createConnectionsRunner } from "./connections/runner.js";
 import { startConnectionsWorker } from "./connections/start.js";
 import { shopifyWebhookRoutes } from "./connections/shopify-webhook.js";
-import { createCronAlertsForEnv } from "./cron-alerts.js";
+import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { cronRoutes } from "./delivery/cron.js";
 import { responseHeaders } from "./response-headers.js";
 
@@ -30,7 +30,7 @@ app.route("/", cronRoutes({
   name: "Connections",
   cronSecret: env.cronSecret,
   runner: worker === null ? null : createConnectionsRunner(worker),
-  ...(env.worker === null ? {} : { alerts: createCronAlertsForEnv(env.worker, clock, process.env) }),
+  ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.pool, clock, process.env) }),
   onError: (error) => console.error("Connections run failed", error),
 }));
 app.route("/", connectionsInternalRoutes({

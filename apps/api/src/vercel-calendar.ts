@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { getRequestListener } from "@hono/node-server";
-import { createCronAlertsForEnv } from "./cron-alerts.js";
+import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { assertCalendarCronFits, parseCalendarEnv } from "./calendar/config.js";
 import { startCalendarRunner } from "./calendar/start.js";
 import { cronRoutes } from "./delivery/cron.js";
@@ -13,7 +13,8 @@ import { cronRoutes } from "./delivery/cron.js";
 const env = parseCalendarEnv(process.env);
 assertCalendarCronFits(env.runner);
 const clock = { now: () => new Date() };
-const runner = env.runner === null ? null : startCalendarRunner(env.runner, { clock, generateId: randomUUID }).runner;
+const started = env.runner === null ? null : startCalendarRunner(env.runner, { clock, generateId: randomUUID });
+const runner = started?.runner ?? null;
 
 export default getRequestListener(cronRoutes({
   path: "/cron/calendar",
@@ -21,6 +22,6 @@ export default getRequestListener(cronRoutes({
   name: "Calendar",
   cronSecret: env.cronSecret,
   runner,
-  ...(env.runner === null ? {} : { alerts: createCronAlertsForEnv(env.runner, clock, process.env) }),
+  ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.pool, clock, process.env) }),
   onError: (error) => console.error("Calendar run failed", error),
 }).fetch);

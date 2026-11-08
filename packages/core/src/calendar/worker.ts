@@ -111,12 +111,14 @@ export interface CalendarRunCounts {
   pushed: number;
   pushRetries: number;
   pushesFailed: number;
+  /** Steps or per-item runs that threw and were swallowed so the others could continue (each is also a `step_failed` report). */
+  stepsFailed: number;
 }
 
 const emptyCounts = (): CalendarRunCounts => ({
   notifications: 0, markedDue: 0, disconnected: 0, disconnectRetries: 0, synced: 0, syncFailed: 0, reauthorized: 0,
   lostLeases: 0, deadlineStops: 0, channelsOpened: 0, channelsStopped: 0, channelFailures: 0, pushesQueued: 0, pushed: 0,
-  pushRetries: 0, pushesFailed: 0,
+  pushRetries: 0, pushesFailed: 0, stepsFailed: 0,
 });
 
 /** The B-21 lock, the same expression booking.create's checkBookingSlot takes. */
@@ -335,6 +337,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       try {
         await disconnectOne(row, counts, tokens, deadline);
       } catch (error) {
+        counts.stepsFailed += 1;
         report({ kind: "step_failed", step: "disconnects", tenantId: row.tenant_id, connectionId: row.id, error: errorMessage(error) });
       }
     }
@@ -470,8 +473,10 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
           report({ kind: "deadline_reached", tenantId: row.tenant_id, connectionId: row.id });
           break;
         }
-        await syncFailed(row, lease.until, error, counts).catch((failure: unknown) =>
-          report({ kind: "step_failed", step: "sync", tenantId: row.tenant_id, connectionId: row.id, error: errorMessage(failure) }));
+        await syncFailed(row, lease.until, error, counts).catch((failure: unknown) => {
+          counts.stepsFailed += 1;
+          report({ kind: "step_failed", step: "sync", tenantId: row.tenant_id, connectionId: row.id, error: errorMessage(failure) });
+        });
       }
     }
     return counts;
@@ -725,6 +730,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       try {
         await pushOne(push, counts, tokens, deadline);
       } catch (error) {
+        counts.stepsFailed += 1;
         report({ kind: "step_failed", step: "pushes", tenantId: push.tenant_id, connectionId: push.connection_id, error: errorMessage(error) });
       }
     }
@@ -841,6 +847,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
       try {
         await work();
       } catch (error) {
+        counts.stepsFailed += 1;
         report({ kind: "step_failed", step, error: errorMessage(error) });
       }
     }

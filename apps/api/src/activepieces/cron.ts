@@ -4,7 +4,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { apiErrorBody } from "@zs/core";
-import type { CronAlerts } from "../cron-alerts.js";
+import { startCronRun, type CronAlerts } from "../cron-alerts.js";
+import { CronRunFailed, runFailure } from "../cron-outcome.js";
 import { responseHeaders } from "../response-headers.js";
 import type { ActivepiecesRunner } from "./runner.js";
 
@@ -28,16 +29,20 @@ export function activepiecesCronRoutes(config: {
     if (!timingSafeEqual(digest(given), digest(`Bearer ${config.cronSecret}`)))
       return c.json(apiErrorBody("Unauthorized", "Invalid cron credentials"), 401);
     if (!config.runner) return c.json({ ran: false, reason: "ACTIVEPIECES_WEBHOOK_WORKER is off" }, 200);
+    const run = startCronRun({ now: () => new Date() });
     let result: object;
     try {
       result = await config.runner.run();
     } catch (error) {
       // Leases and the ingest marks make a failed run safe to repeat on the next schedule.
       config.onError?.(error);
-      await config.alerts?.failed("activepieces", error);
+      await config.alerts?.failed("activepieces", error, run);
       return c.json(apiErrorBody("Unavailable", "Activepieces webhook run failed"), 503);
     }
-    await config.alerts?.succeeded("activepieces");
+    // A run whose deliveries all failed is a failure too, though it answers 200 (cron-outcome.ts).
+    const failure = runFailure("activepieces", result);
+    if (failure === null) await config.alerts?.succeeded("activepieces", run);
+    else await config.alerts?.failed("activepieces", new CronRunFailed("activepieces", failure), run);
     return c.json({ ran: true, ...result }, 200);
   });
   app.notFound((c) => c.json(apiErrorBody("NotFound", "Route not found"), 404));

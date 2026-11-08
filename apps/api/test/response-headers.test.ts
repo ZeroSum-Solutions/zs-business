@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp, createHs256Verifier } from "../src/app.js";
+import { connectionsInternalRoutes } from "../src/connections/internal.js";
+import { shopifyWebhookRoutes } from "../src/connections/shopify-webhook.js";
 import { isPrivateApiPath, responseHeaders } from "../src/response-headers.js";
 import { call, clock, createApiHarness, ORIGIN, SECRET, type ApiHarness } from "./helpers.js";
 
@@ -104,6 +106,22 @@ describe("responseHeaders without a database", () => {
   });
 });
 
+describe("the connections function routes carry the headers themselves", () => {
+  it("connectionsInternalRoutes and shopifyWebhookRoutes need no outer middleware", async () => {
+    const internal = connectionsInternalRoutes({ worker: null, env: "preview", secrets: { current: "" }, clock });
+    const webhook = shopifyWebhookRoutes({ native: null });
+    const checks = [
+      await internal.request("/internal/connections/link", { method: "POST" }),
+      await internal.request("/internal/not-here"),
+      await webhook.request("/webhooks/shopify", { method: "POST" }),
+    ];
+    for (const reply of checks) {
+      expect(reply.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(reply.headers.get("Cache-Control")).toBe("no-store");
+    }
+  });
+});
+
 describe("responseHeaders rules", () => {
   const app = new Hono();
   app.use("*", responseHeaders);
@@ -112,11 +130,36 @@ describe("responseHeaders rules", () => {
   app.get("/mcp", (c) => c.json({ ok: true }));
   app.get("/public/page", (c) => c.json({ ok: true }, 200, { "Cache-Control": "public, max-age=300" }));
 
-  it("fills no-store only where the route set no Cache-Control", async () => {
+  app.get("/v1/loud", (c) => c.json({ ok: true }, 200, { "Cache-Control": "private, no-store" }));
+  app.get("/integrations/activepieces/v1/flows", (c) => c.json({ ok: true }));
+  app.post("/webhooks/shopify", (c) => c.json({ ok: true }));
+  app.get("/oauth/google/callback", (c) => c.json({ ok: true }));
+  app.get("/oauth/google/error", (c) => c.json({ ok: true }, 400, { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }));
+  app.get("/oauth/boom", () => { throw new Error("callback failed"); });
+  app.onError((_error, c) => c.json({ error: "x" }, 500));
+
+  it("forces no-store on a private path, unless the route already said no-store (fail closed)", async () => {
     expect((await app.request("/v1/plain")).headers.get("Cache-Control")).toBe("no-store");
-    expect((await app.request("/v1/own")).headers.get("Cache-Control")).toBe("private, max-age=60");
+    expect((await app.request("/v1/own")).headers.get("Cache-Control")).toBe("no-store");
+    expect((await app.request("/v1/loud")).headers.get("Cache-Control")).toBe("private, no-store");
     expect((await app.request("/mcp")).headers.get("Cache-Control")).toBe("no-store");
     expect((await app.request("/public/page")).headers.get("Cache-Control")).toBe("public, max-age=300");
+  });
+
+  it("covers the Activepieces integration API and the webhook receivers", async () => {
+    expect((await app.request("/integrations/activepieces/v1/flows")).headers.get("Cache-Control")).toBe("no-store");
+    const hook = await app.request("/webhooks/shopify", { method: "POST" });
+    expect(hook.headers.get("Cache-Control")).toBe("no-store");
+    expect(hook.headers.get("X-Content-Type-Options")).toBe("nosniff");
+  });
+
+  it("keeps the callback headers on /oauth answers, errors included, and fills them when a route left them out", async () => {
+    for (const path of ["/oauth/google/callback", "/oauth/google/error", "/oauth/boom"]) {
+      const reply = await app.request(path);
+      expect(reply.headers.get("Cache-Control"), path).toBe("no-store");
+      expect(reply.headers.get("Referrer-Policy"), path).toBe("no-referrer");
+      expect(reply.headers.get("X-Content-Type-Options"), path).toBe("nosniff");
+    }
   });
 
   it("matches whole path segments", () => {
@@ -124,6 +167,10 @@ describe("responseHeaders rules", () => {
     expect(isPrivateApiPath("/v1/crm/contacts")).toBe(true);
     expect(isPrivateApiPath("/mcp")).toBe(true);
     expect(isPrivateApiPath("/cron/billing")).toBe(true);
+    expect(isPrivateApiPath("/webhooks/shopify")).toBe(true);
+    expect(isPrivateApiPath("/integrations/activepieces/v1/x")).toBe(true);
+    expect(isPrivateApiPath("/integrations/activepieces")).toBe(false);
+    expect(isPrivateApiPath("/webhooksx")).toBe(false);
     expect(isPrivateApiPath("/v10/x")).toBe(false);
     expect(isPrivateApiPath("/mcpx")).toBe(false);
     expect(isPrivateApiPath("/public/v1/book")).toBe(false);

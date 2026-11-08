@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { asService } from "@zs/db";
 import { createTestDatabase, type TestDatabase } from "@zs/db/testing";
 import { createOpsAlertMailer } from "../src/cron-alert-mail.js";
-import { createCronAlerts, listOpenCronAlerts, type ServiceRun } from "../src/cron-alerts.js";
+import { createCronAlerts, listOpenCronAlerts, startCronRun, type ServiceRun } from "../src/cron-alerts.js";
 import { cronRoutes } from "../src/delivery/cron.js";
 
 const CRON_SECRET = ["test", "cron", "c".repeat(32)].join("-");
@@ -15,9 +15,9 @@ const ENV = {
   RESEND_FROM: "ZS Hub <alerts@hub.example>",
 };
 let database: TestDatabase;
-let now = Date.parse("2026-11-08T10:00:00.000Z");
-const clock = { now: () => new Date(now) };
-const minutes = (count: number) => { now += count * 60_000; };
+const clock = { now: () => new Date("2026-11-08T10:00:00.000Z") };
+const realClock = { now: () => new Date() };
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const service: ServiceRun = (work) => asService(database.pool, work);
 
 beforeAll(async () => {
@@ -27,7 +27,6 @@ afterAll(async () => {
   await database?.close();
 });
 beforeEach(async () => {
-  now = Date.parse("2026-11-08T10:00:00.000Z");
   await database.pool.query("DELETE FROM cron_alerts");
 });
 
@@ -48,17 +47,17 @@ describe("the operator email on a new or reopened alert", () => {
     expect(url).toBe("https://api.resend.com/emails");
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Bearer ${ENV.RESEND_API_KEY}`);
-    expect(headers["Idempotency-Key"]).toBe("cron-alert:billing:2026-11-08T10:00:00.000Z");
-    expect(bodyOf(sent)).toMatchObject({ from: ENV.RESEND_FROM, to: ["ops@example.com"], subject: '[ZS Hub] Cron job "billing" is failing' });
+    expect(headers["Idempotency-Key"]).toMatch(/^cron-alert:billing:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+[+-]\d{2}$/);
+    expect(bodyOf(sent)).toMatchObject({ from: ENV.RESEND_FROM, to: ["ops@example.com"], subject: '[ZS Hub unknown environment] Cron job "billing" is failing' });
     expect(bodyOf(sent).text).toContain("Error: pool exhausted");
   });
 
   it("sends nothing on a repeat failure", async () => {
     const { sent, a } = wired(ENV);
     await a.failed("billing", new Error("x"));
-    minutes(5);
+    await sleep(10);
     await a.failed("billing", new Error("x"));
-    minutes(5);
+    await sleep(10);
     await a.failed("billing", new Error("x"));
     expect(sent).toHaveBeenCalledTimes(1);
   });
@@ -66,9 +65,9 @@ describe("the operator email on a new or reopened alert", () => {
   it("sends again when an alert reopens after a good run, and per job", async () => {
     const { sent, a } = wired(ENV);
     await a.failed("billing", new Error("x"));
-    minutes(5);
-    await a.succeeded("billing");
-    minutes(5);
+    await sleep(10);
+    await a.succeeded("billing", startCronRun(realClock));
+    await sleep(10);
     await a.failed("billing", new Error("again"));
     expect(sent).toHaveBeenCalledTimes(2);
     expect(bodyOf(sent, 1).text).toContain("Error: again");
@@ -133,5 +132,48 @@ describe("the operator email on a new or reopened alert", () => {
     });
     await a.failed("billing", new Error("x"));
     expect(sent).not.toHaveBeenCalled();
+  });
+});
+
+describe("the operator email names where it comes from", () => {
+  const message = { job: "billing", openedAt: "2026-11-08 10:00:00.123456+00", failureCount: 1, error: "Error: x" };
+
+  it("puts the Vercel environment and project in the subject and body, not a fixed 'production'", async () => {
+    const sent = vi.fn(async () => new Response("{}", { status: 200 }));
+    const preview = createOpsAlertMailer({
+      env: { ...ENV, VERCEL_ENV: "preview", VERCEL_PROJECT_PRODUCTION_URL: "zs-business-workers.vercel.app" },
+      fetch: sent as never, report: () => undefined,
+    });
+    await expect(preview(message)).resolves.toBe(true);
+    const body = bodyOf(sent);
+    expect(body.subject).toBe('[ZS Hub preview] Cron job "billing" is failing');
+    expect(body.text).toContain("Environment: preview. Project: zs-business-workers.vercel.app.");
+    expect(body.text).toContain("run in the preview database");
+    expect(body.text).not.toContain("production");
+  });
+
+  it("says so when the platform gives no environment", async () => {
+    const sent = vi.fn(async () => new Response("{}", { status: 200 }));
+    await createOpsAlertMailer({ env: ENV, fetch: sent as never, report: () => undefined })(message);
+    expect(bodyOf(sent).text).toContain("Environment: unknown environment. Project: unknown project.");
+  });
+
+  it("answers false when it skipped, was refused or failed, and true only for a 2xx", async () => {
+    const log = vi.fn();
+    expect(await createOpsAlertMailer({ env: { ...ENV, OPS_ALERT_EMAIL: undefined }, report: log })(message)).toBe(false);
+    expect(await createOpsAlertMailer({ env: ENV, fetch: (async () => new Response("{}", { status: 500 })) as never, report: log })(message)).toBe(false);
+    expect(await createOpsAlertMailer({ env: ENV, fetch: (async () => { throw new Error("down"); }) as never, report: log })(message)).toBe(false);
+    expect(await createOpsAlertMailer({ env: ENV, fetch: (async () => new Response("{}", { status: 202 })) as never, report: log })(message)).toBe(true);
+  });
+
+  it("cuts the send at the time it is given", async () => {
+    let signal: AbortSignal | undefined;
+    const fetchStub = (async (_url: string, init: RequestInit) => {
+      signal = init.signal as AbortSignal;
+      return new Response("{}", { status: 200 });
+    }) as never;
+    await createOpsAlertMailer({ env: ENV, fetch: fetchStub, report: () => undefined })(message, { timeoutMs: 50 });
+    await sleep(80);
+    expect(signal?.aborted).toBe(true);
   });
 });

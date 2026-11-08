@@ -13,7 +13,8 @@ export interface CronAlertMessage {
   /** Already redacted by describeCronError. */
   readonly error: string;
 }
-export type CronAlertNotifier = (message: CronAlertMessage) => Promise<void>;
+/** Resolves true only when the provider accepted the mail (a 2xx); false when it was skipped, refused or failed. */
+export type CronAlertNotifier = (message: CronAlertMessage, options?: { readonly timeoutMs?: number }) => Promise<boolean>;
 
 type Env = Readonly<Record<string, string | undefined>>;
 type Fetch = (input: string, init: RequestInit) => Promise<Response>;
@@ -56,10 +57,20 @@ export function createOpsAlertMailer(deps: {
     }
   }
 
-  return async (message) => {
+  /** Where this alert comes from: the Vercel environment and the project's host, never a guess at "production". */
+  function origin(): { readonly environment: string; readonly project: string } {
+    const clean = (value: string | undefined) => (value ?? "").replace(/[^A-Za-z0-9.:_-]/g, "").slice(0, 80);
+    return {
+      environment: clean(deps.env.VERCEL_ENV) || "unknown environment",
+      project: clean(deps.env.VERCEL_PROJECT_PRODUCTION_URL) || clean(deps.env.VERCEL_URL) || "unknown project",
+    };
+  }
+
+  return async (message, options) => {
     try {
       const mail = configured();
-      if (mail === "off") return;
+      if (mail === "off") return false;
+      const where = origin();
       const response = await doFetch(mail.endpoint, {
         method: "POST",
         headers: {
@@ -71,25 +82,31 @@ export function createOpsAlertMailer(deps: {
         body: JSON.stringify({
           from: mail.from,
           to: [mail.to],
-          subject: `[ZS Hub] Cron job "${message.job}" is failing`,
+          subject: `[ZS Hub ${where.environment}] Cron job "${message.job}" is failing`,
           text: [
             `The scheduled job "${message.job}" failed at ${message.openedAt}.`,
+            `Environment: ${where.environment}. Project: ${where.project}.`,
             "",
             `Error: ${message.error}`,
             "",
-            "You get this one email when an alert opens, and again only if it is fixed and then fails again.",
-            "To see every open alert, run in the production database:",
+            "You get this email when an alert opens (again later only if the send did not go through), and again only if it is fixed and then fails again.",
+            `To see every open alert, run in the ${where.environment} database:`,
             "  SELECT job, failure_count, last_failed_at, last_error FROM cron_alerts WHERE resolved_at IS NULL;",
             "The alert closes by itself on the next good run.",
           ].join("\n"),
         }),
         redirect: "manual",
-        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+        signal: AbortSignal.timeout(Math.max(1, Math.floor(Math.min(SEND_TIMEOUT_MS, options?.timeoutMs ?? SEND_TIMEOUT_MS)))),
       });
       await response.body?.cancel().catch(() => undefined);
-      if (response.status < 200 || response.status >= 300) report(`Cron alert email for ${message.job} refused: HTTP ${response.status}`);
+      if (response.status < 200 || response.status >= 300) {
+        report(`Cron alert email for ${message.job} refused: HTTP ${response.status}`);
+        return false;
+      }
+      return true;
     } catch (error) {
       report(`Cron alert email for ${message.job} not sent`, error instanceof Error ? error.message : error);
+      return false;
     }
   };
 }
