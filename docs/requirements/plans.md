@@ -330,8 +330,10 @@ A link does not change a comped tenant: it stays comped until a Shopify contract
 Creating a top-up and the Stripe worker's checkout, subscription and invoice events take the
 same plan lock before they read the provider, so a link and a new Stripe charge never both
 commit. The lock key is the tenant ID in Postgres's own UUID spelling, so one tenant written in
-upper or lower case takes one lock; for a tenant another provider bills the worker ends `not_ours` before any write or
-Stripe call, and a plan checkout or top-up start re-reads the provider before each Stripe call.
+upper or lower case takes one lock. The worker resolves the tenant from its stored Stripe rows
+whatever its provider, and for a tenant another provider bills it ends `not_ours` (never `wait`,
+so nothing is retried) before any write or Stripe call; it only marks a pending plan checkout
+`expired` or `completed`, so the row never looks open, and a plan checkout or top-up start re-reads the provider before each Stripe call.
 `tenant_plans` gains `shopify_shop_id`, `shopify_shop_domain`, `shopify_synced_at`,
 `shopify_sync_failures` and `shopify_next_sync_at` (PL-18); a Shopify row in `plan_subscriptions`
 must have a shop GID as its ID. The PL-10 derivation picks the effective subscription only among
@@ -353,29 +355,36 @@ transaction under the tenant's plan lock, it re-reads the link (a tenant relinke
 synced by another run since it was picked is skipped and the answer dropped), stores the answer as
 that shop's row in `plan_subscriptions` (provider `shopify`, ID the shop GID), and derives the
 record with the PL-10 derivation (the same code). With a deadline, a call starts only when at
-least two seconds remain after the 500 ms pause; the call's timeout and the transaction's lock
-and statement waits are cut to the time left, keeping one second for the commit. Every stored answer, `null` included, sets `shopify_synced_at` to the
+least two seconds remain after the 500 ms pause (the pause follows a call, never a skip); the
+call's timeout and the transaction's lock and statement waits are cut to the time left, keeping
+one second for the commit, and never raised above the service defaults. With under two seconds
+left the pass reads nothing. Every stored answer, `null` included, sets `shopify_synced_at` to the
 clock and clears `shopify_sync_failures` and `shopify_next_sync_at`.
 - A contract whose `trialEndsAt` is after the clock is `trialing`; any other contract is
   `active`. `trial_end` is `trialEndsAt`, `current_period_end` is the end of
   `currentBillingCycle`, `cancel_at_period_end` is `cancelAtEndOfCycle`, and
   `extra_connections` is 0.
 - The plan is the first item whose handle is in the PL-16 map, and only together with a known
-  billing period. Otherwise a row that is not ended keeps the plan and interval it had; a row that
-  never had both, or a new contract after an ended one, ends `mismatch` and gives no plan (it
-  still holds the status).
+  billing period. Otherwise the outcome is `mismatch` (reported), and a row that is not ended keeps the plan and interval it had; a row that
+  never had both ends `mismatch` and gives no plan (it still holds the status). A new contract
+  after an ended row that names no known plan also ends `mismatch` but writes no row: the ended
+  row stays, so the tenant stays read-only until a known plan is seen (overwriting it would
+  leave the tenant comped, with no limits).
 - `null` (no contract) turns a stored row that is not ended into `canceled`, with `ended_at`
   and `status_since` the clock. With no stored row, nothing is written. A contract seen after
   the row ended is a new one: `started_at` is the clock.
 - The pass never takes an error for `null`: an unreachable Partner API, a GraphQL error, an
-  `errors` field that is not a list, a malformed answer or an answer for another shop writes
+  `errors` field that is not a list, a malformed answer, an answer over 64 KiB or an answer for another shop writes
   nothing to the plan rows and is reported. It adds one to `shopify_sync_failures` and sets
   `shopify_next_sync_at` to the clock plus one minute doubled per failure, at most one hour, so
   failing shops never starve the others; that write applies only while the link and
   `shopify_synced_at` are still the ones picked, so an older failure never undoes a newer sync.
   Throttling (HTTP 429, or a GraphQL error "Too many requests" or code 429 in a 200 answer), 5xx,
   any other non-2xx status (a bad token, an unknown API version or a redirect: the same for every shop),
-  an unreachable Partner API, an answer cut off mid-body and a database error also end the pass.
+  an unreachable Partner API, an answer cut off mid-body and a database error also end the pass,
+  except a lock or statement wait that runs out on one tenant (its plan lock held elsewhere): that
+  tenant is counted as an error and backed off, and the pass goes on while time is left. The
+  failure write takes no plan lock, so a stuck lock never keeps one tenant first in every pass.
   Reported text never carries the Partner token: upstream messages are cut to 200 characters with
   token-like strings removed. The Shopify pass starts only if the Stripe
   passes left time before the runner's deadline; the run summary carries it as `shopify`.

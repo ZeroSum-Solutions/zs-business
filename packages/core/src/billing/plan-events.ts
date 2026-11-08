@@ -105,15 +105,15 @@ export function createPlanEvents(deps: PlanEventDeps) {
     return found.rowCount === 1 ? tenantId : null;
   }
   async function storedTenant(tx: Transaction, subscriptionId: string | null, customerId: string | null): Promise<string | null> {
+    // Resolved whatever the tenant's provider: the caller then ends `not_ours` under the plan lock
+    // for a tenant another provider bills (PL-14, PL-17), instead of `wait` and retries.
     if (subscriptionId) {
-      // PL-14: a tenant another provider bills is never resolved from its old Stripe rows.
       const row = (await tx.query<{ tenant_id: string }>(
-        `SELECT s.tenant_id FROM plan_subscriptions s LEFT JOIN tenant_plans p ON p.tenant_id=s.tenant_id
-          WHERE s.provider='stripe' AND s.id=$1 AND coalesce(p.billing_provider, 'stripe')='stripe'`, [subscriptionId])).rows[0];
+        "SELECT tenant_id FROM plan_subscriptions WHERE provider='stripe' AND id=$1", [subscriptionId])).rows[0];
       if (row) return row.tenant_id;
     }
     if (customerId) {
-      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM tenant_plans WHERE stripe_customer_id=$1 AND billing_provider='stripe'", [customerId])).rows[0];
+      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM tenant_plans WHERE stripe_customer_id=$1", [customerId])).rows[0];
       if (row) return row.tenant_id;
     }
     return null;
@@ -207,9 +207,17 @@ export function createPlanEvents(deps: PlanEventDeps) {
     const tenantId = await checkoutTenant(tx, object);
     if (!tenantId) return "not_ours";
     await lockTenantPlan(tx, tenantId);
-    if (await otherProvider(tx, tenantId)) return "not_ours";
     const checkoutId = uuid(meta(object).zs_checkout)!;
     const sessionId = id(object.id, "cs_");
+    if (await otherProvider(tx, tenantId)) {
+      // The checkout row still records how the session ended, so it never looks open; nothing
+      // else is written and Stripe is not called (PL-17 known limit: the operator refunds).
+      await tx.query(
+        `UPDATE plan_checkouts SET status=$5, stripe_checkout_session_id=coalesce(stripe_checkout_session_id,$3), updated_at=$4
+          WHERE tenant_id=$1 AND id=$2 AND status='pending'`,
+        [tenantId, checkoutId, sessionId, at, type === "checkout.session.expired" ? "expired" : "completed"]);
+      return "not_ours";
+    }
     if (type === "checkout.session.expired") {
       const updated = await tx.query(
         `UPDATE plan_checkouts SET status='expired', stripe_checkout_session_id=coalesce(stripe_checkout_session_id,$3), updated_at=$4

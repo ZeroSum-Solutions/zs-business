@@ -3,7 +3,7 @@
 // anything but `on` runs nothing and needs no other variable.
 import { parse } from "pg-connection-string";
 import { z } from "zod";
-import { secureUrlProblem, shopifyBillingConfigSchema, type ShopifyBillingConfig } from "@zs/core";
+import { shopifyBillingConfigSchema, type ShopifyBillingConfig } from "@zs/core";
 import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -55,15 +55,8 @@ function parseShopify(source: Readonly<Record<string, string | undefined>>): Sho
   });
   // The token never appears in the message: only the paths of the fields that failed.
   if (!parsed.success) throw new Error(`Invalid environment: BILLING_SHOPIFY_ ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "value"}: ${issue.path[0] === "token" ? "invalid" : issue.message}`).join("; ")}`);
-  const config = parsed.data;
-  if (!config.baseUrl.startsWith("https://") && !LOOPBACK.has(new URL(config.baseUrl).hostname.replace(/^\[|\]$/g, "")))
-    throw new Error("Invalid environment: BILLING_SHOPIFY_BASE_URL must be https (http only on a loopback host)");
-  const problem = secureUrlProblem("BILLING_SHOPIFY_BASE_URL", config.baseUrl);
-  if (problem) throw new Error(`Invalid environment: ${problem}`);
-  const base = new URL(config.baseUrl);
-  if (base.search || base.hash || (base.pathname !== "/" && base.pathname !== ""))
-    throw new Error("Invalid environment: BILLING_SHOPIFY_BASE_URL is an origin only (no path, query or fragment)");
-  return config;
+  // The schema keeps the token to an https origin (http only on loopback), with no credentials or path.
+  return parsed.data;
 }
 
 export interface BillingRunnerEnv {

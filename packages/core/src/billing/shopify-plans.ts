@@ -21,6 +21,18 @@ export const SHOPIFY_COMMIT_RESERVE_MS = 1_000;
 /** PL-18: a call starts only with at least this much time before the deadline. */
 export const SHOPIFY_MIN_CALL_BUDGET_MS = SHOPIFY_COMMIT_RESERVE_MS + 1_000;
 const BACKOFF_BASE_MS = 60_000;
+/** The service transaction's own waits (packages/db scoped.ts); bound() never raises them. */
+const SERVICE_LOCK_TIMEOUT_MS = 5_000;
+const SERVICE_STATEMENT_TIMEOUT_MS = 15_000;
+/** lock_not_available and query_canceled: a wait that ran out. */
+const WAITS: ReadonlySet<string> = new Set(["55P03", "57014"]);
+const sqlState = (error: unknown): string => {
+  for (let at: unknown = error, depth = 0; at && typeof at === "object" && depth < 4; at = (at as { cause?: unknown }).cause, depth += 1) {
+    const code = (at as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+  }
+  return "";
+};
 const BACKOFF_MAX_MS = 60 * 60_000;
 const ENDED_STRIPE = ["canceled", "unpaid", "incomplete_expired"];
 const ENDED: ReadonlySet<string> = new Set(["canceled", "unpaid", "incomplete_expired", "paused"]);
@@ -162,6 +174,14 @@ export function createShopifyPlanSync(deps: {
       const fresh = !previous || ENDED.has(previous.status);
       const plan = recognised ?? (!fresh && previous.plan !== null && previous.plan_interval !== null
         ? { plan: previous.plan, interval: previous.plan_interval, founding: previous.founding } : null);
+      // An unrecognised new contract never replaces the ended row: overwriting it would drop the
+      // end that makes the tenant read-only and leave it comped, with no limits (PL-10, PL-18).
+      if (plan === null && previous && fresh) {
+        await tx.query(
+          `UPDATE tenant_plans SET shopify_synced_at=$2, shopify_sync_failures=0, shopify_next_sync_at=NULL, updated_at=$2 WHERE tenant_id=$1`,
+          [tenantId, at]);
+        return "mismatch";
+      }
       const startedAt = fresh ? at : previous.started_at;
       const statusSince = previous && previous.status === status ? previous.status_since : at;
       await tx.query(
@@ -174,7 +194,8 @@ export function createShopifyPlanSync(deps: {
            status_since=EXCLUDED.status_since, updated_at=EXCLUDED.updated_at`,
         [tenantId, shopId, status, plan?.plan ?? null, plan?.interval ?? null, plan?.founding ?? false,
           contract.trialEndsAt, contract.cycleEnd, contract.cancelAtEndOfCycle, startedAt, statusSince, at]);
-      outcome = plan === null ? "mismatch" : "plan_synced";
+      // A contract that names no known plan is a mismatch even when the row keeps its old plan.
+      outcome = recognised === null ? "mismatch" : "plan_synced";
     }
     const duplicate = await derivePlanRecord(tx, tenantId, at, deps.graceDays * DAY_MS);
     await tx.query(
@@ -196,11 +217,15 @@ export function createShopifyPlanSync(deps: {
       [picked.tenant_id, picked.shopify_shop_id, at, BACKOFF_BASE_MS, BACKOFF_MAX_MS, picked.shopify_synced_at]);
   }
 
-  /** Bounds this transaction's lock and statement waits to the time left, when there is a deadline. */
+  /**
+   * Cuts this transaction's lock and statement waits to the time left, when there is a deadline.
+   * It only ever shortens them: never past the service defaults (5 s lock, 15 s statement).
+   */
   async function bound(tx: Transaction, left: number) {
     if (!Number.isFinite(left)) return;
-    const ms = `${Math.max(1, Math.floor(left))}ms`;
-    await tx.query("SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $1, true)", [ms]);
+    const ms = Math.max(1, Math.floor(left));
+    await tx.query("SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+      [`${Math.min(ms, SERVICE_LOCK_TIMEOUT_MS)}ms`, `${Math.min(ms, SERVICE_STATEMENT_TIMEOUT_MS)}ms`]);
   }
 
   return {
@@ -208,19 +233,27 @@ export function createShopifyPlanSync(deps: {
     async runOnce(options: { readonly deadline?: Date } = {}): Promise<ShopifySyncSummary> {
       const outcomes: Record<string, number> = {};
       const count = (outcome: string) => { outcomes[outcome] = (outcomes[outcome] ?? 0) + 1; };
-      const due = await deps.service((tx) => tx.query<Picked>(
-        `SELECT tenant_id, shopify_shop_id, shopify_synced_at FROM tenant_plans
-          WHERE billing_provider='shopify' AND shopify_shop_id IS NOT NULL AND (shopify_next_sync_at IS NULL OR shopify_next_sync_at <= $1)
-          ORDER BY shopify_synced_at ASC NULLS FIRST, tenant_id LIMIT $2`, [now(), deps.limit]));
       const left = () => options.deadline ? options.deadline.getTime() - now().getTime() : Number.POSITIVE_INFINITY;
+      // Too little time for even one call: the database is not touched either.
+      if (left() < SHOPIFY_MIN_CALL_BUDGET_MS) return { checked: 0, outcomes, stopped: false };
+      const due = await deps.service(async (tx) => {
+        await bound(tx, left());
+        return tx.query<Picked>(
+          `SELECT tenant_id, shopify_shop_id, shopify_synced_at FROM tenant_plans
+            WHERE billing_provider='shopify' AND shopify_shop_id IS NOT NULL AND (shopify_next_sync_at IS NULL OR shopify_next_sync_at <= $1)
+            ORDER BY shopify_synced_at ASC NULLS FIRST, tenant_id LIMIT $2`, [now(), deps.limit]);
+      });
       let checked = 0;
       let stopped = false;
-      /** Records one failure in its own short transaction; a failure to record ends nothing more. */
+      /**
+       * Records one failure in its own short transaction; a failure to record ends nothing more.
+       * It takes no plan lock: the write is conditional on the row (recordFailure), so a plan
+       * lock held elsewhere never keeps a stuck tenant first in line on every pass.
+       */
       const fail = async (picked: Picked) => {
         try {
           await deps.service(async (tx) => {
             await bound(tx, Math.max(left(), 250));
-            await lockTenantPlan(tx, picked.tenant_id);
             await recordFailure(tx, picked, now());
           });
         } catch {
@@ -228,16 +261,13 @@ export function createShopifyPlanSync(deps: {
         }
       };
       for (const picked of due.rows) {
-        if (checked > 0) await sleep(SHOPIFY_CALL_SPACING_MS);
-        // Checked after the pause, so no call starts without its budget before the deadline.
-        const budget = left() - SHOPIFY_COMMIT_RESERVE_MS;
-        if (budget < SHOPIFY_MIN_CALL_BUDGET_MS - SHOPIFY_COMMIT_RESERVE_MS) break;
+        if (left() < SHOPIFY_MIN_CALL_BUDGET_MS) break;
         // Another run may have synced this tenant, or stored a failure backoff, since it was
         // picked: then this call would be spent twice (PL-18). The read takes no lock.
         let stillDue: boolean;
         try {
           stillDue = await deps.service(async (tx) => {
-            await bound(tx, Math.max(budget, 250));
+            await bound(tx, left());
             const row = (await tx.query<{ ok: boolean }>(
               `SELECT (shopify_next_sync_at IS NULL OR shopify_next_sync_at <= $4) AS ok FROM tenant_plans
                 WHERE tenant_id=$1 AND billing_provider='shopify' AND shopify_shop_id=$2 AND shopify_synced_at IS NOT DISTINCT FROM $3`,
@@ -254,6 +284,11 @@ export function createShopifyPlanSync(deps: {
           count("skipped");
           continue;
         }
+        // The pause follows only a call, never a skip (PL-18).
+        if (checked > 0) await sleep(SHOPIFY_CALL_SPACING_MS);
+        // Checked after the pause and the re-read, so no call starts without its budget.
+        const budget = left() - SHOPIFY_COMMIT_RESERVE_MS;
+        if (budget < SHOPIFY_MIN_CALL_BUDGET_MS - SHOPIFY_COMMIT_RESERVE_MS) break;
         checked += 1;
         // The Partner API call holds no transaction, connection or plan lock (PL-18).
         let contract: ShopifyContract | null;
@@ -284,10 +319,12 @@ export function createShopifyPlanSync(deps: {
           count(outcome);
           if (outcome === "mismatch" || outcome === "plan_duplicate") deps.report?.({ tenantId: picked.tenant_id, outcome });
         } catch (error) {
-          // A database error, or a lock or statement wait past the deadline: the pass ends.
           count("error");
           deps.report?.({ tenantId: picked.tenant_id, outcome: "error", detail: error instanceof Error ? error.name : "unknown" });
           await fail(picked);
+          // One tenant's lock or statement wait (its plan lock held elsewhere) skips that tenant
+          // only, while time is left; any other database error ends the pass.
+          if (WAITS.has(sqlState(error)) && left() >= SHOPIFY_MIN_CALL_BUDGET_MS) continue;
           stopped = true;
           break;
         }

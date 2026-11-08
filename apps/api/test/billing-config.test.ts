@@ -179,7 +179,7 @@ describe("parseBillingEnv (S-8, S-9)", () => {
       [{ ...SHOPIFY, BILLING_SHOPIFY_PLAN_HANDLES: JSON.stringify({ ...handles, hub_pro: "solo" }) }, /distinct/],
       [{ ...SHOPIFY, BILLING_SHOPIFY_PLAN_HANDLES: JSON.stringify({ hub_solo: "solo" }) }, /planHandles/],
       [{ ...SHOPIFY, BILLING_SHOPIFY_PARTNER_TOKEN: `${token} x` }, /token: invalid/],
-      [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "http://partners.example.test" }, /must be https/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "http://partners.example.test" }, /baseUrl: .*must use https/],
       [{ ...SHOPIFY, BILLING_SHOPIFY_SYNC_LIMIT: "101" }, /BILLING_SHOPIFY_SYNC_LIMIT/],
       [{ BILLING_SHOPIFY_SYNC_LIMIT: "5" }, /needs BILLING_SHOPIFY_PARTNER_ID/],
       [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "https://user:pw@partners.example.test" }, /credentials/],

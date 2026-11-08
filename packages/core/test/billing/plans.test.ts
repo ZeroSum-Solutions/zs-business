@@ -361,11 +361,12 @@ describe("billing provider (PL-14)", () => {
        VALUES ($1,$2,'studio','month','price_x','https://a.test/','https://a.test/',$2,$3,$3)`, [tenantId, randomUUID(), b.h.clock.now()]));
     await b.deliver(subEvent("customer.subscription.updated", { ...sub, metadata: { zs_tenant: tenantId } }));
     await b.h.service((tx) => tx.query("UPDATE tenant_plans SET stripe_customer_id=$2 WHERE tenant_id=$1", [tenantId, sub.customer]));
-    expect((await worker().runOnce()).outcomes).toEqual({ wait: 1 });
+    // Resolved by its customer, then ended under the plan lock: no retries, no Stripe read.
+    expect((await worker().runOnce()).outcomes).toEqual({ not_ours: 1 });
     expect(await plan(tenantId)).toMatchObject({ billing_provider: "shopify", status: "none" });
   });
 
-  it("a tenant linked to Shopify after its Stripe plan ended is never resolved from its Stripe rows, and Stripe is never asked", async () => {
+  it("ends every Stripe event for a tenant linked to Shopify not_ours, with no retry, write or Stripe call", async () => {
     const tenantId = await b.tenant();
     const { sub, started } = await subscribe(tenantId);
     const ended = { ...sub, status: "canceled", ended_at: Math.floor(b.h.clock.now().getTime() / 1000) };
@@ -382,7 +383,7 @@ describe("billing provider (PL-14)", () => {
     const before = await plan(tenantId);
     const reads = () => fake.received.filter((r) => r.path.startsWith("/v1/subscriptions/")).length;
     const readsBefore = reads();
-    // Stored subscription ID and customer only: nothing resolves the tenant.
+    // Stored subscription ID and customer only: resolved, then dropped under the lock (no `wait` and retries).
     await b.deliver(subEvent("customer.subscription.updated", { ...ended, status: "active", metadata: {} }));
     await b.deliver(invoiceEvent("invoice.payment_failed", { ...ended, metadata: {} }, stripeId("in")));
     // Metadata naming the tenant's own checkout: resolved, then dropped under the lock before any write.
@@ -391,7 +392,7 @@ describe("billing provider (PL-14)", () => {
       metadata: { zs_tenant: tenantId, zs_checkout: started.checkout.id },
     }));
     await b.deliver(subEvent("customer.subscription.updated", { ...ended, status: "active" }));
-    expect((await worker().runOnce()).outcomes).toEqual({ wait: 2, not_ours: 2 });
+    expect((await worker().runOnce()).outcomes).toEqual({ not_ours: 4 });
     expect(reads()).toBe(readsBefore);
     expect(await plan(tenantId)).toEqual(before);
   });
@@ -429,6 +430,11 @@ describe("tenancy of the plan tables (PL-12)", () => {
     for (const [sql, params] of [
       ["UPDATE tenant_plans SET read_only_after=NULL, status='active' WHERE tenant_id=$1", [a.tenantId]],
       ["UPDATE tenant_plans SET founding_invite=true WHERE tenant_id=$1", [a.tenantId]],
+      // PL-17: only the service role links a tenant to a shop or writes its sync state.
+      ["UPDATE tenant_plans SET billing_provider='shopify', shopify_shop_id='gid://shopify/Shop/1', shopify_shop_domain='a.myshopify.com' WHERE tenant_id=$1", [a.tenantId]],
+      ["UPDATE tenant_plans SET shopify_synced_at=now(), shopify_sync_failures=0, shopify_next_sync_at=NULL WHERE tenant_id=$1", [a.tenantId]],
+      [`INSERT INTO plan_subscriptions (tenant_id, provider, id, status, plan, plan_interval, started_at, status_since, created_at, updated_at)
+        VALUES ($1,'shopify','gid://shopify/Shop/1','active','pro','month',now(),now(),now(),now())`, [a.tenantId]],
       ["INSERT INTO tenant_plans (tenant_id, created_at, updated_at) VALUES ($1, now(), now())", [other.tenantId]],
       ["UPDATE plan_subscriptions SET status='active' WHERE id=$1", [sub.id]],
       ["DELETE FROM plan_subscriptions WHERE id=$1", [sub.id]],

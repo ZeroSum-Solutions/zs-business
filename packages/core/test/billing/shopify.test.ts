@@ -131,6 +131,8 @@ describe("the Partner API reader (PL-18)", () => {
       // A body cut off after the headers is a transport failure.
       [{ cut: true }, true],
       [{ status: 302 }, true],
+      // An answer over 64 KiB is not read to the end.
+      [{ status: 200, body: { data: { activeSubscription: null }, pad: "x".repeat(70_000) } }, false],
     ];
     for (const [failure, stopPass] of cases) {
       partner.failures.push(failure);
@@ -142,6 +144,12 @@ describe("the Partner API reader (PL-18)", () => {
     }
     partner.contracts.set(shop.id, { shopId: newShop().id });
     await expect(reader().active(shop.id)).rejects.toThrow(/another shop/);
+    // The token goes only to an https origin, whoever builds the reader.
+    for (const baseUrl of ["http://partners.example.test", "https://user:pw@partners.example.test", "https://partners.example.test/proxy"])
+      expect(() => createShopifySubscriptionReader({ config: { partnerId: "5300652", token: TOKEN, appId: "444984655873", planHandles: HANDLES, baseUrl } }))
+        .toThrow();
+    expect(() => createShopifySubscriptionReader({ config: { partnerId: "5300652", token: TOKEN, appId: "444984655873", planHandles: HANDLES, baseUrl: "http://127.0.0.1:9" } }))
+      .not.toThrow();
   });
 });
 
@@ -235,7 +243,7 @@ describe("the Shopify pass (PL-18)", () => {
     expect(await plan(tenantId)).toMatchObject({ status: "active", plan: "solo", plan_interval: "month" });
     // A known handle with an unknown period keeps both, as the plan and interval count together.
     partner.contracts.set(shop.id, { billingPeriod: "EVERY_90_DAYS", handles: [HANDLES.hub_pro] });
-    expect((await syncTenant(tenantId)).outcomes).toEqual({ plan_synced: 1 });
+    expect((await syncTenant(tenantId)).outcomes).toEqual({ mismatch: 1 });
     expect(await plan(tenantId)).toMatchObject({ plan: "solo", plan_interval: "month" });
   });
 
@@ -390,6 +398,31 @@ describe("the Shopify pass (PL-18)", () => {
     expect(await plan(tenants[1]!)).toMatchObject({ shopify_sync_failures: 1, shopify_synced_at: null });
   });
 
+  it("skips a tenant whose plan lock wait runs out and goes on with the next", async () => {
+    partner = fakePartner();
+    const tenants = [await b.tenant(), await b.tenant()].sort();
+    for (const tenantId of tenants) {
+      const shop = newShop();
+      await link(tenantId, shop);
+      partner.contracts.set(shop.id, { handles: [HANDLES.hub_solo] });
+    }
+    await b.h.service((tx) => tx.query(
+      "UPDATE tenant_plans SET shopify_next_sync_at=$1 WHERE billing_provider='shopify' AND shopify_shop_id IS NOT NULL",
+      [new Date(b.h.clock.now().getTime() + 365 * DAY)]));
+    await b.h.service((tx) => tx.query("UPDATE tenant_plans SET shopify_next_sync_at=NULL WHERE tenant_id = ANY($1::uuid[])", [tenants]));
+    // Calls: the pick, the first tenant's re-read, then its store transaction, which times out.
+    let calls = 0;
+    const service: typeof b.h.service = (work) => {
+      calls += 1;
+      if (calls === 3) return Promise.reject(Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" }));
+      return b.h.service(work);
+    };
+    const pass = createShopifyPlanSync({ service, clock: b.h.clock, reader: reader(), limit: 100, graceDays: 7, sleep: async () => {} });
+    expect(await pass.runOnce()).toEqual({ checked: 2, outcomes: { error: 1, plan_synced: 1 }, stopped: false });
+    expect(await plan(tenants[0]!)).toMatchObject({ shopify_sync_failures: 1, shopify_next_sync_at: expect.any(Date) });
+    expect(await plan(tenants[1]!)).toMatchObject({ plan: "solo", shopify_sync_failures: 0 });
+  });
+
   it("gives a new contract after an ended one no plan from the ended one", async () => {
     partner = fakePartner();
     const tenantId = await b.tenant();
@@ -399,9 +432,17 @@ describe("the Shopify pass (PL-18)", () => {
     await syncTenant(tenantId);
     partner.contracts.set(shop.id, null);
     await syncTenant(tenantId);
+    const ended = await plan(tenantId);
+    expect(ended).toMatchObject({ read_only_after: expect.any(Date) });
     partner.contracts.set(shop.id, { handles: ["mystery"] });
     expect((await syncTenant(tenantId)).outcomes).toEqual({ mismatch: 1 });
-    expect(await shopRow(tenantId, shop.id)).toMatchObject({ status: "active", plan: null, plan_interval: null, founding: false });
+    // The ended row stays as it was, so the tenant stays read-only instead of turning comped.
+    expect(await shopRow(tenantId, shop.id)).toMatchObject({ status: "canceled", plan: "pro", founding: true });
+    expect(await plan(tenantId)).toMatchObject({ plan: ended!.plan, status: ended!.status, read_only_after: ended!.read_only_after, shopify_synced_at: b.h.clock.now() });
+    // A recognised contract then starts afresh.
+    partner.contracts.set(shop.id, { handles: [HANDLES.hub_solo] });
+    expect((await syncTenant(tenantId)).outcomes).toEqual({ plan_synced: 1 });
+    expect(await plan(tenantId)).toMatchObject({ plan: "solo", founding: false, read_only_after: null });
   });
 });
 

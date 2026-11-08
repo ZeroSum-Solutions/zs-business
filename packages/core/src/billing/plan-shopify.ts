@@ -4,6 +4,7 @@
 // or null; anything else is an error, never "no contract".
 import { z } from "zod";
 import type { HubPlan, PlanInterval } from "@zs/contracts";
+import { secureUrlProblem } from "../edge/auth.js";
 
 /** PL-16: our five Shopify plan keys. */
 export const SHOPIFY_PLAN_KEYS = ["hub_solo", "hub_studio", "hub_pro", "hub_studio_founding", "hub_pro_founding"] as const;
@@ -32,7 +33,15 @@ export const shopifyBillingConfigSchema = z.strictObject({
   planHandles: z.strictObject(Object.fromEntries(SHOPIFY_PLAN_KEYS.map((key) => [key, handleSchema])) as Record<ShopifyPlanKey, typeof handleSchema>)
     .refine((handles) => new Set(Object.values(handles)).size === SHOPIFY_PLAN_KEYS.length, "every plan handle must be distinct"),
   apiVersion: z.string().regex(/^[0-9]{4}-[0-9]{2}$/).default(SHOPIFY_PARTNER_DEFAULT_VERSION),
-  baseUrl: z.url({ protocol: /^https?$/ }).default(SHOPIFY_PARTNER_DEFAULT_BASE_URL),
+  // The token goes only to an https origin (plain http only on loopback, for tests), with no
+  // credentials, path, query or fragment, whoever builds the reader (PL-20).
+  baseUrl: z.string().superRefine((value, ctx) => {
+    const problem = secureUrlProblem("baseUrl", value);
+    if (problem) return void ctx.addIssue({ code: "custom", message: problem });
+    const url = new URL(value);
+    if (url.search || url.hash || (url.pathname !== "/" && url.pathname !== ""))
+      ctx.addIssue({ code: "custom", message: "baseUrl is an origin only, with no path, query or fragment" });
+  }).default(SHOPIFY_PARTNER_DEFAULT_BASE_URL),
   timeoutMs: z.number().int().min(500).max(30_000).default(8_000),
 });
 export type ShopifyBillingConfig = z.input<typeof shopifyBillingConfigSchema>;
@@ -92,11 +101,37 @@ const answerSchema = z.object({
 
 /** PL-18: upstream text never carries the token or anything token-like into an error or a log. */
 function redacted(text: string, token: string): string {
-  return text.split(token).join("[redacted]")
+  return text.slice(0, 4_096).split(token).join("[redacted]")
     .replace(/\bprt[a-z]*_[A-Za-z0-9]+/g, "[redacted]")
-    .replace(/[A-Za-z0-9_\-]{24,}/g, "[redacted]")
+    .replace(/[A-Za-z0-9_\-]{16,}/g, "[redacted]")
     .replace(/[^\x20-\x7e]/g, " ")
     .slice(0, 200);
+}
+
+/** The largest answer read; an activeSubscription answer is well under 4 KiB. */
+const ANSWER_LIMIT_BYTES = 64 * 1024;
+
+/** The body as text, or null when it is over the limit. Throws when the body stops arriving. */
+async function readAnswer(response: Response): Promise<string | null> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > ANSWER_LIMIT_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 const throttled = (errors: unknown[]) => errors.some((raw) => {
@@ -131,15 +166,20 @@ export function createShopifySubscriptionReader(input: {
       } catch {
         throw new ShopifyPartnerError("The Partner API is unreachable", true);
       }
-      if (response.status === 429 || response.status >= 500) throw new ShopifyPartnerError(`The Partner API answered ${response.status}`, true);
+      if (response.status === 429 || response.status >= 500) {
+        // The body is not read; cancelling it frees the connection.
+        await response.body?.cancel().catch(() => undefined);
+        throw new ShopifyPartnerError(`The Partner API answered ${response.status}`, true);
+      }
       // A body that stops arriving (abort, timeout, reset) is a transport failure and ends the pass;
       // only a complete body that is not JSON is a malformed answer.
-      let text: string;
+      let text: string | null;
       try {
-        text = await response.text();
+        text = await readAnswer(response);
       } catch {
         throw new ShopifyPartnerError("The Partner API answer was cut off", true);
       }
+      if (text === null) throw new ShopifyPartnerError("The Partner API answer is too large", false);
       // Per-shop failures come as GraphQL errors in a 200 answer. Any other status (401, 403, a 404
       // for an unknown API version, a redirect) is the token or the endpoint, the same for every
       // shop, so it ends the pass instead of backing off each shop in turn.

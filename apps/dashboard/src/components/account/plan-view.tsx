@@ -112,7 +112,21 @@ export function PlanView() {
   // keeps reading for a while instead of stopping at the first settled answer (PL-18).
   const plan = usePlan({ poll: returned === "success", watchUntil });
   const holds = plan.data ? HOLDS_PLAN.has(plan.data.status) : false;
-  const settled = returned === "success" && holds;
+  // The Shopify note lasts while the page still reads the plan and nothing has changed yet.
+  const [watching, setWatching] = useState(false);
+  useEffect(() => {
+    if (watchUntil === undefined) return;
+    setWatching(true);
+    const timer = window.setTimeout(() => setWatching(false), Math.max(0, watchUntil - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [watchUntil]);
+  const shape = plan.data ? `${plan.data.status}|${plan.data.plan}|${plan.data.interval}|${plan.data.founding}` : null;
+  const [firstShape, setFirstShape] = useState<string | null>(null);
+  useEffect(() => {
+    if (returned === "shopify" && shape !== null) setFirstShape((first) => first ?? shape);
+  }, [returned, shape]);
+  const settled = returned === "success" ? holds
+    : returned === "shopify" ? !watching || (firstShape !== null && shape !== firstShape) : false;
   const zone = browserZone();
   const [interval, setInterval] = useState<PlanInterval>("month");
   const [extra, setExtra] = useState(0);
