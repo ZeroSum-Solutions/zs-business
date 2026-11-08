@@ -664,10 +664,20 @@ optional `RESEND_BASE_URL`; no outbox row, no wallet charge). The subject and bo
 carries an idempotency key from the job and its `opened_at`, so a retry cannot mail twice. The workers project holds
 all of these; the API project holds none.
 
-Not covered: a function that dies before its handler runs (a bad environment at start-up, a failed import, a pool that
-cannot open) raises no alert and no email, because the recorder is wired in that same start-up; a cron that Vercel
-never calls; and a failure while the database itself is down (the alert cannot be written, so it cannot be told
-apart from a repeat and no email is sent). Those still show only in Vercel's logs.
+Start-up failures (`src/cron-startup.ts`): each cron entry builds its config, pools and runner on its first request, not at
+module load. When that throws (a missing or invalid variable, a pool or dependency that cannot be built), an authorised
+call answers 503 and records the failure under the job's own row as `CronStartupFailed: <job> failed to start: ...`
+(redacted like any alert, no schema change), mailed through the same path. The build is retried on every request, and the
+next good run closes the alert. The record needs the job's service database URL (`DELIVERY_DATABASE_URL`,
+`BILLING_DATABASE_URL`, `CALENDAR_DATABASE_URL`, `ACTIVEPIECES_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`,
+`CONNECTIONS_DATABASE_URL`) and, for a hosted host, `DATABASE_CA_CERT`; it never opens an unpinned connection. When the row
+cannot be written, the email alone goes out, once an hour per job. With no Resend settings either, only the 503 and the
+Vercel log show it.
+
+Not covered: a function whose bundle cannot load or whose imports throw at module load (Vercel answers 500 itself); a
+start-up failure with `CRON_SECRET` unset (the route answers 404 by design, and the call cannot be authorised); a cron
+that Vercel never calls; and a failure while the database itself is down and no email can be sent (the alert cannot be
+told apart from a repeat). Those still show only in Vercel's logs.
 
 ## Database pool and request limits
 

@@ -8,15 +8,27 @@ import { createCronAlertsOnPool } from "./cron-alerts.js";
 import { parseFollowUpEnv } from "./followup/config.js";
 import { followUpCronRoutes } from "./followup/cron.js";
 import { startFollowUpRunner } from "./followup/start.js";
+import { createStartupRecorder, guardCronEntry } from "./cron-startup.js";
 
-const env = parseFollowUpEnv(process.env);
 const clock = { now: () => new Date() };
-const started = env.runner === null ? null : await startFollowUpRunner(env.runner, { clock, generateId: randomUUID });
-const runner = started?.runner ?? null;
 
-export default getRequestListener(followUpCronRoutes({
-  cronSecret: env.cronSecret,
-  runner,
-  ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.servicePool, clock, process.env) }),
-  onError: (error) => console.error("Follow-up run failed", error),
-}).fetch);
+// Built on the first request, not at module load, so a start-up failure raises a cron alert (cron-startup.ts).
+export default getRequestListener(guardCronEntry({
+  job: "followup",
+  cronPath: "/cron/followup",
+  env: process.env,
+  clock,
+  recordStartupFailure: createStartupRecorder({ env: process.env, clock, databaseUrlVariable: "FOLLOWUP_SERVICE_DATABASE_URL" }),
+  build: async () => {
+    const env = parseFollowUpEnv(process.env);
+    const started = env.runner === null ? null : await startFollowUpRunner(env.runner, { clock, generateId: randomUUID });
+    const runner = started?.runner ?? null;
+
+    return followUpCronRoutes({
+      cronSecret: env.cronSecret,
+      runner,
+      ...(started === null ? {} : { alerts: createCronAlertsOnPool(started.servicePool, clock, process.env) }),
+      onError: (error) => console.error("Follow-up run failed", error),
+    }).fetch;
+  },
+}));
