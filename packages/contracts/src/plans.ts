@@ -49,6 +49,10 @@ export const PLAN_CATALOG: Readonly<Record<HubPlan, PlanCatalogEntry>> = Object.
   },
 });
 
+/** PL-2: the plan whose limits a subscription with an unknown price holds: the lowest paid plan. */
+export const HELD_PLAN: HubPlan = "solo";
+export const HELD_PLAN_INTERVAL: PlanInterval = "month";
+
 /** PL-1: the extra managed connection add-on, USD cents a month per unit. */
 export const EXTRA_CONNECTION_PRICE = 1_000;
 export const MAX_EXTRA_CONNECTIONS = 20;

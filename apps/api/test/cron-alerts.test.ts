@@ -341,6 +341,20 @@ describe("cron routes raise and clear the alert", () => {
     expect((await listOpenCronAlerts(service)).map((alert) => alert.job).sort()).toEqual(["activepieces", "followup"]);
   });
 
+  it("the billing cron mails the unknown-price alert core opened (PL-2), once, and never raises its own alert", async () => {
+    await database.pool.query(
+      `INSERT INTO cron_alerts (job, opened_at, last_failed_at, failure_count, last_error) VALUES ('billing-plan-price', now(), now(), 1, 'Stripe subscription sub_x (tenant t) has an unknown price lookup key')`);
+    const notify = vi.fn(async (_message: unknown) => true);
+    const withMail = createCronAlerts({ service, clock, report: () => undefined, notify });
+    const runner = { run: async () => ({ passes: 1, claimed: 1, outcomes: { plan_held: 1 }, budgetSpent: false }) };
+    const routes = cronRoutes({ cronSecret: CRON_SECRET, runner, alerts: withMail, path: "/cron/billing", killSwitch: "BILLING_WORKER", name: "Billing" });
+    expect((await routes.request("/cron/billing", authed)).status).toBe(200);
+    expect((await routes.request("/cron/billing", authed)).status).toBe(200);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0]![0]).toMatchObject({ job: "billing-plan-price", failureCount: 1 });
+    expect((await rows()).map((row) => [row.job, row.notified_at !== null])).toEqual([["billing-plan-price", true]]);
+  });
+
   it("cron answers carry nosniff and no-store", async () => {
     const reply = await cronRoutes({ cronSecret: CRON_SECRET, runner: ok }).request("/cron/delivery", authed);
     expect(reply.headers.get("X-Content-Type-Options")).toBe("nosniff");

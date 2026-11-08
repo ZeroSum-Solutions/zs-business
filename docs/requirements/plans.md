@@ -85,8 +85,17 @@ are stated for the dashboard and later rules (Known limits).
 `hub_connection_month`, with metadata `zs_plan`, `zs_interval` (and `founding=true`). The API
 holds a map from lookup key to price ID (PL-13). The worker never needs it: it reads the plan from
 the subscription item's `price.lookup_key`. An item whose lookup key is not in the catalog makes
-the subscription keep the plan it last had (lookup keys can move between prices); a subscription
-whose plan was never recognised ends `mismatch` and gives no plan, but its status is still kept.
+the subscription keep the plan it last had (lookup keys can move between prices). A live
+subscription whose plan was never recognised (first sight with an unknown key) is held: its row keeps
+no plan and status as Stripe answered, the tenant gets the limits of the lowest paid plan (`solo`,
+monthly; never unlimited), the event ends `plan_held`, and the checkout action refuses a new
+Checkout with 409 `plan_price_hold`. The worker opens the `cron_alerts` row `billing-plan-price`
+in the same transaction (PL-10 text, no secret); the billing cron mails it to `OPS_ALERT_EMAIL`
+once. The hold is reconciled, and the alert closes when no tenant is held, as soon as a later
+answer for that subscription names a known lookup key (Stripe is read again on every event for it)
+or the subscription ends. An ended subscription with an unknown key still ends `mismatch` with no
+plan. There is no operator action: fix the price's lookup key in Stripe, then any event for the
+subscription reconciles it.
 
 **PL-3. The plan record.** `plan_subscriptions` holds one row per Stripe subscription of a
 tenant, as Stripe last answered it: status, plan, interval, founding, extra connections, trial
@@ -413,7 +422,7 @@ shows a Shopify tenant no Stripe plan buttons and no add-on field. It shows a **
 and without one), or, when it is null, the words "Open your Shopify admin, then Settings > Apps".
 After `?shopify=welcome` (Shopify's own welcome link opens the embedded app instead, C-29) it reads the plan every 15 seconds for ten minutes, even when the plan
 is already active (a change from one active plan to another keeps the status), and says a change
-can take a few minutes to show. `plan_read_only` and `plan_limit` (PL-8, with `resource`,
+can take a few minutes to show. `plan_price_hold` (PL-2), `plan_read_only` and `plan_limit` (PL-8, with `resource`,
 `limit` and `used` when valid) also leave the API as documented reasons.
 
 **PL-20. Configuration.** Billing runner (workers project), all four or none (a partial set is

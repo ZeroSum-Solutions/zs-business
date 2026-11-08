@@ -106,6 +106,12 @@ export const planCheckoutHandler: ActionHandler<PlanDispatchConfig> = {
     await lockTenantPlan(tx, binding.tenantId);
     const row = await tenantPlan(tx, binding.tenantId);
     if (row && row.billing_provider !== "stripe") throw notStripe();
+    // PL-2: a subscription with an unknown price holds the tenant; no second checkout until it is reconciled.
+    const held = await tx.query(
+      `SELECT 1 FROM plan_subscriptions WHERE tenant_id=$1 AND provider='stripe' AND plan IS NULL
+         AND status NOT IN ('canceled','unpaid','incomplete_expired','paused') LIMIT 1`, [binding.tenantId]);
+    if (held.rowCount === 1)
+      throw new Conflict("A subscription with an unknown price is being reconciled; no new checkout until it is", { reason: "plan_price_hold" });
     if (row && entitled(row.status)) throw new Conflict("The business already has a plan; change it in billing", { reason: "plan_exists" });
     const open = (await tx.query<{ id: string; checkout_url: string | null }>(
       `SELECT id, checkout_url FROM plan_checkouts WHERE tenant_id=$1 AND status='pending' AND created_at > $2

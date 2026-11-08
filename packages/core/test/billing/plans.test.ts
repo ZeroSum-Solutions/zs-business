@@ -3,7 +3,7 @@
 // limits, founding, the Portal and tenancy under the runtime role. All data is synthetic.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { CONNECTION_CONNECT_ACTION, PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanInterval } from "@zs/contracts";
+import { CONNECTION_CONNECT_ACTION, PLAN_CATALOG, PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanInterval } from "@zs/contracts";
 import { cannotBeApproved } from "../../src/approvals/index.js";
 import { derivedId, mapError, memberDispatch } from "../../src/edge/index.js";
 import {
@@ -324,19 +324,85 @@ describe("applying plan events (PL-10)", () => {
     expect(await plan(tenantId)).toMatchObject({ plan: "pro", stripe_subscription_id: second.id });
   });
 
-  it("a first-seen subscription with an unknown price lookup key ends mismatch, sets no plan and keeps its status (PL-2)", async () => {
-    const tenantId = await b.tenant();
-    const started = await (await planSession(tenantId)).startPlanCheckout({ plan: "studio", interval: "month" }, `plan-${randomUUID()}`);
-    const sub = subscription({ id: stripeId("sub"), customer: stripeId("cus"), tenantId, checkoutId: started.checkout.id, status: "active",
-      at: b.h.clock.now(), lookupKey: "hub_unknown_month" });
-    fake.subscriptions.set(sub.id, sub);
-    await b.deliver(subEvent("customer.subscription.created", sub));
-    expect((await worker().runOnce()).outcomes).toEqual({ mismatch: 1 });
-    expect(await plan(tenantId)).toMatchObject({ plan: null, status: "none", read_only_after: null });
-    expect((await b.h.rows<Record<string, any>>("SELECT plan, status FROM plan_subscriptions WHERE tenant_id=$1 AND id=$2", [tenantId, sub.id]))[0])
-      .toEqual({ plan: null, status: "active" });
-    // No plan means no limits: the tenant stays comped.
-    expect(await (await planSession(tenantId)).getBillingPlan()).toMatchObject({ status: "none", plan: null });
+  describe("a first-seen subscription with an unknown price lookup key (PL-2)", () => {
+    const ALERT = "SELECT * FROM cron_alerts WHERE job='billing-plan-price'";
+    /** The hold: stored without a plan, the tenant on the lowest paid plan's limits, one open alert. */
+    async function holdTenant() {
+      await b.h.database.pool.query("DELETE FROM cron_alerts WHERE job='billing-plan-price'");
+      // The alert is platform-wide: it closes only when no tenant is held, so earlier tests' holds end first.
+      await b.h.database.pool.query("UPDATE plan_subscriptions SET status='canceled' WHERE provider='stripe' AND plan IS NULL");
+      const tenantId = await b.tenant();
+      const started = await (await planSession(tenantId)).startPlanCheckout({ plan: "studio", interval: "month" }, `plan-${randomUUID()}`);
+      const sub = subscription({ id: stripeId("sub"), customer: stripeId("cus"), tenantId, checkoutId: started.checkout.id, status: "active",
+        at: b.h.clock.now(), lookupKey: "hub_unknown_month" });
+      fake.subscriptions.set(sub.id, sub);
+      await b.deliver(subEvent("customer.subscription.created", sub));
+      return { tenantId, sub };
+    }
+
+    it("holds the tenant on the lowest paid plan's limits, keeps the status and stores no plan on the subscription", async () => {
+      const { tenantId, sub } = await holdTenant();
+      expect((await worker().runOnce()).outcomes).toEqual({ plan_held: 1 });
+      expect(await plan(tenantId)).toMatchObject({ plan: "solo", plan_interval: "month", status: "active", read_only_after: null });
+      expect((await b.h.rows<Record<string, any>>("SELECT plan, status FROM plan_subscriptions WHERE tenant_id=$1 AND id=$2", [tenantId, sub.id]))[0])
+        .toEqual({ plan: null, status: "active" });
+      expect(await (await planSession(tenantId)).getBillingPlan()).toMatchObject({ status: "active", plan: "solo", limits: PLAN_CATALOG.solo.limits });
+    });
+
+    it("refuses a second checkout while the hold is on", async () => {
+      const { tenantId } = await holdTenant();
+      await worker().runOnce();
+      await expect((await planSession(tenantId)).startPlanCheckout({ plan: "pro", interval: "year" }, `plan-${randomUUID()}`))
+        .rejects.toMatchObject({ code: "Conflict", details: { reason: "plan_price_hold" } });
+    });
+
+    it("opens one cron alert at the injected time, and a repeat raises its count", async () => {
+      const { tenantId, sub } = await holdTenant();
+      const first = b.h.clock.now();
+      await worker().runOnce();
+      expect(await b.h.rows<Record<string, any>>(ALERT)).toMatchObject([{ failure_count: 1, resolved_at: null, notified_at: null, opened_at: first }]);
+      expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.last_error).toContain(sub.id);
+      expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.last_error).toContain(tenantId);
+      b.h.clock.advance(1_000);
+      await b.deliver(subEvent("customer.subscription.updated", sub));
+      await worker().runOnce();
+      expect(await b.h.rows<Record<string, any>>(ALERT)).toMatchObject([{ failure_count: 2, resolved_at: null, opened_at: first }]);
+    });
+
+    it("lifts when a later answer names a known price, and closes the alert", async () => {
+      const { tenantId, sub } = await holdTenant();
+      await worker().runOnce();
+      b.h.clock.advance(1_000);
+      const fixed = subscription({ id: sub.id, customer: sub.customer, tenantId, status: "active", at: b.h.clock.now(), plan: "pro" });
+      fake.subscriptions.set(sub.id, fixed);
+      await b.deliver(subEvent("customer.subscription.updated", fixed));
+      expect((await worker().runOnce()).outcomes).toEqual({ plan_synced: 1 });
+      expect(await plan(tenantId)).toMatchObject({ plan: "pro", status: "active" });
+      expect((await b.h.rows<Record<string, any>>(ALERT))[0]!.resolved_at).toEqual(b.h.clock.now());
+      // The hold is off: the refusal is now the ordinary one for a tenant that has a plan.
+      await expect((await planSession(tenantId)).startPlanCheckout({ plan: "pro", interval: "year" }, `plan-${randomUUID()}`))
+        .rejects.toMatchObject({ details: { reason: "plan_exists" } });
+    });
+
+    it("lifts when the subscription ends: the tenant is read-only and may check out again", async () => {
+      const { tenantId, sub } = await holdTenant();
+      await worker().runOnce();
+      b.h.clock.advance(1_000);
+      const ended = { ...sub, status: "canceled", ended_at: Math.floor(b.h.clock.now().getTime() / 1000) };
+      fake.subscriptions.set(sub.id, ended);
+      await b.deliver(subEvent("customer.subscription.deleted", ended));
+      expect((await worker().runOnce()).outcomes).toEqual({ mismatch: 1 });
+      b.h.clock.advance(PLAN_CHECKOUT_LIFETIME_MS); // the checkout that started it is no longer open
+      expect(await (await planSession(tenantId)).startPlanCheckout({ plan: "pro", interval: "month" }, `plan-${randomUUID()}`)).toHaveProperty("checkoutUrl");
+    });
+
+    it("a known key never opens an alert or a hold", async () => {
+      await b.h.database.pool.query("DELETE FROM cron_alerts WHERE job='billing-plan-price'");
+      const tenantId = await b.tenant();
+      await subscribe(tenantId, { plan: "studio" });
+      expect(await plan(tenantId)).toMatchObject({ plan: "studio", status: "active" });
+      expect(await b.h.rows(ALERT)).toEqual([]);
+    });
   });
 
   it("checkout.session.expired marks a pending plan checkout expired, and a repeat changes nothing (PL-10)", async () => {

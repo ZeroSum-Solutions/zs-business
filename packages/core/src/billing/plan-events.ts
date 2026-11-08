@@ -2,14 +2,16 @@
 // event only names a subscription; the worker reads it again from Stripe, stores that answer and
 // derives the tenant's plan record from its own rows, so order and repeats do not matter. The
 // tenant always comes from our rows, never from the event alone.
-import { ENTITLED_PLAN_STATUSES, PLAN_ADDON_LOOKUP_KEY, PLAN_LOOKUP_KEYS, type HubPlan, type PlanInterval, type PlanStatus } from "@zs/contracts";
+import { ENTITLED_PLAN_STATUSES, HELD_PLAN, HELD_PLAN_INTERVAL, PLAN_ADDON_LOOKUP_KEY, PLAN_LOOKUP_KEYS, type HubPlan, type PlanInterval, type PlanStatus } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { lockTenantPlan } from "./plan-gate.js";
 import type { StripeSubscriptionReader } from "./plan-stripe.js";
 
 export type PlanOutcome = "plan_synced" | "plan_duplicate" | "checkout_completed" | "expired" | "mismatch" | "ignored" | "not_ours" | "wait"
   /** PL-17: not ours, but the checkout row was closed; the worker keeps that write and records the outcome `not_ours`. */
-  | "not_ours_closed";
+  | "not_ours_closed"
+  /** PL-2: first sight of a subscription with an unknown price; the tenant holds the lowest paid plan and an operator alert is open. */
+  | "plan_held";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const STRIPE_ID = /^[A-Za-z0-9_]{1,250}$/;
@@ -17,6 +19,8 @@ const SUBSCRIPTION_STATUSES = ["trialing", "active", "past_due", "unpaid", "canc
 type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
 const ENDED: ReadonlySet<string> = new Set(["canceled", "unpaid", "incomplete_expired", "paused"]);
 const entitled = (status: string) => (ENTITLED_PLAN_STATUSES as readonly string[]).includes(status);
+/** PL-2: the cron_alerts job that holds the open unknown-price alert. */
+export const PLAN_PRICE_ALERT_JOB = "billing-plan-price";
 
 type Json = Record<string, unknown>;
 const record = (value: unknown): Json | null => (value && typeof value === "object" && !Array.isArray(value) ? value as Json : null);
@@ -62,7 +66,10 @@ export async function derivePlanRecord(tx: Transaction, tenantId: string, at: Da
   const current = rows.filter((row) => row.provider === provider && (provider !== "shopify" || row.id === binding?.shopify_shop_id));
   const recognised = current.filter((row) => row.plan !== null);
   const paying = recognised.filter((row) => entitled(row.status));
-  const effective = paying[0] ?? recognised[0] ?? null;
+  // PL-2: a live Stripe subscription whose price was never recognised holds the lowest paid plan's
+  // limits (not unlimited) until a later answer names a known price or the subscription ends.
+  const unrecognised = current.find((row) => row.provider === "stripe" && row.plan === null && !ENDED.has(row.status));
+  const effective = paying[0] ?? (unrecognised ? { ...unrecognised, plan: HELD_PLAN, plan_interval: HELD_PLAN_INTERVAL } : null) ?? recognised[0] ?? null;
   // PL-8: a failed invoice counts only while Stripe says the subscription is past due, so one
   // that Stripe voided or forgave cannot make a paying tenant read-only.
   const failed = effective?.provider === "stripe" && effective.status === "past_due" ? (await tx.query<{ first: Date | null }>(
@@ -87,6 +94,26 @@ export async function derivePlanRecord(tx: Transaction, tenantId: string, at: Da
       rows.length > 0, foundingStart === undefined ? null : new Date(foundingStart),
       effective && entitled(effective.status) ? failed : null, readOnlyAfter, at]);
   return paying.length > 1;
+}
+
+/** PL-2: opens the platform alert (or raises its count) for a subscription held on an unknown price. No secret goes in; the operator email reads this text. */
+async function openPlanPriceAlert(tx: Transaction, tenantId: string, subscriptionId: string, at: Date): Promise<void> {
+  await tx.query(
+    `INSERT INTO cron_alerts (job, opened_at, last_failed_at, failure_count, last_error, notified_at)
+     VALUES ($1, $3, $3, 1, $2, NULL)
+     ON CONFLICT (job) DO UPDATE SET
+       opened_at = CASE WHEN cron_alerts.resolved_at IS NULL THEN cron_alerts.opened_at ELSE EXCLUDED.opened_at END,
+       failure_count = CASE WHEN cron_alerts.resolved_at IS NULL THEN cron_alerts.failure_count + 1 ELSE 1 END,
+       notified_at = CASE WHEN cron_alerts.resolved_at IS NULL THEN cron_alerts.notified_at ELSE NULL END,
+       last_error = EXCLUDED.last_error, last_failed_at = EXCLUDED.last_failed_at, resolved_at = NULL`,
+    [PLAN_PRICE_ALERT_JOB, `Stripe subscription ${subscriptionId} (tenant ${tenantId}) has an unknown price lookup key; the tenant is held on the lowest paid plan and cannot start another checkout until the subscription names a known price`, at]);
+}
+/** PL-2: closes the alert once no live Stripe subscription is held any more. */
+async function closePlanPriceAlert(tx: Transaction, at: Date): Promise<void> {
+  await tx.query(
+    `UPDATE cron_alerts SET resolved_at=$2 WHERE job=$1 AND resolved_at IS NULL AND NOT EXISTS (
+       SELECT 1 FROM plan_subscriptions WHERE provider='stripe' AND plan IS NULL
+         AND status NOT IN ('canceled','unpaid','incomplete_expired','paused'))`, [PLAN_PRICE_ALERT_JOB, at]);
 }
 
 export interface PlanEventDeps {
@@ -201,7 +228,12 @@ export function createPlanEvents(deps: PlanEventDeps) {
     if (plan.founding && ENDED.has(status) && !(previous && ENDED.has(previous.status)))
       await tx.query("UPDATE tenant_plans SET founding_invite=false, updated_at=$2 WHERE tenant_id=$1", [tenantId, at]);
     const duplicate = await derivePlanRecord(tx, tenantId, at, graceMs);
-    if (plan.plan === null) return "mismatch";
+    if (plan.plan === null) {
+      if (ENDED.has(status)) return "mismatch";
+      await openPlanPriceAlert(tx, tenantId, subscriptionId, at);
+      return "plan_held";
+    }
+    await closePlanPriceAlert(tx, at);
     return duplicate ? "plan_duplicate" : "plan_synced";
   }
 

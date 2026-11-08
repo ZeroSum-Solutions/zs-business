@@ -33,6 +33,11 @@ export interface CronAlerts {
    * `run` is on it (a stale success must not resolve a newer failure). One statement. Never throws.
    */
   succeeded(job: string, run?: CronRun): Promise<void>;
+  /**
+   * Another part of the system wrote an open alert row for `job` (core's PL-2 unknown-price hold): email the
+   * operator if that open row has not been mailed yet. Never throws.
+   */
+  notifyOpen(job: string, run?: CronRun): Promise<void>;
 }
 
 export interface OpenCronAlert {
@@ -176,6 +181,28 @@ export function createCronAlerts(deps: {
         ));
       } catch (problem) {
         report(`Cron alert for ${job} not recorded`, problem);
+      }
+    },
+    async notifyOpen(job, run) {
+      try {
+        if (!deps.notify) return;
+        const began = monotonic();
+        const total = budgetFor(run);
+        if (total < 200) return;
+        const found = await bounded(total, (tx) => tx.query<{ opened_at: string; failure_count: number; last_error: string }>(
+          "SELECT opened_at::text AS opened_at, failure_count, last_error FROM cron_alerts WHERE job = $1 AND resolved_at IS NULL AND notified_at IS NULL", [job]));
+        const row = found.rows[0];
+        if (!row) return;
+        const sendMs = total - (monotonic() - began);
+        if (sendMs < MIN_SEND_MS) return;
+        const sent = await deps.notify({ job, openedAt: row.opened_at, failureCount: row.failure_count, error: row.last_error }, { timeoutMs: sendMs });
+        if (!sent) return;
+        const markMs = total - (monotonic() - began);
+        if (markMs < 200) return;
+        await bounded(markMs, (tx) => tx.query(
+          "UPDATE cron_alerts SET notified_at = clock_timestamp() WHERE job = $1 AND opened_at = $2::timestamptz AND notified_at IS NULL", [job, row.opened_at]));
+      } catch (problem) {
+        report(`Cron alert for ${job} not mailed`, problem);
       }
     },
     async succeeded(job, run) {
