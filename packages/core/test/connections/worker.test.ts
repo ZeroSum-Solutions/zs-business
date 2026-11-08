@@ -69,6 +69,25 @@ const seedAccount = (tenantId: string, id = `ca_seed_${randomUUID().slice(0, 8)}
   return id;
 };
 
+describe("native tier link (C-4, C-18)", () => {
+  it("with the native tier on, a Shopify link is refused as not_found and makes no Composio call", async () => {
+    const native = { run: async () => { throw new Error("unused"); }, finishDisconnect: async () => "disconnected" as const, pass: async () => ({ refreshed: 0 }) };
+    const nativeWorker = createConnectionsWorker({
+      service: (work) => asService(database.servicePool, work),
+      composio: createComposioClient({ apiKey: "test-key", baseUrl: "https://composio.test/api/v3.1", fetch: fake.fetch, timeoutMs: 1500 }),
+      clock, config: { env: ENV, callbackUrl: CALLBACK_URL, authConfigIds: { shopify: AUTH_CONFIG } }, native,
+    });
+    const linked = await nativeWorker.link({ tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(),
+      shopDomain: "testshop.myshopify.com", createdBy: a.memberId, browserHash: "b".repeat(43) });
+    expect(linked).toEqual({ outcome: "refused", code: "not_found" });
+    expect(fake.calls).toHaveLength(0);
+    expect((await database.pool.query("SELECT 1 FROM connection_attempts")).rowCount).toBe(0);
+    // Without the native tier the same call links.
+    expect((await worker.link({ tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(),
+      shopDomain: "testshop.myshopify.com", createdBy: a.memberId, browserHash: "b".repeat(43) })).outcome).toBe("linked");
+  });
+});
+
 describe("link (C-3, C-5)", () => {
   const linkInput = (over: Partial<Parameters<typeof worker.link>[0]> = {}) => ({
     tenantId: a.tenantId, toolkit: "shopify", attemptId: randomUUID(), connectionId: randomUUID(), shopDomain: "testshop.myshopify.com",
