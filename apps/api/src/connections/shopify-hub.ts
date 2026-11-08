@@ -6,7 +6,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type { HubPort } from "@zs/core";
 import { asService } from "@zs/db";
-import { createTenant, tenantIdForKey } from "../tenant-create.js";
+import { checkTenantCreateInput, createTenant, tenantIdForKey } from "../tenant-create.js";
 import type { SupabaseAuthAdmin } from "../supabase-auth-admin.js";
 
 export function createShopifyHub(deps: {
@@ -22,9 +22,13 @@ export function createShopifyHub(deps: {
   return {
     async createHub(input) {
       const tenantId = tenantIdForKey(input.key);
-      const email = input.ownerEmail.trim().toLowerCase();
-      let step = "find_user";
+      let step = "check_input";
       try {
+        // Before any Auth call: an address or name the tenant create would refuse must not leave an Auth user behind.
+        // The raw address goes in: the member rules check ASCII before folding case, so a non-ASCII address (the Kelvin
+        // sign folds to "k") cannot alias an ASCII one.
+        const email = checkTenantCreateInput({ key: input.key, name: input.name, ownerEmail: input.ownerEmail, dryRun: false }).email;
+        step = "find_user";
         const found = await deps.auth.findUser(email);
         if (found?.tenantId && found.tenantId !== tenantId) return { kind: "email_has_hub" };
         step = "read_state";
@@ -33,16 +37,19 @@ export function createShopifyHub(deps: {
           name: (await tx.query<{ name: string }>("SELECT name FROM tenants WHERE tenant_id=$1", [tenantId])).rows[0]?.name ?? null,
         }));
         if (state.elsewhere > 0) return { kind: "email_has_hub" };
-        if (!found) {
-          step = "create_user";
-          // No mailbox is involved: the user is confirmed and holds a random password nobody learns; sign-in is by link.
-          await deps.auth.createUser({ email, password: randomBytes(32).toString("base64url") });
-        }
         step = "create_tenant";
         // A retry keeps the name the tenant already has, so a renamed store cannot trip the rerun check.
         const name = state.name ?? input.name;
-        await createTenant({ service: deps.pool, clock: deps.clock, generateId, auth: deps.auth }, { key: input.key, name, ownerEmail: email, dryRun: false });
-        return { kind: "ok", tenantId };
+        await createTenant({ service: deps.pool, clock: deps.clock, generateId, auth: deps.auth }, { key: input.key, name, ownerEmail: email, dryRun: false }, {
+          // Under the provisioning locks, after the stored-owner, name and membership checks: a refused retry leaves no Auth user.
+          // No mailbox is involved: the user is confirmed and holds a random password nobody learns; sign-in is by link.
+          createOwnerUser: async () => {
+            step = "create_user";
+            await deps.auth.createUser({ email, password: randomBytes(32).toString("base64url") });
+            step = "create_tenant";
+          },
+        });
+        return { kind: "ok", tenantId, name };
       } catch {
         // A create that raced another for the same email lost: the next retry finds the user. No error text is kept.
         deps.report?.({ kind: "hub_error", step });

@@ -20,7 +20,7 @@ import {
   type StripeEnv,
   type PlanConfig,
 } from "@zs/core";
-import { IMAGE_ADAPTERS, IMAGE_PRESETS, type ImagePreset } from "@zs/contracts";
+import { IMAGE_ADAPTERS, IMAGE_PRESETS, signInLimiterSecretSchema, type ImagePreset } from "@zs/contracts";
 import { assertLocalDatabaseUrl } from "@zs/db";
 import { trustedProxyList, type ClientIpConfig } from "./public/client-ip.js";
 import { parseGoogleEnv, type GoogleEnv } from "./calendar/google-env.js";
@@ -78,6 +78,10 @@ const envSchema = z.object({
   PUBLIC_RATE_LIMIT_STORE: z.enum(["postgres", "memory"]).default("postgres"),
   // delivery.md D-9: verifies the List-Unsubscribe tokens in outgoing email (the delivery worker
   // signs them with the same secret). Unset turns the public unsubscribe routes off.
+  // hub-launch L9: the bearer token the dashboard sends to POST /public/v1/sign-in/admit, which keeps its
+  // sign-in link limits in the shared limiter. Unset turns the route off (404); the dashboard then refuses sign-in.
+  SIGN_IN_LIMITER_SECRET: signInLimiterSecretSchema.optional(),
+  SIGN_IN_LIMITER_PREVIOUS_SECRET: signInLimiterSecretSchema.optional(),
   UNSUBSCRIBE_TOKEN_SECRET: unsubscribeTokenSecretSchema.optional(),
   // The previous secret keeps verifying links in mail sent before a rotation.
   UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: unsubscribeTokenSecretSchema.optional(),
@@ -163,6 +167,8 @@ export interface ServerEnv {
   readonly publicIntake: PublicIntakeEnv | null;
   readonly sites: SitesEnv | null;
   readonly unsubscribe: UnsubscribeEnv | null;
+  /** hub-launch L9: SIGN_IN_LIMITER_SECRET (+ the optional PREVIOUS one during a rotation); null (route off) when unset. */
+  readonly signInLimiterSecrets: { readonly current: string; readonly previous?: string } | null;
   readonly resendWebhook: ResendWebhookEnv | null;
   /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
   readonly stripe: StripeEnv | null;
@@ -246,6 +252,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     publicIntake: parsePublicIntake(parsed.data),
     sites: parseSites(parsed.data),
     unsubscribe: parseUnsubscribe(parsed.data),
+    signInLimiterSecrets: parseSignInSecrets(parsed.data),
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
     plans: parsePlansWithStripe(env),
@@ -418,6 +425,18 @@ function parsePublicIntake(data: z.infer<typeof envSchema>): PublicIntakeEnv | n
     clientIp: parseClientIp(data),
     limitOverrides,
   };
+}
+
+/** SIGN_IN_LIMITER_SECRET turns the dashboard's admit route on; the PREVIOUS one only makes sense next to it. */
+function parseSignInSecrets(data: z.infer<typeof envSchema>): ServerEnv["signInLimiterSecrets"] {
+  const current = data.SIGN_IN_LIMITER_SECRET;
+  const previous = data.SIGN_IN_LIMITER_PREVIOUS_SECRET;
+  if (current === undefined) {
+    if (previous !== undefined) throw new Error("Invalid environment: SIGN_IN_LIMITER_PREVIOUS_SECRET needs SIGN_IN_LIMITER_SECRET");
+    return null;
+  }
+  if (previous === current) throw new Error("Invalid environment: SIGN_IN_LIMITER_PREVIOUS_SECRET must differ from SIGN_IN_LIMITER_SECRET");
+  return previous === undefined ? { current } : { current, previous };
 }
 
 function parseUnsubscribe(data: z.infer<typeof envSchema>): UnsubscribeEnv | null {

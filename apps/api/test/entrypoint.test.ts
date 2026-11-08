@@ -191,3 +191,45 @@ describe("public limits across API instances", () => {
     }
   }, 30_000);
 });
+
+// hub-launch L9: the dashboard's sign-in limits through the real entry point (env parsing, server wiring, the
+// Postgres limiter on the runtime login), with two API processes standing in for two serverless instances.
+describe("sign-in limits across API instances", () => {
+  const CURRENT = ["entry", "sign-in", "c".repeat(32)].join("-");
+  const PREVIOUS = ["entry", "sign-in", "p".repeat(32)].join("-");
+  const admit = (api: Running, address: string, secret: string, limits = { perAddress: 4, global: 1000 }) =>
+    fetch(`http://127.0.0.1:${api.port}/public/v1/sign-in/admit`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ address, ...limits }),
+    });
+
+  it("counts one budget in Postgres for concurrent requests that reach either instance", async () => {
+    const [first, second] = await Promise.all([0, 1].map(() => startApi({ SIGN_IN_LIMITER_SECRET: CURRENT, SIGN_IN_LIMITER_PREVIOUS_SECRET: PREVIOUS })));
+    try {
+      // The route is on, behind the secret.
+      expect((await fetch(`http://127.0.0.1:${first!.port}/public/v1/sign-in/admit`, { method: "POST" })).status).toBe(401);
+      const results = await Promise.all(Array.from({ length: 12 }, (_, i) => admit(i % 2 ? second! : first!, "192.0.2.201", CURRENT)));
+      const statuses = results.map((response) => response.status);
+      expect(statuses.filter((status) => status === 204)).toHaveLength(4);
+      expect(statuses.filter((status) => status === 429)).toHaveLength(8);
+      expect(results.find((response) => response.status === 429)?.headers.get("cache-control")).toBe("no-store");
+      // The previous secret works on both instances (the rotation window), a made-up one on neither.
+      expect((await admit(first!, "192.0.2.202", PREVIOUS)).status).toBe(204);
+      expect((await admit(second!, "192.0.2.203", PREVIOUS)).status).toBe(204);
+      expect((await admit(second!, "192.0.2.204", "q".repeat(40))).status).toBe(401);
+      // Neither secret reaches the log.
+      expect(first!.output() + second!.output()).not.toMatch(new RegExp(`${CURRENT}|${PREVIOUS}`));
+    } finally {
+      await Promise.all([first!.stop(), second!.stop()]);
+    }
+  }, 30_000);
+
+  it("leaves the route off (404) until SIGN_IN_LIMITER_SECRET is set", async () => {
+    const api = await startApi();
+    try {
+      expect((await admit(api, "192.0.2.205", CURRENT)).status).toBe(404);
+    } finally {
+      await api.stop();
+    }
+  }, 30_000);
+});

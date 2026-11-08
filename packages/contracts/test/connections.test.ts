@@ -66,6 +66,24 @@ describe("connections contracts (C-4, C-6, C-10, C-14, C-16)", () => {
     expect(normalizeAccountLabel("lone \ud800 surrogate")).toBe("lone � surrogate");
   });
 
+  it("is idempotent and NFC for random hostile text (property, seeded)", () => {
+    // A format character between a base and a combining mark used to leave the first pass decomposed.
+    const pieces = ["a", "e", "\u0301", "\u200b", "\u202e", "\u0000", " ", "\t", "\n", "\u2028", "\ud800", "\udc00", "😀", "\u0041\u030a", "\u00c5", "\ufeff", "\ue000", "\u0378", "Z", "\u0308"];
+    let seed = 20261108;
+    const next = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 2 ** 32;
+    for (let i = 0; i < 4000; i += 1) {
+      const raw = Array.from({ length: 1 + Math.floor(next() * 40) }, () => pieces[Math.floor(next() * pieces.length)]).join("");
+      const once = normalizeAccountLabel(raw);
+      if (once === null) continue;
+      expect(normalizeAccountLabel(once), JSON.stringify(raw)).toBe(once);
+      expect(once, JSON.stringify(raw)).toBe(once.normalize("NFC"));
+      expect([...once].length).toBeLessThanOrEqual(120);
+    }
+    expect(normalizeAccountLabel("e\u200b\u0301")).toBe("\u00e9");
+    const nearCut = "x".repeat(119) + "e\u0301";
+    expect(normalizeAccountLabel(nearCut)).toBe("x".repeat(119) + "\u00e9");
+  });
+
   it("counts label characters, not UTF-16 units, as the database does (C-8 of the fix round, C-14)", () => {
     const astral = "😀".repeat(120);
     expect(normalizeAccountLabel(astral + "x")).toBe(astral);

@@ -61,6 +61,11 @@ describe("readBusinessForm", () => {
   });
 
   it("does not let the business name be empty or too long", () => {
+    const emoji = (n: number) => "😀".repeat(n);
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), displayName: emoji(120) })).toMatchObject({ ok: true });
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), displayName: emoji(121) })).toMatchObject({ ok: false });
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), legalName: emoji(200) })).toMatchObject({ ok: true });
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), legalName: emoji(201) })).toMatchObject({ ok: false });
     for (const displayName of ["  ", "x".repeat(121)]) {
       expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), displayName })).toMatchObject({ ok: false, errors: { displayName: expect.any(String) } });
     }

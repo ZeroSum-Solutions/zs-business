@@ -1,97 +1,164 @@
 /**
- * In-memory rate limits for sign-in requests: enough for one dashboard server. Every request
- * for a sign-in link is reserved before its body is read and counts against the caller's
- * address (see clientAddress) and against everyone, so a burst of parallel requests cannot
- * outrun the limit and nobody can make the server send unlimited email.
+ * Rate limits for sign-in link requests, kept in the API's shared Postgres limiter (POST /public/v1/sign-in/admit,
+ * public-intake.md P-10) so they hold across every dashboard server instance. Every request is charged against the
+ * caller's address and against everyone, together in one atomic call, before its body is read: a burst of parallel
+ * requests cannot outrun the limit and nobody can make the server send unlimited email. There is no per-email
+ * bucket (it would let anyone lock a known address out, and its Retry-After would tell who has an account). A
+ * charge is never given back, so a request Supabase could not take still counts.
+ *
+ * It fails closed, like the API's other shared-limiter callers: when the limiter cannot answer (no valid
+ * DASHBOARD_SIGN_IN_LIMITER_SECRET, an unusable ZS_API_URL, the API unreachable, a store outage) no link is sent and
+ * the caller gets 502. A missing or invalid setting is logged once per process.
  */
+import {
+  SIGN_IN_ADMIT_PATH, SIGN_IN_DEFAULT_LIMITS, SIGN_IN_DIRECT_ADDRESS, signInLimiterSecretSchema, type SignInAdmitBody,
+} from "@zs/contracts";
+
 export interface AttemptLimits {
-  windowMs: number;
   /** Attempts one address may make in a window. */
   perAddress: number;
   /** Attempts everyone together may make in a window. */
   global: number;
 }
 
-const MAX_TRACKED_ADDRESSES = 1000;
+export const DEFAULT_ATTEMPT_LIMITS: AttemptLimits = { ...SIGN_IN_DEFAULT_LIMITS };
 
-export const DEFAULT_ATTEMPT_LIMITS: AttemptLimits = { windowMs: 15 * 60 * 1000, perAddress: 5, global: 30 };
+type Vars = Record<string, string | undefined>;
 
 /**
- * Sign-in link requests per 15 minutes: DASHBOARD_SIGN_IN_PER_ADDRESS (default 5) and
- * DASHBOARD_SIGN_IN_GLOBAL (default 30), whole numbers from 1 to 10000. Without a trusted
- * proxy every caller shares one address, so a larger team may need a higher first limit.
+ * Sign-in link requests per 15 minutes: DASHBOARD_SIGN_IN_PER_ADDRESS (default 5) and DASHBOARD_SIGN_IN_GLOBAL
+ * (default 30), whole numbers from 1 to 10000. Without a trusted proxy every caller shares one address, so a
+ * larger team may need a higher first limit.
  */
-export function attemptLimitsFromEnv(env: Record<string, string | undefined> = process.env): AttemptLimits {
+export function attemptLimitsFromEnv(vars: Vars = process.env): AttemptLimits {
   const read = (name: string, fallback: number) => {
-    const value = Number(env[name]?.trim() || fallback);
+    const value = Number(vars[name]?.trim() || fallback);
     return Number.isInteger(value) && value >= 1 && value <= 10_000 ? value : fallback;
   };
   return {
-    windowMs: DEFAULT_ATTEMPT_LIMITS.windowMs,
     perAddress: read("DASHBOARD_SIGN_IN_PER_ADDRESS", DEFAULT_ATTEMPT_LIMITS.perAddress),
     global: read("DASHBOARD_SIGN_IN_GLOBAL", DEFAULT_ATTEMPT_LIMITS.global),
   };
 }
 
-/**
- * Attempts per address and in total over a sliding window. Every attempt is reserved before
- * its body is read; refund() gives one back when a caller should not be charged for it.
- */
-export class AttemptLimiter {
-  private readonly attempts = new Map<string, number[]>();
-  private all: number[] = [];
+export type Admission =
+  | { readonly ok: true }
+  /** Over a limit: the seconds to wait. */
+  | { readonly ok: false; readonly retryAfterSeconds: number }
+  /** The limiter could not answer: fail closed. */
+  | { readonly ok: false; readonly unavailable: true };
 
-  constructor(private readonly limits: AttemptLimits = DEFAULT_ATTEMPT_LIMITS) {}
-
-  /** Seconds until this address may try again, or 0 when it may try now. */
-  retryAfter(address: string, now: number = Date.now()): number {
-    const since = now - this.limits.windowMs;
-    this.all = this.all.filter((time) => time > since);
-    const mine = (this.attempts.get(address) ?? []).filter((time) => time > since);
-    if (mine.length > 0) this.attempts.set(address, mine);
-    else this.attempts.delete(address);
-    const blockedUntil = Math.max(
-      mine.length >= this.limits.perAddress ? mine[mine.length - this.limits.perAddress]! + this.limits.windowMs : 0,
-      this.all.length >= this.limits.global ? this.all[this.all.length - this.limits.global]! + this.limits.windowMs : 0,
-    );
-    return blockedUntil > now ? Math.ceil((blockedUntil - now) / 1000) : 0;
-  }
-
+export interface SignInLimiter {
   /**
-   * Takes one attempt for this address and for everyone, or returns the seconds to wait and
-   * takes nothing. Synchronous on purpose: call it before awaiting anything, so concurrent
-   * requests each see the attempts the ones before them took.
+   * Charges the caller's address and everyone, in one call, before the request body is read. `signal` ends the
+   * call early (the incoming request was dropped); the call always ends after a few seconds on its own.
    */
-  reserve(address: string, now: number = Date.now()): number {
-    const wait = this.retryAfter(address, now);
-    if (wait > 0) return wait;
-    this.all.push(now);
-    this.attempts.set(address, [...(this.attempts.get(address) ?? []), now]);
-    // Addresses that never come back must not pile up.
-    if (this.attempts.size > MAX_TRACKED_ADDRESSES) {
-      const since = now - this.limits.windowMs;
-      for (const [key, times] of this.attempts) {
-        if (times[times.length - 1]! <= since) this.attempts.delete(key);
-      }
-    }
-    return 0;
-  }
+  admit(address: string, signal?: AbortSignal): Promise<Admission>;
+}
 
-  /** Gives back the attempt reserve() took at `time`: the sign-in succeeded. */
-  refund(address: string, time: number) {
-    const drop = (times: number[]) => {
-      const index = times.lastIndexOf(time);
-      return index === -1 ? times : [...times.slice(0, index), ...times.slice(index + 1)];
-    };
-    this.all = drop(this.all);
-    const mine = drop(this.attempts.get(address) ?? []);
-    if (mine.length > 0) this.attempts.set(address, mine);
-    else this.attempts.delete(address);
+export interface SharedLimiterConfig {
+  /** apps/api base URL. */
+  apiUrl: string;
+  /** DASHBOARD_SIGN_IN_LIMITER_SECRET; the API holds the same value as SIGN_IN_LIMITER_SECRET. Absent: always unavailable. */
+  secret: string | null;
+  limits: AttemptLimits;
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 5000;
+/** The API reads at most this many characters of an address; a longer one is not an address. */
+const MAX_ADDRESS_LENGTH = 64;
+
+/** An empty or oversize value joins the shared "direct" bucket here, so a header can never make the call fail. */
+const boundedAddress = (address: string) =>
+  address.length === 0 || address.length > MAX_ADDRESS_LENGTH ? SIGN_IN_DIRECT_ADDRESS : address;
+
+export function createSharedSignInLimiter(config: SharedLimiterConfig): SignInLimiter {
+  const send = config.fetch ?? fetch;
+  return {
+    async admit(address, signal) {
+      if (!config.secret) return { ok: false, unavailable: true };
+      const body: SignInAdmitBody = { address: boundedAddress(address), perAddress: config.limits.perAddress, global: config.limits.global };
+      const deadline = AbortSignal.timeout(config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      try {
+        const response = await send(`${config.apiUrl}${SIGN_IN_ADMIT_PATH}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.secret}` },
+          body: JSON.stringify(body),
+          cache: "no-store",
+          redirect: "error",
+          signal: signal === undefined ? deadline : AbortSignal.any([signal, deadline]),
+        });
+        if (response.status === 204) return { ok: true };
+        if (response.status === 429) {
+          const wait = Number(response.headers.get("retry-after"));
+          return { ok: false, retryAfterSeconds: Number.isInteger(wait) && wait >= 1 ? wait : 60 };
+        }
+        await response.body?.cancel().catch(() => undefined);
+        return { ok: false, unavailable: true };
+      } catch {
+        return { ok: false, unavailable: true };
+      }
+    },
+  };
+}
+
+const LOOPBACK_HOSTS = new Set(["localhost", "[::1]"]);
+
+/**
+ * The base URL the limiter call goes to. https anywhere; plain http only to this machine (the secret is a bearer
+ * token, so it must not cross a network in clear). Returns the reason when the value cannot be used.
+ */
+export function limiterApiUrl(raw: string | undefined): { readonly url: string } | { readonly problem: string } {
+  const value = raw?.trim() ?? "";
+  if (value === "") return { problem: "ZS_API_URL is not set" };
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { problem: "ZS_API_URL is not a URL" };
   }
+  const loopback = LOOPBACK_HOSTS.has(parsed.hostname) || /^127(?:\.\d{1,3}){3}$/.test(parsed.hostname);
+  if (parsed.protocol === "http:" && !loopback) return { problem: "ZS_API_URL must be https (plain http is allowed only for localhost)" };
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return { problem: "ZS_API_URL must be an https URL" };
+  return { url: value.replace(/\/+$/, "") };
+}
+
+const reported = new Set<string>();
+/** Test hook: forget what was already logged. */
+export function resetSignInLimiterReports(): void {
+  reported.clear();
+}
+
+/** The limiter for this server: the shared one at ZS_API_URL, with its secret and limits from the environment. */
+export function signInLimiterFromEnv(
+  vars: Vars = process.env,
+  report: (message: string) => void = (message) => console.error(message),
+): SignInLimiter {
+  const problems: string[] = [];
+  const rawSecret = vars.DASHBOARD_SIGN_IN_LIMITER_SECRET;
+  const secret = signInLimiterSecretSchema.safeParse(rawSecret ?? "");
+  if (rawSecret === undefined || rawSecret.trim() === "")
+    problems.push("DASHBOARD_SIGN_IN_LIMITER_SECRET is not set");
+  else if (!secret.success)
+    problems.push(`DASHBOARD_SIGN_IN_LIMITER_SECRET ${secret.error.issues[0]?.message ?? "is not valid"}`);
+  const api = limiterApiUrl(vars.ZS_API_URL);
+  if ("problem" in api) problems.push(api.problem);
+  for (const problem of problems) {
+    if (reported.has(problem)) continue;
+    reported.add(problem);
+    report(`Sign-in is closed: ${problem}. Set it on the dashboard (and SIGN_IN_LIMITER_SECRET on the API, deployed first).`);
+  }
+  return createSharedSignInLimiter({
+    apiUrl: "url" in api ? api.url : "",
+    secret: secret.success && "url" in api ? secret.data : null,
+    limits: attemptLimitsFromEnv(vars),
+  });
 }
 
 /** The limiter key for every caller when no trusted proxy says who they are. */
-export const DIRECT_ADDRESS = "direct";
+export const DIRECT_ADDRESS = SIGN_IN_DIRECT_ADDRESS;
 
 /**
  * The caller's address for rate limiting. X-Forwarded-For counts only behind a trusted
