@@ -125,7 +125,20 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
         if (live.rowCount) throw new Conflict("This app is already connected", { reason: "already_connected" });
         return { toolkit: named, request: parsed, memberId: member.memberId };
       });
-      await charge(connections.limiter, connectCharges(tenantId), signal);
+      const charges = connectCharges(tenantId);
+      await charge(connections.limiter, charges, signal);
+      const chargedAt = now(); // after the take, so the window it opened or joined starts at or before this
+      /**
+       * C-4: the connect limit pays for a link that exists. A link the worker refused, or that failed, gives its
+       * unit back. A refund that fails keeps the charge and never hides the real answer.
+       */
+      const refund = async (): Promise<void> => {
+        try {
+          await connections.limiter.refund?.(charges, { chargedAt });
+        } catch {
+          // The charge stands; the window ends within the hour.
+        }
+      };
       const attemptId = deps.generateId().toLowerCase();
       const connectionId = deps.generateId().toLowerCase();
       let linked;
@@ -134,10 +147,12 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
           tenantId, toolkit, attemptId, connectionId, shopDomain: request.shopDomain, createdBy: memberId.toLowerCase(), browserHash: request.browserBinding,
         }, withDeadline(signal));
       } catch (error) {
+        await refund();
         if (error instanceof ConnectorUnavailable) throw new ConnectionsRefused("unavailable");
         throw error;
       }
       if (linked.outcome === "refused") {
+        await refund();
         if (linked.code === "not_found") throw new NotFound();
         if (linked.code === "provider_rate_limited") throw new ConnectionsRefused("rate_limited", linked.retryAfterSeconds ?? 60);
         throw new ConnectionsRefused("unavailable");

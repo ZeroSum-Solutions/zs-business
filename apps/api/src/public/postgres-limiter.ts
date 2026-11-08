@@ -42,5 +42,13 @@ export function createPostgresRateLimiter(db: ScopedDatabase, clock: { now(): Da
       });
       return retryAfterMs > 0 ? { ok: false, retryAfterSeconds: retryAfterSeconds(retryAfterMs) } : { ok: true };
     },
+    async refund(charges, { chargedAt }) {
+      await db.withoutTenant((tx) => tx.query(
+        "SELECT public.rate_limit_refund($1, $2, $3::jsonb)",
+        [clock.now().toISOString(), chargedAt.toISOString(), JSON.stringify(charges.map(({ key }) => bucketKey(key)))],
+      )).catch((error: unknown) => {
+        throw transient(error) ?? error;
+      });
+    },
   };
 }

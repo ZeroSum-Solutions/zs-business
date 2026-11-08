@@ -347,7 +347,10 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       if (shop.kind === "failed") return { kind: "unavailable" };
       if (shop.shop.domain !== domain) return { kind: "invalid" };
       const s = sealed(shop.shop.id, answer.tokens);
-      const name = shop.shop.name.slice(0, 120);
+      // The store's name is text an outsider chose: C-14's clean form (no NUL, control, bidirectional or unpaired
+      // surrogate characters; 1 to 120 code points), else the domain. Postgres refuses a NUL byte, and a plain
+      // UTF-16 cut can split a surrogate pair or leave a space at the end.
+      const name = normalizeAccountLabel(shop.shop.name) ?? shop.shop.domain;
       // The row seen before the Shopify calls fences the write: an uninstall or redact that ran meanwhile moved the
       // generation or removed the row, and this exchange must not bring the store back to life behind it.
       const observed = existing === null ? null : gen(existing);
@@ -573,7 +576,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     }
 
     const key = `shopify-${SHOP_GID_RE.exec(row.shop_id)![1]}`;
-    const name = row.shop_name.trim().slice(0, 120) || key;
+    const name = normalizeAccountLabel(row.shop_name) ?? key; // the tenant refuses an outer space or more than 120 characters
     const made = await deps.hub.createHub({ key, name, ownerEmail: owner.email });
     if (made.kind === "email_has_hub") return { outcome: "email_has_hub" };
     if (made.kind === "failed") { report({ kind: "hub_failed", shop: domain }); return { outcome: "unavailable" }; }

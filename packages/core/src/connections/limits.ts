@@ -13,6 +13,12 @@ export interface ConnectionCharge {
 export type ConnectionTake = { readonly ok: true } | { readonly ok: false; readonly retryAfterSeconds: number };
 export interface ConnectionLimiter {
   take(charges: readonly ConnectionCharge[], options?: { readonly signal?: AbortSignal; readonly remainingMs?: () => number }): Promise<ConnectionTake>;
+  /**
+   * C-4: gives back one unit in each named bucket that a `take` accepted at `chargedAt`, when the work it paid
+   * for did not happen. A bucket whose window has since passed is left alone. Optional: a limiter without it
+   * keeps the charge.
+   */
+  refund?(charges: readonly ConnectionCharge[], options: { readonly chargedAt: Date }): Promise<void>;
 }
 
 const MINUTE = 60_000;

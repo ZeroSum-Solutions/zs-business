@@ -6,7 +6,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type { HubPort } from "@zs/core";
 import { asService } from "@zs/db";
-import { createTenant, tenantIdForKey } from "../tenant-create.js";
+import { checkTenantCreateInput, createTenant, tenantIdForKey } from "../tenant-create.js";
 import type { SupabaseAuthAdmin } from "../supabase-auth-admin.js";
 
 export function createShopifyHub(deps: {
@@ -23,8 +23,11 @@ export function createShopifyHub(deps: {
     async createHub(input) {
       const tenantId = tenantIdForKey(input.key);
       const email = input.ownerEmail.trim().toLowerCase();
-      let step = "find_user";
+      let step = "check_input";
       try {
+        // Before any Auth call: an address or name the tenant create would refuse must not leave an Auth user behind.
+        checkTenantCreateInput({ key: input.key, name: input.name, ownerEmail: email, dryRun: false });
+        step = "find_user";
         const found = await deps.auth.findUser(email);
         if (found?.tenantId && found.tenantId !== tenantId) return { kind: "email_has_hub" };
         step = "read_state";

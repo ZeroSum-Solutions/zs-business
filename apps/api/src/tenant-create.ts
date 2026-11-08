@@ -69,8 +69,9 @@ interface Checked {
 export function checkTenantCreateInput(input: TenantCreateInput): Checked {
   if (!TENANT_KEY_PATTERN.test(input.key)) refuse("--key must match ^[a-z0-9][a-z0-9-]{2,39}$");
   const name = input.name.trim();
-  // The tenant trigger trims and cuts a name to 120 characters; refuse one it would change.
-  if (name.length < 1 || name.length > 120 || name !== input.name) refuse("--name must be 1 to 120 characters with no outer spaces");
+  // The tenant trigger trims and cuts a name to 120 characters (code points, as Postgres counts them, not UTF-16
+  // units: a name of emoji is 120 characters at 240 units); refuse one it would change.
+  if (name.length < 1 || [...name].length > 120 || name !== input.name) refuse("--name must be 1 to 120 characters with no outer spaces");
   const email = memberEmailSchema.safeParse(input.ownerEmail);
   if (!email.success) refuse("--owner-email is not a valid address");
   // An explicit empty zone is a bad zone, not an omitted one.
