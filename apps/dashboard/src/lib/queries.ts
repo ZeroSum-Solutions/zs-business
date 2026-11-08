@@ -342,11 +342,20 @@ export function useResults(query: HomeResultsQuery | null) {
   });
 }
 
-/** The prepaid wallet (delivery.md D-4). Owners only: the API needs `billing`, so staff never ask. */
+/** How often an open Home reads the wallet again: workers spend and hold from it while it is open. */
+export const WALLET_POLL_MS = 60_000;
+
+/**
+ * The prepaid wallet (delivery.md D-4). Owners only: the API needs `billing`, so staff never ask.
+ * Workers spend and hold from it at any time, so it is read again every minute and on return to the tab.
+ */
 export function useWallet(canRead: boolean) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  return useQuery({ enabled: enabled && canRead, queryKey: keys.wallet, queryFn: ({ signal }) => api.getWallet({ signal }) });
+  return useQuery({
+    enabled: enabled && canRead, queryKey: keys.wallet, queryFn: ({ signal }) => api.getWallet({ signal }),
+    refetchInterval: WALLET_POLL_MS, refetchOnWindowFocus: true,
+  });
 }
 
 /** The inbox list, a page at a time by keyset cursor (inbox-home.md I-8). */

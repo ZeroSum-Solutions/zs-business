@@ -146,7 +146,7 @@ export type {
 
 /**
  * Managed-tier connections (connections.md): what an owner sees of one, and of the grant that waits
- * for the owner's confirmation. Named apart from the sample workspace's `Connection`.
+ * for the owner's confirmation. Named apart from the contracts' Google Calendar `CalendarConnection`.
  */
 export type { Connection as ManagedConnection, ConnectionStatus as ManagedConnectionStatus, PendingConnection as PendingManagedConnection };
 

@@ -106,7 +106,13 @@ test("a website booking shows in Calendar, Customers, Inbox and Home, and an own
   const staff = await staffPage(browser, info);
   try {
     const resultsCalls: string[] = [];
-    staff.page.on("request", (call) => { if (call.url().includes("/api/v1/home/")) resultsCalls.push(call.url()); });
+    const ownerCalls: string[] = [];
+    staff.page.on("request", (call) => {
+      if (call.url().includes("/api/v1/home/")) resultsCalls.push(call.url());
+      // The wallet and the Shopify list are the owner's (billing, integrations): staff never ask for them.
+      const path = new URL(call.url()).pathname;
+      if (path === "/api/v1/wallet" || path === "/api/v1/connections") ownerCalls.push(path);
+    });
     await staff.page.goto("/");
     await expect(staff.page.getByRole("heading", { name: "Next appointments" })).toBeVisible();
     await expect(staff.page.getByRole("region", { name: "Revenue this week" })).toHaveCount(0);
@@ -122,6 +128,7 @@ test("a website booking shows in Calendar, Customers, Inbox and Home, and an own
     await expect(staffDraft.getByRole("button", { name: "Approve and queue" })).toHaveCount(0);
     await expect(staffDraft.getByRole("button", { name: "Discard" })).toBeVisible();
     expect(resultsCalls, "staff requests for Home results").toEqual([]);
+    expect(ownerCalls, "staff requests for the wallet or Shopify").toEqual([]);
   } finally {
     await staff.close();
   }

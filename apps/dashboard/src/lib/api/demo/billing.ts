@@ -3,16 +3,27 @@
  * wallet (delivery.md D-4). Demo mode never reaches Stripe, so Checkout and the Portal are off and say so.
  */
 import { EXTRA_CONNECTION_PRICE, PLAN_CATALOG, type BillingPlan, type PlanCatalogEntry, type WalletSummary } from "@zs/contracts";
-import { ApiError } from "../errors";
+import { ApiError, demoError } from "../errors";
 import type { BillingApi } from "../types";
 import type { DemoClock } from "./adapter";
+import type { DemoActor } from "./agents";
 
 export const DEMO_PLAN_OFF = "Demo mode does not open Stripe. Plans and billing work in the live hub.";
 
-export function createDemoBilling(options: { clock?: DemoClock; latencyMs?: number } = {}): BillingApi {
+export interface DemoBillingOptions {
+  clock?: DemoClock;
+  latencyMs?: number;
+  /** The demo adapter's wait: its latency, and its offline and expired-session switches. Replaces `latencyMs`. */
+  wait?: () => Promise<void>;
+  /** Who the demo session is: the wallet needs `billing`, which only an owner has (D-4). */
+  actor?: () => DemoActor;
+}
+
+export function createDemoBilling(options: DemoBillingOptions = {}): BillingApi {
   const clock = options.clock ?? { now: () => new Date() };
   const latency = options.latencyMs ?? 0;
-  const wait = () => (latency > 0 ? new Promise((resolve) => setTimeout(resolve, latency)) : Promise.resolve());
+  const wait = options.wait ?? (() => (latency > 0 ? new Promise<void>((resolve) => setTimeout(resolve, latency)) : Promise.resolve()));
+  const actor = options.actor;
   const ahead = (days: number) => new Date(clock.now().getTime() + days * 86_400_000).toISOString();
 
   const plan = (): BillingPlan => ({
@@ -46,7 +57,11 @@ export function createDemoBilling(options: { clock?: DemoClock; latencyMs?: numb
 
   return {
     async getBillingPlan() { await wait(); return plan(); },
-    async getWallet() { await wait(); return wallet(); },
+    async getWallet() {
+      await wait();
+      if (actor && actor().role !== "owner") throw demoError("Forbidden");
+      return wallet();
+    },
     async startPlanCheckout() { await wait(); throw new ApiError("not_found", DEMO_PLAN_OFF, 404, "NotFound"); },
     async openBillingPortal() { await wait(); throw new ApiError("not_found", DEMO_PLAN_OFF, 404, "NotFound"); },
   };

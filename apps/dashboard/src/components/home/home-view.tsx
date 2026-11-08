@@ -303,7 +303,8 @@ function ChecklistCard({ checklist, className }: { checklist: Needs["checklist"]
       </TrayHeader>
       <Card>
         {checklist.data ? <p className="sr-only">{open > 0 ? `${open} need${open === 1 ? "s" : ""} you` : "None need you"}</p> : null}
-        {paused(checklist) ? <ErrorNote error={OFFLINE} retry={() => checklist.refetch()} /> : checklist.isPending ? <LoadingRows rows={3} /> : checklist.isError ? <ErrorNote error={checklist.error} retry={() => checklist.refetch()} /> : (
+        {paused(checklist) ? <ErrorNote error={OFFLINE} retry={() => checklist.refetch()} /> : checklist.isPending ? <LoadingRows rows={3} /> : checklist.isError && !checklist.data ? <ErrorNote error={checklist.error} retry={() => checklist.refetch()} /> : (
+          <>
           <ul className="divide-y divide-border">
             {(checklist.data ?? []).map((item) => {
               const check = CHECK[item.status];
@@ -319,6 +320,9 @@ function ChecklistCard({ checklist, className }: { checklist: Needs["checklist"]
               );
             })}
           </ul>
+          {/* One list failed: the rows above are what did answer, and the retry reads the other again. */}
+          {checklist.isError ? <div className="mt-3"><ErrorNote error={checklist.error} retry={() => checklist.refetch()} /></div> : null}
+          </>
         )}
       </Card>
     </Tray>
@@ -435,6 +439,13 @@ function peopleLine(names: string[]): string {
   return `${short.slice(0, 3).join(", ")} and ${short.length - 3} more`;
 }
 
+/** "Google Calendar and Shopify are in Connections": only the rows Home has, so staff and a server without Shopify are told no more. */
+function settledConnections(items: readonly { label: string }[]): string {
+  const labels = items.map((item) => item.label);
+  if (labels.length === 0) return "Open Connections to see them";
+  return `${labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`} ${labels.length === 1 ? "is" : "are"} in Connections`;
+}
+
 /** What needs the owner now, first on every screen size (BRIEF: "what needs me now"). */
 function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
   const { waiting, threads, checklist, bookings, resources, next, now, zone, actions, people, count, state } = needs;
@@ -446,7 +457,8 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
   const inbox = unknown(threads);
   // The time needs the calendar's zone, so it waits for the resources too.
   const calendar = unknown(bookings) ?? (next ? unknown(resources) : null);
-  const connections = unknown(checklist);
+  // A row that needs the person stays in view even when the other list failed to load.
+  const connections = open > 0 ? null : unknown(checklist);
   const resource = resources.data?.find((item) => item.id === next?.resourceId);
   const customer = next ? bookingCustomerName(next) : null;
 
@@ -456,7 +468,9 @@ function NeedsYou({ needs, className }: { needs: Needs; className?: string }) {
   const calendarTitle = calendar?.title ?? (next ? nextTitle(next.startsAt, now, zone) : "No appointments coming up");
   const calendarDetail = calendar?.detail ?? (next ? (next.title ?? customer ?? "Next appointment") : "Open slots are on the calendar");
   const connectionsTitle = connections?.title ?? (open > 0 ? `${formatNumber(open)} connection${open === 1 ? "" : "s"} need${open === 1 ? "s" : ""} you` : "No connection needs you");
-  const connectionsDetail = connections?.detail ?? (open > 0 ? "Fix these to keep requests coming in." : "Google Calendar and Shopify are in Connections");
+  const connectionsDetail = connections?.detail ?? (open > 0
+    ? (checklist.isError ? "Couldn't check the others. Open Connections to try again." : "Open Connections to fix them.")
+    : settledConnections(checklist.data ?? []));
 
   const row = (icon: ReactNode, tone: Parameters<typeof IconTile>[0]["tone"], title: string, detail: string, foot?: ReactNode, arrow = true) => (
     <span className="flex items-start gap-3 lg:gap-4">

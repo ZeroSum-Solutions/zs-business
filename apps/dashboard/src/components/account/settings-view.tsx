@@ -108,8 +108,9 @@ function BusinessCard() {
     body = <LoadingRows rows={3} label="Loading business details" />;
   } else if (profile.isError && isApiError(profile.error, "not_found")) {
     // BP-10: the server is older than the profile. Show what is known, and why it cannot change.
+    // The currency is not known (empty), so the form says "Not available" rather than inventing one.
     const known: BusinessProfile = {
-      displayName: identity?.businessName ?? "", legalName: null, phoneE164: null, timeZone: null, currency: "USD",
+      displayName: identity?.businessName ?? "", legalName: null, phoneE164: null, timeZone: null, currency: "",
       postalAddress: null, revision: 1, updatedAt: "",
     };
     body = <BusinessFormBody profile={known} reload={async () => undefined} lockedReason={BUSINESS_NOT_AVAILABLE} />;
@@ -250,6 +251,7 @@ function BusinessFormBody({ profile, reload, lockedReason }: {
         <div>
           <Label htmlFor={FIELD_IDS.currency}>Currency</Label>
           <Select {...props("currency", true)} className="w-full" value={form.currency} onChange={(event) => edit({ currency: event.target.value })}>
+            {form.currency === "" ? <option value="">Not available</option> : null}
             {ACTIVE_CURRENCIES.map((currency) => <option key={currency.code} value={currency.code}>{currencyLabel(currency.code)}</option>)}
           </Select>
           {note("currency", "New deals start in this currency. Saved amounts do not change.")}

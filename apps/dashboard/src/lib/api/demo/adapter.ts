@@ -47,6 +47,7 @@ import { createDemoEnrichment } from "./enrichment";
 import { createDemoCalendar, type DemoCalendarControls } from "./calendar";
 import { createDemoSetup, type DemoSetupControls } from "./setup";
 import { createDemoManagedConnections, type DemoManagedConnectionsControls } from "./managed-connections";
+import { createDemoBilling } from "./billing";
 import { createDemoTemplates, type DemoTemplateControls } from "./templates";
 import {
   byContactName,
@@ -59,6 +60,7 @@ import {
   type BrowserApi,
   type BusinessApi,
   type EnrichmentApi,
+  type BillingApi,
   type BookingApi,
   type BookingView,
   type CalendarSyncApi,
@@ -143,7 +145,7 @@ export interface DemoControls extends DemoAgentControls, DemoTemplateControls, D
   approveReplyElsewhere(replyId: string): ReplyRecord;
 }
 
-export type DemoApi = BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & CalendarSyncApi & ManagedConnectionsApi & SetupApi & DemoControls;
+export type DemoApi = BillingApi & BookingApi & CrmApi & IntakeApi & InboxApi & HomeApi & AgentsApi & BrowserApi & BusinessApi & EnrichmentApi & CalendarSyncApi & ManagedConnectionsApi & SetupApi & DemoControls;
 
 export interface DemoWrite {
   operation: string;
@@ -452,6 +454,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     },
   });
   const managedConnections = createDemoManagedConnections({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
+  // The plan and wallet share the adapter's wait and actor, so offline, an expired session and staff apply to them too.
+  const billing = createDemoBilling({ clock, wait, actor: () => actor });
 
   /** B-12: the first instant too far ahead to book; none for a calendar without a horizon. */
   const horizonOf = (resource: DemoResource) =>
@@ -466,6 +470,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     ...calendar,
     ...setup,
     ...managedConnections,
+    ...billing,
 
     async listResources() {
       await wait();

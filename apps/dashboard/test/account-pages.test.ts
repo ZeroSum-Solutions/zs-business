@@ -159,6 +159,9 @@ describe("settings", () => {
     });
     expect(html).toContain(BUSINESS_NOT_AVAILABLE);
     expect(html).toContain(`value="${escaped(DEMO_BUSINESS)}"`);
+    // The API gave no currency: none is invented.
+    expect(html).toMatch(/<option value="" selected="">Not available<\/option>/);
+    expect(html).not.toMatch(/<option value="USD" selected="">/);
     expect(html).toMatch(/<fieldset[^>]*disabled=""/);
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
   });

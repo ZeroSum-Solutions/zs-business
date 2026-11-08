@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import AxeBuilder from "@axe-core/playwright";
 import type { APIRequestContext, Page } from "@playwright/test";
+import type { CalendarConnection, ManagedConnection } from "../../src/lib/api";
 import { CALENDAR_UNAVAILABLE, defaultMessage, demoErrorBody } from "../../src/lib/api/errors";
+import { connectionChecklist } from "../../src/lib/connection-rows";
 import { expectDialogInset, mainNav, openBookingOnFirstOpenDay, shot, viewportShot } from "../helpers";
 import { LIVE } from "./env";
 import { expect, lastSignInLink, ownerEmail, signInRequest, test } from "./fixtures";
@@ -431,35 +433,32 @@ test("shows no sample data anywhere and turns off writes that would not reach th
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
   const walletResponse = await walletRead;
   expect(walletResponse.status()).toBe(200);
-  const wallet = (await walletResponse.json()) as { currency: string; balance: number; available: number };
+  const wallet = (await walletResponse.json()) as { currency: string; balance: number; reserved: number; available: number };
   const walletRegion = page.getByRole("region", { name: "Wallet" });
   if (wallet.balance === 0) {
     await expect(walletRegion.getByText("No money in the wallet yet")).toBeVisible();
   } else {
-    const amount = new Intl.NumberFormat("en-US", { style: "currency", currency: wallet.currency.toUpperCase() }).format(wallet.available / 100);
-    await expect(walletRegion.getByTestId("wallet-balance")).toContainText(amount);
+    // In the currency's own minor units (a yen wallet has none), as the card formats them.
+    const format = new Intl.NumberFormat("en-US", { style: "currency", currency: wallet.currency.toUpperCase() });
+    const money = (minor: number) => format.format(minor / 10 ** (format.resolvedOptions().maximumFractionDigits ?? 2));
+    await expect(walletRegion.getByTestId("wallet-balance")).toContainText(money(wallet.available));
+    if (wallet.reserved > 0) await expect(walletRegion.getByTestId("wallet-balance")).toContainText(`${money(wallet.reserved)} held for jobs in progress, of ${money(wallet.balance)}`);
   }
+  // Connections: Home's rows are the ones the shared rules make of what the two routes answered.
   const calendarResponse = await calendarRead;
   expect(calendarResponse.status()).toBe(200);
-  const { items: calendars } = (await calendarResponse.json()) as { items: { status: string; lastSyncedAt: string | null; lastError: string | null }[] };
-  const calendarRow = page.getByRole("region", { name: "Connections" }).getByTestId("checklist-google_calendar");
-  const live = calendars.filter((item) => item.status !== "disconnected");
-  if (live.length === 0) await expect(calendarRow).toContainText("Not connected");
-  else if (live.every((item) => item.status === "active" && item.lastSyncedAt !== null && item.lastError === null)) await expect(calendarRow).toContainText("syncing busy times");
-  else await expect(calendarRow).not.toContainText("Not connected");
+  const { items: calendars } = (await calendarResponse.json()) as { items: CalendarConnection[] };
   // Shopify: an owner reads the stores; a server without connections settings answers 404 and Home leaves the row out.
   const storesResponse = await storesRead;
-  const shopifyRow = page.getByRole("region", { name: "Connections" }).getByTestId("checklist-shopify");
-  if (storesResponse.status() === 404) {
-    await expect(shopifyRow).toHaveCount(0);
-  } else {
-    expect(storesResponse.status()).toBe(200);
-    const { items: stores } = (await storesResponse.json()) as { items: { status: string; accountLabel: string | null; accountDomain: string }[] };
-    const active = stores.find((item) => item.status === "active");
-    if (active) await expect(shopifyRow).toContainText(active.accountLabel ?? active.accountDomain);
-    else if (stores.length === 0) await expect(shopifyRow).toContainText("Not connected");
-    else await expect(shopifyRow).toBeVisible();
+  if (storesResponse.status() !== 404) expect(storesResponse.status()).toBe(200);
+  const stores = storesResponse.status() === 404 ? null : ((await storesResponse.json()) as { items: ManagedConnection[] }).items;
+  const checklist = page.getByRole("region", { name: "Connections" });
+  for (const row of connectionChecklist(calendars, stores)) {
+    const shown = checklist.getByTestId(`checklist-${row.id}`);
+    await expect(shown).toContainText(row.badge);
+    await expect(shown).toContainText(row.detail);
   }
+  if (stores === null) await expect(checklist.getByTestId("checklist-shopify")).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Wallet and usage" })).toHaveCount(0);
   await expect(page.getByTestId("sample-badge")).toHaveCount(0);
   await expect(page.getByText(/sample data/i)).toHaveCount(0);
@@ -502,7 +501,8 @@ test("shows no sample data anywhere and turns off writes that would not reach th
   await expect(business.getByLabel("Business name")).toBeEnabled();
   await expect(business.getByLabel("Business name")).not.toHaveValue("");
   await expect(business.getByRole("button", { name: "Save changes" })).toBeDisabled();
-  for (const toggle of await page.getByRole("switch").all()) await expect(toggle).toBeDisabled();
+  // No notification switches: nothing sends them, so Settings has none.
+  await expect(page.getByRole("switch")).toHaveCount(0);
 });
 
 test("reloads and allows a retry when the API reports a concurrent update", async ({ page }, info) => {

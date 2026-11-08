@@ -7,7 +7,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { WalletSummary } from "@zs/contracts";
 import { HomeView } from "../src/components/home/home-view";
 import { ApiError, type CalendarConnection, type ManagedConnection } from "../src/lib/api";
-import { connectionChecklist } from "../src/lib/connection-checklist";
+import { createDemoAdapter } from "../src/lib/api/demo/adapter";
+import { combineChecklist, connectionChecklist, type ChecklistRead } from "../src/lib/connection-rows";
+import { WALLET_POLL_MS } from "../src/lib/queries";
 import { failQuery, keys, renderScreen } from "./helpers/render";
 
 vi.mock("next/navigation", () => ({
@@ -119,6 +121,84 @@ describe("Home without sample data", () => {
     expect(body).toContain("Ask an owner to reconnect it.");
     expect(body).toContain("Needs an owner");
     expect(body).not.toMatch(/\bReconnect\b/);
+    // Nothing on Home needs staff for it: no "needs you" count or card for work only an owner can do.
+    expect(body).not.toMatch(/\d+ connections? needs? you|One thing needs you|\b1 needs you/);
+    expect(body).toContain("No connection needs you");
+    expect(body).toContain("None need you");
+  });
+
+  it("names only the connections Home shows when none needs anyone", () => {
+    // Staff: no Shopify row, so no claim that Shopify is in Connections.
+    const staff = text(home((client) => {
+      client.setQueryData(keys.calendarConnections, [CALENDAR]);
+    }, true));
+    expect(staff).toContain("Google Calendar is in Connections");
+    expect(staff).not.toContain("Shopify");
+    // Staff are not told to connect a calendar themselves.
+    const none = text(home((client) => client.setQueryData(keys.calendarConnections, []), true));
+    expect(none).toContain("An owner can connect it");
+    // An owner on a server without connections settings (404): the same.
+    const old = text(home((client) => {
+      client.setQueryData(keys.wallet, WALLET);
+      client.setQueryData(keys.calendarConnections, [CALENDAR]);
+      failQuery(client, keys.managedConnections, new ApiError("not_found", "We could not find that.", 404));
+    }));
+    expect(old).toContain("Google Calendar is in Connections");
+    expect(old).not.toContain("Shopify");
+    const both = text(home((client) => {
+      client.setQueryData(keys.wallet, WALLET);
+      client.setQueryData(keys.calendarConnections, [CALENDAR]);
+      client.setQueryData(keys.managedConnections, [STORE]);
+    }));
+    expect(both).toContain("Google Calendar and Shopify are in Connections");
+  });
+
+  it("says an owner's refused Shopify read could not be checked, instead of leaving the row out", () => {
+    const html = home((client) => {
+      client.setQueryData(keys.wallet, WALLET);
+      client.setQueryData(keys.calendarConnections, [CALENDAR]);
+      failQuery(client, keys.managedConnections, new ApiError("forbidden", "You do not have access to that.", 403));
+    });
+    const body = text(html);
+    expect(html).toContain('data-testid="checklist-shopify"');
+    expect(body).toContain("Couldn't read Shopify");
+    expect(body).toContain("Couldn't check everything.");
+    expect(body).not.toContain("No connection needs you");
+    expect(body).toContain("Try again");
+  });
+
+  it("keeps a connection that needs the owner in view when the other list failed", () => {
+    const body = text(home((client) => {
+      client.setQueryData(keys.wallet, WALLET);
+      client.setQueryData(keys.calendarConnections, [{ ...CALENDAR, status: "reauthorize" }]);
+      failQuery(client, keys.managedConnections, new ApiError("server", "We could not reach the server.", 503));
+    }));
+    expect(body).toContain("1 connection needs you");
+    expect(body).toContain("Reconnect");
+    expect(body).toContain("Couldn't check the others. Open Connections to try again.");
+    expect(body).toContain("Couldn't read Shopify");
+    // The count waits for every read: it is not told.
+    expect(body).toContain("Couldn't check everything.");
+    const reverse = text(home((client) => {
+      client.setQueryData(keys.wallet, WALLET);
+      failQuery(client, keys.calendarConnections, new ApiError("server", "We could not reach the server.", 503));
+      client.setQueryData(keys.managedConnections, [{ ...STORE, status: "reauthorize", reauthorizeReason: "auth_error" }]);
+    }));
+    expect(reverse).toContain("1 connection needs you");
+    expect(reverse).toContain("Couldn't read Google Calendar");
+  });
+
+  it("reads the wallet again while Home stays open", () => {
+    let cache: QueryClient | null = null;
+    home((client) => {
+      cache = client;
+      client.setQueryData(keys.wallet, WALLET);
+      client.setQueryData(keys.calendarConnections, [CALENDAR]);
+      client.setQueryData(keys.managedConnections, [STORE]);
+    });
+    const options = cache!.getQueryCache().find({ queryKey: keys.wallet })!.options as { refetchInterval?: unknown; refetchOnWindowFocus?: unknown };
+    expect(options.refetchInterval).toBe(WALLET_POLL_MS);
+    expect(options.refetchOnWindowFocus).toBe(true);
   });
 
   it("shows a first sync, a failed sync and a disconnect as what they are", () => {
@@ -179,11 +259,67 @@ describe("the connections checklist", () => {
     expect(connectionChecklist([], [{ ...STORE, status: "disconnected" }])[1]!.status).toBe("off");
   });
 
+  it("names every Shopify store with a problem, not only the first", () => {
+    const other = (n: number, domain: string): ManagedConnection => ({ ...STORE, id: id(n), accountDomain: domain, accountLabel: null });
+    const reauth = { ...other(82, "north.myshopify.com"), status: "reauthorize" as const, reauthorizeReason: "auth_error" as const };
+    const unrevoked = { ...other(83, "south.myshopify.com"), status: "disconnected" as const, revokeFailed: true };
+    const row = connectionChecklist([], [reauth, unrevoked])[1]!;
+    expect(row).toMatchObject({ status: "action", actionLabel: "Reconnect" });
+    expect(row.detail).toContain("reconnect");
+    expect(row.detail).toContain("south.myshopify.com");
+    const two = connectionChecklist([], [unrevoked, { ...other(84, "east.myshopify.com"), status: "disconnected", revokeFailed: true }])[1]!;
+    expect(two.detail).toContain("south.myshopify.com and east.myshopify.com");
+  });
+
+  it("lets a live connection of the same store replace a revoke warning stamped in the same millisecond", () => {
+    const unrevoked: ManagedConnection = { ...STORE, status: "disconnected", revokeFailed: true };
+    const same: ManagedConnection = { ...STORE, id: id(85) };
+    expect(connectionChecklist([], [unrevoked, same])[1]).toMatchObject({ status: "ok", detail: "Halden Rowe" });
+  });
+
   it("offers Reconnect only to someone who can manage calendars", () => {
     const owner = connectionChecklist([{ ...CALENDAR, status: "reauthorize" }], null)[0]!;
     expect(owner).toMatchObject({ status: "action", actionLabel: "Reconnect" });
     const staff = connectionChecklist([{ ...CALENDAR, status: "reauthorize" }], null, { canManageCalendars: false })[0]!;
-    expect(staff).toMatchObject({ status: "action", actionLabel: null, badge: "Needs an owner" });
+    // Staff cannot fix it: a warning that waits for an owner, never counted as needing them.
+    expect(staff).toMatchObject({ status: "warn", actionLabel: null, badge: "Needs an owner" });
     expect(staff.detail).toContain("Ask an owner to reconnect it.");
+  });
+});
+
+describe("the connections read", () => {
+  const read = <T>(over: Partial<ChecklistRead<T>>): ChecklistRead<T> => ({
+    data: undefined, status: "pending", fetchStatus: "idle", isPending: true, isError: false, error: null, refetch: async () => undefined, ...over,
+  });
+  const done = <T>(data: T, over: Partial<ChecklistRead<T>> = {}) => read<T>({ data, status: "success", isPending: false, ...over });
+
+  it("is not offline while one list is cached and the other is still fetching", () => {
+    const combined = combineChecklist(done([CALENDAR], { fetchStatus: "paused" }), read({ fetchStatus: "fetching" }));
+    expect(combined).toMatchObject({ status: "pending", fetchStatus: "fetching", data: undefined });
+    expect(combineChecklist(done([CALENDAR]), read({ fetchStatus: "paused" })).fetchStatus).toBe("paused");
+  });
+
+  it("shows each list that answered, with the failed one said to be unchecked", () => {
+    const failed = read<ManagedConnection[]>({ status: "error", isPending: false, isError: true, error: new ApiError("server", "We could not reach the server.", 503) });
+    const combined = combineChecklist(done([CALENDAR]), failed);
+    expect(combined.status).toBe("error");
+    expect(combined.data?.map((row) => [row.id, row.badge])).toEqual([["google_calendar", "Connected"], ["shopify", "Couldn't check"]]);
+    // Nothing answered: no rows at all.
+    expect(combineChecklist(read({ status: "error", isPending: false, isError: true }), failed).data).toBeUndefined();
+  });
+});
+
+describe("the demo wallet", () => {
+  it("follows the demo session: owners only, and offline or signed out like every other read", async () => {
+    const demo = createDemoAdapter();
+    await expect(demo.getWallet()).resolves.toMatchObject({ currency: "usd" });
+    demo.actAs("staff");
+    await expect(demo.getWallet()).rejects.toMatchObject({ kind: "forbidden" });
+    demo.actAs("owner");
+    demo.setOffline(true);
+    await expect(demo.getWallet()).rejects.toMatchObject({ kind: "network" });
+    demo.setOffline(false);
+    demo.expireSession();
+    await expect(demo.getWallet()).rejects.toMatchObject({ kind: "unauthorized" });
   });
 });

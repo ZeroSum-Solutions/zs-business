@@ -3,7 +3,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Fragment, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
+import { LoadingRows, PageHeader } from "@/components/ui/states";
 import { returnNotice, type ReturnNotice } from "@/lib/calendar-sync";
 import { forgetPending, pendingRemembered, pendingStorage, rememberPending, returnNotice as managedReturnNotice } from "@/lib/managed-connections";
 import { useKeys, useSetup } from "@/lib/queries";
