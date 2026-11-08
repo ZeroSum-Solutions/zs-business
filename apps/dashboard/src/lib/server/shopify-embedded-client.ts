@@ -121,7 +121,8 @@ function openHub(status) {
     status.textContent = result.outcome === "not_owner"
       ? "Only the store owner can open the hub from here. Ask the owner, or sign in to the hub directly."
       : result.outcome === "invalid_token" ? SHOP_TROUBLE.invalid_token
-      : result.outcome === "not_available" ? "This store is not linked to a hub yet. Reload this page."
+      // Not "not linked": the page above may well say Connected. The worker answers this when no hub owner has the store owner's email (C-21).
+      : result.outcome === "not_available" ? "Open ZS Hub works only when the hub owner's email is the store owner's email. Sign in to the hub directly."
       : SHOP_TROUBLE.unavailable;
   });
 }
