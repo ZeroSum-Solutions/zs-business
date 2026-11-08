@@ -283,16 +283,23 @@ Evidence (shopify.dev, read 2026-11-07, in our own words; sources at the end of 
 creates a Shopify charge. Reasons: it is the default and recommended path for new public apps;
 it needs no Admin API token, which Composio holds and which we would otherwise reach only
 through its proxy; plan changes without support (1.2.3) are Shopify's page; and the Partner API
-token is ours. No Stripe charge is made for such a tenant (PL-14).
+token is ours. No Stripe charge of any kind is made for such a tenant: no plan Checkout or Portal
+(PL-14) and no wallet top-up (`wallet.topup.create` and the top-up session answer 409
+`billing_provider`, stripe.md S-1). Its paid usage (texts, voice, lookups) is off until a rule
+adds a Shopify usage meter; a wallet balance it already holds is still spent.
 
 **PL-16. The Shopify catalog.** Set in the Partner Dashboard, from PL-1:
 - Three public plans, Solo, Studio and Pro, each with the monthly and yearly list price of PL-1
-  ($49 / $490, $99 / $990, $199 / $1,990), and a 14-day free trial.
+  ($49 / $490, $99 / $990, $199 / $1,990), and a 14-day free trial. Shopify's own trial rules
+  apply to a Shopify tenant (it counts trial days per shop), not PL-4's once-per-tenant rule.
 - Two private plans, Studio Founding and Pro Founding ($69 / $690 and $139 / $1,390), each
   authorised by the operator for one store only after `setFoundingInvite` (PL-11) accepted that
-  tenant, so the 25-place cap still counts it.
+  tenant, so the 25-place cap still counts it. When the operator ends an invite, they also remove
+  the store's access to the private plan in the Partner Dashboard; the runner never clears
+  `founding_invite` for a Shopify tenant, because it cannot tell a cancellation from a freeze.
 - The extra-connection add-on is **not sold** to Shopify tenants in this revision. A Shopify
-  tenant that needs more managed connections moves up a plan. An App Pricing usage meter can
+  tenant that needs more managed connections moves up a plan. Each plan's listing text names its
+  connection limit (PL-1). An App Pricing usage meter can
   carry the add-on later (a new rule here first); it would be monthly only, with no cap.
 - Each plan's welcome link is the dashboard plan page with `?shopify=welcome`.
 - The Shopify plan handles map to our plans by configuration (PL-20): the five keys `hub_solo`,
@@ -302,53 +309,73 @@ token is ours. No Stripe charge is made for such a tenant (PL-14).
 
 **PL-17. Linking a tenant to its shop.** An operator (service role, `setShopifyBilling`) sets a
 tenant's `billing_provider` to `shopify` with the shop's GID (`gid://shopify/Shop/<n>`, unique
-across tenants) and its `<name>.myshopify.com` domain, under the tenant's plan lock. It is
-refused (409 `stripe_plan_active`) while the tenant has a Stripe subscription in `trialing`,
-`active` or `past_due`, so no tenant pays twice. Setting the provider back to `stripe` (shop
-cleared) is refused (409 `shopify_plan_active`) while a Shopify subscription of the tenant is
-`trialing` or `active`. A link does not change a comped tenant: it stays comped until a
-Shopify contract is seen. `tenant_plans` gains `shopify_shop_id`, `shopify_shop_domain` and
-`shopify_synced_at` (PL-18); a Shopify row in `plan_subscriptions` must have a shop GID as its ID.
+across tenants) and its `<name>.myshopify.com` domain, under the tenant's plan lock. Refusals, so
+no tenant pays twice and no Stripe payment lands after the switch:
+- 409 `stripe_plan_active` while a Stripe subscription of the tenant is not ended (any status but
+  `canceled`, `unpaid`, `incomplete_expired`), or while a plan checkout of the tenant is
+  `pending` and less than 24 hours old (a Checkout Session lives one hour; PL-5).
+- 409 `shopify_plan_active` when the tenant already names another shop whose row is `trialing`
+  or `active`. Relinking from an ended shop is allowed; the old row stays as history.
+- Setting the provider back to `stripe` clears the shop and is refused (409
+  `shopify_plan_active`) while the current shop's row is `trialing` or `active`.
+A link does not change a comped tenant: it stays comped until a Shopify contract is seen.
+`tenant_plans` gains `shopify_shop_id`, `shopify_shop_domain`, `shopify_synced_at`,
+`shopify_sync_failures` and `shopify_next_sync_at` (PL-18); a Shopify row in `plan_subscriptions`
+must have a shop GID as its ID. The PL-10 derivation picks the effective subscription only among
+rows of the tenant's current provider, and for `shopify` only the current shop's row; ended rows
+of any provider still count for `read_only_after`. `tenant_plans.stripe_subscription_id` names
+the effective subscription only when it is a Stripe one.
 
 **PL-18. Reading the Shopify plan.** The billing runner (`/cron/billing`, stripe.md S-8), after
 its Stripe passes, runs one Shopify pass when PL-20 is configured: up to
-`BILLING_SHOPIFY_SYNC_LIMIT` linked tenants, least recently synced first. For each tenant, in its
-own transaction under the tenant's plan lock, it asks `activeSubscription` for the tenant's shop
-and stores the answer as the tenant's one Shopify row in `plan_subscriptions` (provider
-`shopify`, ID the shop GID), then derives the record with the PL-10 derivation (the same code).
+`BILLING_SHOPIFY_SYNC_LIMIT` linked tenants whose `shopify_next_sync_at` is null or due, least
+recently synced first, until the runner's deadline. Calls are made one at a time, at least 500 ms
+apart (two a second, half the Partner API limit, so a second overlapping runner stays under it).
+For each tenant, in its own transaction under the tenant's plan lock, it re-reads the link (a
+tenant relinked or synced by another run since it was picked is skipped), asks
+`activeSubscription` for the tenant's shop and stores the answer as that shop's row in
+`plan_subscriptions` (provider `shopify`, ID the shop GID), then derives the record with the PL-10
+derivation (the same code). Every stored answer, `null` included, sets `shopify_synced_at` to the
+clock and clears `shopify_sync_failures` and `shopify_next_sync_at`.
 - A contract whose `trialEndsAt` is after the clock is `trialing`; any other contract is
   `active`. `trial_end` is `trialEndsAt`, `current_period_end` is the end of
   `currentBillingCycle`, `cancel_at_period_end` is `cancelAtEndOfCycle`, and
   `extra_connections` is 0.
-- The plan is the first item whose handle is in the PL-16 map. An unknown handle keeps the
-  plan the row had; a row whose plan was never recognised ends `mismatch` and gives no plan.
-  An unknown billing period keeps the interval the row had.
+- The plan is the first item whose handle is in the PL-16 map, and only together with a known
+  billing period. Otherwise the row keeps the plan and interval it had; a row that never had both
+  ends `mismatch` and gives no plan (it still holds the status).
 - `null` (no contract) turns a stored row that is not ended into `canceled`, with `ended_at`
   and `status_since` the clock. With no stored row, nothing is written. A contract seen after
   the row ended is a new one: `started_at` is the clock.
-- The pass never takes an error for `null`: an unreachable Partner API, a GraphQL error or a
-  non-JSON answer writes nothing for that tenant and is reported; 429 or 5xx also ends the pass.
-  `shopify_synced_at` moves only after a stored answer.
+- The pass never takes an error for `null`: an unreachable Partner API, a GraphQL error, a
+  malformed answer or an answer for another shop writes nothing to the plan rows and is reported.
+  It adds one to `shopify_sync_failures` and sets `shopify_next_sync_at` to the clock plus one
+  minute doubled per failure, at most one hour, so failing shops never starve the others.
+  Throttling (HTTP 429, or a GraphQL error "Too many requests" or code 429 in a 200 answer) and
+  5xx also end the pass.
 - Shopify handles failed payments itself (it freezes the store). The hub adds no grace for a
   Shopify tenant: a contract that disappears makes the tenant read-only as an ended Stripe
   subscription does (PL-10), and a contract seen again lifts it.
-- Founding: a Shopify founding plan sets `founding_started_at` like a Stripe one; when it is
-  first seen ended the tenant loses `founding_invite` (PL-11).
+- Founding: a Shopify founding plan sets `founding_started_at` like a Stripe one, so the place
+  stays counted (PL-11). `founding_invite` is left to the operator (PL-16).
 - The PL-1 limits and the PL-8 gate read the same `tenant_plans` fields, so nothing else changes.
-  The record lags Shopify by at most one cron interval.
+  The record lags Shopify by about the cron interval times the number of linked tenants divided
+  by the sync limit. An uninstall cancels the contract; until the next read the tenant keeps its
+  plan. On reinstall Shopify asks for a plan again (1.2.2) and the next read stores it.
 
 **PL-19. API and dashboard for a Shopify tenant.** GET /v1/billing/plan (PL-7) adds
 `shopifyManageUrl`: the plan selection page of PL-15 for the tenant's shop domain, when the
 tenant is Shopify-billed, has a domain and `SHOPIFY_BILLING_APP_HANDLE` is set; otherwise null.
 For a Shopify tenant, `checkoutEnabled` and `portalEnabled` are false and `trialAvailable` is
-false (Shopify owns the trial). The dashboard plan page then shows no Stripe plan buttons and no
+false (Shopify owns the trial). The dashboard hides wallet top-ups for it (PL-15). The dashboard plan page then shows no Stripe plan buttons and no
 add-on field. It shows a **Manage billing in Shopify** link to `shopifyManageUrl` (with the plan
 and without one), or, when it is null, the words "Open your Shopify admin, then Settings > Apps".
 After `?shopify=welcome` it polls the plan until it holds one, as after a Stripe Checkout.
 
 **PL-20. Configuration.** Billing runner (workers project), all four or none (a partial set is
 refused at start): `BILLING_SHOPIFY_PARTNER_ID` (the number in the Partner Dashboard URL),
-`BILLING_SHOPIFY_PARTNER_TOKEN` (a Partner API client token with only Manage apps),
+`BILLING_SHOPIFY_PARTNER_TOKEN` (a Partner API client token with only Manage apps; it is not a
+store token and reads every shop of the organisation, so it lives only on the billing function),
 `BILLING_SHOPIFY_APP_ID` (the numeric app ID) and `BILLING_SHOPIFY_PLAN_HANDLES` (JSON from the
 five PL-16 keys to handles, all five, distinct). Optional: `BILLING_SHOPIFY_SYNC_LIMIT` (1 to 100,
 default 20), `BILLING_SHOPIFY_API_VERSION` (default `2026-10`) and `BILLING_SHOPIFY_BASE_URL`
@@ -372,13 +399,18 @@ Sources (fetched 2026-11-07):
 
 ## Known limits (revision 3)
 
-- Shopify tenants cannot buy the extra-connection add-on (PL-16); they move up a plan.
-- Linking a tenant to its shop is an operator step (PL-17). A merchant who installs from the App
-  Store does not get a tenant or a link by itself; that needs a rule in connections.md first.
+- **Before the listing is submitted:** an App Store install does not yet create or bind a hub
+  tenant. A merchant who installs gets no tenant and no PL-17 link by itself, and the operator
+  links by hand. App Store review installs the app, so an install path (verified shop, tenant,
+  link, then the plan selection page) needs a rule in connections.md first.
+- Shopify tenants cannot buy the extra-connection add-on (PL-16) or wallet usage (PL-15).
 - A linked Shopify tenant that never chooses a plan is comped, as any tenant without a plan.
-- A Shopify freeze is not told apart from a cancellation: both read as no contract (PL-18).
+- A Shopify freeze is not told apart from a cancellation: both read as no contract (PL-18), so a
+  frozen store's hub turns read-only until Shopify unfreezes it.
 - `pendingUpdate` (a plan change at the next cycle) is not stored; the record changes when the
   contract does.
+- A Stripe plan Checkout that completes after a PL-17 link (only possible past the 24-hour gate)
+  is not applied; the operator refunds it in Stripe.
 
 - A tenant that never subscribed is comped. Requiring a plan of new tenants needs a rule here.
 - Bookable resources, model-assisted agents, voice, the agent daily cap and the email allowance
