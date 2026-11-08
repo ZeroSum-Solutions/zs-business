@@ -18,22 +18,124 @@ import { OVERRIDE_KEYS } from "./catalog.js";
 export const COMPOSIO_BASE_URL = "https://backend.composio.dev/api/v3.1";
 export const COMPOSIO_TIMEOUT_MS = 6_000;
 export const COMPOSIO_MAX_BODY_BYTES = 1024 * 1024;
+/** An error body is read up to this many bytes; a longer one is dropped whole (class `unknown`), never partly used. */
+export const COMPOSIO_MAX_ERROR_BODY_BYTES = 16 * 1024;
 
 export type ComposioErrorKind = "rate_limited" | "key_refused" | "not_found" | "bad_request" | "unavailable";
 /**
- * Never carries provider text: only our kind and the HTTP status. `accountId` is set when a link
- * answer could not be used but named the account it made, so the caller can remove it (B-7).
+ * What kind of answer this was, for code that must decide whether to retry or give something back. It is a
+ * description of the answer, not a promise about side effects.
+ *   - `provider_refused`: Composio answered with its documented refusal envelope (a 400, 404 or 422, see
+ *     `classifyHttpError`) and the body names no account.
+ *   - `transient`: 429, 402, 408, 5xx, a timeout or a network failure (also while reading the error body).
+ *   - `unknown`: everything else (401, 403, 410, 409, an unreadable, oversized or foreign 4xx body, a malformed 2xx).
+ * A caller that needs proof that nothing was created must get it elsewhere; the other two classes are never proof.
+ */
+export type ComposioErrorClass = "provider_refused" | "transient" | "unknown";
+export interface ComposioErrorInfo {
+  readonly errorClass: ComposioErrorClass;
+  /** The parsed non-2xx body (JSON), or `undefined` when it was empty, over the size limit or not JSON. */
+  readonly body?: unknown;
+  /** Composio's `error.request_id`, a safe identifier for support and logs. */
+  readonly requestId?: string;
+  /** An account id the error body named (it may exist although the call failed). Distinct from `accountId`, which only `link` sets. */
+  readonly namedAccountId?: string;
+}
+/**
+ * Never carries provider text in its message: only our kind and the HTTP status. `accountId` is set when a link
+ * answer could not be used but named the account it made, so the caller can remove it (B-7). The provider's
+ * non-2xx body rides along as `body` (a non-enumerable property, so JSON.stringify, spreads and loggers skip it):
+ * it is for code to classify, never for a message, a log line or a response.
  */
 export class ComposioError extends Error {
+  readonly errorClass: ComposioErrorClass;
+  readonly requestId?: string;
+  readonly namedAccountId?: string;
+  declare readonly body: unknown;
   constructor(
     readonly kind: ComposioErrorKind,
     readonly status?: number,
     readonly detail?: "too_large" | "malformed" | "timeout" | "network",
     readonly accountId?: string,
+    info?: ComposioErrorInfo,
   ) {
     super(`composio ${kind}${status === undefined ? "" : ` ${status}`}${detail ? ` ${detail}` : ""}`);
     this.name = "ComposioError";
+    this.errorClass = info?.errorClass ?? (detail === "timeout" || detail === "network" ? "transient" : status !== undefined ? classifyHttpError(status, undefined).errorClass : "unknown");
+    if (info?.requestId !== undefined) this.requestId = info.requestId;
+    if (info?.namedAccountId !== undefined) this.namedAccountId = info.namedAccountId;
+    Object.defineProperty(this, "body", { value: info?.body, enumerable: false, writable: false });
   }
+}
+
+const REFUSABLE_STATUSES: readonly number[] = [400, 404, 422];
+const TRANSIENT_STATUSES: readonly number[] = [402, 408, 429];
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+const safeId = (value: unknown, max: number): string | undefined =>
+  typeof value === "string" && value.length > 0 && value.length <= max && /^[\x21-\x7e]+$/.test(value) ? value : undefined;
+/** A request id we expose in errors and reports: short, and only characters that cannot carry a token or a sentence. */
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const ENVELOPE_KEYS: readonly string[] = ["message", "status", "request_id", "suggested_fix"];
+const ACCOUNT_KEYS: readonly string[] = ["connected_account_id", "connectedAccountId", "id"];
+
+/**
+ * The documented envelope and nothing else: the root holds only `error`; `error` holds only `message` (a
+ * non-empty string), `status` (an integer), `request_id` (a string) and, optionally, `suggested_fix` (a string).
+ * Any other key, and any nested value, fails it: an extra field is a shape nobody documented, and it may be
+ * where an account id or other state hides.
+ */
+function strictEnvelope(body: unknown): { status: number; requestId: string | undefined } | undefined {
+  const root = asRecord(body);
+  if (root === undefined || Object.keys(root).length !== 1) return undefined;
+  const error = asRecord(root["error"]);
+  if (error === undefined || !Object.keys(error).every((key) => ENVELOPE_KEYS.includes(key))) return undefined;
+  const { message, status, request_id: requestId, suggested_fix: fix } = error;
+  if (typeof message !== "string" || message.length === 0 || typeof status !== "number" || !Number.isInteger(status)) return undefined;
+  if (fix !== undefined && typeof fix !== "string") return undefined;
+  if (typeof requestId !== "string") return undefined;
+  return { status, requestId: REQUEST_ID.test(requestId) ? requestId : undefined };
+}
+/** A bounded scan (depth 6, 200 nodes) for an account id anywhere in the body, so the information is kept. */
+function scanForAccountId(body: unknown): string | undefined {
+  let budget = 200;
+  const walk = (value: unknown, depth: number): string | undefined => {
+    if (depth > 6 || budget-- <= 0) return undefined;
+    if (Array.isArray(value)) {
+      for (const item of value) { const found = walk(item, depth + 1); if (found) return found; }
+      return undefined;
+    }
+    const record = asRecord(value);
+    if (record === undefined) return undefined;
+    for (const key of ACCOUNT_KEYS) { const id = safeId(record[key], 128); if (id) return id; }
+    for (const child of Object.values(record)) { const found = walk(child, depth + 1); if (found) return found; }
+    return undefined;
+  };
+  return walk(body, 0);
+}
+/**
+ * Classifies a non-2xx answer from its status and parsed body, never from message text. Evidence: Composio's
+ * public error reference (https://docs.composio.dev/reference/errors, read 2026-11-08) documents one envelope,
+ * `{"error": {"message", "status", "request_id", "suggested_fix"?}}` with `status` the HTTP code. It documents no
+ * machine-readable error code and no guarantee about side effects, and this function claims none:
+ * `provider_refused` means only "Composio answered with its documented refusal envelope".
+ *   - 5xx, 402, 408, 429: `transient`.
+ *   - 400, 404, 422 whose body is exactly that envelope (see `strictEnvelope`), with `status` equal to the HTTP
+ *     status, a request id of safe characters, and no account id anywhere in the body: `provider_refused`.
+ *   - 409, 401, 403, 410, other 4xx and any body that is missing, oversized, not JSON or another shape: `unknown`.
+ * `requestId` is taken only from a validated envelope. `namedAccountId` comes from a bounded scan of the whole body.
+ */
+export function classifyHttpError(status: number, body: unknown): ComposioErrorInfo {
+  const envelope = strictEnvelope(body);
+  const matched = envelope !== undefined && envelope.status === status;
+  const requestId = matched ? envelope.requestId : undefined;
+  const named = scanForAccountId(body);
+  const base: { body?: unknown; requestId?: string; namedAccountId?: string } = {
+    ...(body === undefined ? {} : { body }), ...(requestId === undefined ? {} : { requestId }), ...(named === undefined ? {} : { namedAccountId: named }),
+  };
+  if (status >= 500 || TRANSIENT_STATUSES.includes(status)) return { errorClass: "transient", ...base };
+  const refused = REFUSABLE_STATUSES.includes(status) && matched && requestId !== undefined && named === undefined;
+  return { errorClass: refused ? "provider_refused" : "unknown", ...base };
 }
 
 /** C-8: Composio's account statuses. Anything else is `UNKNOWN` and fails closed. */
@@ -209,6 +311,7 @@ export interface ComposioClientConfig {
   readonly fetch?: typeof fetch;
   readonly timeoutMs?: number;
   readonly maxBodyBytes?: number;
+  readonly maxErrorBodyBytes?: number;
 }
 
 function kindOf(status: number): ComposioErrorKind {
@@ -220,7 +323,7 @@ function kindOf(status: number): ComposioErrorKind {
   return "unavailable";
 }
 
-/** Reads at most `max` bytes; more is `too_large`, never partly used. */
+/** Reads at most `max` bytes; more is `too_large`, never partly used. Checked after each read, so one runtime chunk can arrive first; the reader is cancelled as soon as the total passes `max`. */
 async function readCapped(response: Response, max: number): Promise<string> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > max) {
@@ -244,6 +347,46 @@ async function readCapped(response: Response, max: number): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/**
+ * Reads a non-2xx body up to `max` bytes. An empty, oversized, unreadable-as-JSON body is `undefined` (class
+ * `unknown`, never used). A transport failure or timeout while reading is different: the answer is incomplete, so it
+ * is thrown as a `transient` error with the `timeout` or `network` detail. The size is checked after each read, so
+ * one runtime chunk can arrive before the check; the reader is cancelled the moment the total passes `max`.
+ */
+async function readErrorBody(response: Response, max: number, timeout: AbortSignal): Promise<unknown> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    await response.body?.cancel().catch(() => undefined);
+    return undefined;
+  }
+  if (!response.body) return undefined;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel().catch(() => undefined);
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    await reader.cancel().catch(() => undefined);
+    throw new ComposioError(kindOf(response.status), response.status, timeout.aborted ? "timeout" : "network", undefined, { errorClass: "transient" });
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (text.length === 0) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Drops trailing "/" without a backtracking regex (CodeQL js/polynomial-redos). */
 function trimTrailingSlashes(url: string): string {
   let end = url.length;
@@ -256,6 +399,7 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
   const doFetch = config.fetch ?? fetch;
   const timeoutMs = config.timeoutMs ?? COMPOSIO_TIMEOUT_MS;
   const maxBody = config.maxBodyBytes ?? COMPOSIO_MAX_BODY_BYTES;
+  const maxErrorBody = config.maxErrorBodyBytes ?? COMPOSIO_MAX_ERROR_BODY_BYTES;
 
   async function call(method: string, path: string, body: unknown, signal: AbortSignal | undefined): Promise<{ status: number; json: unknown }> {
     const timeout = AbortSignal.timeout(timeoutMs);
@@ -274,8 +418,8 @@ export function createComposioClient(config: ComposioClientConfig): ComposioClie
     }
     try {
       if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new ComposioError(kindOf(response.status), response.status);
+        const errorBody = await readErrorBody(response, maxErrorBody, timeout);
+        throw new ComposioError(kindOf(response.status), response.status, undefined, undefined, classifyHttpError(response.status, errorBody));
       }
       const text = await readCapped(response, maxBody);
       if (text.length === 0) return { status: response.status, json: undefined };
