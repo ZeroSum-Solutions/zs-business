@@ -130,12 +130,18 @@ All data goes through one typed client in `src/lib/api/`. Components use the hoo
     (`shouldCreateUser: false`: people join only by invitation) and always answers 204, so
     it never tells whether an address has an account. The link goes to `/auth/confirm` on
     the host the browser used (after the same-origin check), so the Supabase redirect allow
-    list must hold only this dashboard's URL. Requests are rate limited in memory, 5 per
-    address and 30 in total per 15 minutes by default (`DASHBOARD_SIGN_IN_PER_ADDRESS`,
-    `DASHBOARD_SIGN_IN_GLOBAL`), then 429 with `Retry-After`. The body may be 2 KiB and must
+    list must hold only this dashboard's URL. Requests are rate limited in the API's shared
+    Postgres limiter (`POST /public/v1/sign-in/admit`, so the limits hold across server
+    instances): 5 per address, 30 in total and 5 per email address per 15 minutes by default
+    (`DASHBOARD_SIGN_IN_PER_ADDRESS`, `DASHBOARD_SIGN_IN_GLOBAL`, `DASHBOARD_SIGN_IN_PER_EMAIL`),
+    then 429 with `Retry-After`. The email is charged by its SHA-256, so the raw address keys no
+    bucket and unknown addresses count like known ones. It needs `DASHBOARD_SIGN_IN_LIMITER_SECRET`
+    (32+ characters, the same value as `SIGN_IN_LIMITER_SECRET` on the API project) and fails
+    closed: when the limiter is unset, unreachable or down, no link is sent and the answer is 502
+    `unavailable`. The body may be 2 KiB and must
     arrive within 10 seconds, read the same bounded way (413 `too_large`, 408 `timeout`).
-    Each attempt is reserved before its body is read, so parallel requests cannot outrun
-    the limit, and a refused body still counts; one Supabase could not take is given back.
+    Each attempt is charged before its body is read, so parallel requests cannot outrun
+    the limit, and a refused body still counts; so does one Supabase could not take.
     The address comes from the right-most `X-Forwarded-For` entry only with
     `DASHBOARD_TRUST_PROXY=1`; otherwise every caller shares one key.
 - Embedded Shopify app (`POST /api/shopify/<op>`, connections.md C-21, C-30): the session-token

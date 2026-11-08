@@ -4,8 +4,10 @@
  * POST /api/sign-in takes `{ email, next? }` as JSON from this origin and asks Supabase to
  * email a sign-in link. It never creates an account (people join by invitation) and it
  * answers 204 whether or not the address has one, so it cannot be used to find out who
- * does. Every request is reserved against the caller's address and against everyone before
- * its body is read, so nobody can make the server send unlimited email.
+ * does not. Every request is charged to the caller's address and to everyone before its body
+ * is read, and to the email address once it parsed, in the API's shared limiter (rate-limit.ts),
+ * so nobody can make the server send unlimited email however many instances serve. When the
+ * limiter cannot answer, nothing is sent: 502 `unavailable`.
  *
  * GET /auth/confirm is where the link lands: it trades the link's one-time token hash for a
  * session (Supabase verifyOtp), sets the httpOnly session cookies and redirects to `next`.
@@ -26,7 +28,7 @@ import { safeNextUrl } from "../safe-next";
 import { readBoundedBody, type BodyTiming } from "./body";
 import { isHttps, jsonAnswer, publicOrigin, reportSetupProblem, trustProxyFromEnv, type LiveSetup } from "./live-config";
 import { isSameOrigin } from "./origin";
-import { clientAddress, type AttemptLimiter } from "./rate-limit";
+import { clientAddress, type Admission, type SignInLimiter } from "./rate-limit";
 import { authFor, expiredCookies, hasSessionCookie, lookupSession } from "./supabase";
 
 const SignInBody = z.object({
@@ -44,11 +46,17 @@ function nextPath(next: string | null | undefined): string {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+/** The answer for a refused admission, or null when the request may go on. */
+function refusal(admission: Admission): Response | null {
+  if (admission.ok) return null;
+  if ("unavailable" in admission) return jsonAnswer(502, { error: "unavailable" });
+  return jsonAnswer(429, { error: "rate_limited" }, { "Retry-After": String(admission.retryAfterSeconds) });
+}
+
 export async function requestSignInLink(
   request: Request,
   setup: LiveSetup | null,
-  limiter: AttemptLimiter,
-  now: Date = new Date(),
+  limiter: SignInLimiter,
   timing: BodyTiming = {},
 ): Promise<Response> {
   // Demo mode has nothing to sign in to.
@@ -62,11 +70,9 @@ export async function requestSignInLink(
   if (!isSameOrigin(request, config.trustProxy)) return jsonAnswer(403, { error: "forbidden" });
   if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return jsonAnswer(415, { error: "unsupported_media_type" });
 
-  // Reserve before the first await: requests in flight together must all count.
-  const address = clientAddress(request, config.trustProxy);
-  const reservedAt = now.getTime();
-  const wait = limiter.reserve(address, reservedAt);
-  if (wait > 0) return jsonAnswer(429, { error: "rate_limited" }, { "Retry-After": String(wait) });
+  // Charge before the body is read: a refused or malformed body stays charged.
+  const refused = refusal(await limiter.admitAddress(clientAddress(request, config.trustProxy)));
+  if (refused) return refused;
 
   // Read at most MAX_BODY_BYTES; a refused body stays charged, like a malformed one.
   const raw = await readBoundedBody(request, { maxBytes: MAX_BODY_BYTES, deadlineMs: BODY_DEADLINE_MS, ...timing });
@@ -84,12 +90,13 @@ export async function requestSignInLink(
   }
   if (!parsed) return jsonAnswer(400, { error: "invalid_email" });
 
+  const emailRefused = refusal(await limiter.admitEmail(parsed.email));
+  if (emailRefused) return emailRefused;
+
   const auth = authFor(request, config);
   const emailRedirectTo = `${publicOrigin(request, config.trustProxy)}/auth/confirm?next=${encodeURIComponent(nextPath(parsed.next))}`;
   const { error } = await auth.client.auth.signInWithOtp({ email: parsed.email, options: { shouldCreateUser: false, emailRedirectTo } });
   if (error && (isAuthRetryableFetchError(error) || (error.status ?? 500) >= 500)) {
-    // Nothing was sent, so the attempt is not charged.
-    limiter.refund(address, reservedAt);
     return auth.finish(jsonAnswer(502, { error: "unavailable" }));
   }
   if (error?.status === 429) return auth.finish(jsonAnswer(429, { error: "rate_limited" }, { "Retry-After": "60" }));

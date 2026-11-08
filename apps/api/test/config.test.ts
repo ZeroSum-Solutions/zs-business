@@ -97,6 +97,13 @@ describe("parseServerEnv", () => {
       .toThrow(/PUBLIC_BASE_URL/);
   });
 
+  it("keeps the sign-in limit route off until SIGN_IN_LIMITER_SECRET is set, and refuses a short one", () => {
+    expect(parseServerEnv(base).signInLimiterSecret).toBeNull();
+    const secret = ["sign", "in", "limiter", "s".repeat(32)].join("-");
+    expect(parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: secret }).signInLimiterSecret).toBe(secret);
+    expect(() => parseServerEnv({ ...base, SIGN_IN_LIMITER_SECRET: "short" })).toThrow(/SIGN_IN_LIMITER_SECRET/);
+  });
+
   it("keeps the unsubscribe routes off until a token secret is set", () => {
     expect(parseServerEnv(base).unsubscribe).toBeNull();
     // The booking secret does not turn them on, and theirs does not turn booking on.

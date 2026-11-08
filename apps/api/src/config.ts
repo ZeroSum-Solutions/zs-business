@@ -50,6 +50,7 @@ export const publicBaseUrlSchema = z.url({ protocol: /^https?$/ });
 export const activepiecesKeySecretSchema = signingSecretSchema("Activepieces key", PLACEHOLDER_ACTIVEPIECES_KEY_SECRET);
 /** Loopback receivers (http://127.0.0.1) for local development; only with a loopback database. */
 export const activepiecesLoopbackSchema = z.enum(["on", "off"]).default("off");
+const signInLimiterSecretSchema = z.string().min(32, "sign-in limiter secrets must be at least 32 characters");
 const unsubscribeTokenSecretSchema = signingSecretSchema("unsubscribe token", PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET);
 /** Headers that hosting platforms overwrite, so a caller cannot choose the value. */
 export const CLIENT_IP_HEADERS = ["x-vercel-forwarded-for", "x-real-ip", "cf-connecting-ip", "fly-client-ip"] as const;
@@ -78,6 +79,9 @@ const envSchema = z.object({
   PUBLIC_RATE_LIMIT_STORE: z.enum(["postgres", "memory"]).default("postgres"),
   // delivery.md D-9: verifies the List-Unsubscribe tokens in outgoing email (the delivery worker
   // signs them with the same secret). Unset turns the public unsubscribe routes off.
+  // hub-launch L9: the bearer token the dashboard sends to POST /public/v1/sign-in/admit, which keeps its
+  // sign-in link limits in the shared limiter. Unset turns the route off (404); the dashboard then refuses sign-in.
+  SIGN_IN_LIMITER_SECRET: signInLimiterSecretSchema.optional(),
   UNSUBSCRIBE_TOKEN_SECRET: unsubscribeTokenSecretSchema.optional(),
   // The previous secret keeps verifying links in mail sent before a rotation.
   UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET: unsubscribeTokenSecretSchema.optional(),
@@ -163,6 +167,8 @@ export interface ServerEnv {
   readonly publicIntake: PublicIntakeEnv | null;
   readonly sites: SitesEnv | null;
   readonly unsubscribe: UnsubscribeEnv | null;
+  /** hub-launch L9: SIGN_IN_LIMITER_SECRET; null (the sign-in limit route is off) when unset. */
+  readonly signInLimiterSecret: string | null;
   readonly resendWebhook: ResendWebhookEnv | null;
   /** stripe.md S-9: wallet top-ups and the Stripe webhook; null (both off) when no STRIPE_ variable is set. */
   readonly stripe: StripeEnv | null;
@@ -246,6 +252,7 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     publicIntake: parsePublicIntake(parsed.data),
     sites: parseSites(parsed.data),
     unsubscribe: parseUnsubscribe(parsed.data),
+    signInLimiterSecret: parsed.data.SIGN_IN_LIMITER_SECRET ?? null,
     resendWebhook: parseResendWebhook(parsed.data),
     stripe: parseStripeEnv(env),
     plans: parsePlansWithStripe(env),

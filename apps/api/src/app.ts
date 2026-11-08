@@ -63,6 +63,7 @@ import { googleCalendarRoutes, type GoogleCalendarConfig } from "./public/google
 import { connectionsCallbackRoutes, type ConnectionsApiConfig } from "./public/connections.js";
 import { twilioWebhookRoutes, type TwilioWebhookConfig } from "./public/twilio-webhook.js";
 import { unsubscribeRoutes, type UnsubscribeConfig } from "./public/unsubscribe.js";
+import { SIGN_IN_LIMIT_PREFIX, signInLimitRoutes, type SignInLimitConfig } from "./public/sign-in-limit.js";
 import { transcriptionRoutes, workerAuth, workerRoutes, type TranscriptionApiConfig } from "./routes/transcription.js";
 import { intakeMemberRoutes, intakeWorkerAuth, intakeWorkerRoutes, type DocumentIntakeApiConfig } from "./routes/document-intake.js";
 
@@ -93,6 +94,8 @@ export interface AppDependencies {
   readonly images?: ImageDependencies;
   /** One-click email unsubscribe (delivery.md D-9); absent means the routes are off. */
   readonly unsubscribe?: UnsubscribeConfig;
+  /** The dashboard's sign-in link limits (hub-launch L9), counted in the shared limiter; absent means /public/v1/sign-in is off. */
+  readonly signInLimit?: SignInLimitConfig;
   /**
    * The inquiry follow-up agent's model and limits (agents.md G-9, G-11); absent means
    * `POST /v1/agents/followup/runs` is off (404). The other agent routes are always on.
@@ -280,6 +283,7 @@ export function createApp(deps: AppDependencies) {
     app.route("/", routes.site);
   }
   if (deps.unsubscribe) app.route("/public/v1", unsubscribeRoutes(edge, deps.unsubscribe, requestEdge));
+  if (deps.signInLimit) app.route(SIGN_IN_LIMIT_PREFIX, signInLimitRoutes(edge, deps.signInLimit));
   if (deps.resendWebhook) app.route("/", resendWebhookRoutes(edge, deps.resendWebhook, requestEdge));
   if (deps.stripeWebhook) app.route("/", stripeWebhookRoutes(edge, deps.stripeWebhook, requestEdge));
   if (deps.googleCalendar) app.route("/", googleCalendarRoutes(deps.googleCalendar, requestEdge));
@@ -421,6 +425,7 @@ export function createApp(deps: AppDependencies) {
 export type App = ReturnType<typeof createApp>;
 export { allowAllBots, type BotCheck, type PublicIntakeConfig } from "./public/routes.js";
 export type { UnsubscribeConfig } from "./public/unsubscribe.js";
+export type { SignInLimitConfig } from "./public/sign-in-limit.js";
 export type { ResendWebhookConfig } from "./public/resend-webhook.js";
 export type { StripeWebhookConfig } from "./public/stripe-webhook.js";
 export type { GoogleCalendarConfig } from "./public/google-calendar.js";

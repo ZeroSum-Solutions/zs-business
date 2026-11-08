@@ -17,6 +17,8 @@ import {
   createPostgresRateLimiter,
   type App,
   type PublicIntakeConfig,
+  type RateLimiter,
+  type SignInLimitConfig,
   type ResendWebhookConfig,
   type TwilioWebhookConfig,
   type UnsubscribeConfig,
@@ -35,6 +37,7 @@ export const PREVIOUS_KEY_SECRET = ["test", "booking", "p".repeat(32)].join("-")
 export const PUBLIC_BASE_URL = "http://book.test";
 /** Synthetic unsubscribe token secrets, built at runtime like SECRET. */
 export const UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "u".repeat(32)].join("-");
+export const SIGN_IN_LIMITER_SECRET = ["test", "sign-in-limiter", "l".repeat(32)].join("-");
 export const PREVIOUS_UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "q".repeat(32)].join("-");
 /** Synthetic Resend webhook secrets in the `whsec_<base64>` shape, built at runtime like SECRET. */
 export const RESEND_WEBHOOK_SECRET = "whsec_" + Buffer.from(["test", "resend", "w".repeat(32)].join("-")).toString("base64");
@@ -133,6 +136,8 @@ export interface HarnessOptions {
   limiterStore?: "memory" | "postgres";
   /** Turns the unsubscribe routes on; the token secret defaults to UNSUBSCRIBE_SECRET. */
   unsubscribe?: Partial<UnsubscribeConfig>;
+  /** Turns POST /public/v1/sign-in/admit on; the secret defaults to SIGN_IN_LIMITER_SECRET. */
+  signInLimit?: Partial<SignInLimitConfig>;
   /** Turns POST /webhooks/resend on; the signing secret defaults to RESEND_WEBHOOK_SECRET. */
   resendWebhook?: Partial<ResendWebhookConfig>;
   /** Turns the /webhooks/twilio routes on with the TWILIO_* test values below. */
@@ -182,6 +187,9 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
     ...(options.unsubscribe
       ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...shared, ...options.unsubscribe } }
       : {}),
+    ...(options.signInLimit
+      ? { signInLimit: { secret: SIGN_IN_LIMITER_SECRET, ...shared, ...options.signInLimit } }
+      : {}),
     ...(options.resendWebhook
       ? { resendWebhook: { secrets: { current: RESEND_WEBHOOK_SECRET }, ...options.resendWebhook } }
       : {}),
@@ -214,7 +222,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
  * statements), with the Activepieces routes and the remote MCP endpoint on. Owner tokens from
  * `ApiHarness.a.token` work on it as long as `clock` does not pass their hour.
  */
-export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number } = {}): App {
+export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number; signInLimit?: { limiter?: RateLimiter } } = {}): App {
   const appClock = options.clock ?? clock;
   return createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
@@ -225,6 +233,7 @@ export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Da
     config: { allowedOrigins: [ORIGIN], ...(options.requestTimeoutMs ? { requestTimeoutMs: options.requestTimeoutMs } : {}) },
     ...(options.activepieces === false ? {} : { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } } }),
     ...(options.onError ? { onError: options.onError } : {}),
+    ...(options.signInLimit ? { signInLimit: { secret: SIGN_IN_LIMITER_SECRET, limiter: options.signInLimit.limiter ?? createPostgresRateLimiter(db, appClock) } } : {}),
   });
 }
 

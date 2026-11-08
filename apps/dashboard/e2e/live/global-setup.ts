@@ -146,6 +146,8 @@ export default async function globalSetup() {
   const jwtSecret = randomBytes(32).toString("hex");
   // Signs this run's public booking keys; the API serves the booking page and widget with it.
   const bookingKeySecret = randomBytes(32).toString("hex");
+  // The sign-in limits count in the API (public.rate_limit_take); the dashboard holds the same secret.
+  const signInLimiterSecret = randomBytes(32).toString("hex");
   // Google Calendar (G-12): this run's signing secrets and sealing key pair.
   const googleStateSecret = randomBytes(32).toString("hex");
   const googleChannelSecret = randomBytes(32).toString("hex");
@@ -284,6 +286,7 @@ export default async function globalSetup() {
         SESSION_CACHE_SECONDS: "0",
         PORT: String(LIVE.apiPort),
         PUBLIC_BOOKING_KEY_SECRET: bookingKeySecret,
+        SIGN_IN_LIMITER_SECRET: signInLimiterSecret,
         PUBLIC_BASE_URL: LIVE.apiUrl,
         // Releases live in the API's memory: no R2 here. The DB rows are the real ones.
         SITES_STORE: "memory",
@@ -312,11 +315,13 @@ export default async function globalSetup() {
       // One address for every test (no trusted proxy): lift the sign-in limits for the run.
       DASHBOARD_SIGN_IN_PER_ADDRESS: "10000",
       DASHBOARD_SIGN_IN_GLOBAL: "10000",
+      DASHBOARD_SIGN_IN_PER_EMAIL: "10000",
+      DASHBOARD_SIGN_IN_LIMITER_SECRET: signInLimiterSecret,
       NEXT_TELEMETRY_DISABLED: "1",
     });
     await run("build", "pnpm", ["exec", "next", "build", "--webpack"], { cwd: dashboardDir, env: webEnv });
     const leaks = findBundleLeaks(path.join(dashboardDir, ".next-live"), [
-      ownerToken, otherToken, outsiderToken, token, jwtSecret, anonKey, bookingKeySecret, googleStateSecret, googleChannelSecret, sealKeys.privateKey,
+      ownerToken, otherToken, outsiderToken, token, jwtSecret, anonKey, bookingKeySecret, signInLimiterSecret, googleStateSecret, googleChannelSecret, sealKeys.privateKey,
     ]);
     if (leaks.length > 0) {
       throw new Error(`The dashboard build ships a token or secret: ${leaks.map((leak) => `${leak.kind} in ${leak.file}`).join(", ")}`);

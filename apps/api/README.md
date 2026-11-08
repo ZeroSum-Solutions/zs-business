@@ -118,6 +118,7 @@ Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
 | `IMAGE_ADAPTER` | Optional: turns image jobs on (image-port.md IM-21): `kie` or `fal`; `fake` only with `IMAGE_ENVIRONMENT=test` and a loopback `DATABASE_URL`. Needs `SITES_STORE` (images share the site store). Unset, every `/v1/media` route answers 404. See "Images". |
 | `PUBLIC_RATE_LIMIT_STORE` | Where the public booking and unsubscribe limits count. `postgres` (default): `public.rate_limit_buckets`, shared by every API instance on the database. `memory`: this process only, refused unless `DATABASE_URL` is a loopback host. |
+| `SIGN_IN_LIMITER_SECRET` | Optional (32+ characters; the dashboard holds the same value as `DASHBOARD_SIGN_IN_LIMITER_SECRET`): the bearer token for `POST /public/v1/sign-in/admit`, where the dashboard keeps its sign-in link limits (per address, in total, per email address) in the shared Postgres limiter so they hold across instances. The route sees the address and the SHA-256 of the email, never the email. Unset, the route is off (404) and the dashboard sends no sign-in link. Fails closed: a store outage answers a retryable 503. |
 | `UNSUBSCRIBE_TOKEN_SECRET` | Verifies the email unsubscribe tokens that the delivery worker signs with the same secret (32+ characters; the `.env.example` placeholder is refused). Unset, the unsubscribe routes are off. They use `PUBLIC_CLIENT_IP_HEADER` or `PUBLIC_TRUSTED_PROXIES` and the `PUBLIC_RATE_ADDRESS_*` limits, counted in their own buckets of the `PUBLIC_RATE_LIMIT_STORE` store. |
 | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | Optional, during a rotation: links signed with it still verify. |
 | `RESEND_WEBHOOK_SECRET` | The signing secret of the Resend webhook endpoint, as Resend shows it (`whsec_` then base64, at least 24 bytes). Anything else is refused. Unset, `POST /webhooks/resend` is off. |
@@ -789,6 +790,7 @@ against the pinned Supabase Root 2021 CA.
    | `UNSUBSCRIBE_TOKEN_SECRET` | yes (verifies links) | yes (signs links, only with `DELIVERY_WORKER=on`) |
    | `UNSUBSCRIBE_TOKEN_PREVIOUS_SECRET` | yes (verifies links) | yes (only with `DELIVERY_WORKER=on`, if rotating) |
    | `RESEND_WEBHOOK_SECRET`, `RESEND_WEBHOOK_PREVIOUS_SECRET` | yes | no |
+   | `SIGN_IN_LIMITER_SECRET` (the dashboard project holds the same value as `DASHBOARD_SIGN_IN_LIMITER_SECRET`) | yes | no |
    | `ACTIVEPIECES_KEY_SECRET` (and `ACTIVEPIECES_KEY_PREVIOUS_SECRET`, `ACTIVEPIECES_ALLOW_LOOPBACK`) | yes | yes (only with `ACTIVEPIECES_WEBHOOK_WORKER=on`) |
    | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CHANNEL_SECRET`, `GOOGLE_OAUTH_BASE_URL`, `GOOGLE_TOKEN_BASE_URL`, `GOOGLE_API_BASE_URL` | yes | yes (only with `CALENDAR_WORKER=on`; the three `*_BASE_URL` are optional overrides read by both through `google-env.ts`) |
    | `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_STATE_PREVIOUS_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY` | yes | no |
