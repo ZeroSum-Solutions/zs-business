@@ -3,7 +3,7 @@
 # install time, and the app authenticates with session tokens (token exchange), never an OAuth redirect.
 client_id = "baad8397402f461c395de7c8b08bacd0"
 name = "ZS Business Connections (preview)"
-application_url = "https://zs-business-dashboard-preview.vercel.app/shopify/app"
+application_url = "https://app-preview.zerosumsolutions.com/shopify/app"
 embedded = true
 
 [access_scopes]
@@ -12,7 +12,7 @@ scopes = "read_orders"
 use_legacy_install_flow = false
 
 [auth]
-redirect_urls = ["https://zs-business-dashboard-preview.vercel.app/shopify/app"]
+redirect_urls = ["https://app-preview.zerosumsolutions.com/shopify/app"]
 
 [webhooks]
 api_version = "2026-10"
