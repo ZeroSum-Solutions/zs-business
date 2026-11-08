@@ -832,3 +832,126 @@ describe("attempt token", () => {
     expect(verifyConnectAttempt({ current: "other-secret-other-secret-other-secret" }, token, clock.now())).toBeNull();
   });
 });
+
+// C-4: the connect charge is given back only where the provider is known to have created nothing.
+describe("connect quota refund (C-4)", () => {
+  /** A limiter that issues receipts and records what is refunded; `refundFails` makes the refund throw. */
+  let issued: string[];
+  let refunded: string[];
+  let refundFails = false;
+  const receiptLimiter: ConnectionLimiter = {
+    ...limiter,
+    async takeWithReceipt(charges) {
+      const taken = await limiter.take(charges);
+      if (!taken.ok) return taken;
+      const id = `receipt-${issued.length}`;
+      issued.push(id);
+      return { ok: true, receipt: { id } };
+    },
+    async refund(receipt) {
+      if (refundFails) throw new Error("store down");
+      refunded.push(receipt.id);
+      return 1;
+    },
+  };
+  beforeEach(() => { issued = []; refunded = []; refundFails = false; });
+  const start = (connector: ConnectorPort = port, who = a) =>
+    createConnectionsSession({ ...deps(), connections: { connector, stateSecrets: { current: STATE }, limiter: receiptLimiter } }, { tenantId: who.tenantId, actorId: who.owner.userId })
+      .start("shopify", { shopDomain: SHOP, browserBinding: BINDING }).catch((e: unknown) => e);
+  const stub = (answer: () => Promise<Awaited<ReturnType<ConnectorPort["link"]>>>): ConnectorPort => ({ ...port, link: answer });
+
+  // The allow-list: explicit provider answers that refuse the request before it is processed.
+  it.each([400, 401, 402, 403, 404, 422, 429])("a Composio %i is an explicit refusal: the charge is given back, once", async (status) => {
+    fake.override(/POST \/connected_accounts\/link/, { status, json: {}, times: 1 });
+    const error = await start();
+    expect(error).toBeInstanceOf(Error);
+    expect(issued).toEqual(["receipt-0"]);
+    expect(refunded).toEqual(["receipt-0"]);
+    expect((await database.pool.query("SELECT 1 FROM connection_attempts")).rowCount).toBe(0);
+  });
+
+  it("the organization's own budget refusing before any call is refunded, and so is the 429 that opened it", async () => {
+    fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
+    expect(await start()).toMatchObject({ kind: "rate_limited" });
+    const callsBefore = fake.calls.length;
+    // The 429 opened a cooldown on the organization's budget: this link never leaves the worker.
+    expect(await start()).toMatchObject({ kind: "rate_limited" });
+    expect(fake.calls.length).toBe(callsBefore);
+    expect(refunded).toEqual(["receipt-0", "receipt-1"]);
+  });
+
+  it("a worker refusal from its own checks before any provider call (nothingCreated) is refunded", async () => {
+    const error = await start(stub(async () => ({ outcome: "refused", code: "not_found", nothingCreated: true })));
+    expect(error).toBeInstanceOf(NotFound);
+    expect(refunded).toEqual(["receipt-0"]);
+  });
+
+  // Everything else may have left a provider account behind: the charge stands.
+  it.each([408, 409, 410, 425, 500, 502, 503, 504])("a Composio %i keeps the charge", async (status) => {
+    fake.override(/POST \/connected_accounts\/link/, { status, json: {}, times: 1 });
+    expect(await start()).toBeInstanceOf(Error);
+    expect(issued).toHaveLength(1);
+    expect(refunded).toEqual([]);
+  });
+
+  it("a Composio call that times out keeps the charge", async () => {
+    fake.override(/POST \/connected_accounts\/link/, { hang: true, times: 1 });
+    expect(await start()).toMatchObject({ kind: "unavailable" });
+    expect(refunded).toEqual([]);
+  });
+
+  it("an answer we cannot read keeps the charge, even when it names the account it made", async () => {
+    fake.override(/POST \/connected_accounts\/link/, { status: 200, json: { connected_account_id: "ca_made", redirect_url: "not a url" }, times: 1 });
+    expect(await start()).toMatchObject({ kind: "unavailable" });
+    fake.override(/POST \/connected_accounts\/link/, { status: 200, json: { unexpected: true }, times: 1 });
+    expect(await start()).toMatchObject({ kind: "unavailable" });
+    expect(refunded).toEqual([]);
+  });
+
+  it("a worker that cannot be reached, an unknown error, and a refusal that is not marked all keep the charge", async () => {
+    expect(await start(stub(async () => { throw new ConnectorUnavailable("timeout"); }))).toMatchObject({ kind: "unavailable" });
+    expect(await start(stub(async () => { throw new ConnectorUnavailable("network"); }))).toMatchObject({ kind: "unavailable" });
+    expect(await start(stub(async () => { throw new Error("boom"); }))).toMatchObject({ message: "boom" });
+    // `nothingCreated` is absent: the worker could not tell, so the API cannot assume.
+    expect(await start(stub(async () => ({ outcome: "refused", code: "provider_unavailable" })))).toMatchObject({ kind: "unavailable" });
+    expect(await start(stub(async () => ({ outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: 5 })))).toMatchObject({ kind: "rate_limited" });
+    expect(await start(stub(async () => ({ outcome: "refused", code: "not_found" })))).toBeInstanceOf(NotFound);
+    expect(issued).toHaveLength(6);
+    expect(refunded).toEqual([]);
+  });
+
+  it("a link that succeeds, or that fails after the provider returned an account, keeps the charge", async () => {
+    expect(await start()).toMatchObject({ authorizeUrl: expect.stringMatching(/^https:\/\/connect\.composio\.test\//) });
+    expect(refunded).toEqual([]);
+    // The provider made the account; our attempt row could not be written: the worker removes it, the charge stands.
+    await database.pool.query("ALTER TABLE connection_attempts ADD CONSTRAINT refund_test_block CHECK (false) NOT VALID");
+    try {
+      expect(await start()).toMatchObject({ kind: "unavailable" });
+    } finally {
+      await database.pool.query("ALTER TABLE connection_attempts DROP CONSTRAINT refund_test_block");
+    }
+    expect(fake.callsTo(/POST \/connected_accounts\/link/).length).toBe(2);
+    expect(refunded).toEqual([]);
+  });
+
+  it("a refund that fails never changes the answer", async () => {
+    refundFails = true;
+    fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
+    expect(await start()).toMatchObject({ kind: "rate_limited", retryAfterSeconds: 60 });
+    expect(refunded).toEqual([]);
+  });
+
+  it("a limiter without receipts charges and never refunds", async () => {
+    fake.override(/POST \/connected_accounts\/link/, { status: 429, json: {}, times: 1 });
+    const error = await session(a.tenantId, a.owner.userId).start("shopify", { shopDomain: SHOP, browserBinding: BINDING }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "rate_limited" });
+    expect(taken).toEqual(["conn-connect"]);
+  });
+
+  it("a refused charge is not refunded because it was never taken", async () => {
+    limiterRefuses = true;
+    expect(await start()).toMatchObject({ kind: "rate_limited", retryAfterSeconds: 42 });
+    expect(issued).toEqual([]);
+    expect(refunded).toEqual([]);
+  });
+});

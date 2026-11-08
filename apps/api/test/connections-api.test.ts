@@ -30,6 +30,7 @@ import {
   type ConnectorPort,
 } from "@zs/core";
 import { createApp, createHs256Verifier, type App } from "../src/app.js";
+import { createPostgresRateLimiter } from "../src/public/postgres-limiter.js";
 import { parseConnectionsApiEnv } from "../src/connections/api-env.js";
 import { parseServerEnv } from "../src/config.js";
 import { ACTIVEPIECES_KEY_SECRET, call, clock, createApiHarness, NOW, ORIGIN, SECRET, signedInMember, type ApiHarness, type MemberSetup } from "./helpers.js";
@@ -154,6 +155,30 @@ describe("off without the config (C-3, C-15)", () => {
     for (const name of CONNECTION_TOOLS)
       await expect(client.callTool({ name, arguments: { connectionId: randomUUID(), tool: "x", arguments: {} } }), name).rejects.toMatchObject({ code: -32601 });
     await client.close();
+  });
+});
+
+describe("the connect quota against the shared limiter (C-4)", () => {
+  const countOfConnect = async () => Number((await h.database.pool.query<{ count: number }>(
+    "SELECT coalesce(sum(count),0)::int AS count FROM rate_limit_buckets WHERE key = sha256(convert_to($1, 'UTF8'))", [`conn-connect:${h.a.tenantId}`])).rows[0]!.count);
+  const buildShared = () => createApp({
+    verifier: createHs256Verifier(SECRET, { clock }), sessionCheck: createLocalStubSessionCheck(h.database.db, clock), clock,
+    db: h.database.db, generateId: randomUUID, config: { allowedOrigins: [ORIGIN] }, activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } },
+    connections: { connector: port, stateSecrets: { current: STATE }, returnUrl: RETURN_URL, limiter: createPostgresRateLimiter(h.database.db, clock), report: (event) => reports.push(event) },
+  });
+
+  it("a link the provider refused gives its unit back; a link that may exist does not", async () => {
+    const shared = buildShared();
+    fake.override(/POST \/connected_accounts\/link/, { status: 422, json: {}, times: 1 });
+    expect((await start(shared, h.a.token)).response.status).toBeGreaterThanOrEqual(400);
+    expect(await countOfConnect()).toBe(0);
+    // A 503 from the provider: the account may exist, so the unit stays spent.
+    fake.override(/POST \/connected_accounts\/link/, { status: 503, json: {}, times: 1 });
+    expect((await start(shared, h.a.token)).response.status).toBe(503);
+    expect(await countOfConnect()).toBe(1);
+    // A link that worked is a spent unit too.
+    expect((await start(shared, h.a.token)).response.status).toBe(200);
+    expect(await countOfConnect()).toBe(2);
   });
 });
 

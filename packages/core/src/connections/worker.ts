@@ -281,6 +281,24 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   const isRateLimit = (error: unknown) => error instanceof BudgetRefused || (error instanceof ComposioError && error.kind === "rate_limited");
   const retryAfterOf = (error: unknown) => (error instanceof BudgetRefused ? error.retryAfterSeconds : COOLDOWN_SECONDS);
 
+  /**
+   * C-4: the only link failures that prove the provider created no connected account, so the API may give the
+   * connect charge back. An explicit allow-list; everything else (a timeout, a network error, a 5xx, a 3xx, an
+   * answer we could not read, a status outside the list, any error that names an account, any non-Composio
+   * error) keeps the charge, because the provider may have made the link and a refund would let a tenant make
+   * links without limit.
+   *   - Our own budget said no before the call left (BudgetRefused).
+   *   - Composio answered with one of these HTTP statuses, which refuse the request before it is processed: 400
+   *     and 422 (the request is invalid), 401 and 403 (our key or project is refused), 402 and 429 (a limit),
+   *     404 (the auth config is unknown). 408, 409, 410, 425 and every 5xx are left out: they can follow work
+   *     the provider already did or started.
+   */
+  const REFUSED_BEFORE_CREATE = new Set([400, 401, 402, 403, 404, 422, 429]);
+  const confirmedNothingCreated = (error: unknown): boolean =>
+    error instanceof BudgetRefused
+    || (error instanceof ComposioError && error.kind !== "unavailable" && error.detail === undefined && error.accountId === undefined
+      && error.status !== undefined && REFUSED_BEFORE_CREATE.has(error.status));
+
   const accountMatches = (account: ComposioAccount | null, expected: { id: string; tenantId: string; toolkit: string; authConfigId: string }): account is ComposioAccount =>
     account !== null && account.id === expected.id && account.userId === userIdOf(expected.tenantId)
       && account.toolkit === expected.toolkit && account.authConfigId === expected.authConfigId;
@@ -390,9 +408,10 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   async function link(input: { tenantId: string; toolkit: string; attemptId: string; connectionId: string; shopDomain: string; createdBy: string; browserHash: string }, signal?: AbortSignal): Promise<ConnectorLinkResponse> {
     const toolkit = catalogToolkit(input.toolkit);
     const authConfigId = config.authConfigIds[input.toolkit];
-    if (!toolkit || !authConfigId) return { outcome: "refused", code: "not_found" };
+    // C-4: these three refusals come from our own checks before any provider call: nothing can exist.
+    if (!toolkit || !authConfigId) return { outcome: "refused", code: "not_found", nothingCreated: true };
     // C-18: with the native tier on, Shopify is installed from the App Store; no typed shop domain starts a Composio link (S1 2.3.1).
-    if (input.toolkit === "shopify" && deps.native) return { outcome: "refused", code: "not_found" };
+    if (input.toolkit === "shopify" && deps.native) return { outcome: "refused", code: "not_found", nothingCreated: true };
     const started = now();
     const expiresAt = new Date(started.getTime() + config.attemptLifetimeMs);
     const row = (accountId: string, status: "started" | "cancelling") => service((tx) => tx.query(
@@ -427,9 +446,10 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       }, signal));
     } catch (error) {
       if (error instanceof ComposioError && error.accountId !== undefined) await compensate(error.accountId);
+      const nothingCreated = confirmedNothingCreated(error) ? { nothingCreated: true as const } : {};
       return isRateLimit(error)
-        ? { outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: retryAfterOf(error) }
-        : { outcome: "refused", code: "provider_unavailable" };
+        ? { outcome: "refused", code: "provider_rate_limited", retryAfterSeconds: retryAfterOf(error), ...nothingCreated }
+        : { outcome: "refused", code: "provider_unavailable", ...nothingCreated };
     }
     try {
       await row(made.connectedAccountId, "started");

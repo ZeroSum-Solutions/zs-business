@@ -38,7 +38,7 @@ import { memberDispatch, parseInput, type EdgeDependencies, type Principal } fro
 import { requireMember } from "../members/access.js";
 import { catalogTool, catalogToolkit, OVERRIDE_KEYS } from "./catalog.js";
 import { countTokensWithAccess, getConnection, listConnections, listLiveConnections } from "./handlers.js";
-import { callbackCharges, callbackStatusCharges, connectCharges, runCharges, type ConnectionLimiter } from "./limits.js";
+import { callbackCharges, callbackStatusCharges, connectCharges, runCharges, type ConnectionLimiter, type ConnectionReceipt } from "./limits.js";
 import { ComposioError } from "./composio.js";
 import { ConnectorUnavailable, type ConnectorPort } from "./port.js";
 import {
@@ -70,6 +70,17 @@ const withDeadline = (signal: AbortSignal | undefined, ms = CALLBACK_WORKER_BUDG
 async function charge(limiter: ConnectionLimiter, charges: Parameters<ConnectionLimiter["take"]>[0], signal?: AbortSignal): Promise<void> {
   const taken = await limiter.take(charges, signal ? { signal } : {});
   if (!taken.ok) throw new ConnectionsRefused("rate_limited", taken.retryAfterSeconds);
+}
+
+/** Like `charge`, and returns the charge's receipt when the limiter issues one (C-4). */
+async function chargeWithReceipt(limiter: ConnectionLimiter, charges: Parameters<ConnectionLimiter["take"]>[0], signal?: AbortSignal): Promise<ConnectionReceipt | undefined> {
+  if (!limiter.takeWithReceipt) {
+    await charge(limiter, charges, signal);
+    return undefined;
+  }
+  const taken = await limiter.takeWithReceipt(charges, signal ? { signal } : {});
+  if (!taken.ok) throw new ConnectionsRefused("rate_limited", taken.retryAfterSeconds);
+  return taken.receipt;
 }
 
 /**
@@ -125,7 +136,21 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
         if (live.rowCount) throw new Conflict("This app is already connected", { reason: "already_connected" });
         return { toolkit: named, request: parsed, memberId: member.memberId };
       });
-      await charge(connections.limiter, connectCharges(tenantId), signal);
+      const receipt = await chargeWithReceipt(connections.limiter, connectCharges(tenantId), signal);
+      /**
+       * C-4: gives the connect charge back, but only where the worker says the provider created nothing
+       * (`nothingCreated`, set from an explicit allow-list in worker.ts). Never on a thrown error: a timeout,
+       * a transport failure or any other exception leaves the provider link possibly alive. A failed refund
+       * keeps the charge and never changes the answer.
+       */
+      const refundCharge = async (): Promise<void> => {
+        if (!receipt || !connections.limiter.refund) return;
+        try {
+          await connections.limiter.refund(receipt);
+        } catch {
+          // The charge stands; its window ends within the hour.
+        }
+      };
       const attemptId = deps.generateId().toLowerCase();
       const connectionId = deps.generateId().toLowerCase();
       let linked;
@@ -138,6 +163,7 @@ export function createConnectionsSession(deps: EdgeDependencies, principal: Prin
         throw error;
       }
       if (linked.outcome === "refused") {
+        if (linked.nothingCreated === true) await refundCharge();
         if (linked.code === "not_found") throw new NotFound();
         if (linked.code === "provider_rate_limited") throw new ConnectionsRefused("rate_limited", linked.retryAfterSeconds ?? 60);
         throw new ConnectionsRefused("unavailable");
