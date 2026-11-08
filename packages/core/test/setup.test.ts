@@ -18,6 +18,7 @@ import type { Transaction } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createSession, type EdgeDependencies } from "../src/edge/session.js";
 import { memberAuthorize } from "../src/edge/session.js";
+import { NEVER_APPROVED_ACTIONS, cannotBeApproved } from "../src/approvals/policy.js";
 import { applyTemplateHandler, createDispatcher, createTemplateSession, derivedId, type ActionHandler } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -217,6 +218,11 @@ describe("tenant.template.apply (IT-4)", () => {
     // The owner then applies normally: nothing above took the key.
     await expect(sessionFor(tenantId, ownerId).applyTemplate({ templateId: "agency", timeZone: "UTC" }))
       .resolves.toMatchObject({ replayed: false });
+  });
+
+  it("lists tenant.template.apply in NEVER_APPROVED_ACTIONS, so no approval policy can gate it (IT-4)", () => {
+    expect(NEVER_APPROVED_ACTIONS.has(TEMPLATE_APPLY_ACTION)).toBe(true);
+    expect(cannotBeApproved(TEMPLATE_APPLY_ACTION)).toBe(true);
   });
 
   it("keeps the template: prefix from every member action, and keys per tenant", async () => {
