@@ -984,8 +984,10 @@ mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/
 # 2. A throwaway PostgreSQL 17 cluster on loopback (not the shared test cluster on 55432:
 #    the restore creates Supabase's platform roles, such as supabase_admin, cluster-wide).
 docker run -d --rm --name zs-restore-proof -p 127.0.0.1:55433:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17
-# 3. Restore, check, drop. The report goes to the receipts folder; exit 1 on any failed check.
-RESTORE_ADMIN_URL=postgres://postgres@127.0.0.1:55433/postgres \
+# 3. Restore, check, drop. The report goes to the receipts folder; exit 1 on any failed check
+#    or when the throwaway database cannot be dropped. ZS_TARGET_REF (or --project-ref) is the
+#    project the backup must come from.
+RESTORE_ADMIN_URL=postgres://postgres@127.0.0.1:55433/postgres ZS_TARGET_REF=<ref> \
   mise exec -- pnpm -s --filter @zs/api db:restore-proof --backup ~/Backups/zs-business/<ref>-<date>-recovery-proof.dump \
   > ~/Backups/zs-business/receipts/restore-proof-<date>.json
 # 4. Remove the cluster.
@@ -993,14 +995,26 @@ docker stop zs-restore-proof
 ```
 
 `db:restore-proof` (`src/restore-proof.ts`) refuses an admin URL that is not loopback, names
-another database than `postgres` or is not a superuser, and an archive whose manifest does not
-match it by name, size and sha256 (it applies no age or live-ledger gate, so any earlier backup
-can be tested). It creates the roles the archive names as owner, grantee or policy target
-(NOLOGIN) and `zs_runtime` (a LOGIN member of `authenticated` only, as `bootstrap-roles.sql`),
-creates a new `zs_restore_proof_<time>_<id>` database from `template0`, drops its empty `public`
-schema (the archive creates it, with its owner and grants), and runs `pg_restore --exit-on-error
---single-transaction` with the PostgreSQL 17 `pg_restore`. Then it checks, and the report lists
-each check with its detail:
+another database than `postgres` or is not a superuser, and a cluster that holds any database
+besides `postgres`, `template0`, `template1` and earlier `zs_restore_proof_*` ones. The restore
+creates roles and alters `zs_runtime` cluster-wide, so it needs a cluster of its own; the CLI has
+no switch to override this (only the tests pass `allowSharedCluster`, because the shared test
+cluster holds every suite's database). It refuses an archive whose manifest does not match it by
+name, size and sha256 (it applies no age or live-ledger gate, so any earlier backup can be
+tested) or names another project than `ZS_TARGET_REF` / `--project-ref`. It copies the archive
+once into a private temporary folder, hashes that copy and gives only the copy to `pg_restore`.
+It refuses a server older than the pg_dump that wrote the archive, an archive that does not name
+its pg_dump version, and a `pg_restore` newer than the server: pg_dump 17 and pg_restore 17 write
+`SET transaction_timeout`, which PostgreSQL 16 rejects, so use a 17 cluster for hosted archives
+(`pg_restore` comes from `PG_RESTORE`, else the newest of the versioned installs and `PATH`).
+It creates the roles the archive names as owner, grantee or policy target (NOLOGIN), then sets
+`zs_runtime` up as a LOGIN member of `authenticated` only, as `bootstrap-roles.sql` does (also
+when the archive names it), creates a new `zs_restore_proof_<time>_<id>` database from
+`template0`, drops its empty `public` schema (the archive creates it, with its owner and
+grants), and runs `pg_restore --exit-on-error --single-transaction`. Then it checks, and the
+report lists each check with its detail. Error text and `pg_restore` output in the report pass
+through `redactSecrets`, and `DETAIL`, `CONTEXT` and `INSERT` lines (they quote production rows)
+are dropped.
 
 | Check | Passes when |
 |---|---|
@@ -1009,9 +1023,9 @@ each check with its detail:
 | row counts | Every table in `public` and `zs_internal` holds exactly as many rows as its COPY block in the archive, and no archived table is missing. |
 | RLS | Every `public` table with `tenant_id` enables and forces RLS and has a policy, and the restored policies number as many as the archive's. |
 | runtime login | `zs_runtime` passes the API's startup guard (`assertRuntimeLogin`), belongs to `authenticated` only, and `authenticated` may use `public` and read tenant tables. |
-| two-tenant denial | Through `createScopedDatabase` on the `zs_runtime` login: the two tenants with the most rows (a random empty tenant if there is only one) each read their own rows. Neither sees any row of another tenant in any tenant table or can update one (each update runs and rolls back), and with no tenant set nothing is visible. A table without a SELECT grant counts as denied (42501). |
+| two-tenant denial | Through `createScopedDatabase` on the `zs_runtime` login: the two tenants with the most rows (a random empty tenant if there is only one) each read their own rows. Neither sees any row of another tenant in any tenant table or can update or delete one (each write runs and rolls back), and with no tenant set nothing is visible or writable. Only a refusal with SQLSTATE 42501 (a table without a grant) counts as denied; any other error fails the check with its code. Rows with a NULL `tenant_id` are ignored when picking the tenants. Tenant tables where neither tenant owns a row are listed as `unproven` in the detail; that does not fail the check. |
 
-The database is dropped at the end (`--keep` leaves it for inspection; drop it by hand). The
+The database is dropped at the end (`--keep` leaves it for inspection; drop it by hand). If the drop fails, the report says `dropped: false` with the database name and the error, and the run exits 1. The
 report holds the archive's name, size and sha256, the roles created and the check results, never
 credentials. On 2026-11-08 a fresh production backup restored with all checks passing: 92 tables,
 83 tenant tables, 92 policies, no denial leaks. The first two tries had failed. Archives up to

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -17,12 +18,25 @@ export interface ResolvePgToolOptions {
   /** Test seams. */
   readonly listDir?: (path: string) => readonly string[];
   readonly fileExists?: (path: string) => boolean;
+  /** The major version of the program on PATH, or null when it is missing or unreadable. */
+  readonly pathMajor?: (tool: PgTool) => number | null;
 }
+
+const pathMajorOf = (tool: PgTool): number | null => {
+  try {
+    const text = execFileSync(tool, ["--version"], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] });
+    const major = Number(/\(PostgreSQL\) (\d+)/.exec(text)?.[1] ?? NaN);
+    return Number.isInteger(major) ? major : null;
+  } catch {
+    return null;
+  }
+};
 
 const majorOf = (path: string) => Number(/(?:postgresql@|postgresql\/)(\d+)\//.exec(path)?.[1] ?? 0);
 
 /**
- * The newest installed versioned copy of a PostgreSQL client program, else its bare name (PATH).
+ * The newest copy of a PostgreSQL client program: the highest major across the versioned
+ * installs and the program on PATH (on a tie the versioned install wins), else its bare name.
  * pg_dump refuses a server newer than itself, and pg_restore refuses an archive written by a
  * newer pg_dump (hosted Supabase is PostgreSQL 17; Homebrew's default PATH may hold 16), while a
  * newer client reads older servers and archives. So the newest copy is always the safe pick.
@@ -37,15 +51,17 @@ export function resolvePgTool(tool: PgTool, options: ResolvePgToolOptions = {}):
     }
   });
   const fileExists = options.fileExists ?? existsSync;
-  const candidates: string[] = [];
+  const candidates: { path: string; major: number }[] = [];
   for (const { root, dir } of VERSIONED_ROOTS) {
     for (const name of listDir(root)) {
       const bin = dir(name);
       if (bin === null) continue;
       const path = join(root, bin, tool);
-      if (fileExists(path)) candidates.push(path);
+      if (fileExists(path)) candidates.push({ path, major: majorOf(path) });
     }
   }
-  candidates.sort((a, b) => majorOf(b) - majorOf(a));
-  return candidates[0] ?? tool;
+  const onPath = (options.pathMajor ?? pathMajorOf)(tool);
+  if (onPath !== null) candidates.push({ path: tool, major: onPath });
+  candidates.sort((a, b) => b.major - a.major);
+  return candidates[0]?.path ?? tool;
 }
