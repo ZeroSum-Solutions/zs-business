@@ -22,7 +22,6 @@ import {
   INTAKE_MAX_PAGES,
   NotFound,
   Refused,
-  TenantDenied,
   claimedIntakeJobSchema,
   doclingResultSchema,
   filenameSchema,
@@ -47,7 +46,6 @@ import {
   type IntakeRow,
   type IntakeUploadResult,
   type IntakeWorkerOutcome,
-  type JsonValue,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import type { Authorize, EdgeDependencies, Principal } from "../edge/session.js";
@@ -59,6 +57,7 @@ import { requireMember } from "../members/access.js";
 import { intakeJobId, intakeWorkerActorId, type IntakeDispatchConfig } from "./handlers.js";
 import { resultDigest } from "./mapping.js";
 import { intakeFilePath, type IntakeFileStore } from "./port.js";
+import { only, toJson } from "../edge/dispatch-util.js";
 
 export interface DocumentIntakeConfig {
   readonly store: IntakeFileStore;
@@ -75,11 +74,6 @@ interface Lease {
   readonly expired: boolean;
 }
 
-const only = (...actionTypes: string[]): Authorize => async (_tx, binding) => {
-  if (!actionTypes.includes(binding.actionType)) throw new TenantDenied();
-};
-
-const toJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 const approvalFor = (tenantId: string, key: string) => ({ tenantId, id: derivedId(tenantId, key, "approval") });
 
 export interface UploadInput {

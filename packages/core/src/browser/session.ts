@@ -6,8 +6,7 @@ import {
   browserRunOutputSchema, browserStatusOutputSchema, browserTargetOutputSchema,
   killBrowserRequestSchema, requestBrowserRunRequestSchema, resumeBrowserRequestSchema, saveBrowserTargetRequestSchema,
   updateBrowserSettingsRequestSchema,
-  type BrowserRunDetail, type BrowserRunList, type BrowserRunOutput, type BrowserStatus, type BrowserStatusOutput, type BrowserTargetOutput,
-  type JsonValue, type Permission,
+  type BrowserRunDetail, type BrowserRunList, type BrowserRunOutput, type BrowserStatus, type BrowserStatusOutput, type BrowserTargetOutput, type Permission,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { readClock } from "../booking/slots.js";
@@ -20,8 +19,7 @@ import {
 } from "./handlers.js";
 import { browserStatus, getArtifactKey, getBrowserRunDetail, listBrowserRuns } from "./rows.js";
 import type { BrowserArtifactStore } from "./store.js";
-
-const toJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
+import { toJson } from "../edge/dispatch-util.js";
 
 export interface BrowserSessionOptions {
   readonly config: BrowserConfig;

@@ -198,6 +198,7 @@ import { calendarHandlers, getCalendarConnection, googleConnectIdempotencyKey, l
 import { CONNECT_STATE_LIFETIME_MS, pkceChallenge, pkceVerifier, signConnectState, type OAuthStateSecrets } from "../calendar/oauth-state.js";
 import { pendingGrantId, verifyPendingGrant, type PendingGrant } from "../calendar/pending-grant.js";
 import type { GoogleClient } from "../calendar/types.js";
+import { toJson } from "./dispatch-util.js";
 import { enrichmentHandlers } from "../enrichment/handlers.js";
 import { derivedId } from "./ids.js";
 import { SiteStoreUnavailable, validationError } from "./errors.js";
@@ -510,11 +511,6 @@ export function memberDispatch(deps: EdgeDependencies, principal: Principal) {
 /** Optional fields a caller left out are absent from a payload, never `undefined` (JSON). */
 function defined<T extends Record<string, unknown>>(value: T): { [K in keyof T]: Exclude<T[K], undefined> } {
   return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as { [K in keyof T]: Exclude<T[K], undefined> };
-}
-
-/** A parsed value as the JSON a payload carries: optional keys left out are absent, never `undefined`. */
-function toJson(value: unknown): JsonValue {
-  return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
 /** Drop trailing slashes in one linear pass; a /\/+$/ regex backtracks on long runs of "/". */
