@@ -161,13 +161,21 @@ CREATE TABLE public.shopify_webhook_events (
   shop_domain text NOT NULL CONSTRAINT shopify_webhook_events_domain CHECK (shop_domain ~ '^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$'),
   received_at timestamptz NOT NULL
 );
+-- C-22: one exchange or refresh per store at a time (S2). A short lease keyed by the verified domain, taken
+-- before any install row exists. The worker holds no pool client while it waits on Shopify, so this is a
+-- row, not a session lock.
+CREATE TABLE public.shopify_locks (
+  shop_domain text PRIMARY KEY CONSTRAINT shopify_locks_domain CHECK (shop_domain ~ '^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$'),
+  held_until timestamptz NOT NULL,
+  holder uuid NOT NULL
+);
 CREATE INDEX shopify_webhook_events_received ON public.shopify_webhook_events (received_at);
 CREATE INDEX shopify_webhook_events_shop ON public.shopify_webhook_events (shop_domain);
 
 DO $$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['shopify_installs', 'shopify_claims', 'shopify_webhook_events'] LOOP
+  FOREACH t IN ARRAY ARRAY['shopify_installs', 'shopify_claims', 'shopify_webhook_events', 'shopify_locks'] LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE public.%I FORCE ROW LEVEL SECURITY', t);
     IF t = 'shopify_claims' THEN
@@ -185,3 +193,4 @@ END $$;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.shopify_installs TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.shopify_claims TO service_role;
 GRANT SELECT, INSERT, DELETE ON public.shopify_webhook_events TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.shopify_locks TO service_role;

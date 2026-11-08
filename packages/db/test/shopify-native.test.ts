@@ -95,7 +95,7 @@ describe("native reauthorize recovery (C-22)", () => {
 
 describe("install ledger, claims, webhook events (C-22, C-21, C-24)", () => {
   it("refuses the runtime role everything on all three tables (42501)", async () => {
-    for (const table of ["shopify_installs", "shopify_claims", "shopify_webhook_events"]) {
+    for (const table of ["shopify_installs", "shopify_claims", "shopify_webhook_events", "shopify_locks"]) {
       await expect(fixture.a.run((tx) => tx.query(`SELECT * FROM ${table}`)), table).rejects.toMatchObject({ code: "42501" });
       await expect(fixture.a.run((tx) => tx.query(`DELETE FROM ${table}`)), table).rejects.toMatchObject({ code: "42501" });
     }

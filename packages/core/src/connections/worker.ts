@@ -35,6 +35,7 @@ import {
   type ComposioAccount,
   type ComposioClient,
 } from "./composio.js";
+import type { NativeConnectionRow, NativeRunResult } from "../shopify/native-worker.js";
 import { CONNECT_ATTEMPT_LIFETIME_MS } from "./tokens.js";
 import type { ConnectorEnv } from "./signing.js";
 
@@ -99,6 +100,15 @@ export interface ConnectionsWorkerDeps {
   readonly clock: { now(): Date };
   readonly config: ConnectionsWorkerConfig;
   readonly report?: (event: ConnectionsWorkerReport) => void;
+  /**
+   * Revision 4: the native Shopify tier (C-21 to C-24). A `native` row has no Composio account, so every
+   * Composio path below is for `tier = 'composio'` rows only and a native row is handed to this port.
+   */
+  readonly native?: {
+    run(input: { row: NativeConnectionRow; tool: string; arguments: Record<string, unknown> }, signal?: AbortSignal): Promise<NativeRunResult>;
+    finishDisconnect(row: NativeConnectionRow): Promise<"disconnected" | "pending">;
+    pass(ctx: { readonly deadline: number }): Promise<{ refreshed: number }>;
+  };
 }
 
 /** What one pass did. */
@@ -120,7 +130,9 @@ type RevokeOutcome = "revoked" | "failed" | null;
 interface ConnectionRow {
   tenant_id: string;
   id: string;
+  tier: "composio" | "native";
   toolkit: string;
+  /** Null on a native row; the Composio paths below never see one. */
   composio_account_id: string;
   external_account_id: string;
   account_domain: string;
@@ -130,7 +142,7 @@ interface ConnectionRow {
   revoke_outcome: RevokeOutcome;
   claimed_until: Date | null;
 }
-const CONNECTION_FIELDS = ["tenant_id", "id", "toolkit", "composio_account_id", "external_account_id", "account_domain", "status", "reauthorize_reason",
+const CONNECTION_FIELDS = ["tenant_id", "id", "tier", "toolkit", "composio_account_id", "external_account_id", "account_domain", "status", "reauthorize_reason",
   "last_error_code", "revoke_outcome", "claimed_until"] as const;
 interface AttemptRow {
   tenant_id: string;
@@ -352,7 +364,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   };
   /** True while another live connection (any tenant) holds the same store, matched by the typed domain or the verified store ID. */
   const installSharedWith = (toolkit: string, composioAccountId: string, accountDomain: string, externalAccountId: string | null) => async () => (((await service((tx) => tx.query(
-    `SELECT 1 FROM connections WHERE toolkit=$1 AND composio_account_id<>$2 AND status IN ('active','reauthorize')
+    `SELECT 1 FROM connections WHERE toolkit=$1 AND composio_account_id IS DISTINCT FROM $2 AND status IN ('active','reauthorize')
         AND (account_domain=$3 OR external_account_id=$4::text) LIMIT 1`,
     [toolkit, composioAccountId, accountDomain, externalAccountId]))).rowCount ?? 0) > 0);
   const removeAttemptAccount = (attempt: AttemptRow, pass: PassContext | undefined, signal?: AbortSignal) => removeAccount(
@@ -618,6 +630,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     if (Object.keys(input.arguments).some((key) => OVERRIDE_KEYS.has(key))) return fail("invalid_arguments");
     const args = tool.input.safeParse(input.arguments);
     if (!args.success) return fail("invalid_arguments");
+    if (row.tier === "native") return runNative(row, tool, args.data, input, fail, started, signal);
     const authConfigId = config.authConfigIds[row.toolkit];
     if (!authConfigId) return fail("provider_unavailable");
     const userId = userIdOf(input.tenantId);
@@ -671,6 +684,30 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     }
   }
 
+  /** Revision 4, C-23: a native row reads over the Admin GraphQL API; size, schema and disclosure rules are the same. */
+  async function runNative(
+    row: ConnectionRow, tool: CatalogTool, args: Record<string, unknown>, input: { tenantId: string; connectionId: string; tool: string },
+    fail: (code: Extract<ConnectorRunResponse, { outcome: "error" }>["code"], retryAfterSeconds?: number) => ConnectorRunResponse, started: number, signal?: AbortSignal,
+  ): Promise<ConnectorRunResponse> {
+    if (!deps.native) return fail("provider_unavailable");
+    const answer = await deps.native.run({ row: { tenant_id: row.tenant_id, id: row.id, external_account_id: row.external_account_id, account_domain: row.account_domain,
+      status: row.status, last_error_code: row.last_error_code, revoke_outcome: row.revoke_outcome }, tool: input.tool, arguments: args }, signal);
+    if (answer.kind === "error") return fail(answer.code, answer.retryAfterSeconds);
+    // B-9: a disconnect during the call wins, its data is dropped.
+    const after = await service((tx) => loadConnection(tx, input.tenantId, input.connectionId));
+    if (!after || after.status === "disconnecting" || after.status === "disconnected") return fail("not_found");
+    if (after.status !== "active") return fail("connection_needs_reconnect");
+    const projected = tool.project(answer.projected);
+    if (projected === undefined) return fail("provider_unavailable");
+    const trimmed = trimToSize(projected, tool.listPath, CONNECTION_RESULT_MAX_BYTES);
+    if (!trimmed) return fail("provider_unavailable");
+    if (after.last_error_code === "provider_permission_denied") await service((tx) => tx.query(
+      `UPDATE connections SET last_error_code=NULL, updated_at=$3 WHERE tenant_id=$1 AND id=$2 AND status='active' AND last_error_code='provider_permission_denied'`,
+      [input.tenantId, row.id, now()]));
+    report({ kind: "run", tenantId: input.tenantId, connectionId: input.connectionId, tool: input.tool, code: "ok", ms: now().getTime() - started });
+    return { outcome: "ok", data: trimmed.data, truncated: trimmed.truncated };
+  }
+
   /**
    * C-8: an `active` row moves; an auth failure also upgrades a `reauthorize`/`provider_status` row, since
    * a credential that failed outranks a status read. A row ending keeps its state.
@@ -692,6 +729,14 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
    * `account_mismatch` and an operator hears of it.
    */
   async function finishDisconnect(row: ConnectionRow, pass: PassContext | undefined, signal?: AbortSignal): Promise<"disconnected" | "pending"> {
+    if (row.tier === "native") {
+      if (!deps.native) return "pending";
+      const outcome = await deps.native.finishDisconnect({ tenant_id: row.tenant_id, id: row.id, external_account_id: row.external_account_id, account_domain: row.account_domain,
+        status: row.status, last_error_code: row.last_error_code, revoke_outcome: row.revoke_outcome });
+      if (outcome === "disconnected") report({ kind: "disconnected", tenantId: row.tenant_id, connectionId: row.id, revokeFailed: false });
+      else report({ kind: "disconnect_retry", tenantId: row.tenant_id, connectionId: row.id, code: "delete_failed" });
+      return outcome;
+    }
     const authConfigId = config.authConfigIds[row.toolkit];
     if (!authConfigId) {
       // A-2: without the auth config the account cannot be proved ours, so nothing is revoked or deleted;
@@ -785,7 +830,7 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
         "status='cancelling' OR (status IN ('started','verified') AND expires_at + ($4::bigint * interval '1 millisecond') <= $2)", "expires_at, id",
         [config.sweepGraceMs], async (attempt) => { if (await sweepAttempt(attempt, ctx, signal)) result.swept += 1; });
       // 3. live rows not checked for a day.
-      await each<ConnectionRow>(ctx, "connections", CONNECTION_FIELDS, "status IN ('active','reauthorize') AND last_checked_at <= $4", "last_checked_at, id",
+      await each<ConnectionRow>(ctx, "connections", CONNECTION_FIELDS, "tier='composio' AND status IN ('active','reauthorize') AND last_checked_at <= $4", "last_checked_at, id",
         [new Date(now().getTime() - config.healthIntervalMs)], async (row) => {
           await healthCheck(row, ctx, signal);
           result.checked += 1;
@@ -794,6 +839,14 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
       if (!(error instanceof PassLimit)) throw error;
       stopped = error.why;
       report({ kind: "pass_stopped", why: error.why });
+    }
+    // 3b. revision 4: refresh near-expiry Shopify tokens, trim the webhook ledger, expire claims.
+    if (deps.native) {
+      try {
+        await deps.native.pass({ deadline: ctx.deadline });
+      } catch (error) {
+        if (!(error instanceof PassLimit)) throw error;
+      }
     }
     // 4. nonces past their expiry: one statement and no Composio call, so it runs even after a limit.
     await service((tx) => tx.query("DELETE FROM connector_request_nonces WHERE expires_at < $1", [now()]));

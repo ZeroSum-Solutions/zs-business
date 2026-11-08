@@ -131,3 +131,4 @@ export type { BookingLinkProvider } from "./templates/send.js";
 export { createBookingLinkProvider } from "./templates/booking-link.js";
 export * from "./browser/index.js";
 export * from "./enrichment/index.js";
+export * from "./shopify/index.js";

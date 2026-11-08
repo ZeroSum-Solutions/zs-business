@@ -61,7 +61,7 @@ describe("Shopify client (C-22)", () => {
     const first = await client().exchangeOffline(SHOP, mintIdToken(NOW));
     if (first.kind !== "ok") throw new Error("exchange");
     fake.failGraphql = { status: 403, body: { errors: "Non-expiring access tokens are no longer accepted for the Admin API" } };
-    expect(await client().readShop(SHOP, first.tokens.accessToken)).toEqual({ kind: "failed", reason: "unauthorized" });
+    expect(await client().readShop(SHOP, first.tokens.accessToken)).toEqual({ kind: "failed", reason: "forbidden" });
     fake.failGraphql = { status: 429 };
     expect(await client().readShop(SHOP, first.tokens.accessToken)).toEqual({ kind: "failed", reason: "rate_limited" });
     fake.failGraphql = null;

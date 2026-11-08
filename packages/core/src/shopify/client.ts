@@ -79,7 +79,7 @@ export function createShopifyClient(config: ShopifyClientConfig) {
     }
     return Buffer.concat(chunks).toString("utf8");
   }
-  const failure = (status: number): ShopifyFailure => status === 401 || status === 403 ? "unauthorized" : status === 429 ? "rate_limited" : "unavailable";
+  const failure = (status: number): ShopifyFailure => status === 401 ? "unauthorized" : status === 403 ? "forbidden" : status === 429 ? "rate_limited" : "unavailable";
 
   async function token(shop: string, body: Record<string, unknown>, signal?: AbortSignal) {
     return send(shop, "/admin/oauth/access_token", { headers: {}, body: JSON.stringify({ client_id: config.clientId, client_secret: config.clientSecret, ...body }) }, signal);
