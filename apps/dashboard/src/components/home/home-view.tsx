@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, MinusCircle, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, Clock, MinusCircle, WarningCircle } from "@phosphor-icons/react";
 import Link from "next/link";
 import { type ReactNode, useMemo, useState, useSyncExternalStore } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -273,7 +273,7 @@ function WalletCard({ className }: { className?: string }) {
             <p className="text-sm font-bold text-muted">Available</p>
             <p className="tabular mt-1 text-[32px] leading-none font-extrabold tracking-display text-fg">{walletAmount(wallet.data.available, wallet.data.currency)}</p>
             {wallet.data.reserved > 0 ? (
-              <p className="tabular mt-2 text-caption text-fg-2">{walletAmount(wallet.data.reserved, wallet.data.currency)} held for sends in progress, of {walletAmount(wallet.data.balance, wallet.data.currency)}</p>
+              <p className="tabular mt-2 text-caption text-fg-2">{walletAmount(wallet.data.reserved, wallet.data.currency)} held for jobs in progress, of {walletAmount(wallet.data.balance, wallet.data.currency)}</p>
             ) : null}
             <p className="mt-3 text-caption text-muted">{WALLET_CAPTION}</p>
           </Card>
@@ -283,10 +283,13 @@ function WalletCard({ className }: { className?: string }) {
   );
 }
 
-const CHECK: Record<ChecklistStatus, { tile: "neutral" | "warn"; icon: typeof CheckCircle; badge: "success" | "warn" | "neutral"; label: string }> = {
-  ok: { tile: "neutral", icon: CheckCircle, badge: "success", label: "Connected" },
-  action: { tile: "warn", icon: WarningCircle, badge: "warn", label: "Needs action" },
-  off: { tile: "neutral", icon: MinusCircle, badge: "neutral", label: "Not connected" },
+// The badge words come with each row (`ChecklistItem.badge`); the status picks only the look.
+const CHECK: Record<ChecklistStatus, { tile: "neutral" | "warn"; icon: typeof CheckCircle; badge: "success" | "warn" | "neutral" }> = {
+  ok: { tile: "neutral", icon: CheckCircle, badge: "success" },
+  action: { tile: "warn", icon: WarningCircle, badge: "warn" },
+  warn: { tile: "warn", icon: WarningCircle, badge: "warn" },
+  pending: { tile: "neutral", icon: Clock, badge: "neutral" },
+  off: { tile: "neutral", icon: MinusCircle, badge: "neutral" },
 };
 
 /** Google Calendar and Shopify, from the routes the Connections page reads. */
@@ -311,7 +314,7 @@ function ChecklistCard({ checklist, className }: { checklist: Needs["checklist"]
                     <p className="text-sm font-bold text-fg">{item.label}</p>
                     <p className="text-caption text-muted">{item.detail}</p>
                   </div>
-                  <Badge tone={check.badge} className="shrink-0">{check.label}</Badge>
+                  <Badge tone={check.badge} className="shrink-0">{item.badge}</Badge>
                 </li>
               );
             })}

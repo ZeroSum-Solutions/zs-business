@@ -422,11 +422,44 @@ test("retries a booking whose answer was lost with the same key, and the API rep
 });
 
 test("shows no sample data anywhere and turns off writes that would not reach the API", async ({ page }) => {
+  // Home's wallet (GET /v1/wallet) and connections (the calendar and Shopify routes) come from the API:
+  // each read must answer, and the screen must show what it answered, not just draw a container.
+  const read = (path: string) => page.waitForResponse((response) => response.request().method() === "GET"
+    && new URL(response.url()).pathname === `/api${path}`);
+  const [walletRead, calendarRead, storesRead] = [read("/v1/wallet"), read("/v1/calendar/connections"), read("/v1/connections")];
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1, name: "This week" })).toBeVisible();
-  // The wallet (GET /v1/wallet) and the connections (calendar and Shopify routes) are live; nothing says sample.
-  await expect(page.getByRole("region", { name: "Wallet" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Connections" })).toBeVisible();
+  const walletResponse = await walletRead;
+  expect(walletResponse.status()).toBe(200);
+  const wallet = (await walletResponse.json()) as { currency: string; balance: number; available: number };
+  const walletRegion = page.getByRole("region", { name: "Wallet" });
+  if (wallet.balance === 0) {
+    await expect(walletRegion.getByText("No money in the wallet yet")).toBeVisible();
+  } else {
+    const amount = new Intl.NumberFormat("en-US", { style: "currency", currency: wallet.currency.toUpperCase() }).format(wallet.available / 100);
+    await expect(walletRegion.getByTestId("wallet-balance")).toContainText(amount);
+  }
+  const calendarResponse = await calendarRead;
+  expect(calendarResponse.status()).toBe(200);
+  const { items: calendars } = (await calendarResponse.json()) as { items: { status: string; lastSyncedAt: string | null; lastError: string | null }[] };
+  const calendarRow = page.getByRole("region", { name: "Connections" }).getByTestId("checklist-google_calendar");
+  const live = calendars.filter((item) => item.status !== "disconnected");
+  if (live.length === 0) await expect(calendarRow).toContainText("Not connected");
+  else if (live.every((item) => item.status === "active" && item.lastSyncedAt !== null && item.lastError === null)) await expect(calendarRow).toContainText("syncing busy times");
+  else await expect(calendarRow).not.toContainText("Not connected");
+  // Shopify: an owner reads the stores; a server without connections settings answers 404 and Home leaves the row out.
+  const storesResponse = await storesRead;
+  const shopifyRow = page.getByRole("region", { name: "Connections" }).getByTestId("checklist-shopify");
+  if (storesResponse.status() === 404) {
+    await expect(shopifyRow).toHaveCount(0);
+  } else {
+    expect(storesResponse.status()).toBe(200);
+    const { items: stores } = (await storesResponse.json()) as { items: { status: string; accountLabel: string | null; accountDomain: string }[] };
+    const active = stores.find((item) => item.status === "active");
+    if (active) await expect(shopifyRow).toContainText(active.accountLabel ?? active.accountDomain);
+    else if (stores.length === 0) await expect(shopifyRow).toContainText("Not connected");
+    else await expect(shopifyRow).toBeVisible();
+  }
   await expect(page.getByRole("region", { name: "Wallet and usage" })).toHaveCount(0);
   await expect(page.getByTestId("sample-badge")).toHaveCount(0);
   await expect(page.getByText(/sample data/i)).toHaveCount(0);
