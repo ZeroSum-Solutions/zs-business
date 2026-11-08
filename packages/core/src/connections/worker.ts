@@ -817,9 +817,12 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
     }
   }
 
-  async function pass(signal?: AbortSignal): Promise<ConnectionsPassResult> {
+  async function pass(callerSignal?: AbortSignal): Promise<ConnectionsPassResult> {
     const start = now().getTime();
     const ctx: PassContext = { deadline: start + config.passMs, calls: 0, maxCalls: config.passMaxCalls };
+    // C-9: the pass allows `passMs` in all. The time check runs before each call, so a call's own 6 s timeout could
+    // overrun it; every provider call of this pass also carries the pass deadline as an abort.
+    const signal = callerSignal ? AbortSignal.any([callerSignal, AbortSignal.timeout(config.passMs)]) : AbortSignal.timeout(config.passMs);
     const result = { disconnected: 0, swept: 0, checked: 0 };
     let stopped: ConnectionsPassResult["stopped"] = null;
     try {

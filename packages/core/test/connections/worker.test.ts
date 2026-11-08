@@ -1158,6 +1158,19 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect((await makeWorker(database, fake, clock, {}, reports).pass()).stopped).toBe("budget");
   });
 
+  it("C-9: a provider call that hangs is cut at the pass deadline, not at its own 1.5 s timeout", async () => {
+    const t = await newTenant(fixture);
+    await seedConnection(fixture, { tenantId: t.tenantId, memberId: t.memberId, accountId: seedAccount(t.tenantId), lastChecked: new Date(T0 - 2 * DAY) });
+    fake.override(/^GET \/connected_accounts\//, { hang: true });
+    const started = Date.now();
+    const out = await makeWorker(database, fake, clock, { passMs: 300 }, reports).pass();
+    const took = Date.now() - started;
+    // The harness client gives a call 1,500 ms; the pass allows 300 ms in all, so the call is aborted there.
+    expect(took).toBeLessThan(1000);
+    expect(out).toMatchObject({ checked: 1, composioCalls: 1 });
+    expect((await database.pool.query("SELECT last_error_code FROM connections")).rows[0].last_error_code).toBe("provider_unavailable");
+  });
+
   it("B-4: the pass budget fits the 30 s function limit", () => {
     expect(() => makeWorker(database, fake, clock, { passMs: 40_000 })).toThrow();
     expect(worker.config.passMs).toBeLessThanOrEqual(25_000);

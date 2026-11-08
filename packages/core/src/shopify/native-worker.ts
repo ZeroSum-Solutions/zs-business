@@ -291,10 +291,15 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       const s = sealed(row.shop_id, answer.tokens);
       const written = await service((tx) => tx.query(
         `UPDATE shopify_installs SET access_sealed=$3, access_key_id=$4, refresh_sealed=$5, refresh_key_id=$6, access_expires_at=$7, refresh_expires_at=$8, updated_at=$9
-          WHERE shop_id=$1 AND generation=$2 AND status='live'`,
-        [row.shop_id, gen(row), s.access.text, s.access.keyId, s.refresh.text, s.refresh.keyId, s.accessExpires, s.refreshExpires, now()]));
-      // A generation that moved (an uninstall or a new exchange) means this pair is not ours to keep.
-      if (written.rowCount !== 1) return { kind: "none" };
+          WHERE shop_id=$1 AND generation=$2 AND status='live' AND refresh_sealed IS NOT DISTINCT FROM $10`,
+        [row.shop_id, gen(row), s.access.text, s.access.keyId, s.refresh.text, s.refresh.keyId, s.accessExpires, s.refreshExpires, now(), row.refresh_sealed]));
+      if (written.rowCount !== 1) {
+        // A generation that moved (an uninstall or a new exchange) means this pair is not ours to keep. A refresh version
+        // that moved with the generation unchanged means a successor took the lapsed lease and stored a newer pair: the
+        // install is fine and the caller tries again (a sealed value has a fresh nonce on every write, so it names the version).
+        const current = await installByDomain(domain);
+        return current !== null && current.status === "live" && gen(current) === gen(row) ? { kind: "unavailable" } : { kind: "none" };
+      }
       report({ kind: "refreshed", shop: row.shop_domain });
       return { kind: "ok", row, token: answer.tokens.accessToken };
     });
@@ -520,6 +525,17 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
   const ownerMember = (tx: Transaction, tenantId: string, email: string) => tx.query<{ id: string }>(
     "SELECT id FROM tenant_members WHERE tenant_id=$1 AND lower(email)=$2 AND role='owner' LIMIT 1", [tenantId, email]).then((r) => r.rows[0]?.id ?? null);
 
+  /**
+   * C-21: inside a final binding transaction, locks the install row and confirms it is still the live incarnation the
+   * request authenticated against. The request read its snapshot long before (Shopify calls, hub creation), so an
+   * uninstall, a redact or a reinstall that committed meanwhile must stop the bind, not be overwritten by it.
+   */
+  async function installUnchanged(tx: Transaction, row: InstallRow): Promise<boolean> {
+    const current = (await tx.query<{ status: string; generation: string | number }>(
+      "SELECT status::text AS status, generation FROM shopify_installs WHERE shop_id=$1 FOR UPDATE", [row.shop_id])).rows[0];
+    return current !== undefined && current.status === "live" && Number(current.generation) === gen(row);
+  }
+
   async function createHub(input: { idToken: string }): Promise<CreateHubResult> {
     const auth = await authenticate(input.idToken, false);
     if (auth.kind === "invalid_token") return { outcome: "invalid_token" };
@@ -536,7 +552,8 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       `SELECT p.tenant_id, t.name FROM tenant_plans p JOIN tenants t ON t.tenant_id=p.tenant_id WHERE p.shopify_shop_id=$1`, [row.shop_id]))).rows[0];
     if (returning) {
       try {
-        const bound = await service(async (tx) => {
+        const bound = await service(async (tx): Promise<boolean | "gone"> => {
+          if (!(await installUnchanged(tx, row))) return "gone";
           const memberId = await ownerMember(tx, returning.tenant_id, owner.email);
           if (memberId === null) return false;
           const live = await tx.query("SELECT 1 FROM connections WHERE tenant_id=$1 AND toolkit='shopify' AND status IN ('active','reauthorize','disconnecting')", [returning.tenant_id]);
@@ -544,6 +561,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
           await bind(tx, { tenantId: returning.tenant_id, memberId, row });
           return true;
         });
+        if (bound === "gone") return { outcome: "not_installed" };
         if (bound) {
           report({ kind: "bound", tenantId: returning.tenant_id, shop: domain, via: "relink" });
           return { outcome: "relinked", businessName: returning.name, ownerEmail: owner.email };
@@ -561,6 +579,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
     if (made.kind === "failed") { report({ kind: "hub_failed", shop: domain }); return { outcome: "unavailable" }; }
     try {
       const done = await service(async (tx) => {
+        if (!(await installUnchanged(tx, row))) return "gone";
         const memberId = await ownerMember(tx, made.tenantId, owner.email);
         if (memberId === null) throw new Error("The new hub has no owner member");
         if (await storeInUse(tx, row.shop_id, domain)) {
@@ -573,6 +592,7 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
         await bind(tx, { tenantId: made.tenantId, memberId, row });
         return "bound";
       });
+      if (done === "gone") return { outcome: "not_installed" };
       if (done === "taken") return { outcome: "store_in_use" };
       if (done === "bound") report({ kind: "bound", tenantId: made.tenantId, shop: domain, via: "create_hub" });
     } catch (error) {
@@ -644,6 +664,12 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
         const name = (await tx.query<{ name: string }>("SELECT name FROM tenants WHERE tenant_id=$1", [claim.tenant_id])).rows[0]?.name ?? "";
         return { kind: "redeemed", name };
       }
+      // A replay (a stolen or cached ID token, a double tap) of the code this same store already redeemed is the same
+      // call again: it gets the same answer and changes nothing, so it is not a wrong guess (C-21: idempotent by code).
+      const again = (await tx.query<{ name: string }>(
+        `SELECT t.name FROM shopify_claims c JOIN tenants t ON t.tenant_id=c.tenant_id
+          WHERE c.code_hash=$1 AND c.status='redeemed' AND c.shop_id=$2 AND c.expires_at > $3`, [hash, row.shop_id, now()])).rows[0];
+      if (again) return { kind: "redeemed", name: again.name };
       const failures = Number(counter.claim_failures) + 1;
       const lock = failures >= CLAIM_MAX_WRONG;
       await tx.query("UPDATE shopify_installs SET claim_failures=$2, claim_locked_until=$3, updated_at=$4 WHERE shop_id=$1",
@@ -785,14 +811,18 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
 
   // ---- webhooks (C-24) --------------------------------------------------------------------------
   const TOPICS = new Set(["app/uninstalled", "customers/data_request", "customers/redact", "shop/redact"]);
+  const TOPIC_SHAPE = /^[a-z_]{1,40}\/[a-z_]{1,40}$/;
 
   async function webhook(input: WebhookInput): Promise<{ status: 200 | 401 | 500 }> {
     const started = now().getTime();
     const done = (status: 200 | 401 | 500, topic = "unknown", shop = "unknown") => { report({ kind: "webhook", topic, shop, status, ms: Math.max(0, now().getTime() - started) }); return { status }; };
-    if (input.rawBody.byteLength > MAX_WEBHOOK_BYTES) return done(401);
-    if (!verifyWebhookHmac(config.secrets, input.rawBody, input.hmac)) return done(401);
+    // The headers are not signed, so a refusal before the body is checked logs them only when they have the exact shape of a
+    // topic and a shop domain (never free text): a log line then still says which delivery failed (C-24 "logs carry topic, shop domain").
+    const shaped = { topic: input.topic !== null && TOPIC_SHAPE.test(input.topic) ? input.topic : undefined, shop: input.shopDomain !== null && SHOP_DOMAIN.test(input.shopDomain) ? input.shopDomain : undefined };
+    if (input.rawBody.byteLength > MAX_WEBHOOK_BYTES) return done(401, shaped.topic, shaped.shop);
+    if (!verifyWebhookHmac(config.secrets, input.rawBody, input.hmac)) return done(401, shaped.topic, shaped.shop);
     const { topic, shopDomain, webhookId } = input;
-    if (!topic || !shopDomain || !webhookId || !SHOP_DOMAIN.test(shopDomain) || webhookId.length > 128 || !/^[a-z_]{1,40}\/[a-z_]{1,40}$/.test(topic)) return done(401);
+    if (!topic || !shopDomain || !webhookId || shaped.topic === undefined || shaped.shop === undefined || webhookId.length > 128) return done(401, shaped.topic, shaped.shop);
     let body: Record<string, unknown> | undefined;
     try { body = record(JSON.parse(Buffer.from(input.rawBody).toString("utf8"))); } catch { body = undefined; }
     if (!body) return done(401);
@@ -916,10 +946,15 @@ export function createShopifyNativeWorker(deps: ShopifyNativeDeps) {
       `SELECT shop_domain FROM shopify_installs WHERE status='live' AND (refresh_expires_at <= $1 OR access_expires_at <= $2)
         ORDER BY refresh_expires_at LIMIT 25`, [new Date(now().getTime() + PASS_REFRESH_BELOW_MS), new Date(now().getTime() - DAY)]))).rows;
     for (const { shop_domain } of due) {
-      if (now().getTime() >= ctx.deadline) break;
-      const answer = await refreshInstall(shop_domain, true);
+      // C-9: the time is checked before each store, and the Shopify call itself is cut when the pass time ends,
+      // so a slow store cannot hold the pass past its limit (the client's own timeout is longer than what may be left).
+      const left = ctx.deadline - now().getTime();
+      if (left <= 0) break;
+      const answer = await refreshInstall(shop_domain, true, AbortSignal.timeout(left));
       if (answer.kind === "ok") refreshed += 1;
     }
+    // Database work only (no Shopify call), so it runs even when the time is up, as the nonce cleanup does (C-9); skipping it
+    // after a busy pass would starve it for good.
     await service(async (tx) => {
       await tx.query("DELETE FROM shopify_webhook_events WHERE received_at < $1", [new Date(now().getTime() - EVENT_KEEP_MS)]);
       await tx.query("DELETE FROM shopify_locks WHERE held_until < $1", [now()]);

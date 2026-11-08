@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { asService } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { shopifyOrdersResponseSchema } from "@zs/contracts";
-import { createLocalShopifyPort, createShopifyClient, createShopifyNativeWorker, handleShopifyOperation, parseSealKeys, type HubPort, type ShopifyNativeReport, type ShopifyWorkerOps } from "../../src/index.js";
+import { createLocalShopifyPort, createShopifyClient, createShopifyNativeWorker, handleShopifyOperation, parseSealKeys, type HubPort, type ShopifyNativeDeps, type ShopifyNativeReport, type ShopifyWorkerOps } from "../../src/index.js";
 import { createConnectionsWorker, createComposioClient } from "../../src/index.js";
 import { addMember, makeClock, T0, type TestClock } from "../connections/harness.js";
 import { FakeComposio } from "../connections/fake-composio.js";
@@ -44,13 +44,31 @@ function fakeHub(): HubPort {
   };
 }
 
-function makeNative(over: { fetch?: typeof fetch } = {}) {
+/** Makes the next transaction that runs a statement matching `sql` fail at that statement, once: a fault between two steps of a bind. */
+function faultOnce(sql: RegExp): { service: ShopifyNativeDeps["service"]; fired: () => boolean } {
+  let armed = true;
+  return {
+    fired: () => !armed,
+    service: (work) => asService(database.servicePool, (tx) => work(new Proxy(tx, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (property !== "query") return value;
+        return (text: unknown, ...rest: unknown[]) => {
+          if (armed && typeof text === "string" && sql.test(text)) { armed = false; throw new Error("injected fault"); }
+          return (value as (...args: unknown[]) => unknown).call(target, text, ...rest);
+        };
+      },
+    }))),
+  };
+}
+
+function makeNative(over: { fetch?: typeof fetch; hub?: HubPort; service?: ShopifyNativeDeps["service"] } = {}) {
   return createShopifyNativeWorker({
-    service: (work) => asService(database.servicePool, work),
+    service: over.service ?? ((work) => asService(database.servicePool, work)),
     client: createShopifyClient({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, apiVersion: "2026-10", fetch: over.fetch ?? fake.fetch, timeoutMs: 1000 }),
     clock,
     config: { clientId: CLIENT_ID, secrets: { current: CLIENT_SECRET }, sealKeys: parseSealKeys({ current: KEY_A, currentId: "k1" }), graceDays: 7 },
-    hub: fakeHub(),
+    hub: over.hub ?? fakeHub(),
     newId: randomUUID,
     report: (event) => reports.push(event),
   });
@@ -212,24 +230,84 @@ describe("refresh and recovery (C-22)", () => {
     expect(fake.lastRefreshWithTokens).toHaveLength(2);
     expect(fake.lastRefreshWithTokens[0]).toBe(fake.lastRefreshWithTokens[1]);
   });
-  it("two simultaneous refreshes send one refresh request: the lease keeps the other out (C-27)", async () => {
+  /** A fetch that holds the first token-endpoint call matching `grant` until `release()`, and says when it is inside. */
+  function holdTokenCall(grant: (body: Record<string, unknown>) => boolean) {
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const inside = new Promise<void>((resolve) => { entered = resolve; });
+    let armed = true;
+    const held: typeof fetch = async (input, init) => {
+      if (armed && String(input).endsWith("/oauth/access_token") && grant(JSON.parse(String(init?.body)) as Record<string, unknown>)) { armed = false; entered(); await gate; }
+      return fake.fetch(input, init);
+    };
+    return { held, release, inside };
+  }
+  const isRefresh = (body: Record<string, unknown>) => body["grant_type"] === "refresh_token";
+  const isOfflineExchange = (body: Record<string, unknown>) => String(body["requested_token_type"] ?? "").includes("offline");
+  const runRow = () => ({ tenant_id: a.tenantId, id: randomUUID(), external_account_id: SHOP_GID, account_domain: SHOP, status: "active", last_error_code: null, revoke_outcome: null }) as const;
+  const lockRows = async () => (await database.pool.query("SELECT 1 FROM shopify_locks")).rowCount;
+
+  it("two simultaneous refreshes send one refresh request: the other is told to try again (C-27, C-10)", async () => {
     await worker.open({ idToken: token() });
     const before = await install();
     clock.ms += 56 * 60_000;
-    const row = { tenant_id: a.tenantId, id: randomUUID(), external_account_id: SHOP_GID, account_domain: SHOP, status: "active", last_error_code: null, revoke_outcome: null } as const;
-    // The refresh answers slowly, so both calls are inside it together unless the lease keeps one out.
-    const slow: typeof fetch = async (input, init) => {
-      if (String(input).endsWith("/oauth/access_token")) await new Promise((resolve) => setTimeout(resolve, 100));
-      return fake.fetch(input, init);
-    };
-    const racing = makeNative({ fetch: slow });
-    const results = await Promise.all([
-      racing.run({ row, tool: "shopify_list_orders", arguments: {} }),
-      racing.run({ row, tool: "shopify_list_orders", arguments: {} }),
-    ]);
-    expect(results.some((result) => result.kind === "ok")).toBe(true);
+    const { held, release, inside } = holdTokenCall(isRefresh);
+    const racing = makeNative({ fetch: held });
+    // The first call is inside Shopify's refresh and holds the store's lease.
+    const first = racing.run({ row: runRow(), tool: "shopify_list_orders", arguments: {} });
+    await inside;
+    // The second finds the lease taken. C-10's closed set of run errors has no "busy": it is provider_unavailable (retry later).
+    expect(await racing.run({ row: runRow(), tool: "shopify_list_orders", arguments: {} })).toEqual({ kind: "error", code: "provider_unavailable" });
+    // The held request has not reached Shopify yet and the second never sent one.
+    expect(fake.lastRefreshWithTokens).toHaveLength(0);
+    release();
+    expect((await first).kind).toBe("ok");
     expect(fake.lastRefreshWithTokens).toHaveLength(1);
     expect((await install()).refresh_sealed).not.toBe(before.refresh_sealed);
+    expect(await lockRows()).toBe(0);
+    // The stored pair is fresh now: the next call reads with it and sends no refresh.
+    expect((await racing.run({ row: runRow(), tool: "shopify_list_orders", arguments: {} })).kind).toBe("ok");
+    expect(fake.lastRefreshWithTokens).toHaveLength(1);
+  });
+  it("a refresh in flight keeps an exchange out, and its stale write then changes nothing (refresh versus exchange, C-22, C-27)", async () => {
+    await worker.open({ idToken: token() });
+    const before = await install();
+    clock.ms += 56 * 60_000;
+    const { held, release, inside } = holdTokenCall(isRefresh);
+    const refreshing = makeNative({ fetch: held });
+    const first = refreshing.run({ row: runRow(), tool: "shopify_list_orders", arguments: {} });
+    await inside;
+    // A stale 401 elsewhere marked the install needs_reauth while the refresh was in flight: the app opening now wants an exchange.
+    await database.pool.query("UPDATE shopify_installs SET status='needs_reauth'");
+    const exchangesBefore = exchanges().length;
+    expect(await worker.open({ idToken: token() })).toEqual({ outcome: "busy" });
+    expect(exchanges()).toHaveLength(exchangesBefore);
+    release();
+    // The refresh finds the install no longer live: its pair is dropped, the row keeps what it had.
+    expect(await first).toEqual({ kind: "error", code: "connection_needs_reconnect" });
+    expect(await install()).toMatchObject({ status: "needs_reauth", refresh_sealed: before.refresh_sealed, access_sealed: before.access_sealed });
+    expect(await lockRows()).toBe(0);
+    // The lease is free again: the exchange now goes through and revives the install under a new generation.
+    expect(await worker.open({ idToken: token() })).toMatchObject({ outcome: "ok" });
+    expect(await install()).toMatchObject({ status: "live", generation: String(Number(before.generation) + 1) });
+  });
+  it("an exchange in flight keeps a refresh out (C-22: never both at once)", async () => {
+    await worker.open({ idToken: token() });
+    await database.pool.query("UPDATE shopify_installs SET status='needs_reauth'");
+    const { held, release, inside } = holdTokenCall(isOfflineExchange);
+    const exchanging = makeNative({ fetch: held });
+    const opening = exchanging.open({ idToken: token() });
+    await inside;
+    // Another instance finds the install live and near its end while the exchange runs (its status moved under it).
+    await database.pool.query("UPDATE shopify_installs SET status='live', access_expires_at=$1", [new Date(clock.now().getTime() + 60_000)]);
+    expect(await worker.pass({ deadline: clock.ms + 20_000 })).toEqual({ refreshed: 0 });
+    expect(await worker.run({ row: runRow(), tool: "shopify_list_orders", arguments: {} })).toEqual({ kind: "error", code: "provider_unavailable" });
+    expect(fake.calls.filter((c) => c.body?.grant_type === "refresh_token")).toHaveLength(0);
+    release();
+    expect(await opening).toMatchObject({ outcome: "ok" });
+    expect(fake.calls.filter((c) => c.body?.grant_type === "refresh_token")).toHaveLength(0);
+    expect(await lockRows()).toBe(0);
   });
   it("an invalid refresh token marks the install and the connection, and reopening the app restores both", async () => {
     await worker.open({ idToken: token() });
@@ -259,12 +337,65 @@ describe("refresh and recovery (C-22)", () => {
     expect(out.kind).toBe("error");
     expect(await install()).toMatchObject({ status: "uninstalled", access_sealed: null, refresh_sealed: null });
   });
+  it("a refresh whose lease lapsed cannot overwrite the pair a newer refresh stored (C-22)", async () => {
+    await worker.open({ idToken: token() });
+    clock.ms += 56 * 60_000;
+    // A successor took the expired lease and stored its pair while this refresh was in flight: same generation, new refresh version.
+    const lapsed: typeof fetch = async (input, init) => {
+      const response = await fake.fetch(input, init);
+      if (String(input).endsWith("/oauth/access_token") && JSON.parse(String(init?.body)).grant_type === "refresh_token")
+        await database.pool.query("UPDATE shopify_installs SET access_sealed=$1, refresh_sealed=$2", ["successor-access".padEnd(48, "-"), "successor-refresh".padEnd(48, "-")]);
+      return response;
+    };
+    const out = await makeNative({ fetch: lapsed }).run({ row: { tenant_id: a.tenantId, id: randomUUID(), external_account_id: SHOP_GID, account_domain: SHOP, status: "active", last_error_code: null, revoke_outcome: null }, tool: "shopify_list_orders", arguments: {} });
+    expect(await install()).toMatchObject({ status: "live", access_sealed: "successor-access".padEnd(48, "-"), refresh_sealed: "successor-refresh".padEnd(48, "-") });
+    // The install is still live: the caller may try again, it is not told to reconnect.
+    expect(out).toEqual({ kind: "error", code: "provider_unavailable" });
+  });
   it("the cron pass refreshes an install whose refresh token has under 30 days left", async () => {
     await worker.open({ idToken: token() });
     clock.ms += 61 * 86_400_000;
     fake.expiresIn = 3600;
     const out = await worker.pass({ deadline: clock.ms + 20_000 });
     expect(out.refreshed).toBe(1);
+  });
+  it("the cron pass also refreshes an install whose access token ended over a day ago while its refresh token has plenty left (C-22)", async () => {
+    await worker.open({ idToken: token() });
+    const before = await install();
+    clock.ms += 2 * 86_400_000;
+    // 88 days of refresh token left: only the "access token expired more than a day ago" rule selects it.
+    expect(before.refresh_expires_at.getTime() - clock.ms).toBeGreaterThan(30 * 86_400_000);
+    expect((await worker.pass({ deadline: clock.ms + 20_000 })).refreshed).toBe(1);
+    expect((await install()).refresh_sealed).not.toBe(before.refresh_sealed);
+    // An access token that ended less than a day ago, with the refresh token far off, is left for the next use.
+    await database.pool.query("UPDATE shopify_installs SET access_expires_at=$1", [new Date(clock.ms - 3_600_000)]);
+    expect((await worker.pass({ deadline: clock.ms + 20_000 })).refreshed).toBe(0);
+  });
+  it("a pass whose time is already up refreshes nothing and sends nothing to Shopify (C-9)", async () => {
+    await worker.open({ idToken: token() });
+    clock.ms += 61 * 86_400_000;
+    const callsBefore = fake.calls.length;
+    expect(await worker.pass({ deadline: clock.ms })).toEqual({ refreshed: 0 });
+    expect(fake.calls).toHaveLength(callsBefore);
+    expect((await install()).status).toBe("live");
+  });
+  it("a refresh that hangs is cut at the pass deadline, not at the client's own timeout (C-9)", async () => {
+    await worker.open({ idToken: token() });
+    clock.ms += 61 * 86_400_000;
+    const hanging: typeof fetch = async (input, init) => {
+      if (!String(input).endsWith("/oauth/access_token")) return fake.fetch(input, init);
+      return new Promise<Response>((_, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) reject(signal.reason);
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    const started = Date.now();
+    // The client allows a call 1,000 ms; the pass has 250 ms left.
+    expect(await makeNative({ fetch: hanging }).pass({ deadline: clock.ms + 250 })).toEqual({ refreshed: 0 });
+    expect(Date.now() - started).toBeLessThan(700);
+    expect((await install()).status).toBe("live");
+    expect(await lockRows()).toBe(0);
   });
 });
 
@@ -295,6 +426,53 @@ describe("shopify_create_hub: a new tenant with no operator (C-21)", () => {
     expect(await worker.createHub({ idToken: token() })).toMatchObject({ outcome: "created" });
     expect(hubCalls).toEqual(["shopify-9001", "shopify-9001"]);
     expect(await connections()).toHaveLength(1);
+  });
+  const uninstallRow = () => database.pool.query(
+    `UPDATE shopify_installs SET status='uninstalled', access_sealed=NULL, access_key_id=NULL, refresh_sealed=NULL, refresh_key_id=NULL,
+        access_expires_at=NULL, refresh_expires_at=NULL, uninstalled_at=now(), generation=generation+1`);
+  it("an uninstall that lands after the hub is made binds nothing: the bind transaction rechecks the install (C-21)", async () => {
+    await worker.open({ idToken: token() });
+    const base = fakeHub();
+    const racing = makeNative({ hub: { ...base, async createHub(input) { const made = await base.createHub(input); await uninstallRow(); return made; } } });
+    expect(await racing.createHub({ idToken: token() })).toEqual({ outcome: "not_installed" });
+    expect(await connections()).toHaveLength(0);
+    expect((await database.pool.query("SELECT 1 FROM tenant_plans WHERE shopify_shop_id=$1", [SHOP_GID])).rowCount).toBe(0);
+    // The tenant made for this store waits unbound. The merchant opens the app again (a new exchange) and the next create-hub finishes it.
+    expect(await worker.open({ idToken: token() })).toMatchObject({ outcome: "ok" });
+    expect(await worker.createHub({ idToken: token() })).toMatchObject({ outcome: "created" });
+    expect(new Set(hubCalls)).toEqual(new Set(["shopify-9001"]));
+    expect((await connections()).filter((c) => c.status === "active")).toHaveLength(1);
+  });
+  it("an uninstall that lands before a returning owner's bind binds nothing either", async () => {
+    await worker.open({ idToken: token() });
+    await worker.createHub({ idToken: token() });
+    await database.pool.query("UPDATE connections SET status='disconnected', account_label=NULL");
+    const afterOnlineExchange: typeof fetch = async (input, init) => {
+      const response = await fake.fetch(input, init);
+      if (String(input).endsWith("/oauth/access_token") && String(JSON.parse(String(init?.body)).requested_token_type).includes("online")) await uninstallRow();
+      return response;
+    };
+    expect(await makeNative({ fetch: afterOnlineExchange }).createHub({ idToken: token() })).toEqual({ outcome: "not_installed" });
+    expect((await connections()).filter((c) => c.status === "active")).toHaveLength(0);
+  });
+  it("a fault at each statement of the bind rolls it back whole, and the retry finishes the same tenant (C-21, C-27)", async () => {
+    await worker.open({ idToken: token() });
+    // The first statement of the bind, and the billing write that follows it in the same transaction.
+    for (const [index, statement] of [/INSERT INTO connections/, /INSERT INTO tenant_plans/].entries()) {
+      await database.pool.query("DELETE FROM connections");
+      await database.pool.query("DELETE FROM tenant_plans");
+      const fault = faultOnce(statement);
+      await expect(makeNative({ service: fault.service }).createHub({ idToken: token() }), `fault ${index}`).rejects.toThrow("injected fault");
+      expect(fault.fired(), `fault ${index} fired`).toBe(true);
+      expect(await connections(), `connections after fault ${index}`).toHaveLength(0);
+      expect((await database.pool.query("SELECT 1 FROM tenant_plans WHERE shopify_shop_id=$1", [SHOP_GID])).rowCount, `billing after fault ${index}`).toBe(0);
+      expect(await worker.createHub({ idToken: token() }), `retry ${index}`).toMatchObject({ outcome: "created" });
+      const [row, ...rest] = await connections();
+      expect(rest).toHaveLength(0);
+      expect(await plan(row.tenant_id)).toEqual({ billing_provider: "shopify", shopify_shop_id: SHOP_GID });
+    }
+    expect(new Set(hubCalls)).toEqual(new Set(["shopify-9001"]));
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM tenants WHERE name='ZS Test Store'")).rows[0].n).toBe(1);
   });
   it("answers email_has_hub when the owner's email already belongs to a hub, leaving the claim flow", async () => {
     await database.pool.query("INSERT INTO tenant_members (tenant_id,id,email,role,created_at,updated_at) VALUES ($1,$2,$3,'owner',$4,$4)", [a.tenantId, randomUUID(), OWNER_EMAIL, new Date(T0)]);
@@ -348,6 +526,30 @@ describe("claims: an existing hub links a store only with the owner's confirm (C
     expect((await connections())[0]).toMatchObject({ tenant_id: a.tenantId, tier: "native", status: "active" });
     expect(await plan(a.tenantId)).toEqual({ billing_provider: "shopify", shopify_shop_id: SHOP_GID });
     expect(await worker.claimStatus({ tenantId: a.tenantId })).toBeNull();
+  });
+  it("a replay of the code this store already redeemed changes nothing: same answer, no failure counted (C-21)", async () => {
+    const started = await worker.claimStart({ tenantId: a.tenantId, memberId: a.memberId });
+    if (started.outcome !== "started") throw new Error("claim");
+    expect(await redeem(started.code)).toMatchObject({ outcome: "redeemed" });
+    const claimRow = async () => (await database.pool.query("SELECT status, redeemed_at, shop_id, updated_at FROM shopify_claims")).rows[0];
+    const first = await claimRow();
+    // More replays than the five wrong codes that lock a store.
+    for (let i = 0; i < 6; i += 1) expect(await redeem(started.code)).toEqual({ outcome: "redeemed", businessName: expect.any(String) });
+    expect(await install()).toMatchObject({ claim_failures: 0, claim_locked_until: null });
+    expect(await claimRow()).toEqual(first);
+    // The owner can still confirm.
+    expect(await worker.claimConfirm({ tenantId: a.tenantId, claimId: started.claimId, memberId: a.memberId })).toMatchObject({ outcome: "confirmed" });
+  });
+  it("a redeemed code is not a valid guess for another store, which still counts a failure", async () => {
+    const started = await worker.claimStart({ tenantId: a.tenantId, memberId: a.memberId });
+    if (started.outcome !== "started") throw new Error("claim");
+    expect(await redeem(started.code)).toMatchObject({ outcome: "redeemed" });
+    const other = "other-store.myshopify.com";
+    fake.otherShops[other] = { gid: "gid://shopify/Shop/9002", name: "Other Store" };
+    const otherToken = mintIdToken(clock.now(), {}, CLIENT_SECRET, other);
+    expect(await worker.open({ idToken: otherToken })).toMatchObject({ outcome: "ok" });
+    expect(await worker.redeemClaim({ idToken: otherToken, code: started.code })).toEqual({ outcome: "invalid_code" });
+    expect((await database.pool.query("SELECT claim_failures FROM shopify_installs WHERE shop_domain=$1", [other])).rows[0].claim_failures).toBe(1);
   });
   it("five wrong codes lock redeeming for an hour, then it opens again", async () => {
     const started = await worker.claimStart({ tenantId: a.tenantId, memberId: a.memberId });
@@ -446,6 +648,24 @@ describe("webhooks (C-24)", () => {
     expect((await send("app/uninstalled", { ...uninstallBody, myshopify_domain: "other.myshopify.com" })).status).toBe(401);
     expect((await send("shop/redact", { shop_id: 1, shop_domain: "other.myshopify.com" })).status).toBe(401);
     expect((await connections())[0]!.status).toBe("active");
+    expect((await install()).status).toBe("live");
+  });
+  it("logs the header's topic and shop on a 401 too, when they are well-formed, and 'unknown' when they are not (C-24)", async () => {
+    const webhooks = () => reports.filter((report) => report.kind === "webhook");
+    expect((await send("app/uninstalled", uninstallBody, { hmac: signWebhook("{}") })).status).toBe(401);
+    expect((await send("app/uninstalled", uninstallBody, { id: null })).status).toBe(401);
+    expect((await send("app/uninstalled", uninstallBody, { hmac: null, shop: "not a shop\nforged-line" })).status).toBe(401);
+    expect(webhooks().map(({ topic, shop, status }) => ({ topic, shop, status }))).toEqual([
+      { topic: "app/uninstalled", shop: SHOP, status: 401 },
+      { topic: "app/uninstalled", shop: SHOP, status: 401 },
+      { topic: "app/uninstalled", shop: "unknown", status: 401 },
+    ]);
+  });
+  it("answers 401 to a signed body over 256 KiB and logs it, without reading further (the worker's own cap, C-24)", async () => {
+    const raw = JSON.stringify({ ...uninstallBody, padding: "x".repeat(256 * 1024) });
+    const out = await worker.webhook({ rawBody: Buffer.from(raw), hmac: signWebhook(raw), topic: "app/uninstalled", shopDomain: SHOP, webhookId: randomUUID() });
+    expect(out).toEqual({ status: 401 });
+    expect(reports.find((report) => report.kind === "webhook")).toMatchObject({ topic: "app/uninstalled", shop: SHOP, status: 401 });
     expect((await install()).status).toBe("live");
   });
   it("uninstall wipes the tokens and disconnects the connection; a repeat does nothing more", async () => {

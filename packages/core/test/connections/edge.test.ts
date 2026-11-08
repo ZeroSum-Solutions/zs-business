@@ -586,10 +586,26 @@ describe("cancel and disconnect (C-5, C-13)", () => {
     expect(await events()).toBe(1);
     expect((await s.disconnect(id, `k-${randomUUID()}`)).result.status).toBe("disconnected");
     expect(await events()).toBe(1);
-    for (let i = 0; i < 22; i++)
-      await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.owner.memberId, accountId: `ca_old_${i}`, toolkit: `tk${i}`, status: "disconnected" });
-    const listed = (await s.list()).items.filter((c) => c.status === "disconnected");
-    expect(listed).toHaveLength(20);
+    // 22 more disconnected rows, each a second newer than the last (and all newer than the one disconnected above), and two
+    // live rows older than every one of them: the list drops the 3 oldest disconnected rows, keeps both live rows, and is newest first.
+    const base = new Date(T0).getTime();
+    const history: string[] = [];
+    for (let i = 0; i < 22; i++) {
+      const rowId = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.owner.memberId, accountId: `ca_old_${i}`, toolkit: `tk${i}`, status: "disconnected" });
+      await database.pool.query("UPDATE connections SET created_at=$3 WHERE tenant_id=$1 AND id=$2", [a.tenantId, rowId, new Date(base + (i + 1) * 1000)]);
+      history.push(rowId);
+    }
+    const live: string[] = [];
+    for (const [i, status] of (["active", "reauthorize"] as const).entries()) {
+      const rowId = await seedConnection(fixture, { tenantId: a.tenantId, memberId: a.owner.memberId, accountId: `ca_live_${i}`, toolkit: `live${i}`, status });
+      await database.pool.query("UPDATE connections SET created_at=$3 WHERE tenant_id=$1 AND id=$2", [a.tenantId, rowId, new Date(base - (i + 1) * 86_400_000)]);
+      live.push(rowId);
+    }
+    const listed = (await s.list()).items;
+    // History rows 2..21 (the 20 newest, newest first), then the live rows, which are older than all of them.
+    expect(listed.map((c) => c.id)).toEqual([...history.slice(2).reverse(), ...live]);
+    expect(listed.filter((c) => c.status === "disconnected")).toHaveLength(20);
+    expect(listed.map((c) => c.id)).not.toContain(id);
   });
 
   it("a worker that is down leaves it disconnecting for the pass; a revoke failure is shown", async () => {
