@@ -38,13 +38,24 @@ interface FakeContract {
 /** The Partner API as fetch: a contract per shop, or queued failures answered first. */
 function fakePartner() {
   const contracts = new Map<string, FakeContract | null>();
-  const failures: Array<{ status?: number; body?: unknown; throws?: boolean }> = [];
+  // `before` runs first (another writer acting while the call is out); `answer` then answers normally.
+  const failures: Array<{ status?: number; body?: unknown; throws?: boolean; cut?: boolean; before?: () => Promise<void>; answer?: boolean }> = [];
   const requests: Array<{ url: string; headers: Record<string, string>; body: { variables: { appId: string; shopId: string } } }> = [];
   const fetch: typeof globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
     requests.push({ url: String(url), headers: init?.headers as Record<string, string>, body });
-    const failure = failures.shift();
+    const queued = failures.shift();
+    if (queued?.before) await queued.before();
+    const failure = queued?.answer ? undefined : queued;
     if (failure?.throws) throw new TypeError("fetch failed");
+    if (failure?.cut) return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"data":'));
+        controller.error(new DOMException("The operation was aborted", "AbortError"));
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+    if (failure && failure.status !== undefined && failure.status >= 300 && failure.status < 400)
+      return new Response(null, { status: failure.status, headers: { location: "https://elsewhere.example.test/" } });
     if (failure) return new Response(JSON.stringify(failure.body ?? {}), { status: failure.status ?? 200, headers: { "content-type": "application/json" } });
     const shopId = body.variables.shopId as string;
     const found = contracts.get(shopId);
@@ -111,8 +122,15 @@ describe("the Partner API reader (PL-18)", () => {
       [{ status: 503 }, true],
       [{ status: 200, body: { errors: [{ message: "Too many requests" }] } }, true],
       [{ status: 200, body: { errors: [{ message: "Shop not found" }] } }, false],
-      [{ status: 401, body: { errors: "unauthorized" } }, false],
+      [{ status: 401, body: { errors: "unauthorized" } }, true],
       [{ status: 200, body: { data: { activeSubscription: { shop: { id: shop.id } } } } }, false],
+      // An errors field that is not a list is an error, never "no contract".
+      [{ status: 200, body: { data: { activeSubscription: null }, errors: { message: "service failure" } } }, false],
+      // Upstream text that echoes a token is redacted.
+      [{ status: 200, body: { errors: [{ message: `bad token ${TOKEN} and prtapi_${"a".repeat(32)}` }] } }, false],
+      // A body cut off after the headers is a transport failure.
+      [{ cut: true }, true],
+      [{ status: 302 }, true],
     ];
     for (const [failure, stopPass] of cases) {
       partner.failures.push(failure);
@@ -120,6 +138,7 @@ describe("the Partner API reader (PL-18)", () => {
       expect(error).toBeInstanceOf(ShopifyPartnerError);
       expect((error as ShopifyPartnerError).stopPass).toBe(stopPass);
       expect((error as Error).message).not.toContain(TOKEN);
+      expect((error as Error).message).not.toMatch(/prtapi_|f{24}/);
     }
     partner.contracts.set(shop.id, { shopId: newShop().id });
     await expect(reader().active(shop.id)).rejects.toThrow(/another shop/);
@@ -170,7 +189,10 @@ describe("linking a tenant to its shop (PL-17)", () => {
 
     await b.startTopUp(tenantId, 2_500);
     await expect(link(tenantId, newShop())).rejects.toMatchObject({ details: { reason: "stripe_plan_active" } });
-    b.h.clock.advance(60 * 60_000 + 1);
+    // Age alone never frees the link: a delayed payment can still settle a completed Checkout.
+    b.h.clock.advance(7 * DAY);
+    await expect(link(tenantId, newShop())).rejects.toMatchObject({ details: { reason: "stripe_plan_active" } });
+    await b.h.service((tx) => tx.query("UPDATE wallet_topups SET status='expired' WHERE tenant_id=$1", [tenantId]));
     await expect(link(tenantId, newShop())).resolves.toMatchObject({ billingProvider: "shopify" });
   });
 });
@@ -299,6 +321,142 @@ describe("the Shopify pass (PL-18)", () => {
     await b.h.service((tx) => tx.query("UPDATE tenant_plans SET shopify_next_sync_at=NULL WHERE tenant_id=$1", [tenantId]));
     expect(await sync().runOnce({ deadline: b.h.clock.now() })).toEqual({ checked: 0, outcomes: {}, stopped: false });
     expect(partner.requests).toHaveLength(0);
+  });
+
+  it("checks the deadline after the pause between calls", async () => {
+    partner = fakePartner();
+    const tenants = [await b.tenant(), await b.tenant()];
+    for (const tenantId of tenants) {
+      const shop = newShop();
+      await link(tenantId, shop);
+      partner.contracts.set(shop.id, { handles: [HANDLES.hub_solo] });
+    }
+    await b.h.service((tx) => tx.query(
+      "UPDATE tenant_plans SET shopify_next_sync_at=$1 WHERE billing_provider='shopify' AND shopify_shop_id IS NOT NULL",
+      [new Date(b.h.clock.now().getTime() + 365 * DAY)]));
+    await b.h.service((tx) => tx.query("UPDATE tenant_plans SET shopify_next_sync_at=NULL WHERE tenant_id = ANY($1::uuid[])", [tenants]));
+    // 2.2 s left: the first call has its budget; after the 500 ms pause the second would not.
+    const pass = createShopifyPlanSync({
+      service: b.h.service, clock: b.h.clock, reader: reader(), limit: 100, graceDays: 7,
+      sleep: async (ms) => { b.h.clock.advance(ms); },
+    });
+    expect(await pass.runOnce({ deadline: new Date(b.h.clock.now().getTime() + 2_200) })).toEqual({ checked: 1, outcomes: { plan_synced: 1 }, stopped: false });
+    expect(partner.requests).toHaveLength(1);
+  });
+
+  it("drops an answer and keeps a newer sync when another run synced the tenant during the call", async () => {
+    partner = fakePartner();
+    const tenantId = await b.tenant();
+    const shop = newShop();
+    await link(tenantId, shop);
+    partner.contracts.set(shop.id, { handles: [HANDLES.hub_solo] });
+    const newer = new Date(b.h.clock.now().getTime() + 5);
+    const otherRun = async () => {
+      await b.h.service((tx) => tx.query(
+        "UPDATE tenant_plans SET shopify_synced_at=$2, shopify_sync_failures=0, shopify_next_sync_at=NULL WHERE tenant_id=$1", [tenantId, newer]));
+    };
+    // A success that raced: skipped, nothing stored.
+    partner.failures.push({ before: otherRun, answer: true });
+    expect((await syncTenant(tenantId)).outcomes).toEqual({ skipped: 1 });
+    expect(await shopRow(tenantId, shop.id)).toBeUndefined();
+    // A failure that raced: the newer sync stays, with no failure and no backoff.
+    await b.h.service((tx) => tx.query("UPDATE tenant_plans SET shopify_synced_at=NULL WHERE tenant_id=$1", [tenantId]));
+    partner.failures.push({ before: otherRun, status: 200, body: { errors: [{ message: "Shop not found" }] } });
+    expect((await syncTenant(tenantId)).outcomes).toEqual({ error: 1 });
+    expect(await plan(tenantId)).toMatchObject({ shopify_synced_at: newer, shopify_sync_failures: 0, shopify_next_sync_at: null });
+  });
+
+  it("skips, without a call, a tenant another run put into backoff after this pass picked it", async () => {
+    partner = fakePartner();
+    const tenants = [await b.tenant(), await b.tenant()].sort();
+    for (const tenantId of tenants) {
+      const shop = newShop();
+      await link(tenantId, shop);
+      partner.contracts.set(shop.id, { handles: [HANDLES.hub_solo] });
+    }
+    await b.h.service((tx) => tx.query(
+      "UPDATE tenant_plans SET shopify_next_sync_at=$1 WHERE billing_provider='shopify' AND shopify_shop_id IS NOT NULL",
+      [new Date(b.h.clock.now().getTime() + 365 * DAY)]));
+    await b.h.service((tx) => tx.query("UPDATE tenant_plans SET shopify_next_sync_at=NULL WHERE tenant_id = ANY($1::uuid[])", [tenants]));
+    // While the first call is out, another run fails on the second tenant and stores its backoff.
+    partner.failures.push({
+      before: () => b.h.service(async (tx) => { await tx.query(
+        "UPDATE tenant_plans SET shopify_sync_failures=1, shopify_next_sync_at=$2 WHERE tenant_id=$1",
+        [tenants[1], new Date(b.h.clock.now().getTime() + 60_000)]); }),
+      answer: true,
+    });
+    expect(await sync().runOnce()).toEqual({ checked: 1, outcomes: { plan_synced: 1, skipped: 1 }, stopped: false });
+    expect(partner.requests).toHaveLength(1);
+    expect(await plan(tenants[1]!)).toMatchObject({ shopify_sync_failures: 1, shopify_synced_at: null });
+  });
+
+  it("gives a new contract after an ended one no plan from the ended one", async () => {
+    partner = fakePartner();
+    const tenantId = await b.tenant();
+    const shop = newShop();
+    await link(tenantId, shop);
+    partner.contracts.set(shop.id, { handles: [HANDLES.hub_pro_founding] });
+    await syncTenant(tenantId);
+    partner.contracts.set(shop.id, null);
+    await syncTenant(tenantId);
+    partner.contracts.set(shop.id, { handles: ["mystery"] });
+    expect((await syncTenant(tenantId)).outcomes).toEqual({ mismatch: 1 });
+    expect(await shopRow(tenantId, shop.id)).toMatchObject({ status: "active", plan: null, plan_interval: null, founding: false });
+  });
+});
+
+describe("links that race (PL-17)", () => {
+  /** Holds one link's transaction open until `release`, so a second writer must wait for it. */
+  function heldLink(tenantId: string, shop: { id: string; domain: string }) {
+    let release!: () => void;
+    let linked!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { linked = resolve; });
+    const done = b.h.service(async (tx) => {
+      await setShopifyBilling(tx, { tenantId, shop, now: b.h.clock.now(), graceDays: 7 });
+      linked();
+      await gate;
+    });
+    return { ready, release, done };
+  }
+
+  it("gives two businesses linking one shop at once one link and one shop_taken", async () => {
+    const shop = newShop();
+    const first = await b.tenant();
+    const second = await b.tenant();
+    const held = heldLink(first, shop);
+    await held.ready;
+    const racing = link(second, shop);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    held.release();
+    await held.done;
+    await expect(racing).rejects.toMatchObject({ details: { reason: "shop_taken" } });
+    expect(await plan(first)).toMatchObject({ shopify_shop_id: shop.id });
+  });
+
+  it("makes a top-up started during a link wait for it, then refuses it", async () => {
+    const tenantId = await b.tenant();
+    const session = await b.session(tenantId);
+    const held = heldLink(tenantId, newShop());
+    await held.ready;
+    const racing = session.createTopUp({ amount: 2_500 }, `topup-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    held.release();
+    await held.done;
+    await expect(racing).rejects.toMatchObject({ details: { reason: "billing_provider" } });
+    expect((await b.h.rows("SELECT 1 FROM wallet_topups WHERE tenant_id=$1", [tenantId])).length).toBe(0);
+  });
+  it("takes one plan lock for a tenant ID in either letter case", async () => {
+    const tenantId = await b.tenant();
+    const session = await b.session(tenantId);
+    const held = heldLink(tenantId.toUpperCase(), newShop());
+    await held.ready;
+    const racing = session.createTopUp({ amount: 2_500 }, `topup-${randomUUID()}`);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    held.release();
+    await held.done;
+    await expect(racing).rejects.toMatchObject({ details: { reason: "billing_provider" } });
+    expect((await b.h.rows("SELECT 1 FROM wallet_topups WHERE tenant_id=$1", [tenantId])).length).toBe(0);
   });
 });
 

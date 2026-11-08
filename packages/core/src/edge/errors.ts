@@ -95,7 +95,13 @@ const CONFLICT_REASONS = new Set([
   "consent_required", "lease_lost", "intake_not_in_review", "intake_changed", "intake_target_changed",
   // plans.md PL-4..PL-7, PL-11, PL-14, PL-15: why a plan Checkout, the Portal or a top-up is refused.
   "plan_exists", "checkout_open", "checkout_closed", "no_customer", "founding_full", "billing_provider",
+  // PL-8: an action refused by the plan, on Stripe or Shopify.
+  "plan_read_only", "plan_limit",
 ]);
+/** PL-8: the counted resources a plan_limit conflict may name. */
+const PLAN_LIMIT_RESOURCES = new Set(["seats", "bookableResources", "managedConnections", "automationTokens"]);
+const count = (value: JsonValue | undefined): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */
 const REPLY_STATUSES = new Set(["draft", "approved", "sent", "failed", "discarded"]);
 /** H-1 revision 4: an invalid_currency conflict names the deal's stored code (three capitals). */
@@ -133,6 +139,13 @@ function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<s
   // PL-4: an open plan checkout answers its stored Stripe Checkout URL, so the owner goes back to it.
   if (safe.reason === "checkout_open" && typeof details.checkoutUrl === "string" && STRIPE_CHECKOUT_URL.test(details.checkoutUrl))
     safe.checkoutUrl = details.checkoutUrl;
+  // PL-8: a plan_limit conflict names what ran out and the numbers, so the owner sees why.
+  if (safe.reason === "plan_limit" && typeof details.resource === "string" && PLAN_LIMIT_RESOURCES.has(details.resource)
+    && count(details.limit) && count(details.used)) {
+    safe.resource = details.resource;
+    safe.limit = details.limit;
+    safe.used = details.used;
+  }
   return safe;
 }
 

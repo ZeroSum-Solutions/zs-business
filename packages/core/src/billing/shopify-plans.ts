@@ -6,7 +6,6 @@ import { Conflict, type HubPlan, type PlanInterval } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { derivePlanRecord } from "./plan-events.js";
 import { lockTenantPlan } from "./plan-gate.js";
-import { CHECKOUT_LIFETIME_MS } from "./topups.js";
 import {
   SHOPIFY_INTERVALS, SHOPIFY_PLAN_KEY_PLANS, SHOPIFY_PLAN_KEYS, SHOPIFY_SHOP_DOMAIN, SHOPIFY_SHOP_GID, ShopifyPartnerError,
   type ShopifyContract, type ShopifyPlanKey, type ShopifySubscriptionReader,
@@ -17,6 +16,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const SHOPIFY_LINK_CHECKOUT_GATE_MS = DAY_MS;
 /** PL-18: the pause between two Partner API calls of one pass. */
 export const SHOPIFY_CALL_SPACING_MS = 500;
+/** PL-18: time kept back from the deadline for the commit or rollback after a call. */
+export const SHOPIFY_COMMIT_RESERVE_MS = 1_000;
+/** PL-18: a call starts only with at least this much time before the deadline. */
+export const SHOPIFY_MIN_CALL_BUDGET_MS = SHOPIFY_COMMIT_RESERVE_MS + 1_000;
 const BACKOFF_BASE_MS = 60_000;
 const BACKOFF_MAX_MS = 60 * 60_000;
 const ENDED_STRIPE = ["canceled", "unpaid", "incomplete_expired"];
@@ -53,6 +56,9 @@ export async function setShopifyBilling(tx: Transaction, input: {
   if (!SHOPIFY_SHOP_GID.test(shop.id)) throw new Conflict("Not a shop GID", { reason: "shop_invalid" });
   const domain = shop.domain.toLowerCase();
   if (!SHOPIFY_SHOP_DOMAIN.test(domain) || domain.length > 255) throw new Conflict("Not a myshopify.com domain", { reason: "shop_invalid" });
+  // Two businesses linking one shop at once: the shop lock (always taken after the plan lock)
+  // makes the second wait and then see the first, so it gets shop_taken, not a unique violation.
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`shopify-shop:${shop.id}`]);
   if (currentShop !== null && currentShop !== shop.id && holds(shopStatus))
     throw new Conflict("The business still holds a plan on its current shop", { reason: "shopify_plan_active" });
   const stripeOpen = (await tx.query(
@@ -61,10 +67,10 @@ export async function setShopifyBilling(tx: Transaction, input: {
   const checkoutOpen = (await tx.query(
     "SELECT 1 FROM plan_checkouts WHERE tenant_id=$1 AND status='pending' AND created_at > $2 LIMIT 1",
     [input.tenantId, new Date(input.now.getTime() - SHOPIFY_LINK_CHECKOUT_GATE_MS)])).rowCount === 1;
-  // A top-up Checkout lives an hour (S-2); one still open could charge through Stripe after the link.
+  // Any pending top-up blocks, whatever its age: a delayed payment method can settle a completed
+  // Checkout days later. Only Stripe's expired or failed event (or an operator) closes one.
   const topUpOpen = (await tx.query(
-    "SELECT 1 FROM wallet_topups WHERE tenant_id=$1 AND status='pending' AND created_at > $2 LIMIT 1",
-    [input.tenantId, new Date(input.now.getTime() - CHECKOUT_LIFETIME_MS)])).rowCount === 1;
+    "SELECT 1 FROM wallet_topups WHERE tenant_id=$1 AND status='pending' LIMIT 1", [input.tenantId])).rowCount === 1;
   if (stripeOpen || checkoutOpen || topUpOpen)
     throw new Conflict("The business has a Stripe plan or an open Stripe checkout", { reason: "stripe_plan_active" });
   // A shop's row ID is global (plan_subscriptions_id_once), so a shop that ever billed another
@@ -96,6 +102,12 @@ export interface ShopifySyncSummary {
   readonly outcomes: Record<string, number>;
   /** True when throttling or a Shopify failure ended the pass early. */
   readonly stopped: boolean;
+}
+
+interface Picked {
+  tenant_id: string;
+  shopify_shop_id: string;
+  shopify_synced_at: Date | null;
 }
 
 interface ShopRow {
@@ -146,10 +158,10 @@ export function createShopifyPlanSync(deps: {
     } else {
       const status = contract.trialEndsAt !== null && contract.trialEndsAt.getTime() > at.getTime() ? "trialing" : "active";
       const recognised = named(contract);
-      const plan = recognised ?? (previous && previous.plan !== null && previous.plan_interval !== null
-        ? { plan: previous.plan, interval: previous.plan_interval, founding: previous.founding } : null);
-      // A contract seen after the row ended is a new one.
+      // A contract seen after the row ended is a new one; it never inherits the ended contract's plan.
       const fresh = !previous || ENDED.has(previous.status);
+      const plan = recognised ?? (!fresh && previous.plan !== null && previous.plan_interval !== null
+        ? { plan: previous.plan, interval: previous.plan_interval, founding: previous.founding } : null);
       const startedAt = fresh ? at : previous.started_at;
       const statusSince = previous && previous.status === status ? previous.status_since : at;
       await tx.query(
@@ -171,17 +183,24 @@ export function createShopifyPlanSync(deps: {
     return outcome === "plan_synced" && duplicate ? "plan_duplicate" : outcome;
   }
 
-  async function failed(tenantId: string, shopId: string) {
-    const at = now();
-    await deps.service(async (tx) => {
-      await lockTenantPlan(tx, tenantId);
-      await tx.query(
-        `UPDATE tenant_plans SET shopify_sync_failures=least(shopify_sync_failures + 1, 1000000),
-           shopify_next_sync_at=$3::timestamptz + least($4::bigint * power(2, least(shopify_sync_failures, 20))::bigint, $5::bigint) * interval '1 millisecond',
-           updated_at=$3
-         WHERE tenant_id=$1 AND shopify_shop_id=$2`,
-        [tenantId, shopId, at, BACKOFF_BASE_MS, BACKOFF_MAX_MS]);
-    });
+  /**
+   * PL-18: one more failure and the next backoff, only while the row is still the one picked
+   * (same shop, no sync stored since), so an older failure never undoes a newer sync.
+   */
+  async function recordFailure(tx: Transaction, picked: Picked, at: Date) {
+    await tx.query(
+      `UPDATE tenant_plans SET shopify_sync_failures=least(shopify_sync_failures + 1, 1000000),
+         shopify_next_sync_at=$3::timestamptz + least($4::bigint * power(2, least(shopify_sync_failures, 20))::bigint, $5::bigint) * interval '1 millisecond',
+         updated_at=$3
+       WHERE tenant_id=$1 AND billing_provider='shopify' AND shopify_shop_id=$2 AND shopify_synced_at IS NOT DISTINCT FROM $6`,
+      [picked.tenant_id, picked.shopify_shop_id, at, BACKOFF_BASE_MS, BACKOFF_MAX_MS, picked.shopify_synced_at]);
+  }
+
+  /** Bounds this transaction's lock and statement waits to the time left, when there is a deadline. */
+  async function bound(tx: Transaction, left: number) {
+    if (!Number.isFinite(left)) return;
+    const ms = `${Math.max(1, Math.floor(left))}ms`;
+    await tx.query("SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $1, true)", [ms]);
   }
 
   return {
@@ -189,37 +208,88 @@ export function createShopifyPlanSync(deps: {
     async runOnce(options: { readonly deadline?: Date } = {}): Promise<ShopifySyncSummary> {
       const outcomes: Record<string, number> = {};
       const count = (outcome: string) => { outcomes[outcome] = (outcomes[outcome] ?? 0) + 1; };
-      const due = await deps.service((tx) => tx.query<{ tenant_id: string; shopify_shop_id: string; shopify_synced_at: Date | null }>(
+      const due = await deps.service((tx) => tx.query<Picked>(
         `SELECT tenant_id, shopify_shop_id, shopify_synced_at FROM tenant_plans
           WHERE billing_provider='shopify' AND shopify_shop_id IS NOT NULL AND (shopify_next_sync_at IS NULL OR shopify_next_sync_at <= $1)
           ORDER BY shopify_synced_at ASC NULLS FIRST, tenant_id LIMIT $2`, [now(), deps.limit]));
+      const left = () => options.deadline ? options.deadline.getTime() - now().getTime() : Number.POSITIVE_INFINITY;
       let checked = 0;
       let stopped = false;
+      /** Records one failure in its own short transaction; a failure to record ends nothing more. */
+      const fail = async (picked: Picked) => {
+        try {
+          await deps.service(async (tx) => {
+            await bound(tx, Math.max(left(), 250));
+            await lockTenantPlan(tx, picked.tenant_id);
+            await recordFailure(tx, picked, now());
+          });
+        } catch {
+          deps.report?.({ tenantId: picked.tenant_id, outcome: "error", detail: "failure not recorded" });
+        }
+      };
       for (const picked of due.rows) {
-        if (options.deadline && now().getTime() >= options.deadline.getTime()) break;
         if (checked > 0) await sleep(SHOPIFY_CALL_SPACING_MS);
+        // Checked after the pause, so no call starts without its budget before the deadline.
+        const budget = left() - SHOPIFY_COMMIT_RESERVE_MS;
+        if (budget < SHOPIFY_MIN_CALL_BUDGET_MS - SHOPIFY_COMMIT_RESERVE_MS) break;
+        // Another run may have synced this tenant, or stored a failure backoff, since it was
+        // picked: then this call would be spent twice (PL-18). The read takes no lock.
+        let stillDue: boolean;
+        try {
+          stillDue = await deps.service(async (tx) => {
+            await bound(tx, Math.max(budget, 250));
+            const row = (await tx.query<{ ok: boolean }>(
+              `SELECT (shopify_next_sync_at IS NULL OR shopify_next_sync_at <= $4) AS ok FROM tenant_plans
+                WHERE tenant_id=$1 AND billing_provider='shopify' AND shopify_shop_id=$2 AND shopify_synced_at IS NOT DISTINCT FROM $3`,
+              [picked.tenant_id, picked.shopify_shop_id, picked.shopify_synced_at, now()])).rows[0];
+            return row?.ok === true;
+          });
+        } catch (error) {
+          count("error");
+          deps.report?.({ tenantId: picked.tenant_id, outcome: "error", detail: error instanceof Error ? error.name : "database failure" });
+          stopped = true;
+          break;
+        }
+        if (!stillDue) {
+          count("skipped");
+          continue;
+        }
         checked += 1;
+        // The Partner API call holds no transaction, connection or plan lock (PL-18).
+        let contract: ShopifyContract | null;
+        try {
+          contract = await deps.reader.active(picked.shopify_shop_id, Number.isFinite(budget) ? { timeoutMs: budget } : {});
+        } catch (error) {
+          count("error");
+          const partner = error instanceof ShopifyPartnerError;
+          deps.report?.({ tenantId: picked.tenant_id, outcome: "error", detail: partner ? error.message : "reader failure" });
+          await fail(picked);
+          if (!partner || error.stopPass) {
+            stopped = true;
+            break;
+          }
+          continue;
+        }
         try {
           const outcome = await deps.service(async (tx) => {
+            await bound(tx, Math.max(left(), 250));
             await lockTenantPlan(tx, picked.tenant_id);
             const row = (await tx.query<{ billing_provider: string; shopify_shop_id: string | null; shopify_synced_at: Date | null }>(
-              "SELECT billing_provider, shopify_shop_id, shopify_synced_at FROM tenant_plans WHERE tenant_id=$1", [picked.tenant_id])).rows[0];
-            // Relinked, unlinked or synced by another run since it was picked.
+              "SELECT billing_provider, shopify_shop_id, shopify_synced_at FROM tenant_plans WHERE tenant_id=$1 FOR UPDATE", [picked.tenant_id])).rows[0];
+            // Relinked, unlinked or synced by another run since it was picked: this answer is stale.
             if (!row || row.billing_provider !== "shopify" || row.shopify_shop_id !== picked.shopify_shop_id
               || (row.shopify_synced_at?.getTime() ?? null) !== (picked.shopify_synced_at?.getTime() ?? null)) return "skipped" as const;
-            const contract = await deps.reader.active(picked.shopify_shop_id);
             return store(tx, picked.tenant_id, picked.shopify_shop_id, contract, now());
           });
           count(outcome);
           if (outcome === "mismatch" || outcome === "plan_duplicate") deps.report?.({ tenantId: picked.tenant_id, outcome });
         } catch (error) {
+          // A database error, or a lock or statement wait past the deadline: the pass ends.
           count("error");
-          deps.report?.({ tenantId: picked.tenant_id, outcome: "error", detail: error instanceof Error ? error.message : "unknown" });
-          await failed(picked.tenant_id, picked.shopify_shop_id);
-          if (!(error instanceof ShopifyPartnerError) || error.stopPass) {
-            stopped = true;
-            break;
-          }
+          deps.report?.({ tenantId: picked.tenant_id, outcome: "error", detail: error instanceof Error ? error.name : "unknown" });
+          await fail(picked);
+          stopped = true;
+          break;
         }
       }
       return { checked, outcomes, stopped };

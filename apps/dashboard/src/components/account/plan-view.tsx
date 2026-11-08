@@ -13,7 +13,7 @@ import { ErrorNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { ApiError } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
-import { browserZone, usePlan } from "@/lib/queries";
+import { browserZone, PLAN_WATCH_MS, usePlan } from "@/lib/queries";
 import { formatDay } from "@/lib/time";
 import { formatMoney, formatNumber } from "@/lib/utils";
 
@@ -95,18 +95,24 @@ function checkoutMessage(error: unknown): string | undefined {
 export function PlanView() {
   const api = useApi();
   const [returned, setReturned] = useState<"success" | "cancelled" | "shopify" | null>(null);
+  const [watchUntil, setWatchUntil] = useState<number | undefined>(undefined);
   // Stripe returns here with ?checkout=…, Shopify's welcome link with ?shopify=welcome (PL-16);
   // read it once, without a Suspense boundary.
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     const value = query.get("checkout");
     if (value === "success" || value === "cancelled") setReturned(value);
-    else if (query.get("shopify") === "welcome") setReturned("shopify");
+    else if (query.get("shopify") === "welcome") {
+      setReturned("shopify");
+      setWatchUntil(Date.now() + PLAN_WATCH_MS);
+    }
   }, []);
   const confirming = returned === "success" || returned === "shopify";
-  const plan = usePlan({ poll: confirming });
+  // A Shopify change may leave the status as it was (one active plan for another), so the page
+  // keeps reading for a while instead of stopping at the first settled answer (PL-18).
+  const plan = usePlan({ poll: returned === "success", watchUntil });
   const holds = plan.data ? HOLDS_PLAN.has(plan.data.status) : false;
-  const settled = confirming && holds;
+  const settled = returned === "success" && holds;
   const zone = browserZone();
   const [interval, setInterval] = useState<PlanInterval>("month");
   const [extra, setExtra] = useState(0);
@@ -137,7 +143,9 @@ export function PlanView() {
             {confirming && !settled ? (
               <p role="status" className="flex items-start gap-3 rounded-md bg-info-tint p-4 text-sm text-info">
                 <Info size={20} aria-hidden className="mt-px shrink-0" />
-                Thanks. {returned === "shopify" ? "Shopify" : "Stripe"} is confirming your plan; it shows here in a moment.
+                {returned === "shopify"
+                  ? "Thanks. Shopify is confirming your plan. A change can take a few minutes to show here; this page checks again on its own."
+                  : "Thanks. Stripe is confirming your plan; it shows here in a moment."}
               </p>
             ) : null}
             {returned === "cancelled" && !holds ? (

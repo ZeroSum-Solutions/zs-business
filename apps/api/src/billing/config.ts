@@ -3,7 +3,7 @@
 // anything but `on` runs nothing and needs no other variable.
 import { parse } from "pg-connection-string";
 import { z } from "zod";
-import { shopifyBillingConfigSchema, type ShopifyBillingConfig } from "@zs/core";
+import { secureUrlProblem, shopifyBillingConfigSchema, type ShopifyBillingConfig } from "@zs/core";
 import { DELIVERY_CRON_BUDGET_LIMIT_MS, PLACEHOLDER_CRON_SECRET } from "../cron-common.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -27,7 +27,7 @@ const onSchema = z.object({
 });
 
 const SHOPIFY_REQUIRED = ["BILLING_SHOPIFY_PARTNER_ID", "BILLING_SHOPIFY_PARTNER_TOKEN", "BILLING_SHOPIFY_APP_ID", "BILLING_SHOPIFY_PLAN_HANDLES"] as const;
-const SHOPIFY_OPTIONAL = ["BILLING_SHOPIFY_API_VERSION", "BILLING_SHOPIFY_BASE_URL"] as const;
+const SHOPIFY_OPTIONAL = ["BILLING_SHOPIFY_API_VERSION", "BILLING_SHOPIFY_BASE_URL", "BILLING_SHOPIFY_SYNC_LIMIT"] as const;
 
 /** PL-20: the Partner API reader's config, or null when no BILLING_SHOPIFY_ variable is set. */
 function parseShopify(source: Readonly<Record<string, string | undefined>>): ShopifyBillingConfig | null {
@@ -58,6 +58,11 @@ function parseShopify(source: Readonly<Record<string, string | undefined>>): Sho
   const config = parsed.data;
   if (!config.baseUrl.startsWith("https://") && !LOOPBACK.has(new URL(config.baseUrl).hostname.replace(/^\[|\]$/g, "")))
     throw new Error("Invalid environment: BILLING_SHOPIFY_BASE_URL must be https (http only on a loopback host)");
+  const problem = secureUrlProblem("BILLING_SHOPIFY_BASE_URL", config.baseUrl);
+  if (problem) throw new Error(`Invalid environment: ${problem}`);
+  const base = new URL(config.baseUrl);
+  if (base.search || base.hash || (base.pathname !== "/" && base.pathname !== ""))
+    throw new Error("Invalid environment: BILLING_SHOPIFY_BASE_URL is an origin only (no path, query or fragment)");
   return config;
 }
 

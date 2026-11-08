@@ -106,7 +106,10 @@ export function createPlanEvents(deps: PlanEventDeps) {
   }
   async function storedTenant(tx: Transaction, subscriptionId: string | null, customerId: string | null): Promise<string | null> {
     if (subscriptionId) {
-      const row = (await tx.query<{ tenant_id: string }>("SELECT tenant_id FROM plan_subscriptions WHERE provider='stripe' AND id=$1", [subscriptionId])).rows[0];
+      // PL-14: a tenant another provider bills is never resolved from its old Stripe rows.
+      const row = (await tx.query<{ tenant_id: string }>(
+        `SELECT s.tenant_id FROM plan_subscriptions s LEFT JOIN tenant_plans p ON p.tenant_id=s.tenant_id
+          WHERE s.provider='stripe' AND s.id=$1 AND coalesce(p.billing_provider, 'stripe')='stripe'`, [subscriptionId])).rows[0];
       if (row) return row.tenant_id;
     }
     if (customerId) {
@@ -122,7 +125,14 @@ export function createPlanEvents(deps: PlanEventDeps) {
   }
 
   /** Reads one subscription from Stripe and stores it; then derives the tenant's record. */
+  /** PL-14: true when another provider bills the tenant; checked under the plan lock, before any write or Stripe call. */
+  async function otherProvider(tx: Transaction, tenantId: string): Promise<boolean> {
+    const row = (await tx.query<{ billing_provider: string }>("SELECT billing_provider FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
+    return row !== undefined && row.billing_provider !== "stripe";
+  }
+
   async function sync(tx: Transaction, tenantId: string, subscriptionId: string, at: Date): Promise<PlanOutcome> {
+    if (await otherProvider(tx, tenantId)) return "not_ours";
     if (!deps.subscriptions) return "wait";
     const answer = await deps.subscriptions.retrieve(subscriptionId);
     if (!answer) return "not_ours";
@@ -197,6 +207,7 @@ export function createPlanEvents(deps: PlanEventDeps) {
     const tenantId = await checkoutTenant(tx, object);
     if (!tenantId) return "not_ours";
     await lockTenantPlan(tx, tenantId);
+    if (await otherProvider(tx, tenantId)) return "not_ours";
     const checkoutId = uuid(meta(object).zs_checkout)!;
     const sessionId = id(object.id, "cs_");
     if (type === "checkout.session.expired") {
@@ -235,6 +246,7 @@ export function createPlanEvents(deps: PlanEventDeps) {
     const tenantId = (await checkoutTenant(tx, details)) ?? (await storedTenant(tx, subscriptionId, id(object.customer, "cus_")));
     if (!tenantId) return "wait";
     await lockTenantPlan(tx, tenantId);
+    if (await otherProvider(tx, tenantId)) return "not_ours";
     const amount = Number.isSafeInteger(object.amount_due) && (object.amount_due as number) >= 0 ? object.amount_due as number : 0;
     const currency = typeof object.currency === "string" && /^[a-z]{3}$/.test(object.currency) ? object.currency : "usd";
     const when = created ?? at;

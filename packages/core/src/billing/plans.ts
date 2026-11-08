@@ -141,14 +141,17 @@ interface StoredCheckout {
     readonly successUrl: string; readonly cancelUrl: string;
   };
   readonly checkoutUrl: string | null;
+  /** PL-15: the tenant's billing provider now. */
+  readonly billingProvider: string;
 }
 
 export async function getStoredCheckout(tx: Transaction, tenantId: string, checkoutId: string): Promise<StoredCheckout | null> {
   const row = (await tx.query<CheckoutRow & {
     plan_price_id: string; addon_price_id: string | null; stripe_customer_id: string | null;
-    success_url: string; cancel_url: string; checkout_url: string | null;
-  }>(`SELECT ${CHECKOUT_COLUMNS}, plan_price_id, addon_price_id, stripe_customer_id, success_url, cancel_url, checkout_url
-        FROM plan_checkouts WHERE tenant_id=$1 AND id=$2`, [tenantId, checkoutId])).rows[0];
+    success_url: string; cancel_url: string; checkout_url: string | null; billing_provider: string | null;
+  }>(`SELECT ${CHECKOUT_COLUMNS.split(",").map((column) => `c.${column.trim()}`).join(", ")}, c.plan_price_id, c.addon_price_id,
+        c.stripe_customer_id, c.success_url, c.cancel_url, c.checkout_url, p.billing_provider
+        FROM plan_checkouts c LEFT JOIN tenant_plans p ON p.tenant_id=c.tenant_id WHERE c.tenant_id=$1 AND c.id=$2`, [tenantId, checkoutId])).rows[0];
   if (!row) return null;
   return {
     checkout: checkoutFromRow(row),
@@ -157,6 +160,7 @@ export async function getStoredCheckout(tx: Transaction, tenantId: string, check
       successUrl: row.success_url, cancelUrl: row.cancel_url,
     },
     checkoutUrl: row.checkout_url,
+    billingProvider: row.billing_provider ?? "stripe",
   };
 }
 
@@ -179,6 +183,8 @@ export async function startPlanCheckout(input: {
   await input.dispatch(parsed);
   const found = await input.read(parsed.payload.checkoutId);
   if (!found) throw new Conflict("The checkout is not available", { reason: "checkout_closed" });
+  // PL-15: checked again before every Stripe answer, a replay included; the tenant may have been linked to Shopify since.
+  if (found.billingProvider !== "stripe") throw notStripe();
   const { checkout } = found;
   const createdAt = Date.parse(checkout.createdAt);
   if (found.checkoutUrl !== null && checkout.status === "pending" && input.now.getTime() - createdAt < PLAN_CHECKOUT_LIFETIME_MS)

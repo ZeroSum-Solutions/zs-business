@@ -18,6 +18,7 @@ import { currentTenant } from "../booking/create.js";
 import { parseOrFail } from "../crm/rows.js";
 import type { CheckoutSessionRequest, StripeClient } from "./stripe.js";
 import { WALLET_TOPUP_CREATE_ACTION } from "@zs/contracts";
+import { lockTenantPlan } from "./plan-gate.js";
 
 /**
  * S-2: Checkout expires an hour after the top-up was created. Stripe refuses an expires_at less
@@ -95,6 +96,8 @@ export const createTopUpHandler: ActionHandler<TopUpDispatchConfig> = {
 /** PL-15: a tenant another provider bills is never charged through Stripe, top-ups included. */
 const otherProvider = () => new Conflict("This business is billed through another provider", { reason: "billing_provider" });
 async function notStripeBilled(tx: Transaction, tenantId: string): Promise<void> {
+  // PL-17: under the plan lock, so a Shopify link either sees this top-up or commits first and refuses it here.
+  await lockTenantPlan(tx, tenantId);
   const row = (await tx.query<{ billing_provider: string }>("SELECT billing_provider FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
   if (row && row.billing_provider !== "stripe") throw otherProvider();
 }

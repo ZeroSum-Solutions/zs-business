@@ -5,7 +5,8 @@ import type { Transaction } from "@zs/db";
 
 /** PL-4, PL-10: one tenant's plan decisions and plan events never interleave. */
 export async function lockTenantPlan(tx: Transaction, tenantId: string): Promise<void> {
-  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`plan:${tenantId}`]);
+  // The key uses Postgres's own UUID spelling, so "ABC…" and "abc…" (one tenant) take one lock.
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('plan:' || $1::uuid::text, 0))", [tenantId]);
 }
 
 /** PL-1: the limits in force; null for a comped tenant. */

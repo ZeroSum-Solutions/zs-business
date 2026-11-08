@@ -58,8 +58,11 @@ export class ShopifyPartnerError extends Error {
 
 export interface ShopifySubscriptionReader {
   readonly config: ParsedShopifyBillingConfig;
-  /** The shop's current contract, or null when Shopify says it has none. Throws ShopifyPartnerError. */
-  active(shopId: string): Promise<ShopifyContract | null>;
+  /**
+   * The shop's current contract, or null when Shopify says it has none. Throws ShopifyPartnerError.
+   * `timeoutMs` shortens the configured timeout, so a pass stays inside its deadline.
+   */
+  active(shopId: string, options?: { readonly timeoutMs?: number }): Promise<ShopifyContract | null>;
 }
 
 const QUERY = `query ActiveSubscription($appId: ID!, $shopId: ID!) {
@@ -87,6 +90,15 @@ const answerSchema = z.object({
   }),
 });
 
+/** PL-18: upstream text never carries the token or anything token-like into an error or a log. */
+function redacted(text: string, token: string): string {
+  return text.split(token).join("[redacted]")
+    .replace(/\bprt[a-z]*_[A-Za-z0-9]+/g, "[redacted]")
+    .replace(/[A-Za-z0-9_\-]{24,}/g, "[redacted]")
+    .replace(/[^\x20-\x7e]/g, " ")
+    .slice(0, 200);
+}
+
 const throttled = (errors: unknown[]) => errors.some((raw) => {
   const error = raw && typeof raw === "object" ? raw as { message?: unknown; extensions?: { code?: unknown } } : {};
   const code = String(error.extensions?.code ?? "");
@@ -103,32 +115,51 @@ export function createShopifySubscriptionReader(input: {
   const appGid = `gid://shopify/App/${config.appId}`;
   return {
     config,
-    async active(shopId) {
+    async active(shopId, options = {}) {
       if (!SHOPIFY_SHOP_GID.test(shopId)) throw new ShopifyPartnerError("Not a shop GID", false);
+      const timeoutMs = Math.max(1, Math.min(config.timeoutMs, Math.floor(options.timeoutMs ?? config.timeoutMs)));
       let response: Response;
       try {
         response = await send(url, {
           method: "POST",
           headers: { "Content-Type": "application/json", Accept: "application/json", "X-Shopify-Access-Token": config.token, "User-Agent": "zs-business-billing" },
           body: JSON.stringify({ query: QUERY, variables: { appId: appGid, shopId } }),
-          signal: AbortSignal.timeout(config.timeoutMs),
+          signal: AbortSignal.timeout(timeoutMs),
+          // A redirect is an error, never followed with the token.
+          redirect: "manual",
         });
       } catch {
         throw new ShopifyPartnerError("The Partner API is unreachable", true);
       }
       if (response.status === 429 || response.status >= 500) throw new ShopifyPartnerError(`The Partner API answered ${response.status}`, true);
+      // A body that stops arriving (abort, timeout, reset) is a transport failure and ends the pass;
+      // only a complete body that is not JSON is a malformed answer.
+      let text: string;
+      try {
+        text = await response.text();
+      } catch {
+        throw new ShopifyPartnerError("The Partner API answer was cut off", true);
+      }
+      // Per-shop failures come as GraphQL errors in a 200 answer. Any other status (401, 403, a 404
+      // for an unknown API version, a redirect) is the token or the endpoint, the same for every
+      // shop, so it ends the pass instead of backing off each shop in turn.
+      if (!response.ok) throw new ShopifyPartnerError(`The Partner API answered ${response.status}`, true);
       let body: unknown;
       try {
-        body = await response.json();
+        body = JSON.parse(text);
       } catch {
         throw new ShopifyPartnerError(`The Partner API answered ${response.status} without JSON`, false);
       }
-      if (!response.ok) throw new ShopifyPartnerError(`The Partner API answered ${response.status}`, false);
-      const errors = body && typeof body === "object" && Array.isArray((body as { errors?: unknown }).errors) ? (body as { errors: unknown[] }).errors : [];
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new ShopifyPartnerError("The Partner API answer is malformed", false);
+      // Any `errors` field that is not absent, null or an empty list makes the answer an error, never "no contract".
+      const rawErrors = (body as { errors?: unknown }).errors;
+      if (rawErrors !== undefined && rawErrors !== null && !Array.isArray(rawErrors))
+        throw new ShopifyPartnerError("The Partner API answer is malformed", false);
+      const errors: unknown[] = Array.isArray(rawErrors) ? rawErrors : [];
       if (errors.length > 0) {
         if (throttled(errors)) throw new ShopifyPartnerError("The Partner API is throttling", true);
         const first = errors[0] && typeof errors[0] === "object" ? (errors[0] as { message?: unknown }).message : undefined;
-        throw new ShopifyPartnerError(`The Partner API refused: ${typeof first === "string" ? first.slice(0, 200) : "unknown error"}`, false);
+        throw new ShopifyPartnerError(`The Partner API refused: ${typeof first === "string" ? redacted(first, config.token) : "unknown error"}`, false);
       }
       const parsed = answerSchema.safeParse(body);
       if (!parsed.success) throw new ShopifyPartnerError("The Partner API answer is malformed", false);

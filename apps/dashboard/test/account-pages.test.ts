@@ -13,7 +13,7 @@ import { DEMO_BUSINESS, DEMO_TENANT_ID } from "../src/lib/api/demo/seed";
 import { createDemoBilling } from "../src/lib/api/demo/billing";
 import { createDemoWorkspace } from "../src/lib/api/demo/workspace";
 import { ApiProvider } from "../src/lib/api/react";
-import { scopeKeys } from "../src/lib/queries";
+import { PLAN_POLL_MS, PLAN_WATCH_MS, PLAN_WATCH_POLL_MS, planRefetchInterval, scopeKeys } from "../src/lib/queries";
 import { SessionProvider } from "../src/lib/session";
 
 const NEAR_MIDNIGHT_UTC = "2026-11-21T03:30:00.000Z";
@@ -80,6 +80,19 @@ describe("plan", () => {
       { ...shopify, status: "none", plan: null, limits: null, shopifyManageUrl: null }));
     expect(unknown).toContain(escaped(SHOPIFY_ADMIN_HINT).replaceAll(">", "&gt;"));
     expect(unknown).not.toContain("Manage billing in Shopify");
+  });
+
+  it("keeps reading an already active plan for a while after a Shopify return, then stops (PL-18)", () => {
+    const now = Date.parse(NEAR_MIDNIGHT_UTC);
+    const watchUntil = now + PLAN_WATCH_MS;
+    // Shopify: an active plan can still change at the runner's next pass, so reading goes on.
+    expect(planRefetchInterval({ status: "active" }, { watchUntil }, now)).toBe(PLAN_WATCH_POLL_MS);
+    expect(planRefetchInterval({ status: "active" }, { watchUntil }, watchUntil - 1)).toBe(PLAN_WATCH_POLL_MS);
+    expect(planRefetchInterval({ status: "active" }, { watchUntil }, watchUntil)).toBe(false);
+    // Stripe: reads until the plan settles.
+    expect(planRefetchInterval({ status: "none" }, { poll: true }, now)).toBe(PLAN_POLL_MS);
+    expect(planRefetchInterval({ status: "active" }, { poll: true }, now)).toBe(false);
+    expect(planRefetchInterval(undefined, {}, now)).toBe(false);
   });
 
   it("describes the wallet and the providers as the contracts do", async () => {

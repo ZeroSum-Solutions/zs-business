@@ -181,6 +181,9 @@ describe("parseBillingEnv (S-8, S-9)", () => {
       [{ ...SHOPIFY, BILLING_SHOPIFY_PARTNER_TOKEN: `${token} x` }, /token: invalid/],
       [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "http://partners.example.test" }, /must be https/],
       [{ ...SHOPIFY, BILLING_SHOPIFY_SYNC_LIMIT: "101" }, /BILLING_SHOPIFY_SYNC_LIMIT/],
+      [{ BILLING_SHOPIFY_SYNC_LIMIT: "5" }, /needs BILLING_SHOPIFY_PARTNER_ID/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "https://user:pw@partners.example.test" }, /credentials/],
+      [{ ...SHOPIFY, BILLING_SHOPIFY_BASE_URL: "https://partners.example.test/x?y=1" }, /origin only/],
     ];
     for (const [extra, expected] of cases) {
       const message = billingError({ ...ON, ...extra });

@@ -5,9 +5,10 @@ import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanInterval } from "@zs/contracts";
 import { cannotBeApproved } from "../../src/approvals/index.js";
+import { mapError } from "../../src/edge/index.js";
 import {
   createBillingWorker, createSession, createStripeSubscriptionReader, PLAN_CHECKOUT_LIFETIME_MS, planGate, setFoundingInvite,
-  type Session,
+  setShopifyBilling, SHOPIFY_LINK_CHECKOUT_GATE_MS, type Session,
 } from "../../src/index.js";
 import { startFakeStripePlans, type FakeStripePlans } from "./fake-stripe-plans.js";
 import { createBillingHarness, stripeId, type BillingHarness } from "./helpers.js";
@@ -196,8 +197,11 @@ describe("applying plan events (PL-10)", () => {
     expect((await session.getBillingPlan()).readOnly).toBe(false);
     b.h.clock.advance(8 * DAY);
     expect(await session.getBillingPlan()).toMatchObject({ readOnly: true, status: "past_due" });
-    await expect(session.upsertContact({ displayName: "Ada Halden", email: "ada@haldenrowe.example" }, `c-${randomUUID()}`))
-      .rejects.toMatchObject({ code: "Conflict", details: { reason: "plan_read_only" } });
+    const refused = await session.upsertContact({ displayName: "Ada Halden", email: "ada@haldenrowe.example" }, `c-${randomUUID()}`)
+      .then(() => null, (error: unknown) => error);
+    expect(refused).toMatchObject({ code: "Conflict", details: { reason: "plan_read_only" } });
+    // The reason leaves the API as is, so the dashboard can say what to do.
+    expect(mapError(refused)).toMatchObject({ status: 409, body: { error: { details: { reason: "plan_read_only" } } } });
     // Adding money and fixing billing still work.
     await expect(session.createTopUp({ amount: 1_000 }, `t-${randomUUID()}`)).resolves.toBeDefined();
     // The invoice is paid: read-only lifts, and a late repeat of the failure changes nothing.
@@ -278,8 +282,10 @@ describe("plan limits (PL-8)", () => {
     await subscribe(tenantId, { plan: "solo" });
     const session = await planSession(tenantId);
     await expect(session.inviteMember({ email: `${randomUUID()}@haldenrowe.example`, role: "staff" }, randomUUID())).resolves.toBeDefined();
-    await expect(session.inviteMember({ email: `${randomUUID()}@haldenrowe.example`, role: "staff" }, randomUUID()))
-      .rejects.toMatchObject({ code: "Conflict", details: { reason: "plan_limit", resource: "seats", limit: 2, used: 2 } });
+    const over = await session.inviteMember({ email: `${randomUUID()}@haldenrowe.example`, role: "staff" }, randomUUID())
+      .then(() => null, (error: unknown) => error);
+    expect(over).toMatchObject({ code: "Conflict", details: { reason: "plan_limit", resource: "seats", limit: 2, used: 2 } });
+    expect(mapError(over).body.error.details).toEqual({ reason: "plan_limit", resource: "seats", limit: 2, used: 2 });
     const comped = await b.tenant();
     const owner = await planSession(comped);
     for (let i = 0; i < 3; i += 1)
@@ -357,6 +363,37 @@ describe("billing provider (PL-14)", () => {
     await b.h.service((tx) => tx.query("UPDATE tenant_plans SET stripe_customer_id=$2 WHERE tenant_id=$1", [tenantId, sub.customer]));
     expect((await worker().runOnce()).outcomes).toEqual({ wait: 1 });
     expect(await plan(tenantId)).toMatchObject({ billing_provider: "shopify", status: "none" });
+  });
+
+  it("a tenant linked to Shopify after its Stripe plan ended is never resolved from its Stripe rows, and Stripe is never asked", async () => {
+    const tenantId = await b.tenant();
+    const { sub, started } = await subscribe(tenantId);
+    const ended = { ...sub, status: "canceled", ended_at: Math.floor(b.h.clock.now().getTime() / 1000) };
+    fake.subscriptions.set(sub.id, ended);
+    await b.deliver(subEvent("customer.subscription.deleted", ended));
+    await worker().runOnce();
+    await b.settle();
+    expect(await plan(tenantId)).toMatchObject({ status: "canceled" });
+    b.h.clock.advance(SHOPIFY_LINK_CHECKOUT_GATE_MS + 1);
+    const shopNumber = 9_000_000 + Math.floor(Math.random() * 1_000_000);
+    await b.h.service((tx) => setShopifyBilling(tx, {
+      tenantId, shop: { id: `gid://shopify/Shop/${shopNumber}`, domain: `halden-${shopNumber}.myshopify.com` }, now: b.h.clock.now(), graceDays: 7,
+    }));
+    const before = await plan(tenantId);
+    const reads = () => fake.received.filter((r) => r.path.startsWith("/v1/subscriptions/")).length;
+    const readsBefore = reads();
+    // Stored subscription ID and customer only: nothing resolves the tenant.
+    await b.deliver(subEvent("customer.subscription.updated", { ...ended, status: "active", metadata: {} }));
+    await b.deliver(invoiceEvent("invoice.payment_failed", { ...ended, metadata: {} }, stripeId("in")));
+    // Metadata naming the tenant's own checkout: resolved, then dropped under the lock before any write.
+    await b.deliver(b.event("checkout.session.completed", {
+      id: stripeId("cs"), object: "checkout.session", mode: "subscription", status: "complete", customer: sub.customer, subscription: sub.id,
+      metadata: { zs_tenant: tenantId, zs_checkout: started.checkout.id },
+    }));
+    await b.deliver(subEvent("customer.subscription.updated", { ...ended, status: "active" }));
+    expect((await worker().runOnce()).outcomes).toEqual({ wait: 2, not_ours: 2 });
+    expect(reads()).toBe(readsBefore);
+    expect(await plan(tenantId)).toEqual(before);
   });
 });
 
