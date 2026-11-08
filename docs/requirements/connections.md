@@ -675,7 +675,7 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     store relinks through the claim flow (C-21).
   - Why not Composio's `BEARER_TOKEN` import: Composio would hold our token and not refresh it,
     and order data would still pass through a subprocessor.
-- **C-19 App configuration.** One app per environment: preview `ZS Business Connections`
+- **C-19 App configuration.** One app per environment: preview `ZS Business Conn (preview)` (Shopify caps names at 30 characters)
   (app id `444938846209`, tested on the dev store `zs-hub-test-store`) and production (`adc380d0312483cd9ab82a09d9f0e267`).
   Config files `shopify/preview/shopify.app.toml` and `shopify/production/shopify.app.toml`
   (no secrets; the client id is public): `embedded = true`; `application_url` is
@@ -835,7 +835,7 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   disclosure rules are C-6 and C-11 unchanged.
 - **C-24 Webhooks and compliance.** One public route in the workers project:
   `POST /webhooks/shopify`.
-  - Reads the raw body (capped at 64 KiB) **before** any parse, computes the base64
+  - Reads the raw body (capped at 256 KiB) **before** any parse, computes the base64
     HMAC-SHA256 with `SHOPIFY_CLIENT_SECRET` (the previous secret also accepted during a
     rotation), compares in constant time on equal-length buffers, and answers `401` with no
     body on any mismatch or missing header (S8). Then it requires `X-Shopify-Topic`,
