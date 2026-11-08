@@ -59,10 +59,23 @@ describe("Shopify card: connect form", () => {
     expect(text(html)).toContain("install ZS Business Connections from the Shopify App Store");
   });
 
-  it("with the native tier on, a store that needs the owner is reopened in Shopify admin, not reconnected by address", () => {
+  it("with the native tier on, a native store that needs the owner is reopened in Shopify admin: no Reconnect (C-18)", () => {
+    const html = card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error", tier: "native" })], fill: (client) => client.setQueryData(keys.shopifyClaim, null) });
+    expect(text(html)).toContain("open ZS Business Connections in your Shopify admin");
+    expect(text(html)).not.toContain("Reconnect Halden Rowe");
+  });
+
+  it("with the native tier on, a row the API did not label (older server) keeps the reopen note (C-18)", () => {
     const html = card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error" })], fill: (client) => client.setQueryData(keys.shopifyClaim, null) });
     expect(text(html)).toContain("open ZS Business Connections in your Shopify admin");
     expect(text(html)).not.toContain("Reconnect Halden Rowe");
+  });
+
+  it("with the native tier on, a legacy Composio row in reauthorize shows a Reconnect action, not the reopen note (C-18)", () => {
+    const html = card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error", tier: "composio" })], fill: (client) => client.setQueryData(keys.shopifyClaim, null) });
+    expect(text(html)).toContain("Reconnect Halden Rowe");
+    expect(html).not.toContain('data-testid="shopify-reopen-note"');
+    expect(text(html)).not.toContain("open ZS Business Connections in your Shopify admin");
   });
 
   it("never asks for a store address when the claim read failed for a reason other than 'no native tier' (C-18)", () => {
@@ -188,6 +201,18 @@ describe("Shopify card: rows", () => {
     expect(testid(unconfirmed, "shopify-warning")).toBe(REVOKE_FAILED_MESSAGE);
     expect(testid(unconfirmed, "shopify-domain")).toBe("halden-rowe.myshopify.com");
     expect(text(unconfirmed)).not.toMatch(/Disconnect Halden Rowe|Reconnect Halden Rowe|Disconnect halden-rowe/);
+  });
+
+  it("shows no Reconnect for a legacy row while the native read is pending or failed (C-18)", () => {
+    const items = [connection({ status: "reauthorize", reauthorizeReason: "auth_error", tier: "composio" })];
+    expect(text(card({ items, live: true }))).not.toContain("Reconnect Halden Rowe");
+    expect(text(card({ items, live: true, fill: (client) => failQuery(client, keys.shopifyClaim, new ClaimsUnavailable(500)) }))).not.toContain("Reconnect Halden Rowe");
+  });
+
+  it("with no native tier, Reconnect shows for a composio row, and for an unlabelled one (C-18)", () => {
+    for (const tier of ["composio", undefined] as const) {
+      expect(text(card({ items: [connection({ status: "reauthorize", reauthorizeReason: "auth_error", ...(tier ? { tier } : {}) })] }))).toContain("Reconnect Halden Rowe");
+    }
   });
 
   it("keeps the disconnect and reconnect words behind their dialogs until asked for", () => {

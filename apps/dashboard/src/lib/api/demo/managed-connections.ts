@@ -172,7 +172,7 @@ export function createDemoManagedConnections(ctx: DemoManagedConnectionsContext)
       const now = ctx.now().toISOString();
       const connection: Connection = {
         id: ctx.newId(), toolkit: grant.toolkit, accountLabel: grant.accountLabel, accountDomain: grant.shopDomain,
-        status: "active", reauthorizeReason: null, revokeFailed: false, readBlocked: false, lastCheckedAt: now, createdAt: now,
+        status: "active", tier: "composio", reauthorizeReason: null, revokeFailed: false, readBlocked: false, lastCheckedAt: now, createdAt: now,
       };
       connections.set(connection.id, connection);
       changedAt.set(connection.id, ctx.now().getTime());

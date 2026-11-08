@@ -10,6 +10,7 @@ import {
   CONNECTION_DISCONNECT_REQUESTED_EVENT,
   connectConnectionCommandSchema,
   connectionSchema,
+  type ConnectionTier,
   disconnectConnectionCommandSchema,
   Conflict,
   NotFound,
@@ -29,6 +30,7 @@ import { connectIdempotencyKey } from "./tokens.js";
 interface ConnectionRow {
   id: string;
   toolkit: string;
+  tier: ConnectionTier;
   account_label: string | null;
   account_domain: string;
   status: Connection["status"];
@@ -39,11 +41,13 @@ interface ConnectionRow {
   created_at: Date;
 }
 /** Never a Composio or external account ID (C-13). */
-const COLUMNS = "id, toolkit, account_label, account_domain, status, reauthorize_reason, last_error_code, revoke_outcome, last_checked_at, created_at";
+const COLUMNS = "id, tier, toolkit, account_label, account_domain, status, reauthorize_reason, last_error_code, revoke_outcome, last_checked_at, created_at";
 
-export const managedConnectionFromRow = (row: ConnectionRow): Connection => connectionSchema.parse({
+/** C-18: every connection the API returns carries its tier (the schema keeps it optional for older answers). */
+export const managedConnectionFromRow = (row: ConnectionRow): Connection & { tier: ConnectionTier } => connectionSchema.parse({
   id: row.id,
   toolkit: row.toolkit,
+  tier: row.tier,
   accountLabel: row.account_label,
   accountDomain: row.account_domain,
   status: row.status,
@@ -55,9 +59,9 @@ export const managedConnectionFromRow = (row: ConnectionRow): Connection => conn
   readBlocked: row.status === "active" && row.last_error_code === "provider_permission_denied",
   lastCheckedAt: row.last_checked_at.toISOString(),
   createdAt: row.created_at.toISOString(),
-});
+}) as Connection & { tier: ConnectionTier };
 
-export async function getConnection(tx: Transaction, tenantId: string, id: string): Promise<Connection | null> {
+export async function getConnection(tx: Transaction, tenantId: string, id: string): Promise<(Connection & { tier: ConnectionTier }) | null> {
   const row = (await tx.query<ConnectionRow>(`SELECT ${COLUMNS} FROM connections WHERE tenant_id=$1 AND id=$2`, [tenantId, id])).rows[0];
   return row ? managedConnectionFromRow(row) : null;
 }
