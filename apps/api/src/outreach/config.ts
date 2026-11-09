@@ -92,6 +92,10 @@ export function assertOutreachCronFits(runner: OutreachRunnerEnv | null): void {
     throw new Error(`Invalid environment: OUTREACH_RUN_BUDGET_MS must be at most ${DELIVERY_CRON_BUDGET_LIMIT_MS} for the cron function, which Vercel stops at 30 s`);
 }
 
+export function checkOutreachDatabaseUrl(name: string, url: string, caCert: string | undefined): void {
+  checkUrl(name, url, caCert);
+}
+
 function checkUrl(name: string, url: string, caCert: string | undefined): void {
   let host: string;
   try {

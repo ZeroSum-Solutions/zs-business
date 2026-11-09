@@ -13,6 +13,9 @@ import {
   OUTREACH_CAMPAIGN_CREATE_ACTION,
   OUTREACH_CAMPAIGN_PAUSE_ACTION,
   OUTREACH_CAMPAIGN_TARGET,
+  OUTREACH_MAILBOX_CONNECT_ACTION,
+  OUTREACH_MAILBOX_DISCONNECT_ACTION,
+  OUTREACH_MAILBOX_TARGET,
   OUTREACH_PROSPECT_STOP_ACTION,
   OUTREACH_PROSPECT_TARGET,
   OUTREACH_PROSPECTS_IMPORT_ACTION,
@@ -42,7 +45,7 @@ import { outreachAllowed } from "../outreach/config.js";
 import { getOutreachCampaign, listOutreachCampaigns, listOutreachMailboxes, listOutreachProspects } from "../outreach/reads.js";
 import { campaignMailboxIds, loadCampaign } from "../outreach/records.js";
 import { prospectsDigest, unknownVariableProblem } from "../outreach/templates.js";
-import { toJson } from "./dispatch-util.js";
+import { only, toJson } from "./dispatch-util.js";
 import { validationError } from "./errors.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, memberAuthorize, parseInput, type EdgeDependencies, type Principal } from "./session.js";
@@ -187,3 +190,46 @@ export function createOutreachSession(deps: EdgeDependencies, principal: Princip
   };
 }
 export type OutreachSession = ReturnType<typeof createOutreachSession>;
+
+/** The principal of the operator command (OS-2): one id per tenant, derived, never a member. */
+export const outreachOperatorActorId = (tenantId: string): string => derivedId(tenantId, "outreach", "operator");
+/** The mailbox's id: derived from the tenant and the address, so a reconnect finds the same row. */
+export const outreachMailboxId = (tenantId: string, address: string): string => derivedId(tenantId, "outreach-mailbox", address.toLowerCase());
+
+/**
+ * The operator command's write path (OS-2, OS-3). The principal may run only the two mailbox actions; the allowlist
+ * travels as dispatch config. Not reachable from any route: only the operator script on the owner's Mac builds one.
+ */
+export function createOutreachOperator(deps: EdgeDependencies, rawTenantId: string) {
+  const tenantId = uuidSchema.parse(rawTenantId);
+  const run = directDispatch(deps, tenantId, outreachOperatorActorId(tenantId),
+    only(OUTREACH_MAILBOX_CONNECT_ACTION, OUTREACH_MAILBOX_DISCONNECT_ACTION), deps.outreach ? { outreach: deps.outreach } : {});
+  const target = (mailboxId: string) => ({ tenantId, type: OUTREACH_MAILBOX_TARGET, id: mailboxId });
+  return {
+    tenantId,
+    allowed: () => outreachAllowed(deps.outreach, tenantId),
+    connectMailbox(input: {
+      readonly mailboxId: string; readonly email: string; readonly displayName: string; readonly dailyLimit: number;
+      readonly sealedRefreshToken: string; readonly grantedScopes: readonly string[]; readonly idempotencyKey: string;
+    }) {
+      const { idempotencyKey, ...payload } = input;
+      return run({
+        actionType: OUTREACH_MAILBOX_CONNECT_ACTION,
+        target: target(input.mailboxId),
+        approvalReference: { tenantId, id: deps.generateId() },
+        idempotencyKey,
+        payload: toJson(payload),
+      });
+    },
+    disconnectMailbox(mailboxId: string, idempotencyKey: string) {
+      return run({
+        actionType: OUTREACH_MAILBOX_DISCONNECT_ACTION,
+        target: target(mailboxId),
+        approvalReference: { tenantId, id: deps.generateId() },
+        idempotencyKey,
+        payload: { mailboxId },
+      });
+    },
+  };
+}
+export type OutreachOperator = ReturnType<typeof createOutreachOperator>;

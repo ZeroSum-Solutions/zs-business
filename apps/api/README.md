@@ -1217,6 +1217,24 @@ With sending off the worker still reads replies and bounces.
 | `OUTREACH_GMAIL_BASE_URL`, `GOOGLE_TOKEN_BASE_URL` | Optional, for tests. |
 | `OUTREACH_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/outreach`, for example `*/5 * * * *`. Unset, there is no cron. |
 
+### Connecting a mailbox (operator command)
+
+Each outreach mailbox consents once, on the owner's Mac, signed in as that mailbox:
+
+```
+pnpm --filter @zs/api outreach:connect-mailbox --tenant <uuid> --mailbox <address> --name "<From name>" [--daily-limit 20] [--dry-run]
+pnpm --filter @zs/api outreach:connect-mailbox --tenant <uuid> --mailbox <address> --disconnect
+```
+
+It listens on `127.0.0.1`, prints the consent URL (scopes `gmail.send` and `gmail.metadata` only), waits at
+most five minutes, then checks state, the refresh token, both scopes and that the signed-in account is the
+mailbox. Any failure after the code exchange revokes the new grant and stores nothing. It uses
+`OUTREACH_TENANTS`, `OUTREACH_GOOGLE_CLIENT_ID`, `OUTREACH_GOOGLE_CLIENT_SECRET`, `OUTREACH_RUNTIME_DATABASE_URL`
+and `DATABASE_CA_CERT` as above, plus `OUTREACH_TOKEN_PUBLIC_KEY` (base64 of the DER SPKI of the X25519
+public key that pairs with the worker's private key) and an optional `OUTREACH_MAILBOX_DOMAINS` (comma-separated,
+default `zerosum-solutions.com`). `--disconnect` clears the stored token; it cannot revoke the grant at Google
+(the runtime login cannot read the token), so revoke the app at myaccount.google.com/permissions too.
+
 `GET /cron/outreach` answers like `/cron/delivery`, with `{ ran: true, counts }` after a run. A mailbox
 whose Google sign-in failed is marked `reauthorize` and reported; an unknown send outcome, a bounce-rate
 pause and a lost lease are reported to an operator (logged without a token).

@@ -15,7 +15,14 @@ export {
   type StoredImage,
 } from "./session.js";
 export { createEnrichmentSession, enrichmentActorId, type EnrichmentSession } from "./enrichment-session.js";
-export { createOutreachSession, type OutreachSession } from "./outreach-session.js";
+export {
+  createOutreachOperator,
+  createOutreachSession,
+  outreachMailboxId,
+  outreachOperatorActorId,
+  type OutreachOperator,
+  type OutreachSession,
+} from "./outreach-session.js";
 export { createPublicSession, publicIntakeActorId, type PublicSession } from "./public-session.js";
 export {
   createInboundSmsSession,
