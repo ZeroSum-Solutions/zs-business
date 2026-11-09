@@ -16,3 +16,7 @@ export * from "./classify.js";
 export * from "./gmail-port.js";
 export * from "./gmail.js";
 export * from "./fake-gmail.js";
+export * from "./config.js";
+export * from "./handlers.js";
+export * from "./records.js";
+export * from "./reads.js";

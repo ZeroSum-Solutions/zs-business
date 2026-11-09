@@ -13,7 +13,7 @@ import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import { templateHandlers } from "../src/templates/handlers.js";
 import { templatedKindHandlers } from "../src/templates/send.js";
 import {
-  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, planHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -88,6 +88,11 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "contact.enrichment.unblock": "enrich",
   "contact.region.attest": "enrich",
   "contact.profile.apply": "enrich",
+  "outreach.campaign.create": "outreach",
+  "outreach.prospects.import": "outreach",
+  "outreach.campaign.activate": "outreach",
+  "outreach.campaign.pause": "outreach",
+  "outreach.prospect.stop": "outreach",
 };
 
 interface Tenant {
@@ -485,12 +490,14 @@ describe("permission map", () => {
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
       ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
-      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...documentIntakeHandlers,
+      ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...outreachHandlers, ...documentIntakeHandlers,
       ...setupHandlers,
     })
       // M6: the agent's own run actions belong to the agent principal only (agents.md G-1); the intake worker's result and fail actions
       // belong to its server-side principal (document-intake.md DL-5); the image worker's to its own.
-      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action) && !IMAGE_WORKER_ACTIONS.includes(action) && action !== "catalog.intake.result" && action !== "catalog.intake.fail")
+      .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action) && !IMAGE_WORKER_ACTIONS.includes(action) && action !== "catalog.intake.result" && action !== "catalog.intake.fail"
+        // outreach-sequencer.md OS-2: the mailbox actions belong to the operator command's principal.
+        && action !== "outreach.mailbox.connect" && action !== "outreach.mailbox.disconnect")
       .sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);

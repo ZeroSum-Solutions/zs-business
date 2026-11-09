@@ -5,7 +5,9 @@ import { validationError } from "../edge/errors.js";
 
 /** Which list and order a cursor belongs to; a cursor from another one is refused. */
 export type CursorKind =
-  | "contacts.recent" | "contacts.name" | "deals.recent" | "bookings.start" | "intake.recent" | "inbox.recent" | "approvals.recent" | "agents.runs";
+  | "contacts.recent" | "contacts.name" | "deals.recent" | "bookings.start" | "intake.recent" | "inbox.recent" | "approvals.recent" | "agents.runs"
+  // outreach-sequencer.md OS-22: prospects in address order; the sort value is the address.
+  | "outreach.prospects";
 
 /** The last row's sort value (microseconds since the epoch, or a name key) and its ID. */
 export type CursorKey = readonly [value: string, id: string];
@@ -32,7 +34,7 @@ export function decodeCursor(kind: CursorKind, query: { cursor?: string | undefi
   if (!Array.isArray(value) || value.length !== 3 || value[0] !== kind) throw invalid("cursor", "Not a cursor for this list");
   const [, sortValue, id] = value as unknown[];
   const valid = typeof sortValue === "string" && typeof id === "string" && ID.test(id) &&
-    (kind === "contacts.name" ? sortValue.length <= 1000 && !sortValue.includes("\0") : MICROS.test(sortValue));
+    (kind === "contacts.name" || kind === "outreach.prospects" ? sortValue.length <= 1000 && !sortValue.includes("\0") : MICROS.test(sortValue));
   if (!valid) throw invalid("cursor", "Not a cursor for this list");
   return [sortValue as string, id as string];
 }
