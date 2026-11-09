@@ -20,3 +20,12 @@ export * from "./config.js";
 export * from "./handlers.js";
 export * from "./records.js";
 export * from "./reads.js";
+export {
+  outreachWorkerConfigSchema,
+  type OutreachReport,
+  type OutreachRunCounts,
+  type OutreachWorkerConfig,
+  type OutreachWorkerDeps,
+  type ParsedOutreachConfig,
+} from "./worker-kit.js";
+export * from "./worker.js";
