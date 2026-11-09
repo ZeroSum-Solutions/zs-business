@@ -147,7 +147,7 @@ export function buildFooter(profile: FooterProfile, unsubscribeUrl: string): str
   return ["--", profile.legalName ?? profile.displayName, formatPostalAddress(profile.postalAddress),
     `To stop these emails: ${unsubscribeUrl}  (or reply "stop")`].join("\n");
 }
-export const appendFooter = (body: string, footer: string): string => `${body.replace(/\s+$/, "")}\n\n${footer}\n`;
+export const appendFooter = (body: string, footer: string): string => `${body.trimEnd()}\n\n${footer}\n`;
 
 // OS-4, OS-8: digests that bind an approval to exactly what an owner saw.
 

@@ -75,5 +75,13 @@ describe("classifyInbound (OS-19)", () => {
   it("reads addresses out of a header value", () => {
     expect(addressesIn('"A, B" <A@x.example>, c@y.example (note)')).toEqual(["a@x.example", "c@y.example"]);
     expect(addressesIn(undefined)).toEqual([]);
+    expect(addressesIn("Name<A@x.example>")).toEqual(["a@x.example"]);
+    expect(addressesIn("<<a@x.example>>")).toEqual([]);
+  });
+
+  it("stays linear on hostile header values", () => {
+    const started = performance.now();
+    addressesIn("<!@".repeat(50_000) + "!".repeat(50_000));
+    expect(performance.now() - started).toBeLessThan(500);
   });
 });

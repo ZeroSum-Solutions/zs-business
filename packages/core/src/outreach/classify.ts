@@ -29,8 +29,17 @@ export type Classification =
 /** Every address in a header value such as `Name <a@b.c>, d@e.f`, lower case. */
 export function addressesIn(value: string | undefined): string[] {
   if (!value) return [];
+  // A linear tokenizer, not a regular expression: header values come from the sender (CodeQL js/polynomial-redos).
   const found: string[] = [];
-  for (const match of value.matchAll(/<([^<>\s]+@[^<>\s]+)>|([^\s<>,;"()]+@[^\s<>,;"()]+)/g)) found.push((match[1] ?? match[2]!).toLowerCase());
+  for (const raw of value.split(/[\s,;"()]/)) {
+    let token = raw;
+    const open = token.lastIndexOf("<");
+    if (open !== -1) token = token.slice(open + 1);
+    if (token.endsWith(">")) token = token.slice(0, -1);
+    const at = token.indexOf("@");
+    if (at <= 0 || at === token.length - 1 || token.includes("<") || token.includes(">")) continue;
+    found.push(token.toLowerCase());
+  }
   return found;
 }
 
