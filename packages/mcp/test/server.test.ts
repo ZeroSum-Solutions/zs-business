@@ -673,13 +673,14 @@ describe("outreach tools (outreach-sequencer.md OS-22)", () => {
     expect(typeof (asked.value as { approvalId: unknown }).approvalId).toBe("string");
 
     const detail = await callTool(allowed, "get_outreach_campaign", { campaignId });
-    expect(detail.value).toMatchObject({ campaign: { id: campaignId, status: "draft" }, prospectCounts: { active: 1 } });
+    expect(detail.value).toMatchObject({ campaign: { id: campaignId, status: "draft" }, prospectCounts: { pending: 1 } });
     const list = await callTool(allowed, "list_outreach_campaigns");
     expect((list.value as { items: { id: string }[] }).items.map((item) => item.id)).toContain(campaignId);
 
     const paused = await callTool(allowed, "pause_outreach_campaign", { idempotencyKey: "op-1", campaignId });
     expect(paused.isError).toBe(false);
-    expect(paused.value).toMatchObject({ result: { id: campaignId, status: "paused" } });
+    // A draft has nothing to pause: the answer is the campaign as it is.
+    expect(paused.value).toMatchObject({ result: { id: campaignId, status: "draft" } });
   });
 
   it("stops one prospect", async () => {
