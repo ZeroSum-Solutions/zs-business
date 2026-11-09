@@ -5,6 +5,7 @@ import {
   IMAGE_ENVIRONMENTS,
   jwtEnvSchema,
   parseImageConfig,
+  parseOutreachTenants,
   parseStripeEnv,
   parsePlanEnv,
   resendWebhookSecretSchema,
@@ -184,6 +185,8 @@ export interface ServerEnv {
   readonly activepieces: ActivepiecesEnv | null;
   /** image-port.md IM-21: image jobs; null (every /v1/media route 404) when IMAGE_ADAPTER is unset. */
   readonly images: ImageEnv | null;
+  /** outreach-sequencer.md OS-1, OS-21: the tenants that may use outreach; null (every /v1/outreach route 404) when OUTREACH_TENANTS is unset. */
+  readonly outreach: { readonly tenants: readonly string[] } | null;
 }
 export interface ImageEnv {
   readonly config: ImageConfig;
@@ -262,7 +265,19 @@ export function parseServerEnv(env: Readonly<Record<string, string | undefined>>
     twilioWebhook: parseTwilioWebhook(parsed.data),
     activepieces: parseActivepieces(parsed.data),
     images: imagesWithStore(parseImageEnv(env), parsed.data.SITES_STORE),
+    outreach: parseOutreach(env),
   };
+}
+
+/** OS-1: the API reads only the allowlist; an invalid id is an error, not a silent skip. */
+function parseOutreach(env: Readonly<Record<string, string | undefined>>): ServerEnv["outreach"] {
+  let tenants: string[];
+  try {
+    tenants = parseOutreachTenants(env.OUTREACH_TENANTS);
+  } catch {
+    throw new Error("Invalid environment: OUTREACH_TENANTS must hold comma-separated tenant UUIDs");
+  }
+  return tenants.length === 0 ? null : { tenants };
 }
 
 /** PL-20: the app handle Shopify puts in the plan selection URL (letters, digits and dashes). */

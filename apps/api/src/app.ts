@@ -14,6 +14,7 @@ import {
   createDocumentIntakeSession,
   createEnrichmentSession,
   createFollowUpAgent,
+  createOutreachSession,
   createTranscriptionSession,
   DatabaseUnavailable,
   mapError,
@@ -22,6 +23,7 @@ import {
   type EnrichmentConfigInput,
   type FollowUpAgentConfig,
   type ImageDependencies,
+  type OutreachAccessInput,
   type Session,
   type SessionCheck,
   type StripeClient,
@@ -51,6 +53,7 @@ import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { MEDIA_UPLOAD_PATH, mediaRoutes } from "./routes/media.js";
 import { memberRoutes } from "./routes/members.js";
+import { outreachRoutes } from "./routes/outreach.js";
 import { siteRoutes } from "./routes/sites.js";
 import { setupRoutes } from "./routes/setup.js";
 import { sourceRoutes } from "./routes/sources.js";
@@ -156,6 +159,11 @@ export interface AppDependencies {
    * token. Absent means /v1/document-intake and /v1/workers/document-intake are off.
    */
   readonly documentIntake?: DocumentIntakeConfig & DocumentIntakeApiConfig;
+  /**
+   * Cold-email outreach (outreach-sequencer.md OS-1, OS-22): the tenants that may use it. Absent means /v1/outreach is
+   * off (404); a tenant outside the list is a 404 as well.
+   */
+  readonly outreach?: OutreachAccessInput;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -274,6 +282,7 @@ export function createApp(deps: AppDependencies) {
     } : {}),
     ...(deps.sites ? { sites: deps.sites } : {}),
     ...(deps.images ? { images: deps.images } : {}),
+    ...(deps.outreach ? { outreach: deps.outreach } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
   const requestEdge = (c: Context<AppEnv>) => {
@@ -363,6 +372,8 @@ export function createApp(deps: AppDependencies) {
   if (images) app.route("/v1/media", mediaRoutes);
   app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
+  // Off without an OUTREACH_TENANTS allowlist: /v1/outreach is then an unknown route (404), like sites.
+  if (deps.outreach) app.route("/v1/outreach", outreachRoutes((c) => createOutreachSession(requestEdge(c), c.var.session.principal)));
   app.route("/v1/sources", sourceRoutes);
   app.route("/v1", calendarRoutes);
   // Off without the connections config: /v1/connections is then an unknown route (404), like sites.

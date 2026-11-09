@@ -151,6 +151,7 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
         },
       },
     }),
+    ...(env.outreach === null ? {} : { outreach: env.outreach }),
     ...(env.activepieces === null ? {} : {
       activepieces: { keySecrets: env.activepieces.keySecrets, urlPolicy: { allowLoopback: env.activepieces.allowLoopback } },
     }),

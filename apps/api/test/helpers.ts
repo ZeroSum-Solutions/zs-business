@@ -155,6 +155,8 @@ export interface HarnessOptions {
   sites?: { store: SiteObjectStore; compiler: SiteCompiler; syncTimeoutMs?: number };
   /** Turns the /v1/media routes on over this store and image config (image-port.md IM-22). */
   images?: ImageDependencies;
+  /** Turns the /v1/outreach routes on for these tenants (outreach-sequencer.md OS-1, OS-22). */
+  outreach?: { tenants: readonly string[] };
 }
 
 export async function createApiHarness(options: HarnessOptions = {}): Promise<ApiHarness> {
@@ -184,6 +186,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
       : {}),
     ...(options.sites ? { sites: options.sites } : {}),
     ...(options.images ? { images: options.images } : {}),
+    ...(options.outreach ? { outreach: options.outreach } : {}),
     ...(options.unsubscribe
       ? { unsubscribe: { tokenSecrets: { current: UNSUBSCRIBE_SECRET }, ...shared, ...options.unsubscribe } }
       : {}),

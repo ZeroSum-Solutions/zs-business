@@ -4,7 +4,7 @@
 //   api    (`pnpm build:vercel`): src/vercel.ts only, every path routes to it. No cron functions and
 //          no crons, so worker-only secrets are never set on that project.
 //   worker (`pnpm build:vercel:worker`): /cron/delivery, /cron/billing, /cron/calendar,
-//          /cron/activepieces, /cron/followup and /cron/connections, plus the five signed
+//          /cron/activepieces, /cron/followup, /cron/connections and /cron/outreach, plus the five signed
 //          /internal/connections/<operation> routes, the nine /internal/shopify/<operation> routes and
 //          POST /webhooks/shopify, each its own function. No API app: every other
 //          path is a 404 (a request that matches no route).
@@ -28,6 +28,7 @@ const cronEntries = [
   { path: "/cron/activepieces", entry: "../src/vercel-activepieces.ts", scheduleVar: "ACTIVEPIECES_CRON_SCHEDULE" },
   { path: "/cron/followup", entry: "../src/vercel-followup.ts", scheduleVar: "FOLLOWUP_CRON_SCHEDULE" },
   { path: "/cron/connections", entry: "../src/vercel-connections.ts", scheduleVar: "CONNECTIONS_CRON_SCHEDULE" },
+  { path: "/cron/outreach", entry: "../src/vercel-outreach.ts", scheduleVar: "OUTREACH_CRON_SCHEDULE" },
 ];
 // The connections worker's signed operations (connections.md C-3): the same entry file as the cron, one
 // function per path, so each is its own anchored route and no function answers another's path.
@@ -67,8 +68,8 @@ const fn = new URL("functions/index.func/", output);
 // whole environment (the calendar token private key included), so the split is by project, not by
 // function. No schedule unless the build sets one, so a deploy never starts sending, moving money,
 // calling Google or webhooks, or drafting by itself; DELIVERY_WORKER=on, BILLING_WORKER=on,
-// CALENDAR_WORKER=on, ACTIVEPIECES_WEBHOOK_WORKER=on and FOLLOWUP_AGENT=on are the second switches,
-// at run time.
+// CALENDAR_WORKER=on, ACTIVEPIECES_WEBHOOK_WORKER=on, FOLLOWUP_AGENT=on and OUTREACH_WORKER=on are the second
+// switches, at run time (outreach also needs OUTREACH_SEND_ENABLED=true before it sends anything).
 const crons = target === "api" ? [] : cronEntries
   .map((cron) => ({ ...cron, fn: new URL(`functions${cron.path}.func/`, output), schedule: process.env[cron.scheduleVar] }));
 for (const cron of crons)
