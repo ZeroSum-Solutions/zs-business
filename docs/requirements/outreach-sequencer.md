@@ -1,6 +1,6 @@
 # Outreach sequencer: cold email from our own Gmail mailboxes
 
-Status: in build (2026-11-08); owner decisions of that day applied. Code follows this file; a change to a numbered
+Status: built (2026-11-08), first slice, not deployed and not scheduled; owner decisions of that day applied. Code follows this file; a change to a numbered
 rule needs a new revision of this file first. Nothing in this work sends a real email: every
 test uses the fake Gmail port (OS-25), and real sending needs two switches the repo owner sets
 by hand (OS-10).
@@ -640,3 +640,26 @@ The fake recorded exactly the expected sends and nothing reached Google.
   already sent from elsewhere ramps as new. Two mailboxes at 20 a day give 40
   first-touch-or-follow-up sends a day once warm.
 - Replies are read in Gmail; nothing reaches the hub Inbox or CRM yet.
+
+## As built (first slice, 2026-11-08)
+
+Where the code differs from the numbered rules above; the rules stay the intent.
+
+- The worker needs a second database login, `OUTREACH_RUNTIME_DATABASE_URL` (an unprivileged
+  login), next to `OUTREACH_DATABASE_URL`: the bounce suppression goes through the shared action
+  path under RLS, which refuses a service login. The operator command uses the same variable.
+- The operator command writes through `createOutreachOperator` (core) and so needs the runtime
+  login, not the `db:hosted-*` service login. A forged `state` stops the command before any code
+  exchange, so there is no grant to revoke in that case; every failure after the exchange revokes.
+- `--disconnect` clears the stored token but does not revoke the grant at Google: the runtime login
+  cannot read the sealed token. The command prints a reminder to revoke the app at
+  myaccount.google.com/permissions. The worker does not revoke on disconnect either.
+- The mailbox cap is `min(mailbox daily limit, OUTREACH_MAILBOX_DAILY_LIMIT)`, then the warm-up
+  ramp. Import fields `firstName` and `company` may be empty; `missing_field` applies only when a
+  campaign variable uses them.
+- Pausing a draft or completed campaign, and stopping a prospect that is not open, answer the
+  record as it is. Importing into a `completed` campaign gives `campaign_not_activatable`.
+- Only activation can be approved; create, import, pause, stop and the mailbox actions are in
+  `NEVER_APPROVED_ACTIONS`. Pause and stop are allowed for read-only agent tokens.
+- There is no Node-process worker script: the worker runs from the cron function only.
+- The workers project holds 22 functions (the README's earlier count of 21 was already stale).
