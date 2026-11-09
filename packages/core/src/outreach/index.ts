@@ -9,3 +9,10 @@ export {
   type OutreachCandidate,
   type SuppressionHit,
 } from "./hard-suppression.js";
+export * from "./templates.js";
+export * from "./schedule.js";
+export * from "./mime.js";
+export * from "./classify.js";
+export * from "./gmail-port.js";
+export * from "./gmail.js";
+export * from "./fake-gmail.js";

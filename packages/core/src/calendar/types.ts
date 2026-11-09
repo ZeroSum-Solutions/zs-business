@@ -67,7 +67,14 @@ export interface NewGoogleEvent {
 
 export interface GoogleClient {
   /** G-1: the consent screen URL. */
-  authorizeUrl(input: { readonly state: string; readonly codeChallenge: string }): string;
+  authorizeUrl(input: {
+    readonly state: string;
+    readonly codeChallenge: string;
+    /** Pre-selects the account on the consent screen (`login_hint`). */
+    readonly loginHint?: string;
+    /** Limits the consent screen to one Workspace domain (`hd`). */
+    readonly hostedDomain?: string;
+  }): string;
   /** G-2: code to tokens. Throws GoogleRequestFailed. */
   exchangeCode(input: { readonly code: string; readonly codeVerifier: string }, options?: RequestOptions): Promise<GoogleTokenGrant>;
   /** G-6: a fresh access token; `invalid_grant` (retry false) when the grant is gone. */

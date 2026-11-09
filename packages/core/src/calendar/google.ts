@@ -37,6 +37,11 @@ export const googleClientConfigSchema = z.strictObject({
   clientSecret: z.string().min(1).max(512),
   /** Only the API needs it, for the consent URL and the code exchange (G-1, G-2). */
   redirectUrl: secureUrl("redirectUrl").optional(),
+  /**
+   * The scopes the consent URL asks for; absent means the calendar's `GOOGLE_SCOPES`, so the calendar is unchanged.
+   * The outreach operator command asks for exactly the Gmail scopes (outreach-sequencer.md OS-2).
+   */
+  scopes: z.array(z.string().min(1).max(200).regex(/^[^\s]+$/)).min(1).max(10).optional(),
   oauthBaseUrl: secureUrl("oauthBaseUrl").default(GOOGLE_DEFAULT_OAUTH_BASE_URL),
   tokenBaseUrl: secureUrl("tokenBaseUrl").default(GOOGLE_DEFAULT_TOKEN_BASE_URL),
   apiBaseUrl: secureUrl("apiBaseUrl").default(GOOGLE_DEFAULT_API_BASE_URL),
@@ -257,16 +262,19 @@ export function createGoogleClient(deps: { readonly config: GoogleClientConfig; 
   return {
     config,
 
-    authorizeUrl({ state, codeChallenge }) {
+    authorizeUrl({ state, codeChallenge, loginHint, hostedDomain }) {
       if (config.redirectUrl === undefined) throw new Error("Google redirectUrl is not configured");
       const query = new URLSearchParams({
         client_id: config.clientId,
         redirect_uri: config.redirectUrl,
         response_type: "code",
-        scope: GOOGLE_SCOPES.join(" "),
+        scope: (config.scopes ?? GOOGLE_SCOPES).join(" "),
         access_type: "offline",
         prompt: "consent",
-        include_granted_scopes: "true",
+        // Only the calendar flow merges earlier grants; a custom scope list asks for exactly what it names.
+        ...(config.scopes === undefined ? { include_granted_scopes: "true" } : {}),
+        ...(loginHint === undefined ? {} : { login_hint: loginHint }),
+        ...(hostedDomain === undefined ? {} : { hd: hostedDomain }),
         state,
         code_challenge: codeChallenge,
         code_challenge_method: "S256",

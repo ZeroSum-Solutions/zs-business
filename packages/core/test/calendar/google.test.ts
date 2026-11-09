@@ -73,6 +73,21 @@ describe("the consent URL (G-1)", () => {
     expect(url.toString()).not.toContain(google.clientSecret);
   });
 
+  it("asks for exactly the configured scopes, with a login hint and hosted domain, and skips include_granted_scopes", () => {
+    const gmail = ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.metadata"];
+    const url = new URL(client({ scopes: gmail }).authorizeUrl({
+      state: "s", codeChallenge: "c", loginHint: "devin@zerosum-solutions.com", hostedDomain: "zerosum-solutions.com",
+    }));
+    expect(url.searchParams.get("scope")).toBe(gmail.join(" "));
+    expect(url.searchParams.get("login_hint")).toBe("devin@zerosum-solutions.com");
+    expect(url.searchParams.get("hd")).toBe("zerosum-solutions.com");
+    expect(url.searchParams.has("include_granted_scopes")).toBe(false);
+    const plain = new URL(client().authorizeUrl({ state: "s", codeChallenge: "c" }));
+    expect(plain.searchParams.has("login_hint")).toBe(false);
+    expect(plain.searchParams.has("hd")).toBe(false);
+    expect(() => client({ scopes: [] })).toThrow();
+  });
+
   it("uses Google's hosts by default and trims trailing slashes", () => {
     const real = createGoogleClient({ config: { clientId: "id", clientSecret: "secret", redirectUrl: REDIRECT } });
     expect(real.config).toMatchObject({
