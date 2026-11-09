@@ -55,6 +55,13 @@ describe("runFailure", () => {
     expect(runFailure("calendar", { counts: { pushesFailed: 1, pushed: 1 } })).toBeNull();
   });
 
+  it("outreach compares the steps that failed with the steps that ran to their end, not with the mailbox count", () => {
+    expect(runFailure("outreach", { counts: { mailboxes: 3, stepsFailed: 1, stepsSucceeded: 0 } })).not.toBeNull();
+    // Four steps per mailbox: one failing step among ten that ran is no failed run.
+    expect(runFailure("outreach", { counts: { mailboxes: 3, stepsFailed: 1, stepsSucceeded: 10 } })).toBeNull();
+    expect(runFailure("outreach", { counts: { mailboxes: 0, stepsFailed: 0, stepsSucceeded: 0 } })).toBeNull();
+  });
+
   it("an unknown job or a malformed summary is never a failure", () => {
     expect(runFailure("other", { errors: 9 })).toBeNull();
     expect(runFailure("delivery", {})).toBeNull();

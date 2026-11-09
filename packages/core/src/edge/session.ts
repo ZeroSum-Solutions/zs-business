@@ -6,6 +6,11 @@
 // M3b: stored approvals (approvals.md) run through approvedDispatch beside the direct path.
 import {
   ROLE_PERMISSIONS,
+  OUTREACH_CAMPAIGN_ACTIVATE_ACTION,
+  OUTREACH_CAMPAIGN_CREATE_ACTION,
+  OUTREACH_CAMPAIGN_PAUSE_ACTION,
+  OUTREACH_PROSPECT_STOP_ACTION,
+  OUTREACH_PROSPECTS_IMPORT_ACTION,
   applyTemplateRequestSchema,
   applyTemplateResponseSchema,
   BOOKING_PAGE_SET_PUBLISHED_ACTION,
@@ -200,6 +205,7 @@ import { pendingGrantId, verifyPendingGrant, type PendingGrant } from "../calend
 import type { GoogleClient } from "../calendar/types.js";
 import { toJson } from "./dispatch-util.js";
 import { enrichmentHandlers } from "../enrichment/handlers.js";
+import { outreachHandlers } from "../outreach/handlers.js";
 import { derivedId } from "./ids.js";
 import { SiteStoreUnavailable, validationError } from "./errors.js";
 
@@ -249,6 +255,11 @@ export interface EdgeDependencies {
   readonly images?: ImageDependencies;
   /** Milliseconds left before the request's deadline, when it has one. */
   readonly timeLeft?: () => number;
+  /**
+   * Outreach sequencer (outreach-sequencer.md OS-1): the tenants that may use it. Absent or empty means
+   * every outreach route answers 404 and every outreach action is refused, including an approved one.
+   */
+  readonly outreach?: { readonly tenants: readonly string[] };
 }
 
 /** IM-22: an image's bytes and media type, read back from the store. */
@@ -298,7 +309,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 const dispatch = createDispatcher({
   ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
-  ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
+  ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...outreachHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
 });
 
@@ -365,6 +376,13 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "contact.enrichment.unblock": "enrich",
   "contact.region.attest": "enrich",
   "contact.profile.apply": "enrich",
+  // outreach-sequencer.md OS-1, OS-4, OS-7..OS-9: owners run cold-email campaigns. Activation is `required` in
+  // APPROVAL_POLICIES; the mailbox actions belong to the operator command's principal and have no entry here.
+  [OUTREACH_CAMPAIGN_CREATE_ACTION]: "outreach",
+  [OUTREACH_PROSPECTS_IMPORT_ACTION]: "outreach",
+  [OUTREACH_CAMPAIGN_ACTIVATE_ACTION]: "outreach",
+  [OUTREACH_CAMPAIGN_PAUSE_ACTION]: "outreach",
+  [OUTREACH_PROSPECT_STOP_ACTION]: "outreach",
 });
 
 /**
@@ -455,7 +473,8 @@ export function approvedDispatch(deps: EdgeDependencies, tenantId: string, actor
       actor: { id: actorId, tenantId },
       db: deps.db,
       clock: deps.clock,
-      config: {},
+      // OS-1: an approved outreach run checks the same allowlist the direct path does.
+      config: deps.outreach ? { outreach: deps.outreach } : {},
       generateId: deps.generateId,
       resolveApproval: async (tx, reference) =>
         reference.tenantId === tenantId && reference.id === row.id

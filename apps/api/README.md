@@ -831,7 +831,7 @@ against the pinned Supabase Root 2021 CA.
    | Project | Build command | Output |
    |---|---|---|
    | API (`prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ`) | `pnpm build:vercel` | One Node 24 function from `src/vercel.ts` for every path. No cron functions, no crons. **The build fails while any `*_CRON_SCHEDULE` is set**, so a deploy cannot drop a live cron unnoticed. |
-   | Workers (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`) | `pnpm build:vercel:worker` | Eleven functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces`, `/cron/followup`, `/cron/connections` and the five `/internal/connections/<operation>` routes, each reached only by its exact path (anchored routes, `^/cron/<name>$`), and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
+   | Workers (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`) | `pnpm build:vercel:worker` | Twenty-two functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces`, `/cron/followup`, `/cron/connections`, `/cron/outreach` and the five `/internal/connections/<operation>` routes, each reached only by its exact path (anchored routes, `^/cron/<name>$`), and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
 
    `build-vercel.mjs <api|worker> [dir]` cleans only its default `.vercel/output`; a directory
    given as `dir` must not exist or be empty, or the script stops before writing anything.
@@ -878,13 +878,15 @@ against the pinned Supabase Root 2021 CA.
    | `CALENDAR_WORKER`, `CALENDAR_DATABASE_URL`, `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS`, `GOOGLE_TOKEN_PRIVATE_KEY`, `GOOGLE_WEBHOOK_URL`, `GOOGLE_EVENT_TITLE` | **no** | yes |
    | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_WORKER_ID`, `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS` (this row does not cover `ACTIVEPIECES_KEY_SECRET`: the API needs it for the owner routes) | **no** | yes |
    | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `FOLLOWUP_MODEL`, `FOLLOWUP_SLOT_MINUTES`, `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS`, `FOLLOWUP_INTERVAL_MS`, `AGENT_MODEL_PERSONAL_DATA`, `AGENT_MODEL_NO_PERSONAL_DATA`, `AGENT_TEMPLATED`, `AGENT_TEMPLATED_MAX_CANDIDATES`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `COMPOSIO_API_KEY` | **no** | yes |
+   | `OUTREACH_WORKER`, `OUTREACH_DATABASE_URL`, `OUTREACH_RUNTIME_DATABASE_URL`, `OUTREACH_GOOGLE_CLIENT_ID`, `OUTREACH_GOOGLE_CLIENT_SECRET`, `OUTREACH_TOKEN_PRIVATE_KEY`, `OUTREACH_SEND_ENABLED`, `OUTREACH_GMAIL_BASE_URL`, `OUTREACH_MAILBOX_DAILY_LIMIT`, `OUTREACH_SENDS_PER_TICK`, `OUTREACH_MIN_GAP_MS`, `OUTREACH_PROBE_DELAY_MS`, `OUTREACH_RUN_BUDGET_MS` | **no** | yes |
+   | `OUTREACH_TENANTS` (the tenant allowlist, comma-separated tenant UUIDs; no secret) | yes (turns `/v1/outreach` on) | yes |
    | `ENRICHMENT_WORKER`, `ENRICHMENT_DATABASE_URL`, `ENRICHMENT_WORKER_ID`, `ENRICHMENT_CLAIM_LIMIT`, `ENRICHMENT_MAX_ATTEMPTS`, `ENRICHMENT_PROVIDER_TIMEOUT_MS`, `ENRICHMENT_INTERVAL_MS`, `TREG_TOKEN`, `TREG_BASE_URL` | **no** | no (the Mac's enrichment worker) |
    | `IMAGE_WORKER`, `IMAGE_DATABASE_URL`, `IMAGE_SERVICE_DATABASE_URL`, `IMAGE_INTERVAL_MS` | **no** | no (the Mac's image worker) |
    | `CONNECTIONS_DATABASE_URL`, `CONNECTIONS_SHOPIFY_AUTH_CONFIG_ID`, `CONNECTIONS_CALLBACK_URL` (with `COMPOSIO_API_KEY`, listed above) | **no** | yes |
    | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_ID`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS_ID`, `SHOPIFY_API_VERSION`, `SHOPIFY_PLAN_GRACE_DAYS`, `SUPABASE_SERVICE_ROLE_KEY`, `HUB_SIGN_IN_URL` (the native Shopify tier) | **no** | yes |
    | `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`, `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (the signing secrets and environment; the same values in both projects) | yes (the API signs with them) | yes |
    | `CONNECTIONS_WORKER_URL`, `CONNECTIONS_STATE_SECRET`, `CONNECTIONS_STATE_PREVIOUS_SECRET`, `CONNECTIONS_RETURN_URL`, `CONNECTIONS_EMBEDDED_ADDRESS_SECRET` (the API side only; the last one also on the dashboard project) | yes | no |
-   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
+   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE`, `OUTREACH_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
 
    `CEREBRAS_*`, `DEEPSEEK_*` and `AGENT_MODEL_*` are worker-only because `POST /v1/agents/followup/runs`
    and the template-suggestion route are not wired in `createServer` today. Wiring them into the API
@@ -1181,6 +1183,61 @@ connections (revoke, remove blocks). It alone holds the token private key. Off u
 budgetSpent }` after a run: `counts` sums the worker's passes (`synced`, `pushed`, `disconnected`,
 `channelsOpened`, …). A run makes passes until one moves nothing or the budget is spent.
 Reauthorize, failed syncs, failed pushes and channel failures are logged for an operator.
+
+## Outreach (`/v1/outreach`, `GET /cron/outreach`)
+
+Cold email from a tenant's own Google Workspace mailboxes (docs/requirements/outreach-sequencer.md).
+The owner routes sit under `/v1/outreach` and need the `outreach` permission; they exist only when the
+API has `OUTREACH_TENANTS`, and a tenant outside that list gets 404 on every one. The worker runs in the
+workers project. **Nothing sends by default**: the worker sends only with `OUTREACH_WORKER=on`, the exact
+string `OUTREACH_SEND_ENABLED=true`, an `OUTREACH_CRON_SCHEDULE`, an allowlisted tenant, a connected mailbox
+and an approved, active campaign. `TRUE`, `1`, `yes` and a value with a space around it leave sending off.
+With sending off the worker still reads replies and bounces.
+
+| Route | Meaning |
+|---|---|
+| `POST /v1/outreach/campaigns` | Create a draft campaign (201). Needs `Idempotency-Key`. |
+| `POST /v1/outreach/campaigns/:id/prospects` | Import prospects; the answer lists each rejected row and its reason. |
+| `POST /v1/outreach/campaigns/:id/activation` | Ask for an owner's approval to start the campaign (201, `{ approvalId }`). The owner approves at `POST /v1/approvals/:id/approve`. |
+| `POST /v1/outreach/campaigns/:id/pause`, `POST /v1/outreach/prospects/:id/stop` | Stop sending a campaign, or one prospect. |
+| `GET /v1/outreach/campaigns`, `GET /v1/outreach/campaigns/:id`, `GET /v1/outreach/campaigns/:id/prospects`, `GET /v1/outreach/mailboxes` | Reads. Never a token or the history cursor. |
+
+| Variable | Meaning |
+|---|---|
+| `OUTREACH_WORKER` | Kill switch. `on` runs; anything else, or unset, runs nothing. |
+| `CRON_SECRET` | The same bearer as `/cron/delivery`. Unset, the route is 404. |
+| `OUTREACH_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
+| `OUTREACH_RUNTIME_DATABASE_URL` | The runtime LOGIN role (unprivileged, member of `authenticated` only): the bounce suppression goes through the shared action path under RLS. |
+| `OUTREACH_TENANTS` | Comma-separated tenant UUIDs the worker may touch. With the worker on it needs at least one. |
+| `OUTREACH_GOOGLE_CLIENT_ID`, `OUTREACH_GOOGLE_CLIENT_SECRET` | The Workspace-internal OAuth client the operator command signs mailboxes in with. |
+| `OUTREACH_TOKEN_PRIVATE_KEY` | Base64 of the DER PKCS#8 of the X25519 key that opens sealed refresh tokens. Its own pair, not the calendar's. Only this function holds it. |
+| `OUTREACH_SEND_ENABLED` | `true` (exactly) turns sending on. Leave it unset until launch. |
+| `UNSUBSCRIBE_TOKEN_SECRET`, `DELIVERY_UNSUBSCRIBE_BASE_URL` | The same values as the delivery worker; they sign the link in each email. |
+| `OUTREACH_MAILBOX_DAILY_LIMIT`, `OUTREACH_SENDS_PER_TICK`, `OUTREACH_MIN_GAP_MS`, `OUTREACH_PROBE_DELAY_MS`, `OUTREACH_RUN_BUDGET_MS` | Optional tuning: 20 (1 to 50), 1 (1 to 5), 240000, 120000, 20000. The cron function allows a budget of at most 20000. |
+| `OUTREACH_GMAIL_BASE_URL`, `GOOGLE_TOKEN_BASE_URL` | Optional, for tests. |
+| `OUTREACH_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/outreach`, for example `*/5 * * * *`. Unset, there is no cron. |
+
+### Connecting a mailbox (operator command)
+
+Each outreach mailbox consents once, on the owner's Mac, signed in as that mailbox:
+
+```
+pnpm --filter @zs/api outreach:connect-mailbox --tenant <uuid> --mailbox <address> --name "<From name>" [--daily-limit 20] [--dry-run]
+pnpm --filter @zs/api outreach:connect-mailbox --tenant <uuid> --mailbox <address> --disconnect
+```
+
+It listens on `127.0.0.1`, prints the consent URL (scopes `gmail.send` and `gmail.metadata` only), waits at
+most five minutes, then checks state, the refresh token, both scopes and that the signed-in account is the
+mailbox. Any failure after the code exchange revokes the new grant and stores nothing. It uses
+`OUTREACH_TENANTS`, `OUTREACH_GOOGLE_CLIENT_ID`, `OUTREACH_GOOGLE_CLIENT_SECRET`, `OUTREACH_RUNTIME_DATABASE_URL`
+and `DATABASE_CA_CERT` as above, plus `OUTREACH_TOKEN_PUBLIC_KEY` (base64 of the DER SPKI of the X25519
+public key that pairs with the worker's private key) and an optional `OUTREACH_MAILBOX_DOMAINS` (comma-separated,
+default `zerosum-solutions.com`). `--disconnect` clears the stored token; it cannot revoke the grant at Google
+(the runtime login cannot read the token), so revoke the app at myaccount.google.com/permissions too.
+
+`GET /cron/outreach` answers like `/cron/delivery`, with `{ ran: true, counts }` after a run. A mailbox
+whose Google sign-in failed is marked `reauthorize` and reported; an unknown send outcome, a bounce-rate
+pause and a lost lease are reported to an operator (logged without a token).
 
 ## Activepieces (`/v1/integrations/activepieces`, `/integrations/activepieces/v1`, `/cron/activepieces`)
 

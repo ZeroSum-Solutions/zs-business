@@ -12,7 +12,9 @@ import { z } from "zod";
 import {
   createBookingRequestSchema,
   createDealRequestSchema,
+  createOutreachCampaignRequestSchema,
   draftReplyRequestSchema,
+  importOutreachProspectsRequestSchema,
   idempotencyKeySchema,
   killFollowUpRequestSchema,
   listApprovalsQuerySchema,
@@ -32,7 +34,7 @@ import {
   upsertContactRequestSchema,
   uuidSchema,
 } from "@zs/contracts";
-import { authenticate, mapError, parseInput, type EdgeDependencies, type Session, type SessionCheck, type TokenVerifier } from "@zs/core";
+import { authenticate, createOutreachSession, mapError, parseInput, type EdgeDependencies, type Session, type SessionCheck, type TokenVerifier } from "@zs/core";
 
 /** The member's Supabase access token, or a function returning the current one (read per call). */
 export type AccessTokenSource = string | (() => string | Promise<string>);
@@ -75,7 +77,7 @@ type ToolConfig<Input extends z.ZodObject> = {
 };
 
 export function createMcpServer(deps: McpDependencies): McpServer {
-  const edge: EdgeDependencies = { db: deps.db, clock: deps.clock, generateId: deps.generateId };
+  const edge: EdgeDependencies = { db: deps.db, clock: deps.clock, generateId: deps.generateId, ...(deps.outreach ? { outreach: deps.outreach } : {}) };
   const token = deps.accessToken;
   /** Authenticate on every call, so a signed-out, expired or removed member stops at once. */
   const authenticated = async (): Promise<Session> =>
@@ -243,6 +245,50 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     description: "Read one follow-up agent run with every decision it made: the drafted reply and its pending approval, or why it skipped.",
     inputSchema: z.strictObject({ runId: uuidSchema }), annotations: read,
   }, ({ runId }, session) => session.getFollowUpRun(runId));
+
+  // outreach-sequencer.md OS-22: only with an OUTREACH_TENANTS allowlist, like the HTTP routes. There is deliberately no
+  // approve tool: the owner approves an activation at /v1/approvals/:id/approve, so an agent token cannot start sending.
+  if (deps.outreach) {
+    const outreach = (session: Session) => createOutreachSession(edge, session.principal);
+    tool("create_outreach_campaign", {
+      description: "Create a draft cold-email campaign: 1 to 5 steps, a sending window and the mailboxes to send from. Nothing sends until an owner approves its activation.",
+      inputSchema: keyed(createOutreachCampaignRequestSchema.shape),
+      annotations: write,
+    }, ({ idempotencyKey, ...body }, session) => outreach(session).createCampaign(body, idempotencyKey));
+
+    tool("import_outreach_prospects", {
+      description: "Add prospects to a draft or paused campaign. The answer lists each rejected row and why.",
+      inputSchema: keyed({ campaignId: uuidSchema, ...importOutreachProspectsRequestSchema.shape }),
+      annotations: write,
+    }, ({ idempotencyKey, campaignId, ...body }, session) => outreach(session).importProspects(campaignId, body, idempotencyKey));
+
+    tool("request_outreach_activation", {
+      description: "Ask an owner to approve starting a campaign. Returns the pending approvalId; it does not start anything.",
+      inputSchema: keyed({ campaignId: uuidSchema }),
+      annotations: write,
+    }, ({ idempotencyKey, campaignId }, session) => outreach(session).requestActivation(campaignId, idempotencyKey));
+
+    tool("pause_outreach_campaign", {
+      description: "Stop a campaign from sending at once. Only an owner can start it again.",
+      inputSchema: keyed({ campaignId: uuidSchema }),
+      annotations: write,
+    }, ({ idempotencyKey, campaignId }, session) => outreach(session).pauseCampaign(campaignId, idempotencyKey));
+
+    tool("stop_outreach_prospect", {
+      description: "Stop one prospect: no further steps are sent to them.",
+      inputSchema: keyed({ prospectId: uuidSchema }),
+      annotations: write,
+    }, ({ idempotencyKey, prospectId }, session) => outreach(session).stopProspect(prospectId, idempotencyKey));
+
+    tool("list_outreach_campaigns", {
+      description: "List outreach campaigns, newest first.", inputSchema: z.strictObject({}), annotations: read,
+    }, (_args, session) => outreach(session).listCampaigns());
+
+    tool("get_outreach_campaign", {
+      description: "Read one campaign: its settings, steps, prospect counts by status and today's sends per mailbox.",
+      inputSchema: z.strictObject({ campaignId: uuidSchema }), annotations: read,
+    }, ({ campaignId }, session) => outreach(session).getCampaign(campaignId));
+  }
 
   server.server.setRequestHandler(CallToolRequestSchema, (request) => {
     const call = calls.get(request.params.name);

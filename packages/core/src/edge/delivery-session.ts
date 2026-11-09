@@ -28,15 +28,26 @@ export const unsubscribeActorId = (tenantId: string) => derivedId(tenantId, "pub
 export const inboundSmsActorId = (tenantId: string) => derivedId(tenantId, "inbound-sms", "actor");
 
 export function createUnsubscribeSession(deps: EdgeDependencies, secrets: UnsubscribeSecrets) {
-  /** The delivery a token names and where it went; a forged token and an unknown delivery look the same. */
-  async function resolve(token: string) {
+  /**
+   * The send a token names and where it went; a forged token and an unknown send look the same. A delivery is looked up
+   * first; an outreach send (outreach-sequencer.md OS-18) answers when no delivery has that ID. The outreach lookup
+   * ignores the outreach allowlist on purpose: an address that asked to stop stays stopped.
+   */
+  async function resolve(token: string): Promise<{ ref: { tenantId: string; deliveryId: string }; address: string; source: string }> {
     const ref = verifyUnsubscribeToken(secrets, token);
     if (!ref) throw new NotFound();
-    const row = await deps.db.tenant(ref.tenantId, async (tx) => (await tx.query<{ channel: DeliveryChannel; recipient_address: string | null }>(
-      "SELECT channel, recipient_address FROM message_deliveries WHERE tenant_id=$1 AND id=$2",
-      [ref.tenantId, ref.deliveryId])).rows[0]);
-    if (!row || row.channel !== "email" || !row.recipient_address) throw new NotFound();
-    return { ref, address: row.recipient_address };
+    const found = await deps.db.tenant(ref.tenantId, async (tx) => {
+      const delivery = (await tx.query<{ channel: DeliveryChannel; recipient_address: string | null }>(
+        "SELECT channel, recipient_address FROM message_deliveries WHERE tenant_id=$1 AND id=$2",
+        [ref.tenantId, ref.deliveryId])).rows[0];
+      if (delivery) return delivery.channel === "email" && delivery.recipient_address
+        ? { address: delivery.recipient_address, source: `email:${ref.deliveryId}` } : null;
+      const send = (await tx.query<{ recipient_address: string }>(
+        "SELECT recipient_address FROM outreach_sends WHERE tenant_id=$1 AND id=$2", [ref.tenantId, ref.deliveryId])).rows[0];
+      return send ? { address: send.recipient_address.toLowerCase(), source: `outreach:${ref.deliveryId}` } : null;
+    });
+    if (!found) throw new NotFound();
+    return { ref, ...found };
   }
 
   return {
@@ -47,7 +58,7 @@ export function createUnsubscribeSession(deps: EdgeDependencies, secrets: Unsubs
     },
     /** RFC 8058 one-click: suppress the address the delivery went to. A repeat replays. */
     unsubscribe: async (token: string): Promise<SuppressionResult> => {
-      const { ref, address } = await resolve(token);
+      const { ref, address, source } = await resolve(token);
       const tenantId = ref.tenantId;
       const idempotencyKey = `unsubscribe:${ref.deliveryId}`;
       const run = directDispatch(deps, tenantId, unsubscribeActorId(tenantId), only(SUPPRESSION_RECORD_ACTION));
@@ -56,7 +67,7 @@ export function createUnsubscribeSession(deps: EdgeDependencies, secrets: Unsubs
         target: { tenantId, type: "suppression", id: suppressionTargetId(tenantId, "email", address) },
         approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
         idempotencyKey,
-        payload: { channel: "email", address, reason: "unsubscribe", source: `email:${ref.deliveryId}` },
+        payload: { channel: "email", address, reason: "unsubscribe", source },
       }, { dispatch: run });
     },
   };

@@ -4,6 +4,7 @@ import {
   type ApiErrorBody,
   type ApiErrorCode,
   ENRICHMENT_ERROR_CODES,
+  OUTREACH_ERROR_CODES,
   type JsonValue,
 } from "@zs/contracts";
 import { DatabaseUnavailable } from "@zs/db";
@@ -92,6 +93,8 @@ const CONFLICT_REASONS = new Set([
   "variant_expired", "variant_changed", "variant_not_staged", "variant_not_running", "image_not_approved", "upload_missing",
   // enrichment.md E-17: the only enrichment reasons a tenant sees.
   ...ENRICHMENT_ERROR_CODES,
+  // outreach-sequencer.md OS-23: the only outreach reasons a tenant sees.
+  ...OUTREACH_ERROR_CODES,
   "consent_required", "lease_lost", "intake_not_in_review", "intake_changed", "intake_target_changed",
   // plans.md PL-4..PL-7, PL-11, PL-14, PL-15: why a plan Checkout, the Portal or a top-up is refused.
   "plan_exists", "checkout_open", "checkout_closed", "no_customer", "founding_full", "billing_provider",

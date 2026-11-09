@@ -1,5 +1,14 @@
 // approvals.md A-9: who may ask for an action, and which actions only run once approved.
-import type { Permission } from "@zs/contracts";
+import {
+  OUTREACH_CAMPAIGN_ACTIVATE_ACTION,
+  OUTREACH_CAMPAIGN_CREATE_ACTION,
+  OUTREACH_CAMPAIGN_PAUSE_ACTION,
+  OUTREACH_MAILBOX_CONNECT_ACTION,
+  OUTREACH_MAILBOX_DISCONNECT_ACTION,
+  OUTREACH_PROSPECT_STOP_ACTION,
+  OUTREACH_PROSPECTS_IMPORT_ACTION,
+  type Permission,
+} from "@zs/contracts";
 
 export interface ApprovalPolicy {
   /** The permission a member needs to request this action. */
@@ -23,6 +32,8 @@ export const APPROVAL_POLICIES: Readonly<Record<string, ApprovalPolicy>> = Objec
   "media.variant.approve": Object.freeze({ request: "publish", required: true }),
   // enrichment.md E-14: a looked-up field reaches the profile only once an owner approves it.
   "contact.profile.apply": Object.freeze({ request: "enrich", required: true }),
+  // outreach-sequencer.md OS-8: a campaign sends nothing until an owner approves the exact content and prospects.
+  [OUTREACH_CAMPAIGN_ACTIVATE_ACTION]: Object.freeze({ request: "outreach", required: true }),
 });
 
 /** Never proposed through an approval: the approval actions themselves. */
@@ -57,6 +68,10 @@ export const NEVER_APPROVED_ACTIONS: ReadonlySet<string> = new Set([
   // industry-templates.md IT-4: the apply route checks the template and zone and reads the setup
   // row before it dispatches under its reserved key; an approved copy would skip those steps.
   "tenant.template.apply",
+  // outreach-sequencer.md OS-8: activation is the one outreach action an owner approves; the rest are the owner's direct
+  // decisions (the edge mints their ids) or the operator command's (the sealed token comes from its consent flow).
+  OUTREACH_CAMPAIGN_CREATE_ACTION, OUTREACH_PROSPECTS_IMPORT_ACTION, OUTREACH_CAMPAIGN_PAUSE_ACTION, OUTREACH_PROSPECT_STOP_ACTION,
+  OUTREACH_MAILBOX_CONNECT_ACTION, OUTREACH_MAILBOX_DISCONNECT_ACTION,
 ]);
 export const cannotBeApproved = (actionType: string) =>
   isApprovalAction(actionType) || isSiteAction(actionType) || NEVER_APPROVED_ACTIONS.has(actionType);

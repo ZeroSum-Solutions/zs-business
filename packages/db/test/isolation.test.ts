@@ -11,7 +11,12 @@ import {
 } from "../src/testing.js";
 
 /** Tenant tables only the worker's service role reads (connections.md C-7). */
-const WORKER_ONLY = new Set(["connection_attempts", "shopify_claims"]);
+const WORKER_ONLY = new Set([
+  "connection_attempts", "shopify_claims",
+  // The runtime role reads this table's columns one by one (never the sealed token, cursor or lease), so `select *` is
+  // refused; packages/db/test/outreach.test.ts proves the isolation of its allowed columns.
+  "outreach_mailboxes",
+]);
 let harness: TestDatabase;
 let fixture: TwoTenantFixture;
 beforeAll(async () => {

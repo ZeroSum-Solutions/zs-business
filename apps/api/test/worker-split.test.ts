@@ -19,7 +19,7 @@ const slash = (path: string) => path.replaceAll("\\", "/");
 /** Source files only a cron function or a Mac worker may bundle: runners, starters, cron routes, worker configs, scripts. */
 const WORKER_ONLY_SOURCES = [
   /\/apps\/api\/src\/vercel-[a-z]+\.ts$/,
-  /\/apps\/api\/src\/(delivery|billing|calendar|activepieces|followup|enrichment|images|connections)\/(start|config|cron|runner|internal)\.ts$/,
+  /\/apps\/api\/src\/(delivery|billing|calendar|activepieces|followup|enrichment|images|connections|outreach)\/(start|config|cron|runner|internal)\.ts$/,
   /\/apps\/api\/src\/scripts\//,
 ];
 
@@ -79,7 +79,7 @@ describe("the API function (src/vercel.ts)", () => {
     expect(inputs.filter((path) => WORKER_ONLY_SOURCES.some((pattern) => pattern.test(path)))).toEqual([]);
   }, 60_000);
 
-  it.each(["vercel-delivery.ts", "vercel-billing.ts", "vercel-calendar.ts", "vercel-activepieces.ts", "vercel-followup.ts", "vercel-connections.ts"])(
+  it.each(["vercel-delivery.ts", "vercel-billing.ts", "vercel-calendar.ts", "vercel-activepieces.ts", "vercel-followup.ts", "vercel-connections.ts", "vercel-outreach.ts"])(
     "%s bundles no API app", async (entry) => {
       const { inputs } = await bundleEntry(entry);
       expect(inputs.filter((path) => /\/src\/(app|server|vercel)\.ts$/.test(path))).toEqual([]);
@@ -93,7 +93,7 @@ describe("build-vercel.mjs", () => {
   const noSchedules = Object.fromEntries(Object.entries(process.env).filter(([name]) => !CRON_SCHEDULE_VARIABLES.includes(name)));
   const allSchedules = {
     DELIVERY_CRON_SCHEDULE: "*/5 * * * *", BILLING_CRON_SCHEDULE: "*/5 * * * *", CALENDAR_CRON_SCHEDULE: "*/5 * * * *",
-    ACTIVEPIECES_CRON_SCHEDULE: "*/5 * * * *", FOLLOWUP_CRON_SCHEDULE: "0 * * * *", CONNECTIONS_CRON_SCHEDULE: "*/10 * * * *",
+    ACTIVEPIECES_CRON_SCHEDULE: "*/5 * * * *", FOLLOWUP_CRON_SCHEDULE: "0 * * * *", CONNECTIONS_CRON_SCHEDULE: "*/10 * * * *", OUTREACH_CRON_SCHEDULE: "*/5 * * * *",
   };
 
   /** A fresh, empty directory path: the script writes into an empty or missing directory only. */
@@ -149,7 +149,7 @@ describe("build-vercel.mjs", () => {
 
   it("worker: only the cron functions and the signed connections routes, their schedules, exact anchored routes, no static files", async () => {
     const { dir, config, functions } = await run("worker", allSchedules);
-    const names = ["activepieces", "billing", "calendar", "connections", "delivery", "followup"].map((name) => `cron/${name}`);
+    const names = ["activepieces", "billing", "calendar", "connections", "delivery", "followup", "outreach"].map((name) => `cron/${name}`);
     const internal = [
       ...["cancel", "complete", "disconnect", "link", "run"].map((name) => `internal/connections/${name}`),
       ...["open", "create_hub", "redeem_claim", "sign_in", "claim_start", "claim_status", "claim_cancel", "claim_confirm", "orders"].map((name) => `internal/shopify/${name}`),
@@ -170,6 +170,7 @@ describe("build-vercel.mjs", () => {
       { path: "/cron/activepieces", schedule: "*/5 * * * *" },
       { path: "/cron/followup", schedule: "0 * * * *" },
       { path: "/cron/connections", schedule: "*/10 * * * *" },
+      { path: "/cron/outreach", schedule: "*/5 * * * *" },
     ]);
     await expect(stat(join(dir, "functions", "index.func"))).rejects.toThrow();
     await expect(stat(join(dir, "functions", "cron", "delivery.func", "static"))).rejects.toThrow();
@@ -177,7 +178,7 @@ describe("build-vercel.mjs", () => {
 
   it("worker: with no schedule variables there is no crons key", async () => {
     const { config, functions } = await run("worker", {});
-    expect(functions).toHaveLength(21);
+    expect(functions).toHaveLength(22);
     expect(config.crons).toBeUndefined();
   }, 120_000);
 

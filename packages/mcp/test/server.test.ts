@@ -41,7 +41,7 @@ import {
   type TestDatabase,
   type TwoTenantFixture,
 } from "@zs/db/testing";
-import { createHs256Verifier, createLocalStubSessionCheck, createSession, type TokenVerifier } from "@zs/core";
+import { createHs256Verifier, createLocalStubSessionCheck, createSession, generateSealKeyPair, parseSealPublicKey, sealRefreshToken, type TokenVerifier } from "@zs/core";
 import { createMcpServer, type AccessTokenSource } from "../src/server.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
@@ -97,10 +97,11 @@ async function signedInMember(tenantId: string, role: "owner" | "staff" | null):
 /** A server acting with `accessToken`, verified like the API does, over an in-memory transport. */
 async function serve(
   accessToken: AccessTokenSource,
-  { at = clock, verifier = createHs256Verifier(SECRET, { clock: at }) }: { at?: { now(): Date }; verifier?: TokenVerifier } = {},
+  { at = clock, verifier = createHs256Verifier(SECRET, { clock: at }), outreach }: { at?: { now(): Date }; verifier?: TokenVerifier; outreach?: { tenants: readonly string[] } } = {},
 ): Promise<Client> {
   const server = createMcpServer({
     db: database.db, clock: at, generateId: randomUUID, verifier, sessionCheck: createLocalStubSessionCheck(database.db, at), accessToken,
+    ...(outreach ? { outreach } : {}),
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const connected = new Client({ name: "test", version: "0.0.0" });
@@ -606,5 +607,101 @@ describe("authorization on every tool call, like the HTTP API", () => {
       resourceId: tenant.resourceId, from: "2026-10-19T16:00:00.000Z", to: "2026-10-19T17:00:00.000Z",
     }));
     expect(slots.slots.map((slot) => slot.startsAt)).toEqual(["2026-10-19T16:00:00.000Z"]);
+  });
+});
+
+describe("outreach tools (outreach-sequencer.md OS-22)", () => {
+  const seal = parseSealPublicKey(generateSealKeyPair().publicKey);
+  let allowed: Client;
+  let staff: Client;
+  let outsider: Client;
+  let bare: Client;
+  let mailboxId: string;
+  let campaignId = "";
+
+  beforeAll(async () => {
+    mailboxId = randomUUID();
+    await fixture.service(async (tx) => {
+      await tx.query(
+        `UPDATE business_profiles SET time_zone='America/Los_Angeles', legal_name='Zero Sum Solutions LLC',
+           postal_address='{"line1":"1 Market St","city":"San Francisco","region":"CA","postalCode":"94105","country":"US"}'::jsonb WHERE tenant_id=$1`, [fixture.a.tenantId]);
+      await tx.query(
+        `INSERT INTO outreach_mailboxes (tenant_id,id,email,display_name,status,sealed_refresh_token,granted_scopes,daily_limit,created_at,updated_at)
+         VALUES ($1,$2,'devin@zerosum-solutions.com','Sam Sender','active',$3,'{}',20,now(),now())`,
+        [fixture.a.tenantId, mailboxId, sealRefreshToken(seal, { tenantId: fixture.a.tenantId, connectionId: mailboxId }, "fake-refresh")]);
+    });
+    const tokens = { owner: await signedInMember(fixture.a.tenantId, "owner"), staff: await signedInMember(fixture.a.tenantId, "staff"), out: await signedInMember(fixture.b.tenantId, "owner") };
+    const outreach = { tenants: [fixture.a.tenantId] };
+    allowed = await serve(tokens.owner.token, { outreach });
+    staff = await serve(tokens.staff.token, { outreach });
+    outsider = await serve(tokens.out.token, { outreach });
+    bare = await serve(tokens.owner.token);
+  });
+  afterAll(async () => { await Promise.all([allowed?.close(), staff?.close(), outsider?.close(), bare?.close()]); });
+
+  const campaign = () => ({
+    idempotencyKey: `oc-${randomUUID()}`, name: "MCP campaign",
+    steps: [{ subject: "Idea for {{company}}", body: "Hi {{first_name}}, a quick idea.", delayBusinessDays: 0 }],
+    window: { start: "08:00", end: "10:30" }, dailyCapPerMailbox: 5, mailboxIds: [mailboxId],
+  });
+
+  it("is absent without an allowlist, and has no approve tool", async () => {
+    const names = (await bare.listTools()).tools.map((tool) => tool.name);
+    expect(names.filter((name) => /outreach/.test(name))).toEqual([]);
+    const withOutreach = (await allowed.listTools()).tools.map((tool) => tool.name).filter((name) => /outreach/.test(name)).sort();
+    expect(withOutreach).toEqual([
+      "create_outreach_campaign", "get_outreach_campaign", "import_outreach_prospects", "list_outreach_campaigns",
+      "pause_outreach_campaign", "request_outreach_activation", "stop_outreach_prospect",
+    ]);
+    expect(withOutreach.filter((name) => /approve|reject|revoke|send/.test(name))).toEqual([]);
+  });
+
+  it("creates, imports, asks for activation, reads, stops a prospect and pauses", async () => {
+    const created = await callTool(allowed, "create_outreach_campaign", campaign());
+    expect(created.isError).toBe(false);
+    campaignId = (created.value as { result: { id: string; status: string } }).result.id;
+    expect((created.value as { result: { status: string } }).result.status).toBe("draft");
+
+    const imported = await callTool(allowed, "import_outreach_prospects", {
+      idempotencyKey: "oi-1", campaignId,
+      prospects: [{ email: "pat@acme.example", firstName: "Pat", company: "Acme" }, { email: "bad", firstName: "X", company: "Y" }],
+    });
+    expect(imported.value).toMatchObject({ result: { imported: 1, rejected: [{ index: 1, reason: "invalid_email" }] } });
+
+    const asked = await callTool(allowed, "request_outreach_activation", { idempotencyKey: "oa-1", campaignId });
+    expect(asked.isError).toBe(false);
+    expect(typeof (asked.value as { approvalId: unknown }).approvalId).toBe("string");
+
+    const detail = await callTool(allowed, "get_outreach_campaign", { campaignId });
+    expect(detail.value).toMatchObject({ campaign: { id: campaignId, status: "draft" }, prospectCounts: { pending: 1 } });
+    const list = await callTool(allowed, "list_outreach_campaigns");
+    expect((list.value as { items: { id: string }[] }).items.map((item) => item.id)).toContain(campaignId);
+
+    const paused = await callTool(allowed, "pause_outreach_campaign", { idempotencyKey: "op-1", campaignId });
+    expect(paused.isError).toBe(false);
+    // A draft has nothing to pause: the answer is the campaign as it is.
+    expect(paused.value).toMatchObject({ result: { id: campaignId, status: "draft" } });
+  });
+
+  it("stops one prospect", async () => {
+    const fresh = (await callTool(allowed, "create_outreach_campaign", campaign())).value as { result: { id: string } };
+    await callTool(allowed, "import_outreach_prospects", { idempotencyKey: "oi-2", campaignId: fresh.result.id, prospects: [{ email: "lee@globex.example", firstName: "Lee", company: "Globex" }] });
+    const rows = await fixture.service(async (tx) => (await tx.query<{ id: string }>("SELECT id FROM outreach_prospects WHERE tenant_id=$1 AND campaign_id=$2", [fixture.a.tenantId, fresh.result.id])).rows);
+    const stopped = await callTool(allowed, "stop_outreach_prospect", { idempotencyKey: "os-1", prospectId: rows[0]!.id });
+    expect(stopped.value).toMatchObject({ result: { status: "stopped" } });
+  });
+
+  it("rejects a missing key, staff, and another tenant's campaign", async () => {
+    const { idempotencyKey: _key, ...noKey } = campaign();
+    expect((await callTool(allowed, "create_outreach_campaign", noKey)).isError).toBe(true);
+
+    const denied = await callTool(staff, "list_outreach_campaigns");
+    expect(denied.isError).toBe(true);
+    expect(apiErrorBodySchema.parse(denied.value).error.code).toBe("Forbidden");
+
+    const hidden = await callTool(outsider, "get_outreach_campaign", { campaignId });
+    expect(hidden.isError).toBe(true);
+    expect(apiErrorBodySchema.parse(hidden.value).error.code).toBe("NotFound");
+    expect((await callTool(outsider, "pause_outreach_campaign", { idempotencyKey: "op-x", campaignId })).isError).toBe(true);
   });
 });

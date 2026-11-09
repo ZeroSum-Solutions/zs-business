@@ -5,10 +5,10 @@
 // GOOGLE_*_BASE_URL, GOOGLE_CHANNEL_SECRET, PUBLIC_BOOKING_KEY_SECRET, PUBLIC_BASE_URL,
 // TWILIO_ACCOUNT_SID, TWILIO_WEBHOOK_BASE_URL) are not here.
 
-/** The five cron schedules, set as build variables on the workers project only. */
+/** The cron schedules, set as build variables on the workers project only. */
 export const CRON_SCHEDULE_VARIABLES = [
   "DELIVERY_CRON_SCHEDULE", "BILLING_CRON_SCHEDULE", "CALENDAR_CRON_SCHEDULE", "ACTIVEPIECES_CRON_SCHEDULE", "FOLLOWUP_CRON_SCHEDULE",
-  "CONNECTIONS_CRON_SCHEDULE",
+  "CONNECTIONS_CRON_SCHEDULE", "OUTREACH_CRON_SCHEDULE",
 ];
 
 export const WORKER_ONLY_ENV = [
@@ -50,6 +50,12 @@ export const WORKER_ONLY_ENV = [
   // variables. The API reads them (parseEnrichmentEnv in src/vercel.ts) as the service gate; they hold no secret.
   // image worker (src/images/config.ts); the API keeps IMAGE_ADAPTER and the adapter settings (parseImageEnv)
   "IMAGE_WORKER", "IMAGE_DATABASE_URL", "IMAGE_SERVICE_DATABASE_URL", "IMAGE_INTERVAL_MS",
+  // outreach worker (src/outreach/config.ts, outreach-sequencer.md OS-21). The API reads only OUTREACH_TENANTS (the
+  // allowlist, no secret); UNSUBSCRIBE_TOKEN_SECRET and DELIVERY_UNSUBSCRIBE_BASE_URL are shared with the delivery worker.
+  "OUTREACH_WORKER", "OUTREACH_DATABASE_URL", "OUTREACH_RUNTIME_DATABASE_URL", "OUTREACH_GOOGLE_CLIENT_ID",
+  "OUTREACH_GOOGLE_CLIENT_SECRET", "OUTREACH_TOKEN_PRIVATE_KEY", "OUTREACH_SEND_ENABLED", "OUTREACH_GMAIL_BASE_URL",
+  "OUTREACH_MAILBOX_DAILY_LIMIT", "OUTREACH_SENDS_PER_TICK", "OUTREACH_MIN_GAP_MS", "OUTREACH_PROBE_DELAY_MS",
+  "OUTREACH_RUN_BUDGET_MS",
   // cron failure alert email (src/cron-alert-mail.ts); it sends with the RESEND_* sender above
   "OPS_ALERT_EMAIL",
   // build variables of the workers project

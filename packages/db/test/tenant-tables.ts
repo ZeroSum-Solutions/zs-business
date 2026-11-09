@@ -96,6 +96,13 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
       if (name === "connections") Object.assign(row, { account_label: "fixture", external_account_id: "1", account_domain: "fixture.myshopify.com", composio_account_id: `ca_${randomUUID()}` });
       if (name === "shopify_claims") Object.assign(row, { code_hash: randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "") });
       if (name === "connection_attempts") Object.assign(row, { browser_hash: "a".repeat(43), account_domain: "fixture.myshopify.com", composio_account_id: `ca_${randomUUID()}` });
+      // Outreach (outreach-sequencer.md OS-24): shaped values the CHECKs need. A disconnected mailbox holds no sealed token.
+      if (name === "outreach_mailboxes") Object.assign(row, { email: `fixture-${randomUUID()}@example.com`, status: "disconnected" });
+      if (name === "outreach_campaigns") Object.assign(row, { window_start_min: 480, window_end_min: 630, content_digest: "a".repeat(64) });
+      if (name === "outreach_campaign_steps") Object.assign(row, { step_number: 1, subject: "fixture", delay_business_days: 0 });
+      if (name === "outreach_prospects") Object.assign(row, { email: `fixture-${randomUUID()}@example.com` });
+      if (name === "outreach_sends") Object.assign(row, { status: "not_sent", recipient_address: "fixture@example.com" });
+      if (name === "outreach_inbound_events") Object.assign(row, { kind: "reply" });
       // Document intake (document-intake.md DL-1): a job needs a real hash, and its rows need a page count.
       // A row is written only into a job in review, which holds a page count, a parser and a digest.
       if (name === "document_intake_jobs") {

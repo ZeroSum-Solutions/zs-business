@@ -14,6 +14,7 @@ import {
   createDocumentIntakeSession,
   createEnrichmentSession,
   createFollowUpAgent,
+  createOutreachSession,
   createTranscriptionSession,
   DatabaseUnavailable,
   mapError,
@@ -22,6 +23,7 @@ import {
   type EnrichmentConfigInput,
   type FollowUpAgentConfig,
   type ImageDependencies,
+  type OutreachAccessInput,
   type Session,
   type SessionCheck,
   type StripeClient,
@@ -51,6 +53,7 @@ import { inboxRoutes } from "./routes/inbox.js";
 import { intakeRoutes } from "./routes/intake.js";
 import { MEDIA_UPLOAD_PATH, mediaRoutes } from "./routes/media.js";
 import { memberRoutes } from "./routes/members.js";
+import { outreachRoutes } from "./routes/outreach.js";
 import { siteRoutes } from "./routes/sites.js";
 import { setupRoutes } from "./routes/setup.js";
 import { sourceRoutes } from "./routes/sources.js";
@@ -156,6 +159,11 @@ export interface AppDependencies {
    * token. Absent means /v1/document-intake and /v1/workers/document-intake are off.
    */
   readonly documentIntake?: DocumentIntakeConfig & DocumentIntakeApiConfig;
+  /**
+   * Cold-email outreach (outreach-sequencer.md OS-1, OS-22): the tenants that may use it. Absent means /v1/outreach is
+   * off (404); a tenant outside the list is a 404 as well.
+   */
+  readonly outreach?: OutreachAccessInput;
   /** Receives unexpected errors; responses never include their details. */
   readonly onError?: (error: unknown) => void;
   /** Readiness probe for `GET /readyz`, for example `checkDatabase(pool)`. */
@@ -193,6 +201,9 @@ const unavailable = (signal: AbortSignal) => new Promise<never>((_, reject) => {
 const HTTP_ERROR_CODES: Partial<Record<number, ApiErrorCode>> = {
   401: "Unauthorized", 403: "Forbidden", 404: "NotFound", 409: "Conflict",
 };
+
+/** POST /v1/outreach/campaigns/:id/prospects, the only outreach route with a body over 64 KiB. */
+const OUTREACH_IMPORT_PATH = /^\/v1\/outreach\/campaigns\/[^/]+\/prospects$/;
 
 export function createApp(deps: AppDependencies) {
   const app = new Hono<AppEnv>();
@@ -274,6 +285,7 @@ export function createApp(deps: AppDependencies) {
     } : {}),
     ...(deps.sites ? { sites: deps.sites } : {}),
     ...(deps.images ? { images: deps.images } : {}),
+    ...(deps.outreach ? { outreach: deps.outreach } : {}),
   };
   /** The edge for one request: its database work stops at the request's deadline. */
   const requestEdge = (c: Context<AppEnv>) => {
@@ -333,6 +345,8 @@ export function createApp(deps: AppDependencies) {
   const jsonLimit = bodyLimit({ maxSize: 64 * 1024, onError: tooLarge });
   // document-intake.md DL-13: an apply request lists up to 5,000 row IDs, about 195 KB of JSON.
   const intakeApplyLimit = bodyLimit({ maxSize: INTAKE_APPLY_BODY_LIMIT, onError: tooLarge });
+  // outreach-sequencer.md OS-7: an import lists up to 500 prospects of up to about 1.2 KB each. Only that route.
+  const outreachImportLimit = bodyLimit({ maxSize: 1024 * 1024, onError: tooLarge });
   // The PDF upload carries its own 20 MiB limit (routes/document-intake.ts).
   // IM-22: an image upload is raw bytes with its own limit, checked after auth in mediaRoutes.
   // Only that exact route skips this one; with images off it keeps 64 KiB and answers 404.
@@ -340,6 +354,7 @@ export function createApp(deps: AppDependencies) {
   app.use("/v1/*", (c, next) => {
     if (c.req.path === DOCUMENT_INTAKE_UPLOAD_PATH) return next();
     if (images && c.req.method === "POST" && c.req.path === MEDIA_UPLOAD_PATH) return next();
+    if (c.req.method === "POST" && OUTREACH_IMPORT_PATH.test(c.req.path)) return outreachImportLimit(c, next);
     return (DOCUMENT_INTAKE_APPLY_PATH.test(c.req.path) ? intakeApplyLimit : jsonLimit)(c, next);
   });
   app.use("/v1/*", async (c, next) => {
@@ -363,6 +378,8 @@ export function createApp(deps: AppDependencies) {
   if (images) app.route("/v1/media", mediaRoutes);
   app.route("/v1", billingRoutes);
   app.route("/v1/approvals", approvalRoutes);
+  // Off without an OUTREACH_TENANTS allowlist: /v1/outreach is then an unknown route (404), like sites.
+  if (deps.outreach) app.route("/v1/outreach", outreachRoutes((c) => createOutreachSession(requestEdge(c), c.var.session.principal)));
   app.route("/v1/sources", sourceRoutes);
   app.route("/v1", calendarRoutes);
   // Off without the connections config: /v1/connections is then an unknown route (404), like sites.
