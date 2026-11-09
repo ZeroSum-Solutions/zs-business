@@ -83,6 +83,8 @@ const expectedPath: Record<string, string> = {
   // Enrichment (20261023600000_enrichment.sql, E-7): a changed email or phone clears the region mark.
   "crm_contacts_clear_region_attest()": "pg_catalog, pg_temp",
   "inbox_replies_guard()": "pg_catalog, pg_temp",
+  // Outreach (20261109100000_outreach_sequencer.sql, OS-24): the runtime role may set a mailbox active or disconnected only.
+  "outreach_mailboxes_runtime_status()": "pg_catalog, pg_temp",
   "site_history_append_only()": "pg_catalog, pg_temp",
   "voice_textback_append_only()": "pg_catalog, pg_temp",
   "rate_limit_receipt_take(timestamp with time zone,jsonb)": "pg_catalog, pg_temp",
