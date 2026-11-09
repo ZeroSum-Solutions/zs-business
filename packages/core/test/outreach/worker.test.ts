@@ -372,6 +372,10 @@ describe("the pre-send check (OS-14)", () => {
     await r.run({ messageIdWaitMs: 10 * DAY });
     expect(sentCount(r)).toBe(1);
     expect(await r.status(prospectEmail(1))).toBe("active");
+    // The wait counts from the first failed lookup, which the first run stored: a day later the prospect stops (B8).
+    const [stored] = await world.rows<{ message_id_first_failed_at: Date | null }>("SELECT message_id_first_failed_at FROM outreach_sends WHERE tenant_id=$1", [r.tenant]);
+    expect(stored!.message_id_first_failed_at).not.toBeNull();
+    world.time.ms += DAY;
     r.fake.script(ADDR, "getMessage", { status: 500 });
     await r.run({ messageIdWaitMs: DAY });
     expect(sentCount(r)).toBe(1);
@@ -592,12 +596,35 @@ describe("replies and bounces (OS-19)", () => {
     expect(events.map((event) => event.kind).filter((kind) => kind === "outreach_history_reset")).toHaveLength(2);
   });
 
-  it("keeps the cursor where it was when a run cannot read all the new mail", async () => {
+  const mailboxState = async (r: Rig) => (await world.rows<{ history_id: string; history_resume_token: string | null }>(
+    "SELECT history_id, history_resume_token FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]))[0]!;
+
+  it("keeps the cursor where it was and resumes from a stored page token when a run cannot read all the new mail (B3)", async () => {
     const r = await sent();
-    const before = (await world.rows<{ history_id: string }>("SELECT history_id FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]))[0]!.history_id;
+    const before = (await mailboxState(r)).history_id;
+    r.fake.setHistoryPageSize(ADDR, 1);
     for (let i = 0; i < 3; i += 1) r.fake.receive(ADDR, { from: "someone@else.example" });
     await r.run({ maxInboundMessages: 1 });
-    expect((await world.rows<{ history_id: string }>("SELECT history_id FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]))[0]!.history_id).toBe(before);
+    expect(await mailboxState(r)).toMatchObject({ history_id: before, history_resume_token: expect.any(String) });
+    await r.run({ maxInboundMessages: 1 });
+    await r.run({ maxInboundMessages: 1 });
+    const after = await mailboxState(r);
+    expect(after.history_resume_token).toBeNull();
+    expect(BigInt(after.history_id)).toBeGreaterThan(BigInt(before));
+  });
+
+  it("sends nothing from a mailbox that has not read all its new mail, so a reply on a later page stops its prospect first (B3)", async () => {
+    const r = await sent();
+    const first = r.fake.sent[0]!;
+    r.fake.setHistoryPageSize(ADDR, 1);
+    r.fake.receive(ADDR, { from: "someone@else.example" });
+    r.fake.reply(ADDR, first.threadId, first.to);
+    world.time.ms = THURSDAY;
+    await r.run({ maxInboundMessages: 1 });
+    expect(sentCount(r)).toBe(1);
+    await r.run({ maxInboundMessages: 1 });
+    expect(sentCount(r)).toBe(1);
+    expect(await r.status(first.to)).toBe("replied");
   });
 });
 
@@ -621,8 +648,8 @@ describe("unsubscribe, bounce rate and sign-in (OS-18, OS-20, OS-3)", () => {
       await world.rows("UPDATE outreach_prospects SET next_due_on='2026-12-01', thread_id=$3 WHERE tenant_id=$1 AND id=$2", [r.tenant, item.id, `thr-seed-${index}`]);
       await r.seed(item.id, 1, "sent", { date: "2026-10-01", thread: `thr-seed-${index}` });
     }
-    // The first run only stores the mailbox's history cursor; mail that arrives after it is what the next run reads.
-    await r.run({ sendEnabled: false });
+    // The mailbox already has its history cursor (the fake's first history id); mail that arrives after it is what the next run reads.
+    await world.rows("UPDATE outreach_mailboxes SET history_id='1000' WHERE tenant_id=$1", [r.tenant]);
     for (const item of all.slice(0, bounced)) r.fake.bounce(ADDR, undefined, item.email);
     return r;
   }
@@ -678,5 +705,299 @@ describe("unsubscribe, bounce rate and sign-in (OS-18, OS-20, OS-3)", () => {
     } finally {
       for (const spy of spies) spy.mockRestore();
     }
+  });
+});
+
+// Review fixes (B1..B9 and the warnings): each block names the finding it closes.
+describe("review fixes", () => {
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** Sends step 1 from a fresh rig, with its history cursor stored. */
+  async function afterStep1(options: Parameters<typeof rig>[0] = {}) {
+    const r = await rig(options);
+    await r.run();
+    return r;
+  }
+
+  /**
+   * Holds `hold` open in one transaction, starts a worker run on other connections, shows that the run sends nothing while the
+   * transaction is open (it is waiting on a lock the writer also takes), then lets the transaction commit.
+   */
+  async function raceWith(r: Rig, hold: (tx: Parameters<Parameters<typeof world.fixture.service>[0]>[0]) => Promise<void>, overrides: Partial<OutreachWorkerConfig> = {}) {
+    let pending: Promise<OutreachRunCounts> | undefined;
+    await world.fixture.service(async (tx) => {
+      await hold(tx);
+      pending = r.run(overrides);
+      await pause(600);
+      expect(r.fake.sendCalls(), "the run must wait for the writer's lock").toBe(0);
+    });
+    return pending!;
+  }
+
+  describe("B1: only mail with one of our own refs is ours", () => {
+    it("treats a prospect's reply that copies our X-Zs-Ref header as a reply", async () => {
+      const r = await afterStep1();
+      const [row] = await r.sends();
+      r.fake.reply(ADDR, r.fake.sent[0]!.threadId, prospectEmail(1), { "X-Zs-Ref": row!.id });
+      world.time.ms = THURSDAY;
+      await r.run();
+      expect(await r.status(prospectEmail(1))).toBe("replied");
+      expect(sentCount(r)).toBe(1);
+    });
+
+    it("treats a reply with an X-Zs-Ref of no send of ours as a reply too", async () => {
+      const r = await afterStep1();
+      r.fake.reply(ADDR, r.fake.sent[0]!.threadId, prospectEmail(1), { "X-Zs-Ref": randomUUID() });
+      world.time.ms = THURSDAY;
+      await r.run();
+      expect(await r.status(prospectEmail(1))).toBe("replied");
+      expect(sentCount(r)).toBe(1);
+    });
+  });
+
+  describe("B2: a mailbox sends only after it settled and read everything", () => {
+    it("sends nothing in a run whose inbound read failed, and sends in the next", async () => {
+      const r = await afterStep1();
+      world.time.ms = THURSDAY;
+      r.fake.script(ADDR, "history", { status: 500 });
+      const failed = await r.run();
+      expect(failed.stepsFailed).toBe(1);
+      expect(sentCount(r)).toBe(1);
+      await r.run();
+      expect(sentCount(r)).toBe(2);
+    });
+
+    it("sends nothing while an uncertain attempt could not be settled to its end, then sends once it is decided", async () => {
+      const r = await rig({ count: 2 });
+      await r.run();
+      const unsent = (await r.prospects()).find((p) => p.email !== r.fake.sent[0]!.to)!;
+      await r.seed(unsent.id, 1, "uncertain", { history: "1" });
+      r.fake.setHistoryPageSize(ADDR, 1);
+      for (let i = 0; i < 3; i += 1) r.fake.receive(ADDR, { from: "someone@else.example" });
+      world.time.ms = THURSDAY;
+      await r.run({ maxHistoryPages: 1 });
+      expect(sentCount(r)).toBe(1);
+      await r.run({ maxHistoryPages: 50 });
+      expect(sentCount(r)).toBe(2);
+    });
+  });
+
+  describe("B4: a history gap pauses a mailbox that has mailed prospects", () => {
+    it("pauses the mailbox with a reason and an operator report, sends nothing, and a reconnect resumes it", async () => {
+      const r = await afterStep1();
+      const cursor = (await world.rows<{ history_id: string }>("SELECT history_id FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]))[0]!.history_id;
+      // Gmail drops the history up to the cursor; mail that arrived since moves the mailbox's head past it.
+      r.fake.expireHistoryThrough(ADDR, Number(cursor) + 1);
+      r.fake.receive(ADDR, { from: "someone@else.example" });
+      world.time.ms = THURSDAY;
+      await r.run();
+      expect(events).toContainEqual({ kind: "outreach_history_reset", tenantId: r.tenant, mailboxId: r.mailboxes[0], reason: "expired", paused: true });
+      const [box] = await world.rows<{ pause_reason: string | null; paused_until: Date | null }>("SELECT pause_reason, paused_until FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]);
+      expect(box!.pause_reason).toBe("history_gap");
+      expect(box!.paused_until!.getUTCFullYear()).toBe(9999);
+      expect(sentCount(r)).toBe(1);
+      await r.run();
+      expect(sentCount(r)).toBe(1);
+      await world.mailbox(r.tenant, ADDR);
+      const [after] = await world.rows("SELECT paused_until, pause_reason FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]);
+      expect(after).toMatchObject({ paused_until: null, pause_reason: null });
+      await r.run();
+      expect(sentCount(r)).toBe(2);
+    });
+
+    it("moves a mailbox with nothing mailed to the head without a pause", async () => {
+      const r = await rig({ count: 1 });
+      await r.run({ sendEnabled: false });
+      const [box] = await world.rows<{ pause_reason: string | null }>("SELECT pause_reason FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]);
+      expect(box!.pause_reason).toBeNull();
+    });
+  });
+
+  describe("B5: the send decision waits for competing writers' locks and rechecks", () => {
+    it("does not send past an approval revoked in an open transaction", async () => {
+      const r = await rig();
+      const { activation_approval_id } = await r.campaign();
+      const done = await raceWith(r, async (tx) => {
+        await tx.query("UPDATE approvals SET status='revoked', revoked_by=$3, revoked_at=$4 WHERE tenant_id=$1 AND id=$2", [r.tenant, activation_approval_id, r.ownerId, new Date(world.time.ms)]);
+      });
+      expect(done.sends).toBe(0);
+      expect(sentCount(r)).toBe(0);
+      expect(await r.campaign()).toMatchObject({ status: "paused", paused_reason: "approval_revoked" });
+    });
+
+    it("does not send past a campaign paused in an open transaction", async () => {
+      const r = await rig();
+      await raceWith(r, async (tx) => {
+        await tx.query("UPDATE outreach_campaigns SET status='paused', paused_reason='owner' WHERE tenant_id=$1 AND id=$2", [r.tenant, r.campaignId]);
+      });
+      expect(sentCount(r)).toBe(0);
+      expect(await r.campaign()).toMatchObject({ status: "paused", paused_reason: "owner" });
+    });
+
+    it("does not send to an address suppressed in an open transaction (the writer's advisory lock)", async () => {
+      const r = await rig();
+      await raceWith(r, async (tx) => {
+        await tx.query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))", [`suppression:${r.tenant}:email:${prospectEmail(1)}`]);
+        await tx.query("INSERT INTO suppressions (tenant_id,channel,address,reason,source,created_at) VALUES ($1,'email',$2,'manual','test',$3)", [r.tenant, prospectEmail(1), new Date(world.time.ms)]);
+      });
+      expect(sentCount(r)).toBe(0);
+      expect(await r.status(prospectEmail(1))).toBe("suppressed");
+    });
+
+    it("does not send past a CRM identity lock held by a consent writer", async () => {
+      const r = await rig();
+      await raceWith(r, async (tx) => {
+        await tx.query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))", [`crm:contact:email:${r.tenant}:${prospectEmail(1)}`]);
+      });
+      // Nothing changed when the lock was released: the send goes.
+      expect(sentCount(r)).toBe(1);
+    });
+
+    it("does not send after the owner stopped the prospect in an open transaction", async () => {
+      const r = await rig();
+      await raceWith(r, async (tx) => {
+        await tx.query("UPDATE outreach_prospects SET status='stopped', next_step=NULL, next_due_on=NULL, stopped_at=$3 WHERE tenant_id=$1 AND email=$2", [r.tenant, prospectEmail(1), new Date(world.time.ms)]);
+      });
+      expect(sentCount(r)).toBe(0);
+      expect(await r.status(prospectEmail(1))).toBe("stopped");
+    });
+
+    it("rechecks the postal address a profile writer changed in an open transaction", async () => {
+      const r = await rig();
+      await raceWith(r, async (tx) => {
+        await tx.query("UPDATE business_profiles SET postal_address=NULL WHERE tenant_id=$1", [r.tenant]);
+      });
+      expect(sentCount(r)).toBe(0);
+      expect(await r.campaign()).toMatchObject({ status: "paused", paused_reason: "postal_address_missing" });
+    });
+  });
+
+  describe("B6: the worker needs an approved activation of this very campaign", () => {
+    it.each([
+      ["another target", "UPDATE approvals SET target_id=gen_random_uuid() WHERE tenant_id=$1 AND id=$2"],
+      ["another action", "UPDATE approvals SET action_type='outreach.campaign.pause' WHERE tenant_id=$1 AND id=$2"],
+    ])("pauses the campaign and sends nothing when its approval is %s", async (_name, change) => {
+      const r = await rig();
+      const { activation_approval_id } = await r.campaign();
+      await world.rows(change, [r.tenant, activation_approval_id]);
+      await r.run();
+      expect(sentCount(r)).toBe(0);
+      expect(await r.campaign()).toMatchObject({ status: "paused", paused_reason: "approval_invalid" });
+    });
+  });
+
+  describe("B7: an open attempt of a prospect is skipped, not fatal", () => {
+    it("sends to the other prospects when the first one already has an uncertain attempt", async () => {
+      const r = await rig({ count: 2 });
+      const [first] = await r.prospects();
+      await r.seed(first!.id, 1, "uncertain", { history: "1" });
+      const counts = await r.run({ probeDelayMs: DAY });
+      expect(counts.stepsFailed).toBe(0);
+      expect(sentCount(r)).toBe(1);
+      expect(r.fake.sent[0]!.to).toBe(prospectEmail(2));
+    });
+  });
+
+  describe("B8: the Message-ID wait", () => {
+    it("fails the mailbox into reauthorize when the lookup says the grant is gone", async () => {
+      const r = await afterStep1();
+      await world.rows("UPDATE outreach_sends SET rfc_message_id=NULL WHERE tenant_id=$1", [r.tenant]);
+      world.time.ms = THURSDAY;
+      r.fake.script(ADDR, "getMessage", { status: 401 });
+      await r.run();
+      expect((await world.rows("SELECT status FROM outreach_mailboxes WHERE tenant_id=$1", [r.tenant]))[0]!.status).toBe("reauthorize");
+      expect(await r.status(prospectEmail(1))).toBe("active");
+    });
+  });
+
+  describe("B9: a run that ran out of time before Gmail was asked releases the reservation", () => {
+    it("marks the row not_sent, keeps the prospect on its step and sends it in the next run", async () => {
+      const r = await rig();
+      let ids = 0;
+      let jumped = false;
+      const clock = { now: () => new Date(world.time.ms + (jumped ? 25_000 : 0)) };
+      const worker = createOutreachWorker({
+        service: world.fixture.service, db: world.database.db, gmail: r.fake, oauth: r.fake.oauth, clock,
+        generateId: () => { ids += 1; if (ids >= 2) jumped = true; return randomUUID(); },
+        report: (event) => { events.push(event); },
+        config: { privateKey, tenants: [r.tenant], sendEnabled: true, minGapMs: 0, probeDelayMs: 0, unsubscribeBaseUrl: "https://hub.example/u", unsubscribeSecret: SECRET },
+      });
+      const counts = await worker.runOnce();
+      expect(r.fake.sendCalls()).toBe(0);
+      expect(counts.notSent).toBe(1);
+      expect(await r.sends()).toMatchObject([{ status: "not_sent", error_code: "out_of_time" }]);
+      expect(await r.status(prospectEmail(1))).toBe("active");
+      await r.run();
+      expect(sentCount(r)).toBe(1);
+    });
+  });
+
+  describe("warnings", () => {
+    it("counts a bounce by its event and ignores a prospect stopped before any mail by a bounce suppression (A6, Argon)", async () => {
+      const r = await rig({ count: 45 });
+      const all = await r.prospects();
+      for (const [index, item] of all.slice(0, 39).entries()) {
+        await world.rows("UPDATE outreach_prospects SET next_due_on='2026-12-01', thread_id=$3 WHERE tenant_id=$1 AND id=$2", [r.tenant, item.id, `thr-seed-${index}`]);
+        await r.seed(item.id, 1, "sent", { date: "2026-10-01", thread: `thr-seed-${index}` });
+      }
+      await world.rows("UPDATE outreach_mailboxes SET history_id='1000' WHERE tenant_id=$1", [r.tenant]);
+      for (const item of all.slice(39, 44))
+        await world.rows("INSERT INTO suppressions (tenant_id,channel,address,reason,source,created_at) VALUES ($1,'email',$2,'bounce','test',$3)", [r.tenant, item.email, new Date(world.time.ms)]);
+      await r.run({ sendsPerTick: 5 });
+      expect((await r.prospects()).filter((p) => p.status === "bounced")).toHaveLength(5);
+      expect((await r.campaign()).status).toBe("active");
+    });
+
+    it("pauses the campaign with a reason when the business has no time zone, never on UTC (A11)", async () => {
+      const r = await rig();
+      await world.profile(r.tenant, { timeZone: null });
+      await r.run();
+      expect(sentCount(r)).toBe(0);
+      expect(await r.campaign()).toMatchObject({ status: "paused", paused_reason: "time_zone_missing" });
+    });
+
+    it("rotates mailboxes by their last attempt so one cannot starve the other (OS-13)", async () => {
+      const r = await rig({ count: 2, addresses: [ADDR, OTHER] });
+      await r.run({ mailboxesPerRun: 1 });
+      await r.run({ mailboxesPerRun: 1 });
+      expect(new Set(r.fake.calls.map((call) => call.mailbox).filter((m) => m !== null)).size).toBe(2);
+    });
+
+    it("treats a first send date ahead of today (a time zone moved west) as warm-up day zero", async () => {
+      const r = await rig({ count: 2 });
+      const [, second] = await r.prospects();
+      await r.seed(second!.id, 1, "sent", { date: "2026-11-10", thread: "thr-future" });
+      const counts = await r.run();
+      expect(counts.stepsFailed).toBe(0);
+      expect(sentCount(r)).toBe(1);
+    });
+
+    it("lets a follow-up lookup stay out of the 24 hours until the first lookup failed (B8 clock)", async () => {
+      const r = await afterStep1();
+      await world.rows("UPDATE outreach_sends SET rfc_message_id=NULL WHERE tenant_id=$1", [r.tenant]);
+      world.time.ms = THURSDAY;
+      r.fake.script(ADDR, "getMessage", { status: 500 });
+      await r.run({ messageIdWaitMs: DAY });
+      world.time.ms = THURSDAY + 2 * 60 * MINUTE;
+      r.fake.script(ADDR, "getMessage", { status: 500 });
+      await r.run({ messageIdWaitMs: DAY });
+      expect(await r.status(prospectEmail(1))).toBe("active");
+    });
+
+    it("refuses at import a prospect whose rendered subject is too long (A10)", async () => {
+      const r = await rig({ count: 0, campaign: { steps: [{ subject: "{{company}}{{company}}{{company}}{{company}}{{company}}{{company}}", body: "Hi {{first_name}}", delayBusinessDays: 0 }] } });
+      const imported = (await r.session.importProspects(r.campaignId, { prospects: [prospect(1, { company: "C".repeat(190) }), prospect(2)] }, randomUUID())).result;
+      expect(imported.rejected).toEqual([{ index: 0, reason: "render_too_long" }]);
+      expect(imported.imported).toBe(1);
+    });
+
+    it("stops a prospect that slipped past the import with a too-long subject, and still sends the others (A10)", async () => {
+      const r = await rig({ count: 2, campaign: { steps: [{ subject: "{{company}}{{company}}{{company}}", body: "Hi {{first_name}}", delayBusinessDays: 0 }] } });
+      await world.rows("UPDATE outreach_prospects SET company=$3 WHERE tenant_id=$1 AND email=$2", [r.tenant, prospectEmail(1), "C".repeat(190)]);
+      const counts = await r.run({ sendsPerTick: 2 });
+      expect(counts.stepsFailed).toBe(0);
+      expect(await r.status(prospectEmail(1))).toBe("stopped");
+      expect(sentCount(r)).toBe(1);
+    });
   });
 });

@@ -17,7 +17,7 @@ export type OutreachVariable = (typeof OUTREACH_VARIABLES)[number];
 /** OS-7: why one prospect row of an import is refused. */
 export const OUTREACH_ROW_REASONS = Object.freeze([
   "invalid_email", "role_address", "missing_field", "hard_suppressed", "suppressed", "consent_denied",
-  "duplicate", "mailbox_not_in_campaign",
+  "duplicate", "mailbox_not_in_campaign", "render_too_long",
 ] as const);
 export type OutreachRowReason = (typeof OUTREACH_ROW_REASONS)[number];
 

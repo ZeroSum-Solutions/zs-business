@@ -85,6 +85,21 @@ export function renderStep(steps: readonly TemplateStep[], stepNumber: number, v
   return { ok: true, subject: stepNumber === 1 ? base : `Re: ${base}`, body: renderTemplate(step.body, values) };
 }
 
+/**
+ * OS-7: true when any step would render too long to send: a subject over 300 characters, or a body that with the footer
+ * would pass the 20,000 the send row keeps. The same limits stop a prospect at send time.
+ */
+export function renderTooLong(steps: readonly TemplateStep[], values: TemplateValues): boolean {
+  for (let number = 1; number <= steps.length; number += 1) {
+    const rendered = renderStep(steps, number, values);
+    if (rendered.ok && (rendered.subject.length > RENDER_MAX_SUBJECT || rendered.body.length > RENDER_MAX_BODY)) return true;
+  }
+  return false;
+}
+/** The send row's limits (300 and 20,000) less 2,000 characters kept for the footer. */
+export const RENDER_MAX_SUBJECT = 300;
+export const RENDER_MAX_BODY = 18_000;
+
 // OS-6: the footer and the postal-address guard.
 
 export interface PostalAddress {

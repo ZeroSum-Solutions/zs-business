@@ -66,9 +66,10 @@ interface OpenSend extends SendRow { readonly history_id_before: string | null }
  * OS-16: attempts a crashed run left `sending` are `uncertain` (this run holds the lease, so no live run owns them). Each
  * uncertain attempt older than the probe delay is looked up in the mailbox's history by its `X-Zs-Ref`. A match settles it
  * `sent`. History read to its end without a match, history Gmail no longer keeps, or no start point make it `lost`.
- * A Gmail failure leaves the attempt uncertain for the next run.
+ * A Gmail failure leaves the attempt uncertain for the next run. True when every due attempt was decided; false when the
+ * history was not read to its end (the sent mail found so far is still settled) and the mailbox must not send this run.
  */
-export async function settleOpenAttempts(ctx: Ctx, box: Box): Promise<void> {
+export async function settleOpenAttempts(ctx: Ctx, box: Box): Promise<boolean> {
   await ctx.leased(box, (tx) => tx.query(
     "UPDATE outreach_sends SET status='uncertain', updated_at=$3 WHERE tenant_id=$1 AND mailbox_id=$2 AND status='sending'", [box.tenantId, box.id, ctx.now()]));
   const due = (await ctx.deps.service((tx) => tx.query<OpenSend>(
@@ -76,28 +77,29 @@ export async function settleOpenAttempts(ctx: Ctx, box: Box): Promise<void> {
        FROM outreach_sends WHERE tenant_id=$1 AND mailbox_id=$2 AND status='uncertain' AND attempt_started_at <= $3
       ORDER BY attempt_started_at, id`,
     [box.tenantId, box.id, new Date(ctx.now().getTime() - ctx.cfg.probeDelayMs)]))).rows;
-  if (due.length === 0) return;
+  if (due.length === 0) return true;
   ctx.counts.probed += due.length;
 
   const readable = due.filter((send) => send.history_id_before !== null);
   for (const send of due.filter((candidate) => candidate.history_id_before === null)) await ctx.leased(box, (tx) => markLost(tx, ctx, box, send));
-  if (readable.length === 0) return;
+  if (readable.length === 0) return true;
 
   const start = readable.map((send) => BigInt(send.history_id_before!)).reduce((least, id) => (id < least ? id : least)).toString();
   const sentIds: string[] = [];
+  let complete = true;
   try {
     let pageToken: string | undefined;
     for (let pages = 1; ; pages += 1) {
       const page = await ctx.call((signal) => ctx.gmail.listHistory(box.accessToken, { startHistoryId: start, ...(pageToken ? { pageToken } : {}) }, { signal }));
       for (const message of page.messages) if (message.labelIds.includes("SENT")) sentIds.push(message.id);
       if (page.nextPageToken === null) break;
-      if (pages >= ctx.cfg.maxHistoryPages) return; // not read to its end: nothing is decided
+      if (pages >= ctx.cfg.maxHistoryPages) { complete = false; break; } // not read to its end: a miss decides nothing
       pageToken = page.nextPageToken;
     }
   } catch (error) {
     if (errorCode(error) !== "history_expired") throw error;
     for (const send of readable) await ctx.leased(box, (tx) => markLost(tx, ctx, box, send));
-    return;
+    return true;
   }
 
   const wanted = new Set(readable.map((send) => send.id));
@@ -114,7 +116,8 @@ export async function settleOpenAttempts(ctx: Ctx, box: Box): Promise<void> {
     await ctx.leased(box, async (tx) => {
       if (match) {
         if (await markSent(tx, ctx, box, send, match)) ctx.counts.settledSent += 1;
-      } else await markLost(tx, ctx, box, send);
+      } else if (complete) await markLost(tx, ctx, box, send);
     });
   }
+  return complete;
 }

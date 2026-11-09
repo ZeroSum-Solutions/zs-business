@@ -45,6 +45,16 @@ describe("classifyInbound (OS-19)", () => {
     expect(classifyInbound(message("m5", "thread-1", { from: "pat@acme.example", "content-type": "multipart/alternative" }), context).kind).toBe("reply");
   });
 
+  it("reads the report type as a Content-Type parameter, whatever its case, spacing or quoting (A12)", () => {
+    const bounce = (value: string) => classifyInbound(message("b6", "thread-1", { from: "someone@relay.example", "content-type": value }), context).kind;
+    expect(bounce('Multipart/Report;report-type="Delivery-Status";boundary=x')).toBe("bounce");
+    expect(bounce("multipart/report; boundary=x; REPORT-TYPE = delivery-status")).toBe("bounce");
+    // A disposition notification, a quoted look-alike inside another parameter and a plain text type are no bounce.
+    expect(bounce("multipart/report; report-type=disposition-notification")).toBe("reply");
+    expect(bounce('multipart/mixed; boundary="report-type=delivery-status"')).toBe("reply");
+    expect(bounce('multipart/report; boundary="a;report-type=delivery-status"')).toBe("reply");
+  });
+
   it("records an out-of-office without stopping anything, but treats Auto-Submitted: no as a person", () => {
     expect(classifyInbound(message("a1", "thread-1", { from: "pat@acme.example", "auto-submitted": "auto-replied" }), context))
       .toEqual({ kind: "auto_reply", prospectId: "p1" });

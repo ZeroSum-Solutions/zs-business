@@ -17,7 +17,7 @@ export const outreachWorkerConfigSchema = z.strictObject({
     (value) => value instanceof KeyObject && value.type === "private" && value.asymmetricKeyType === "x25519",
     "privateKey must be an X25519 private key"),
   /** OS-1: OUTREACH_TENANTS. Every query names `tenant_id = ANY(...)` of these or one tenant of a row it found there. */
-  tenants: z.array(uuidSchema).max(100),
+  tenants: z.array(uuidSchema).max(100).transform((ids) => ids.map((id) => id.toLowerCase())),
   /** OS-10: true only for the exact string `true` in the environment (apps/api/src/outreach/config.ts). */
   sendEnabled: z.boolean().default(false),
   /** OS-12: OUTREACH_MAILBOX_DAILY_LIMIT. */
@@ -54,7 +54,7 @@ export type ParsedOutreachConfig = z.infer<typeof outreachWorkerConfigSchema>;
 /** Operator events (OS-3, OS-13, OS-15, OS-16, OS-19, OS-20). Ids and our codes only, cut to 200 characters; never a token. */
 export type OutreachReport =
   | { readonly kind: "outreach_mailbox_reauthorize"; readonly tenantId: string; readonly mailboxId: string; readonly code: string }
-  | { readonly kind: "outreach_history_reset"; readonly tenantId: string; readonly mailboxId: string; readonly reason: "no_cursor" | "expired" }
+  | { readonly kind: "outreach_history_reset"; readonly tenantId: string; readonly mailboxId: string; readonly reason: "no_cursor" | "expired"; readonly paused?: boolean }
   | { readonly kind: "outreach_gmail_daily_limit"; readonly tenantId: string; readonly mailboxId: string }
   | { readonly kind: "outreach_send_outcome_unknown"; readonly tenantId: string; readonly mailboxId: string; readonly sendId: string }
   | { readonly kind: "outreach_bounce_rate"; readonly tenantId: string; readonly campaignId: string; readonly sent: number; readonly bounced: number }
@@ -108,11 +108,13 @@ export interface OutreachRunCounts {
   campaignsPaused: number;
   campaignsCompleted: number;
   stepsFailed: number;
+  /** Steps that ran to their end: the cron outcome compares it with `stepsFailed`. */
+  stepsSucceeded: number;
 }
 export const emptyCounts = (): OutreachRunCounts => ({
   mailboxes: 0, lostLeases: 0, deadlineStops: 0, reauthorized: 0, probed: 0, settledSent: 0, lost: 0, inboundRead: 0, replies: 0,
   ownerReplies: 0, bounces: 0, autoReplies: 0, historyResets: 0, sends: 0, accepted: 0, notSent: 0, rejected: 0, uncertain: 0, stopped: 0,
-  campaignsPaused: 0, campaignsCompleted: 0, stepsFailed: 0,
+  campaignsPaused: 0, campaignsCompleted: 0, stepsFailed: 0, stepsSucceeded: 0,
 });
 
 /** One leased mailbox, for the length of one run. `accessToken` is in memory only (OS-21). */
@@ -168,6 +170,15 @@ export const errorStatus = (error: unknown): number | null =>
   typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : null;
 export const errorReason = (error: unknown): string | null =>
   typeof error === "object" && error !== null && "reason" in error && typeof error.reason === "string" ? error.reason.toLowerCase() : null;
+
+/** A mailbox that Google no longer lets us use: the refresh token is revoked or lacks a scope (OS-3). */
+export function needsReauthorization(error: unknown): boolean {
+  const status = errorStatus(error);
+  return errorCode(error) === "invalid_grant" || status === 401 || (status === 403 && errorReason(error) === "insufficientpermissions");
+}
+
+/** A far-future instant: a mailbox paused "until an operator reconnects it". Not `infinity`, which node-postgres reads as a NaN date. */
+export const PAUSED_UNTIL_OPERATOR = new Date("9999-12-31T00:00:00.000Z");
 
 /** An operator-event text: our words, cut to 200 characters. */
 export const reportText = (value: unknown): string => (value instanceof Error ? `${value.name}` : String(value)).slice(0, 200);

@@ -49,6 +49,10 @@ export const recordSuppressionHandler: ActionHandler = {
   async handle({ tx, command, binding, now }) {
     const { payload } = parseOrFail(recordSuppressionCommandSchema, command);
     requireTarget(command, binding.tenantId, payload.channel, payload.address);
+    // The outreach worker's send decision takes the shared form of this lock before it reads the list, so a suppression that
+    // commits first is seen and one that comes later waits for the decision (outreach-sequencer.md OS-14).
+    await tx.query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))",
+      [`suppression:${binding.tenantId}:${payload.channel}:${payload.address}`]);
     // The first reason stays, except that a lasting reason (bounce, complaint, manual,
     // unsubscribe) replaces `stop`, so a later START cannot lift it.
     const written = await tx.query(

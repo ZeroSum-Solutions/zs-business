@@ -70,7 +70,7 @@ describe("outreach import and permission (OS-1, OS-7)", () => {
 
   it("lists the codes a tenant may see, row reasons included", () => {
     for (const code of ["invalid_email", "role_address", "missing_field", "hard_suppressed", "suppressed", "consent_denied", "duplicate",
-      "mailbox_not_in_campaign", "campaign_not_activatable", "campaign_changed", "no_prospects", "mailbox_unavailable", "time_zone_missing",
+      "mailbox_not_in_campaign", "render_too_long", "campaign_not_activatable", "campaign_changed", "no_prospects", "mailbox_unavailable", "time_zone_missing",
       "postal_address_missing", "postal_address_placeholder", "template_placeholder", "campaign_active", "unknown_variable"])
       expect(OUTREACH_ERROR_CODES).toContain(code);
   });

@@ -7,9 +7,8 @@ import { openRefreshToken } from "../calendar/seal.js";
 import {
   emptyCounts,
   errorCode,
-  errorReason,
-  errorStatus,
   LostLease,
+  needsReauthorization,
   OutOfTime,
   outreachWorkerConfigSchema,
   reportText,
@@ -20,7 +19,7 @@ import {
   type OutreachWorkerConfig,
   type OutreachWorkerDeps,
 } from "./worker-kit.js";
-import { pollInbound } from "./worker-inbound.js";
+import { checkMailboxCampaigns, pollInbound } from "./worker-inbound.js";
 import { sendFromMailbox } from "./worker-send.js";
 import { settleOpenAttempts } from "./worker-settle.js";
 
@@ -33,13 +32,6 @@ interface LeasedRow {
   readonly daily_limit: number;
   readonly paused_until: Date | null;
   readonly history_id: string | null;
-}
-
-/** A mailbox that Google no longer lets us use: the refresh token is revoked or lacks a scope. */
-function needsReauthorization(error: unknown): boolean {
-  const status = errorStatus(error);
-  const code = errorCode(error);
-  return code === "invalid_grant" || status === 401 || (status === 403 && errorReason(error) === "insufficientpermissions");
 }
 
 export interface OutreachWorker {
@@ -59,16 +51,16 @@ export function createOutreachWorker(deps: OutreachWorkerDeps): OutreachWorker {
       };
       const now = () => deps.clock.now();
       const timeLeft = () => deadline - now().getTime();
-      const tenants = cfg.tenants.map((id) => id.toLowerCase());
+      const tenants = cfg.tenants;
       if (tenants.length === 0) return counts;
 
       const leaseToken = deps.generateId();
       const leased = (await deps.service((tx) => tx.query<LeasedRow>(
-        `UPDATE outreach_mailboxes SET lease_token=$1, lease_expires_at=$2, updated_at=$3
+        `UPDATE outreach_mailboxes SET lease_token=$1, lease_expires_at=$2, last_attempt_at=$3, updated_at=$3
           WHERE (tenant_id, id) IN (
             SELECT tenant_id, id FROM outreach_mailboxes
              WHERE status='active' AND tenant_id = ANY($4::uuid[]) AND (lease_expires_at IS NULL OR lease_expires_at <= $3)
-             ORDER BY history_checked_at NULLS FIRST, tenant_id, id LIMIT $5 FOR UPDATE SKIP LOCKED)
+             ORDER BY last_attempt_at NULLS FIRST, tenant_id, id LIMIT $5 FOR UPDATE SKIP LOCKED)
           RETURNING tenant_id, id, email, display_name, sealed_refresh_token, daily_limit, paused_until, history_id`,
         [leaseToken, new Date(now().getTime() + cfg.leaseMs), now(), tenants, cfg.mailboxesPerRun]))).rows;
 
@@ -82,7 +74,7 @@ export function createOutreachWorker(deps: OutreachWorkerDeps): OutreachWorker {
           async leased<T>(target: Box, work: (tx: Transaction) => Promise<T>): Promise<T> {
             return deps.service(async (tx) => {
               const held = await tx.query(
-                "SELECT 1 FROM outreach_mailboxes WHERE tenant_id=$1 AND id=$2 AND lease_token=$3 AND lease_expires_at > $4 FOR UPDATE",
+                "SELECT 1 FROM outreach_mailboxes WHERE tenant_id=$1 AND id=$2 AND lease_token=$3 AND lease_expires_at > $4 AND status='active' FOR UPDATE",
                 [target.tenantId, target.id, target.leaseToken, now()]);
               if (held.rowCount !== 1) throw new LostLease();
               return work(tx);
@@ -150,19 +142,29 @@ async function runMailbox(ctx: Ctx, box: Box, sealed: string): Promise<void> {
   }
   const minted = await ctx.call((signal) => ctx.deps.oauth.refreshAccessToken(refreshToken, { signal }));
   box.accessToken = minted.accessToken;
-  await step(ctx, box, "settle", () => settleOpenAttempts(ctx, box));
-  await step(ctx, box, "inbound", () => pollInbound(ctx, box));
-  if (ctx.cfg.sendEnabled) await step(ctx, box, "send", () => sendFromMailbox(ctx, box));
+  // OS-13: a mailbox sends only when this run settled its open attempts and read all of its new mail (a reply or a bounce
+  // that is not read yet must stop its prospect first).
+  const settled = await step(ctx, box, "settle", () => settleOpenAttempts(ctx, box));
+  const caughtUp = await step(ctx, box, "inbound", () => pollInbound(ctx, box));
+  if (ctx.cfg.sendEnabled && settled && caughtUp) await step(ctx, box, "send", async () => { await sendFromMailbox(ctx, box); return true; });
+  // OS-20: every path that marks a send sent, or a prospect bounced, is covered by one check per run.
+  await step(ctx, box, "bounce_rate", () => checkMailboxCampaigns(ctx, box));
 }
 
-/** A step that fails for its own reasons does not stop the next one; lease, budget and sign-in problems do. */
-async function step(ctx: Ctx, box: Box, name: string, work: () => Promise<void>): Promise<void> {
+/**
+ * A step that fails for its own reasons does not stop the next one; lease, budget and sign-in problems do. True when the
+ * step ran to its end and reported success (a step returning false, or throwing, did not).
+ */
+async function step(ctx: Ctx, box: Box, name: string, work: () => Promise<boolean | void>): Promise<boolean> {
   try {
-    await work();
+    const ok = (await work()) !== false;
+    if (ok) ctx.counts.stepsSucceeded += 1;
+    return ok;
   } catch (error) {
     if (error instanceof LostLease || error instanceof OutOfTime || needsReauthorization(error)) throw error;
     ctx.counts.stepsFailed += 1;
     ctx.report({ kind: "outreach_step_failed", step: name, tenantId: box.tenantId, mailboxId: box.id, error: reportText(errorCode(error)) });
+    return false;
   }
 }
 

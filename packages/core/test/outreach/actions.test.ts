@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { NotFound, TenantDenied, ValidationFailed, OUTREACH_ERROR_CODES } from "@zs/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { OUTREACH_CAMPAIGN_ACTIVATE_ACTION, OUTREACH_CAMPAIGN_TARGET } from "@zs/contracts";
+import { createOutreachOperator } from "../../src/edge/outreach-session.js";
 import { directDispatch, memberAuthorize } from "../../src/edge/session.js";
 import { createWorld, campaignBody, prospect, type World } from "./harness.js";
 
@@ -108,6 +109,32 @@ describe("mailboxes (OS-3)", () => {
     // A reconnect brings it back.
     await world.mailbox(tenantA, "devin.wiggins@zerosum-solutions.com");
     expect((await world.rows<{ status: string }>("SELECT status FROM outreach_mailboxes WHERE tenant_id=$1 AND id=$2", [tenantA, boxes[1]]))[0]!.status).toBe("active");
+  });
+
+  it("clears a pause on reconnect, replays a retried connect, and refuses a token sealed to another mailbox id", async () => {
+    await world.rows("UPDATE outreach_mailboxes SET paused_until='9999-12-31T00:00:00Z', pause_reason='history_gap' WHERE tenant_id=$1 AND id=$2", [tenantA, boxes[0]]);
+    await world.mailbox(tenantA, "devin@zerosum-solutions.com");
+    expect((await world.rows("SELECT paused_until, pause_reason FROM outreach_mailboxes WHERE tenant_id=$1 AND id=$2", [tenantA, boxes[0]]))[0])
+      .toEqual({ paused_until: null, pause_reason: null });
+    // The same command twice (a lost answer, then a retry) is one result: the approval reference is derived from the key.
+    const sealed = (await world.rows<{ t: string }>("SELECT sealed_refresh_token AS t FROM outreach_mailboxes WHERE tenant_id=$1 AND id=$2", [tenantA, boxes[0]]))[0]!.t;
+    const operator = createOutreachOperator(world.deps([tenantA]), tenantA);
+    const command = {
+      mailboxId: boxes[0], email: "devin@zerosum-solutions.com", displayName: "Devin", dailyLimit: 20, sealedRefreshToken: sealed,
+      grantedScopes: ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.metadata"], idempotencyKey: `outreach:mailbox:${boxes[0]}:retry-1`,
+    };
+    const first = await operator.connectMailbox(command);
+    const second = await operator.connectMailbox(command);
+    expect(second.result).toEqual(first.result);
+    // A different id for a stored address would store a token the worker cannot open.
+    await expect(operator.connectMailbox({ ...command, mailboxId: randomUUID(), idempotencyKey: `outreach:mailbox:${boxes[0]}:retry-2` }))
+      .rejects.toMatchObject({ code: "Conflict" });
+  });
+
+  it("answers NotFound, not a validation error, to a malformed id from a tenant outside the allowlist", async () => {
+    const outsider = world.owner(tenantB, ownerB, [tenantA]);
+    await expect(outsider.getCampaign("not-a-uuid")).rejects.toBeInstanceOf(NotFound);
+    await expect(outsider.listProspects("not-a-uuid", {})).rejects.toBeInstanceOf(NotFound);
   });
 
   it("refuses a connect for a tenant outside the allowlist", async () => {
@@ -245,6 +272,16 @@ describe("prospect import (OS-7)", () => {
     await expect(imported(made.id, [prospect(1), prospect(2)])).rejects.toMatchObject({ code: "ValidationFailed" });
     expect((await imported(made.id, [prospect(1)])).result.imported).toBe(1);
   });
+
+  it("counts the rows it keeps against the 5,000, not the rows it was sent", async () => {
+    const made = await campaign();
+    await world.rows(
+      `INSERT INTO outreach_prospects (tenant_id,id,campaign_id,mailbox_id,email,first_name,company,created_at,updated_at)
+       SELECT $1, gen_random_uuid(), $2, $3, 'bulk' || n || '@bulk.example', 'B', 'C', now(), now() FROM generate_series(1, 4999) n`, [tenantA, made.id, boxes[0]]);
+    const result = (await imported(made.id, [{ email: "not-an-email", firstName: "X", company: "Y" }, { ...prospect(2), email: "bulk1@bulk.example" }, prospect(1)])).result;
+    expect(result.imported).toBe(1);
+    expect(result.rejected).toHaveLength(2);
+  });
 });
 
 describe("activation (OS-8)", () => {
@@ -288,6 +325,17 @@ describe("activation (OS-8)", () => {
     expect((await prospectRows(made.id)).every((row) => row.status === "active" && row.next_step === 1 && row.next_due_on === "2026-11-09")).toBe(true);
     const campaignRow = (await world.rows<{ activated_at: Date }>("SELECT activated_at FROM outreach_campaigns WHERE tenant_id=$1 AND id=$2", [tenantA, made.id]))[0]!;
     expect(campaignRow.activated_at.toISOString()).toBe(new Date(world.time.ms).toISOString());
+  });
+
+  it("cuts each field of the approval summary on its own, so a long name never hides the count or the subject", async () => {
+    const made = await campaign({ name: "N".repeat(100), steps: [{ subject: "S".repeat(140), body: "Hi", delayBusinessDays: 0 }] });
+    await imported(made.id, [prospect(1), prospect(2), prospect(3)]);
+    const { approvalId } = await owner().requestActivation(made.id, randomUUID());
+    const summary = (await world.rows<{ summary: string }>("SELECT summary FROM approvals WHERE tenant_id=$1 AND id=$2", [tenantA, approvalId]))[0]!.summary;
+    expect(summary.length).toBeLessThanOrEqual(500);
+    expect(summary).toContain("3 prospects");
+    expect(summary).toContain("08:00-10:30");
+    expect(summary.endsWith('"')).toBe(true);
   });
 
   it("starts each prospect on today's date in the tenant's zone, not UTC", async () => {

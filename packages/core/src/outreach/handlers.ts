@@ -49,6 +49,7 @@ import {
   contentDigest,
   missingVariables,
   prospectsDigest,
+  renderTooLong,
   templateProblem,
   unknownVariableProblem,
   type PostalAddress,
@@ -152,8 +153,6 @@ export const importProspectsHandler: ActionHandler = {
     const mailboxIds = await campaignMailboxIds(tx, tenantId, campaign.id);
     const held = (await tx.query<{ n: number }>(
       "SELECT count(*)::int AS n FROM outreach_prospects WHERE tenant_id=$1 AND campaign_id=$2", [tenantId, campaign.id])).rows[0]!.n;
-    if (held + payload.prospects.length > OUTREACH_MAX_PROSPECTS_PER_CAMPAIGN)
-      throw new ValidationFailed("A campaign holds at most 5,000 prospects");
     const at = clockInstant(now);
 
     // Normalise every address once; the lookups below take them as lists.
@@ -193,6 +192,7 @@ export const importProspectsHandler: ActionHandler = {
         const values = { firstName: row.firstName.trim(), company: row.company.trim(), industry: row.industry?.trim() ?? null };
         if (ROLE_LOCAL_PARTS.has(local)) { reject("role_address"); continue; }
         if (missingVariables(steps, values).length > 0) { reject("missing_field"); continue; }
+        if (renderTooLong(steps, values)) { reject("render_too_long"); continue; }
         if (hardSuppressionHit({ email, website: row.website ?? null, company: values.company,
           name: [values.firstName, row.lastName ?? ""].join(" ").trim() }) !== null) { reject("hard_suppressed"); continue; }
         if (suppressed.has(email)) { reject("suppressed"); continue; }
@@ -207,6 +207,8 @@ export const importProspectsHandler: ActionHandler = {
       kept.add(email);
       rows.push({ id: derivedId(tenantId, "outreach-prospect", email), email, mailboxId, status: row.excluded === true ? "excluded" : "pending", row });
     }
+    // OS-7: the limit counts the rows this call keeps, not the rows it was sent (a refused row holds no place).
+    if (held + rows.length > OUTREACH_MAX_PROSPECTS_PER_CAMPAIGN) throw new ValidationFailed("A campaign holds at most 5,000 prospects");
     if (rows.length > 0) {
       await tx.query(
         `INSERT INTO outreach_prospects (tenant_id,id,campaign_id,mailbox_id,email,first_name,last_name,company,industry,website,status,created_at,updated_at)
@@ -339,15 +341,20 @@ export const connectMailboxHandler: ActionHandler = {
     const tenantId = binding.tenantId;
     requireAllowed(config, tenantId);
     const at = clockInstant(now);
-    // A new row starts active; a reconnect replaces the token and sets active. `reauthorize` is the worker's word alone.
+    // A new row starts active; a reconnect replaces the token, sets active and clears any pause (the worker pauses a mailbox
+    // "until reconnected" after a history gap, OS-19). `reauthorize` is the worker's word alone. The token is sealed to the
+    // mailbox id, so a reconnect that names another id than the stored row would store a token the worker cannot open: refused.
     // The update names the parameters, not EXCLUDED: reading EXCLUDED.sealed_refresh_token would need a SELECT grant the runtime role does not hold.
     const row = (await tx.query<{ id: string; email: string; status: string }>(
       `INSERT INTO outreach_mailboxes (tenant_id,id,email,display_name,status,sealed_refresh_token,granted_scopes,daily_limit,connected_by,created_at,updated_at)
        VALUES ($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$9)
-       ON CONFLICT (tenant_id, email) DO UPDATE SET status='active', sealed_refresh_token=$5, display_name=$4, daily_limit=$7, updated_at=$9
+       ON CONFLICT (tenant_id, email) DO UPDATE SET status='active', sealed_refresh_token=$5, display_name=$4, daily_limit=$7,
+         paused_until=NULL, pause_reason=NULL, updated_at=$9
+         WHERE outreach_mailboxes.id = $2
        RETURNING id, email, status`,
       [tenantId, payload.mailboxId, payload.email, payload.displayName, payload.sealedRefreshToken, payload.grantedScopes,
-        payload.dailyLimit, binding.actorId, at])).rows[0]!;
+        payload.dailyLimit, binding.actorId, at])).rows[0];
+    if (!row) throw refuse("mailbox_id_mismatch");
     return {
       result: { id: row.id, email: row.email, status: row.status },
       event: { type: "outreach.mailbox.connected", payload: { mailboxId: row.id } },
