@@ -156,6 +156,83 @@ describe("column and statement grants", () => {
   });
 });
 
+describe("runtime guards on campaigns and prospects (review fix B6; 20261109110000)", () => {
+  const approval = async (tenantId: string, status: string, target: string, action = "outreach.campaign.activate") => {
+    const id = randomUUID();
+    const decided = status === "pending" ? [null, null] : [randomUUID(), T0];
+    await fixture.service((tx) => tx.query(
+      `INSERT INTO approvals (tenant_id,id,action_type,target_type,target_id,payload,summary,requested_by,requested_at,expires_at,status,decided_by,decided_at,revoked_by,revoked_at)
+       VALUES ($1,$2,$3,'outreach_campaign',$4,'{}','Activate',$5,$6,'2026-11-16T16:00:00Z',$7,$8,$9,$10,$11)`,
+      [tenantId, id, action, target, randomUUID(), T0, status, decided[0], decided[1], status === "revoked" ? randomUUID() : null, status === "revoked" ? T0 : null]));
+    return id;
+  };
+  const pausedCampaign = async (tenantId: string, approvalId: string) => {
+    const id = randomUUID();
+    await fixture.service((tx) => tx.query(
+      `INSERT INTO outreach_campaigns (tenant_id,id,name,status,paused_reason,window_start_min,window_end_min,content_digest,activation_approval_id,activated_at,created_by,created_at,updated_at)
+       VALUES ($1,$2,'Paused','paused','owner',480,630,$3,$4,$5,$6,$5,$5)`, [tenantId, id, "d".repeat(64), approvalId, T0, randomUUID()]));
+    return id;
+  };
+
+  it("never lets the runtime role complete or un-draft a campaign", async () => {
+    const a = fixture.a.tenantId;
+    for (const status of ["completed", "draft"])
+      expect(await denied(() => fixture.a.run((tx) => tx.query(
+        "UPDATE outreach_campaigns SET status=$3 WHERE tenant_id=$1 AND id=$2", [a, ids.campaign, status]))), status).toMatchObject({ code: "42501" });
+  });
+
+  it("starts a paused campaign for the runtime role only against an approved activation of that very campaign", async () => {
+    const a = fixture.a.tenantId;
+    const start = (campaign: string, approvalId: string) => fixture.a.run((tx) => tx.query(
+      "UPDATE outreach_campaigns SET status='active', paused_reason=NULL, activation_approval_id=$3 WHERE tenant_id=$1 AND id=$2", [a, campaign, approvalId]));
+    const pending = await approval(a, "pending", randomUUID());
+    const campaign = await pausedCampaign(a, pending);
+    expect(await denied(() => start(campaign, pending)), "pending").toMatchObject({ code: "42501" });
+    const elsewhere = await approval(a, "approved", randomUUID());
+    expect(await denied(() => start(campaign, elsewhere)), "another campaign's approval").toMatchObject({ code: "42501" });
+    const other = await approval(a, "approved", campaign, "outreach.campaign.pause");
+    expect(await denied(() => start(campaign, other)), "another action").toMatchObject({ code: "42501" });
+    const revoked = await approval(a, "revoked", campaign);
+    expect(await denied(() => start(campaign, revoked)), "revoked").toMatchObject({ code: "42501" });
+    const good = await approval(a, "approved", campaign);
+    await start(campaign, good);
+    expect((await fixture.service((tx) => tx.query<{ status: string }>("SELECT status FROM outreach_campaigns WHERE tenant_id=$1 AND id=$2", [a, campaign]))).rows[0]!.status).toBe("active");
+    // An active campaign's approval cannot be swapped by the runtime role to one that is not approved.
+    expect(await denied(() => fixture.a.run((tx) => tx.query(
+      "UPDATE outreach_campaigns SET activation_approval_id=$3 WHERE tenant_id=$1 AND id=$2", [a, campaign, pending])))).toMatchObject({ code: "42501" });
+    // Pausing it is always allowed.
+    await fixture.a.run((tx) => tx.query("UPDATE outreach_campaigns SET status='paused', paused_reason='owner' WHERE tenant_id=$1 AND id=$2", [a, campaign]));
+    // The service role (the worker) is not held by the guard.
+    await fixture.service((tx) => tx.query("UPDATE outreach_campaigns SET status='completed', paused_reason=NULL WHERE tenant_id=$1 AND id=$2", [a, campaign]));
+  });
+
+  it("never reopens or reschedules a prospect for the runtime role", async () => {
+    const a = fixture.a.tenantId;
+    const row = randomUUID();
+    await fixture.service((tx) => tx.query(
+      `INSERT INTO outreach_prospects (tenant_id,id,campaign_id,mailbox_id,email,first_name,company,status,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,'guard@acme.example','Gus','Acme','pending',$5,$5)`, [a, row, ids.campaign, ids.mailbox, T0]));
+    await fixture.a.run((tx) => tx.query(
+      "UPDATE outreach_prospects SET status='active', next_step=1, next_due_on='2026-11-09' WHERE tenant_id=$1 AND id=$2", [a, row]));
+    expect(await denied(() => fixture.a.run((tx) => tx.query(
+      "UPDATE outreach_prospects SET next_step=2, next_due_on='2026-11-12' WHERE tenant_id=$1 AND id=$2", [a, row])))).toMatchObject({ code: "42501" });
+    await fixture.service((tx) => tx.query(
+      "UPDATE outreach_prospects SET status='replied', next_step=NULL, next_due_on=NULL WHERE tenant_id=$1 AND id=$2", [a, row]));
+    for (const status of ["active", "pending", "stopped"])
+      expect(await denied(() => fixture.a.run((tx) => tx.query(
+        "UPDATE outreach_prospects SET status=$3, next_step=1, next_due_on='2026-11-09' WHERE tenant_id=$1 AND id=$2", [a, row, status]))), status).toMatchObject({ code: "42501" });
+  });
+
+  it("lets the runtime role clear a mailbox pause (the reconnect) and nothing else of its schedule state", async () => {
+    const a = fixture.a.tenantId;
+    await fixture.service((tx) => tx.query(
+      "UPDATE outreach_mailboxes SET paused_until='9999-12-31T00:00:00Z', pause_reason='history_gap' WHERE tenant_id=$1 AND id=$2", [a, ids.mailbox]));
+    await fixture.a.run((tx) => tx.query("UPDATE outreach_mailboxes SET paused_until=NULL, pause_reason=NULL WHERE tenant_id=$1 AND id=$2", [a, ids.mailbox]));
+    expect(await denied(() => fixture.a.run((tx) => tx.query(
+      "UPDATE outreach_mailboxes SET history_resume_token='x' WHERE tenant_id=$1 AND id=$2", [a, ids.mailbox])))).toMatchObject({ code: "42501" });
+  });
+});
+
 describe("mailbox status", () => {
   it("lets the runtime role set a mailbox active or disconnected and refuses reauthorize", async () => {
     const a = fixture.a.tenantId;
