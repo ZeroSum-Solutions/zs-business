@@ -625,7 +625,7 @@ describe("plan limits (PL-8)", () => {
       "agent.kill", "agent.kind.kill", "browser.kill", "agent.run.finish", "agent.run.stall", "agent.kind.run.finish", "agent.cost.warn",
       "member.remove", "connection.disconnect", "calendar.google.disconnect", "automation.token.revoke",
       "approval.reject", "approval.revoke", "inbox.reply.discard",
-      "outreach.campaign.pause", "outreach.prospect.stop",
+      "outreach.campaign.pause", "outreach.prospect.stop", "outreach.mailbox.disconnect",
     ].sort());
     expect(PLAN_CHECKOUT_CREATE_ACTION).toBe("plan.checkout.create");
   });

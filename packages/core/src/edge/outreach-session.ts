@@ -129,7 +129,10 @@ export function createOutreachSession(deps: EdgeDependencies, principal: Princip
       });
       const { campaign, open } = view;
       const window = `${String(Math.floor(campaign.window_start_min / 60)).padStart(2, "0")}:${String(campaign.window_start_min % 60).padStart(2, "0")}-${String(Math.floor(campaign.window_end_min / 60)).padStart(2, "0")}:${String(campaign.window_end_min % 60).padStart(2, "0")}`;
-      const summary = `Start the campaign "${campaign.name}": ${open.length} prospects from ${view.emails.join(", ")}, ${window}, up to ${campaign.daily_cap_per_mailbox} a day per mailbox, subject "${view.subject}"`;
+      // The owner approves what the summary says: each field is cut on its own, so a long name or list never hides the count or the subject.
+      const clip = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, max - 3)}...`);
+      const senders = view.emails.length <= 3 ? view.emails.join(", ") : `${view.emails.slice(0, 3).join(", ")} and ${view.emails.length - 3} more`;
+      const summary = `Start the campaign "${clip(campaign.name, 80)}": ${open.length} prospects from ${clip(senders, 150)}, ${window}, up to ${campaign.daily_cap_per_mailbox} a day per mailbox, subject "${clip(view.subject, 150)}"`;
       // Not the "approval" ID the envelope derives: the actions_tenant_approval index allows one action per approval ID.
       const approvalId = derivedId(tenantId, idempotencyKey, "approval-record");
       const request = requestApprovalRequestSchema.parse({
@@ -170,6 +173,7 @@ export function createOutreachSession(deps: EdgeDependencies, principal: Princip
       return parseInput(outreachCampaignListSchema, { items: await read((tx) => listOutreachCampaigns(tx, tenantId)) }, "result");
     },
     async getCampaign(rawId: unknown): Promise<OutreachCampaignDetail> {
+      allowed();
       const id = campaignId(rawId);
       const now = new Date(readClock(deps.clock));
       const found = await read((tx) => getOutreachCampaign(tx, tenantId, id, now));
@@ -177,6 +181,7 @@ export function createOutreachSession(deps: EdgeDependencies, principal: Princip
       return parseInput(outreachCampaignDetailSchema, found, "result");
     },
     async listProspects(rawId: unknown, rawQuery: unknown): Promise<OutreachProspectPage> {
+      allowed();
       const id = campaignId(rawId);
       const query = parseInput(listOutreachProspectsQuerySchema, rawQuery ?? {}, "query");
       const found = await read((tx) => listOutreachProspects(tx, tenantId, id, query));
@@ -216,7 +221,8 @@ export function createOutreachOperator(deps: EdgeDependencies, rawTenantId: stri
       return run({
         actionType: OUTREACH_MAILBOX_CONNECT_ACTION,
         target: target(input.mailboxId),
-        approvalReference: { tenantId, id: deps.generateId() },
+        // Derived, so a retry of the same command (a lost answer) replays the stored result instead of clashing.
+        approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
         idempotencyKey,
         payload: toJson(payload),
       });
@@ -225,7 +231,7 @@ export function createOutreachOperator(deps: EdgeDependencies, rawTenantId: stri
       return run({
         actionType: OUTREACH_MAILBOX_DISCONNECT_ACTION,
         target: target(mailboxId),
-        approvalReference: { tenantId, id: deps.generateId() },
+        approvalReference: { tenantId, id: derivedId(tenantId, idempotencyKey, "approval") },
         idempotencyKey,
         payload: { mailboxId },
       });

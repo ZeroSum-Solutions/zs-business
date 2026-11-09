@@ -54,7 +54,7 @@ const RULES: Readonly<Record<string, (result: Counts) => string | null>> = {
   outreach: (r) => {
     const c = record(r.counts);
     const failed = n(c.stepsFailed);
-    return allFailed(failed, Math.max(0, n(c.mailboxes) - failed)) ? `every outreach mailbox step of the run failed (${failed} failures)` : null;
+    return allFailed(failed, n(c.stepsSucceeded)) ? `every outreach mailbox step of the run failed (${failed} failures)` : null;
   },
   connections: (r) =>
     allFailed(n(r.failed), n(r.succeeded)) ? `every connections work item of the run failed (${n(r.failed)} failures)` : null,

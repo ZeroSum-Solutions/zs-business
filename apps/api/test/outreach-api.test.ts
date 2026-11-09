@@ -71,6 +71,19 @@ async function draft(harness = h, tenant = h.a, mailboxId = mailboxA) {
   return outreachCampaignOutputSchema.parse(response.body).result;
 }
 
+describe("the body limit", () => {
+  it("lets only the prospect import carry more than 64 KiB", async () => {
+    const created = await draft();
+    const pad = "x".repeat(90);
+    const many = Array.from({ length: 450 }, () => { serial += 1; return { email: `big${serial}@acme${serial}.example`, firstName: `Pat${serial}`, company: `Acme ${serial}`, industry: pad, website: `https://${pad}.example` }; });
+    const imported = await call(h.app, "POST", `/v1/outreach/campaigns/${created.id}/prospects`, { token: h.a.token, key: randomUUID(), body: { prospects: many } });
+    expect(JSON.stringify({ prospects: many }).length).toBeGreaterThan(64 * 1024);
+    expect(imported.status).toBe(200);
+    const big = await call(h.app, "POST", "/v1/outreach/campaigns", { token: h.a.token, key: randomUUID(), body: campaignBody(mailboxA, { name: "N".repeat(70 * 1024) }) });
+    expect(big.status).toBe(413);
+  });
+});
+
 describe("the owner routes (OS-22)", () => {
   it("creates, imports, asks for activation, takes the owner's approval, reads, pauses and stops", async () => {
     const created = await draft();

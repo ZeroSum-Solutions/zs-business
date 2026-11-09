@@ -275,15 +275,20 @@ export async function connectMailbox(args: ConnectArgs, deps: ConnectDeps): Prom
     if (profile.emailAddress.toLowerCase() !== args.mailbox) return await fail("wrong_account", "The signed-in account is not the mailbox you named");
 
     const sealed = sealRefreshToken(deps.env.publicKey, { tenantId: args.tenantId, connectionId: mailboxId }, grant.refreshToken);
+    // The same command, with the same key, three times at most: a first try that committed but lost its answer replays its
+    // stored result, so the live grant is revoked only when the database really refused (OS-3).
+    const command = {
+      mailboxId, email: args.mailbox, displayName: args.name ?? "", dailyLimit: args.dailyLimit,
+      sealedRefreshToken: sealed, grantedScopes: [...OUTREACH_GMAIL_SCOPES],
+      idempotencyKey: `outreach:mailbox:${mailboxId}:${createHash("sha256").update(sealed).digest("hex").slice(0, 16)}`,
+    };
     let stored;
-    try {
-      stored = await deps.operator.connectMailbox({
-        mailboxId, email: args.mailbox, displayName: args.name ?? "", dailyLimit: args.dailyLimit,
-        sealedRefreshToken: sealed, grantedScopes: [...OUTREACH_GMAIL_SCOPES],
-        idempotencyKey: `outreach:mailbox:${mailboxId}:${createHash("sha256").update(sealed).digest("hex").slice(0, 16)}`,
-      });
-    } catch {
-      return await fail("store_failed", "The database refused the mailbox");
+    for (let attempt = 1; stored === undefined; attempt += 1) {
+      try {
+        stored = await deps.operator.connectMailbox(command);
+      } catch {
+        if (attempt >= 3) return await fail("store_failed", "The database refused the mailbox");
+      }
     }
     const status = String((stored.result as { status?: unknown } | null)?.status ?? "active");
     deps.print(`Connected ${args.mailbox}: mailbox ${mailboxId}, status ${status}.`);

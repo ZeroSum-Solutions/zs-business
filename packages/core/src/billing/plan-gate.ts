@@ -30,6 +30,8 @@ export const READ_ONLY_ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
   "approval.reject", "approval.revoke", "inbox.reply.discard",
   // outreach-sequencer.md OS-9: an owner can always stop sending.
   "outreach.campaign.pause", "outreach.prospect.stop",
+  // OS-3: the owner can always disconnect a mailbox (the token is cleared); connecting one is a paid action.
+  "outreach.mailbox.disconnect",
 ]);
 
 /** PL-8: the counted limits, by the action that would add one more. */

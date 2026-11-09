@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createSessionCheckFromConfig, createVerifierFromConfig, parseJwtEnv, parseSessionCheckEnv } from "@zs/core";
+import { createSessionCheckFromConfig, createVerifierFromConfig, parseJwtEnv, parseOutreachTenants, parseSessionCheckEnv } from "@zs/core";
 import { assertLocalDatabaseUrl, assertRuntimeLogin, createRuntimePool, createScopedDatabase } from "@zs/db";
 import { createMcpServer } from "./server.js";
 
@@ -34,6 +34,8 @@ await assertRuntimeLogin(pool).catch(async (error: unknown) => {
   throw error;
 });
 const db = createScopedDatabase(pool);
+// outreach-sequencer.md OS-1, OS-22: the outreach tools exist only for an OUTREACH_TENANTS allowlist, like the HTTP routes.
+const outreachTenants = parseOutreachTenants(process.env.OUTREACH_TENANTS);
 const server = createMcpServer({
   db,
   clock,
@@ -41,6 +43,7 @@ const server = createMcpServer({
   verifier: createVerifierFromConfig(jwt, clock),
   sessionCheck: createSessionCheckFromConfig(sessionCheckConfig, { db, clock }),
   accessToken: env.ZS_ACCESS_TOKEN,
+  ...(outreachTenants.length > 0 ? { outreach: { tenants: outreachTenants } } : {}),
 });
 await server.connect(new StdioServerTransport());
 const shutdown = async () => {

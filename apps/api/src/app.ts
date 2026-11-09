@@ -202,6 +202,9 @@ const HTTP_ERROR_CODES: Partial<Record<number, ApiErrorCode>> = {
   401: "Unauthorized", 403: "Forbidden", 404: "NotFound", 409: "Conflict",
 };
 
+/** POST /v1/outreach/campaigns/:id/prospects, the only outreach route with a body over 64 KiB. */
+const OUTREACH_IMPORT_PATH = /^\/v1\/outreach\/campaigns\/[^/]+\/prospects$/;
+
 export function createApp(deps: AppDependencies) {
   const app = new Hono<AppEnv>();
   const origins = new Set(deps.config.allowedOrigins);
@@ -342,6 +345,8 @@ export function createApp(deps: AppDependencies) {
   const jsonLimit = bodyLimit({ maxSize: 64 * 1024, onError: tooLarge });
   // document-intake.md DL-13: an apply request lists up to 5,000 row IDs, about 195 KB of JSON.
   const intakeApplyLimit = bodyLimit({ maxSize: INTAKE_APPLY_BODY_LIMIT, onError: tooLarge });
+  // outreach-sequencer.md OS-7: an import lists up to 500 prospects of up to about 1.2 KB each. Only that route.
+  const outreachImportLimit = bodyLimit({ maxSize: 1024 * 1024, onError: tooLarge });
   // The PDF upload carries its own 20 MiB limit (routes/document-intake.ts).
   // IM-22: an image upload is raw bytes with its own limit, checked after auth in mediaRoutes.
   // Only that exact route skips this one; with images off it keeps 64 KiB and answers 404.
@@ -349,6 +354,7 @@ export function createApp(deps: AppDependencies) {
   app.use("/v1/*", (c, next) => {
     if (c.req.path === DOCUMENT_INTAKE_UPLOAD_PATH) return next();
     if (images && c.req.method === "POST" && c.req.path === MEDIA_UPLOAD_PATH) return next();
+    if (c.req.method === "POST" && OUTREACH_IMPORT_PATH.test(c.req.path)) return outreachImportLimit(c, next);
     return (DOCUMENT_INTAKE_APPLY_PATH.test(c.req.path) ? intakeApplyLimit : jsonLimit)(c, next);
   });
   app.use("/v1/*", async (c, next) => {

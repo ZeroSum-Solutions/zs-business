@@ -79,12 +79,12 @@ const args = (change: Partial<ConnectArgs> = {}): ConnectArgs => ({
   tenantId: tenant, mailbox: DEVIN, name: "Devin", dailyLimit: 20, dryRun: false, disconnect: false, ...change,
 });
 
-function deps(change: { tenants?: readonly string[]; domains?: readonly string[]; waitMs?: number; printed?: string[] } = {}): ConnectDeps {
+function deps(change: { tenants?: readonly string[]; domains?: readonly string[]; waitMs?: number; printed?: string[]; operator?: (real: ConnectDeps["operator"]) => ConnectDeps["operator"] } = {}): ConnectDeps {
   const printed = change.printed ?? [];
   const allowed = change.tenants ?? [tenant];
   return {
     env: { tenants: allowed, domains: change.domains ?? ["zerosum-solutions.com"], publicKey: parseSealPublicKey(pair.publicKey) },
-    operator: createOutreachOperator({ db: h.database.db, clock: { now: () => new Date() }, generateId: randomUUID, outreach: { tenants: allowed } }, tenant),
+    operator: (change.operator ?? ((real) => real))(createOutreachOperator({ db: h.database.db, clock: { now: () => new Date() }, generateId: randomUUID, outreach: { tenants: allowed } }, tenant)),
     makeGoogle: (redirectUrl) => createGoogleClient({ config: { clientId: "client-id.example", clientSecret: "client-secret-value", redirectUrl, scopes: SCOPES, tokenBaseUrl: google.base } }),
     gmail: createGmailClient({ config: { baseUrl: google.base } }),
     checkTenant: async () => undefined,
@@ -157,6 +157,42 @@ describe("parseConnectEnv", () => {
     try { parseConnectEnv({ ...good, OUTREACH_TOKEN_PUBLIC_KEY: "secret-looking-garbage" }); } catch (error) { message = String(error); }
     expect(message).toMatch(/OUTREACH_TOKEN_PUBLIC_KEY/);
     expect(message).not.toContain("secret-looking-garbage");
+  });
+});
+
+describe("storing the grant (OS-3)", () => {
+  it("replays the same command when the first answer is lost after the commit, and keeps the live grant", async () => {
+    const mailbox = fresh();
+    google.state.behaviour.profileEmail = mailbox;
+    const keys: string[] = [];
+    const out = await run({
+      args: { mailbox },
+      change: { operator: (real) => ({ ...real, async connectMailbox(input) {
+        keys.push(input.idempotencyKey);
+        const result = await real.connectMailbox(input);
+        if (keys.length === 1) throw new Error("the answer was lost");
+        return result;
+      } }) },
+    });
+    expect(out.error).toBeNull();
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(1);
+    expect(google.log.revoked).toEqual([]);
+    expect(await stored(mailbox)).toHaveLength(1);
+  });
+
+  it("revokes the fresh grant only after the store failed three times", async () => {
+    const mailbox = fresh();
+    google.state.behaviour.profileEmail = mailbox;
+    let attempts = 0;
+    const out = await run({
+      args: { mailbox },
+      change: { operator: (real) => ({ ...real, async connectMailbox() { attempts += 1; throw new Error("refused"); } }) },
+    });
+    expect(out.error).toMatchObject({ code: "store_failed", revoked: true });
+    expect(attempts).toBe(3);
+    expect(google.log.revoked).toHaveLength(1);
+    expect(await stored(mailbox)).toHaveLength(0);
   });
 });
 
