@@ -215,7 +215,8 @@ footer, its address and exactly one unsubscribe URL.
 A row is rejected, with its index and one reason, when: the email is invalid
 (`invalid_email`); its local part is `postmaster`, `abuse`, `mailer-daemon`, `noreply` or
 `no-reply` (`role_address`); a variable used by the campaign's steps is empty for it
-(`missing_field`); `hardSuppressionHit` matches its email, website, company or full name
+(`missing_field`); some step would render a subject over 300 characters or a body over 18,000
+(`render_too_long`); `hardSuppressionHit` matches its email, website, company or full name
 (`hard_suppressed`); the address has a `suppressions` row of any reason (`suppressed`); a CRM
 contact with that address has email consent `denied` (`consent_denied`); the address is already
 a prospect in the tenant, any campaign, or twice in the payload (`duplicate`); `mailboxId` is
@@ -640,6 +641,20 @@ The fake recorded exactly the expected sends and nothing reached Google.
   already sent from elsewhere ramps as new. Two mailboxes at 20 a day give 40
   first-touch-or-follow-up sends a day once warm.
 - Replies are read in Gmail; nothing reaches the hub Inbox or CRM yet.
+- A reply from another address of the same person (an alias) in a new thread is not matched to
+  the prospect (OS-19 matches by thread, then by the prospect's own address).
+- The bounce-rate check (OS-20) runs per campaign after each send and once per mailbox per run;
+  two mailboxes sending for one campaign in the same instant can overshoot the limit by up to one
+  send per mailbox before the pause lands.
+- The send decision commits the `sending` row under row and advisory locks (see "As built, review
+  fixes"). A change that commits after that point (a revoke, a suppression, a pause) still lets
+  that one send go: the window between the commit and `messages.send` is a single request.
+- A role address (`postmaster@`, `abuse@`, ...) is refused at import (OS-7), not again at send.
+- A response lost after the request was written is treated as `uncertain` only for a timeout or a
+  network failure; a Gmail HTTP answer with an unexpected status other than the listed ones is also
+  `uncertain`, and nothing finer is tried.
+- A tenant without a `tenant_plans` row sends (the plan gate passes it too); fail-closed on a
+  missing row is a billing decision, not an outreach one.
 
 ## As built (first slice, 2026-11-08)
 
@@ -663,3 +678,58 @@ Where the code differs from the numbered rules above; the rules stay the intent.
   `NEVER_APPROVED_ACTIONS`. Pause and stop are allowed for read-only agent tokens.
 - There is no Node-process worker script: the worker runs from the cron function only.
 - The workers project holds 22 functions (the README's earlier count of 21 was already stale).
+
+## As built, review fixes (2026-11-09)
+
+Migration `supabase/migrations/20261109110000_outreach_hardening.sql` (additive: three nullable columns, one
+column grant, two invoker triggers). After the Sol, Argon, DeepSeek and Grok review of the first slice.
+
+- **Own mail (OS-19, B1).** A message is `own` only when its `X-Zs-Ref` is the id of one of this mailbox's
+  `outreach_sends` and it carries the `SENT` label or the mailbox as sender. A prospect's reply that copies the
+  header is still a reply. The content type is parsed with its parameters (quote-aware, any case) and a bounce
+  needs `multipart/report` with `report-type=delivery-status`.
+- **Send gate (OS-13, B2).** A mailbox sends only when, in this run, settling its open attempts and reading its new
+  mail both succeeded and the reader reached the history head. Otherwise the run sends nothing for it.
+- **Resumable inbound read (B3).** The reader classifies each history page in order before it reads the next. A run
+  that hits `maxHistoryPages` or `maxInboundMessages` keeps the next page token in `history_resume_token` and the
+  cursor where it was; the next run resumes from the token. The cap is checked per page, so one page is always read
+  whole. The cursor moves only after the last page.
+- **History gap (OS-19, B4).** A missing cursor or an expired one moves the cursor to the mailbox head. When the
+  mailbox has open prospects with a mailed thread, replies in the gap cannot be recovered, so the mailbox is
+  paused with `pause_reason = 'history_gap'` and `paused_until = 9999-12-31`, an `outreach_history_reset` report
+  with `paused: true` goes to the operator, and nothing is sent. Reconnecting the mailbox (OS-3) clears the pause;
+  the operator is expected to check Gmail for replies first. A mailbox with nothing mailed resets without a pause.
+- **Decision point (OS-14, OS-15, B5).** The gate runs in one transaction that also commits the `sending` row. Lock
+  order: mailbox lease row, business profile (share), tenant plan (share), campaign (update), the shared advisory
+  locks `suppression:<tenant>:email:<address>` and `crm:contact:email:<tenant>:<address>`, the CRM contact row
+  (share), the prospect (update), the activation approval (share). The suppression handler takes the first advisory
+  lock exclusively; the CRM writers already take the second. A writer that committed first is therefore seen, and a
+  writer that comes later waits for the `sending` row. A follow-up runs the gate twice around its Gmail thread
+  check. Interleaving tests hold a writer's transaction open against a running worker.
+- **Approval (OS-8, OS-24, B6).** The worker sends only for an approval that is `approved`, of action
+  `outreach.campaign.activate`, targeting this campaign; otherwise the campaign pauses (`approval_revoked` or
+  `approval_invalid`). Two triggers back this for the runtime role: it cannot set a campaign `draft` or `completed`,
+  cannot make one `active` (or swap an active campaign's approval) without such an approved approval, and cannot
+  move a prospect out of a closed status or reschedule a running one.
+- **Open attempts (B7).** The candidate query skips a prospect that already has a `sending`, `sent`, `uncertain` or
+  `lost` attempt for its next step; a unique violation on the open-attempt index in the gate is a skip. Candidates
+  are taken per campaign (25 each) and interleaved, so one campaign that cannot send does not hide the others.
+- **Message-ID wait (OS-14, B8).** The 24 hours count from the first failed lookup, stored in
+  `outreach_sends.message_id_first_failed_at`. A lookup answered with 401 or `invalid_grant` ends the mailbox's run
+  into `reauthorize`.
+- **Budget (OS-13, B9).** When the run budget has passed before `messages.send` is invoked, the `sending` row becomes
+  `not_sent` (`out_of_time`), the prospect keeps its step, and the mailbox stops for the run.
+- **Bounce rate (OS-20).** The rate is distinct prospects with a `bounce` event over sent rows, checked after each
+  send and once per mailbox per run, under the lease. A prospect stopped before any mail by a bounce suppression
+  never counts.
+- **Rendering (OS-5, OS-6, OS-17).** A rendered subject over 300 characters or a body over 18,000 is refused at
+  import (`render_too_long`) and stops the prospect at send time, as does a header value Gmail cannot carry.
+- **Time zone (OS-12).** A business with no time zone pauses its campaigns (`time_zone_missing`); there is no UTC
+  fallback. A first send date ahead of today (the zone moved west) counts as warm-up day zero.
+- **Smaller changes.** `last_attempt_at` rotates mailboxes; `ctx.leased` also requires an `active` mailbox; the
+  allowlist is lower-cased once; `outreach.mailbox.disconnect` is allowed for a read-only tenant; the import limit of
+  5,000 counts the rows kept; a reconnect refuses a mailbox id other than the stored row's and clears a pause; the
+  operator's approval reference is derived from the idempotency key and the store is retried with the same command
+  before the fresh grant is revoked; the approval summary cuts each field on its own; a malformed id from a tenant
+  outside the allowlist is 404; only the prospect import route takes a body up to 1 MiB; the cron outcome compares
+  `stepsFailed` with `stepsSucceeded`; the MCP stdio entry reads `OUTREACH_TENANTS`.
