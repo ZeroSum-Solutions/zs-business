@@ -405,6 +405,26 @@ are capped at 8 KiB (413). Responses are `Cache-Control: no-store`,
 `Referrer-Policy: no-referrer`, and the page loads nothing from anywhere (CSP
 `default-src 'none'`, its one inline style pinned by hash, no script).
 
+## Customer booking link (`/manage/:token`, `/public/v1/manage/:token`, no auth)
+
+A visitor who books on the hosted page or the widget gets a confirmation email with a private link
+(booking-self-service.md BS-3). On only with `PUBLIC_BOOKING_KEY_SECRET` and `PUBLIC_BASE_URL`: the
+token key derives from the booking-key secret (the previous secret still verifies), so there is no new
+variable. A token names one tenant and one booking and dies at the booking's start.
+
+| Method and path | Result |
+|---|---|
+| `GET /manage/:token` | The static page (`manage.html`, `manage.js`, the booker stylesheet). CSP forbids inline code and framing; `no-store`, `no-referrer`, `noindex`. A forged token gets the not-found page. |
+| `GET /public/v1/manage/:token` | The booking: `state` (`confirmed`, `cancelled`, `moved`, `started`), business, service, times, `canChange`, and for `moved` a fresh link to the new booking. No contact, notes or IDs. |
+| `GET /public/v1/manage/:token/slots?from&to&zone` | Free times for the booking's own resource (409 `not_changeable` unless confirmed). |
+| `POST /public/v1/manage/:token/cancel` | `Idempotency-Key` (UUID), body `{}`. Cancels as the customer (409 `too_late` after the start); a repeat returns the cancelled view. |
+| `POST /public/v1/manage/:token/reschedule` | `Idempotency-Key` (UUID), body `{ startsAt }`. Cancels and re-books in one transaction; a lost slot is 409 `slot_unavailable` and the old booking stays. Answers `{ view, token }`. |
+
+A forged token, another tenant's booking and a booking the owner made by hand all get the same 404
+body. An expired token is 409 `link_expired`. A forged or expired token spends one count from the
+caller's address (`manage-forged`); a valid token spends from its booking, its address and, for
+writes, its tenant (the `PUBLIC_RATE_*` limits, 429 with `Retry-After`). Bodies are capped at 8 KiB.
+
 ## Resend webhook (`/webhooks/resend`, no auth)
 
 Resend posts email events here (resend.md R-7, R-8). On only when `RESEND_WEBHOOK_SECRET` is

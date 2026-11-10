@@ -214,9 +214,9 @@ describe("runs (G-7, G-11)", () => {
     expect(detail.status).toBe(200);
     expect(followUpRunDetailSchema.parse(detail.body)).toEqual(run);
 
-    // The draft waits for an owner; nothing was sent.
+    // The draft waits for an owner; nothing was sent but the inquiry's own booking confirmation (booking-self-service.md BS-3).
     const sends = await h.fixture.service((tx) => tx.query(
-      "SELECT 1 FROM outbox WHERE tenant_id=$1 AND event_type='message.send_requested'", [h.a.tenantId]));
+      "SELECT 1 FROM outbox WHERE tenant_id=$1 AND event_type='message.send_requested' AND NOT (payload->>'purpose' = 'transactional' AND payload->>'body' LIKE '%/manage/zsm1_%')", [h.a.tenantId]));
     expect(sends.rows).toHaveLength(0);
   });
 

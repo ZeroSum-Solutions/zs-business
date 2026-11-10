@@ -1,5 +1,9 @@
 export * from "./actions/dispatch.js";
-export { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, createBooking, getAvailableSlots } from "./booking/index.js";
+export {
+  bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, confirmationMessageId, createBooking,
+  getAvailableSlots, manageExpiry, manageUrl, manageView, signManageToken, verifyManageToken,
+} from "./booking/index.js";
+export type { ManageLinkConfig, ManageRef, ManageSecrets } from "./booking/index.js";
 export { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "./crm/index.js";
 export * from "./edge/index.js";
 export { findSlots, getBooking, listBookings, listResources } from "./reads/booking.js";

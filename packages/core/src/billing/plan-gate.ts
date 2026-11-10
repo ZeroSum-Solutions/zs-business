@@ -32,6 +32,8 @@ export const READ_ONLY_ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
   "outreach.campaign.pause", "outreach.prospect.stop",
   // OS-3: the owner can always disconnect a mailbox (the token is cleared); connecting one is a paid action.
   "outreach.mailbox.disconnect",
+  // booking-self-service.md BS-12: a customer can always cancel their own booking, even when the business is read-only.
+  "booking.self_cancel",
 ]);
 
 /** PL-8: the counted limits, by the action that would add one more. */

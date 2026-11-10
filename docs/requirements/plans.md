@@ -1,6 +1,7 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
+Status: draft contract, revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
+booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
 Shopify App Pricing, read back from the Partner API). Revision 2 added PL-14, a billing provider
 per tenant and per subscription. Revision 1 followed a
 GPT-6.1 Sol review of the first draft (mixed intervals, event order, stale checkouts, unpaid
@@ -164,7 +165,7 @@ injected clock. A read-only tenant may run only: `plan.checkout.create`, `wallet
 `media.variant.fail`; not `voice.textback.optin`, which starts an outbound text), the stops (`agent.kill`, `agent.kind.kill`, `browser.kill`,
 `agent.run.finish`, `agent.run.stall`, `agent.kind.run.finish`, `agent.cost.warn`) and the
 removals (`member.remove`, `connection.disconnect`, `calendar.google.disconnect`,
-`automation.token.revoke`, `approval.reject`, `approval.revoke`, `inbox.reply.discard`). Anything
+`automation.token.revoke`, `approval.reject`, `approval.revoke`, `inbox.reply.discard`) and the customer's own cancel (`booking.self_cancel`). Anything
 else is refused with 409 `plan_read_only`. Reads always work, so an owner can see and export the
 data. **Limits** (PL-1) apply to a tenant whose record names a plan: before `member.invite`,
 `connection.connect` and `automation.token.create`, the dispatcher takes a per-tenant transaction

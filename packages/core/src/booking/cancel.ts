@@ -53,11 +53,12 @@ export interface CancelledBooking {
  * B-30, B-31: cancel one booking in the caller's transaction, under the resource lock. A confirmed booking that has not
  * ended becomes `cancelled`; one already cancelled is returned as it is; one that ended is `Conflict` `booking_over`.
  * `actorId` is null when the customer cancels through their own link (booking-self-service.md). `clock` is read once,
- * after the resource lock is held, so a long wait cannot cancel a booking that has since ended.
+ * after the resource lock is held, so a long wait cannot cancel a booking that has since ended. With `notStarted`
+ * (the customer's link, booking-self-service.md BS-6) a booking whose start has passed is `Conflict` `too_late`.
  */
 export async function cancelBookingRow(
   tx: Transaction, tenantId: string, bookingId: string,
-  by: { readonly actorId: string | null; readonly reason: string | null }, clock: () => Date,
+  by: { readonly actorId: string | null; readonly reason: string | null; readonly notStarted?: boolean }, clock: () => Date,
 ): Promise<CancelledBooking> {
   const found = (await tx.query<{ resource_id: string }>(
     "SELECT resource_id FROM bookings WHERE tenant_id=$1 AND id=$2", [tenantId, bookingId],
@@ -73,6 +74,9 @@ export async function cancelBookingRow(
   const at = clockInstant(now);
   if (row.status === "cancelled")
     return { record: bookingRecord(row), cancelledAt: row.cancelled_at!.toISOString(), reason: row.cancel_reason, changed: false };
+  // A customer link (`notStarted`) answers `too_late` for anything that began, over or not (BS-6).
+  if (by.notStarted && row.starts_at.getTime() <= now.getTime())
+    throw new Conflict("The appointment has already started", { reason: "too_late" });
   if (row.ends_at.getTime() <= now.getTime())
     throw new Conflict("The booking is already over", { reason: "booking_over" });
   const updated = (await tx.query<CancelRow>(
@@ -103,7 +107,7 @@ export async function bookingCustomer(tx: Transaction, tenantId: string, booking
   )).rows[0];
 }
 
-const oneLine = (text: string, max: number): string => [...text.replace(/\s+/g, " ").trim()].slice(0, max).join("");
+export const oneLine = (text: string, max: number): string => [...text.replace(/\s+/g, " ").trim()].slice(0, max).join("");
 
 /** B-33: the plain cancellation email. It never carries the owner's reason (B-29). */
 export function cancellationNotice(input: {

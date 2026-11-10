@@ -1,6 +1,6 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 5 (2026-10-19). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 8 (2026-11-10; revision 5 text kept below). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
@@ -11,6 +11,9 @@ one Postgres table shared by every API instance, so hosted public intake may be 
 Revision 7 (2026-10-22, audit B1): P-12 consent rows carry the `disclosureText` the visitor
 saw. A replay of a link or reject stored before that fills it from the consent row, or, once
 that row is gone, from the page's append-only disclosure history for the stored version.
+Revision 8 (2026-11-10, first-client week): P-1 allows three more anonymous writes, each authorized
+by a signed per-booking link and defined in `booking-self-service.md` (`booking.self_cancel`,
+`booking.self_reschedule`, `booking.confirmation_send`); `booking.public_request` itself is unchanged.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -34,7 +37,9 @@ dashboard. Messaging, payments, cancellation and outside calendars are out of sc
 
 ## Numbered rules
 
-**P-1. One public action.** The only anonymous write is `booking.public_request`. It runs
+**P-1. One public action.** The only anonymous write that needs no earlier proof is `booking.public_request`
+(revision 8: the three link-authorized actions of `booking-self-service.md` also run anonymously, each only for the one
+booking its signed token names). It runs
 through the shared dispatcher (`createDispatcher`) like every other action: idempotency
 key, approval binding, state plus action plus outbox in one transaction. No other
 action is reachable without an owner principal.

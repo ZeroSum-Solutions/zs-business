@@ -4,7 +4,7 @@
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { NotFound, ValidationFailed } from "@zs/contracts";
-import { apiErrorBody, createPublicSession, verifyBookingKey, type BookingKeySecrets, type EdgeDependencies } from "@zs/core";
+import { apiErrorBody, createManageSession, createPublicSession, verifyBookingKey, verifyManageToken, type BookingKeySecrets, type EdgeDependencies } from "@zs/core";
 import { jsonBody } from "../routes/request.js";
 import { createMemoryRateLimiter, DEFAULT_RATE_LIMITS, type RateLimiter, type RateLimits } from "./limiter.js";
 import { bookerAssets } from "./assets.js";
@@ -79,6 +79,36 @@ export function publicRoutes(
     return { address, session: createPublicSession(requestEdge(c), ref) };
   };
 
+  /**
+   * BS-9: a forged or expired token is charged to the caller's address alone; a valid one is charged to its booking
+   * and its address, and a write also to its tenant. All counters are taken before any database work.
+   */
+  const admitManage = async (c: Context<AppEnv>, kind: "read" | "write") => {
+    const socket = (c.env as NodeBindings | undefined)?.incoming?.socket?.remoteAddress;
+    const address = clientAddress(socket, (name) => c.req.header(name));
+    const bucket = addressBucket(address);
+    const token = c.req.param("token") ?? "";
+    const ref = verifyManageToken(config.keySecrets, token);
+    const valid = ref !== null && edge.clock.now().getTime() < ref.expiresAt * 1000;
+    const charges = !valid
+      ? [{ key: `manage-forged:${bucket}`, rule: limits.addressWrites }]
+      : kind === "write"
+        ? [{ key: `manage-write:${ref.tenantId}:${ref.bookingId}`, rule: limits.addressWrites },
+          { key: `address-write:${bucket}`, rule: limits.addressWrites },
+          { key: `tenant-write:${ref.tenantId}`, rule: limits.tenantWrites }]
+        : [{ key: `manage-read:${ref.tenantId}:${ref.bookingId}`, rule: limits.addressReads },
+          { key: `address-read:${bucket}`, rule: limits.addressReads }];
+    const taken = await limiter.take(charges, {
+      signal: c.var.signal,
+      remainingMs: () => c.var.deadline - edge.clock.now().getTime(),
+    });
+    if (!taken.ok) throw new RateLimited(taken.retryAfterSeconds);
+    const handle = createManageSession(requestEdge(c), config.keySecrets, config.publicBaseUrl).open(token);
+    // BS-1: a forged token looks exactly like a booking that is not there.
+    if (!handle) throw new NotFound();
+    return handle;
+  };
+
   const api = new Hono<AppEnv>()
     .use("*", async (c, next) => {
       await next();
@@ -97,6 +127,17 @@ export function publicRoutes(
         ? body.botToken : null;
       if (!(await botCheck({ token, address }))) throw new ValidationFailed("Bot check failed");
       return c.json(await session.request(body, c.req.header("Idempotency-Key")), 201);
+    })
+    // booking-self-service.md BS-4..BS-8: the customer's own link. The token is the only reference.
+    .get("/manage/:token", async (c) => c.json(await (await admitManage(c, "read")).view()))
+    .get("/manage/:token/slots", async (c) => c.json(await (await admitManage(c, "read")).slots(c.req.query())))
+    .post("/manage/:token/cancel", async (c) => {
+      const handle = await admitManage(c, "write");
+      return c.json(await handle.cancel(await jsonBody(c), c.req.header("Idempotency-Key")));
+    })
+    .post("/manage/:token/reschedule", async (c) => {
+      const handle = await admitManage(c, "write");
+      return c.json(await handle.reschedule(await jsonBody(c), c.req.header("Idempotency-Key")));
     });
 
   const assets = bookerAssets();
@@ -108,7 +149,13 @@ export function publicRoutes(
     })
     .get("/booker.js", (c) => c.body(assets.bookerJs, 200, assets.scriptHeaders))
     .get("/booker.css", (c) => c.body(assets.bookerCss, 200, assets.styleHeaders))
-    .get("/embed.js", (c) => c.body(assets.embedJs, 200, assets.scriptHeaders));
+    .get("/embed.js", (c) => c.body(assets.embedJs, 200, assets.scriptHeaders))
+    // BS-10: one static page for every token; the script reads the token from its own URL.
+    .get("/manage/:token", (c) => {
+      if (!verifyManageToken(config.keySecrets, c.req.param("token"))) return c.html(assets.missingHtml, 404, assets.manageHeaders);
+      return c.html(assets.manageHtml, 200, assets.manageHeaders);
+    })
+    .get("/manage.js", (c) => c.body(assets.manageJs, 200, assets.scriptHeaders));
 
   return { api, site };
 }

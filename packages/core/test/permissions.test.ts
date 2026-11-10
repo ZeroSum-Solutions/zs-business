@@ -13,7 +13,7 @@ import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import { templateHandlers } from "../src/templates/handlers.js";
 import { templatedKindHandlers } from "../src/templates/send.js";
 import {
-  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingCancelHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, planHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -492,7 +492,7 @@ describe("permission map", () => {
     // The public request is the one action no member session may run (public-intake.md P-1).
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
-      ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
+      ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
       ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...outreachHandlers, ...documentIntakeHandlers,
       ...setupHandlers,
     })
@@ -500,11 +500,14 @@ describe("permission map", () => {
       // belong to its server-side principal (document-intake.md DL-5); the image worker's to its own.
       .filter((action) => action !== PUBLIC_REQUEST_ACTION && !PAYLOAD_PERMISSION_ACTIONS.includes(action) && !AGENT_ACTIONS.includes(action) && !IMAGE_WORKER_ACTIONS.includes(action) && action !== "catalog.intake.result" && action !== "catalog.intake.fail"
         // outreach-sequencer.md OS-2: the mailbox actions belong to the operator command's principal.
-        && action !== "outreach.mailbox.connect" && action !== "outreach.mailbox.disconnect")
+        && action !== "outreach.mailbox.connect" && action !== "outreach.mailbox.disconnect"
+        // booking-self-service.md BS-2, BS-3: the customer's link and the confirmation email belong to the server-built public principal.
+        && !(action in bookingSelfServiceHandlers))
       .sort();
     expect([...PAYLOAD_PERMISSION_ACTIONS].sort()).toEqual(["approval.request", "approval.revoke", "source.observe"]);
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual(registered);
     expect(Object.keys(ACTION_PERMISSIONS)).not.toContain(PUBLIC_REQUEST_ACTION);
+    for (const action of Object.keys(bookingSelfServiceHandlers)) expect(Object.keys(ACTION_PERMISSIONS)).not.toContain(action);
     for (const action of AGENT_ACTIONS) expect(Object.keys(ACTION_PERMISSIONS)).not.toContain(action);
     expect({ ...ACTION_PERMISSIONS }).toEqual(EXPECTED_ACTIONS);
   });

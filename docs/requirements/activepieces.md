@@ -1,6 +1,6 @@
 # M5: Activepieces automations
 
-Status: draft contract for M5, provider 5 of 5 (2026-10-20), revision 3 (hub review r1: W-2, W-4, W-7, W-8; audit 2026-10-22: W-7, W-8). Code follows this file;
+Status: draft contract for M5, provider 5 of 5 (2026-10-20), revision 4 (hub review r1: W-2, W-4, W-7, W-8; audit 2026-10-22: W-7, W-8; 2026-11-10: W-4 customer reschedule). Code follows this file;
 a change to a numbered rule needs a new revision of this file first.
 
 Scope: let an owner connect Activepieces flows to their business in two directions. Outbound,
@@ -56,7 +56,8 @@ catch-webhook server on 127.0.0.1. The Mac sets the variables in W-14 when this 
 - **W-4 Where events come from.** A website booking request gives `lead.created` (name, email,
   phone, channel, page, possible-match flag), `booking.created` with `source: "website"`, and
   `message.received` when the visitor wrote a note. An owner's booking gives `booking.created`
-  with `source: "owner"`. A deal create or stage move gives `deal.won` when the new stage's
+  with `source: "owner"`. A customer's move of a website booking (`booking-self-service.md` BS-8) gives
+  `booking.created` for the new booking with `source: "website"` and the same intake item. A deal create or stage move gives `deal.won` when the new stage's
   outcome is `won` and the stage the deal's previous write left was not. Both, and the value the
   event carries (the last one set before that write), are read from the outbox history, so a
   later reopen or price change does not alter or repeat an event.

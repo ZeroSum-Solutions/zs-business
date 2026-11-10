@@ -7,6 +7,8 @@ import {
   bookingRecordSchema,
   dealRecordSchema,
   publicBookingRequestResultSchema,
+  SELF_RESCHEDULE_ACTION,
+  selfRescheduleResultSchema,
   type AutomationEventType,
   type JsonValue,
 } from "@zs/contracts";
@@ -15,7 +17,7 @@ import { PUBLIC_REQUEST_ACTION } from "../intake/public-request.js";
 
 /** W-4: the outbox event types that can become a business event. */
 export const SOURCE_EVENT_TYPES: readonly string[] = Object.freeze([
-  PUBLIC_REQUEST_ACTION, "booking.create", "crm.deal.create", "crm.deal.move-stage",
+  PUBLIC_REQUEST_ACTION, "booking.create", SELF_RESCHEDULE_ACTION, "crm.deal.create", "crm.deal.move-stage",
 ]);
 
 export interface OutboxRow {
@@ -107,6 +109,30 @@ function ownerBooking(row: OutboxRow): BusinessEvent[] {
   }];
 }
 
+/** booking-self-service.md BS-8: a customer's move makes a new booking, and a subscriber hears about it as any new one. */
+async function customerReschedule(tx: Transaction, row: OutboxRow): Promise<BusinessEvent[]> {
+  const parsed = actionEvent(selfRescheduleResultSchema).safeParse(row.payload);
+  if (!parsed.success) return [];
+  const booking = parsed.data.result.booking;
+  const item = (await tx.query<{ intake_item_id: string | null; contact_id: string | null }>(
+    `SELECT b.intake_item_id, i.contact_id FROM bookings b
+       LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id AND i.status IN ('new_contact','linked')
+      WHERE b.tenant_id=$1 AND b.id=$2`, [row.tenant_id, booking.id])).rows[0];
+  if (!item) return [];
+  return [{
+    type: "booking.created",
+    data: {
+      bookingId: booking.id,
+      resourceId: booking.resourceId,
+      startsAt: booking.startsAt,
+      endsAt: booking.endsAt,
+      source: "website",
+      intakeItemId: item.intake_item_id,
+      contactId: item.contact_id,
+    },
+  }];
+}
+
 /** Every deal write bumps the revision and leaves one outbox row whose result is the deal. */
 const DEAL_WRITE_TYPES = ["crm.deal.create", "crm.deal.move-stage", "crm.deal.set-details"];
 
@@ -164,6 +190,8 @@ export async function businessEvents(tx: Transaction, row: OutboxRow): Promise<B
       return websiteRequest(tx, row);
     case "booking.create":
       return ownerBooking(row);
+    case SELF_RESCHEDULE_ACTION:
+      return customerReschedule(tx, row);
     case "crm.deal.create":
     case "crm.deal.move-stage":
       return dealWon(tx, row);

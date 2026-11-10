@@ -86,6 +86,9 @@ const CONFLICT_REASONS = new Set([
   "cost_cap", "model_error", "model_invalid", "kind_not_available",
   "template_changed", "template_superseded", "template_not_approved",
   "suggestion_in_progress", "suggestion_used", "booking_link_unconfigured",
+  // booking.md B-31 (booking_over; the dashboard already words it) and booking-self-service.md BS-1, BS-6, BS-8: why the
+  // customer's link refuses a change.
+  "booking_over", "link_expired", "too_late", "same_time", "not_changeable",
   // industry-templates.md IT-4: a tenant applies one template.
   "template_already_applied",
   // browser-tasks.md BT-9, BT-11, BT-12: why a website task cannot start or a write task is refused.
