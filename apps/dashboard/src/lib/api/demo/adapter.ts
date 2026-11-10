@@ -980,7 +980,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     },
 
     setPipelines(next) {
-      pipelines = clone(next);
+      // A test may hand in the older shape without archived stages.
+      pipelines = clone(next).map((pipeline) => ({ ...pipeline, archivedStages: pipeline.archivedStages ?? [] }));
     },
 
     setOpenHours(weekday, hours) {
