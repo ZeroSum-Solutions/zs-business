@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GoogleCalendarCard } from "../src/components/account/google-calendar-card";
 import { firstBookableDay } from "../src/components/calendar/booking-dialog";
 import { BookingPageCard } from "../src/components/calendar/booking-page-card";
-import { CalendarView } from "../src/components/calendar/calendar-view";
+import { CalendarView, openingView } from "../src/components/calendar/calendar-view";
 import type { BookingPageSummary, CalendarConnection, ResourceSummary } from "../src/lib/api";
 import { startOfZonedDay, addDays } from "../src/lib/time";
 import { keys, renderScreen } from "./helpers/render";
@@ -82,6 +82,37 @@ describe("calendar page", () => {
   it("starts the booking sheet's days at today when the page shows a past day (U2-12)", () => {
     expect(firstBookableDay("2026-10-19", "2026-10-21")).toBe("2026-10-21");
     expect(firstBookableDay("2026-10-23", "2026-10-21")).toBe("2026-10-23");
+  });
+});
+
+describe("calendar opening view (demo polish)", () => {
+  const weekOf19 = (client: QueryClient) => {
+    client.setQueryData(keys.bookings(range("2026-10-21", 1)), empty);
+    client.setQueryData(keys.bookings(range("2026-10-19", 7)), empty);
+    client.setQueryData(keys.slots({ ...range("2026-10-19", 7), zone: ZONE }), { resourceId: studio.id, timeZone: ZONE, zone: ZONE, slots: [] });
+  };
+
+  it("opens on the week when nothing is booked today, never on an empty day", () => {
+    const html = calendar(weekOf19).replaceAll("<!-- -->", "");
+    expect(html).toContain("Week of Mon, Oct 19");
+    expect(html).not.toContain("Nothing booked yet");
+  });
+
+  it("opens on the linked day even when it is empty", () => {
+    const html = calendar((client) => {
+      client.setQueryData(keys.bookings(range("2026-10-22", 1)), empty);
+      client.setQueryData(keys.slots({ ...range("2026-10-22", 1), zone: ZONE }), { resourceId: studio.id, timeZone: ZONE, zone: ZONE, slots: [] });
+    }, { date: "2026-10-22" });
+    expect(html).toContain("Nothing booked yet");
+    expect(html).not.toContain("Week of");
+  });
+
+  it("picks Day when today has a booking, Week when it has none, and waits while today loads", () => {
+    expect(openingView({ items: [{}] }, false)).toBe("day");
+    expect(openingView({ items: [] }, false)).toBe("week");
+    expect(openingView(undefined, false)).toBeNull();
+    // A failed read of today still opens somewhere: the Day view shows the error with a retry.
+    expect(openingView(undefined, true)).toBe("day");
   });
 });
 

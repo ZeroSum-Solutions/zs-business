@@ -9,7 +9,9 @@
   const params = new URLSearchParams(location.search);
   const embedded = params.get("embed") === "1" && window.parent !== window;
   const channel = params.get("channel") === "widget" ? "widget" : "booking_page";
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  // Times show in the business's zone (the resource's), so a Chicago gym never shows 4:00 AM to a
+  // visitor on a Pacific laptop. The visitor's own time is added only where it differs.
+  const visitorZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const RANGE_DAYS = 14;
   const REFRESH_MS = 3 * 60 * 1000;
 
@@ -30,10 +32,72 @@
     result: null,
   };
 
-  const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
-  const dayLabel = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "short", month: "short", day: "numeric" });
-  const longDay = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "long", month: "long", day: "numeric" });
-  const timeLabel = new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" });
+  const formats = new Map();
+
+  /** Formatters for one zone, built once. An unknown zone falls back to the visitor's. */
+  function formatsFor(zoneId) {
+    if (formats.has(zoneId)) return formats.get(zoneId);
+    let set;
+    try {
+      set = {
+        zone: zoneId,
+        dayKey: new Intl.DateTimeFormat("en-CA", { timeZone: zoneId, year: "numeric", month: "2-digit", day: "2-digit" }),
+        dayLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "short", month: "short", day: "numeric" }),
+        longDay: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "long", month: "long", day: "numeric" }),
+        timeLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit" }),
+        name: zoneName(zoneId),
+      };
+    } catch {
+      set = zoneId === visitorZone ? null : formatsFor(visitorZone);
+    }
+    formats.set(zoneId, set);
+    return set;
+  }
+
+  /** "Pacific Time (Los Angeles)" for America/Los_Angeles; "UTC" for UTC. */
+  function zoneName(zoneId) {
+    const city = zoneId.includes("/") ? zoneId.split("/").pop().replace(/_/g, " ") : zoneId;
+    let generic = "";
+    try {
+      const part = new Intl.DateTimeFormat(undefined, { timeZone: zoneId, timeZoneName: "longGeneric" })
+        .formatToParts(new Date()).find((item) => item.type === "timeZoneName");
+      generic = part ? part.value : "";
+    } catch {
+      generic = "";
+    }
+    // Zones with no common name format as an offset ("GMT+00:00"); the city reads better.
+    if (!generic || /^(GMT|UTC)/.test(generic)) return city;
+    return zoneId.includes("/") ? `${generic} (${city})` : generic;
+  }
+
+  /** The business's zone: the chosen resource's, else the visitor's. */
+  function biz() {
+    const resource = state.page && state.page.resources.find((item) => item.id === state.resourceId);
+    return formatsFor(resource && resource.timeZone ? resource.timeZone : visitorZone);
+  }
+
+  function mine() {
+    return formatsFor(visitorZone);
+  }
+
+  /** The visitor's own clock time for an instant, or null when it reads the same as the business's. */
+  function visitorTime(iso) {
+    const at = new Date(iso);
+    const ours = biz();
+    const theirs = mine();
+    if (ours.zone === theirs.zone) return null;
+    const same = ours.timeLabel.format(at) === theirs.timeLabel.format(at) && ours.dayKey.format(at) === theirs.dayKey.format(at);
+    if (same) return null;
+    const sameDay = ours.dayKey.format(at) === theirs.dayKey.format(at);
+    return sameDay ? `${theirs.timeLabel.format(at)} your time` : `${theirs.dayLabel.format(at)}, ${theirs.timeLabel.format(at)} your time`;
+  }
+
+  /** "10:00 AM – 11:00 AM Pacific Time (Los Angeles)", plus the visitor's time when it differs. */
+  function rangeLine(startsAt, endsAt) {
+    const f = biz();
+    const yours = visitorTime(startsAt);
+    return `${f.timeLabel.format(new Date(startsAt))} – ${f.timeLabel.format(new Date(endsAt))} ${f.name}${yours ? ` (${yours})` : ""}`;
+  }
 
   /** Build an element; strings become text nodes, never markup. */
   function h(tag, attrs, ...children) {
@@ -117,7 +181,7 @@
   function slotsByDay() {
     const days = new Map();
     for (const slot of state.slots) {
-      const key = dayKey.format(new Date(slot.startsAt));
+      const key = biz().dayKey.format(new Date(slot.startsAt));
       if (!days.has(key)) days.set(key, []);
       days.get(key).push(slot);
     }
@@ -135,8 +199,18 @@
     return state.notice ? h("p", { class: "booker-error", role: "alert" }, state.notice) : null;
   }
 
+  function zoneHint() {
+    const f = biz();
+    const differs = state.slots.some((slot) => visitorTime(slot.startsAt) !== null);
+    const where = state.page.businessName ? ` local time for ${state.page.businessName}` : " the business's local time";
+    return h("p", { class: "booker-hint" }, differs
+      ? `Times are in ${f.name},${where}. Your time is shown under each one.`
+      : `Times are in ${f.name},${where}.`);
+  }
+
   function dateView() {
     const days = slotsByDay();
+    const f = biz();
     return [
       ...header(),
       resourcePicker(),
@@ -149,15 +223,16 @@
           class: "booker-choice",
           disabled: locked(),
           onclick: go(() => { state.day = key; state.notice = ""; state.step = "time"; render(); }),
-        }, dayLabel.format(new Date(slots[0].startsAt)), h("small", {}, `${slots.length} ${slots.length === 1 ? "time" : "times"}`)))),
-      h("p", { class: "booker-hint" }, `Times are shown in ${zone}.`),
+        }, f.dayLabel.format(new Date(slots[0].startsAt)), h("small", {}, `${slots.length} ${slots.length === 1 ? "time" : "times"}`)))),
+      days.size === 0 ? null : zoneHint(),
     ];
   }
 
   function timeView() {
     const slots = slotsByDay().get(state.day) || [];
+    const f = biz();
     return [
-      h("h2", { tabindex: "-1", "data-focus": true }, slots[0] ? longDay.format(new Date(slots[0].startsAt)) : "Pick a time"),
+      h("h2", { tabindex: "-1", "data-focus": true }, slots[0] ? f.longDay.format(new Date(slots[0].startsAt)) : "Pick a time"),
       noticeLine(),
       slots.length === 0
         ? h("p", { class: "booker-status" }, "No times are left on this day.")
@@ -166,7 +241,8 @@
           class: "booker-choice",
           disabled: locked(),
           onclick: go(() => { state.slot = slot; state.notice = ""; state.errors = {}; state.step = "details"; render(); }),
-        }, timeLabel.format(new Date(slot.startsAt))))),
+        }, f.timeLabel.format(new Date(slot.startsAt)), visitorTime(slot.startsAt) ? h("small", {}, visitorTime(slot.startsAt)) : null))),
+      slots.length === 0 ? null : zoneHint(),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days"),
     ];
   }
@@ -199,8 +275,8 @@
 
   function slotSummary(slot) {
     return h("div", { class: "booker-summary" },
-      h("strong", {}, longDay.format(new Date(slot.startsAt))),
-      h("div", {}, `${timeLabel.format(new Date(slot.startsAt))} – ${timeLabel.format(new Date(slot.endsAt))}`));
+      h("strong", {}, biz().longDay.format(new Date(slot.startsAt))),
+      h("div", {}, rangeLine(slot.startsAt, slot.endsAt)));
   }
 
   /** No answer we can trust: show what was sent and offer only the same request again. */
@@ -247,7 +323,8 @@
         field("name", "Name", input("name", { autocomplete: "name", required: true, maxlength: "200" })),
         field("email", "Email", input("email", { type: "email", autocomplete: "email", required: true, maxlength: "254" })),
         field("phone", "Phone (optional)", input("phone", { type: "tel", autocomplete: "tel", maxlength: "20" }),
-          "International format, for example +44 20 7946 0000."),
+          northAmerican() ? "For example (555) 555-0123. Outside the US or Canada, start with + and your country code."
+            : "Start with + and your country code."),
         field("notes", "Notes (optional)", input("notes", { multiline: true, rows: "3", maxlength: "1000" })),
         h("fieldset", { class: "booker-consent" },
           h("legend", {}, "Updates"),
@@ -268,7 +345,7 @@
     return [
       h("div", { class: "booker-done" },
         h("h2", { tabindex: "-1", "data-focus": true }, "You're booked"),
-        h("p", {}, `${longDay.format(new Date(result.startsAt))}, ${timeLabel.format(new Date(result.startsAt))} – ${timeLabel.format(new Date(result.endsAt))}`),
+        h("p", {}, `${biz().longDay.format(new Date(result.startsAt))}, ${rangeLine(result.startsAt, result.endsAt)}`),
         h("p", { class: "booker-hint" }, `Reference ${result.requestId.slice(0, 8)}`)),
       h("button", { type: "button", class: "booker-link", onclick: () => { resetForm(); state.step = "date"; loadSlots(); } }, "Book another time"),
     ];
@@ -285,7 +362,7 @@
   const FIELD_MESSAGES = {
     name: "Please enter your name.",
     email: "Please enter a valid email address.",
-    phone: "Please use international format, starting with +.",
+    phone: "Please enter a full phone number with area code, or start with + and your country code.",
     notes: "Notes can be at most 1000 characters.",
   };
 
@@ -298,9 +375,21 @@
     return errors;
   }
 
+  // US and Canada zones (country code +1): a ten-digit number there is read as +1.
+  const NANP_ZONE = /^(America\/(New_York|Detroit|Chicago|Denver|Boise|Phoenix|Los_Angeles|Anchorage|Juneau|Sitka|Metlakatla|Yakutat|Nome|Adak|Menominee|Indiana\/.+|Kentucky\/.+|North_Dakota\/.+|Indianapolis|Louisville|Toronto|Vancouver|Edmonton|Winnipeg|Regina|Halifax|St_Johns|Moncton|Glace_Bay|Goose_Bay|Swift_Current|Whitehorse|Dawson|Dawson_Creek|Fort_Nelson|Creston|Cambridge_Bay|Iqaluit|Rankin_Inlet|Resolute|Inuvik|Atikokan|Blanc-Sablon|Puerto_Rico)|Pacific\/Honolulu|US\/.+|Canada\/.+)$/;
+
+  function northAmerican() {
+    return NANP_ZONE.test(biz().zone);
+  }
+
   function normalizedPhone() {
     const phone = state.form.phone.replace(/[\s().-]/g, "");
-    return phone === "" ? null : phone;
+    if (phone === "") return null;
+    if (!phone.startsWith("+") && northAmerican()) {
+      if (/^[2-9][0-9]{9}$/.test(phone)) return `+1${phone}`;
+      if (/^1[2-9][0-9]{9}$/.test(phone)) return `+${phone}`;
+    }
+    return phone;
   }
 
   async function submit(event) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, Clock, MinusCircle, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, CalendarBlank, ChatCircleDots, CheckCircle, Clock, Globe, MinusCircle, WarningCircle } from "@phosphor-icons/react";
 import Link from "next/link";
 import { type ReactNode, useMemo, useState, useSyncExternalStore } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,7 @@ import { ApiError, bookingCustomerName, defaultMessage, type HomeResults } from 
 import { ORIGIN_LABELS, revenueSourceLabel } from "@/lib/lead-sources";
 import { useConnectionChecklist, type ChecklistStatus } from "@/lib/connection-checklist";
 import { useBookings, useDisplayZone, useInboxCount, useResources, useResults, useThreads, useWallet } from "@/lib/queries";
-import { resourceLabel } from "@/lib/resources";
+import { bookingTitle, resourceLabel } from "@/lib/resources";
 import { greetingLine } from "@/lib/greeting";
 import { READ_BILLING, READ_RESULTS, useCan } from "@/lib/session";
 import { addDays, formatDateKey, formatDay, formatRange, formatTime, weekdayOf, zonedDateKey } from "@/lib/time";
@@ -358,15 +358,18 @@ function NextAppointments({ needs, className }: { needs: Needs; className?: stri
                 {day.items.map((booking) => {
                   const resource = nameOf(booking.resourceId);
                   const customer = bookingCustomerName(booking);
+                  const title = bookingTitle(booking, resource);
                   return (
                     <li key={booking.id} className="flex gap-3 py-3 last:pb-0 sm:gap-4">
                       <p className="tabular w-20 shrink-0 pt-px text-sm font-bold text-fg">{formatTime(booking.startsAt, zone)}</p>
                       <div className="min-w-0 flex-1">
-                        <h3 className="truncate text-body font-semibold text-fg">{booking.title ?? (booking.source === "website" ? "Website booking" : "Appointment")}</h3>
+                        <h3 className="truncate text-body font-semibold text-fg">{title.text}</h3>
                         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
                           <Avatar name={customer} size="sm" />
                           <span className="min-w-0 truncate text-caption text-fg-2">{customer ?? "No customer linked"}</span>
-                          {resource ? <Badge className="ml-auto" tone={resourceTone(resource.id, resources.data)}>{resourceLabel(resource)}</Badge> : null}
+                          {/* The service is already the title; the badge then says where it was booked, if online. */}
+                          {resource && !title.fromService ? <Badge className="ml-auto" tone={resourceTone(resource.id, resources.data)}>{resourceLabel(resource)}</Badge>
+                            : booking.source === "website" ? <Badge className="ml-auto" tone="accent"><Globe aria-hidden />Website</Badge> : null}
                         </div>
                       </div>
                     </li>

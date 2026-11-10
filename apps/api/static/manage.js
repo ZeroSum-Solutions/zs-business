@@ -6,7 +6,8 @@
   const root = document.getElementById("booker");
   const match = /^\/manage\/(zsm1_[A-Za-z0-9_-]{70})\/?$/.exec(location.pathname);
   let token = match ? match[1] : null;
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  // Times show in the business's zone (the booking's), as on the booker; the visitor's is the fallback.
+  const visitorZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const RANGE_DAYS = 14;
 
   const state = {
@@ -25,10 +26,44 @@
     outcome: "",
   };
 
-  const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
-  const dayLabel = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "short", month: "short", day: "numeric" });
-  const longDay = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "long", month: "long", day: "numeric" });
-  const timeLabel = new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" });
+  const formats = new Map();
+
+  /** Formatters for one zone, built once. An unknown zone falls back to the visitor's. */
+  function formatsFor(zoneId) {
+    if (formats.has(zoneId)) return formats.get(zoneId);
+    let set;
+    try {
+      set = {
+        dayKey: new Intl.DateTimeFormat("en-CA", { timeZone: zoneId, year: "numeric", month: "2-digit", day: "2-digit" }),
+        dayLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "short", month: "short", day: "numeric" }),
+        longDay: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "long", month: "long", day: "numeric" }),
+        timeLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit" }),
+        name: zoneName(zoneId),
+      };
+    } catch {
+      set = zoneId === visitorZone ? null : formatsFor(visitorZone);
+    }
+    formats.set(zoneId, set);
+    return set;
+  }
+
+  /** "Pacific Time (Los Angeles)" for America/Los_Angeles; "UTC" for UTC. */
+  function zoneName(zoneId) {
+    const city = zoneId.includes("/") ? zoneId.split("/").pop().replace(/_/g, " ") : zoneId;
+    let generic = "";
+    try {
+      const part = new Intl.DateTimeFormat(undefined, { timeZone: zoneId, timeZoneName: "longGeneric" })
+        .formatToParts(new Date()).find((item) => item.type === "timeZoneName");
+      generic = part ? part.value : "";
+    } catch {
+      generic = "";
+    }
+    if (!generic || /^(GMT|UTC)/.test(generic)) return city;
+    return zoneId.includes("/") ? `${generic} (${city})` : generic;
+  }
+
+  const fmt = () => formatsFor(state.view && state.view.timeZone ? state.view.timeZone : visitorZone);
+  const zoneLine = () => `Times are in ${fmt().name}${state.view ? `, local time for ${state.view.businessName}` : ""}.`;
 
   /** Build an element; strings become text nodes, never markup. */
   function h(tag, attrs, ...children) {
@@ -82,9 +117,9 @@
     const start = new Date(view.startsAt);
     const end = new Date(view.endsAt);
     return h("div", { class: "booker-summary" },
-      h("strong", {}, longDay.format(start)),
-      h("div", {}, `${timeLabel.format(start)} – ${timeLabel.format(end)}`),
-      h("div", { class: "booker-hint" }, `Times are shown in ${zone}.`));
+      h("strong", {}, fmt().longDay.format(start)),
+      h("div", {}, `${fmt().timeLabel.format(start)} – ${fmt().timeLabel.format(end)}`),
+      h("div", { class: "booker-hint" }, zoneLine()));
   }
 
   function header(view) {
@@ -115,7 +150,7 @@
     if (view.state === "moved") {
       const next = view.movedTo;
       return [...header(view), h("h2", {}, "This appointment was moved"),
-        h("p", { class: "booker-status" }, `It is now on ${longDay.format(new Date(next.startsAt))}, ${timeLabel.format(new Date(next.startsAt))}.`),
+        h("p", { class: "booker-status" }, `It is now on ${fmt().longDay.format(new Date(next.startsAt))}, ${fmt().timeLabel.format(new Date(next.startsAt))}.`),
         h("a", { class: "booker-link", href: `/manage/${next.token}` }, "See the new appointment")];
     }
     if (step === "done") return doneView();
@@ -143,7 +178,7 @@
   function slotsByDay() {
     const days = new Map();
     for (const slot of state.slots) {
-      const key = dayKey.format(new Date(slot.startsAt));
+      const key = fmt().dayKey.format(new Date(slot.startsAt));
       if (!days.has(key)) days.set(key, []);
       days.get(key).push(slot);
     }
@@ -158,20 +193,20 @@
         : h("div", { class: "booker-grid" }, [...days].map(([key, slots]) => h("button", {
           type: "button", class: "booker-choice", disabled: locked(),
           onclick: go(() => { state.day = key; state.notice = ""; state.step = "time"; render(); }),
-        }, dayLabel.format(new Date(slots[0].startsAt)), h("small", {}, `${slots.length} ${slots.length === 1 ? "time" : "times"}`)))),
-      h("p", { class: "booker-hint" }, `Times are shown in ${zone}.`),
+        }, fmt().dayLabel.format(new Date(slots[0].startsAt)), h("small", {}, `${slots.length} ${slots.length === 1 ? "time" : "times"}`)))),
+      h("p", { class: "booker-hint" }, zoneLine()),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.notice = ""; state.step = "view"; render(); }) }, "Back")];
   }
 
   function timeView() {
     const slots = slotsByDay().get(state.day) || [];
-    return [h("h2", { tabindex: "-1", "data-focus": true }, slots[0] ? longDay.format(new Date(slots[0].startsAt)) : "Pick a time"), noticeLine(),
+    return [h("h2", { tabindex: "-1", "data-focus": true }, slots[0] ? fmt().longDay.format(new Date(slots[0].startsAt)) : "Pick a time"), noticeLine(),
       slots.length === 0
         ? h("p", { class: "booker-status" }, "No times are left on this day.")
         : h("div", { class: "booker-grid" }, slots.map((slot) => h("button", {
           type: "button", class: "booker-choice", disabled: locked(),
           onclick: go(() => { state.slot = slot; state.notice = ""; state.step = "confirm"; render(); }),
-        }, timeLabel.format(new Date(slot.startsAt))))),
+        }, fmt().timeLabel.format(new Date(slot.startsAt))))),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days")];
   }
 
@@ -183,8 +218,8 @@
         h("button", { type: "button", class: "booker-primary", disabled: locked(), onclick: go(() => { state.slot = null; state.step = "date"; render(); }) }, "See free times")];
     }
     return [h("h2", { tabindex: "-1", "data-focus": true }, "Move your appointment to"),
-      h("div", { class: "booker-summary" }, h("strong", {}, longDay.format(new Date(slot.startsAt))),
-        h("div", {}, `${timeLabel.format(new Date(slot.startsAt))} – ${timeLabel.format(new Date(slot.endsAt))}`)),
+      h("div", { class: "booker-summary" }, h("strong", {}, fmt().longDay.format(new Date(slot.startsAt))),
+        h("div", {}, `${fmt().timeLabel.format(new Date(slot.startsAt))} – ${fmt().timeLabel.format(new Date(slot.endsAt))}`)),
       noticeLine(),
       h("button", { type: "button", class: "booker-primary", disabled: state.submitting, onclick: reschedule }, state.submitting ? "Moving…" : "Move my appointment"),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "time"; state.notice = ""; render(); }) }, "Choose another time")];
