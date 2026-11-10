@@ -10,6 +10,7 @@ import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/m
 import { CallToolRequestSchema, ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
+  cancelBookingRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
   createOutreachCampaignRequestSchema,
@@ -68,6 +69,8 @@ async function run(work: () => Promise<ToolOutput>): Promise<CallToolResult> {
 }
 
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+/** An irreversible change: a cancelled booking cannot be reopened (booking.md B-30). */
+const destructive = { ...write, destructiveHint: true };
 const read = { readOnlyHint: true, openWorldHint: false };
 
 type ToolConfig<Input extends z.ZodObject> = {
@@ -109,6 +112,12 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     inputSchema: keyed(createBookingRequestSchema.shape),
     annotations: write,
   }, ({ idempotencyKey, ...body }, session) => session.createBooking(body, idempotencyKey));
+
+  tool("cancel_booking", {
+    description: "Cancel a booking and free its slot. The customer gets a cancellation email unless notifyCustomer is false. A booking that already ended cannot be cancelled. Reuse the idempotencyKey to retry safely.",
+    inputSchema: keyed({ bookingId: uuidSchema, ...cancelBookingRequestSchema.shape }),
+    annotations: destructive,
+  }, ({ idempotencyKey, bookingId, ...body }, session) => session.cancelBooking(bookingId, body, idempotencyKey));
 
   tool("upsert_contact", {
     description: "Create a contact, or return the existing one that has the same email or phone.",

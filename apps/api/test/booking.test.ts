@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   apiErrorBodySchema,
   bookingPageSchema,
+  cancelBookingOutputSchema,
   contactPageSchema,
   createBookingOutputSchema,
   dealPageSchema,
@@ -192,5 +193,61 @@ describe("instants outside UTC years 0001..9999 (B-3)", () => {
       expect((await call(h.app, "GET", `/v1/booking/slots?resourceId=${h.a.resourceId}&from=${from}&to=${to}`, { token: h.a.token })).status).toBe(200);
       expect((await call(h.app, "GET", `/v1/booking/bookings?from=${from}&to=${to}`, { token: h.a.token })).status).toBe(200);
     }
+  });
+});
+
+describe("POST /v1/booking/bookings/:id/cancel (B-29..B-35)", () => {
+  const cancel = (id: string, body: unknown = {}, key = randomUUID(), tenant = h.a) =>
+    call(h.app, "POST", `/v1/booking/bookings/${id}/cancel`, { token: tenant.token, key, body });
+  const listed = async (query: string) =>
+    bookingPageSchema.parse((await call(h.app, "GET", `/v1/booking/bookings?${query}`, { token: h.a.token })).body).items.map((item) => item.id);
+
+  it("cancels, frees the slot and moves the booking from the default list to the cancelled list", async () => {
+    const booked = await book("2026-10-26T09:00:00.000Z");
+    const id = createBookingOutputSchema.parse(booked.body).result.id;
+    const window = "from=2026-10-26T00:00:00.000Z&to=2026-10-27T00:00:00.000Z";
+    expect(await listed(window)).toContain(id);
+
+    const done = await cancel(id, { reason: "Owner is away" });
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    expect(cancelBookingOutputSchema.parse(done.body).result).toMatchObject({
+      booking: { id, status: "cancelled" }, reason: "Owner is away", customerNotice: "no_customer",
+    });
+    expect(await listed(window)).not.toContain(id);
+    expect(await listed(`${window}&status=cancelled`)).toContain(id);
+    expect(await listed(`${window}&status=all`)).toContain(id);
+    expect((await call(h.app, "GET", `/v1/booking/bookings?status=nope`, { token: h.a.token })).status).toBe(400);
+
+    const detail = await call(h.app, "GET", `/v1/booking/bookings/${id}`, { token: h.a.token });
+    expect(detail.body).toMatchObject({ id, cancellationReason: "Owner is away" });
+    // The same hour books again.
+    expect((await book("2026-10-26T09:00:00.000Z")).status).toBe(201);
+  });
+
+  it("replays one key and treats a new key on a cancelled booking as already cancelled", async () => {
+    const id = createBookingOutputSchema.parse((await book("2026-10-26T11:00:00.000Z")).body).result.id;
+    const key = randomUUID();
+    const first = await cancel(id, {}, key);
+    const again = await cancel(id, {}, key);
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual(first.body);
+    const later = await cancel(id, { reason: "Different" });
+    expect(later.status).toBe(200);
+    expect(cancelBookingOutputSchema.parse(later.body).result).toMatchObject({ customerNotice: "already_cancelled", reason: null });
+    const reused = await cancel(id, { reason: "Changed body" }, key);
+    expect(reused.status).toBe(409);
+  });
+
+  it("needs a key and a valid body, and answers 404 across tenants", async () => {
+    const id = createBookingOutputSchema.parse((await book("2026-10-26T13:00:00.000Z")).body).result.id;
+    const noKey = await call(h.app, "POST", `/v1/booking/bookings/${id}/cancel`, { token: h.a.token, body: {} });
+    expect(noKey.status).toBe(400);
+    expect((await cancel(id, { reason: "x".repeat(501) })).status).toBe(400);
+    expect((await cancel(id, { surprise: 1 })).status).toBe(400);
+    expect((await cancel(id, {}, randomUUID(), h.b)).status).toBe(404);
+    expect((await cancel(randomUUID())).status).toBe(404);
+    expect((await call(h.app, "POST", `/v1/booking/bookings/${id}/cancel`, { key: randomUUID(), body: {} })).status).toBe(401);
+    const row = await call(h.app, "GET", `/v1/booking/bookings/${id}`, { token: h.a.token });
+    expect(row.body).not.toHaveProperty("cancellationReason");
   });
 });

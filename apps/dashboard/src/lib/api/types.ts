@@ -20,6 +20,7 @@ import type {
   BookingPageSummary,
   BookingRecord,
   BookingSummary,
+  CancelBookingResult,
   CalendarConnection,
   CalendarConnectionStatus,
   ConsentEvidence,
@@ -97,6 +98,7 @@ export type {
   BookingContactResult,
   BookingPageSummary,
   BookingRecord,
+  CancelBookingResult,
   CalendarConnection,
   CalendarConnectionStatus,
   ConsentEvidence,
@@ -228,6 +230,14 @@ export interface SlotQuery {
   zone?: string;
 }
 
+/** Cancel a booking (booking.md B-29). `notifyCustomer` defaults to true on the server. */
+export interface BookingCancel {
+  bookingId: string;
+  /** Why, for the owner's own record; the customer never sees it. */
+  reason?: string | null;
+  notifyCustomer?: boolean;
+}
+
 /** The API filters: bookings overlapping [from, to), in start order. */
 export interface BookingListQuery {
   resourceId?: string;
@@ -235,6 +245,8 @@ export interface BookingListQuery {
   to?: string;
   /** Only this customer's bookings: the ones linked to them and their website requests. */
   contactId?: string;
+  /** `confirmed` (the default) is what the calendar shows; `cancelled` and `all` are for history (B-32). */
+  status?: "confirmed" | "cancelled" | "all";
   /** Only the first `limit` bookings, in one request (at most 100). */
   limit?: number;
 }
@@ -307,6 +319,12 @@ export interface BookingApi {
   linkBookingContact(input: BookingContactLink, options: WriteOptions): Promise<BookingContactResult>;
   /** Clear who a booking is for (BC-4). Same conflicts as `linkBookingContact`. */
   unlinkBookingContact(input: BookingContactUnlink, options: WriteOptions): Promise<BookingContactResult>;
+  /**
+   * Cancel a booking and free its time (B-29..B-35). The customer is emailed unless `notifyCustomer` is false.
+   * Throws a conflict with reason `booking_over` for a booking that has ended, and `not_found` for an unknown one.
+   * Cancelling a booking twice is not an error: the result says `already_cancelled`.
+   */
+  cancelBooking(input: BookingCancel, options: WriteOptions): Promise<CancelBookingResult>;
 }
 
 export interface CrmApi {

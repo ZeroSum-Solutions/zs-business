@@ -74,10 +74,13 @@ export const bookings = pgTable(
     occupiedEndsAt: instant("occupied_ends_at").notNull(),
     bufferBeforeMinutes: integer("buffer_before_minutes").notNull().default(0),
     bufferAfterMinutes: integer("buffer_after_minutes").notNull().default(0),
-    status: text("status").$type<"confirmed">().notNull().default("confirmed"),
+    status: text("status").$type<"confirmed" | "cancelled">().notNull().default("confirmed"),
     createdAt: instant("created_at").notNull(),
     source: text("source").$type<"owner" | "website">().notNull().default("owner"),
     intakeItemId: uuid("intake_item_id"),
+    cancelledAt: instant("cancelled_at"),
+    cancelledBy: uuid("cancelled_by"),
+    cancelReason: text("cancel_reason"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
@@ -95,7 +98,10 @@ export const bookings = pgTable(
     check("bookings_occupied_bounds",
       sql`${table.occupiedStartsAt} = ${table.startsAt} - make_interval(mins => ${table.bufferBeforeMinutes})
         AND ${table.occupiedEndsAt} = ${table.endsAt} + make_interval(mins => ${table.bufferAfterMinutes})`),
-    check("bookings_status_confirmed", sql`${table.status} = 'confirmed'`),
+    check("bookings_status", sql`${table.status} IN ('confirmed', 'cancelled')`),
+    check("bookings_cancelled_fields", sql`(${table.status} = 'cancelled') = (${table.cancelledAt} IS NOT NULL)
+      AND (${table.cancelledBy} IS NULL OR ${table.status} = 'cancelled')
+      AND (${table.cancelReason} IS NULL OR (${table.status} = 'cancelled' AND char_length(${table.cancelReason}) BETWEEN 1 AND 500))`),
     index("bookings_tenant_start").on(table.tenantId, table.startsAt, table.id),
     // Also covers the (tenant_id, resource_id) foreign key.
     index("bookings_tenant_resource_start").on(table.tenantId, table.resourceId, table.startsAt, table.id),

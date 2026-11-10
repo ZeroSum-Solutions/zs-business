@@ -21,6 +21,7 @@ import {
   threadPageSchema,
   contactPageSchema,
   contactRecordSchema,
+  cancelBookingOutputSchema,
   createBookingOutputSchema,
   createDealOutputSchema,
   createOrFindContactOutputSchema,
@@ -157,7 +158,7 @@ describe("MCP tools over an in-memory transport", () => {
   it("lists every write and read tool", async () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
-      "create_booking", "create_deal", "discard_reply", "draft_reply", "find_slots", "get_approval", "get_contact",
+      "cancel_booking", "create_booking", "create_deal", "discard_reply", "draft_reply", "find_slots", "get_approval", "get_contact",
       "get_followup_agent", "get_followup_run", "get_thread", "home_results", "list_approvals", "list_bookings", "list_contacts",
       "list_deals", "list_followup_runs", "list_pipelines", "list_resources", "list_sources", "list_threads", "move_deal_stage",
       "observe_source", "request_approval", "set_deal_details", "stop_followup_agent", "upsert_contact",
@@ -703,5 +704,26 @@ describe("outreach tools (outreach-sequencer.md OS-22)", () => {
     expect(hidden.isError).toBe(true);
     expect(apiErrorBodySchema.parse(hidden.value).error.code).toBe("NotFound");
     expect((await callTool(outsider, "pause_outreach_campaign", { idempotencyKey: "op-x", campaignId })).isError).toBe(true);
+  });
+
+  // Last: it creates bookings, and home_results above counts the bookings taken this week.
+  it("cancel_booking frees the slot; a replayed key returns the same result and a foreign ID is not found", async () => {
+    const args = { idempotencyKey: "cx-1", resourceId: tenant.resourceId, startsAt: "2026-10-19T12:00:00.000Z" };
+    const booking = createBookingOutputSchema.parse((await callTool(client, "create_booking", args)).value).result;
+    const cancelArgs = { idempotencyKey: "cx-2", bookingId: booking.id, reason: "Customer called" };
+    const first = await callTool(client, "cancel_booking", cancelArgs);
+    expect(cancelBookingOutputSchema.parse(first.value).result).toMatchObject({
+      booking: { id: booking.id, status: "cancelled" }, reason: "Customer called", customerNotice: "no_customer",
+    });
+    expect((await callTool(client, "cancel_booking", cancelArgs)).value).toEqual(first.value);
+    const rebooked = await callTool(client, "create_booking", { ...args, idempotencyKey: "cx-3" });
+    const again = createBookingOutputSchema.parse(rebooked.value).result;
+    expect(again.status).toBe("confirmed");
+    // Leave no confirmed booking behind: later tests count the calendar.
+    await callTool(client, "cancel_booking", { idempotencyKey: "cx-6", bookingId: again.id });
+    const missing = await callTool(client, "cancel_booking", { idempotencyKey: "cx-4", bookingId: randomUUID() });
+    expect(apiErrorBodySchema.parse(missing.value).error.code).toBe("NotFound");
+    const bad = await callTool(client, "cancel_booking", { idempotencyKey: "cx-5", bookingId: booking.id, reason: "x".repeat(501) });
+    expect(bad.isError).toBe(true);
   });
 });

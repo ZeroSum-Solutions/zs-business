@@ -13,7 +13,7 @@ import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import { templateHandlers } from "../src/templates/handlers.js";
 import { templatedKindHandlers } from "../src/templates/send.js";
 import {
-  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingCancelHandlers, bookingContactHandlers, bookingHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, planHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -32,6 +32,7 @@ const IMAGE_WORKER_ACTIONS = ["media.variant.stage", "media.variant.fail"];
 /** What each action needs, written out so a change to the map has to change this test too. */
 const EXPECTED_ACTIONS: Record<string, Permission> = {
   "booking.create": "calendar",
+  "booking.cancel": "calendar",
   "media.asset.upload": "publish",
   "media.variant.generate": "publish",
   "media.variant.approve": "publish",
@@ -280,6 +281,8 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
       return session.unlinkBookingContact(bookingId, { expectedRevision: 1 }, randomUUID());
     } },
     getBooking: { permission: "calendar", run: async () => session.getBooking(await ownerBooking()) },
+    // booking.md B-29: cancelling needs the calendar permission, like booking.
+    cancelBooking: { permission: "calendar", run: async () => session.cancelBooking(await ownerBooking(), {}, randomUUID()) },
     upsertContact: { permission: "customers", run: () => session.upsertContact({ displayName: "Bo", email: `${randomUUID()}@example.com` }, randomUUID()) },
     createDeal: { permission: "customers", run: async () => {
       const contact = await sessionFor(tenant.ownerId).upsertContact({ email: `${randomUUID()}@example.com` }, randomUUID());
@@ -489,7 +492,7 @@ describe("permission map", () => {
     // The public request is the one action no member session may run (public-intake.md P-1).
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
-      ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
+      ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
       ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...outreachHandlers, ...documentIntakeHandlers,
       ...setupHandlers,
     })

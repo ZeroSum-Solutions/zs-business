@@ -130,7 +130,7 @@ export async function findKindCandidates(
   return rows.map(fact);
 }
 
-const firstName = (displayName: string | null): string => {
+export const firstName = (displayName: string | null): string => {
   const word = (displayName ?? "").trim().split(/\s+/)[0] ?? "";
   return word ? [...word].slice(0, 60).join("") : "there";
 };

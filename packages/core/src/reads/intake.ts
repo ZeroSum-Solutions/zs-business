@@ -48,7 +48,7 @@ const ITEM_SELECT = `
          b.id AS booking_id, b.resource_id AS booking_resource_id,
          b.starts_at AS booking_starts_at, b.ends_at AS booking_ends_at
     FROM intake_items i
-    LEFT JOIN bookings b ON b.tenant_id = i.tenant_id AND b.intake_item_id = i.id`;
+    LEFT JOIN bookings b ON b.tenant_id = i.tenant_id AND b.intake_item_id = i.id AND b.status = 'confirmed'`;
 
 async function consentFor(tx: Transaction, tenantId: string, ids: readonly string[]) {
   const rows = (await tx.query<IntakeConsentRow>(
