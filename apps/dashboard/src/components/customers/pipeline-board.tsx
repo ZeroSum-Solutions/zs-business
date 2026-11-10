@@ -46,10 +46,10 @@ function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blocked
       <Link href={`/customers/${deal.contactId}`} className="mt-0.5 inline-flex min-h-11 max-w-full items-center text-sm break-words text-accent underline-offset-4 hover:underline">
         {contactName}
       </Link>
-      {/* Stacked on a desktop board, so the select gets the card's full width and a long stage name fits. */}
+      {/* Stacked on a desktop board, so the select gets the card's full width; the native arrow keeps its own space, so little right padding is needed and "Design approved" fits in a 7-stage column. */}
       <div className="mt-2 flex items-center justify-between gap-2 lg:flex-col lg:items-stretch lg:gap-1">
         <label htmlFor={selectId} className="text-xs font-medium text-fg-2">Stage<span className="sr-only"> of {deal.title}</span></label>
-        <Select id={selectId} value={deal.stageId} disabled={moving || blockedBy !== null} aria-describedby={blockedBy ?? undefined} onChange={(event) => onMove(deal, event.target.value)} className="min-w-0 flex-1 pr-8 lg:w-full lg:flex-none lg:pr-6 lg:pl-2.5">
+        <Select id={selectId} value={deal.stageId} disabled={moving || blockedBy !== null} aria-describedby={blockedBy ?? undefined} onChange={(event) => onMove(deal, event.target.value)} className="min-w-0 flex-1 pr-8 lg:w-full lg:flex-none lg:pr-1 lg:pl-2.5">
           {pipeline.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
         </Select>
       </div>
