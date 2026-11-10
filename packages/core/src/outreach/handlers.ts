@@ -96,7 +96,7 @@ export const createCampaignHandler: ActionHandler = {
     const { payload } = parseOrFail(createOutreachCampaignCommandSchema, command);
     const tenantId = binding.tenantId;
     requireAllowed(config, tenantId);
-    // OS-5: any `{{` that is not one of the three variables is refused, with the field named by the edge.
+    // OS-5: any `{{` that is not one of the four variables is refused, with the field named by the edge.
     if (unknownVariableProblem(payload.steps)) throw new ValidationFailed("unknown_variable");
     const mailboxIds = [...new Set(payload.mailboxIds.map((id) => id.toLowerCase()))];
     const found = (await tx.query<{ id: string }>(
@@ -137,6 +137,9 @@ interface StepRow { step_number: number; subject: string | null; body: string }
 const loadSteps = async (tx: Transaction, tenantId: string, campaignId: string) => (await tx.query<StepRow>(
   "SELECT step_number, subject, body FROM outreach_campaign_steps WHERE tenant_id=$1 AND campaign_id=$2 ORDER BY step_number",
   [tenantId, campaignId])).rows;
+
+/** OS-7: the row's opener trimmed; null when it is empty. */
+const openerOf = (row: { readonly opener?: string | undefined }): string | null => row.opener?.trim() || null;
 
 export const importProspectsHandler: ActionHandler = {
   resolveTarget: resolveCampaign,
@@ -190,7 +193,7 @@ export const importProspectsHandler: ActionHandler = {
       } else {
         const local = email.slice(0, email.lastIndexOf("@"));
         const values = { firstName: row.firstName.trim(), company: row.company.trim(), industry: row.industry?.trim() ?? null,
-          opener: row.opener?.trim() || null };
+          opener: openerOf(row) };
         if (ROLE_LOCAL_PARTS.has(local)) { reject("role_address"); continue; }
         if (missingVariables(steps, values).length > 0) { reject("missing_field"); continue; }
         if (renderTooLong(steps, values)) { reject("render_too_long"); continue; }
@@ -221,7 +224,7 @@ export const importProspectsHandler: ActionHandler = {
           rows.map((r) => r.row.firstName.trim()), rows.map((r) => r.row.lastName ?? null),
           rows.map((r) => r.row.company.trim()), rows.map((r) => r.row.industry?.trim() || null),
           // An excluded row only reserves the address (OS-7): it keeps no opener.
-          rows.map((r) => (r.status === "pending" ? r.row.opener?.trim() || null : null)),
+          rows.map((r) => (r.status === "pending" ? openerOf(r.row) : null)),
           rows.map((r) => r.row.website ?? null), rows.map((r) => r.status)]);
     }
     const result: ImportOutreachProspectsResult = {

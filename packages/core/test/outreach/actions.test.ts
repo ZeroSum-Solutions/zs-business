@@ -270,7 +270,11 @@ describe("prospect import (OS-7)", () => {
     const other = await campaign({ steps: [{ subject: "Hi {{first_name}}", body: "{{opener}}", delayBusinessDays: 0 }] });
     expect((await imported(other.id, [prospect(6, { opener: "o".repeat(300) })])).result.imported).toBe(1);
     for (const opener of ["o".repeat(301), "line one\nline two", "line one\rline two"])
-      await expect(imported(other.id, [prospect(7), prospect(8, { opener })])).rejects.toMatchObject({ code: "ValidationFailed" });
+      await expect(imported(other.id, [prospect(7), prospect(8, { opener })])).rejects.toMatchObject({
+        code: "ValidationFailed", details: { issues: [{ path: "prospects.1.opener" }] },
+      });
+    // Trimming comes first: 300 characters plus padding is a valid opener.
+    expect((await imported(other.id, [prospect(11, { opener: ` ${"o".repeat(300)} ` })])).result.imported).toBe(1);
     expect(await world.rows("SELECT 1 FROM outreach_prospects WHERE tenant_id=$1 AND email IN ('pat7@acme7.example','pat8@acme8.example')", [tenantA])).toHaveLength(0);
     // A campaign that does not use {{opener}} accepts rows with or without one and still stores it.
     const plain = await campaign();
@@ -283,7 +287,7 @@ describe("prospect import (OS-7)", () => {
   it("refuses an opener with CR or LF, or over 300 characters, in the database itself (OS-7)", async () => {
     const made = await campaign();
     await imported(made.id, [prospect(1)]);
-    for (const opener of ["a\nb", "a\rb", "", "o".repeat(301)])
+    for (const opener of ["a\nb", "a\rb", "", "   ", "o".repeat(301)])
       await expect(world.rows("UPDATE outreach_prospects SET opener=$2 WHERE tenant_id=$1", [tenantA, opener])).rejects.toThrow(/outreach_prospects_opener/);
   });
 

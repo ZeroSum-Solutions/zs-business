@@ -137,12 +137,17 @@ export const outreachProspectRowSchema = z.strictObject({
   lastName: postgresText(1, 100).optional(),
   company: postgresText(0, 200),
   industry: postgresText(0, 100).optional(),
-  /** A researched first line (OS-5 `{{opener}}`): at most 300 characters, one line. Empty after trimming = none. */
-  opener: postgresText(0, OUTREACH_OPENER_MAX).refine((value) => !/[\r\n]/.test(value), "An opener is one line").optional(),
+  /** A researched first line (OS-5 `{{opener}}`): at most 300 characters once trimmed, one line. Empty after trimming = none. */
+  opener: postgresText(0, OUTREACH_OPENER_MAX * 4).optional(),
   website: postgresText(1, 300).optional(),
   mailboxId: idSchema.optional(),
   /** True = contacted elsewhere (for example by Smartlead): reserve the address, never send. */
   excluded: z.boolean().optional(),
+}).superRefine((row, ctx) => {
+  // An excluded row only reserves the address and keeps no opener, so only a row that can be sent is held to the rules (OS-7).
+  if (row.excluded === true || row.opener === undefined) return;
+  if (/[\r\n]/.test(row.opener)) ctx.addIssue({ code: "custom", message: "An opener is one line", path: ["opener"] });
+  else if (row.opener.trim().length > OUTREACH_OPENER_MAX) ctx.addIssue({ code: "custom", message: `An opener is at most ${OUTREACH_OPENER_MAX} characters`, path: ["opener"] });
 });
 export type OutreachProspectRow = z.infer<typeof outreachProspectRowSchema>;
 
@@ -283,7 +288,8 @@ export const outreachProspectRecordSchema = z.strictObject({
   lastName: z.string().nullable(),
   company: z.string(),
   industry: z.string().nullable(),
-  opener: z.string().nullable(),
+  // Default null: a stored result from before the opener existed (an idempotent replay) has no such key.
+  opener: z.string().nullable().default(null),
   website: z.string().nullable(),
   status: outreachProspectStatusSchema,
   nextStep: z.number().int().nullable(),

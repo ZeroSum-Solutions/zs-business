@@ -165,7 +165,7 @@ describe("prospect opener (20261110100000; outreach-sequencer.md OS-5, OS-7)", (
     await insert("one@acme.example", "Read your post on boilers.");
     await insert("two@acme.example", "x".repeat(300));
     await insert("none@acme.example", null);
-    for (const [index, bad] of ["a\nb", "a\rb", "", "x".repeat(301)].entries())
+    for (const [index, bad] of ["a\nb", "a\rb", "", "   ", "x".repeat(301)].entries())
       expect(await denied(() => insert(`bad${index}@acme.example`, bad))).toMatchObject({ code: "23514" });
     const stored = await fixture.a.run(async (tx) => (await tx.query<{ opener: string | null }>(
       "SELECT opener FROM outreach_prospects WHERE tenant_id=$1 AND email LIKE '%@acme.example' AND email <> 'sam@acme.example' ORDER BY email", [a])).rows.map((r) => r.opener?.length ?? null));

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  createOutreachCampaignRequestSchema, idempotencyKeySchema, importOutreachProspectsRequestSchema, OUTREACH_ERROR_CODES, OUTREACH_VARIABLES,
+  createOutreachCampaignRequestSchema, idempotencyKeySchema, importOutreachProspectsRequestSchema, OUTREACH_ERROR_CODES, OUTREACH_VARIABLES, outreachProspectRecordSchema,
   outreachWindowSchema, permissionSchema, ROLE_PERMISSIONS,
 } from "../src/index.js";
 
@@ -64,11 +64,22 @@ describe("outreach import and permission (OS-1, OS-7)", () => {
     const row = { email: "a@b.example", firstName: "A", company: "B" };
     const parse = (opener: unknown) => importOutreachProspectsRequestSchema.safeParse({ prospects: [{ ...row, opener }] });
     expect(importOutreachProspectsRequestSchema.safeParse({ prospects: [row] }).success).toBe(true);
-    for (const ok of ["Read your post on boilers.", "x", "x".repeat(300), "", "   ", "Loved {{company}}", "tab\there"]) expect(parse(ok).success, ok).toBe(true);
-    for (const bad of ["x".repeat(301), "two\nlines", "two\rlines", "crlf\r\n", 5, null]) expect(parse(bad).success, String(bad)).toBe(false);
+    for (const ok of ["Read your post on boilers.", "x", "x".repeat(300), ` ${"x".repeat(300)} `, "", "   ", "Loved {{company}}", "tab\there"]) expect(parse(ok).success, ok).toBe(true);
+    for (const bad of ["x".repeat(301), "x".repeat(1201), "two\nlines", "two\rlines", "crlf\r\n", 5, null]) expect(parse(bad).success, String(bad)).toBe(false);
+    // An excluded row only reserves the address: its opener is not checked, so it cannot block the rest of the call.
+    expect(importOutreachProspectsRequestSchema.safeParse({ prospects: [{ ...row, excluded: true, opener: "two\nlines" }, { ...row, opener: "x".repeat(300) }] }).success).toBe(true);
     const broken = parse("two\nlines");
     expect(broken.success ? [] : broken.error.issues[0]!.path).toEqual(["prospects", 0, "opener"]);
     expect(OUTREACH_VARIABLES).toEqual(["first_name", "company", "industry", "opener"]);
+  });
+
+  it("reads a stored prospect record from before the opener existed as opener null (replay of a stop)", () => {
+    const stored = {
+      id, campaignId: id, mailboxId: id, email: "a@b.example", firstName: "A", lastName: null, company: "B", industry: null, website: null,
+      status: "stopped", nextStep: null, nextDueOn: null, stoppedAt: null, createdAt: "2026-11-09T10:00:00.000Z", updatedAt: "2026-11-09T10:00:00.000Z",
+    };
+    expect(outreachProspectRecordSchema.parse(stored).opener).toBeNull();
+    expect(outreachProspectRecordSchema.parse({ ...stored, opener: "Hi" }).opener).toBe("Hi");
   });
 
   it("gives owners the outreach permission and staff none, and reserves the outreach: key prefix", () => {
