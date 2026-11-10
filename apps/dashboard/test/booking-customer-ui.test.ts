@@ -95,7 +95,7 @@ describe("customer change messages", () => {
 describe("calendar day: cancelling (booking.md B-29, B-30)", () => {
   it("offers Cancel booking on a booking that has not ended, named by its time", () => {
     const html = calendar([booking(0, {})]);
-    expect(html).toMatch(/aria-label="Cancel the booking at \d{1,2}:\d{2} [AP]M"/);
+    expect(html).toMatch(/aria-label="Cancel booking at \d{1,2}:\d{2} [AP]M"/);
     expect(html).toContain("Cancel booking");
   });
 

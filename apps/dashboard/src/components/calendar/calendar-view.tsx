@@ -74,7 +74,7 @@ function BookingRow({ booking, zone, onCustomer, onCancel }: { booking: BookingV
           {!onCancel || Date.parse(booking.endsAt) <= Date.now() ? null : (
             <button
               type="button"
-              aria-label={`Cancel the booking at ${time}`}
+              aria-label={`Cancel booking at ${time}`}
               onClick={() => onCancel(booking.id)}
               className="focus-inset mt-0.5 inline-flex min-h-11 items-center rounded-sm px-1 text-sm font-bold text-danger underline-offset-4 hover:underline"
             >

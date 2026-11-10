@@ -40,7 +40,7 @@ test("cancels a booking for a customer, emails them, and opens the time again", 
   await expect(row).toHaveCount(1);
   await expect(page.getByRole("region", { name: "Open times" }).getByRole("button", { name: "Book 10:00 AM" })).toHaveCount(0);
 
-  await row.getByRole("button", { name: "Cancel the booking at 10:00 AM" }).click();
+  await row.getByRole("button", { name: "Cancel booking at 10:00 AM" }).click();
   const dialog = page.getByRole("dialog", { name: "Cancel this booking?" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText(CUSTOMER);
@@ -65,7 +65,7 @@ test("cancels without telling the customer when the switch is off", async ({ pag
   await openRepairDay(page);
   await bookTenAm(page, CUSTOMER);
   const row = page.getByRole("region", { name: "Booked" }).getByRole("listitem").filter({ hasText: CUSTOMER });
-  await row.getByRole("button", { name: "Cancel the booking at 10:00 AM" }).click();
+  await row.getByRole("button", { name: "Cancel booking at 10:00 AM" }).click();
   const dialog = page.getByRole("dialog", { name: "Cancel this booking?" });
   await dialog.getByRole("switch", { name: new RegExp(`Email ${CUSTOMER}`) }).click();
   await dialog.getByRole("button", { name: "Cancel booking" }).click();
@@ -82,7 +82,7 @@ test("a booking with no customer says no email will be sent, and Keep booking ch
   const booked = page.getByRole("region", { name: "Booked" });
   const row = booked.getByRole("listitem").filter({ hasText: "No customer linked" });
   await expect(row).toHaveCount(1);
-  await row.getByRole("button", { name: "Cancel the booking at 10:00 AM" }).click();
+  await row.getByRole("button", { name: "Cancel booking at 10:00 AM" }).click();
   const dialog = page.getByRole("dialog", { name: "Cancel this booking?" });
   await expect(dialog).toContainText("no email will be sent");
   await expect(dialog.getByRole("switch")).toHaveCount(0);
@@ -97,7 +97,7 @@ test("cancelling a booking with no customer sends the default and the server ans
   await bookTenAm(page, null);
   const booked = page.getByRole("region", { name: "Booked" });
   const row = booked.getByRole("listitem").filter({ hasText: "No customer linked" });
-  await row.getByRole("button", { name: "Cancel the booking at 10:00 AM" }).click();
+  await row.getByRole("button", { name: "Cancel booking at 10:00 AM" }).click();
   const dialog = page.getByRole("dialog", { name: "Cancel this booking?" });
   await dialog.getByRole("button", { name: "Cancel booking" }).click();
   await expect(dialog).toBeHidden();
