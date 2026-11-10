@@ -148,6 +148,31 @@ describe("access and the send switch (OS-1, OS-10)", () => {
     const [pat] = await r.prospects();
     expect(pat).toMatchObject({ status: "active", next_step: 2, due: "2026-11-12", thread_id: message!.threadId });
   });
+
+  it("sends the prospect's researched opener as plain text, and an opener holding {{company}} stays literal (OS-5, OS-7)", async () => {
+    const r = await rig({ count: 0, campaign: { steps: [{ subject: "Quick idea for {{company}}", body: "Hi {{first_name}},\n\n{{opener}}\n\nBest,\nDevin", delayBusinessDays: 0 }] } });
+    const opener = "Saw {{company}} opened a second shop on Main St.";
+    const imported = (await r.session.importProspects(r.campaignId, { prospects: [prospect(1, { opener: `  ${opener}  ` })] }, randomUUID())).result;
+    expect(imported).toMatchObject({ imported: 1, rejected: [] });
+    expect((await world.rows<{ opener: string }>("SELECT opener FROM outreach_prospects WHERE tenant_id=$1", [r.tenant]))[0]!.opener).toBe(opener);
+    const { approvalId } = await r.session.requestActivation(r.campaignId, randomUUID());
+    await world.member_session(r.tenant, r.ownerId, [r.tenant]).approveApproval(approvalId, {}, randomUUID());
+    await r.run();
+    const [message] = r.fake.sent;
+    expect(message!.subject).toBe("Quick idea for Acme 1");
+    expect(message!.body).toContain(`Hi Pat1,\n\n${opener}\n\nBest,\nDevin`);
+  });
+
+  it("stops a prospect whose opener went missing after import instead of sending a blank line (OS-14)", async () => {
+    const r = await rig({ count: 0, campaign: { steps: [{ subject: "Hi {{first_name}}", body: "{{opener}}", delayBusinessDays: 0 }] } });
+    await r.session.importProspects(r.campaignId, { prospects: [prospect(1, { opener: "A real first line." })] }, randomUUID());
+    const { approvalId } = await r.session.requestActivation(r.campaignId, randomUUID());
+    await world.member_session(r.tenant, r.ownerId, [r.tenant]).approveApproval(approvalId, {}, randomUUID());
+    await world.rows("UPDATE outreach_prospects SET opener=NULL WHERE tenant_id=$1", [r.tenant]);
+    await r.run();
+    expect(sentCount(r)).toBe(0);
+    expect(await r.status(prospectEmail(1))).toBe("stopped");
+  });
 });
 
 describe("caps, warm-up and pacing (OS-12)", () => {

@@ -21,9 +21,12 @@ const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
 /** Longest chunk of UTF-8 bytes in one encoded word: 42 bytes make 56 base64 characters plus 12 of framing, under 75. */
 const WORD_BYTES = 42;
 
-/** RFC 2047 encoded words (UTF-8, B encoding), cut at character boundaries, joined by a fold. ASCII passes through. */
+/**
+ * RFC 2047 encoded words (UTF-8, B encoding), cut at character boundaries, joined by a fold. Plain ASCII passes through,
+ * except text holding `=?`: a prospect value such as `=?UTF-8?B?...?=` would otherwise be decoded by the reader.
+ */
 export function encodeHeaderText(value: string): string {
-  if (PRINTABLE_ASCII.test(value)) return value;
+  if (PRINTABLE_ASCII.test(value) && !value.includes("=?")) return value;
   const words: string[] = [];
   let chunk = "";
   let size = 0;

@@ -64,6 +64,13 @@ describe("buildRawMessage (OS-17)", () => {
     expect(parsed.headers.from).toBe("Zoë Müller <sam@sender.example>");
   });
 
+  it("keeps an encoded-word look-alike in the subject as the literal text it was (a prospect value)", () => {
+    const subject = "=?UTF-8?B?SGVsbG8=?= from Acme";
+    const raw = buildRawMessage({ ...base, subject });
+    expect(text(raw).split("\r\n\r\n")[0]).not.toContain(`Subject: ${subject}`);
+    expect(parseRawMessage(raw).headers.subject).toBe(subject);
+  });
+
   it("encodes the body as quoted-printable and round-trips non-ASCII text, long lines and trailing spaces", () => {
     const body = `Café ${"é".repeat(60)} = sign\nline with trailing space \nlast ${"word ".repeat(40)}\n`;
     const encoded = encodeQuotedPrintable(body);
