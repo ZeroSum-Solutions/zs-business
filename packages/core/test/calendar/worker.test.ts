@@ -806,6 +806,29 @@ describe("bookings out (G-10)", () => {
     expect(pushes.map((push) => push.status).sort()).toEqual(["pending", "pushed"]);
     expect(pushes.find((push) => push.status === "pending")).toMatchObject({ pushed_at: null, google_event_id: expect.any(String) });
   });
+
+  it("sends no event for a booking that is cancelled, before or during the batch (B-32)", async () => {
+    const w = await world();
+    const tenantId = w.resource.tenantId;
+    const cancel = (id: string) => h.service((tx) => tx.query(
+      "UPDATE bookings SET status='cancelled', cancelled_at=$3 WHERE tenant_id=$1 AND id=$2", [tenantId, id, new Date(START)]));
+    const before = await h.booking(w.resource, "2026-10-22T10:00:00.000Z");
+    await cancel(before);
+    const bookings = [await h.booking(w.resource, "2026-10-22T12:00:00.000Z"), await h.booking(w.resource, "2026-10-22T14:00:00.000Z")];
+    // The owner cancels both while the first insert is in flight: the one already sent stays, the other is not sent.
+    w.google.fail("insertEvent", async () => { await cancel(bookings[0]!); await cancel(bookings[1]!); });
+    await h.worker(w.google, w.clock).runOnce();
+    expect(w.google.count("insertEvent")).toBe(1);
+    expect(await h.push(tenantId, before)).toBeUndefined();
+    const pushes = await Promise.all(bookings.map((id) => h.push(tenantId, id)));
+    expect(pushes.map((push) => push.status).sort()).toEqual(["pending", "pushed"]);
+    // Once its lease ends, the next pass retires the push that never went out; the sent one stays pushed.
+    w.clock.advance(DAY);
+    await h.worker(w.google, w.clock).runOnce();
+    expect(w.google.count("insertEvent")).toBe(1);
+    expect((await Promise.all(bookings.map((id) => h.push(tenantId, id)))).map((push) => [push.status, push.last_error]).sort())
+      .toEqual([["failed", "booking_cancelled"], ["pushed", null]]);
+  });
 });
 
 describe("deadline (G-10)", () => {

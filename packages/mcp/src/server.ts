@@ -69,6 +69,8 @@ async function run(work: () => Promise<ToolOutput>): Promise<CallToolResult> {
 }
 
 const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+/** An irreversible change: a cancelled booking cannot be reopened (booking.md B-30). */
+const destructive = { ...write, destructiveHint: true };
 const read = { readOnlyHint: true, openWorldHint: false };
 
 type ToolConfig<Input extends z.ZodObject> = {
@@ -114,7 +116,7 @@ export function createMcpServer(deps: McpDependencies): McpServer {
   tool("cancel_booking", {
     description: "Cancel a booking and free its slot. The customer gets a cancellation email unless notifyCustomer is false. A booking that already ended cannot be cancelled. Reuse the idempotencyKey to retry safely.",
     inputSchema: keyed({ bookingId: uuidSchema, ...cancelBookingRequestSchema.shape }),
-    annotations: write,
+    annotations: destructive,
   }, ({ idempotencyKey, bookingId, ...body }, session) => session.cancelBooking(bookingId, body, idempotencyKey));
 
   tool("upsert_contact", {

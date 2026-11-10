@@ -80,4 +80,31 @@ describe("demo adapter: cancelling a booking", () => {
     expect(await failure(api.cancelBooking({ bookingId: MISSING }, key()))).toMatchObject({ kind: "not_found" });
     expect((await api.getBooking(booking.id)).status).toBe("confirmed");
   });
+
+  it("a website request stops showing its booking once the booking is cancelled (B-32)", async () => {
+    const api = adapter();
+    const withBooking = (await api.listIntakeItems({})).items.filter((item) => item.booking);
+    expect(withBooking.length).toBeGreaterThan(0);
+    const item = withBooking[0]!;
+    await api.cancelBooking({ bookingId: item.booking!.id, notifyCustomer: false }, key());
+    expect((await api.listIntakeItems({})).items.find((row) => row.id === item.id)?.booking).toBeNull();
+  });
+
+  it("fingerprints the canonical request and accepts an upper-case booking ID (B-29)", async () => {
+    const api = adapter();
+    const booking = await bookFree(api);
+    const same = { idempotencyKey: "canonical-key" };
+    const first = await api.cancelBooking({ bookingId: booking.id.toUpperCase() }, same);
+    const again = await api.cancelBooking({ bookingId: booking.id, reason: null, notifyCustomer: true }, same);
+    expect(again).toEqual(first);
+  });
+
+  it("treats a placeholder address as no email (D-1)", async () => {
+    const api = adapter();
+    const booking = await bookFree(api);
+    const { contact } = await api.createOrFindContact({ displayName: "Placeholder", email: "nobody@placeholder.invalid", phone: null }, key());
+    const detail = await api.getBooking(booking.id);
+    await api.linkBookingContact({ bookingId: booking.id, contactId: contact.id, expectedRevision: detail.customerRevision }, key());
+    expect((await api.cancelBooking({ bookingId: booking.id }, key())).customerNotice).toBe("no_email");
+  });
 });

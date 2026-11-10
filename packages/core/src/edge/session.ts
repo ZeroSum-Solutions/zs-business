@@ -696,7 +696,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     /** booking.md B-29: cancel a booking and, unless told not to, email the customer. */
     async cancelBooking(bookingId: unknown, body: unknown, key: unknown): Promise<CancelBookingOutput> {
       const id = parseInput(uuidSchema, bookingId, "booking ID");
-      const request = parseInput(cancelBookingRequestSchema, body ?? {});
+      const request = parseInput(cancelBookingRequestSchema, body === undefined ? {} : body);
       const { id: _target, ...rest } = envelope(key, "booking", id);
       return parseInput(cancelBookingOutputSchema,
         await run({

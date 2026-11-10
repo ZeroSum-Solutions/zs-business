@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ActionError, IdempotencyConflict, type MemberRole, type MessageSendRequested } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
 import { createPublicSession } from "../../src/edge/public-session.js";
+import { lockResource } from "../../src/booking/cancel.js";
 import { createSession, type EdgeDependencies, type Session } from "../../src/index.js";
 
 const START = Date.parse("2026-10-23T09:00:00.000Z");
@@ -191,6 +192,58 @@ describe("the freed slot (B-32)", () => {
   });
 });
 
+describe("concurrency (B-21, B-31)", () => {
+  it("two cancels under different keys: one cancels and queues the notice, the other is already_cancelled", async () => {
+    const id = await contact(a, "Dee Race");
+    const booking = await book();
+    await a.linkBookingContact(booking.id, { contactId: id, expectedRevision: 0 }, randomUUID());
+    const before = await messageEvents();
+    const settled = await Promise.all([
+      sessionFor(staff).cancelBooking(booking.id, { reason: "one" }, randomUUID()),
+      sessionFor(owner).cancelBooking(booking.id, { reason: "two" }, randomUUID()),
+    ]);
+    expect(settled.map((done) => done.result.customerNotice).sort()).toEqual(["already_cancelled", "queued"]);
+    expect(await messageEvents()).toBe(before + 1);
+    // Both answers describe the one stored cancellation.
+    expect(new Set(settled.map((done) => done.result.reason)).size).toBe(1);
+    expect((await rowOf(booking.id)).cancel_reason).toBe(settled[0]!.result.reason);
+  });
+
+  it("a cancel racing a create for the same slot leaves at most one confirmed booking, and both answers are valid", async () => {
+    const startsAt = nextStart();
+    const first = await book(a, startsAt);
+    const settled = await Promise.allSettled([
+      sessionFor(staff).cancelBooking(first.id, {}, randomUUID()),
+      sessionFor(owner).createBooking({ resourceId, startsAt }, randomUUID()),
+    ]);
+    expect(settled[0]!.status).toBe("fulfilled");
+    if (settled[1]!.status === "rejected") expect(settled[1]!.reason).toMatchObject({ code: "Conflict" });
+    const live = await fixture.service((tx) => tx.query(
+      "SELECT 1 FROM bookings WHERE tenant_id=$1 AND resource_id=$2 AND starts_at=$3 AND status='confirmed'", [fixture.a.tenantId, resourceId, startsAt]));
+    expect(live.rowCount).toBe(settled[1]!.status === "fulfilled" ? 1 : 0);
+    expect((await rowOf(first.id)).status).toBe("cancelled");
+  });
+
+  it("decides on the time after the resource lock: a wait that crosses the end refuses with booking_over", async () => {
+    const booking = await book();
+    let now = START;
+    const slow = createSession({ db: database.db, clock: { now: () => new Date(now) }, generateId: randomUUID }, { tenantId: fixture.a.tenantId, actorId: staff });
+    let locked!: () => void;
+    let release!: () => void;
+    const hasLock = new Promise<void>((resolve) => { locked = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const holder = fixture.service(async (tx) => { await lockResource(tx, fixture.a.tenantId, resourceId); locked(); await held; });
+    await hasLock;
+    const attempt = rejection(slow.cancelBooking(booking.id, {}, randomUUID()));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    now = Date.parse(booking.endsAt) + 1000;
+    release();
+    await holder;
+    expect(await attempt).toMatchObject({ code: "Conflict", details: { reason: "booking_over" } });
+    expect((await rowOf(booking.id)).status).toBe("confirmed");
+  });
+});
+
 describe("idempotency (B-31)", () => {
   it("replays one key to the same action and writes once", async () => {
     const booking = await book();
@@ -229,7 +282,7 @@ describe("idempotency (B-31)", () => {
 describe("the customer notice (B-33)", () => {
   it("queues one transactional email with the local time, the business and no reason", async () => {
     const customerId = await contact(a, "Ana Ruiz");
-    const booking = await book();
+    const booking = await book(a, "2026-11-20T11:00:00.000Z");
     await a.linkBookingContact(booking.id, { contactId: customerId, expectedRevision: 0 }, randomUUID());
     const done = await a.cancelBooking(booking.id, { reason: "Private: the doctor quit" }, randomUUID());
     expect(done.result.customerNotice).toBe("queued");
@@ -281,6 +334,7 @@ describe("validation (B-29)", () => {
     const booking = await book();
     const bad: unknown[] = [
       { reason: "x".repeat(501) }, { reason: "" }, { notifyCustomer: "yes" }, { extra: true }, { reason: "bad\u0000text" },
+      { reason: "two\nlines" }, { reason: "two\r\nlines" }, { reason: "para\u2029sep" }, null,
     ];
     for (const body of bad) {
       expect(await rejection(a.cancelBooking(booking.id, body, randomUUID())), JSON.stringify(body)).toMatchObject({ code: "ValidationFailed" });
@@ -296,6 +350,10 @@ describe("two tenants (B-35)", () => {
     expect(await rejection(b.cancelBooking(booking.id, {}, randomUUID()))).toMatchObject({ code: "NotFound" });
     expect((await rowOf(booking.id)).status).toBe("confirmed");
     expect((await b.listBookings({ status: "all", limit: 100 })).items).toHaveLength(0);
+    // Once it is cancelled, tenant B still cannot read the cancellation or find it in the history.
+    await a.cancelBooking(booking.id, { reason: "Private" }, randomUUID());
+    expect(await rejection(b.getBooking(booking.id))).toMatchObject({ code: "NotFound" });
+    expect((await b.listBookings({ status: "cancelled", limit: 100 })).items).toHaveLength(0);
   });
 
   it("the runtime role cannot cross tenants with SQL, reopen a cancelled booking or cancel without a stamp", async () => {
@@ -314,6 +372,18 @@ describe("two tenants (B-35)", () => {
       .toMatchObject({ code: "42501" });
     expect(await sqlRejection(fixture.a.run((tx) => tx.query("UPDATE bookings SET starts_at=starts_at WHERE id=$1", [booking.id]))))
       .toMatchObject({ code: "42501" });
+    expect((await rowOf(booking.id)).status).toBe("cancelled");
+  });
+
+  it("holds for the API's own login after RESET ROLE (G-4 pattern), not only for `authenticated`", async () => {
+    const booking = await book();
+    await a.cancelBooking(booking.id, {}, randomUUID());
+    const reopen = fixture.a.run(async (tx) => {
+      await tx.query("RESET ROLE");
+      expect((await tx.query("SELECT current_user AS u")).rows[0]).toEqual({ u: "zs_runtime" });
+      return tx.query("UPDATE bookings SET status='confirmed', cancelled_at=NULL, cancelled_by=NULL, cancel_reason=NULL WHERE id=$1", [booking.id]);
+    });
+    expect(await sqlRejection(reopen)).toMatchObject({ code: "42501" });
     expect((await rowOf(booking.id)).status).toBe("cancelled");
   });
 });

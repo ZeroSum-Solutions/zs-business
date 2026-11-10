@@ -28,11 +28,13 @@ ALTER TABLE public.bookings ADD CONSTRAINT bookings_resource_occupied_excl EXCLU
 GRANT UPDATE (status, cancelled_at, cancelled_by, cancel_reason) ON public.bookings TO authenticated;
 
 -- B-30: a cancellation is final. The runtime role cannot reopen a cancelled booking or change what a
--- cancelled booking says. Invoker function: current_user is the role running the statement.
+-- cancelled booking says. Invoker function. The API's login (zs_runtime) inherits `authenticated`, so a
+-- session that left its SET LOCAL ROLE still runs under the limit: only the service role (the workers) is
+-- exempt, the same test as calendar_connections_runtime_guard (20261107000000, G-4).
 CREATE FUNCTION public.booking_cancel_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  IF current_user <> 'authenticated' THEN
+  IF pg_has_role(current_user, 'service_role', 'MEMBER') THEN
     RETURN NEW;
   END IF;
   IF OLD.status = 'cancelled' THEN

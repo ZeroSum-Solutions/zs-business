@@ -127,7 +127,8 @@ export const createBookingOutputSchema = z.lazy(() => actionResultSchema.extend(
 export type CreateBookingOutput = z.infer<typeof createBookingOutputSchema>;
 
 /** B-29: why an owner cancelled, shown to nobody but the owner. One line of plain text, up to 500 characters. */
-export const bookingCancelReasonSchema = z.string().trim().min(1).max(500).refine(isPostgresText, "Invalid Postgres text");
+export const bookingCancelReasonSchema = z.string().trim().min(1).max(500).refine(isPostgresText, "Invalid Postgres text")
+  .refine((value) => !/[\r\n\u0085\u2028\u2029]/u.test(value), "The reason must be one line");
 /** B-29: the HTTP and tool body. Both fields are optional; the server fills the defaults before it binds the action. */
 export const cancelBookingRequestSchema = z.strictObject({
   reason: bookingCancelReasonSchema.nullish(),
@@ -160,7 +161,7 @@ export const cancelBookingResultSchema = z.strictObject({
   cancelledAt: bookingInstantSchema,
   reason: z.string().nullable(),
   customerNotice: cancelNoticeSchema,
-});
+}).refine((value) => value.booking.status === "cancelled", "A cancellation result holds a cancelled booking");
 export type CancelBookingResult = z.infer<typeof cancelBookingResultSchema>;
 export const cancelBookingOutputSchema = z.lazy(() => actionResultSchema.extend({ result: cancelBookingResultSchema }));
 export type CancelBookingOutput = z.infer<typeof cancelBookingOutputSchema>;

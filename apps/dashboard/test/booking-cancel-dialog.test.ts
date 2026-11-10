@@ -6,7 +6,7 @@ import { ApiError, demoError } from "../src/lib/api";
 describe("cancelledToast", () => {
   const at = "Mon, Oct 26 at 10:00 AM";
   it("says whether the customer was told", () => {
-    expect(cancelledToast(at, "Ana Ruiz", "queued")).toBe(`Cancelled ${at}. Ana Ruiz will get an email.`);
+    expect(cancelledToast(at, "Ana Ruiz", "queued")).toBe(`Cancelled ${at}. An email to Ana Ruiz is queued.`);
     expect(cancelledToast(at, "Ana Ruiz", "off")).toBe(`Cancelled ${at}. No email was sent.`);
     expect(cancelledToast(at, null, "no_email")).toBe(`Cancelled ${at}. The customer has no email on file, so nothing was sent.`);
     expect(cancelledToast(at, null, "no_customer")).toBe(`Cancelled ${at}.`);

@@ -362,6 +362,10 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     revision,
   });
 
+  /** B-32: like the API's intake reads, a request shows its booking only while that booking is confirmed. */
+  const withLiveBooking = (item: IntakeItemRecord): IntakeItemRecord =>
+    item.booking && bookings.get(item.booking.id)?.status === "cancelled" ? { ...item, booking: null } : item;
+
   /** The API refuses a reviewed item and treats an unknown one as another tenant's (403). */
   function pendingItem(id: string): IntakeItemRecord {
     parse(uuidSchema, id);
@@ -571,11 +575,13 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       });
     },
 
-    cancelBooking(input, options) {
-      return idempotent("booking.cancel", input, options, (): CancelBookingResult => {
-        const { bookingId, ...rest } = input;
-        const request = parse(cancelBookingRequestSchema, rest);
-        parse(uuidSchema, bookingId);
+    async cancelBooking(input, options) {
+      // Parse first, so the replay fingerprint is the canonical request the live edge binds (B-29).
+      const { bookingId: rawId, ...rest } = input;
+      const request = parse(cancelBookingRequestSchema, rest);
+      const bookingId = parse(uuidSchema, rawId);
+      const canonical = { bookingId, reason: request.reason ?? null, notifyCustomer: request.notifyCustomer ?? true };
+      return idempotent("booking.cancel", canonical, options, (): CancelBookingResult => {
         const booking = bookingOrThrow(bookingId);
         const done = cancellations.get(bookingId);
         if (booking.status === "cancelled" && done) {
@@ -584,12 +590,14 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         // B-30: a booking that has ended cannot be cancelled.
         if (Date.parse(booking.endsAt) <= clock.now().getTime()) throw demoError("Conflict", { reason: "booking_over" });
         booking.status = "cancelled";
-        const record = { cancelledAt: nowIso(), reason: request.reason ?? null };
+        const record = { cancelledAt: nowIso(), reason: canonical.reason };
         cancellations.set(bookingId, record);
-        // B-33: the notice goes to the linked customer, or the website visitor, when they have an email.
+        // B-33: the notice goes to the linked customer, or the website visitor, when they have a usable email
+        // (the same rule as the live handler: an address under the reserved .invalid name is a placeholder).
         const customer = toView(booking).customer;
         const contact = customer?.contactId ? contacts.get(customer.contactId) : undefined;
-        const notice: CancelNotice = request.notifyCustomer === false ? "off" : !customer?.contactId ? "no_customer" : contact?.email ? "queued" : "no_email";
+        const usable = contact?.email && !/[@.]invalid$/i.test(contact.email);
+        const notice: CancelNotice = !canonical.notifyCustomer ? "off" : !customer?.contactId ? "no_customer" : usable ? "queued" : "no_email";
         return { booking: toRecord(booking), cancelledAt: record.cancelledAt, reason: record.reason, customerNotice: notice };
       });
     },
@@ -733,7 +741,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     async listIntakeItems(query = {}) {
       await wait();
       const { status } = parse(listIntakeItemsQuerySchema, query);
-      const rows = [...intakeItems.values()]
+      const rows = [...intakeItems.values()].map(withLiveBooking)
         .filter((item) => !status || item.status === status)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
       return completeList(clone(rows));
@@ -795,7 +803,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       const entries: ThreadEntry[] = [
         ...requests.map((item): ThreadEntry => ({
           type: "request", id: item.id, at: item.createdAt, channel: item.channel, status: item.status,
-          name: item.submitted.name, notes: item.submitted.notes, booking: item.booking,
+          name: item.submitted.name, notes: item.submitted.notes, booking: withLiveBooking(item).booking,
         })),
         ...(summary.kind === "customer"
           ? [...replies.values()].filter((reply) => reply.contactId === summary.contactId && reply.status !== "discarded")

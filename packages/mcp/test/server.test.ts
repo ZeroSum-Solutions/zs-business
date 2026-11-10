@@ -210,26 +210,6 @@ describe("MCP tools over an in-memory transport", () => {
     expect(apiErrorBodySchema.parse(taken.value).error.code).toBe("Conflict");
   });
 
-  it("cancel_booking frees the slot; a replayed key returns the same result and a foreign ID is not found", async () => {
-    const args = { idempotencyKey: "cx-1", resourceId: tenant.resourceId, startsAt: "2026-10-19T12:00:00.000Z" };
-    const booking = createBookingOutputSchema.parse((await callTool(client, "create_booking", args)).value).result;
-    const cancelArgs = { idempotencyKey: "cx-2", bookingId: booking.id, reason: "Customer called" };
-    const first = await callTool(client, "cancel_booking", cancelArgs);
-    expect(cancelBookingOutputSchema.parse(first.value).result).toMatchObject({
-      booking: { id: booking.id, status: "cancelled" }, reason: "Customer called", customerNotice: "no_customer",
-    });
-    expect((await callTool(client, "cancel_booking", cancelArgs)).value).toEqual(first.value);
-    const rebooked = await callTool(client, "create_booking", { ...args, idempotencyKey: "cx-3" });
-    const again = createBookingOutputSchema.parse(rebooked.value).result;
-    expect(again.status).toBe("confirmed");
-    // Leave no confirmed booking behind: later tests count the calendar.
-    await callTool(client, "cancel_booking", { idempotencyKey: "cx-6", bookingId: again.id });
-    const missing = await callTool(client, "cancel_booking", { idempotencyKey: "cx-4", bookingId: randomUUID() });
-    expect(apiErrorBodySchema.parse(missing.value).error.code).toBe("NotFound");
-    const bad = await callTool(client, "cancel_booking", { idempotencyKey: "cx-5", bookingId: booking.id, reason: "x".repeat(501) });
-    expect(bad.isError).toBe(true);
-  });
-
   it("list tools return only the configured tenant's rows", async () => {
     const contacts = contactPageSchema.parse((await callTool(client, "list_contacts", { limit: 10 })).value);
     const deals = dealPageSchema.parse((await callTool(client, "list_deals")).value);
@@ -724,5 +704,26 @@ describe("outreach tools (outreach-sequencer.md OS-22)", () => {
     expect(hidden.isError).toBe(true);
     expect(apiErrorBodySchema.parse(hidden.value).error.code).toBe("NotFound");
     expect((await callTool(outsider, "pause_outreach_campaign", { idempotencyKey: "op-x", campaignId })).isError).toBe(true);
+  });
+
+  // Last: it creates bookings, and home_results above counts the bookings taken this week.
+  it("cancel_booking frees the slot; a replayed key returns the same result and a foreign ID is not found", async () => {
+    const args = { idempotencyKey: "cx-1", resourceId: tenant.resourceId, startsAt: "2026-10-19T12:00:00.000Z" };
+    const booking = createBookingOutputSchema.parse((await callTool(client, "create_booking", args)).value).result;
+    const cancelArgs = { idempotencyKey: "cx-2", bookingId: booking.id, reason: "Customer called" };
+    const first = await callTool(client, "cancel_booking", cancelArgs);
+    expect(cancelBookingOutputSchema.parse(first.value).result).toMatchObject({
+      booking: { id: booking.id, status: "cancelled" }, reason: "Customer called", customerNotice: "no_customer",
+    });
+    expect((await callTool(client, "cancel_booking", cancelArgs)).value).toEqual(first.value);
+    const rebooked = await callTool(client, "create_booking", { ...args, idempotencyKey: "cx-3" });
+    const again = createBookingOutputSchema.parse(rebooked.value).result;
+    expect(again.status).toBe("confirmed");
+    // Leave no confirmed booking behind: later tests count the calendar.
+    await callTool(client, "cancel_booking", { idempotencyKey: "cx-6", bookingId: again.id });
+    const missing = await callTool(client, "cancel_booking", { idempotencyKey: "cx-4", bookingId: randomUUID() });
+    expect(apiErrorBodySchema.parse(missing.value).error.code).toBe("NotFound");
+    const bad = await callTool(client, "cancel_booking", { idempotencyKey: "cx-5", bookingId: booking.id, reason: "x".repeat(501) });
+    expect(bad.isError).toBe(true);
   });
 });

@@ -45,13 +45,13 @@ test("cancels a booking for a customer, emails them, and opens the time again", 
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText(CUSTOMER);
   await expect(dialog.getByRole("switch", { name: new RegExp(`Email ${CUSTOMER}`) })).toBeChecked();
-  await dialog.getByLabel("Reason (only you see this)").fill("Shop closed for the day");
+  await dialog.getByLabel("Reason (your team sees it, the customer does not)").fill("Shop closed for the day");
   await expectDialogInset(page);
   await viewportShot(page, "booking-cancel-sheet", info.project.name);
   await dialog.getByRole("button", { name: "Cancel booking" }).click();
   await expect(dialog).toBeHidden();
 
-  await expect(page.getByRole("status").getByText(/^Cancelled .* will get an email\.$/)).toBeVisible();
+  await expect(page.getByRole("status").getByText(/^Cancelled .*\. An email to .* is queued\.$/)).toBeVisible();
   await expect(booked.getByRole("listitem").filter({ hasText: CUSTOMER })).toHaveCount(0);
   // The freed time is open again.
   await expect(page.getByRole("region", { name: "Open times" }).getByRole("button", { name: "Book 10:00 AM" })).toBeVisible();
@@ -90,4 +90,19 @@ test("a booking with no customer says no email will be sent, and Keep booking ch
   await expect(dialog).toBeHidden();
   await expect(row).toHaveCount(1);
   expect(await writes(page, "booking.cancel")).toEqual([]);
+});
+
+test("cancelling a booking with no customer sends the default and the server answers no customer", async ({ page }) => {
+  await openRepairDay(page);
+  await bookTenAm(page, null);
+  const booked = page.getByRole("region", { name: "Booked" });
+  const row = booked.getByRole("listitem").filter({ hasText: "No customer linked" });
+  await row.getByRole("button", { name: "Cancel the booking at 10:00 AM" }).click();
+  const dialog = page.getByRole("dialog", { name: "Cancel this booking?" });
+  await dialog.getByRole("button", { name: "Cancel booking" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(booked.getByRole("listitem").filter({ hasText: "No customer linked" })).toHaveCount(0);
+  expect((await writes(page, "booking.cancel")).map((write) => write.payload)).toEqual([
+    { bookingId: expect.any(String), reason: null, notifyCustomer: true },
+  ]);
 });

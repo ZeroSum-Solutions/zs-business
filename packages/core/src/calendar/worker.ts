@@ -697,6 +697,13 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     if (past(deadline)) return counts;
     const claimed = await deps.service(async (tx) => {
       const at = nowMs();
+      // B-32: a push that never went out for a booking since cancelled is retired, so it does not wait for ever.
+      await tx.query(
+        `UPDATE calendar_pushes p SET status='failed', last_error='booking_cancelled', lease_until=NULL, updated_at=$1
+           FROM bookings b
+          WHERE b.tenant_id=p.tenant_id AND b.id=p.booking_id AND b.status='cancelled'
+            AND p.status='pending' AND (p.lease_until IS NULL OR p.lease_until <= $1)`,
+        [new Date(at)]);
       const queued = await tx.query(
         `INSERT INTO calendar_pushes (tenant_id, connection_id, booking_id, status, attempts, next_attempt_at, created_at, updated_at)
          SELECT b.tenant_id, c.id, b.id, 'pending', 0, $1, $1, $1
@@ -754,6 +761,7 @@ export function createCalendarWorker(deps: CalendarWorkerDeps) {
     const found = await deps.service((tx) => tx.query(
       `SELECT 1 FROM calendar_pushes p
          JOIN calendar_connections c ON c.tenant_id=p.tenant_id AND c.id=p.connection_id AND c.status='active'
+         JOIN bookings k ON k.tenant_id=p.tenant_id AND k.id=p.booking_id AND k.status='confirmed'
         WHERE p.tenant_id=$1 AND p.connection_id=$2 AND p.booking_id=$3 AND p.lease_until=$4 AND p.status='pending'`,
       [push.tenant_id, push.connection_id, push.booking_id, push.lease_until]));
     return found.rowCount === 1;

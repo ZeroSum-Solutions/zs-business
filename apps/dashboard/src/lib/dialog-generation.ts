@@ -15,6 +15,11 @@ export function useDialogGeneration(open: boolean, scope?: string) {
   useEffect(() => {
     generation.current += 1;
     isOpen.current = open;
+    // Unmounting ends the lifetime too: a late answer must not close a newer dialog that took this one's place.
+    return () => {
+      generation.current += 1;
+      isOpen.current = false;
+    };
   }, [open, scope]);
   const current = useCallback(() => generation.current, []);
   const isCurrent = useCallback((tag: number) => tag === generation.current, []);

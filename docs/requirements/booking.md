@@ -3,8 +3,8 @@
 Status: implemented. The numbered rules below are the contract the code and tests
 follow. The slot calculation (`getAvailableSlots`), the `booking.create` handler, the
 `createBooking` wrapper, the schema and the migrations ship in this repository. At the
-time of writing, `pnpm --filter @zs/core test:booking` runs 81 tests in four files
-(public examples, slot calculation, handler acceptance and the real Postgres seam), and
+time of writing, `pnpm --filter @zs/core test:booking` runs the booking suites in five files
+(public examples, slot calculation, handler acceptance, the real Postgres seam and cancellation), and
 all pass. The public examples cover a small part of the contract; the acceptance tests
 cover the rest.
 
@@ -226,8 +226,8 @@ with different keys/IDs for conflicting time cannot both commit. Return one
 success and one typed `Conflict`, with no losing booking/action/outbox row.
 Race tests assert only `code === "Conflict"`: the loser may report
 `details.reason="slot_unavailable"` or `details.postgresCode="23P01"`. The
-constraint has no `WHERE` clause because only `confirmed` exists in this slice;
-adding cancellation later requires `WHERE status='confirmed'`.
+constraint is limited with `WHERE status='confirmed'` from revision 3: a `cancelled` booking
+(B-30) takes no part in it, so its time can be booked again.
 **Upstream does:** S3 conditionally updates one pre-existing available session,
 then reports whether the claim lost. We retain database arbitration but require
 range exclusion because independently created, overlapping intervals are not
@@ -373,15 +373,15 @@ at the time of writing.
 ## Cancellation (revision 3)
 
 **B-29. Desired, the action.** `booking.cancel` has target type `booking` and payload
-`{bookingId, reason, notifyCustomer}`. `reason` is null or one line of 1..500 characters (trimmed, Postgres text),
-kept for the owner and never sent to the customer. `notifyCustomer` is a boolean. The HTTP and tool bodies
-(`POST /v1/bookings/:id/cancel`, MCP `cancel_booking`) may omit both; the server fills `reason: null` and
+`{bookingId, reason, notifyCustomer}`. `reason` is null or one line of 1..500 characters (trimmed, Postgres text,
+no line break), kept for the team and never sent to the customer; any member with the `calendar` permission can read it. `notifyCustomer` is a boolean. The HTTP and tool bodies
+(`POST /v1/booking/bookings/:id/cancel`, MCP `cancel_booking`) may omit both fields (send `{}`; a JSON `null` body is refused); the server fills `reason: null` and
 `notifyCustomer: true` before it binds the action, so one cancellation has one canonical payload. The action needs the
 `calendar` permission, so staff and owners cancel. It runs through the shared dispatcher with an idempotency key like
 every other write. `BookingRecord.status` is `confirmed` or `cancelled`.
 
 **B-30. Desired, state.** `confirmed` becomes `cancelled` once and never goes back. The handler sets `cancelled_at` to
-the dispatcher's time, `cancelled_by` to the acting member and `cancel_reason`; a check keeps the three columns set
+the clock read under the lock (B-31), `cancelled_by` to the acting member and `cancel_reason`; a check keeps the three columns set
 exactly when the status is `cancelled`. The runtime role may update only those four columns, and a trigger refuses any
 runtime update of a row that is already `cancelled`. The booking row, its ID and its customer link stay: a cancelled
 booking can still be read, and its ID is never reused (B-19 still sees it).
@@ -391,7 +391,9 @@ row `FOR UPDATE`, then decide on the locked state:
 - `confirmed` and not over (`ends_at` after the dispatcher's time): cancel it.
 - already `cancelled` (a second call under another key, or a customer link that got there first): change nothing, return
   the stored cancellation with `customerNotice: "already_cancelled"`, send nothing.
-- `ends_at` at or before the dispatcher's time: `Conflict` `details.reason = "booking_over"`.
+- `ends_at` at or before the time: `Conflict` `details.reason = "booking_over"`.
+The time is the injected clock, read once after the resource lock is held, so a long wait for the lock cannot cancel a
+booking that has since ended; that same time is `cancelled_at`.
 A booking ID that does not exist for the caller's tenant, including one that exists only in another tenant, is
 `NotFound` before any lock: tenant B learns nothing about tenant A's bookings.
 
@@ -422,3 +424,23 @@ through the action or the reads; the runtime role of tenant B updating tenant A'
 (RLS); the runtime role cannot reopen a cancelled booking, change another column, or cancel without `cancelled_at`; the
 overlap constraint accepts a booking over a cancelled one and still rejects a booking over a confirmed one (two concurrent
 creates for one freed slot: one wins, one gets `Conflict`).
+
+**B-36. Known limits (revision 3).** These are decided, not forgotten.
+- The trigger of B-30 exempts only the service role (the workers), the same test as
+  `calendar_connections_runtime_guard` (google-calendar.md G-4); a session that leaves `SET ROLE` still runs under it.
+- A Google event already pushed for the booking stays on the owner's calendar: the Google client has no delete call yet.
+  A push that has not been sent is dropped, including one claimed but not yet sent (the send re-checks `confirmed`);
+  the worker marks the unsent push `failed` with `booking_cancelled` once its lease ends.
+- The dashboard lists confirmed bookings only. A cancelled booking, with its reason, is read through the API or the
+  `cancel_booking` result; a history view is a later change.
+- A repeat cancel under a new key still writes an `actions` row and the default `booking.cancel` event, although it
+  changes nothing (`already_cancelled`).
+- Home's "bookings taken" counts every booking by `created_at` (inbox-home.md H-4), cancelled ones included.
+- A tenant on a read-only plan cannot cancel (PL-8 lists the allowed actions; `booking.cancel` is not one).
+- A reminder or review message already queued before the cancel is not recalled. New ones skip a cancelled booking
+  (`CUSTOMER_BOOKINGS` reads `confirmed` only).
+- There is no automation-catalog `booking.cancelled` event and no `propose_booking_cancel` for automation tokens. Both need
+  an `automation_scope` enum change and come with a later revision.
+- The cancellation email is an ordinary charged message (D-6): with an empty wallet, a suppressed address or a revoked
+  approval the cancel still succeeds and delivery drops the notice later, so `queued` means handed to delivery, not
+  delivered. The dashboard says "queued".

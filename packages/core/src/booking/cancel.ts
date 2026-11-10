@@ -52,13 +52,13 @@ export interface CancelledBooking {
 /**
  * B-30, B-31: cancel one booking in the caller's transaction, under the resource lock. A confirmed booking that has not
  * ended becomes `cancelled`; one already cancelled is returned as it is; one that ended is `Conflict` `booking_over`.
- * `actorId` is null when the customer cancels through their own link (booking-self-service.md).
+ * `actorId` is null when the customer cancels through their own link (booking-self-service.md). `clock` is read once,
+ * after the resource lock is held, so a long wait cannot cancel a booking that has since ended.
  */
 export async function cancelBookingRow(
   tx: Transaction, tenantId: string, bookingId: string,
-  by: { readonly actorId: string | null; readonly reason: string | null }, now: Date,
+  by: { readonly actorId: string | null; readonly reason: string | null }, clock: () => Date,
 ): Promise<CancelledBooking> {
-  const at = clockInstant(now);
   const found = (await tx.query<{ resource_id: string }>(
     "SELECT resource_id FROM bookings WHERE tenant_id=$1 AND id=$2", [tenantId, bookingId],
   )).rows[0];
@@ -68,6 +68,9 @@ export async function cancelBookingRow(
     `SELECT ${CANCEL_COLUMNS} FROM bookings WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, [tenantId, bookingId],
   )).rows[0];
   if (!row) throw new NotFound();
+  // The wait on the lock may have been long: decide on the time now that the lock is held (B-31).
+  const now = clock();
+  const at = clockInstant(now);
   if (row.status === "cancelled")
     return { record: bookingRecord(row), cancelledAt: row.cancelled_at!.toISOString(), reason: row.cancel_reason, changed: false };
   if (row.ends_at.getTime() <= now.getTime())
@@ -155,10 +158,10 @@ export const cancelBookingHandler: ActionHandler = {
     return { tenantId, type: "booking", id: target.id };
   },
 
-  async handle({ tx, command, binding, now }) {
+  async handle({ tx, command, binding, clock }) {
     const { payload } = parseOrFail(cancelBookingCommandSchema, command);
     const tenantId = binding.tenantId;
-    const cancelled = await cancelBookingRow(tx, tenantId, payload.bookingId, { actorId: binding.actorId, reason: payload.reason }, now);
+    const cancelled = await cancelBookingRow(tx, tenantId, payload.bookingId, { actorId: binding.actorId, reason: payload.reason }, clock);
     let notice: CancelNotice = "already_cancelled";
     let event: { type: string; payload: JsonValue } | undefined;
     if (cancelled.changed) {
