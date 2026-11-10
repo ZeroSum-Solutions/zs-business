@@ -9,7 +9,9 @@
   const params = new URLSearchParams(location.search);
   const embedded = params.get("embed") === "1" && window.parent !== window;
   const channel = params.get("channel") === "widget" ? "widget" : "booking_page";
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  // Times show in the business's zone (the resource's), so a Chicago gym never shows 4:00 AM to a
+  // visitor on a Pacific laptop. The visitor's own time is added only where it differs.
+  const visitorZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const RANGE_DAYS = 14;
   const REFRESH_MS = 3 * 60 * 1000;
 
@@ -30,10 +32,98 @@
     result: null,
   };
 
-  const dayKey = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
-  const dayLabel = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "short", month: "short", day: "numeric" });
-  const longDay = new Intl.DateTimeFormat(undefined, { timeZone: zone, weekday: "long", month: "long", day: "numeric" });
-  const timeLabel = new Intl.DateTimeFormat(undefined, { timeZone: zone, hour: "numeric", minute: "2-digit" });
+  const formats = new Map();
+
+  /** Formatters for one zone, built once. An unknown zone falls back to the visitor's. */
+  function formatsFor(zoneId) {
+    if (formats.has(zoneId)) return formats.get(zoneId);
+    let set;
+    try {
+      set = {
+        zone: zoneId,
+        dayKey: new Intl.DateTimeFormat("en-CA", { timeZone: zoneId, year: "numeric", month: "2-digit", day: "2-digit" }),
+        dayLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "short", month: "short", day: "numeric" }),
+        longDay: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "long", month: "long", day: "numeric" }),
+        timeLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit" }),
+        offsetLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit", timeZoneName: "short" }),
+        name: zoneName(zoneId),
+      };
+    } catch {
+      set = zoneId === visitorZone ? null : formatsFor(visitorZone);
+    }
+    formats.set(zoneId, set);
+    return set;
+  }
+
+  /** "Pacific Time (Los Angeles)" for America/Los_Angeles; "UTC" for UTC. */
+  function zoneName(zoneId) {
+    const city = zoneId.includes("/") ? zoneId.split("/").pop().replace(/_/g, " ") : zoneId;
+    let generic = "";
+    try {
+      const part = new Intl.DateTimeFormat(undefined, { timeZone: zoneId, timeZoneName: "longGeneric" })
+        .formatToParts(new Date()).find((item) => item.type === "timeZoneName");
+      generic = part ? part.value : "";
+    } catch {
+      generic = "";
+    }
+    // Zones with no common name format as an offset ("GMT+00:00"); the city reads better.
+    if (!generic) return city;
+    // Etc/GMT+8 means UTC-08:00, so its own name reads backwards; Intl's offset is right.
+    // Old aliases (US/Pacific, Canada/Central) already read as a name; their last part is not a city.
+    if (/^(Etc|US|Canada)\//i.test(zoneId) || !zoneId.includes("/")) return generic;
+    if (/^(GMT|UTC)/.test(generic)) return city;
+    return zoneId.includes("/") ? `${generic} (${city})` : generic;
+  }
+
+  /** A clock time; in the repeated hour when clocks go back, the zone abbreviation tells the two apart. */
+  function clock(f, date) {
+    const label = f.timeLabel.format(date);
+    const hour = 3600000;
+    const repeated = f.timeLabel.format(new Date(date.getTime() - hour)) === label || f.timeLabel.format(new Date(date.getTime() + hour)) === label;
+    return repeated ? f.offsetLabel.format(date) : label;
+  }
+
+  /** The business's zone: the chosen resource's, else the visitor's. */
+  function biz() {
+    const resource = state.page && state.page.resources.find((item) => item.id === state.resourceId);
+    return formatsFor(resource && resource.timeZone ? resource.timeZone : visitorZone);
+  }
+
+  function mine() {
+    return formatsFor(visitorZone);
+  }
+
+  /** The visitor's own clock time for an instant, or null when it reads the same as the business's. */
+  function visitorTime(iso) {
+    const at = new Date(iso);
+    const ours = biz();
+    const theirs = mine();
+    if (ours.zone === theirs.zone) return null;
+    const same = ours.timeLabel.format(at) === theirs.timeLabel.format(at) && ours.dayKey.format(at) === theirs.dayKey.format(at);
+    if (same) return null;
+    const sameDay = ours.dayKey.format(at) === theirs.dayKey.format(at);
+    return sameDay ? `${clock(theirs, at)} your time` : `${theirs.dayLabel.format(at)}, ${clock(theirs, at)} your time`;
+  }
+
+  /** "10:00 AM – 11:00 AM Pacific Time (Los Angeles)". */
+  function rangeLine(startsAt, endsAt) {
+    const f = biz();
+    return `${clock(f, new Date(startsAt))} – ${clock(f, new Date(endsAt))} ${f.name}`;
+  }
+
+  /** The visitor's own time on a line of its own, or null when it reads the same. */
+  function yoursLine(startsAt) {
+    const yours = visitorTime(startsAt);
+    return yours ? h("div", { class: "booker-hint" }, yours.charAt(0).toUpperCase() + yours.slice(1)) : null;
+  }
+
+  /** A time button's text: the business's time, and the visitor's under it when it differs, read out as one phrase. */
+  function timeChoice(f, iso) {
+    const time = clock(f, new Date(iso));
+    const yours = visitorTime(iso);
+    if (!yours) return [time];
+    return [h("span", { "aria-hidden": "true" }, time), h("small", { "aria-hidden": "true" }, yours), h("span", { class: "booker-sr" }, `${time} ${f.name}, ${yours}`)];
+  }
 
   /** Build an element; strings become text nodes, never markup. */
   function h(tag, attrs, ...children) {
@@ -110,14 +200,14 @@
         class: "booker-choice",
         "aria-pressed": String(resource.id === state.resourceId),
         disabled: locked(),
-        onclick: go(() => { state.resourceId = resource.id; state.day = null; state.slot = null; loadSlots(); }),
+        onclick: go(() => { state.resourceId = resource.id; state.slots = []; state.day = null; state.slot = null; loadSlots(); }),
       }, resource.name || "Appointment", h("small", {}, `${resource.slotLengthMinutes} min`)))));
   }
 
   function slotsByDay() {
     const days = new Map();
     for (const slot of state.slots) {
-      const key = dayKey.format(new Date(slot.startsAt));
+      const key = biz().dayKey.format(new Date(slot.startsAt));
       if (!days.has(key)) days.set(key, []);
       days.get(key).push(slot);
     }
@@ -135,8 +225,19 @@
     return state.notice ? h("p", { class: "booker-error", role: "alert" }, state.notice) : null;
   }
 
+  /** Names the zone; on the times step, also says the visitor's own time is under each one. */
+  function zoneHint(slots) {
+    const f = biz();
+    const differs = Boolean(slots) && slots.some((slot) => visitorTime(slot.startsAt) !== null);
+    const where = state.page.businessName ? ` local time for ${state.page.businessName}` : " the business's local time";
+    return h("p", { class: "booker-hint" }, differs
+      ? `Times are in ${f.name},${where}. Your time is shown under each one.`
+      : `Times are in ${f.name},${where}.`);
+  }
+
   function dateView() {
     const days = slotsByDay();
+    const f = biz();
     return [
       ...header(),
       resourcePicker(),
@@ -149,15 +250,16 @@
           class: "booker-choice",
           disabled: locked(),
           onclick: go(() => { state.day = key; state.notice = ""; state.step = "time"; render(); }),
-        }, dayLabel.format(new Date(slots[0].startsAt)), h("small", {}, `${slots.length} ${slots.length === 1 ? "time" : "times"}`)))),
-      h("p", { class: "booker-hint" }, `Times are shown in ${zone}.`),
+        }, f.dayLabel.format(new Date(slots[0].startsAt)), h("small", {}, `${slots.length} ${slots.length === 1 ? "time" : "times"}`)))),
+      days.size === 0 ? null : zoneHint(),
     ];
   }
 
   function timeView() {
     const slots = slotsByDay().get(state.day) || [];
+    const f = biz();
     return [
-      h("h2", { tabindex: "-1", "data-focus": true }, slots[0] ? longDay.format(new Date(slots[0].startsAt)) : "Pick a time"),
+      h("h2", { tabindex: "-1", "data-focus": true }, slots[0] ? f.longDay.format(new Date(slots[0].startsAt)) : "Pick a time"),
       noticeLine(),
       slots.length === 0
         ? h("p", { class: "booker-status" }, "No times are left on this day.")
@@ -166,7 +268,8 @@
           class: "booker-choice",
           disabled: locked(),
           onclick: go(() => { state.slot = slot; state.notice = ""; state.errors = {}; state.step = "details"; render(); }),
-        }, timeLabel.format(new Date(slot.startsAt))))),
+        }, ...timeChoice(f, slot.startsAt)))),
+      slots.length === 0 ? null : zoneHint(slots),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days"),
     ];
   }
@@ -190,17 +293,19 @@
       name,
       value: state.form[name],
       "aria-invalid": state.errors[name] ? "true" : null,
-      "aria-describedby": state.errors[name] ? `booker-${name}-error` : null,
+      "aria-describedby": [attrs.hinted ? `booker-${name}-hint` : null, state.errors[name] ? `booker-${name}-error` : null].filter(Boolean).join(" ") || null,
       oninput: (event) => { state.form[name] = event.target.value; },
       ...attrs,
       multiline: null,
+      hinted: null,
     });
   }
 
   function slotSummary(slot) {
     return h("div", { class: "booker-summary" },
-      h("strong", {}, longDay.format(new Date(slot.startsAt))),
-      h("div", {}, `${timeLabel.format(new Date(slot.startsAt))} – ${timeLabel.format(new Date(slot.endsAt))}`));
+      h("strong", {}, biz().longDay.format(new Date(slot.startsAt))),
+      h("div", {}, rangeLine(slot.startsAt, slot.endsAt)),
+      yoursLine(slot.startsAt));
   }
 
   /** No answer we can trust: show what was sent and offer only the same request again. */
@@ -246,8 +351,9 @@
       h("form", { novalidate: true, onsubmit: submit },
         field("name", "Name", input("name", { autocomplete: "name", required: true, maxlength: "200" })),
         field("email", "Email", input("email", { type: "email", autocomplete: "email", required: true, maxlength: "254" })),
-        field("phone", "Phone (optional)", input("phone", { type: "tel", autocomplete: "tel", maxlength: "20" }),
-          "International format, for example +44 20 7946 0000."),
+        field("phone", "Phone (optional)", input("phone", { type: "tel", autocomplete: "tel", maxlength: "20", hinted: true }),
+          northAmerican() ? "For example (555) 555-0123. Outside the US or Canada, start with + and your country code."
+            : "Start with + and your country code."),
         field("notes", "Notes (optional)", input("notes", { multiline: true, rows: "3", maxlength: "1000" })),
         h("fieldset", { class: "booker-consent" },
           h("legend", {}, "Updates"),
@@ -268,7 +374,8 @@
     return [
       h("div", { class: "booker-done" },
         h("h2", { tabindex: "-1", "data-focus": true }, "You're booked"),
-        h("p", {}, `${longDay.format(new Date(result.startsAt))}, ${timeLabel.format(new Date(result.startsAt))} – ${timeLabel.format(new Date(result.endsAt))}`),
+        h("p", {}, `${biz().longDay.format(new Date(result.startsAt))}, ${rangeLine(result.startsAt, result.endsAt)}`),
+        yoursLine(result.startsAt),
         h("p", { class: "booker-hint" }, `Reference ${result.requestId.slice(0, 8)}`)),
       h("button", { type: "button", class: "booker-link", onclick: () => { resetForm(); state.step = "date"; loadSlots(); } }, "Book another time"),
     ];
@@ -285,7 +392,7 @@
   const FIELD_MESSAGES = {
     name: "Please enter your name.",
     email: "Please enter a valid email address.",
-    phone: "Please use international format, starting with +.",
+    phone: "Please enter a full phone number with area code, or start with + and your country code.",
     notes: "Notes can be at most 1000 characters.",
   };
 
@@ -298,9 +405,22 @@
     return errors;
   }
 
+  // US and Canada zones, and US territories (country code +1).
+  const NANP_ZONE = /^(America\/(New_York|Detroit|Chicago|Denver|Boise|Phoenix|Los_Angeles|Anchorage|Juneau|Sitka|Metlakatla|Yakutat|Nome|Adak|Menominee|Indiana\/.+|Kentucky\/.+|North_Dakota\/.+|Indianapolis|Louisville|Toronto|Vancouver|Edmonton|Winnipeg|Regina|Halifax|St_Johns|Moncton|Glace_Bay|Goose_Bay|Swift_Current|Whitehorse|Dawson|Dawson_Creek|Fort_Nelson|Creston|Cambridge_Bay|Iqaluit|Rankin_Inlet|Resolute|Inuvik|Atikokan|Coral_Harbour|Blanc-Sablon|Montreal|Nipigon|Thunder_Bay|Rainy_River|Pangnirtung|Yellowknife|Shiprock|Fort_Wayne|Knox_IN|Atka|Puerto_Rico|St_Thomas|Virgin)|Pacific\/(Honolulu|Johnston|Guam|Saipan)|Navajo|US\/.+|Canada\/.+)$/i;
+
+  /** A bare ten-digit number reads as +1 only when both the business and the visitor are in a +1 zone. */
+  function northAmerican() {
+    return NANP_ZONE.test(biz().zone) && NANP_ZONE.test(visitorZone);
+  }
+
   function normalizedPhone() {
     const phone = state.form.phone.replace(/[\s().-]/g, "");
-    return phone === "" ? null : phone;
+    if (phone === "") return null;
+    if (!phone.startsWith("+") && northAmerican()) {
+      if (/^[2-9][0-9]{9}$/.test(phone)) return `+1${phone}`;
+      if (/^1[2-9][0-9]{9}$/.test(phone)) return `+${phone}`;
+    }
+    return phone;
   }
 
   async function submit(event) {

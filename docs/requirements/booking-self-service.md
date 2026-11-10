@@ -1,7 +1,10 @@
 # Booking self-service: the customer's own link
 
-Status: revision 2 (2026-11-10, first-client week). Code follows this file; a change to a numbered
+Status: revision 3 (2026-11-10, first-client week). Code follows this file; a change to a numbered
 rule needs a new revision of this file first.
+
+Revision 3 (demo polish): BS-10 shows times in the booking's zone, named in words, as the booker does
+(`public-intake.md` P-14).
 
 Revision 2 (review of the first build): BS-3 builds a link only on https (http for a loopback host) and
 greets by name only when it is one plain word; BS-4 follows a chain of moves to the live booking;
@@ -144,7 +147,8 @@ own address and sends it in the path. The page shows the booking (BS-4), a "Canc
 button with a second "Yes, cancel it" step, and "Pick another time" with the day then time steps of
 the booker. It freezes each attempt's key and body until a definitive reply (the P-14 rule), says
 plainly when a time was lost, when the link has expired, when the booking is cancelled or moved,
-and renders every server string with `textContent`.
+and renders every server string with `textContent`. Times are in the booking's `timeZone` (BS-4),
+named in words as on the booker.
 
 **BS-11. Storage.** Migration `20261110300000_booking_reschedule.sql` adds one nullable column
 `bookings.rescheduled_from uuid`, a composite foreign key `(tenant_id, rescheduled_from)` to

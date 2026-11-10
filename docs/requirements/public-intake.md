@@ -1,6 +1,6 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 8 (2026-11-10; revision 5 text kept below). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 9 (2026-11-10; revision 5 text kept below). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
@@ -14,6 +14,9 @@ that row is gone, from the page's append-only disclosure history for the stored 
 Revision 8 (2026-11-10, first-client week): P-1 allows three more anonymous writes, each authorized
 by a signed per-booking link and defined in `booking-self-service.md` (`booking.self_cancel`,
 `booking.self_reschedule`, `booking.confirmation_send`); `booking.public_request` itself is unchanged.
+Revision 9 (2026-11-10, demo polish): P-14 shows times in the business's zone with a readable
+zone name, adds the visitor's own time where it differs, and reads a ten-digit phone as +1 when
+both the business and the visitor's device are in a US or Canada zone.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -220,6 +223,13 @@ framing by any site (`frame-ancestors *`) because embedding is the point. The wi
 script tag that turns each `[data-zs-booking]` element into an iframe of the hosted page
 and resizes it from validated `postMessage` events; a plain iframe snippet works too.
 The widget passes no personal data to the host page.
+The booker groups and labels free times in the chosen resource's `timeZone` (the business's),
+never the visitor's, and names the zone in words ("Pacific Time (Los Angeles)", not the IANA ID).
+When the visitor's device is in another zone, each time also shows the visitor's own clock time,
+marked "your time". In the hour that repeats when clocks go back, times carry the zone abbreviation
+so the two are told apart. When both the business's zone and the visitor's device zone are US or
+Canada (+1) zones, the phone hint is a US example and a ten-digit number (or eleven starting with 1)
+is sent as `+1…`; any other entry must still be E.164 (C-3).
 The booker freezes each attempt's Idempotency-Key and exact body on the first submit and
 keeps them until a definitive reply (a 2xx with a body, or a 4xx). After a network error, a
 5xx or a non-JSON reply it shows the details as sent and offers only "Try again" with the

@@ -13,7 +13,8 @@ test("marks website bookings in Calendar and shows the booking page and embed co
 
   const row = await findWebsiteBooking(page, "Linnea Castellanos");
   await expect(row.getByTestId("website-badge")).toHaveText("Website");
-  await expect(row.getByText("Website booking")).toBeVisible();
+  // The row names the service it was booked for, not a generic "Website booking".
+  await expect(row.getByText("Showroom appointment", { exact: true })).toBeVisible();
   await shot(page, "19-calendar-website", info.project.name);
 });
 

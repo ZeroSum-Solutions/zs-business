@@ -77,6 +77,16 @@ describe("booking link page", () => {
     expect(p.last().flatMap((node) => walk(node)).some((node) => node.tag === "b")).toBe(false);
   });
 
+  it("shows the time in the booking's zone, named in words", async () => {
+    const p = page(() => ({ status: 200, body: { ...VIEW, timeZone: "America/Chicago" } }));
+    await p.settle();
+    const text = p.last().map(textOf).join(" ");
+    // 17:00Z on Nov 9 is 11:00 AM in Chicago, whatever zone the test machine is in.
+    expect(text).toContain("11:00 AM");
+    expect(text).toContain("Times are in Central Time (Chicago), local time for Test <b>Co</b>.");
+    expect(text).not.toContain("America/Chicago");
+  });
+
   it.each([
     [{ ...VIEW, state: "cancelled", canChange: false }, "This appointment is cancelled"],
     [{ ...VIEW, state: "started", canChange: false }, "has started"],

@@ -45,15 +45,17 @@ function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blocked
       <Link href={`/customers/${deal.contactId}`} className="mt-0.5 inline-flex min-h-11 max-w-full items-center text-sm break-words text-accent underline-offset-4 hover:underline">
         {contactName}
       </Link>
-      <div className="mt-2 flex items-center justify-between gap-2">
+      {/* Stacked on a desktop board, so the select gets the card's full width and a long stage name fits. */}
+      <div className="mt-2 flex items-center justify-between gap-2 lg:flex-col lg:items-stretch lg:gap-1">
         <label htmlFor={selectId} className="text-xs font-medium text-fg-2">Stage<span className="sr-only"> of {deal.title}</span></label>
-        <Select id={selectId} value={deal.stageId} disabled={moving || blockedBy !== null} aria-describedby={blockedBy ?? undefined} onChange={(event) => onMove(deal, event.target.value)} className="min-w-0 flex-1 pr-8">
+        <Select id={selectId} value={deal.stageId} disabled={moving || blockedBy !== null} aria-describedby={blockedBy ?? undefined} onChange={(event) => onMove(deal, event.target.value)} className="min-w-0 flex-1 pr-8 lg:w-full lg:flex-none lg:pr-6 lg:pl-2.5">
           {pipeline.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
         </Select>
       </div>
-      <div className="mt-1 flex items-center justify-between gap-2">
+      {/* On a narrow desktop column "Details" wraps under the date and stays on the right. */}
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2">
         <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt).toLowerCase()}</p>
-        <Button variant="ghost" className="-mr-2" disabled={moving} aria-label={`Edit details of ${deal.title}`} onClick={() => onEdit(deal)}>Details</Button>
+        <Button variant="ghost" className="-mr-2 ml-auto" disabled={moving} aria-label={`Edit details of ${deal.title}`} onClick={() => onEdit(deal)}>Details</Button>
       </div>
     </li>
   );
@@ -237,9 +239,10 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
         })}
       </div>
 
-      {/* One column per stage, however many the pipeline has; a long pipeline scrolls sideways. */}
+      {/* One column per stage, however many the pipeline has. Seven stages (the longest template)
+          fit a 1440 px window; a longer pipeline scrolls sideways. */}
       <div
-        className="grid grid-cols-1 gap-4 lg:-m-1 lg:grid-cols-[repeat(var(--stages),minmax(11rem,1fr))] lg:overflow-x-auto lg:p-1"
+        className="grid grid-cols-1 gap-4 lg:-m-1 lg:grid-cols-[repeat(var(--stages),minmax(9rem,1fr))] lg:gap-3 lg:overflow-x-auto lg:p-1"
         style={{ "--stages": stages.length } as CSSProperties}
       >
         {stages.map((stage) => {

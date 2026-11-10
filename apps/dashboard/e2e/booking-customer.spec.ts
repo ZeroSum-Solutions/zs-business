@@ -150,6 +150,8 @@ test("a website booking has no link control", async ({ page }) => {
   await page.clock.setFixedTime(MONDAY_MORNING);
   await page.goto("/calendar");
   await page.getByRole("group", { name: "Calendar" }).getByRole("button", { name: "Showroom" }).click();
+  // An empty today opens on the week; switch to the day to see one day's rows.
+  await page.getByRole("group", { name: "View" }).getByRole("button", { name: "Day" }).click();
   // Tomorrow has the seeded website booking from Linnea Castellanos.
   await page.getByRole("button", { name: "Next day" }).click();
   const website = page.getByRole("region", { name: "Booked" }).getByRole("listitem").filter({ has: page.getByTestId("website-badge") });

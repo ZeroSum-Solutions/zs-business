@@ -2,14 +2,14 @@
 
 import { CaretLeft, CaretRight, Globe, Plus } from "@phosphor-icons/react";
 import { useSearchParams } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Segmented } from "@/components/ui/segmented";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows, PageHeader } from "@/components/ui/states";
 import { bookingCustomerName, defaultMessage, type BookingView, type ResourceSummary } from "@/lib/api";
-import { resourceLabel } from "@/lib/resources";
+import { bookingTitle, resourceLabel } from "@/lib/resources";
 import { useBookings, useResources, useSlots } from "@/lib/queries";
 import { addDays, formatDateKey, formatTime, startOfZonedDay, weekdayOf, zonedDateKey } from "@/lib/time";
 import { useCan } from "@/lib/session";
@@ -41,7 +41,7 @@ function WebsiteBadge({ booking }: { booking: BookingView }) {
   );
 }
 
-function BookingRow({ booking, zone, onCustomer, onCancel }: { booking: BookingView; zone: string; onCustomer?: ((id: string) => void) | undefined; onCancel?: ((id: string) => void) | undefined }) {
+function BookingRow({ booking, resource, zone, onCustomer, onCancel }: { booking: BookingView; resource: ResourceSummary; zone: string; onCustomer?: ((id: string) => void) | undefined; onCancel?: ((id: string) => void) | undefined }) {
   const customer = bookingCustomerName(booking);
   const time = formatTime(booking.startsAt, zone);
   return (
@@ -54,7 +54,7 @@ function BookingRow({ booking, zone, onCustomer, onCancel }: { booking: BookingV
         <Avatar name={customer} size="sm" />
         <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="truncate text-body font-semibold text-fg">{booking.title ?? (fromWebsite(booking) ? "Website booking" : "Appointment")}</p>
+          <p className="truncate text-body font-semibold text-fg">{bookingTitle(booking, resource).text}</p>
           <WebsiteBadge booking={booking} />
         </div>
         <p className="truncate text-sm text-muted">{customer ?? "No customer linked"}</p>
@@ -122,7 +122,7 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
         {bookings.data.items.length === 0 ? (
           <EmptyState title={past ? "Nothing was booked" : "Nothing booked yet"}>{!past && open.length > 0 ? "Pick an open time to book one." : null}</EmptyState>
         ) : (
-          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} zone={zone} {...(canLink ? { onCustomer: (id: string) => setCustomerFor({ id, open: true }) } : {})} {...(canCancel ? { onCancel: (id: string) => setCancelFor({ id, open: true }) } : {})} />)}</ul>
+          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} resource={resource} zone={zone} {...(canLink ? { onCustomer: (id: string) => setCustomerFor({ id, open: true }) } : {})} {...(canCancel ? { onCancel: (id: string) => setCancelFor({ id, open: true }) } : {})} />)}</ul>
         )}
       </section>
       <section aria-labelledby="day-open" className="tray">
@@ -199,7 +199,7 @@ export function WeekView({ resource, weekStart, today, onOpenDay }: {
                 {items.map((booking) => (
                   <li key={booking.id} className="rounded-[10px] bg-accent-tint px-2 py-1.5 text-xs" data-source={booking.source ?? "owner"}>
                     <span className="tabular font-bold text-accent-ink">{formatTime(booking.startsAt, zone)}</span>{" "}
-                    <span className="text-fg-2">{bookingCustomerName(booking) ?? booking.title ?? "Appointment"}</span>
+                    <span className="text-fg-2">{bookingCustomerName(booking) ?? bookingTitle(booking, resource).text}</span>
                     {fromWebsite(booking) ? <span className="ml-1 inline-flex align-middle text-accent" title="Booked on your website"><Globe size={14} aria-label="Website" /></span> : null}
                   </li>
                 ))}
@@ -215,26 +215,61 @@ export function WeekView({ resource, weekStart, today, onOpenDay }: {
 
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 
+/**
+ * The view the calendar opens on when no link names a day: today's Day view when today has a
+ * booking, else the Week, so the first look is never an empty day. Null while today loads.
+ * Today's range is the Day view's own query, so the Day view reuses the answer.
+ */
+export function openingView(today: { items: readonly unknown[] } | undefined, failed: boolean): View | null {
+  if (today) return today.items.length === 0 ? "week" : "day";
+  return failed ? "day" : null;
+}
+
 export function CalendarView() {
   const resources = useResources();
-  // `?date=YYYY-MM-DD&calendar=<id>` opens that day, as the Inbox's booking links do.
-  const params = useSearchParams();
-  const linkedDate = params.get("date");
-  const [resourceId, setResourceId] = useState<string | null>(params.get("calendar"));
-  const [view, setView] = useState<View>("day");
-  const [dateKey, setDateKey] = useState<string | null>(linkedDate && DATE_KEY.test(linkedDate) && !Number.isNaN(Date.parse(linkedDate)) ? linkedDate : null);
-  const [dialog, setDialog] = useState<{ open: boolean; slot: string | null }>({ open: false, slot: null });
 
   if (waitingOffline(resources)) return <><PageHeader title="Calendar" /><OfflineNote /></>;
   if (resources.isPending) return <><PageHeader title="Calendar" /><LoadingRows rows={4} /></>;
   if (resources.isError) return <><PageHeader title="Calendar" /><ErrorNote error={resources.error} retry={() => resources.refetch()} /></>;
   if (resources.data.length === 0) return <><PageHeader title="Calendar" /><EmptyState title="No calendars yet">Add a bookable calendar to start taking appointments.</EmptyState></>;
 
-  const resource = resources.data.find((item) => item.id === resourceId) ?? resources.data[0]!;
+  return <CalendarScreen resources={resources.data} />;
+}
+
+const OPENING_WAIT_MS = 4000;
+
+function CalendarScreen({ resources }: { resources: readonly ResourceSummary[] }) {
+  // `?date=YYYY-MM-DD&calendar=<id>` opens that day, as the Inbox's booking links do.
+  const params = useSearchParams();
+  const linkedDate = params.get("date");
+  const linked = linkedDate && DATE_KEY.test(linkedDate) && !Number.isNaN(Date.parse(linkedDate)) ? linkedDate : null;
+  const [resourceId, setResourceId] = useState<string | null>(params.get("calendar"));
+  // Null until the owner picks a view or the opening view is settled (openingView).
+  const [chosenView, setView] = useState<View | null>(linked ? "day" : null);
+  const [dateKey, setDateKey] = useState<string | null>(linked);
+  const [dialog, setDialog] = useState<{ open: boolean; slot: string | null }>({ open: false, slot: null });
+
+  const resource = resources.find((item) => item.id === resourceId) ?? resources[0]!;
   const today = zonedDateKey(new Date(), resource.timeZone);
   const current = dateKey ?? today;
+  const todayRange = useMemo(() => ({
+    from: startOfZonedDay(today, resource.timeZone).toISOString(),
+    to: startOfZonedDay(addDays(today, 1), resource.timeZone).toISOString(),
+  }), [today, resource.timeZone]);
+  const todays = useBookings({ resourceId: resource.id, ...todayRange });
+  // A read that stalls must not hide the controls for good: after a short wait, open on Day.
+  const [gaveUp, setGaveUp] = useState(false);
+  useEffect(() => {
+    if (chosenView !== null) return;
+    const timer = setTimeout(() => setGaveUp(true), OPENING_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [chosenView]);
+  const autoView = openingView(todays.data, todays.isError) ?? (gaveUp ? "day" : null);
+  const view = chosenView ?? autoView;
+  // Settle it once, so a booking made today does not swap the view under the owner.
+  useEffect(() => { if (chosenView === null && autoView !== null) setView(autoView); }, [chosenView, autoView]);
   const weekStart = addDays(current, 1 - weekdayOf(current));
-  const step = view === "day" ? 1 : 7;
+  const step = view === "week" ? 7 : 1;
 
   return (
     <>
@@ -247,24 +282,27 @@ export function CalendarView() {
         <Segmented
           label="Calendar"
           value={resource.id}
-          options={resources.data.map((item) => ({ value: item.id, label: resourceLabel(item) }))}
+          options={resources.map((item) => ({ value: item.id, label: resourceLabel(item) }))}
           onChange={setResourceId}
         />
-        <Segmented label="View" value={view} options={[{ value: "day", label: "Day" }, { value: "week", label: "Week" }]} onChange={setView} />
+        {/* No view switch or date until the opening view is settled, so nothing flips under the owner. */}
+        {view === null ? null : <Segmented label="View" value={view} options={[{ value: "day", label: "Day" }, { value: "week", label: "Week" }]} onChange={setView} />}
       </div>
-      <div className="mb-4 flex items-center gap-2">
-        <Button variant="secondary" size="icon" aria-label={view === "day" ? "Previous day" : "Previous week"} onClick={() => setDateKey(addDays(current, -step))}><CaretLeft aria-hidden /></Button>
-        <Button variant="secondary" size="icon" aria-label={view === "day" ? "Next day" : "Next week"} onClick={() => setDateKey(addDays(current, step))}><CaretRight aria-hidden /></Button>
+      {view === null ? null : <div className="mb-4 flex items-center gap-2">
+        <Button variant="secondary" size="icon" aria-label={view === "week" ? "Previous week" : "Previous day"} onClick={() => setDateKey(addDays(current, -step))}><CaretLeft aria-hidden /></Button>
+        <Button variant="secondary" size="icon" aria-label={view === "week" ? "Next week" : "Next day"} onClick={() => setDateKey(addDays(current, step))}><CaretRight aria-hidden /></Button>
         {current !== today ? <Button variant="secondary" onClick={() => setDateKey(today)}>Today</Button> : null}
         <h2 className="ml-2 min-w-0 flex-1 text-lg font-bold text-fg" aria-live="polite">
-          {view === "day" ? (
+          {view !== "week" ? (
             // The short date fits on one line beside the buttons on a phone.
             <><span className="sm:hidden">{formatDateKey(current)}</span><span className="hidden sm:inline">{formatDateKey(current, "long")}</span></>
           ) : `Week of ${formatDateKey(weekStart)}`}
         </h2>
-      </div>
+      </div>}
 
-      {view === "day" ? (
+      {view === null ? (
+        waitingOffline(todays) ? <OfflineNote /> : <LoadingRows rows={4} label="Loading calendar" />
+      ) : view === "day" ? (
         <DayView resource={resource} dateKey={current} today={today} onPickSlot={(slot) => setDialog({ open: true, slot })} />
       ) : (
         <WeekView resource={resource} weekStart={weekStart} today={today} onOpenDay={(day) => { setDateKey(day); setView("day"); }} />
