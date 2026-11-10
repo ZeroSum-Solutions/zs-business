@@ -28,6 +28,7 @@ interface ProspectFacts {
   readonly last_name: string | null;
   readonly company: string;
   readonly industry: string | null;
+  readonly opener: string | null;
   readonly website: string | null;
   readonly status: string;
   readonly next_step: number | null;
@@ -115,7 +116,7 @@ async function gate(ctx: Ctx, box: Box, tx: Transaction, candidate: Candidate, i
     await tx.query("SELECT pg_catalog.pg_advisory_xact_lock_shared(pg_catalog.hashtextextended($1, 0))", [key]);
   await tx.query("SELECT 1 FROM crm_contacts WHERE tenant_id=$1 AND normalized_email=$2 FOR SHARE", [tenantId, peek.email]);
   const prospect = (await tx.query<ProspectFacts>(
-    `SELECT id, campaign_id, email, first_name, last_name, company, industry, website, status, next_step, thread_id,
+    `SELECT id, campaign_id, email, first_name, last_name, company, industry, opener, website, status, next_step, thread_id,
             to_char(next_due_on,'YYYY-MM-DD') AS due
        FROM outreach_prospects WHERE tenant_id=$1 AND id=$2 AND mailbox_id=$3 FOR UPDATE`, [tenantId, candidate.id, box.id])).rows[0];
   if (!prospect || prospect.status !== "active" || prospect.next_step !== candidate.next_step || prospect.due === null) return { kind: "skip" };
@@ -188,7 +189,7 @@ async function gate(ctx: Ctx, box: Box, tx: Transaction, candidate: Candidate, i
   const steps = (await tx.query<TemplateStep & { step_number: number }>(
     "SELECT step_number, subject, body FROM outreach_campaign_steps WHERE tenant_id=$1 AND campaign_id=$2 ORDER BY step_number", [tenantId, prospect.campaign_id])).rows;
   const k = candidate.next_step;
-  const rendered = renderStep(steps, k, { firstName: prospect.first_name, company: prospect.company, industry: prospect.industry });
+  const rendered = renderStep(steps, k, { firstName: prospect.first_name, company: prospect.company, industry: prospect.industry, opener: prospect.opener });
   if (!rendered.ok) return stop("stopped");
   if (rendered.subject.length > RENDER_MAX_SUBJECT || rendered.body.length > RENDER_MAX_BODY) return stop("stopped");
 

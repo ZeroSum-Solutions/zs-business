@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  addressProblem, appendFooter, buildFooter, canonicalJson, contentDigest, formatPostalAddress, hasUnknownVariable, missingVariables,
+  addressProblem, appendFooter, buildFooter, canonicalJson, contentDigest, formatPostalAddress, campaignVariables, hasUnknownVariable, missingVariables,
+  renderTooLong,
   prospectsDigest, renderStep, renderTemplate, templateProblem, unknownVariableProblem, type FooterProfile,
 } from "../../src/outreach/templates.js";
 
@@ -8,10 +9,14 @@ const steps = [
   { subject: "Quick idea for {{company}}", body: "Hi {{first_name}}, I noticed {{company}} works in {{industry}}.", delayBusinessDays: 0 },
   { body: "Following up, {{first_name}}.", delayBusinessDays: 3 },
 ];
-const values = { firstName: "Sam", company: "Acme", industry: "Plumbing" };
+const values = { firstName: "Sam", company: "Acme", industry: "Plumbing", opener: null };
+const openerSteps = [
+  { subject: "Quick idea for {{company}}", body: "Hi {{first_name}},\n\n{{opener}}\n\nI help {{industry}} teams.", delayBusinessDays: 0 },
+  { body: "Following up, {{first_name}}.", delayBusinessDays: 3 },
+];
 
 describe("templates (OS-5)", () => {
-  it("renders all three variables", () => {
+  it("renders first_name, company and industry", () => {
     const step = renderStep(steps, 1, values);
     expect(step).toEqual({ ok: true, subject: "Quick idea for Acme", body: "Hi Sam, I noticed Acme works in Plumbing." });
   });
@@ -21,15 +26,57 @@ describe("templates (OS-5)", () => {
   });
 
   it("renders a value that holds a variable literally, in a single pass", () => {
-    const step = renderStep(steps, 1, { firstName: "{{company}}", company: "Acme", industry: "{{first_name}}" });
+    const step = renderStep(steps, 1, { firstName: "{{company}}", company: "Acme", industry: "{{first_name}}", opener: null });
     expect(step).toEqual({ ok: true, subject: "Quick idea for Acme", body: "Hi {{company}}, I noticed Acme works in {{first_name}}." });
-    expect(renderTemplate("{{first_name}}", { firstName: "{{{{", company: "c", industry: null })).toBe("{{{{");
+    expect(renderTemplate("{{first_name}}", { firstName: "{{{{", company: "c", industry: null, opener: null })).toBe("{{{{");
+  });
+
+  it("renders {{opener}} as plain text in a body, in the same pass as the other variables", () => {
+    const opener = "I read your note on retrofitting boilers in Leeds.";
+    expect(renderStep(openerSteps, 1, { ...values, opener })).toEqual({
+      ok: true, subject: "Quick idea for Acme", body: `Hi Sam,\n\n${opener}\n\nI help Plumbing teams.`,
+    });
+    expect(renderStep(openerSteps, 2, { ...values, opener })).toEqual({ ok: true, subject: "Re: Quick idea for Acme", body: "Following up, Sam." });
+    expect(campaignVariables(openerSteps)).toEqual(new Set(["first_name", "company", "industry", "opener"]));
+  });
+
+  it("renders an opener that holds a variable or braces literally, never scanning it again", () => {
+    const opener = "Loved {{company}} and {{opener}} and {{first_name}} {{";
+    expect(renderStep(openerSteps, 1, { ...values, opener })).toEqual({
+      ok: true, subject: "Quick idea for Acme", body: `Hi Sam,\n\n${opener}\n\nI help Plumbing teams.`,
+    });
+    expect(renderTemplate("{{opener}}", { ...values, opener: "$& $1 {{" })).toBe("$& $1 {{");
+  });
+
+  it("still rejects an unknown variable next to {{opener}}", () => {
+    const bad = [{ subject: "s", body: "{{opener}} {{openers}}", delayBusinessDays: 0 }];
+    expect(unknownVariableProblem(bad)).toEqual({ path: "steps.0.body", code: "unknown_variable" });
+    expect(renderStep(bad, 1, { ...values, opener: "x" })).toEqual({ ok: false, reason: "unknown_variable" });
+    for (const spaced of ["{{ opener }}", "{{Opener}}", "{{opener}"]) expect(hasUnknownVariable(spaced), spaced).toBe(true);
+  });
+
+  it("refuses to render when the campaign uses {{opener}} and the prospect has none", () => {
+    for (const opener of [null, "", "   "])
+      expect(renderStep(openerSteps, 1, { ...values, opener })).toEqual({ ok: false, reason: "missing_field" });
+    expect(missingVariables(openerSteps, values)).toEqual(["opener"]);
+    // A campaign that never uses {{opener}} does not need one.
+    expect(missingVariables(steps, values)).toEqual([]);
+    expect(renderStep(steps, 1, { ...values, opener: "ignored" }).ok).toBe(true);
+  });
+
+  it("applies the render length limit to a body that holds the longest opener", () => {
+    const longest = "o".repeat(300);
+    expect(renderTooLong(openerSteps, { ...values, opener: longest })).toBe(false);
+    const heavy = [{ subject: "s", body: "{{opener}}".repeat(61), delayBusinessDays: 0 }];
+    expect(renderTooLong(heavy, { ...values, opener: longest })).toBe(true);
+    const inSubject = [{ subject: "{{opener}}{{opener}}", body: "b", delayBusinessDays: 0 }];
+    expect(renderTooLong(inSubject, { ...values, opener: longest })).toBe(true);
   });
 
   it("flags every other brace sequence as an unknown variable", () => {
     for (const bad of ["{{ first_name }}", "{{firstname}}", "{{First_Name}}", "Hi {{", "}} later", "{{unknown}}", "{{first_name}", "{{{{first_name}}"])
       expect(hasUnknownVariable(bad), bad).toBe(true);
-    for (const good of ["{{first_name}} {{company}} {{industry}}", "no braces", "single { and } are fine"])
+    for (const good of ["{{first_name}} {{company}} {{industry}} {{opener}}", "no braces", "single { and } are fine"])
       expect(hasUnknownVariable(good), good).toBe(false);
     expect(unknownVariableProblem([{ subject: "ok", body: "x" }, { body: "Dear {{name}}" }])).toEqual({ path: "steps.1.body", code: "unknown_variable" });
     expect(unknownVariableProblem([{ subject: "{{who}}", body: "x" }])).toEqual({ path: "steps.0.subject", code: "unknown_variable" });

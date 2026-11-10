@@ -252,6 +252,45 @@ describe("prospect import (OS-7)", () => {
     expect((await imported(other.id, [prospect(2, { email: "excluded@acme2.example" })])).result.rejected).toEqual([{ index: 0, reason: "duplicate" }]);
   });
 
+  it("takes an opener, needs one when the campaign uses {{opener}}, and bounds it (OS-5, OS-7)", async () => {
+    const made = await campaign({ steps: [{ subject: "Hi {{first_name}}", body: "{{opener}}\n\nWorth a chat?", delayBusinessDays: 0 }] });
+    const result = await imported(made.id, [
+      prospect(1, { opener: "  Loved your talk on wholesale pricing.  " }),
+      prospect(2),
+      prospect(3, { opener: "   " }),
+      prospect(4, { opener: "{{company}} just opened a store." }),
+      { email: "ex@acme5.example", firstName: "", company: "", opener: "ignored", excluded: true },
+    ]);
+    expect(result.result).toEqual({ imported: 2, excluded: 1, rejected: [{ index: 1, reason: "missing_field" }, { index: 2, reason: "missing_field" }] });
+    const stored = await world.rows<{ email: string; opener: string | null }>("SELECT email, opener FROM outreach_prospects WHERE tenant_id=$1 ORDER BY email", [tenantA]);
+    expect(stored.map((row) => [row.email, row.opener])).toEqual([
+      ["ex@acme5.example", null], ["pat1@acme1.example", "Loved your talk on wholesale pricing."], ["pat4@acme4.example", "{{company}} just opened a store."],
+    ]);
+    // 300 characters is the longest opener; 301, CR and LF fail the call, name the row, and store nothing.
+    const other = await campaign({ steps: [{ subject: "Hi {{first_name}}", body: "{{opener}}", delayBusinessDays: 0 }] });
+    expect((await imported(other.id, [prospect(6, { opener: "o".repeat(300) })])).result.imported).toBe(1);
+    for (const opener of ["o".repeat(301), "line one\nline two", "line one\rline two"])
+      await expect(imported(other.id, [prospect(7), prospect(8, { opener })])).rejects.toMatchObject({
+        code: "ValidationFailed", details: { issues: [{ path: "prospects.1.opener" }] },
+      });
+    // Trimming comes first: 300 characters plus padding is a valid opener.
+    expect((await imported(other.id, [prospect(11, { opener: ` ${"o".repeat(300)} ` })])).result.imported).toBe(1);
+    expect(await world.rows("SELECT 1 FROM outreach_prospects WHERE tenant_id=$1 AND email IN ('pat7@acme7.example','pat8@acme8.example')", [tenantA])).toHaveLength(0);
+    // A campaign that does not use {{opener}} accepts rows with or without one and still stores it.
+    const plain = await campaign();
+    expect((await imported(plain.id, [prospect(9), prospect(10, { opener: "A line." })])).result.imported).toBe(2);
+    // The prospect record carries it.
+    const listed = await owner().listProspects(plain.id, {});
+    expect(listed.items.map((item: { opener: string | null }) => item.opener ?? "none").sort()).toEqual(["A line.", "none"]);
+  });
+
+  it("refuses an opener with CR or LF, or over 300 characters, in the database itself (OS-7)", async () => {
+    const made = await campaign();
+    await imported(made.id, [prospect(1)]);
+    for (const opener of ["a\nb", "a\rb", "", "   ", "o".repeat(301)])
+      await expect(world.rows("UPDATE outreach_prospects SET opener=$2 WHERE tenant_id=$1", [tenantA, opener])).rejects.toThrow(/outreach_prospects_opener/);
+  });
+
   it("derives the prospect id from the address and refuses an import into an active campaign", async () => {
     const made = await campaign();
     await imported(made.id, [prospect(1)]);

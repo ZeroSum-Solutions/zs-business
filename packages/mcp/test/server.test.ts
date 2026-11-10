@@ -665,7 +665,7 @@ describe("outreach tools (outreach-sequencer.md OS-22)", () => {
 
     const imported = await callTool(allowed, "import_outreach_prospects", {
       idempotencyKey: "oi-1", campaignId,
-      prospects: [{ email: "pat@acme.example", firstName: "Pat", company: "Acme" }, { email: "bad", firstName: "X", company: "Y" }],
+      prospects: [{ email: "pat@acme.example", firstName: "Pat", company: "Acme", opener: "Read your note on boilers." }, { email: "bad", firstName: "X", company: "Y" }],
     });
     expect(imported.value).toMatchObject({ result: { imported: 1, rejected: [{ index: 1, reason: "invalid_email" }] } });
 

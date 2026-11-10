@@ -52,7 +52,7 @@ export async function loadCampaign(tx: Transaction, tenantId: string, id: string
 }
 
 export const PROSPECT_COLUMNS =
-  "id,campaign_id,mailbox_id,email,first_name,last_name,company,industry,website,status,next_step,to_char(next_due_on,'YYYY-MM-DD') AS next_due_on,stopped_at,created_at,updated_at";
+  "id,campaign_id,mailbox_id,email,first_name,last_name,company,industry,opener,website,status,next_step,to_char(next_due_on,'YYYY-MM-DD') AS next_due_on,stopped_at,created_at,updated_at";
 export interface ProspectRow {
   id: string;
   campaign_id: string;
@@ -62,6 +62,7 @@ export interface ProspectRow {
   last_name: string | null;
   company: string;
   industry: string | null;
+  opener: string | null;
   website: string | null;
   status: OutreachProspectRecord["status"];
   next_step: number | null;
@@ -80,6 +81,7 @@ export function prospectRecord(row: ProspectRow): OutreachProspectRecord {
     lastName: row.last_name,
     company: row.company,
     industry: row.industry,
+    opener: row.opener,
     website: row.website,
     status: row.status,
     nextStep: row.next_step,

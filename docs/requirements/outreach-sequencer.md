@@ -1,6 +1,6 @@
 # Outreach sequencer: cold email from our own Gmail mailboxes
 
-Status: built (2026-11-08), first slice, not deployed and not scheduled; owner decisions of that day applied. Code follows this file; a change to a numbered
+Status: built (2026-11-08), first slice; revision 2026-11-10 adds `{{opener}}` (OS-5, OS-7), not deployed and not scheduled; owner decisions of that day applied. Code follows this file; a change to a numbered
 rule needs a new revision of this file first. Nothing in this work sends a real email: every
 test uses the fake Gmail port (OS-25), and real sending needs two switches the repo owner sets
 by hand (OS-10).
@@ -20,7 +20,7 @@ Out of scope: dashboard screens (owners use the API, the MCP adapter and the exi
 approvals screen); HTML email, attachments, images, open and click tracking; A/B tests;
 reading or classifying reply text; creating CRM contacts, deals or Inbox
 threads from replies; holiday calendars; custom variables beyond `first_name`, `company`,
-`industry`; mailboxes outside Google Workspace; service-account sending; any tenant not on the
+`industry`, `opener`; mailboxes outside Google Workspace; service-account sending; any tenant not on the
 allowlist (OS-1); a Node loop worker (cron only); importing from Smartlead's API.
 
 ## Evidence and decisions
@@ -177,15 +177,17 @@ Test: valid create returns `draft` with its digest; a replay returns the same re
 broken rule above is `ValidationFailed` with the field's path; a direct SQL `UPDATE` of a step
 as the runtime role is refused.
 
-**OS-5. Templates.** A template may use exactly `{{first_name}}`, `{{company}}` and
-`{{industry}}` (no spaces inside the braces). Any other `{{` or `}}` sequence is
+**OS-5. Templates.** A template may use exactly `{{first_name}}`, `{{company}}`, `{{industry}}`
+and `{{opener}}` (no spaces inside the braces). `{{opener}}` is the prospect's researched first
+line (revision 2026-11-10, OS-7): one line of plain text, up to 300 characters, written per
+prospect. Any other `{{` or `}}` sequence is
 `ValidationFailed` `unknown_variable` at create. Rendering replaces each variable with the
 prospect's value as plain text; values are never re-scanned, so a value holding `{{` renders
 as text. A rendered subject with CR or LF is refused at send (OS-14). Follow-up subjects are
 `Re: ` + step 1's rendered subject (decided above). The body is sent as written, then the
 footer (OS-6). `renderStep` is a pure function in `templates.ts`.
-Test: render with all three variables; an unknown variable at create; a `first_name` of
-`{{company}}` renders literally; step 2's subject is `Re: <step 1 subject>`.
+Test: render with all four variables; an unknown variable at create; a `first_name` of
+`{{company}}` and an `opener` of `{{company}}` render literally; step 2's subject is `Re: <step 1 subject>`.
 
 **OS-6. Footer and the postal-address guard.** Every email ends with:
 ```
@@ -211,11 +213,14 @@ footer, its address and exactly one unsubscribe URL.
 1..500 rows a call, at most 5,000 prospects a campaign; the campaign must be `draft` or
 `paused` (`Conflict` `campaign_active`). Row fields: `email` (required, the contracts'
 `contactEmailInputSchema`), `firstName` (1..100), `lastName?`, `company` (1..200), `industry?`
-(1..100), `website?`, `mailboxId?`, `excluded?` (true = contacted elsewhere, for example by Smartlead; decided above).
-A row is rejected, with its index and one reason, when: the email is invalid
+(1..100), `opener?` (revision 2026-11-10: a researched first line, at most 300 characters once trimmed, no CR
+or LF; the hub trims it and stores nothing when it is empty after trimming), `website?`, `mailboxId?`, `excluded?` (true = contacted elsewhere, for example by Smartlead; decided above).
+An `opener` over 300 characters once trimmed or holding CR or LF (on a row that is not `excluded`; an excluded row keeps no opener and is not checked) is not a row reason: the call is
+`ValidationFailed` with the row's path (`prospects.<index>.opener`) and stores nothing, so a
+broken first line never reaches a recipient. A row is rejected, with its index and one reason, when: the email is invalid
 (`invalid_email`); its local part is `postmaster`, `abuse`, `mailer-daemon`, `noreply` or
 `no-reply` (`role_address`); a variable used by the campaign's steps is empty for it
-(`missing_field`); some step would render a subject over 300 characters or a body over 18,000
+(`missing_field`; `{{opener}}` is empty when the row has none); some step would render a subject over 300 characters or a body over 18,000
 (`render_too_long`); `hardSuppressionHit` matches its email, website, company or full name
 (`hard_suppressed`); the address has a `suppressions` row of any reason (`suppressed`); a CRM
 contact with that address has email consent `denied` (`consent_denied`); the address is already
@@ -231,7 +236,9 @@ Event `outreach.prospects.imported` (counts only, no addresses).
 Test: one import with a hard-suppressed company, a suppressed address, a consent-denied
 contact, a duplicate, a role address and a missing `industry` returns each reason and stores
 only the good rows, split evenly across two mailboxes; an import into an `active` campaign is
-`campaign_active`.
+`campaign_active`; a campaign that uses `{{opener}}` rejects a row without one as `missing_field`
+and keeps a row with one; an `opener` over 300 characters once trimmed, or with CR or LF, is
+`ValidationFailed` at `prospects.<index>.opener` and nothing is stored.
 
 **OS-8. Activation with approval: `outreach.campaign.activate`.** Payload `{ campaignId,
 contentDigest, prospectsDigest, prospectCount }`. `APPROVAL_POLICIES` gets
@@ -518,7 +525,7 @@ check.
 | `outreach_campaigns` | `id`, `name`, `status`, `paused_reason`, `window_start_min`, `window_end_min`, `daily_cap_per_mailbox`, `content_digest`, `activation_approval_id`, `activated_at`, `created_by`, `created_at`, `updated_at` | PK; `status` in `draft`, `active`, `paused`, `completed`; window minutes 0..1439, end - start >= 30; cap 1..50; digest 64 hex |
 | `outreach_campaign_steps` | `campaign_id`, `step_number`, `delay_business_days`, `subject`, `body` | PK (`tenant_id`, `campaign_id`, `step_number`); FK campaign; step 1: subject not null, delay 0; others: subject null, delay 1..30; step 1..5 |
 | `outreach_campaign_mailboxes` | `campaign_id`, `mailbox_id` | PK of all three; FKs to campaign and mailbox |
-| `outreach_prospects` | `id`, `campaign_id`, `mailbox_id`, `email`, `first_name`, `last_name`, `company`, `industry`, `website`, `status`, `next_step`, `next_due_on` (date), `thread_id`, `stopped_at`, `created_at`, `updated_at` | PK; unique (`tenant_id`, `email`); FK (`tenant_id`, `campaign_id`, `mailbox_id`) to `outreach_campaign_mailboxes`; `status` in `pending`, `excluded`, `active`, `completed`, `replied`, `owner_replied`, `bounced`, `unsubscribed`, `suppressed`, `hard_suppressed`, `consent_denied`, `invalid_address`, `send_outcome_unknown`, `thread_unavailable`, `stopped`; index (`tenant_id`, `mailbox_id`, `status`, `next_due_on`) |
+| `outreach_prospects` | `id`, `campaign_id`, `mailbox_id`, `email`, `first_name`, `last_name`, `company`, `industry`, `opener`, `website`, `status`, `next_step`, `next_due_on` (date), `thread_id`, `stopped_at`, `created_at`, `updated_at` | PK; unique (`tenant_id`, `email`); `opener` null or 1..300 characters with no CR or LF and not blank; FK (`tenant_id`, `campaign_id`, `mailbox_id`) to `outreach_campaign_mailboxes`; `status` in `pending`, `excluded`, `active`, `completed`, `replied`, `owner_replied`, `bounced`, `unsubscribed`, `suppressed`, `hard_suppressed`, `consent_denied`, `invalid_address`, `send_outcome_unknown`, `thread_unavailable`, `stopped`; index (`tenant_id`, `mailbox_id`, `status`, `next_due_on`) |
 | `outreach_sends` | `id`, `campaign_id`, `prospect_id`, `mailbox_id`, `step_number`, `status`, `recipient_address`, `subject`, `body`, `local_send_date`, `attempt_started_at`, `settled_at`, `history_id_before`, `gmail_message_id`, `gmail_thread_id`, `rfc_message_id`, `error_code`, `created_at`, `updated_at` | PK; FKs to prospect and mailbox; `status` in `sending`, `sent`, `uncertain`, `lost`, `not_sent`, `rejected`; partial unique (`tenant_id`, `prospect_id`, `step_number`) where status in `sending`, `sent`, `uncertain`, `lost`; index (`tenant_id`, `mailbox_id`, `local_send_date`); unique (`tenant_id`, `mailbox_id`, `gmail_message_id`) where not null |
 | `outreach_inbound_events` | `id`, `mailbox_id`, `gmail_message_id`, `gmail_thread_id`, `prospect_id`, `kind`, `received_at`, `recorded_at` | PK; unique (`tenant_id`, `mailbox_id`, `gmail_message_id`); `kind` in `reply`, `owner_reply`, `bounce`, `auto_reply` |
 
@@ -733,3 +740,33 @@ column grant, two invoker triggers). After the Sol, Argon, DeepSeek and Grok rev
   before the fresh grant is revoked; the approval summary cuts each field on its own; a malformed id from a tenant
   outside the allowlist is 404; only the prospect import route takes a body up to 1 MiB; the cron outcome compares
   `stepsFailed` with `stepsSucceeded`; the MCP stdio entry reads `OUTREACH_TENANTS`.
+
+## As built, opener (2026-11-10)
+
+Migration `supabase/migrations/20261110100000_outreach_opener.sql`: one nullable column
+`outreach_prospects.opener` with the check above, and the column joins the runtime role's insert grant (the service
+role already holds table-level grants). Campaign steps are unchanged, so step immutability and `content_digest`
+hold. Revision of OS-5, OS-7; OS-14 is unchanged in text (the render check already stops a prospect whose used
+variable is empty).
+
+- **Variable.** `OUTREACH_VARIABLES` gains `opener`. `renderStep` and `missingVariables` take
+  `opener: string | null` in `TemplateValues`; the value is inserted in the same single pass as the others and is never
+  re-scanned, so an opener holding `{{company}}` renders as those characters. `render_too_long` applies unchanged.
+- **Import.** The row schema bounds `opener` to 300 characters with no CR or LF (the schema error names
+  `prospects.<index>.opener`); the handler trims it and stores null when it is empty. An `excluded` row stores no opener
+  (such a row is checked only for `invalid_email` and `duplicate`). `missing_field` applies when a step uses
+  `{{opener}}` and the row has none.
+- **Send.** The worker reads `opener` with the other prospect facts and renders with it. A prospect whose opener went
+  missing (a direct database edit) stops as the existing render failure does.
+- **Reads.** The prospect record gains `opener` (string or null).
+- **Existing prospects.** An address that is already a prospect is a `duplicate` and cannot be re-imported to add an
+  opener; a campaign that uses `{{opener}}` is created and filled from the start.
+- **Replays and limits (review of this revision).** The prospect record parses a stored result without `opener` as
+  null, so an idempotent replay of a stop recorded before this change still answers. The dispatcher bounds one
+  command to 262,144 characters of text, so an import of 500 rows whose fields are all near their maximum (an opener
+  of 300 characters adds up to 150,000) is refused whole with `ValidationFailed`; send it in smaller calls. Lengths are
+  counted in UTF-16 units by the contract and in characters by Postgres, so the contract is never the looser side. The
+  approval summary (OS-8) shows no opener, as it shows no company or industry: the approved set is pinned by the
+  prospects digest and openers cannot change after import, but the owner reads them in the prospect list, not in the
+  approval. The mail header encoder now encodes subject text that holds `=?`, so a value that looks like an encoded
+  word reaches the recipient as typed.
