@@ -6,7 +6,7 @@ import { orderConnections } from "../src/lib/recommended-connections";
 import { calendarConnected, dealTarget, durationLabel, hoursLines, initialZone } from "../src/lib/setup";
 
 const pipeline = (id: string, outcomes: ("open" | "won" | "lost")[]): PipelineSummary => ({
-  id, name: id, stages: outcomes.map((outcome, index) => ({ id: `${id}-s${index + 1}`, name: `Stage ${index + 1}`, position: index + 1, outcome })),
+  id, name: id, stages: outcomes.map((outcome, index) => ({ id: `${id}-s${index + 1}`, name: `Stage ${index + 1}`, position: index + 1, outcome })), archivedStages: [],
 });
 
 describe("hoursLines", () => {

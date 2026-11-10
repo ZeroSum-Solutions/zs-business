@@ -6,7 +6,7 @@ import {
   createDealInputSchema,
   moveDealStageInputSchema,
 } from "./crm.js";
-import { dealSummarySchema, stageOutcomeSchema } from "./home.js";
+import { dealSummarySchema } from "./home.js";
 import { bookingSummarySchema } from "./intake.js";
 import { isPostgresText, jsonValueSchema } from "./json.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
@@ -138,12 +138,6 @@ export type DealPage = z.infer<typeof dealPageSchema>;
 export const bookingPageSchema = pageSchema(bookingSummarySchema);
 export type BookingPage = z.infer<typeof bookingPageSchema>;
 
-export const pipelineSummarySchema = z.strictObject({
-  id: idSchema,
-  name: z.string(),
-  stages: z.array(z.strictObject({ id: idSchema, name: z.string(), position: z.number().int(), outcome: stageOutcomeSchema })),
-});
-export type PipelineSummary = z.infer<typeof pipelineSummarySchema>;
 export const resourceSummarySchema = z.strictObject({
   id: idSchema,
   name: z.string().nullable(),

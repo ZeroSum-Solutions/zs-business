@@ -31,7 +31,7 @@ export function clockInstant(now: Date): string {
   return instant;
 }
 
-export function idInUse(type: "contact" | "deal" | "member" | "approval" | "source record" | "reply" | "calendar connection"): Conflict {
+export function idInUse(type: "contact" | "deal" | "stage" | "member" | "approval" | "source record" | "reply" | "calendar connection"): Conflict {
   return new Conflict(`The ${type} ID is already in use`, { reason: "id_in_use" });
 }
 

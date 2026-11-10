@@ -98,6 +98,10 @@ import {
   resultsQuerySchema,
   roleCan,
   setDealDetailsRequestSchema,
+  archiveStageRequestSchema,
+  createStageRequestSchema,
+  renameStageRequestSchema,
+  reorderStagesRequestSchema,
   slotsQuerySchema,
   threadIdSchema,
   upsertContactRequestSchema,
@@ -168,7 +172,7 @@ import { documentIntakeHandlers } from "../document-intake/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
 import { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
-import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
+import { archiveStage, createDeal, createOrFindContact, createStage, crmHandlers, moveDealStage, renameStage, reorderStages, restoreStage, stageHandlers } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
 import { discardReply, draftReply, inboxHandlers, openSendApproval, requireEmail, RESUME_REPLY_ACTION, SEND_REPLY_ACTION } from "../inbox/index.js";
 import { smsStatusHandlers } from "../delivery/sms-status.js";
@@ -311,7 +315,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 }
 
 const dispatch = createDispatcher({
-  ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
+  ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...stageHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...outreachHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
@@ -335,6 +339,12 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
   "crm.deal.set-details": "customers",
+  // crm.md C-25: the owner edits a pipeline's stages.
+  "crm.stage.create": "customers",
+  "crm.stage.rename": "customers",
+  "crm.stage.reorder": "customers",
+  "crm.stage.archive": "customers",
+  "crm.stage.restore": "customers",
   "inbox.reply.draft": "inbox.drafts",
   "inbox.reply.discard": "inbox.drafts",
   // inbox-home.md I-6: also `required` in APPROVAL_POLICIES, so only an owner's approval runs it.
@@ -574,7 +584,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const writeContext = { dispatch: run };
 
   /** Envelope for one write: target and approval IDs derive from the key, so replays match. */
-  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "plan_checkout" | "calendar_connection" | "site" | "media_asset" | "media_variant" | "tenant_setup" | "booking_page";
+  type EnvelopeType = "booking" | "contact" | "deal" | "inbox_reply" | "intake_item" | "member" | "approval" | "wallet_topup" | "plan_checkout" | "calendar_connection" | "site" | "media_asset" | "media_variant" | "tenant_setup" | "booking_page" | "stage" | "pipeline";
   const envelope = <Type extends EnvelopeType>(rawKey: unknown, type: Type, targetId?: string) =>
     keyedEnvelope(parseInput(idempotencyKeySchema, rawKey, "Idempotency-Key"), type, targetId);
   /** The envelope for a key the server built itself, such as a reserved `inbox:` step key. */
@@ -740,6 +750,41 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const request = parseInput(moveDealStageRequestSchema, body);
       const { id: _id, ...rest } = envelope(key, "deal", id);
       return moveDealStage({ actionType: "crm.deal.move-stage", ...rest, payload: { dealId: id, ...request } }, writeContext);
+    },
+
+    /** crm.md C-25..C-32: each answers with the whole edited pipeline. */
+    async createStage(pipelineId: unknown, body: unknown, key: unknown) {
+      const pipeline = parseInput(uuidSchema, pipelineId, "pipeline ID");
+      const request = parseInput(createStageRequestSchema, body);
+      const { id, ...rest } = envelope(key, "stage");
+      return createStage({ actionType: "crm.stage.create", ...rest, payload: { stageId: id, pipelineId: pipeline, ...request } }, writeContext);
+    },
+
+    async renameStage(stageId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, stageId, "stage ID");
+      const request = parseInput(renameStageRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "stage", id);
+      return renameStage({ actionType: "crm.stage.rename", ...rest, payload: { stageId: id, ...request } }, writeContext);
+    },
+
+    async reorderStages(pipelineId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, pipelineId, "pipeline ID");
+      const request = parseInput(reorderStagesRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "pipeline", id);
+      return reorderStages({ actionType: "crm.stage.reorder", ...rest, payload: { pipelineId: id, ...request } }, writeContext);
+    },
+
+    async archiveStage(stageId: unknown, body: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, stageId, "stage ID");
+      const request = parseInput(archiveStageRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "stage", id);
+      return archiveStage({ actionType: "crm.stage.archive", ...rest, payload: { stageId: id, ...request } }, writeContext);
+    },
+
+    async restoreStage(stageId: unknown, key: unknown) {
+      const id = parseInput(uuidSchema, stageId, "stage ID");
+      const { id: _id, ...rest } = envelope(key, "stage", id);
+      return restoreStage({ actionType: "crm.stage.restore", ...rest, payload: { stageId: id } }, writeContext);
     },
 
     async setDealDetails(dealId: unknown, body: unknown, key: unknown) {

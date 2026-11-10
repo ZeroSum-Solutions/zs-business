@@ -49,6 +49,7 @@ import { createDemoBusiness, type DemoBusinessControls } from "./business";
 import { createDemoEnrichment } from "./enrichment";
 import { createDemoCalendar, type DemoCalendarControls } from "./calendar";
 import { createDemoSetup, type DemoSetupControls } from "./setup";
+import { createDemoStages } from "./stages";
 import { createDemoManagedConnections, type DemoManagedConnectionsControls } from "./managed-connections";
 import { createDemoBilling } from "./billing";
 import { createDemoTemplates, type DemoTemplateControls } from "./templates";
@@ -446,6 +447,14 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
   const { profileTimeZone, confirmTimeZone, ...business } = createDemoBusiness({ now: () => clock.now(), wait, idempotent, parse, actor: () => actor });
 
+  const stages = createDemoStages({
+    now: () => clock.now(), wait, idempotent, parse, newId, deals,
+    pipelines: () => pipelines,
+    setPipelines: (next) => {
+      pipelines = next;
+    },
+  });
+
   const enrichment = createDemoEnrichment({
     now: () => clock.now(), newId, wait, idempotent, actor: () => actor,
     hasContact: (id) => contacts.has(id),
@@ -475,6 +484,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     ...templates,
     ...browser,
     ...business,
+    ...stages,
     ...enrichment,
     ...calendar,
     ...setup,
@@ -685,9 +695,9 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         const deal = deals.get(dealId);
         // An unknown deal, pipeline or stage is the API's 403, never a 404.
         const pipeline = pipelines.find((item) => item.id === move.pipelineId);
-        if (!deal || deal.pipelineId !== move.pipelineId || !pipeline?.stages.some((stage) => stage.id === move.stageId)) {
-          throw demoError("Forbidden");
-        }
+        if (!deal || deal.pipelineId !== move.pipelineId || !pipeline) throw demoError("Forbidden");
+        if (pipeline.archivedStages.some((stage) => stage.id === move.stageId)) throw demoError("Conflict", { reason: "stage_archived" });
+        if (!pipeline.stages.some((stage) => stage.id === move.stageId)) throw demoError("Forbidden");
         if (move.expectedRevision !== deal.revision) {
           throw demoError("Conflict", { reason: "stale_revision", currentRevision: deal.revision });
         }
@@ -707,9 +717,11 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         const request = parse(createDealRequestSchema, input);
         // Like moveDealStage: an unknown customer, pipeline or stage is the API's 403.
         const pipeline = pipelines.find((item) => item.id === request.pipelineId);
-        if (!contacts.has(request.contactId) || !pipeline?.stages.some((stage) => stage.id === request.stageId)) {
+        const archived = pipeline?.archivedStages.some((stage) => stage.id === request.stageId);
+        if (!contacts.has(request.contactId) || !pipeline || (!archived && !pipeline.stages.some((stage) => stage.id === request.stageId))) {
           throw demoError("Forbidden");
         }
+        if (archived) throw demoError("Conflict", { reason: "stage_archived" });
         const at = nowIso();
         const won = pipeline.stages.find((stage) => stage.id === request.stageId)?.outcome === "won";
         const deal: DealSummary = {
@@ -968,7 +980,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     },
 
     setPipelines(next) {
-      pipelines = clone(next);
+      // A test may hand in the older shape without archived stages.
+      pipelines = clone(next).map((pipeline) => ({ ...pipeline, archivedStages: pipeline.archivedStages ?? [] }));
     },
 
     setOpenHours(weekday, hours) {

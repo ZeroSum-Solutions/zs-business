@@ -214,7 +214,12 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/crm/contacts?[search&][sort&][ids&]limit&(cursor|offset)` | page of contacts, newest first or `sort=name`; `search` matches part of a name, email or phone; `ids` is up to 100 comma-separated IDs |
 | `GET /v1/crm/contacts/:id` | one contact; 404 if unknown or another tenant's |
 | `POST /v1/crm/contacts` `{ displayName?, email?, phone?, mode?, consent? }` | 201 created, 200 matched an existing contact |
-| `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered stages, each with its `outcome` (`open`, `won`, `lost`) |
+| `GET /v1/crm/pipelines` | `{ items: PipelineSummary[] }` with ordered live `stages`, each with its `outcome` (`open`, `won`, `lost`), and `archivedStages` |
+| `POST /v1/crm/pipelines/:id/stages` `{ name, outcome? }` | 201 `{ actionId, result: PipelineSummary }`: the stage is added last; `name` is one trimmed line of 1..100 characters, `outcome` defaults to `open` and cannot change later; 409 `name_in_use` (case-insensitive, live stages) or `stage_limit` (30 live). Owners and staff (`customers`); the other stage routes share the key, permission and answer |
+| `POST /v1/crm/pipelines/:id/stages/order` `{ stageIds }` | 200; `stageIds` lists every live stage once, else 409 `stage_set_changed` |
+| `POST /v1/crm/stages/:id/rename` `{ name }` | 200; 409 `name_in_use` or `stage_archived` |
+| `POST /v1/crm/stages/:id/archive` `{ moveDealsTo? }` | 200; a stage is archived, never deleted. 409 `last_stage`, or `stage_has_deals` (with `dealCount`) unless `moveDealsTo` names another live stage of the pipeline, which takes the deals (revision + 1) |
+| `POST /v1/crm/stages/:id/restore` `{}` | 200; the stage returns last; 409 `stage_limit` or `name_in_use`. A deal create or move into an archived stage is 409 `stage_archived` |
 | `GET /v1/crm/deals?[pipelineId&][contactId&]limit&(cursor|offset)` | page of deals (`DealSummary`: the deal plus `value` `{ amountMinor, currency }` or null, `leadSource`, `wonAt`), most recently updated first |
 | `POST /v1/crm/deals` `{ contactId, pipelineId, stageId, title }` | 201 deal |
 | `POST /v1/crm/deals/:id/stage` `{ pipelineId, stageId, expectedRevision }` | 200 deal; 409 `stale_revision`; 409 `invalid_currency` for a deal whose stored currency predates the ISO 4217 check (set its value first). Entering a `won` stage sets `wonAt` to the write's time; leaving it clears it |

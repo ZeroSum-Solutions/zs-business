@@ -111,23 +111,43 @@ export async function listDeals(tx: Transaction, tenantId: string, query: ListDe
 export const PIPELINE_LIMIT = 200;
 export const STAGE_ROW_LIMIT = 2_000;
 
-export async function listPipelines(tx: Transaction, tenantId: string): Promise<PipelineSummary[]> {
-  const rows = (await tx.query<{
-    pipeline_id: string; pipeline_name: string; id: string | null; name: string | null; position: number | null;
-    outcome: StageOutcome | null;
-  }>(
-    `SELECT p.id AS pipeline_id, p.name AS pipeline_name, s.id, s.name, s.position, s.outcome
-       FROM (SELECT tenant_id, id, name FROM crm_pipelines WHERE tenant_id=$1 ORDER BY name, id LIMIT $2) p
-       LEFT JOIN crm_stages s ON s.tenant_id = p.tenant_id AND s.pipeline_id = p.id
-      ORDER BY p.name, p.id, s.position LIMIT $3`,
-    [tenantId, PIPELINE_LIMIT, STAGE_ROW_LIMIT],
-  )).rows;
+interface PipelineStageRow {
+  pipeline_id: string; pipeline_name: string; id: string | null; name: string | null; position: number | null;
+  outcome: StageOutcome | null; archived_at: Date | null;
+}
+
+/** crm.md C-32: live stages in `stages`, archived ones in `archivedStages`, both by position then ID. */
+function groupPipelines(rows: readonly PipelineStageRow[]): PipelineSummary[] {
   const pipelines = new Map<string, PipelineSummary>();
   for (const row of rows) {
-    const pipeline = pipelines.get(row.pipeline_id) ?? { id: row.pipeline_id, name: row.pipeline_name, stages: [] };
+    const pipeline = pipelines.get(row.pipeline_id)
+      ?? { id: row.pipeline_id, name: row.pipeline_name, stages: [], archivedStages: [] };
     if (row.id !== null && row.name !== null && row.position !== null && row.outcome !== null)
-      pipeline.stages.push({ id: row.id, name: row.name, position: row.position, outcome: row.outcome });
+      (row.archived_at === null ? pipeline.stages : pipeline.archivedStages)
+        .push({ id: row.id, name: row.name, position: row.position, outcome: row.outcome });
     pipelines.set(row.pipeline_id, pipeline);
   }
   return [...pipelines.values()];
+}
+
+export async function listPipelines(tx: Transaction, tenantId: string): Promise<PipelineSummary[]> {
+  return groupPipelines((await tx.query<PipelineStageRow>(
+    `SELECT p.id AS pipeline_id, p.name AS pipeline_name, s.id, s.name, s.position, s.outcome, s.archived_at
+       FROM (SELECT tenant_id, id, name FROM crm_pipelines WHERE tenant_id=$1 ORDER BY name, id LIMIT $2) p
+       LEFT JOIN crm_stages s ON s.tenant_id = p.tenant_id AND s.pipeline_id = p.id
+      ORDER BY p.name, p.id, s.position, s.id LIMIT $3`,
+    [tenantId, PIPELINE_LIMIT, STAGE_ROW_LIMIT],
+  )).rows);
+}
+
+/** One pipeline as the stage editor's actions answer it (crm.md C-32). */
+export async function getPipeline(tx: Transaction, tenantId: string, pipelineId: string): Promise<PipelineSummary | undefined> {
+  return groupPipelines((await tx.query<PipelineStageRow>(
+    `SELECT p.id AS pipeline_id, p.name AS pipeline_name, s.id, s.name, s.position, s.outcome, s.archived_at
+       FROM crm_pipelines p
+       LEFT JOIN crm_stages s ON s.tenant_id = p.tenant_id AND s.pipeline_id = p.id
+      WHERE p.tenant_id=$1 AND p.id=$2
+      ORDER BY s.position, s.id LIMIT $3`,
+    [tenantId, pipelineId, STAGE_ROW_LIMIT],
+  )).rows)[0];
 }

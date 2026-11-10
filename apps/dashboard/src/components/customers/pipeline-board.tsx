@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowsClockwise } from "@phosphor-icons/react";
+import { ArrowsClockwise, PencilSimple } from "@phosphor-icons/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/input";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isDealChanged, type DealSummary, type ListResult, type PipelineSummary } from "@/lib/api";
+import { isApiError, isDealChanged, type DealSummary, type ListResult, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { LEAD_SOURCE_LABELS } from "@/lib/lead-sources";
@@ -16,6 +16,7 @@ import { browserZone, useContactNames, useDeals, useKeys, usePipelines } from "@
 import { formatDay } from "@/lib/time";
 import { cn, formatMinor, relativeTime } from "@/lib/utils";
 import { DealDetailsDialog } from "./deal-details-dialog";
+import { StageEditorDialog } from "./stage-editor-dialog";
 
 type DealMove = { dealId: string; pipelineId: string; stageId: string; expectedRevision: number };
 
@@ -88,12 +89,26 @@ export function PipelineBoard() {
       {!pipeline ? (
         <EmptyState title="No pipeline yet">Once a pipeline is set up, each deal shows here under its stage.</EmptyState>
       ) : pipeline.stages.length === 0 ? (
-        <EmptyState title={`${pipeline.name} has no stages yet`}>Its deals show here once the pipeline has stages to move them through.</EmptyState>
+        <NoStages pipeline={pipeline} />
       ) : (
         // A new key per pipeline: a stage filter or a pending move never carries over.
         <StageBoard key={pipeline.id} pipeline={pipeline} />
       )}
     </section>
+  );
+}
+
+/** A pipeline whose stages are not set up yet still opens the editor, so its first stage can be added. */
+function NoStages({ pipeline }: { pipeline: PipelineSummary }) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <>
+      <EmptyState title={`${pipeline.name} has no stages yet`}>Its deals show here once the pipeline has stages to move them through.</EmptyState>
+      <div className="mt-3 flex justify-center">
+        <Button variant="secondary" onClick={() => setEditing(true)}><PencilSimple aria-hidden /> Edit stages</Button>
+      </div>
+      <StageEditorDialog pipeline={pipeline} dealCounts={new Map()} open={editing} onOpenChange={setEditing} />
+    </>
   );
 }
 
@@ -114,6 +129,7 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   // The deal whose stage select had focus when it moved: the card re-mounts, so focus goes back to it.
   const [refocus, setRefocus] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ dealId: string; open: boolean } | null>(null);
+  const [editingStages, setEditingStages] = useState(false);
   // CRM dates show in the viewer's zone; only bookings carry a calendar's own.
   const zone = browserZone();
 
@@ -147,6 +163,8 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
       toast(`Moved to ${stage}.`);
     },
     onError: async (error, request) => {
+      // The stage was archived since this list loaded: show the pipeline as it is now.
+      if (isApiError(error, "conflict") && error.reason === "stage_archived") void queryClient.invalidateQueries({ queryKey: keys.pipelines });
       const since = Date.now();
       let reloaded = true;
       try {
@@ -193,7 +211,10 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
   // The open dialog follows the deal in the list, so a reload brings in its new revision.
   const editingDeal = editing ? deals.data.items.find((item) => item.id === editing.dealId) : undefined;
   // PipelineBoard renders this only for a pipeline with stages.
-  const activeStage = stageFilter ?? stages[0]!.id;
+  // A filter on a stage that was archived since falls back to the first stage.
+  const activeStage = stages.find((stage) => stage.id === stageFilter)?.id ?? stages[0]!.id;
+  const dealCounts = new Map<string, number>();
+  for (const deal of deals.data.items) dealCounts.set(deal.stageId, (dealCounts.get(deal.stageId) ?? 0) + 1);
   const moveError = move.isError && !isDealChanged(move.error) ? move.error : null;
   // A failed refresh keeps the last board on screen, with the note above it.
   const refreshError = deals.isError && !moveError && !reloadNeeded ? deals.error : null;
@@ -216,6 +237,12 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
       {moveError ? <div className="mb-4"><ErrorNote error={moveError} /></div> : null}
       {refreshError ? <div className="mb-4"><ErrorNote error={refreshError} retry={() => deals.refetch()} /></div> : null}
       <IncompleteNote list={deals.data} />
+
+      <div className="mb-3 flex justify-end">
+        <Button variant="secondary" onClick={() => setEditingStages(true)}>
+          <PencilSimple aria-hidden /> Edit stages
+        </Button>
+      </div>
 
       <div role="group" aria-label="Stage" className="mb-3 flex flex-wrap gap-2 py-1 lg:hidden">
         {stages.map((stage) => {
@@ -275,6 +302,7 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
           );
         })}
       </div>
+      <StageEditorDialog pipeline={pipeline} dealCounts={dealCounts} open={editingStages} onOpenChange={setEditingStages} />
       {editingDeal ? (
         <DealDetailsDialog
           deal={editingDeal}

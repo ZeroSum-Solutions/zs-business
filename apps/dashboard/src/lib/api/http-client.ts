@@ -56,6 +56,7 @@ import {
   homeResultsSchema,
   kindDecisionSchema,
   moveDealStageOutputSchema,
+  stageOutputSchema,
   pipelineSummarySchema,
   replyOutputSchema,
   resourceSummarySchema,
@@ -88,6 +89,7 @@ import {
   type KillFollowUpRequest,
   type LinkIntakeItemRequest,
   type MoveDealStageRequest,
+  type PipelineSummary,
   type SetDealDetailsRequest,
   type UpdateAgentKindSettingsRequest,
   type UpdateFollowUpSettingsRequest,
@@ -152,6 +154,12 @@ interface RequestSpec<T extends z.ZodType> {
 
 const resourceListSchema = z.object({ items: z.array(resourceSummarySchema) });
 const pipelineListSchema = z.object({ items: z.array(pipelineSummarySchema) });
+/** Stages in board order, whatever order the server listed them in. */
+const byPosition = (pipeline: PipelineSummary): PipelineSummary => ({
+  ...pipeline,
+  stages: [...pipeline.stages].sort((a, b) => a.position - b.position),
+  archivedStages: [...pipeline.archivedStages].sort((a, b) => a.position - b.position),
+});
 const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema) });
 /** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
 const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
@@ -368,7 +376,28 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
 
     async listPipelines(options = {}) {
       const { items } = await request({ method: "GET", path: "/v1/crm/pipelines", schema: pipelineListSchema, signal: options.signal });
-      return items.map((pipeline) => ({ ...pipeline, stages: [...pipeline.stages].sort((a, b) => a.position - b.position) }));
+      return items.map(byPosition);
+    },
+
+    async createStage(input, options) {
+      const body = { name: input.name, ...(input.outcome ? { outcome: input.outcome } : {}) };
+      return byPosition((await write(`/v1/crm/pipelines/${encodeURIComponent(input.pipelineId)}/stages`, body, stageOutputSchema, options)).result);
+    },
+
+    async renameStage(input, options) {
+      return byPosition((await write(`/v1/crm/stages/${encodeURIComponent(input.stageId)}/rename`, { name: input.name }, stageOutputSchema, options)).result);
+    },
+
+    async reorderStages(input, options) {
+      return byPosition((await write(`/v1/crm/pipelines/${encodeURIComponent(input.pipelineId)}/stages/order`, { stageIds: input.stageIds }, stageOutputSchema, options)).result);
+    },
+
+    async archiveStage(input, options) {
+      return byPosition((await write(`/v1/crm/stages/${encodeURIComponent(input.stageId)}/archive`, { moveDealsTo: input.moveDealsTo }, stageOutputSchema, options)).result);
+    },
+
+    async restoreStage(input, options) {
+      return byPosition((await write(`/v1/crm/stages/${encodeURIComponent(input.stageId)}/restore`, {}, stageOutputSchema, options)).result);
     },
 
     async listContacts(query = {}, options = {}) {

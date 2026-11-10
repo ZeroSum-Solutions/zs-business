@@ -34,3 +34,8 @@ export const moveDealStage: MoveDealStage = async (command, ctx) => {
   const parsed = parseOrFail(moveDealStageCommandSchema, command);
   return parseOrFail(moveDealStageOutputSchema, await ctx.dispatch(parsed));
 };
+
+export {
+  ARCHIVE_STAGE_ACTION, CREATE_STAGE_ACTION, RENAME_STAGE_ACTION, REORDER_STAGES_ACTION, RESTORE_STAGE_ACTION,
+  archiveStage, createStage, renameStage, reorderStages, restoreStage, stageHandlers,
+} from "./stages.js";

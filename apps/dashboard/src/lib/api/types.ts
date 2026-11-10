@@ -295,6 +295,13 @@ export interface StageMove {
   expectedRevision: number;
 }
 
+/** Stage editor inputs (crm.md C-25..C-30). Each call answers with the whole edited pipeline. */
+export interface NewStage { pipelineId: string; name: string; outcome?: "open" | "won" | "lost" }
+export interface StageRename { stageId: string; name: string }
+export interface StageOrder { pipelineId: string; stageIds: string[] }
+export interface StageArchive { stageId: string; moveDealsTo: string | null }
+export interface StageRestore { stageId: string }
+
 /** Value and lead source for one deal (inbox-home.md H-1), with the revision the owner saw. */
 export interface DealDetailsChange {
   dealId: string;
@@ -328,8 +335,24 @@ export interface BookingApi {
 }
 
 export interface CrmApi {
-  /** Pipelines with stages sorted by position. */
+  /** Pipelines with live stages sorted by position; archived stages come apart in `archivedStages`. */
   listPipelines(options?: ReadOptions): Promise<PipelineSummary[]>;
+  /**
+   * Add a stage at the end (C-27). Conflicts carry a reason: `name_in_use`, `stage_limit`.
+   * The four calls below answer with the edited pipeline too.
+   */
+  createStage(input: NewStage, options: WriteOptions): Promise<PipelineSummary>;
+  /** Conflicts: `name_in_use`, `stage_archived` (C-28). */
+  renameStage(input: StageRename, options: WriteOptions): Promise<PipelineSummary>;
+  /** `stageIds` is every live stage once. Conflict `stage_set_changed` when the pipeline changed meanwhile (C-29). */
+  reorderStages(input: StageOrder, options: WriteOptions): Promise<PipelineSummary>;
+  /**
+   * Archive a stage (C-30). A stage with deals needs `moveDealsTo`; without it the conflict is
+   * `stage_has_deals` with `dealCount`. `last_stage` when it is the only live stage.
+   */
+  archiveStage(input: StageArchive, options: WriteOptions): Promise<PipelineSummary>;
+  /** Bring an archived stage back at the end. Conflicts: `name_in_use`, `stage_limit`. */
+  restoreStage(input: StageRestore, options: WriteOptions): Promise<PipelineSummary>;
   /** One page of customers; ask for the next with `cursor: nextCursor`. */
   listContacts(query?: ContactListQuery, options?: ReadOptions): Promise<Page<ContactRecord>>;
   /** Throws `not_found` for an unknown customer, or one of another business. */

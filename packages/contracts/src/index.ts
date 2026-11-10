@@ -100,6 +100,7 @@ export * from "./booking-customer.js";
 export * from "./booking-self-service.js";
 export * from "./business.js";
 export * from "./crm.js";
+export * from "./crm-stages.js";
 export * from "./enrichment.js";
 export * from "./outreach.js";
 export * from "./currency.js";

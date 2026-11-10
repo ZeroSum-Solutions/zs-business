@@ -128,6 +128,7 @@ export const crmStages = pgTable(
     name: text("name").notNull(),
     position: integer("position").notNull(),
     outcome: text("outcome").$type<"open" | "won" | "lost">().notNull().default("open"),
+    archivedAt: timestamptz("archived_at"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),

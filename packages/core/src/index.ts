@@ -5,6 +5,10 @@ export {
 } from "./booking/index.js";
 export type { ManageLinkConfig, ManageRef, ManageSecrets } from "./booking/index.js";
 export { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "./crm/index.js";
+export {
+  ARCHIVE_STAGE_ACTION, CREATE_STAGE_ACTION, RENAME_STAGE_ACTION, REORDER_STAGES_ACTION, RESTORE_STAGE_ACTION,
+  archiveStage, createStage, renameStage, reorderStages, restoreStage, stageHandlers,
+} from "./crm/index.js";
 export * from "./edge/index.js";
 export { findSlots, getBooking, listBookings, listResources } from "./reads/booking.js";
 export { listContacts, listDeals, listPipelines } from "./reads/crm.js";

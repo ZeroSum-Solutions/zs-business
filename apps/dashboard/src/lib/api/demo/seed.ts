@@ -88,6 +88,7 @@ export const DEMO_PIPELINE: PipelineSummary = {
     // A delivered commission is a won deal (inbox-home.md H-2).
     { id: STAGE_IDS.delivered, name: "Delivered", position: 5, outcome: "won" },
   ],
+  archivedStages: [],
 };
 
 /** The seeded customer at 1-based position `n` of CONTACTS. */

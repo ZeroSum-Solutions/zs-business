@@ -15,7 +15,8 @@ result an earlier release stored outside it still replays unchanged. Server time
 (`createdAt`, `updatedAt`, consent `recordedAt` on intake) come from the injected clock, which
 must also lie in the range; outside it the write fails with `ValidationFailed`, nothing written.
 This slice covers contact identity, consent storage, deal creation and stage moves.
-It provides no messaging, contact merge, general contact edit or pipeline editor.
+It provides no messaging, contact merge or general contact edit. Revision 4 adds the stage
+editor (C-25 to C-33); there is still no pipeline create, rename or delete.
 Revision 3 (2026-10-23, enrichment.md E-7, E-14): a contact has one optional profile row
 (`crm_contact_profile`): eight company fields filled only by an approved `contact.profile.apply`,
 a country, the do-not-enrich flag with its reason, and the owner's region mark. Enrichment never
@@ -24,6 +25,10 @@ clears the region mark, so the mark never outlives the facts it was made on.
 Revision 2 (2026-10-22 audit, B5-06): C-14 refuses to move a deal whose stored currency
 is not an ISO 4217 code, with `details.reason="invalid_currency"`; `inbox-home.md` H-1
 (revision 4) defines the deal value and the stored codes that rule applies to.
+Revision 4 (2026-11-10, pipeline stage editor): an owner adds, renames, reorders, archives and
+restores the stages of a pipeline (C-25 to C-33). A stage is archived, never deleted, so a deal
+never loses its history; an archived stage is hidden from the board and refused by deal create
+and move (C-31). These five actions are not in `crmHandlers`, so C-23's three keys stand.
 
 ## Evidence and decisions
 
@@ -323,6 +328,86 @@ INSERT a `crm_contacts` row that supplies exactly the listed contact columns; gr
 that INSERT. It succeeds for the current tenant and fails only through RLS
 `WITH CHECK` (SQLSTATE `42501`) when `tenant_id` is another tenant's. node-pg
 returns `bigint` as a string, so tests read `revision::integer` when comparing.
+
+**C-25. Desired, stage editor actions.** Five actions edit the stages of one pipeline, all
+needing the `customers` permission: `crm.stage.create` (target `stage`, the new stage ID),
+`crm.stage.rename`, `crm.stage.archive` and `crm.stage.restore` (target `stage`, the existing
+stage), and `crm.stage.reorder` (target `pipeline`, the existing pipeline). They live in
+`packages/core/src/crm/stages.ts` as `stageHandlers`, composed by the session next to
+`crmHandlers`; C-23's three-key map does not change. Each runs through the one dispatcher
+(C-17): idempotent, one outbox event, tenant scoped (C-1). A foreign or absent pipeline or
+stage is `TenantDenied`; an unused create ID that exists in another tenant is unused (C-1).
+Every action takes the pipeline's advisory lock first, so two edits of one pipeline never
+interleave.
+
+**C-26. Desired, archive column.** `crm_stages.archived_at timestamptz NULL`: null is a live
+stage. The runtime role may INSERT stages and UPDATE only `name`, `position` and
+`archived_at`; nobody may DELETE a stage (the migration revokes DELETE from the service role
+too). `position` stays unique across live and archived
+stages of a pipeline (the existing constraint), so a reorder writes in two steps (C-29).
+
+**C-27. Desired, create.** The name is trimmed, 1 to 100 characters, one line, and unique
+among the pipeline's live stages when compared case-insensitively
+(`Conflict`, `details.reason="name_in_use"`). `outcome` is `open`, `won` or `lost` and never
+changes afterwards (`won_at` follows it, inbox-home.md H-2). The new stage goes last: its
+position is one more than the largest position in the pipeline, live or archived. A pipeline
+holds at most 30 live stages and at most 200 stages in all, archived ones included
+(`Conflict`, `details.reason="stage_limit"`); the total cap keeps a pipeline's read and its
+action answer inside the 2,000-row read cap and the dispatcher's JSON budget.
+
+**C-28. Desired, rename.** Same name rule as C-27. Renaming a stage to its own name succeeds
+and changes nothing. An archived stage cannot be renamed (`Conflict`, `stage_archived`).
+
+**C-29. Desired, reorder.** `stageIds` lists every live stage of the pipeline exactly once, in
+the new order, at most 30. A duplicate is `ValidationFailed`. A list that misses a live
+stage, or names one that is archived, absent or in another pipeline, is
+`Conflict` with `details.reason="stage_set_changed"` (someone else changed the pipeline; the
+caller reloads). Live positions become 0 to n-1 in that order and archived stages follow in
+their old order, written in two steps (shift every stage far up, then place) so the unique
+position constraint never fires.
+
+**C-30. Desired, archive and restore.** Archive sets `archived_at` from the injected clock.
+The last live stage cannot be archived (`Conflict`, `last_stage`). A stage that holds deals
+needs `moveDealsTo`, another live stage of the same pipeline: the same transaction moves every
+deal there (revision plus one, `updated_at` from the clock) before archiving. Without it the
+answer is `Conflict` with `details.reason="stage_has_deals"` and `dealCount`; nothing is
+written. `moveDealsTo` that is the stage itself, archived, absent or foreign is
+`ValidationFailed`, `Conflict` (`stage_archived`) or `TenantDenied` in that order of
+check. Archiving an archived stage and restoring a live one succeed and change nothing.
+Restore clears `archived_at` and puts the stage last (C-27's position rule), and fails with
+`stage_limit` when 30 live stages exist, and with `name_in_use` when a live stage now has the
+same name (an archived stage cannot be renamed, so rename the live one first). The bulk move
+of an archive runs no automations and emits no `deal.won`: the one outbox event is
+`crm.stage.archive`, which the deal-won automation does not read (a known limit). When a deal
+lands in the stage after the count, the database trigger refuses the archive with
+`stage_has_deals` and no `dealCount`.
+
+**C-31. Desired, deals and archived stages.** `crm.deal.create` and `crm.deal.move-stage`
+refuse an archived destination with `Conflict` and `details.reason="stage_archived"`, after
+C-13's and C-14's ownership and membership checks. The database backs both rules: a trigger
+on `crm_deals` refuses an insert or stage change into an archived stage, and a trigger on
+`crm_stages` refuses to archive a stage that still holds a deal (both `check_violation`, so a
+race between a move and an archive ends in one of the two clean refusals, never a deal in an
+archived stage).
+
+**C-32. Desired, result and reads.** Every stage action answers with the whole edited
+pipeline: `{ id, name, stages, archivedStages }`, each stage `{ id, name, position, outcome }`,
+both lists ordered by position then ID. `listPipelines` (HTTP, MCP and the automation
+hub) returns the same shape; `stages` holds live stages only, so the board and the new-deal
+form need no change. The routes are `POST /v1/crm/pipelines/:id/stages` (create, 201),
+`POST /v1/crm/pipelines/:id/stages/order`, `POST /v1/crm/stages/:id/rename`,
+`/archive` and `/restore`. A refusal reaches HTTP callers as 409 `Conflict` with
+`details.reason` set to `name_in_use`, `stage_limit`, `last_stage`, `stage_archived`,
+`stage_set_changed` or `stage_has_deals` (that one adds `dealCount`); the API error map lists
+these reasons, or they would leave as the generic `conflict`. The member MCP server carries
+the five actions as write tools (`create_stage`, `rename_stage`, `reorder_stages`,
+`archive_stage`, `restore_stage`).
+
+**C-33. Desired, tests.** Real Postgres tests under the runtime role prove C-26 to C-31,
+including a two-tenant denial for every action, the reorder under the unique constraint, an
+archive that moves deals, the refused archive with deals, replay of each action, a race
+between a deal move and an archive, and the grant boundary (no DELETE, no UPDATE of
+`outcome` or `pipeline_id`). A dashboard end-to-end run covers the editor.
 
 ## Frozen API and examples
 

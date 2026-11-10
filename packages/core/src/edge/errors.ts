@@ -89,6 +89,8 @@ const CONFLICT_REASONS = new Set([
   // booking.md B-31 (booking_over; the dashboard already words it) and booking-self-service.md BS-1, BS-6, BS-8: why the
   // customer's link refuses a change.
   "booking_over", "link_expired", "too_late", "same_time", "not_changeable",
+  // crm.md C-27..C-31: why a stage edit, or a deal into an archived stage, is refused.
+  "name_in_use", "stage_limit", "last_stage", "stage_archived", "stage_set_changed", "stage_has_deals",
   // industry-templates.md IT-4: a tenant applies one template.
   "template_already_applied",
   // browser-tasks.md BT-9, BT-11, BT-12: why a website task cannot start or a write task is refused.
@@ -142,6 +144,8 @@ function conflictDetails(details: Readonly<Record<string, JsonValue>>): Record<s
     safe.approvedBy = details.approvedBy;
   if (safe.reason === "invalid_currency" && typeof details.currency === "string" && STORED_CURRENCY.test(details.currency))
     safe.currency = details.currency;
+  // C-30: a stage with deals says how many, so the owner sees what moves.
+  if (safe.reason === "stage_has_deals" && count(details.dealCount)) safe.dealCount = details.dealCount;
   // PL-4: an open plan checkout answers its stored Stripe Checkout URL, so the owner goes back to it.
   if (safe.reason === "checkout_open" && typeof details.checkoutUrl === "string" && STRIPE_CHECKOUT_URL.test(details.checkoutUrl))
     safe.checkoutUrl = details.checkoutUrl;

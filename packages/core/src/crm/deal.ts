@@ -22,11 +22,17 @@ import {
 
 const exists = async (tx: Transaction, sql: string, params: unknown[]) => (await tx.query(sql, params)).rowCount === 1;
 
-async function stagePipeline(tx: Transaction, tenantId: string, stageId: string): Promise<string | undefined> {
-  return (await tx.query<{ pipeline_id: string }>(
-    "SELECT pipeline_id FROM crm_stages WHERE tenant_id=$1 AND id=$2", [tenantId, stageId],
-  )).rows[0]?.pipeline_id;
+async function stagePipeline(tx: Transaction, tenantId: string, stageId: string): Promise<{ pipelineId: string; archived: boolean } | undefined> {
+  const row = (await tx.query<{ pipeline_id: string; archived_at: Date | null }>(
+    "SELECT pipeline_id, archived_at FROM crm_stages WHERE tenant_id=$1 AND id=$2", [tenantId, stageId],
+  )).rows[0];
+  return row && { pipelineId: row.pipeline_id, archived: row.archived_at !== null };
 }
+
+/** crm.md C-31: an archived stage takes no new deals. The database refuses it too (trigger), for a race. */
+const stageArchived = () => new Conflict("The stage is archived", { reason: "stage_archived" });
+const archivedStageError = (error: unknown) =>
+  pgCode(error) === "23514" && pgConstraint(error) === "crm_deals_stage_live" ? stageArchived() : undefined;
 
 async function pipelineOwned(tx: Transaction, tenantId: string, pipelineId: string): Promise<boolean> {
   return exists(tx, "SELECT 1 FROM crm_pipelines WHERE tenant_id=$1 AND id=$2", [tenantId, pipelineId]);
@@ -48,10 +54,11 @@ export const createDealHandler: ActionHandler = {
     const contactOwned = await exists(tx,
       "SELECT 1 FROM crm_contacts WHERE tenant_id=$1 AND id=$2 FOR KEY SHARE", [tenantId, input.contactId]);
     const pipelineFound = await pipelineOwned(tx, tenantId, input.pipelineId);
-    const stagePipelineId = await stagePipeline(tx, tenantId, input.stageId);
-    if (!contactOwned || !pipelineFound || stagePipelineId === undefined) throw new TenantDenied();
-    if (stagePipelineId !== input.pipelineId)
+    const stage = await stagePipeline(tx, tenantId, input.stageId);
+    if (!contactOwned || !pipelineFound || stage === undefined) throw new TenantDenied();
+    if (stage.pipelineId !== input.pipelineId)
       throw new ValidationFailed("The stage does not belong to the pipeline");
+    if (stage.archived) throw stageArchived();
     const row = (await tx.query<DealRow>(
       `INSERT INTO crm_deals (tenant_id,id,contact_id,pipeline_id,stage_id,title,revision,created_at,updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,1,$7,$7) RETURNING ${dealColumns}`,
@@ -65,7 +72,7 @@ export const createDealHandler: ActionHandler = {
       return new Conflict("The deal ID is already in use", {
         reason: "id_in_use", postgresCode: "23505", constraint: "crm_deals_pkey",
       });
-    return undefined;
+    return archivedStageError(error);
   },
 };
 
@@ -92,12 +99,13 @@ export const moveDealStageHandler: ActionHandler = {
       "SELECT pipeline_id, currency FROM crm_deals WHERE tenant_id=$1 AND id=$2", [tenantId, input.dealId],
     )).rows[0];
     const pipelineFound = await pipelineOwned(tx, tenantId, input.pipelineId);
-    const stagePipelineId = await stagePipeline(tx, tenantId, input.stageId);
-    if (!deal || !pipelineFound || stagePipelineId === undefined) throw new TenantDenied();
+    const stage = await stagePipeline(tx, tenantId, input.stageId);
+    if (!deal || !pipelineFound || stage === undefined) throw new TenantDenied();
     if (input.pipelineId !== deal.pipeline_id)
       throw new ValidationFailed("Deals cannot move between pipelines");
-    if (stagePipelineId !== input.pipelineId)
+    if (stage.pipelineId !== input.pipelineId)
       throw new ValidationFailed("The stage does not belong to the deal's pipeline");
+    if (stage.archived) throw stageArchived();
     // inbox-home.md H-1 revision 4: the table checks every updated row's currency, and a deal
     // stored under the earlier check may hold a code outside ISO 4217 until its value is fixed.
     if (deal.currency !== null && !currencyCodeSchema.safeParse(deal.currency).success)
@@ -117,4 +125,5 @@ export const moveDealStageHandler: ActionHandler = {
       });
     return { result: dealRecord(row) };
   },
+  mapError: archivedStageError,
 };
