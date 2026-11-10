@@ -65,6 +65,19 @@
   const fmt = () => formatsFor(state.view && state.view.timeZone ? state.view.timeZone : visitorZone);
   const zoneLine = () => `Times are in ${fmt().name}${state.view ? `, local time for ${state.view.businessName}` : ""}.`;
 
+  /** The visitor's own clock time for an instant ("8:00 AM your time"), or null when it reads the same. */
+  function visitorTime(iso) {
+    const at = new Date(iso);
+    const ours = fmt();
+    const theirs = formatsFor(visitorZone);
+    if (ours === theirs) return null;
+    const sameDay = ours.dayKey.format(at) === theirs.dayKey.format(at);
+    if (sameDay && ours.timeLabel.format(at) === theirs.timeLabel.format(at)) return null;
+    return sameDay ? `${theirs.timeLabel.format(at)} your time` : `${theirs.dayLabel.format(at)}, ${theirs.timeLabel.format(at)} your time`;
+  }
+
+  const yoursLine = (iso) => { const yours = visitorTime(iso); return yours ? h("div", { class: "booker-hint" }, yours) : null; };
+
   /** Build an element; strings become text nodes, never markup. */
   function h(tag, attrs, ...children) {
     const element = document.createElement(tag);
@@ -119,6 +132,7 @@
     return h("div", { class: "booker-summary" },
       h("strong", {}, fmt().longDay.format(start)),
       h("div", {}, `${fmt().timeLabel.format(start)} – ${fmt().timeLabel.format(end)}`),
+      yoursLine(view.startsAt),
       h("div", { class: "booker-hint" }, zoneLine()));
   }
 
@@ -150,7 +164,7 @@
     if (view.state === "moved") {
       const next = view.movedTo;
       return [...header(view), h("h2", {}, "This appointment was moved"),
-        h("p", { class: "booker-status" }, `It is now on ${fmt().longDay.format(new Date(next.startsAt))}, ${fmt().timeLabel.format(new Date(next.startsAt))}.`),
+        h("p", { class: "booker-status" }, `It is now on ${fmt().longDay.format(new Date(next.startsAt))}, ${fmt().timeLabel.format(new Date(next.startsAt))} ${fmt().name}.`),
         h("a", { class: "booker-link", href: `/manage/${next.token}` }, "See the new appointment")];
     }
     if (step === "done") return doneView();
@@ -206,7 +220,7 @@
         : h("div", { class: "booker-grid" }, slots.map((slot) => h("button", {
           type: "button", class: "booker-choice", disabled: locked(),
           onclick: go(() => { state.slot = slot; state.notice = ""; state.step = "confirm"; render(); }),
-        }, fmt().timeLabel.format(new Date(slot.startsAt))))),
+        }, fmt().timeLabel.format(new Date(slot.startsAt)), ((yours) => (yours ? h("small", {}, yours) : null))(visitorTime(slot.startsAt))))),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days")];
   }
 
@@ -219,7 +233,8 @@
     }
     return [h("h2", { tabindex: "-1", "data-focus": true }, "Move your appointment to"),
       h("div", { class: "booker-summary" }, h("strong", {}, fmt().longDay.format(new Date(slot.startsAt))),
-        h("div", {}, `${fmt().timeLabel.format(new Date(slot.startsAt))} – ${fmt().timeLabel.format(new Date(slot.endsAt))}`)),
+        h("div", {}, `${fmt().timeLabel.format(new Date(slot.startsAt))} – ${fmt().timeLabel.format(new Date(slot.endsAt))} ${fmt().name}`),
+        yoursLine(slot.startsAt)),
       noticeLine(),
       h("button", { type: "button", class: "booker-primary", disabled: state.submitting, onclick: reschedule }, state.submitting ? "Moving…" : "Move my appointment"),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "time"; state.notice = ""; render(); }) }, "Choose another time")];

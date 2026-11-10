@@ -73,7 +73,9 @@ describe("hosted booker render", () => {
     const text = textOf(renders.at(-1)!);
     expect(text).toContain("Wed, Nov 11");
     expect(text).not.toContain("Tue, Nov 10");
-    expect(text).toContain("Times are in Central Time (Chicago), local time for Test Co. Your time is shown under each one.");
+    // The day buttons show counts, not times, so the day step names the zone only.
+    expect(text).toContain("Times are in Central Time (Chicago), local time for Test Co.");
+    expect(text).not.toContain("shown under each one");
     expect(text).not.toContain("America/");
   });
 

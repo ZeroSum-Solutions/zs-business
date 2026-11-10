@@ -276,9 +276,10 @@ function CalendarScreen({ resources }: { resources: readonly ResourceSummary[] }
           options={resources.map((item) => ({ value: item.id, label: resourceLabel(item) }))}
           onChange={setResourceId}
         />
-        <Segmented label="View" value={view ?? "day"} options={[{ value: "day", label: "Day" }, { value: "week", label: "Week" }]} onChange={setView} />
+        {/* No view switch or date until the opening view is settled, so nothing flips under the owner. */}
+        {view === null ? null : <Segmented label="View" value={view} options={[{ value: "day", label: "Day" }, { value: "week", label: "Week" }]} onChange={setView} />}
       </div>
-      <div className="mb-4 flex items-center gap-2">
+      {view === null ? null : <div className="mb-4 flex items-center gap-2">
         <Button variant="secondary" size="icon" aria-label={view === "week" ? "Previous week" : "Previous day"} onClick={() => setDateKey(addDays(current, -step))}><CaretLeft aria-hidden /></Button>
         <Button variant="secondary" size="icon" aria-label={view === "week" ? "Next week" : "Next day"} onClick={() => setDateKey(addDays(current, step))}><CaretRight aria-hidden /></Button>
         {current !== today ? <Button variant="secondary" onClick={() => setDateKey(today)}>Today</Button> : null}
@@ -288,7 +289,7 @@ function CalendarScreen({ resources }: { resources: readonly ResourceSummary[] }
             <><span className="sm:hidden">{formatDateKey(current)}</span><span className="hidden sm:inline">{formatDateKey(current, "long")}</span></>
           ) : `Week of ${formatDateKey(weekStart)}`}
         </h2>
-      </div>
+      </div>}
 
       {view === null ? (
         waitingOffline(todays) ? <OfflineNote /> : <LoadingRows rows={4} label="Loading calendar" />

@@ -52,9 +52,10 @@ function DealCard({ deal, pipeline, contactName, onMove, onEdit, moving, blocked
           {pipeline.stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}
         </Select>
       </div>
-      <div className="mt-1 flex items-center justify-between gap-2">
+      {/* On a narrow desktop column "Details" wraps under the date and stays on the right. */}
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2">
         <p className="text-xs text-meta">Updated {relativeTime(deal.updatedAt).toLowerCase()}</p>
-        <Button variant="ghost" className="-mr-2" disabled={moving} aria-label={`Edit details of ${deal.title}`} onClick={() => onEdit(deal)}>Details</Button>
+        <Button variant="ghost" className="-mr-2 ml-auto" disabled={moving} aria-label={`Edit details of ${deal.title}`} onClick={() => onEdit(deal)}>Details</Button>
       </div>
     </li>
   );

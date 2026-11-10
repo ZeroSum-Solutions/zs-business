@@ -369,7 +369,7 @@ function NextAppointments({ needs, className }: { needs: Needs; className?: stri
                           <span className="min-w-0 truncate text-caption text-fg-2">{customer ?? "No customer linked"}</span>
                           {/* The service is already the title; the badge then says where it was booked, if online. */}
                           {resource && !title.fromService ? <Badge className="ml-auto" tone={resourceTone(resource.id, resources.data)}>{resourceLabel(resource)}</Badge>
-                            : booking.source === "website" ? <Badge className="ml-auto" tone="accent"><Globe aria-hidden />Website</Badge> : null}
+                            : booking.source === "website" ? <Badge className="ml-auto" tone="neutral"><Globe aria-hidden />Website</Badge> : null}
                         </div>
                       </div>
                     </li>

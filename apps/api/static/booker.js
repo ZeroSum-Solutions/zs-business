@@ -92,11 +92,16 @@
     return sameDay ? `${theirs.timeLabel.format(at)} your time` : `${theirs.dayLabel.format(at)}, ${theirs.timeLabel.format(at)} your time`;
   }
 
-  /** "10:00 AM – 11:00 AM Pacific Time (Los Angeles)", plus the visitor's time when it differs. */
+  /** "10:00 AM – 11:00 AM Pacific Time (Los Angeles)". */
   function rangeLine(startsAt, endsAt) {
     const f = biz();
+    return `${f.timeLabel.format(new Date(startsAt))} – ${f.timeLabel.format(new Date(endsAt))} ${f.name}`;
+  }
+
+  /** The visitor's own time on a line of its own, or null when it reads the same. */
+  function yoursLine(startsAt) {
     const yours = visitorTime(startsAt);
-    return `${f.timeLabel.format(new Date(startsAt))} – ${f.timeLabel.format(new Date(endsAt))} ${f.name}${yours ? ` (${yours})` : ""}`;
+    return yours ? h("div", { class: "booker-hint" }, yours.charAt(0).toUpperCase() + yours.slice(1)) : null;
   }
 
   /** Build an element; strings become text nodes, never markup. */
@@ -199,9 +204,10 @@
     return state.notice ? h("p", { class: "booker-error", role: "alert" }, state.notice) : null;
   }
 
-  function zoneHint() {
+  /** Names the zone; on the times step, also says the visitor's own time is under each one. */
+  function zoneHint(slots) {
     const f = biz();
-    const differs = state.slots.some((slot) => visitorTime(slot.startsAt) !== null);
+    const differs = Boolean(slots) && slots.some((slot) => visitorTime(slot.startsAt) !== null);
     const where = state.page.businessName ? ` local time for ${state.page.businessName}` : " the business's local time";
     return h("p", { class: "booker-hint" }, differs
       ? `Times are in ${f.name},${where}. Your time is shown under each one.`
@@ -241,8 +247,8 @@
           class: "booker-choice",
           disabled: locked(),
           onclick: go(() => { state.slot = slot; state.notice = ""; state.errors = {}; state.step = "details"; render(); }),
-        }, f.timeLabel.format(new Date(slot.startsAt)), visitorTime(slot.startsAt) ? h("small", {}, visitorTime(slot.startsAt)) : null))),
-      slots.length === 0 ? null : zoneHint(),
+        }, f.timeLabel.format(new Date(slot.startsAt)), ((yours) => (yours ? h("small", {}, yours) : null))(visitorTime(slot.startsAt))))),
+      slots.length === 0 ? null : zoneHint(slots),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days"),
     ];
   }
@@ -276,7 +282,8 @@
   function slotSummary(slot) {
     return h("div", { class: "booker-summary" },
       h("strong", {}, biz().longDay.format(new Date(slot.startsAt))),
-      h("div", {}, rangeLine(slot.startsAt, slot.endsAt)));
+      h("div", {}, rangeLine(slot.startsAt, slot.endsAt)),
+      yoursLine(slot.startsAt));
   }
 
   /** No answer we can trust: show what was sent and offer only the same request again. */
@@ -346,6 +353,7 @@
       h("div", { class: "booker-done" },
         h("h2", { tabindex: "-1", "data-focus": true }, "You're booked"),
         h("p", {}, `${biz().longDay.format(new Date(result.startsAt))}, ${rangeLine(result.startsAt, result.endsAt)}`),
+        yoursLine(result.startsAt),
         h("p", { class: "booker-hint" }, `Reference ${result.requestId.slice(0, 8)}`)),
       h("button", { type: "button", class: "booker-link", onclick: () => { resetForm(); state.step = "date"; loadSlots(); } }, "Book another time"),
     ];

@@ -12,7 +12,8 @@ const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-sr
 
 const asset = (name: string) => readFileSync(new URL(`../../api/static/${name}`, import.meta.url), "utf8");
 
-/** 9, 10 and 11 AM Chicago (15:00Z to 17:00Z in winter) on the two days after `from`. */
+/** 9, 10 and 11 AM Chicago (15:00Z to 17:00Z in winter; the tests pin a November clock) on the two days after `from`. */
+const WINTER = new Date("2026-11-10T12:00:00.000Z");
 function slotsAfter(from: string) {
   const day = new Date(from);
   day.setUTCHours(0, 0, 0, 0);
@@ -60,17 +61,20 @@ test.describe("visitor in another zone", () => {
 
   test("shows business times with the visitor's time under each, and a ten-digit US phone books as +1", async ({ page }) => {
     const posted: string[] = [];
+    await page.clock.setFixedTime(WINTER);
     await serve(page, "America/Chicago", posted);
     await page.goto(`${ORIGIN}/book/${KEY}`);
     await expect(page.getByRole("heading", { name: "Pick a day" })).toBeVisible();
-    await expect(page.getByText("Times are in Central Time (Chicago), local time for Ironside Strength. Your time is shown under each one.")).toBeVisible();
+    await expect(page.getByText("Times are in Central Time (Chicago), local time for Ironside Strength.")).toBeVisible();
     await expect(page.getByText("America/Chicago")).toHaveCount(0);
     await page.getByRole("button", { name: /3 times$/ }).first().click();
+    await expect(page.getByText("Times are in Central Time (Chicago), local time for Ironside Strength. Your time is shown under each one.")).toBeVisible();
     const first = page.locator(".booker-grid button").first();
     await expect(first).toContainText("9:00 AM");
     await expect(first).toContainText("7:00 AM your time");
     await first.click();
-    await expect(page.getByText(/9:00 AM – 10:00 AM Central Time \(Chicago\) \(7:00 AM your time\)/)).toBeVisible();
+    await expect(page.locator(".booker-summary")).toContainText("9:00 AM – 10:00 AM Central Time (Chicago)");
+    await expect(page.locator(".booker-summary")).toContainText("7:00 AM your time");
     await expect(page.getByText("For example (555) 555-0123.", { exact: false })).toBeVisible();
     await page.getByLabel("Name", { exact: true }).fill("Dana Ruiz");
     await page.getByLabel("Email", { exact: true }).fill("dana.ruiz@example.com");
@@ -85,6 +89,7 @@ test.describe("visitor in the business's zone", () => {
   test.use({ timezoneId: "America/Chicago" });
 
   test("names the zone and adds no second time", async ({ page }) => {
+    await page.clock.setFixedTime(WINTER);
     await serve(page, "America/Chicago", []);
     await page.goto(`${ORIGIN}/book/${KEY}`);
     await expect(page.getByText("Times are in Central Time (Chicago), local time for Ironside Strength.")).toBeVisible();
