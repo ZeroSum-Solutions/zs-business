@@ -4,10 +4,11 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  ActionError, SELF_CANCEL_ACTION, SELF_RESCHEDULE_ACTION, type MessageSendRequested,
+  ActionError, idempotencyKeySchema, SELF_CANCEL_ACTION, SELF_RESCHEDULE_ACTION, type MessageSendRequested,
 } from "@zs/contracts";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
-import { confirmBooking } from "../../src/edge/confirm-booking.js";
+import { businessEvents } from "../../src/automation/events.js";
+import { confirmBooking, confirmBudget } from "../../src/edge/confirm-booking.js";
 import { createManageSession } from "../../src/edge/manage-session.js";
 import { createPublicSession, publicIntakeActorId } from "../../src/edge/public-session.js";
 import { confirmationMessageId, createSession, directDispatch, signManageToken, verifyManageToken, type EdgeDependencies } from "../../src/index.js";
@@ -148,6 +149,67 @@ describe("the confirmation email (BS-3)", () => {
     expect((await bookingRow(unkeyed.id)).status).toBe("confirmed");
   });
 
+  it("greets by name only when it is one plain word, so the visitor cannot put a link in the business's email", async () => {
+    const hostile = await visitorBooks({ name: "http://evil.example/verify" });
+    expect((await confirmations(hostile.id))[0]!.body).toMatch(/^Hi there,/);
+    const mail = await visitorBooks({ name: "a@evil.example Bob" });
+    expect((await confirmations(mail.id))[0]!.body).toMatch(/^Hi there,/);
+    const plain = await visitorBooks({ name: "Zoë O'Neil-Smith" });
+    expect((await confirmations(plain.id))[0]!.body).toMatch(/^Hi Zoë,/);
+  });
+
+  it("builds a link only on https (or a loopback http), never over plain http to a real host", async () => {
+    const insecure = { ...deps(), bookingKeys: { secret: SECRET, publicBaseUrl: "http://hub.example.com" } };
+    const startsAt = nextStart();
+    const reply = await createPublicSession(insecure, { tenantId: fixture.a.tenantId, pageId }).request({
+      resourceId, startsAt, name: "Plain Http", email: `${randomUUID().slice(0, 8)}@example.com`, phone: null, notes: null,
+      consent: { email: false, sms: false }, disclosureVersion: "v1", channel: "widget", website: "",
+    }, randomUUID());
+    expect(reply).toMatchObject({ status: "confirmed", startsAt });
+    const id = (await fixture.service((tx) => tx.query<{ id: string }>(
+      "SELECT id FROM bookings WHERE tenant_id=$1 AND intake_item_id=$2", [fixture.a.tenantId, reply.requestId]))).rows[0]!.id;
+    expect(await confirmations(id)).toHaveLength(0);
+    const loopback = await visitorBooks({ keys: false });
+    const run = directDispatch(deps(), fixture.a.tenantId, publicIntakeActorId(fixture.a.tenantId), async () => undefined,
+      { manage: { secret: SECRET, publicBaseUrl: "http://localhost:8787" } });
+    expect(await confirmBooking(run, fixture.a.tenantId, loopback.id, "booked")).toBe("queued");
+  });
+
+  it("writes to the contact an owner linked the request to (the linked branch)", async () => {
+    const contact = randomUUID();
+    const email = `${randomUUID().slice(0, 8)}@example.com`;
+    await fixture.service((tx) => tx.query(
+      `INSERT INTO crm_contacts (tenant_id,id,display_name,normalized_email,created_at,updated_at) VALUES ($1,$2,'Linked Person',$3,$4,$4)`,
+      [fixture.a.tenantId, contact, email, new Date(START)]));
+    const made = await visitorBooks({ keys: false });
+    await fixture.service((tx) => tx.query(
+      "UPDATE intake_items SET status='linked', contact_id=$3, reviewed_at=$4, reviewed_by=$5 WHERE tenant_id=$1 AND id=$2",
+      [fixture.a.tenantId, made.intakeItemId, contact, new Date(START), owner]));
+    const run = directDispatch(deps(), fixture.a.tenantId, publicIntakeActorId(fixture.a.tenantId), async () => undefined,
+      { manage: { secret: SECRET, publicBaseUrl: BASE } });
+    expect(await confirmBooking(run, fixture.a.tenantId, made.id, "booked")).toBe("queued");
+    expect((await confirmations(made.id))[0]).toMatchObject({ contactId: contact });
+  });
+
+  it("says not_confirmed for a booking that has already started", async () => {
+    const made = await visitorBooks({ keys: false });
+    const late = directDispatch(deps(Date.parse(made.startsAt) + 60_000), fixture.a.tenantId, publicIntakeActorId(fixture.a.tenantId),
+      async () => undefined, { manage: { secret: SECRET, publicBaseUrl: BASE } });
+    expect(await confirmBooking(late, fixture.a.tenantId, made.id, "booked")).toBe("not_confirmed");
+    expect(await confirmations(made.id)).toHaveLength(0);
+  });
+
+  it("gives up on a stalled confirmation instead of holding the visitor's answer, and skips it when no time is left", async () => {
+    const stalled = () => new Promise<never>(() => undefined);
+    const started = Date.now();
+    expect(await confirmBooking(stalled as never, fixture.a.tenantId, randomUUID(), "booked", 40)).toBe("failed");
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(await confirmBooking(stalled as never, fixture.a.tenantId, randomUUID(), "booked", 0)).toBe("failed");
+    expect(confirmBudget(undefined)).toBeGreaterThan(0);
+    expect(confirmBudget(() => 1000)).toBeLessThanOrEqual(0);
+    expect(confirmBudget(() => 10_000)).toBeGreaterThan(0);
+  });
+
   it("never fails the visitor's booking when the confirmation cannot be built", async () => {
     const broken = { ...deps(), bookingKeys: { secret: 12345, publicBaseUrl: BASE } } as unknown as EdgeDependencies;
     const startsAt = nextStart();
@@ -181,7 +243,8 @@ describe("what a token reaches (BS-1, BS-2, BS-4)", () => {
 
   it("answers a forged token with no handle", () => {
     const token = tokenFor(randomUUID(), "2026-11-02T09:00:00.000Z");
-    expect(manage().open(token.slice(0, -2) + "AA")).toBeNull();
+    // Change the last character to a different one, so the token is surely not the signed one.
+    expect(manage().open(token.slice(0, -1) + (token.endsWith("A") ? "B" : "A"))).toBeNull();
     expect(createManageSession(deps(), { current: "z".repeat(40) }, BASE).open(token)).toBeNull();
   });
 
@@ -296,6 +359,31 @@ describe("cancelling (BS-6, BS-7)", () => {
       .toMatchObject({ code: "Conflict", details: { reason: "too_late" } });
     expect((await bookingRow(made.id)).status).toBe("confirmed");
   });
+
+  it("answers too_late, not booking_over, for a booking that began and ended", async () => {
+    const made = await visitorBooks();
+    const run = directDispatch(deps(Date.parse(made.startsAt) + 3 * 3600_000), fixture.a.tenantId, publicIntakeActorId(fixture.a.tenantId), async () => undefined);
+    expect(await rejection(run({
+      actionType: SELF_CANCEL_ACTION, target: { tenantId: fixture.a.tenantId, type: "booking", id: made.id },
+      approvalReference: { tenantId: fixture.a.tenantId, id: randomUUID() }, idempotencyKey: `manage:${made.id}:${randomUUID()}`,
+      payload: { bookingId: made.id },
+    }))).toMatchObject({ code: "Conflict", details: { reason: "too_late" } });
+  });
+
+  it("is allowed on a read-only plan, while moving is not (PL-8)", async () => {
+    const cancelling = await visitorBooks();
+    const moving = await visitorBooks();
+    await database.pool.query(
+      `INSERT INTO tenant_plans (tenant_id,status,read_only_after,created_at,updated_at) VALUES ($1,'none',$2,now(),now())
+         ON CONFLICT (tenant_id) DO UPDATE SET read_only_after=$2`, [fixture.a.tenantId, new Date(START - 86400_000)]);
+    try {
+      expect(await rejection(handleFor(moving.id, moving.startsAt).reschedule({ startsAt: nextStart() }, randomUUID())))
+        .toMatchObject({ code: "Conflict", details: { reason: "plan_read_only" } });
+      expect((await handleFor(cancelling.id, cancelling.startsAt).cancel({}, randomUUID())).state).toBe("cancelled");
+    } finally {
+      await database.pool.query("DELETE FROM tenant_plans WHERE tenant_id=$1", [fixture.a.tenantId]);
+    }
+  });
 });
 
 describe("rescheduling (BS-8)", () => {
@@ -320,6 +408,27 @@ describe("rescheduling (BS-8)", () => {
     expect(old.state).toBe("moved");
     expect(old.movedTo).toMatchObject({ startsAt: target });
     expect(verifyManageToken({ current: SECRET }, old.movedTo!.token)).toMatchObject({ bookingId: ref.bookingId });
+  });
+
+  it("leads an old link through two moves to the live booking, and tells automation about each new booking", async () => {
+    const made = await visitorBooks();
+    const first = await handleFor(made.id, made.startsAt).reschedule({ startsAt: nextStart() }, randomUUID());
+    const second = await manage().open(first.token)!.reschedule({ startsAt: nextStart() }, randomUUID());
+    const seen = await handleFor(made.id, made.startsAt).view();
+    expect(seen).toMatchObject({ state: "moved", movedTo: { startsAt: second.view.startsAt } });
+    expect(verifyManageToken({ current: SECRET }, seen.movedTo!.token)!.bookingId).toBe(verifyManageToken({ current: SECRET }, second.token)!.bookingId);
+    const created = verifyManageToken({ current: SECRET }, second.token)!.bookingId;
+    const events = await fixture.service(async (tx) => {
+      const rows = (await tx.query<{ tenant_id: string; id: string; event_type: string; payload: unknown; created_at: Date }>(
+        "SELECT tenant_id, id, event_type, payload, created_at FROM outbox WHERE tenant_id=$1 AND event_type='booking.self_reschedule' AND payload->'result'->'booking'->>'id'=$2",
+        [fixture.a.tenantId, created])).rows;
+      return (await Promise.all(rows.map((row) => businessEvents(tx, row)))).flat();
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "booking.created",
+      data: { bookingId: created, source: "website", intakeItemId: made.intakeItemId, startsAt: second.view.startsAt },
+    });
   });
 
   it("replays one key to the same new booking, and refuses the same key with another time", async () => {
@@ -412,5 +521,19 @@ describe("storage (BS-11)", () => {
     };
     expect(await clash(made.id, made.id)).toBe("bookings_rescheduled_from_other");
     expect(await clash(made.id, randomUUID())).toBe("bookings_rescheduled_from_fk");
+    // A booking of another tenant exists, yet the composite key (tenant, id) refuses it: a plain key on the id alone would not.
+    const replyB = await createPublicSession(deps(), { tenantId: fixture.b.tenantId, pageId: pageIdB }).request({
+      resourceId: resourceIdB, startsAt: "2026-12-02T09:00:00.000Z", name: "Tenant B", email: `${randomUUID().slice(0, 8)}@example.com`, phone: null, notes: null,
+      consent: { email: false, sms: false }, disclosureVersion: "v1", channel: "widget", website: "",
+    }, randomUUID());
+    const idB = (await fixture.service((tx) => tx.query<{ id: string }>(
+      "SELECT id FROM bookings WHERE tenant_id=$1 AND intake_item_id=$2", [fixture.b.tenantId, replyB.requestId]))).rows[0]!.id;
+    expect(await clash(made.id, idB)).toBe("bookings_rescheduled_from_fk");
+  });
+
+  it("reserves the manage: and confirm: key prefixes so no owner key can take a customer's key first", () => {
+    expect(idempotencyKeySchema.safeParse(`manage:${randomUUID()}:${randomUUID()}`).success).toBe(false);
+    expect(idempotencyKeySchema.safeParse(`confirm:${randomUUID()}`).success).toBe(false);
+    expect(idempotencyKeySchema.safeParse(randomUUID()).success).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 5 (2026-10-19). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 8 (2026-11-10; revision 5 text kept below). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.

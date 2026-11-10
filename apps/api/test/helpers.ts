@@ -34,7 +34,7 @@ export const clock = { now: () => new Date(NOW) };
 /** Synthetic booking key secrets, built at runtime like SECRET. */
 export const KEY_SECRET = ["test", "booking", "k".repeat(32)].join("-");
 export const PREVIOUS_KEY_SECRET = ["test", "booking", "p".repeat(32)].join("-");
-export const PUBLIC_BASE_URL = "http://book.test";
+export const PUBLIC_BASE_URL = "https://book.test";
 /** Synthetic unsubscribe token secrets, built at runtime like SECRET. */
 export const UNSUBSCRIBE_SECRET = ["test", "unsubscribe", "u".repeat(32)].join("-");
 export const SIGN_IN_LIMITER_SECRET = ["test", "sign-in-limiter", "l".repeat(32)].join("-");

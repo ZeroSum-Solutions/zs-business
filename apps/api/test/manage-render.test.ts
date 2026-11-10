@@ -99,6 +99,27 @@ describe("booking link page", () => {
     expect(missing.last().map(textOf).join(" ")).toContain("This link is not available");
   });
 
+  it("offers a retry, not a dead link, when the first load fails or the service is busy", async () => {
+    let attempts = 0;
+    const flaky = page(() => {
+      attempts += 1;
+      if (attempts === 1) return "offline";
+      if (attempts === 2) return { status: 503, body: null };
+      if (attempts === 3) return { status: 429, body: { error: { code: "RateLimited" } }, headers: { "retry-after": "60" } };
+      return { status: 200, body: VIEW };
+    });
+    await flaky.settle();
+    expect(flaky.last().map(textOf).join(" ")).not.toContain("This link is not available");
+    expect(flaky.last().map(textOf).join(" ")).toContain("could not reach");
+    await flaky.click("Try again");
+    expect(flaky.last().map(textOf).join(" ")).not.toContain("This link is not available");
+    expect(flaky.last().map(textOf).join(" ")).toContain("did not answer");
+    await flaky.click("Try again");
+    expect(flaky.last().map(textOf).join(" ")).toContain("Too many requests");
+    await flaky.click("Try again");
+    expect(flaky.last().map(textOf).join(" ")).toContain("Cancel appointment");
+  });
+
   it("cancels after a second step, sending one key and an empty body", async () => {
     const p = page((call) => call.method === "POST" ? { status: 200, body: { ...VIEW, state: "cancelled", canChange: false } } : { status: 200, body: VIEW });
     await p.settle();

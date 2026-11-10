@@ -21,9 +21,9 @@ import {
 import type { Transaction } from "@zs/db";
 import { manageExpiry, signManageToken, verifyManageToken, type ManageSecrets } from "../booking/manage-token.js";
 import { readClock } from "../booking/slots.js";
-import { manageView, type ManageLinkConfig } from "../booking/self-service.js";
+import { linkOrigin, manageView, type ManageLinkConfig } from "../booking/self-service.js";
 import { findSlots } from "../reads/booking.js";
-import { confirmBooking } from "./confirm-booking.js";
+import { confirmBooking, confirmBudget } from "./confirm-booking.js";
 import { only, toJson } from "./dispatch-util.js";
 import { derivedId } from "./ids.js";
 import { publicIntakeActorId } from "./public-session.js";
@@ -102,7 +102,7 @@ export function createManageSession(deps: EdgeDependencies, secrets: ManageSecre
             SELF_RESCHEDULE_ACTION, idempotencyKey, bookingId, { bookingId, newBookingId, startsAt: request.startsAt })));
           const created = output.result.booking;
           const confirm = directDispatch(deps, tenantId, publicIntakeActorId(tenantId), only(CONFIRMATION_SEND_ACTION), { manage: link });
-          await confirmBooking(confirm, tenantId, created.id, "rescheduled");
+          if (linkOrigin(publicBaseUrl)) await confirmBooking(confirm, tenantId, created.id, "rescheduled", confirmBudget(deps.timeLeft));
           return {
             view: await viewOf(created.id),
             token: signManageToken(secrets.current, { tenantId, bookingId: created.id, expiresAt: manageExpiry(created.startsAt) }),

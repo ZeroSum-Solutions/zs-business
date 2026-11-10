@@ -68,7 +68,7 @@
 
   function render() {
     const view = state.dead ? deadView()
-      : !state.view ? h("p", { class: "booker-status" }, state.notice || "Loading…")
+      : !state.view ? loadingView()
         : state.attempt && state.attempt.uncertain ? unconfirmedView() : viewFor(state.step);
     // Views are arrays with optional parts (null when absent); replaceChildren would print "null".
     root.replaceChildren(...(Array.isArray(view) ? view : [view]).filter((node) => node !== null && node !== undefined && node !== false));
@@ -92,6 +92,13 @@
       h("h1", { tabindex: "-1", "data-focus": true }, "Your appointment"),
       h("p", { class: "booker-sub" }, view.serviceName ? `${view.businessName} · ${view.serviceName}` : view.businessName),
     ];
+  }
+
+  /** Before the first answer: a loading line, or, when the first load failed, the reason and a retry (not a dead link). */
+  function loadingView() {
+    if (!state.notice) return h("p", { class: "booker-status" }, "Loading…");
+    return [h("p", { class: "booker-error", role: "alert" }, state.notice),
+      h("button", { type: "button", class: "booker-primary", onclick: async () => { state.notice = ""; render(); await loadView(); render(); } }, "Try again")];
   }
 
   function deadView() {
@@ -201,9 +208,11 @@
     const response = await call("GET", `/public/v1/manage/${token}`);
     if (response.status === 200 && response.body && typeof response.body.state === "string") { state.view = response.body; return true; }
     if (response.status === 409 && reasonOf(response) === "link_expired") state.dead = "expired";
-    else if (response.status === 0 && state.view) state.notice = OFFLINE;
+    else if (response.status === 0) state.notice = OFFLINE;
     else if (response.status === 429) state.notice = "Too many requests. Please try again shortly.";
-    else state.dead = "missing";
+    else if (response.status === 404) state.dead = "missing";
+    else if (state.view) state.notice = "The booking service did not answer properly. Please try again.";
+    else state.notice = "The booking service did not answer properly. Please try again in a moment.";
     return false;
   }
 

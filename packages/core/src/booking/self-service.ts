@@ -44,15 +44,32 @@ export interface ManageLinkConfig {
 }
 const manageConfig = (config: unknown): ManageLinkConfig => {
   const manage = (config as { manage?: Partial<ManageLinkConfig> } | null)?.manage;
-  if (!manage || typeof manage.secret !== "string" || typeof manage.publicBaseUrl !== "string")
+  if (!manage || typeof manage.secret !== "string" || typeof manage.publicBaseUrl !== "string" || !linkOrigin(manage.publicBaseUrl))
     throw new ValidationFailed("The booking link is not configured");
   return { secret: manage.secret, publicBaseUrl: manage.publicBaseUrl };
 };
 
+const trimSlashes = (url: string): string => {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end -= 1;
+  return url.slice(0, end);
+};
+
+/**
+ * BS-3: a link is built only on https, or on http for a loopback host (local runs). A bearer link must not cross
+ * the network in clear text, and a missing public address must not send customers a localhost link.
+ */
+export function linkOrigin(publicBaseUrl: string): boolean {
+  let url: URL;
+  try { url = new URL(publicBaseUrl); } catch { return false; }
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
+}
+
 /** The link a customer opens: the origin, `/manage/`, the signed token. */
 export function manageUrl(config: ManageLinkConfig, tenantId: string, bookingId: string, startsAt: Date | string): string {
   const token = signManageToken(config.secret, { tenantId, bookingId, expiresAt: manageExpiry(startsAt) });
-  return `${config.publicBaseUrl.replace(/\/+$/, "")}/manage/${token}`;
+  return `${trimSlashes(config.publicBaseUrl)}/manage/${token}`;
 }
 
 /** BS-2: a managed booking exists in the caller's tenant and came from the website. Anything else reads as missing. */
@@ -64,6 +81,15 @@ async function requireWebsiteBooking(tx: Transaction, target: Target, what: stri
   if (found.rowCount !== 1) throw new NotFound();
   return { tenantId, type: "booking", id: target.id };
 }
+
+/**
+ * BS-3: the visitor typed the name, and anyone can type any address, so the greeting uses it only when it is one
+ * plain word of letters (no link, address or number can ride in the business's email); otherwise "there".
+ */
+export const greetingName = (displayName: string | null): string => {
+  const word = firstName(displayName);
+  return /^[\p{L}\p{M}][\p{L}\p{M}'’.-]*$/u.test(word) ? word : "there";
+};
 
 const json = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 
@@ -146,7 +172,7 @@ export function confirmationMessage(input: {
     purpose: "transactional",
     subject: moved ? `Your appointment is moved to ${when}` : `Your appointment on ${when} is confirmed`,
     body: [
-      `Hi ${firstName(input.displayName)},`,
+      `Hi ${greetingName(input.displayName)},`,
       "",
       moved
         ? `Your appointment with ${business} is now on ${when} (${input.timeZone}).`
@@ -204,6 +230,24 @@ export const bookingSelfServiceHandlers: Readonly<Record<string, ActionHandler>>
   [CONFIRMATION_SEND_ACTION]: confirmationSendHandler,
 });
 
+/** BS-4: the newest booking in the chain of moves that starts at this one (bounded, in case of a long chain). */
+async function liveSuccessor(tx: Transaction, tenantId: string, bookingId: string) {
+  type Next = { id: string; status: string; starts_at: Date; ends_at: Date };
+  let found: Next | undefined;
+  let from = bookingId;
+  for (let hop = 0; hop < 16; hop += 1) {
+    const next = (await tx.query<Next>(
+      "SELECT id, status, starts_at, ends_at FROM bookings WHERE tenant_id=$1 AND rescheduled_from=$2 ORDER BY created_at DESC, id LIMIT 1",
+      [tenantId, from])).rows[0];
+    if (!next) break;
+    found = next;
+    // A cancelled booking in the chain was moved again (or cancelled): follow it to the end.
+    if (next.status !== "cancelled") break;
+    from = next.id;
+  }
+  return found;
+}
+
 interface ViewRow {
   id: string; status: string; starts_at: Date; ends_at: Date; resource_id: string; resource_name: string | null;
   time_zone: string; slot_length_minutes: number; business: string; source: string;
@@ -228,9 +272,7 @@ export async function manageView(
   let movedTo: ManageView["movedTo"] = null;
   if (row.status === "cancelled") {
     state = "cancelled";
-    const next = (await tx.query<{ id: string; starts_at: Date; ends_at: Date }>(
-      "SELECT id, starts_at, ends_at FROM bookings WHERE tenant_id=$1 AND rescheduled_from=$2 ORDER BY created_at DESC, id LIMIT 1",
-      [tenantId, bookingId])).rows[0];
+    const next = link ? await liveSuccessor(tx, tenantId, bookingId) : undefined;
     if (next && link) {
       state = "moved";
       movedTo = {

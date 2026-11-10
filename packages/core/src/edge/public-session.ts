@@ -19,7 +19,8 @@ import { requestPublicBooking } from "../intake/index.js";
 import type { BookingPageRef } from "../intake/keys.js";
 import { findSlots } from "../reads/booking.js";
 import { loadPublishedPage, pageHasResource, publicPage } from "../reads/intake.js";
-import { confirmBooking } from "./confirm-booking.js";
+import { linkOrigin } from "../booking/self-service.js";
+import { confirmBooking, confirmBudget } from "./confirm-booking.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, parseInput, type Authorize, type EdgeDependencies } from "./session.js";
 
@@ -37,7 +38,7 @@ const publicAuthorize: Authorize = async (_tx, binding) => {
 export function createPublicSession(deps: EdgeDependencies, ref: BookingPageRef) {
   const tenantId = uuidSchema.parse(ref.tenantId);
   const pageId = uuidSchema.parse(ref.pageId);
-  // BS-3: with no booking-key secret or public address there is no link to send, so no confirmation either.
+  // BS-3: with no booking-key secret or a public address a link cannot use, there is no confirmation either.
   const manage = deps.bookingKeys ? { manage: { secret: deps.bookingKeys.secret, publicBaseUrl: deps.bookingKeys.publicBaseUrl } } : {};
   const run = directDispatch(deps, tenantId, publicIntakeActorId(tenantId), publicAuthorize, manage);
   const read = <T>(work: (tx: Transaction) => Promise<T>) => deps.db.tenant(tenantId, work);
@@ -82,7 +83,8 @@ export function createPublicSession(deps: EdgeDependencies, ref: BookingPageRef)
         },
       }, { dispatch: run });
       // BS-3: the booking is committed; its confirmation is a second action, and its failure changes nothing.
-      if (deps.bookingKeys) await confirmBooking(run, tenantId, bookingId, "booked");
+      if (deps.bookingKeys && linkOrigin(deps.bookingKeys.publicBaseUrl))
+        await confirmBooking(run, tenantId, bookingId, "booked", confirmBudget(deps.timeLeft));
       // P-6: the outcome and contact stay on the server; every caller sees this shape.
       const { result } = output;
       return {

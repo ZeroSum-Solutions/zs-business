@@ -190,7 +190,8 @@ describe("the page (BS-10)", () => {
     expect(html).toContain('src="/manage.js"');
     expect(html).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/);
     expect(html).not.toContain(made.token!);
-    const missing = await h.app.request(`/manage/${made.token!.slice(0, -2)}AA`);
+    const altered = made.token!.slice(0, -1) + (made.token!.endsWith("A") ? "B" : "A");
+    const missing = await h.app.request(`/manage/${altered}`);
     expect(missing.status).toBe(404);
     expect(missing.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
     const script = await h.app.request("/manage.js");
@@ -255,6 +256,22 @@ describe.each(["memory", "postgres"] as const)("expiry and abuse limits (BS-1, B
     expect((await get(forged, "192.0.2.40")).status).toBe(404);
     expect((await get(forged, "192.0.2.40")).status).toBe(404);
     expect((await get(forged, "192.0.2.40")).status).toBe(429);
+  });
+
+  it("charges a valid write to the address too, and a refused write charges nothing else (BS-9)", async () => {
+    const first = await booked(limited, limited.a, at(9, 23));
+    const second = await booked(limited, limited.a, at(10, 23), first);
+    const third = await booked(limited, limited.a, at(11, 23), first);
+    const cancel = (token: string, from: string) => call(limited.app, "POST", `/public/v1/manage/${token}/cancel`, { key: randomUUID(), headers: as(from), body: {} });
+    // One address, two bookings: its own write budget (2) runs out although the third booking's own bucket is untouched.
+    expect((await cancel(first.token!, "192.0.2.60")).status).toBe(200);
+    expect((await cancel(second.token!, "192.0.2.60")).status).toBe(200);
+    expect((await cancel(third.token!, "192.0.2.60")).status).toBe(429);
+    expect((await limited.fixture.service((tx) => tx.query<{ status: string }>("SELECT status FROM bookings WHERE id=$1", [third.bookingId]))).rows[0]!.status).toBe("confirmed");
+    // The refusal took nothing from the third booking's bucket: two other addresses still cancel it (budget 2 per booking).
+    expect((await cancel(third.token!, "192.0.2.61")).status).toBe(200);
+    expect((await cancel(third.token!, "192.0.2.62")).status).toBe(200);
+    expect((await cancel(third.token!, "192.0.2.63")).status).toBe(429);
   });
 
   it("limits writes per booking, and a refused write changes nothing", async () => {

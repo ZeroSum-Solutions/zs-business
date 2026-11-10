@@ -74,10 +74,11 @@ export async function cancelBookingRow(
   const at = clockInstant(now);
   if (row.status === "cancelled")
     return { record: bookingRecord(row), cancelledAt: row.cancelled_at!.toISOString(), reason: row.cancel_reason, changed: false };
-  if (row.ends_at.getTime() <= now.getTime())
-    throw new Conflict("The booking is already over", { reason: "booking_over" });
+  // A customer link (`notStarted`) answers `too_late` for anything that began, over or not (BS-6).
   if (by.notStarted && row.starts_at.getTime() <= now.getTime())
     throw new Conflict("The appointment has already started", { reason: "too_late" });
+  if (row.ends_at.getTime() <= now.getTime())
+    throw new Conflict("The booking is already over", { reason: "booking_over" });
   const updated = (await tx.query<CancelRow>(
     `UPDATE bookings SET status='cancelled', cancelled_at=$3::timestamptz, cancelled_by=$4, cancel_reason=$5
       WHERE tenant_id=$1 AND id=$2 AND status='confirmed'

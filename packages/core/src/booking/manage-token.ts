@@ -32,8 +32,11 @@ const uuidText = (bytes: Buffer): string => {
 const tag = (secret: string, tenantId: string, bookingId: string, expiresAt: number): Buffer =>
   createHmac("sha256", signingKey(secret)).update(`zsm1:${tenantId}:${bookingId}:${expiresAt}`).digest().subarray(0, TAG_BYTES);
 
-/** The expiry is the booking's start: a whole second at or after it, so the token never dies early. */
-export const manageExpiry = (startsAt: Date | string): number => Math.ceil(new Date(startsAt).getTime() / 1000);
+/**
+ * The expiry is the booking's start: a whole second at or after it, so the token never dies early.
+ * The field is 32 bits (to 2106); a start beyond that clamps, so signing never throws after a commit.
+ */
+export const manageExpiry = (startsAt: Date | string): number => Math.min(0xffffffff, Math.ceil(new Date(startsAt).getTime() / 1000));
 
 export function signManageToken(secret: string, ref: ManageRef): string {
   const tenantId = ref.tenantId.toLowerCase();
