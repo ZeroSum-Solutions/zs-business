@@ -8,6 +8,8 @@ const idSchema = z.lazy(() => uuidSchema);
 
 /** crm.md C-27: at most this many live stages in one pipeline. */
 export const MAX_LIVE_STAGES = 30;
+/** crm.md C-27: and at most this many in all, archived ones included (an archived stage is never deleted). */
+export const MAX_TOTAL_STAGES = 200;
 
 /** crm.md C-27: trimmed, 1 to 100 characters, one line. */
 export const stageNameSchema = z.string().trim().min(1).max(100)
@@ -57,7 +59,7 @@ export type RenameStageCommand = z.infer<typeof renameStageCommandSchema>;
 
 export const reorderStagesInputSchema = z.strictObject({
   pipelineId: idSchema,
-  stageIds: z.array(idSchema).min(1).max(MAX_LIVE_STAGES)
+  stageIds: z.array(idSchema).max(MAX_LIVE_STAGES)
     .refine((ids) => new Set(ids).size === ids.length, "Each stage appears once"),
 });
 export const reorderStagesCommandSchema = z.lazy(() => actionCommandSchema.extend({

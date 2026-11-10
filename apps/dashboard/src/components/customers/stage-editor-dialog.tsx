@@ -9,12 +9,16 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input, Label, Select } from "@/components/ui/input";
 import { ErrorNote } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isApiError, type PipelineSummary } from "@/lib/api";
+import { isApiError, type DealSummary, type ListResult, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { useKeys } from "@/lib/queries";
 
+// The server counts UTF-16 code units (zod `.max(100)`), so the form counts the same way.
 const NAME_MAX = 100;
+const nameLength = (name: string) => name.length;
+/** Conflicts that mean the list on screen is out of date: show what the pipeline is now. */
+const STALE_REASONS = new Set(["stage_set_changed", "stage_archived", "stage_limit", "last_stage", "name_in_use"]);
 type Outcome = "open" | "won" | "lost";
 const OUTCOME_LABELS: Record<Outcome, string> = { open: "Open", won: "Won (a deal here counts as won)", lost: "Lost" };
 
@@ -24,6 +28,14 @@ type Op =
   | { kind: "reorder"; pipelineId: string; stageIds: string[]; focus: string }
   | { kind: "archive"; stageId: string; name: string; moveDealsTo: string | null }
   | { kind: "restore"; stageId: string; name: string };
+
+/** Moving deals across an outcome changes their won date (inbox-home.md H-2), and no automation runs for the move. */
+function outcomeNote(from: Outcome, to: Outcome | undefined): string | null {
+  if (to === undefined || from === to) return null;
+  if (to === "won") return "Deals moved into a won stage count as won today. Automations do not run for this move.";
+  if (from === "won") return "Deals moved out of a won stage lose their won date, and Home revenue drops.";
+  return null;
+}
 
 /** The pipeline answers are the whole truth: write them into the cached list. */
 function withPipeline(list: PipelineSummary[] | undefined, next: PipelineSummary): PipelineSummary[] | undefined {
@@ -57,7 +69,9 @@ export function StageEditorDialog({
   const [newName, setNewName] = useState("");
   const [newOutcome, setNewOutcome] = useState<Outcome>("open");
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
-  const [archiving, setArchiving] = useState<{ id: string; to: string } | null>(null);
+  // `ask`: the deals need a destination (the stage holds some, or the server said so). Fixed once chosen, so a retry
+  // after a lost answer sends the same request and replays it.
+  const [archiving, setArchiving] = useState<{ id: string; to: string; ask: boolean } | null>(null);
 
   const stages = pipeline.stages;
 
@@ -74,38 +88,53 @@ export function StageEditorDialog({
     },
     onSettled: (_result, error, op) => intents.settle(op, error),
     onSuccess: async (result, op) => {
+      // A pipelines read that started before this write must not land over it; the refetch after
+      // settles on the server's list (a replayed answer can be older than the pipeline now).
+      await queryClient.cancelQueries({ queryKey: keys.pipelines });
       queryClient.setQueryData<PipelineSummary[]>(keys.pipelines, (list) => withPipeline(list, result));
+      void queryClient.invalidateQueries({ queryKey: keys.pipelines });
+      if (op.kind === "archive" && op.moveDealsTo !== null) {
+        // The cards follow their stage at once, so a failed deals read cannot leave them under a stage that is gone.
+        queryClient.setQueriesData<ListResult<DealSummary>>({ queryKey: keys.dealsAll }, (list) => list && {
+          ...list,
+          items: list.items.map((deal) => (deal.stageId === op.stageId ? { ...deal, stageId: op.moveDealsTo!, revision: deal.revision + 1 } : deal)),
+        });
+      }
       if (op.kind === "archive") {
         // The deals that moved changed stage and revision; a move into a won stage changes Home's revenue.
-        await queryClient.invalidateQueries({ queryKey: keys.dealsAll });
+        void queryClient.invalidateQueries({ queryKey: keys.dealsAll });
         void queryClient.invalidateQueries({ queryKey: keys.resultsAll });
       }
+      // The control that was used may be gone: focus goes to the nearest one that is not.
+      // The buttons stay disabled until the write has settled, so try again for a few frames.
+      const focusTo = (id: string, tries = 20): number => requestAnimationFrame(() => {
+        const element = document.getElementById(id);
+        if (element instanceof HTMLButtonElement && element.disabled && tries > 0) focusTo(id, tries - 1);
+        else element?.focus();
+      });
       switch (op.kind) {
-        case "create": setNewName(""); toast(`Added ${op.name}.`); break;
-        case "rename": setRenaming(null); toast(`Renamed to ${op.name}.`); break;
-        case "reorder":
-          requestAnimationFrame(() => document.getElementById(`stage-move-${op.focus}`)?.focus());
-          break;
-        case "archive": setArchiving(null); toast(`Archived ${op.name}.`); break;
-        case "restore": toast(`Restored ${op.name}.`); break;
+        case "create": setNewName(""); toast(`Added ${op.name}.`); focusTo(nameId); break;
+        case "rename": setRenaming(null); toast(`Renamed to ${op.name}.`); focusTo(`stage-rename-${op.stageId}`); break;
+        case "reorder": focusTo(op.focus); break;
+        case "archive": setArchiving(null); toast(`Archived ${op.name}.`); focusTo(nameId); break;
+        case "restore": toast(`Restored ${op.name}.`); focusTo(`stage-rename-${op.stageId}`); break;
       }
     },
-    onError: (error) => {
+    onError: (error, op) => {
+      if (!isApiError(error, "conflict")) return;
       // Somebody else changed the pipeline: show what it is now before the owner tries again.
-      if (isApiError(error, "conflict") && (error.reason === "stage_set_changed" || error.reason === "stage_archived"))
-        void queryClient.invalidateQueries({ queryKey: keys.pipelines });
+      if (error.reason && STALE_REASONS.has(error.reason)) void queryClient.invalidateQueries({ queryKey: keys.pipelines });
       // The stage holds more deals than the board showed: ask where they go.
-      if (isApiError(error, "conflict") && error.reason === "stage_has_deals") {
-        const failed = edit.variables;
-        if (failed?.kind === "archive") {
-          const other = stages.find((stage) => stage.id !== failed.stageId);
-          if (other) setArchiving({ id: failed.stageId, to: other.id });
-        }
+      if (error.reason === "stage_has_deals" && op.kind === "archive") {
+        const other = stages.find((stage) => stage.id !== op.stageId);
+        if (other) setArchiving({ id: op.stageId, to: other.id, ask: true });
       }
     },
   });
   const { reset } = edit;
   const busy = edit.isPending;
+  // A change in flight finishes first: closing now would lose its answer.
+  const close = (next: boolean) => { if (next || !busy) onOpenChange(next); };
 
   useEffect(() => {
     if (open) {
@@ -121,7 +150,10 @@ export function StageEditorDialog({
     const ids = stages.map((stage) => stage.id);
     const [moved] = ids.splice(index, 1);
     ids.splice(index + by, 0, moved!);
-    edit.mutate({ kind: "reorder", pipelineId: pipeline.id, stageIds: ids, focus: moved! });
+    // Focus follows the stage: the same button, or the other one when this one is now disabled at the end.
+    const target = index + by;
+    const focus = target === 0 ? `stage-down-${moved}` : target === stages.length - 1 ? `stage-up-${moved}` : by === -1 ? `stage-up-${moved}` : `stage-down-${moved}`;
+    edit.mutate({ kind: "reorder", pipelineId: pipeline.id, stageIds: ids, focus });
   };
   const submitNew = (event: FormEvent) => {
     event.preventDefault();
@@ -130,19 +162,19 @@ export function StageEditorDialog({
   };
 
   const newTrimmed = newName.trim();
-  const newTooLong = [...newTrimmed].length > NAME_MAX;
+  const newTooLong = nameLength(newTrimmed) > NAME_MAX;
   const startArchive = (id: string) => {
     const others = stages.filter((stage) => stage.id !== id);
     const first = others[0];
-    if (first) setArchiving({ id, to: first.id });
+    if (first) setArchiving({ id, to: first.id, ask: (dealCounts.get(id) ?? 0) > 0 });
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={close}>
       <DialogContent
         title="Edit stages"
         description={`${pipeline.name}. Each change saves as you make it.`}
-        footer={<div className="flex justify-end"><Button onClick={() => onOpenChange(false)}>Done</Button></div>}
+        footer={<div className="flex justify-end"><Button disabled={busy} onClick={() => close(false)}>Done</Button></div>}
       >
         <div className="space-y-5" aria-busy={busy}>
           <ul className="space-y-2" aria-label="Stages">
@@ -172,7 +204,7 @@ export function StageEditorDialog({
                         onChange={(event) => setRenaming({ id: stage.id, value: event.target.value })}
                         className="min-w-0 flex-1"
                       />
-                      <Button type="submit" disabled={busy || [...renaming.value.trim()].length > NAME_MAX || renaming.value.trim() === ""}>Save</Button>
+                      <Button type="submit" disabled={busy || nameLength(renaming.value.trim()) > NAME_MAX || renaming.value.trim() === ""}>Save</Button>
                       <Button variant="ghost" disabled={busy} onClick={() => setRenaming(null)}>Cancel</Button>
                     </form>
                   ) : (
@@ -183,13 +215,13 @@ export function StageEditorDialog({
                         <span className="tabular text-xs text-meta">{count === 1 ? "1 deal" : `${count} deals`}</span>
                       </div>
                       <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="icon" id={`stage-move-${stage.id}`} disabled={busy || index === 0} aria-label={`Move ${stage.name} earlier`} onClick={() => move(index, -1)}>
+                        <Button variant="ghost" size="icon" id={`stage-up-${stage.id}`} disabled={busy || index === 0} aria-label={`Move ${stage.name} earlier`} onClick={() => move(index, -1)}>
                           <ArrowUp aria-hidden />
                         </Button>
-                        <Button variant="ghost" size="icon" disabled={busy || index === stages.length - 1} aria-label={`Move ${stage.name} later`} onClick={() => move(index, 1)}>
+                        <Button variant="ghost" size="icon" id={`stage-down-${stage.id}`} disabled={busy || index === stages.length - 1} aria-label={`Move ${stage.name} later`} onClick={() => move(index, 1)}>
                           <ArrowDown aria-hidden />
                         </Button>
-                        <Button variant="ghost" disabled={busy} aria-label={`Rename ${stage.name}`} onClick={() => setRenaming({ id: stage.id, value: stage.name })}>Rename</Button>
+                        <Button variant="ghost" id={`stage-rename-${stage.id}`} disabled={busy} aria-label={`Rename ${stage.name}`} onClick={() => setRenaming({ id: stage.id, value: stage.name })}>Rename</Button>
                         <Button variant="ghost" disabled={busy || others.length === 0} aria-label={`Archive ${stage.name}`} onClick={() => startArchive(stage.id)}>Archive</Button>
                       </div>
                     </div>
@@ -197,30 +229,39 @@ export function StageEditorDialog({
                   {isArchiving ? (
                     <div className="mt-2 space-y-2 border-t border-border pt-2" role="group" aria-label={`Archive ${stage.name}`}>
                       <p className="text-sm text-fg-2">
-                        {count > 0
-                          ? `${count === 1 ? "1 deal is" : `${count} deals are`} in ${stage.name}. They move with it.`
+                        {archiving.ask
+                          ? count > 0
+                            ? `${count === 1 ? "1 deal is" : `${count} deals are`} in ${stage.name}. Choose where they go.`
+                            : `Deals are still in ${stage.name}. Choose where they go.`
                           : `${stage.name} leaves the board. You can restore it later.`}
                       </p>
-                      <div>
-                        <Label htmlFor={`archive-to-${stage.id}`}>Move its deals to</Label>
-                        <Select
-                          id={`archive-to-${stage.id}`}
-                          value={archiving.to}
-                          disabled={busy}
-                          onChange={(event) => setArchiving({ id: stage.id, to: event.target.value })}
-                          className="w-full"
-                        >
-                          {others.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                        </Select>
-                      </div>
+                      {archiving.ask ? (
+                        <div className="space-y-2">
+                          <div>
+                            <Label htmlFor={`archive-to-${stage.id}`}>Move its deals to</Label>
+                            <Select
+                              id={`archive-to-${stage.id}`}
+                              value={archiving.to}
+                              disabled={busy}
+                              onChange={(event) => setArchiving({ id: stage.id, to: event.target.value, ask: true })}
+                              className="w-full"
+                            >
+                              {others.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                            </Select>
+                          </div>
+                          {outcomeNote(stage.outcome, others.find((item) => item.id === archiving.to)?.outcome) ? (
+                            <p className="text-sm text-fg-2">{outcomeNote(stage.outcome, others.find((item) => item.id === archiving.to)?.outcome)}</p>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <div className="flex flex-wrap justify-end gap-2">
                         <Button variant="ghost" disabled={busy} onClick={() => setArchiving(null)}>Keep stage</Button>
                         <Button
                           variant="danger"
                           disabled={busy}
-                          onClick={() => edit.mutate({ kind: "archive", stageId: stage.id, name: stage.name, moveDealsTo: count > 0 || edit.isError ? archiving.to : null })}
+                          onClick={() => edit.mutate({ kind: "archive", stageId: stage.id, name: stage.name, moveDealsTo: archiving.ask ? archiving.to : null })}
                         >
-                          Archive {stage.name}
+                          Archive stage
                         </Button>
                       </div>
                     </div>

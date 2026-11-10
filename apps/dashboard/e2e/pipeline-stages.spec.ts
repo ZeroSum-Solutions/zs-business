@@ -50,7 +50,7 @@ test("archives a stage with deals into another stage, then restores it", async (
   await row.getByRole("button", { name: "Archive Design" }).click();
   const panel = row.getByRole("group", { name: "Archive Design" });
   await panel.getByLabel("Move its deals to").selectOption({ label: "Deposit" });
-  await panel.getByRole("button", { name: "Archive Design" }).click();
+  await panel.getByRole("button", { name: "Archive stage" }).click();
   await expect(page.getByRole("status").getByText("Archived Design.")).toBeVisible();
   await expect(dialog.locator('[data-stage-row="Design"]')).toHaveCount(0);
   await expect(dialog.locator('[data-archived-stage="Design"]')).toBeVisible();

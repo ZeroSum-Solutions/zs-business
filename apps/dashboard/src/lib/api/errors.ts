@@ -99,7 +99,7 @@ const CONFLICT_MESSAGES: Record<string, string> = {
   split_identity: "That email and phone belong to two different customers.",
   identity_mismatch: "That email or phone is already on another customer record.",
   name_in_use: "Another stage already has that name.",
-  stage_limit: "A pipeline holds at most 30 stages. Archive one first.",
+  stage_limit: "This pipeline has reached its limit of 30 stages (200 with archived ones).",
   last_stage: "A pipeline needs at least one stage.",
   stage_archived: "That stage is archived. Restore it first.",
   stage_set_changed: "The stages changed while you were editing. They are reloaded; try again.",

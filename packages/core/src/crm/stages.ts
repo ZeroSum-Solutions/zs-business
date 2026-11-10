@@ -5,6 +5,7 @@ import {
   Conflict,
   createStageCommandSchema,
   MAX_LIVE_STAGES,
+  MAX_TOTAL_STAGES,
   renameStageCommandSchema,
   reorderStagesCommandSchema,
   restoreStageCommandSchema,
@@ -35,6 +36,8 @@ export const RESTORE_STAGE_ACTION = "crm.stage.restore";
 interface StageRow { id: string; pipeline_id: string; name: string; position: number; archived_at: Date | null }
 
 const owned = async (tx: Transaction, sql: string, params: unknown[]) => (await tx.query(sql, params)).rowCount === 1;
+/** At least one row: a name check must not pass because two stages already share a name. */
+const exists = async (tx: Transaction, sql: string, params: unknown[]) => ((await tx.query(sql, params)).rowCount ?? 0) > 0;
 
 /** C-25: two edits of one pipeline never interleave. */
 async function lockPipeline(tx: Transaction, tenantId: string, pipelineId: string): Promise<void> {
@@ -70,7 +73,7 @@ async function nextPosition(tx: Transaction, tenantId: string, pipelineId: strin
 }
 
 async function requireFreeName(tx: Transaction, tenantId: string, pipelineId: string, name: string, exceptId: string | null) {
-  const taken = await owned(tx,
+  const taken = await exists(tx,
     `SELECT 1 FROM crm_stages WHERE tenant_id=$1 AND pipeline_id=$2 AND archived_at IS NULL
         AND lower(name) = lower($3) AND ($4::uuid IS NULL OR id <> $4)`,
     [tenantId, pipelineId, name, exceptId]);
@@ -80,6 +83,14 @@ async function requireFreeName(tx: Transaction, tenantId: string, pipelineId: st
 async function requireRoom(tx: Transaction, tenantId: string, pipelineId: string) {
   if (await liveCount(tx, tenantId, pipelineId) >= MAX_LIVE_STAGES)
     throw new Conflict(`A pipeline holds at most ${MAX_LIVE_STAGES} stages`, { reason: "stage_limit", limit: MAX_LIVE_STAGES });
+}
+
+/** C-27: archived stages stay for good, so a pipeline also holds a bounded number of stages in all. */
+async function requireTotalRoom(tx: Transaction, tenantId: string, pipelineId: string) {
+  const total = Number((await tx.query<{ n: string }>(
+    "SELECT count(*)::text AS n FROM crm_stages WHERE tenant_id=$1 AND pipeline_id=$2", [tenantId, pipelineId])).rows[0]!.n);
+  if (total >= MAX_TOTAL_STAGES)
+    throw new Conflict(`A pipeline holds at most ${MAX_TOTAL_STAGES} stages, archived ones included`, { reason: "stage_limit", limit: MAX_TOTAL_STAGES });
 }
 
 async function answer(tx: Transaction, tenantId: string, pipelineId: string): Promise<{ result: PipelineSummary }> {
@@ -101,6 +112,9 @@ const mapStageError: ActionHandler["mapError"] = (error) => {
     return new Conflict("The stage still holds deals", { reason: "stage_has_deals" });
   if (pgConstraint(error) === "crm_deals_stage_live")
     return new Conflict("The stage is archived", { reason: "stage_archived" });
+  // inbox-home.md H-1 revision 4: a deal stored under the old currency check cannot move until its value is fixed.
+  if (pgConstraint(error) === "crm_deals_currency_code")
+    return new Conflict("A deal's currency is not an ISO 4217 code; set its value first", { reason: "invalid_currency" });
   return undefined;
 };
 
@@ -119,6 +133,7 @@ export const createStageHandler: ActionHandler = {
     await lockPipeline(tx, tenantId, input.pipelineId);
     await requireFreeName(tx, tenantId, input.pipelineId, input.name, null);
     await requireRoom(tx, tenantId, input.pipelineId);
+    await requireTotalRoom(tx, tenantId, input.pipelineId);
     await tx.query(
       "INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome) VALUES ($1,$2,$3,$4,$5,$6)",
       [tenantId, input.stageId, input.pipelineId, input.name, await nextPosition(tx, tenantId, input.pipelineId), input.outcome]);

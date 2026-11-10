@@ -6,7 +6,7 @@
  */
 import type { z } from "zod";
 import {
-  archiveStageRequestSchema, createStageRequestSchema, MAX_LIVE_STAGES, renameStageRequestSchema, reorderStagesRequestSchema,
+  archiveStageRequestSchema, createStageRequestSchema, MAX_LIVE_STAGES, MAX_TOTAL_STAGES, renameStageRequestSchema, reorderStagesRequestSchema,
   type DealSummary, type PipelineSummary, type StageSummary,
 } from "@zs/contracts";
 import { demoError } from "../errors";
@@ -50,7 +50,10 @@ export function createDemoStages(ctx: DemoStagesContext): StageCalls {
       throw demoError("Conflict", { reason: "name_in_use" });
   };
   const requireRoom = (pipeline: PipelineSummary) => {
-    if (pipeline.stages.length >= MAX_LIVE_STAGES) throw demoError("Conflict", { reason: "stage_limit", limit: MAX_LIVE_STAGES });
+    if (pipeline.stages.length >= MAX_LIVE_STAGES) throw demoError("Conflict", { reason: "stage_limit" });
+  };
+  const requireTotalRoom = (pipeline: PipelineSummary) => {
+    if (pipeline.stages.length + pipeline.archivedStages.length >= MAX_TOTAL_STAGES) throw demoError("Conflict", { reason: "stage_limit" });
   };
   const commit = (pipeline: PipelineSummary) => {
     ctx.setPipelines(ctx.pipelines().map((item) => (item.id === pipeline.id ? pipeline : item)));
@@ -65,6 +68,7 @@ export function createDemoStages(ctx: DemoStagesContext): StageCalls {
         const pipeline = clone(pipelineOf(pipelineId));
         requireFreeName(pipeline, request.name, null);
         requireRoom(pipeline);
+        requireTotalRoom(pipeline);
         pipeline.stages.push({ id: ctx.newId(), name: request.name, position: nextPosition(pipeline), outcome: request.outcome });
         return commit(pipeline);
       });
@@ -138,8 +142,10 @@ export function createDemoStages(ctx: DemoStagesContext): StageCalls {
         if (!found.archived) return clone(pipeline);
         requireRoom(pipeline);
         requireFreeName(pipeline, found.stage.name, null);
+        // The position counts the archived stage too, as the server's max(position) + 1 does.
+        const position = nextPosition(pipeline);
         pipeline.archivedStages = pipeline.archivedStages.filter((item) => item.id !== input.stageId);
-        pipeline.stages.push({ ...found.stage, position: nextPosition(pipeline) });
+        pipeline.stages.push({ ...found.stage, position });
         return commit(pipeline);
       });
     },

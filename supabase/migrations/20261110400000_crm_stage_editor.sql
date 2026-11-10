@@ -7,6 +7,8 @@ ALTER TABLE public.crm_stages ADD COLUMN archived_at timestamptz;
 -- C-26: the runtime role renames, reorders and archives. It cannot move a stage to another
 -- pipeline, change its outcome, or delete it (no DELETE grant exists).
 GRANT UPDATE (name, position, archived_at) ON public.crm_stages TO authenticated;
+-- C-26: nobody deletes a stage, the workers' service role included. Deleting a tenant still cascades.
+REVOKE DELETE ON public.crm_stages FROM service_role;
 
 -- C-31: no deal enters an archived stage, however it got there. FOR SHARE makes a concurrent
 -- archive wait for this insert (or this insert wait for the archive and then see it).

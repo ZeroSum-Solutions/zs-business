@@ -395,3 +395,79 @@ describe("two tenants (C-33)", () => {
     expect((await stageRow(p.stageIds[0]!)).outcome).toBe("open");
   });
 });
+
+describe("review fixes (C-26, C-27, C-29, C-30, C-33)", () => {
+  it("replays rename, reorder and restore to their stored answers", async () => {
+    const p = await pipeline(fixture.a.tenantId, ["A", "B", "C"]);
+    const renameKey = randomUUID();
+    const renamed = await a.renameStage(p.stageIds[0]!, { name: "A2" }, renameKey);
+    await a.renameStage(p.stageIds[0]!, { name: "A3" }, randomUUID());
+    expect((await a.renameStage(p.stageIds[0]!, { name: "A2" }, renameKey)).actionId).toBe(renamed.actionId);
+    expect((await stageRow(p.stageIds[0]!)).name).toBe("A3");
+
+    const order = [p.stageIds[2]!, p.stageIds[1]!, p.stageIds[0]!];
+    const orderKey = randomUUID();
+    const reordered = await a.reorderStages(p.id, { stageIds: order }, orderKey);
+    await a.reorderStages(p.id, { stageIds: p.stageIds }, randomUUID());
+    expect((await a.reorderStages(p.id, { stageIds: order }, orderKey)).actionId).toBe(reordered.actionId);
+    expect((await view(p.id)).stages.map((stage) => stage.id)).toEqual(p.stageIds);
+
+    await a.archiveStage(p.stageIds[1]!, {}, randomUUID());
+    const restoreKey = randomUUID();
+    const restored = await a.restoreStage(p.stageIds[1]!, restoreKey);
+    await a.archiveStage(p.stageIds[1]!, {}, randomUUID());
+    expect((await a.restoreStage(p.stageIds[1]!, restoreKey)).actionId).toBe(restored.actionId);
+    expect((await stageRow(p.stageIds[1]!)).archived_at).not.toBeNull();
+  });
+
+  it("refuses a name that matches several live stages already, and an empty reorder list is a changed set", async () => {
+    const p = await pipeline(fixture.a.tenantId, ["New", "NEW", "Other"]);
+    expect(await rejection(a.createStage(p.id, { name: "new" }, randomUUID()))).toMatchObject({ details: { reason: "name_in_use" } });
+    expect(await rejection(a.renameStage(p.stageIds[2]!, { name: "New" }, randomUUID()))).toMatchObject({ details: { reason: "name_in_use" } });
+    expect(await rejection(a.reorderStages(p.id, { stageIds: [] }, randomUUID()))).toMatchObject({ details: { reason: "stage_set_changed" } });
+  });
+
+  it("a pipeline holds 200 stages in all, archived ones included", async () => {
+    const p = await pipeline(fixture.a.tenantId, ["Live"]);
+    await fixture.service((tx) => tx.query(
+      `INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome,archived_at)
+         SELECT $1, gen_random_uuid(), $2, 'Old ' || n, n, 'open', now() FROM generate_series(1,199) n`, [fixture.a.tenantId, p.id]));
+    expect(await rejection(a.createStage(p.id, { name: "Too many" }, randomUUID()))).toMatchObject({ details: { reason: "stage_limit" } });
+    expect((await view(p.id)).archivedStages).toHaveLength(199);
+  });
+
+  it("nobody deletes a stage, the service role included", async () => {
+    const p = await pipeline(fixture.a.tenantId, ["A", "B"]);
+    expect(await sqlRejection(fixture.service((tx) => tx.query("DELETE FROM crm_stages WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, p.stageIds[1]!]))))
+      .toMatchObject({ code: "42501" });
+  });
+
+  it("the runtime role meets the database's own refusals too", async () => {
+    const p = await pipeline(fixture.a.tenantId, ["New", "Busy", "Gone"]);
+    await a.archiveStage(p.stageIds[2]!, {}, randomUUID());
+    expect(await sqlRejection(fixture.a.run((tx) => tx.query(
+      "INSERT INTO crm_deals (tenant_id,id,contact_id,pipeline_id,stage_id,title,revision,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,'x',1,now(),now())",
+      [fixture.a.tenantId, randomUUID(), contactId, p.id, p.stageIds[2]!])))).toMatchObject({ code: "23514", constraint: "crm_deals_stage_live" });
+    await deal(p.id, p.stageIds[1]!);
+    expect(await sqlRejection(fixture.a.run((tx) => tx.query("UPDATE crm_stages SET archived_at=now() WHERE id=$1", [p.stageIds[1]!]))))
+      .toMatchObject({ code: "23514", constraint: "crm_stages_archive_empty" });
+  });
+
+  it("archiving into another stage answers invalid_currency for a deal stored under the old currency check", async () => {
+    const p = await pipeline(fixture.a.tenantId, ["New", "Next"]);
+    const d = await deal(p.id, p.stageIds[0]!);
+    const original = (await database.pool.query(
+      "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid='public.crm_deals'::regclass AND conname='crm_deals_currency_code'")).rows[0].def as string;
+    await database.pool.query("ALTER TABLE public.crm_deals DROP CONSTRAINT crm_deals_currency_code");
+    await database.pool.query("UPDATE public.crm_deals SET value_minor=100, currency='ZZZ' WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, d.id]);
+    await database.pool.query("ALTER TABLE public.crm_deals ADD CONSTRAINT crm_deals_currency_code CHECK (currency <> 'ZZZ') NOT VALID");
+    try {
+      expect(await rejection(a.archiveStage(p.stageIds[0]!, { moveDealsTo: p.stageIds[1]! }, randomUUID())))
+        .toMatchObject({ code: "Conflict", details: { reason: "invalid_currency" } });
+    } finally {
+      await database.pool.query("ALTER TABLE public.crm_deals DROP CONSTRAINT crm_deals_currency_code");
+      await database.pool.query("UPDATE public.crm_deals SET currency=NULL, value_minor=NULL WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, d.id]);
+      await database.pool.query(`ALTER TABLE public.crm_deals ADD CONSTRAINT crm_deals_currency_code ${original}`);
+    }
+  });
+});

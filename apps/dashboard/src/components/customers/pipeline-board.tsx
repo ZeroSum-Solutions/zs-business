@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/input";
 import { EmptyState, ErrorNote, IncompleteNote, LoadingRows } from "@/components/ui/states";
 import { useToast } from "@/components/ui/toast";
-import { isDealChanged, type DealSummary, type ListResult, type PipelineSummary } from "@/lib/api";
+import { isApiError, isDealChanged, type DealSummary, type ListResult, type PipelineSummary } from "@/lib/api";
 import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { LEAD_SOURCE_LABELS } from "@/lib/lead-sources";
@@ -87,12 +87,26 @@ export function PipelineBoard() {
       {!pipeline ? (
         <EmptyState title="No pipeline yet">Once a pipeline is set up, each deal shows here under its stage.</EmptyState>
       ) : pipeline.stages.length === 0 ? (
-        <EmptyState title={`${pipeline.name} has no stages yet`}>Its deals show here once the pipeline has stages to move them through.</EmptyState>
+        <NoStages pipeline={pipeline} />
       ) : (
         // A new key per pipeline: a stage filter or a pending move never carries over.
         <StageBoard key={pipeline.id} pipeline={pipeline} />
       )}
     </section>
+  );
+}
+
+/** A pipeline whose stages are not set up yet still opens the editor, so its first stage can be added. */
+function NoStages({ pipeline }: { pipeline: PipelineSummary }) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <>
+      <EmptyState title={`${pipeline.name} has no stages yet`}>Its deals show here once the pipeline has stages to move them through.</EmptyState>
+      <div className="mt-3 flex justify-center">
+        <Button variant="secondary" onClick={() => setEditing(true)}><PencilSimple aria-hidden /> Edit stages</Button>
+      </div>
+      <StageEditorDialog pipeline={pipeline} dealCounts={new Map()} open={editing} onOpenChange={setEditing} />
+    </>
   );
 }
 
@@ -147,6 +161,8 @@ function StageBoard({ pipeline }: { pipeline: PipelineSummary }) {
       toast(`Moved to ${stage}.`);
     },
     onError: async (error, request) => {
+      // The stage was archived since this list loaded: show the pipeline as it is now.
+      if (isApiError(error, "conflict") && error.reason === "stage_archived") void queryClient.invalidateQueries({ queryKey: keys.pipelines });
       const since = Date.now();
       let reloaded = true;
       try {
