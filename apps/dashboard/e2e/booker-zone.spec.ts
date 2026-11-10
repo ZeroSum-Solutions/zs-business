@@ -117,3 +117,23 @@ test.describe("business outside North America", () => {
     expect(posted).toHaveLength(0);
   });
 });
+
+test.describe("visitor outside North America booking a US business", () => {
+  test.use({ timezoneId: "America/Mexico_City" });
+
+  test("does not read a bare ten-digit number as a US one", async ({ page }) => {
+    const posted: string[] = [];
+    await page.clock.setFixedTime(WINTER);
+    await serve(page, "America/Chicago", posted);
+    await page.goto(`${ORIGIN}/book/${KEY}`);
+    await page.getByRole("button", { name: /3 times$/ }).first().click();
+    await page.locator(".booker-grid button").first().click();
+    await expect(page.getByText("Start with + and your country code.", { exact: true })).toBeVisible();
+    await page.getByLabel("Name", { exact: true }).fill("Luis Ortega");
+    await page.getByLabel("Email", { exact: true }).fill("luis.ortega@example.com");
+    await page.getByLabel("Phone (optional)").fill("5512345678");
+    await page.getByRole("button", { name: "Confirm booking" }).click();
+    await expect(page.getByText("Please enter a full phone number with area code, or start with + and your country code.")).toBeVisible();
+    expect(posted).toHaveLength(0);
+  });
+});

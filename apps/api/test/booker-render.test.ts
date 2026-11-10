@@ -85,6 +85,13 @@ describe("hosted booker render", () => {
     expect(text).toContain("Times are in Pacific Time (Los Angeles), local time for Test Co.");
     expect(text).not.toContain("your time");
   });
+
+  it("names a fixed-offset zone by its real offset (Etc/GMT+8 is eight hours behind UTC)", async () => {
+    const renders = await renderBooker(1, { resourceZone: "Etc/GMT+8", visitorZone: "Etc/GMT+8" });
+    const text = textOf(renders.at(-1)!);
+    expect(text).toContain("Times are in GMT-08:00, local time for Test Co.");
+    expect(text).not.toContain("GMT+8");
+  });
 });
 
 function textOf(nodes: unknown[]): string {

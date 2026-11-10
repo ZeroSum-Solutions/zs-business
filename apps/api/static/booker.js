@@ -45,6 +45,7 @@
         dayLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "short", month: "short", day: "numeric" }),
         longDay: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "long", month: "long", day: "numeric" }),
         timeLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit" }),
+        offsetLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit", timeZoneName: "short" }),
         name: zoneName(zoneId),
       };
     } catch {
@@ -66,8 +67,20 @@
       generic = "";
     }
     // Zones with no common name format as an offset ("GMT+00:00"); the city reads better.
-    if (!generic || /^(GMT|UTC)/.test(generic)) return city;
+    if (!generic) return city;
+    // Etc/GMT+8 means UTC-08:00, so its own name reads backwards; Intl's offset is right.
+    // Old aliases (US/Pacific, Canada/Central) already read as a name; their last part is not a city.
+    if (/^(Etc|US|Canada)\//i.test(zoneId) || !zoneId.includes("/")) return generic;
+    if (/^(GMT|UTC)/.test(generic)) return city;
     return zoneId.includes("/") ? `${generic} (${city})` : generic;
+  }
+
+  /** A clock time; in the repeated hour when clocks go back, the zone abbreviation tells the two apart. */
+  function clock(f, date) {
+    const label = f.timeLabel.format(date);
+    const hour = 3600000;
+    const repeated = f.timeLabel.format(new Date(date.getTime() - hour)) === label || f.timeLabel.format(new Date(date.getTime() + hour)) === label;
+    return repeated ? f.offsetLabel.format(date) : label;
   }
 
   /** The business's zone: the chosen resource's, else the visitor's. */
@@ -89,19 +102,27 @@
     const same = ours.timeLabel.format(at) === theirs.timeLabel.format(at) && ours.dayKey.format(at) === theirs.dayKey.format(at);
     if (same) return null;
     const sameDay = ours.dayKey.format(at) === theirs.dayKey.format(at);
-    return sameDay ? `${theirs.timeLabel.format(at)} your time` : `${theirs.dayLabel.format(at)}, ${theirs.timeLabel.format(at)} your time`;
+    return sameDay ? `${clock(theirs, at)} your time` : `${theirs.dayLabel.format(at)}, ${clock(theirs, at)} your time`;
   }
 
   /** "10:00 AM – 11:00 AM Pacific Time (Los Angeles)". */
   function rangeLine(startsAt, endsAt) {
     const f = biz();
-    return `${f.timeLabel.format(new Date(startsAt))} – ${f.timeLabel.format(new Date(endsAt))} ${f.name}`;
+    return `${clock(f, new Date(startsAt))} – ${clock(f, new Date(endsAt))} ${f.name}`;
   }
 
   /** The visitor's own time on a line of its own, or null when it reads the same. */
   function yoursLine(startsAt) {
     const yours = visitorTime(startsAt);
     return yours ? h("div", { class: "booker-hint" }, yours.charAt(0).toUpperCase() + yours.slice(1)) : null;
+  }
+
+  /** A time button's text: the business's time, and the visitor's under it when it differs, read out as one phrase. */
+  function timeChoice(f, iso) {
+    const time = clock(f, new Date(iso));
+    const yours = visitorTime(iso);
+    if (!yours) return [time];
+    return [h("span", { "aria-hidden": "true" }, time), h("small", { "aria-hidden": "true" }, yours), h("span", { class: "booker-sr" }, `${time} ${f.name}, ${yours}`)];
   }
 
   /** Build an element; strings become text nodes, never markup. */
@@ -179,7 +200,7 @@
         class: "booker-choice",
         "aria-pressed": String(resource.id === state.resourceId),
         disabled: locked(),
-        onclick: go(() => { state.resourceId = resource.id; state.day = null; state.slot = null; loadSlots(); }),
+        onclick: go(() => { state.resourceId = resource.id; state.slots = []; state.day = null; state.slot = null; loadSlots(); }),
       }, resource.name || "Appointment", h("small", {}, `${resource.slotLengthMinutes} min`)))));
   }
 
@@ -247,7 +268,7 @@
           class: "booker-choice",
           disabled: locked(),
           onclick: go(() => { state.slot = slot; state.notice = ""; state.errors = {}; state.step = "details"; render(); }),
-        }, f.timeLabel.format(new Date(slot.startsAt)), ((yours) => (yours ? h("small", {}, yours) : null))(visitorTime(slot.startsAt))))),
+        }, ...timeChoice(f, slot.startsAt)))),
       slots.length === 0 ? null : zoneHint(slots),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days"),
     ];
@@ -272,10 +293,11 @@
       name,
       value: state.form[name],
       "aria-invalid": state.errors[name] ? "true" : null,
-      "aria-describedby": state.errors[name] ? `booker-${name}-error` : null,
+      "aria-describedby": [attrs.hinted ? `booker-${name}-hint` : null, state.errors[name] ? `booker-${name}-error` : null].filter(Boolean).join(" ") || null,
       oninput: (event) => { state.form[name] = event.target.value; },
       ...attrs,
       multiline: null,
+      hinted: null,
     });
   }
 
@@ -329,7 +351,7 @@
       h("form", { novalidate: true, onsubmit: submit },
         field("name", "Name", input("name", { autocomplete: "name", required: true, maxlength: "200" })),
         field("email", "Email", input("email", { type: "email", autocomplete: "email", required: true, maxlength: "254" })),
-        field("phone", "Phone (optional)", input("phone", { type: "tel", autocomplete: "tel", maxlength: "20" }),
+        field("phone", "Phone (optional)", input("phone", { type: "tel", autocomplete: "tel", maxlength: "20", hinted: true }),
           northAmerican() ? "For example (555) 555-0123. Outside the US or Canada, start with + and your country code."
             : "Start with + and your country code."),
         field("notes", "Notes (optional)", input("notes", { multiline: true, rows: "3", maxlength: "1000" })),
@@ -383,11 +405,12 @@
     return errors;
   }
 
-  // US and Canada zones (country code +1): a ten-digit number there is read as +1.
-  const NANP_ZONE = /^(America\/(New_York|Detroit|Chicago|Denver|Boise|Phoenix|Los_Angeles|Anchorage|Juneau|Sitka|Metlakatla|Yakutat|Nome|Adak|Menominee|Indiana\/.+|Kentucky\/.+|North_Dakota\/.+|Indianapolis|Louisville|Toronto|Vancouver|Edmonton|Winnipeg|Regina|Halifax|St_Johns|Moncton|Glace_Bay|Goose_Bay|Swift_Current|Whitehorse|Dawson|Dawson_Creek|Fort_Nelson|Creston|Cambridge_Bay|Iqaluit|Rankin_Inlet|Resolute|Inuvik|Atikokan|Blanc-Sablon|Puerto_Rico)|Pacific\/Honolulu|US\/.+|Canada\/.+)$/;
+  // US and Canada zones, and US territories (country code +1).
+  const NANP_ZONE = /^(America\/(New_York|Detroit|Chicago|Denver|Boise|Phoenix|Los_Angeles|Anchorage|Juneau|Sitka|Metlakatla|Yakutat|Nome|Adak|Menominee|Indiana\/.+|Kentucky\/.+|North_Dakota\/.+|Indianapolis|Louisville|Toronto|Vancouver|Edmonton|Winnipeg|Regina|Halifax|St_Johns|Moncton|Glace_Bay|Goose_Bay|Swift_Current|Whitehorse|Dawson|Dawson_Creek|Fort_Nelson|Creston|Cambridge_Bay|Iqaluit|Rankin_Inlet|Resolute|Inuvik|Atikokan|Coral_Harbour|Blanc-Sablon|Montreal|Nipigon|Thunder_Bay|Rainy_River|Pangnirtung|Yellowknife|Shiprock|Fort_Wayne|Knox_IN|Atka|Puerto_Rico|St_Thomas|Virgin)|Pacific\/(Honolulu|Johnston|Guam|Saipan)|Navajo|US\/.+|Canada\/.+)$/i;
 
+  /** A bare ten-digit number reads as +1 only when both the business and the visitor are in a +1 zone. */
   function northAmerican() {
-    return NANP_ZONE.test(biz().zone);
+    return NANP_ZONE.test(biz().zone) && NANP_ZONE.test(visitorZone);
   }
 
   function normalizedPhone() {

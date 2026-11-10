@@ -236,6 +236,8 @@ export function CalendarView() {
   return <CalendarScreen resources={resources.data} />;
 }
 
+const OPENING_WAIT_MS = 4000;
+
 function CalendarScreen({ resources }: { resources: readonly ResourceSummary[] }) {
   // `?date=YYYY-MM-DD&calendar=<id>` opens that day, as the Inbox's booking links do.
   const params = useSearchParams();
@@ -255,7 +257,14 @@ function CalendarScreen({ resources }: { resources: readonly ResourceSummary[] }
     to: startOfZonedDay(addDays(today, 1), resource.timeZone).toISOString(),
   }), [today, resource.timeZone]);
   const todays = useBookings({ resourceId: resource.id, ...todayRange });
-  const autoView = openingView(todays.data, todays.isError);
+  // A read that stalls must not hide the controls for good: after a short wait, open on Day.
+  const [gaveUp, setGaveUp] = useState(false);
+  useEffect(() => {
+    if (chosenView !== null) return;
+    const timer = setTimeout(() => setGaveUp(true), OPENING_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [chosenView]);
+  const autoView = openingView(todays.data, todays.isError) ?? (gaveUp ? "day" : null);
   const view = chosenView ?? autoView;
   // Settle it once, so a booking made today does not swap the view under the owner.
   useEffect(() => { if (chosenView === null && autoView !== null) setView(autoView); }, [chosenView, autoView]);

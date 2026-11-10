@@ -38,6 +38,7 @@
         dayLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "short", month: "short", day: "numeric" }),
         longDay: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, weekday: "long", month: "long", day: "numeric" }),
         timeLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit" }),
+        offsetLabel: new Intl.DateTimeFormat(undefined, { timeZone: zoneId, hour: "numeric", minute: "2-digit", timeZoneName: "short" }),
         name: zoneName(zoneId),
       };
     } catch {
@@ -58,8 +59,20 @@
     } catch {
       generic = "";
     }
-    if (!generic || /^(GMT|UTC)/.test(generic)) return city;
+    if (!generic) return city;
+    // Etc/GMT+8 means UTC-08:00, so its own name reads backwards; Intl's offset is right.
+    // Old aliases (US/Pacific, Canada/Central) already read as a name; their last part is not a city.
+    if (/^(Etc|US|Canada)\//i.test(zoneId) || !zoneId.includes("/")) return generic;
+    if (/^(GMT|UTC)/.test(generic)) return city;
     return zoneId.includes("/") ? `${generic} (${city})` : generic;
+  }
+
+  /** A clock time; in the repeated hour when clocks go back, the zone abbreviation tells the two apart. */
+  function clock(f, date) {
+    const label = f.timeLabel.format(date);
+    const hour = 3600000;
+    const repeated = f.timeLabel.format(new Date(date.getTime() - hour)) === label || f.timeLabel.format(new Date(date.getTime() + hour)) === label;
+    return repeated ? f.offsetLabel.format(date) : label;
   }
 
   const fmt = () => formatsFor(state.view && state.view.timeZone ? state.view.timeZone : visitorZone);
@@ -73,10 +86,18 @@
     if (ours === theirs) return null;
     const sameDay = ours.dayKey.format(at) === theirs.dayKey.format(at);
     if (sameDay && ours.timeLabel.format(at) === theirs.timeLabel.format(at)) return null;
-    return sameDay ? `${theirs.timeLabel.format(at)} your time` : `${theirs.dayLabel.format(at)}, ${theirs.timeLabel.format(at)} your time`;
+    return sameDay ? `${clock(theirs, at)} your time` : `${theirs.dayLabel.format(at)}, ${clock(theirs, at)} your time`;
   }
 
   const yoursLine = (iso) => { const yours = visitorTime(iso); return yours ? h("div", { class: "booker-hint" }, yours) : null; };
+
+  /** A time button's text: the business's time, and the visitor's under it when it differs, read out as one phrase. */
+  function timeChoice(f, iso) {
+    const time = clock(f, new Date(iso));
+    const yours = visitorTime(iso);
+    if (!yours) return [time];
+    return [h("span", { "aria-hidden": "true" }, time), h("small", { "aria-hidden": "true" }, yours), h("span", { class: "booker-sr" }, `${time} ${f.name}, ${yours}`)];
+  }
 
   /** Build an element; strings become text nodes, never markup. */
   function h(tag, attrs, ...children) {
@@ -131,7 +152,7 @@
     const end = new Date(view.endsAt);
     return h("div", { class: "booker-summary" },
       h("strong", {}, fmt().longDay.format(start)),
-      h("div", {}, `${fmt().timeLabel.format(start)} – ${fmt().timeLabel.format(end)}`),
+      h("div", {}, `${clock(fmt(), start)} – ${clock(fmt(), end)}`),
       yoursLine(view.startsAt),
       h("div", { class: "booker-hint" }, zoneLine()));
   }
@@ -164,7 +185,7 @@
     if (view.state === "moved") {
       const next = view.movedTo;
       return [...header(view), h("h2", {}, "This appointment was moved"),
-        h("p", { class: "booker-status" }, `It is now on ${fmt().longDay.format(new Date(next.startsAt))}, ${fmt().timeLabel.format(new Date(next.startsAt))} ${fmt().name}.`),
+        h("p", { class: "booker-status" }, `It is now on ${fmt().longDay.format(new Date(next.startsAt))}, ${clock(fmt(), new Date(next.startsAt))} ${fmt().name}.`),
         h("a", { class: "booker-link", href: `/manage/${next.token}` }, "See the new appointment")];
     }
     if (step === "done") return doneView();
@@ -220,7 +241,8 @@
         : h("div", { class: "booker-grid" }, slots.map((slot) => h("button", {
           type: "button", class: "booker-choice", disabled: locked(),
           onclick: go(() => { state.slot = slot; state.notice = ""; state.step = "confirm"; render(); }),
-        }, fmt().timeLabel.format(new Date(slot.startsAt)), ((yours) => (yours ? h("small", {}, yours) : null))(visitorTime(slot.startsAt))))),
+        }, ...timeChoice(fmt(), slot.startsAt)))),
+      slots.length === 0 ? null : h("p", { class: "booker-hint" }, zoneLine()),
       h("button", { type: "button", class: "booker-link", disabled: locked(), onclick: go(() => { state.step = "date"; state.notice = ""; render(); }) }, "Back to days")];
   }
 
@@ -233,7 +255,7 @@
     }
     return [h("h2", { tabindex: "-1", "data-focus": true }, "Move your appointment to"),
       h("div", { class: "booker-summary" }, h("strong", {}, fmt().longDay.format(new Date(slot.startsAt))),
-        h("div", {}, `${fmt().timeLabel.format(new Date(slot.startsAt))} – ${fmt().timeLabel.format(new Date(slot.endsAt))} ${fmt().name}`),
+        h("div", {}, `${clock(fmt(), new Date(slot.startsAt))} – ${clock(fmt(), new Date(slot.endsAt))} ${fmt().name}`),
         yoursLine(slot.startsAt)),
       noticeLine(),
       h("button", { type: "button", class: "booker-primary", disabled: state.submitting, onclick: reschedule }, state.submitting ? "Moving…" : "Move my appointment"),
