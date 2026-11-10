@@ -11,7 +11,9 @@ const postgresText = (min: number, max: number) =>
   z.string().min(min).max(max).refine(isPostgresText, "Text is not valid in Postgres");
 
 /** OS-5: the only variables a template may use, in the order the contract names them. */
-export const OUTREACH_VARIABLES = Object.freeze(["first_name", "company", "industry"] as const);
+export const OUTREACH_VARIABLES = Object.freeze(["first_name", "company", "industry", "opener"] as const);
+/** OS-7: the longest `{{opener}}` the hub stores. */
+export const OUTREACH_OPENER_MAX = 300;
 export type OutreachVariable = (typeof OUTREACH_VARIABLES)[number];
 
 /** OS-7: why one prospect row of an import is refused. */
@@ -135,6 +137,8 @@ export const outreachProspectRowSchema = z.strictObject({
   lastName: postgresText(1, 100).optional(),
   company: postgresText(0, 200),
   industry: postgresText(0, 100).optional(),
+  /** A researched first line (OS-5 `{{opener}}`): at most 300 characters, one line. Empty after trimming = none. */
+  opener: postgresText(0, OUTREACH_OPENER_MAX).refine((value) => !/[\r\n]/.test(value), "An opener is one line").optional(),
   website: postgresText(1, 300).optional(),
   mailboxId: idSchema.optional(),
   /** True = contacted elsewhere (for example by Smartlead): reserve the address, never send. */
@@ -279,6 +283,7 @@ export const outreachProspectRecordSchema = z.strictObject({
   lastName: z.string().nullable(),
   company: z.string(),
   industry: z.string().nullable(),
+  opener: z.string().nullable(),
   website: z.string().nullable(),
   status: outreachProspectStatusSchema,
   nextStep: z.number().int().nullable(),

@@ -156,6 +156,27 @@ describe("column and statement grants", () => {
   });
 });
 
+describe("prospect opener (20261110100000; outreach-sequencer.md OS-5, OS-7)", () => {
+  it("lets the runtime role insert one line of 1..300 characters, refuses CR, LF, empty and longer, and never updates it", async () => {
+    const a = fixture.a.tenantId;
+    const insert = (email: string, opener: string | null) => fixture.a.run((tx) => tx.query(
+      `INSERT INTO outreach_prospects (tenant_id,id,campaign_id,mailbox_id,email,first_name,company,opener,status,created_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,'Sam','Acme',$6,'pending',$7,$7)`, [a, randomUUID(), ids.campaign, ids.mailbox, email, opener, T0]));
+    await insert("one@acme.example", "Read your post on boilers.");
+    await insert("two@acme.example", "x".repeat(300));
+    await insert("none@acme.example", null);
+    for (const [index, bad] of ["a\nb", "a\rb", "", "x".repeat(301)].entries())
+      expect(await denied(() => insert(`bad${index}@acme.example`, bad))).toMatchObject({ code: "23514" });
+    const stored = await fixture.a.run(async (tx) => (await tx.query<{ opener: string | null }>(
+      "SELECT opener FROM outreach_prospects WHERE tenant_id=$1 AND email LIKE '%@acme.example' AND email <> 'sam@acme.example' ORDER BY email", [a])).rows.map((r) => r.opener?.length ?? null));
+    expect(stored).toEqual([null, 26, 300]);
+    expect(await denied(() => fixture.a.run((tx) => tx.query(
+      "UPDATE outreach_prospects SET opener='changed' WHERE tenant_id=$1 AND id=$2", [a, ids.prospect])))).toMatchObject({ code: "42501" });
+    // The other tenant never sees these rows (the table's RLS is unchanged).
+    expect(await fixture.b.run(async (tx) => (await tx.query("SELECT 1 FROM outreach_prospects WHERE opener IS NOT NULL")).rowCount)).toBe(0);
+  });
+});
+
 describe("runtime guards on campaigns and prospects (review fix B6; 20261109110000)", () => {
   const approval = async (tenantId: string, status: string, target: string, action = "outreach.campaign.activate") => {
     const id = randomUUID();

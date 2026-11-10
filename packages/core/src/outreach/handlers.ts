@@ -189,7 +189,8 @@ export const importProspectsHandler: ActionHandler = {
         if (duplicate) { reject("duplicate"); continue; }
       } else {
         const local = email.slice(0, email.lastIndexOf("@"));
-        const values = { firstName: row.firstName.trim(), company: row.company.trim(), industry: row.industry?.trim() ?? null };
+        const values = { firstName: row.firstName.trim(), company: row.company.trim(), industry: row.industry?.trim() ?? null,
+          opener: row.opener?.trim() || null };
         if (ROLE_LOCAL_PARTS.has(local)) { reject("role_address"); continue; }
         if (missingVariables(steps, values).length > 0) { reject("missing_field"); continue; }
         if (renderTooLong(steps, values)) { reject("render_too_long"); continue; }
@@ -211,14 +212,16 @@ export const importProspectsHandler: ActionHandler = {
     if (held + rows.length > OUTREACH_MAX_PROSPECTS_PER_CAMPAIGN) throw new ValidationFailed("A campaign holds at most 5,000 prospects");
     if (rows.length > 0) {
       await tx.query(
-        `INSERT INTO outreach_prospects (tenant_id,id,campaign_id,mailbox_id,email,first_name,last_name,company,industry,website,status,created_at,updated_at)
-         SELECT $1, t.id, $2, t.mailbox_id, t.email, t.first_name, t.last_name, t.company, t.industry, t.website, t.status, $3, $3
-           FROM unnest($4::uuid[], $5::uuid[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[])
-             AS t(id, mailbox_id, email, first_name, last_name, company, industry, website, status)`,
+        `INSERT INTO outreach_prospects (tenant_id,id,campaign_id,mailbox_id,email,first_name,last_name,company,industry,opener,website,status,created_at,updated_at)
+         SELECT $1, t.id, $2, t.mailbox_id, t.email, t.first_name, t.last_name, t.company, t.industry, t.opener, t.website, t.status, $3, $3
+           FROM unnest($4::uuid[], $5::uuid[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[], $13::text[])
+             AS t(id, mailbox_id, email, first_name, last_name, company, industry, opener, website, status)`,
         [tenantId, campaign.id, at,
           rows.map((r) => r.id), rows.map((r) => r.mailboxId), rows.map((r) => r.email),
           rows.map((r) => r.row.firstName.trim()), rows.map((r) => r.row.lastName ?? null),
           rows.map((r) => r.row.company.trim()), rows.map((r) => r.row.industry?.trim() || null),
+          // An excluded row only reserves the address (OS-7): it keeps no opener.
+          rows.map((r) => (r.status === "pending" ? r.row.opener?.trim() || null : null)),
           rows.map((r) => r.row.website ?? null), rows.map((r) => r.status)]);
     }
     const result: ImportOutreachProspectsResult = {

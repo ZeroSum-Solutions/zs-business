@@ -12,11 +12,13 @@ export interface TemplateValues {
   readonly firstName: string;
   readonly company: string;
   readonly industry: string | null;
+  /** The researched first line (OS-5 `{{opener}}`); plain text, never re-scanned. */
+  readonly opener: string | null;
 }
 
-const VARIABLE = /\{\{(first_name|company|industry)\}\}/g;
+const VARIABLE = /\{\{(first_name|company|industry|opener)\}\}/g;
 
-/** True when the text holds a `{{` or `}}` that is not one of the three allowed variables written exactly (OS-5). */
+/** True when the text holds a `{{` or `}}` that is not one of the four allowed variables written exactly (OS-5). */
 export function hasUnknownVariable(text: string): boolean {
   const rest = text.replace(VARIABLE, "");
   return rest.includes("{{") || rest.includes("}}");
@@ -53,8 +55,14 @@ export function campaignVariables(steps: readonly TemplateStep[]): Set<OutreachV
   return found;
 }
 
-const valueOf = (values: TemplateValues, name: OutreachVariable): string =>
-  name === "first_name" ? values.firstName : name === "company" ? values.company : values.industry ?? "";
+const valueOf = (values: TemplateValues, name: OutreachVariable): string => {
+  switch (name) {
+    case "first_name": return values.firstName;
+    case "company": return values.company;
+    case "industry": return values.industry ?? "";
+    case "opener": return values.opener ?? "";
+  }
+};
 
 /** Variables the campaign uses for which the prospect has no value (OS-7 `missing_field`). */
 export function missingVariables(steps: readonly TemplateStep[], values: TemplateValues): OutreachVariable[] {

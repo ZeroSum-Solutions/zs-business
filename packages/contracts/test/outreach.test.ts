@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  createOutreachCampaignRequestSchema, idempotencyKeySchema, importOutreachProspectsRequestSchema, OUTREACH_ERROR_CODES,
+  createOutreachCampaignRequestSchema, idempotencyKeySchema, importOutreachProspectsRequestSchema, OUTREACH_ERROR_CODES, OUTREACH_VARIABLES,
   outreachWindowSchema, permissionSchema, ROLE_PERMISSIONS,
 } from "../src/index.js";
 
@@ -58,6 +58,17 @@ describe("outreach import and permission (OS-1, OS-7)", () => {
     expect(importOutreachProspectsRequestSchema.safeParse({ prospects: [row] }).success).toBe(true);
     expect(importOutreachProspectsRequestSchema.safeParse({ prospects: [] }).success).toBe(false);
     expect(importOutreachProspectsRequestSchema.safeParse({ prospects: Array.from({ length: 501 }, () => row) }).success).toBe(false);
+  });
+
+  it("bounds an optional opener to 300 characters with no CR or LF, and allows {{opener}} in templates (OS-5, OS-7)", () => {
+    const row = { email: "a@b.example", firstName: "A", company: "B" };
+    const parse = (opener: unknown) => importOutreachProspectsRequestSchema.safeParse({ prospects: [{ ...row, opener }] });
+    expect(importOutreachProspectsRequestSchema.safeParse({ prospects: [row] }).success).toBe(true);
+    for (const ok of ["Read your post on boilers.", "x", "x".repeat(300), "", "   ", "Loved {{company}}", "tab\there"]) expect(parse(ok).success, ok).toBe(true);
+    for (const bad of ["x".repeat(301), "two\nlines", "two\rlines", "crlf\r\n", 5, null]) expect(parse(bad).success, String(bad)).toBe(false);
+    const broken = parse("two\nlines");
+    expect(broken.success ? [] : broken.error.issues[0]!.path).toEqual(["prospects", 0, "opener"]);
+    expect(OUTREACH_VARIABLES).toEqual(["first_name", "company", "industry", "opener"]);
   });
 
   it("gives owners the outreach permission and staff none, and reserves the outreach: key prefix", () => {
