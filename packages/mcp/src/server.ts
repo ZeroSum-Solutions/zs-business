@@ -10,7 +10,9 @@ import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/m
 import { CallToolRequestSchema, ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
+  archiveStageRequestSchema,
   cancelBookingRequestSchema,
+  createStageRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
   createOutreachCampaignRequestSchema,
@@ -26,6 +28,8 @@ import {
   listSourcesQuerySchema,
   listThreadsQuerySchema,
   moveDealStageRequestSchema,
+  renameStageRequestSchema,
+  reorderStagesRequestSchema,
   observeSourceRequestSchema,
   requestApprovalRequestSchema,
   resultsQuerySchema,
@@ -142,6 +146,36 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     inputSchema: keyed({ dealId: uuidSchema, ...setDealDetailsRequestSchema.shape }),
     annotations: write,
   }, ({ idempotencyKey, dealId, ...body }, session) => session.setDealDetails(dealId, body, idempotencyKey));
+
+  tool("create_stage", {
+    description: "Add a stage at the end of a pipeline (name up to 100 characters; outcome open, won or lost, default open). A pipeline holds at most 30 live stages. Answers with the whole pipeline.",
+    inputSchema: keyed({ pipelineId: uuidSchema, ...createStageRequestSchema.shape }),
+    annotations: write,
+  }, ({ idempotencyKey, pipelineId, ...body }, session) => session.createStage(pipelineId, body, idempotencyKey));
+
+  tool("rename_stage", {
+    description: "Rename a live stage. Two live stages of one pipeline cannot share a name. Answers with the whole pipeline.",
+    inputSchema: keyed({ stageId: uuidSchema, ...renameStageRequestSchema.shape }),
+    annotations: write,
+  }, ({ idempotencyKey, stageId, ...body }, session) => session.renameStage(stageId, body, idempotencyKey));
+
+  tool("reorder_stages", {
+    description: "Set the order of a pipeline's live stages: stageIds lists every live stage once, first to last. If the pipeline changed meanwhile the call fails with stage_set_changed; read list_pipelines and retry.",
+    inputSchema: keyed({ pipelineId: uuidSchema, ...reorderStagesRequestSchema.shape }),
+    annotations: write,
+  }, ({ idempotencyKey, pipelineId, ...body }, session) => session.reorderStages(pipelineId, body, idempotencyKey));
+
+  tool("archive_stage", {
+    description: "Archive a stage: it leaves the board and takes no new deals, and it can be restored. A stage that holds deals needs moveDealsTo (another live stage of the pipeline), and the deals move with it. The last live stage cannot be archived.",
+    inputSchema: keyed({ stageId: uuidSchema, ...archiveStageRequestSchema.shape }),
+    annotations: write,
+  }, ({ idempotencyKey, stageId, ...body }, session) => session.archiveStage(stageId, body, idempotencyKey));
+
+  tool("restore_stage", {
+    description: "Bring an archived stage back, at the end of its pipeline.",
+    inputSchema: keyed({ stageId: uuidSchema }),
+    annotations: write,
+  }, ({ idempotencyKey, stageId }, session) => session.restoreStage(stageId, idempotencyKey));
 
   tool("draft_reply", {
     description: "Draft an email reply to a customer (contactId, body, optional one-line subject; without one the server writes \"Message from <business name>\"). Nothing is sent: the draft waits as a pending approval (inbox.reply.send) until an owner approves it in the dashboard or API.",

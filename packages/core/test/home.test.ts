@@ -477,6 +477,7 @@ describe("lists (H-1, H-2)", () => {
         { id: A.stages.wonAgain, name: "Paid", position: 2, outcome: "won" },
         { id: A.stages.lost, name: "Lost", position: 3, outcome: "lost" },
       ],
+      archivedStages: [],
     }]);
   });
 });

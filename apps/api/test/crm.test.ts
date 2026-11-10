@@ -7,6 +7,7 @@ import {
   dealPageSchema,
   moveDealStageOutputSchema,
   pipelineSummarySchema,
+  stageOutputSchema,
   setDealDetailsOutputSchema,
 } from "@zs/contracts";
 import { call, contactAndDeal, createApiHarness, NOW, signedInMember, type ApiHarness } from "./helpers.js";
@@ -151,7 +152,7 @@ describe("deal stage moves", () => {
       { id: h.a.pipelineId, name: "Sales", stages: [
         { id: h.a.stages[0], name: "New", position: 0, outcome: "open" },
         { id: h.a.stages[1], name: "Won", position: 1, outcome: "won" },
-      ] },
+      ], archivedStages: [] },
     ]);
   });
 });
@@ -218,5 +219,109 @@ describe("deal details (H-1)", () => {
       token: h.a.token, body: { expectedRevision: 2, value: null, leadSource: null },
     });
     expect(missingKey.status).toBe(400);
+  });
+});
+
+describe("pipeline stage editor (C-25..C-33)", () => {
+  /** A pipeline of its own, so the shared one that other tests read keeps its two stages. */
+  async function ownPipeline() {
+    const pipelineId = randomUUID();
+    const stages = [randomUUID(), randomUUID()];
+    await h.database.pool.query("INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,'Repairs')", [h.a.tenantId, pipelineId]);
+    await h.database.pool.query(
+      "INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position,outcome) VALUES ($1,$2,$3,'Received',0,'open'),($1,$4,$3,'Done',1,'won')",
+      [h.a.tenantId, stages[0], pipelineId, stages[1]]);
+    return { pipelineId, stages: stages as [string, string] };
+  }
+  const post = (path: string, body: unknown, token = h.a.token, key: string = randomUUID()) =>
+    call(h.app, "POST", `/v1/crm${path}`, { token, key, body });
+  const stageOf = (response: { body: unknown }) => stageOutputSchema.parse(response.body).result;
+
+  it("adds, renames, reorders, archives and restores a stage, answering with the whole pipeline", async () => {
+    const { pipelineId, stages } = await ownPipeline();
+    const added = await post(`/pipelines/${pipelineId}/stages`, { name: "  Quote sent " });
+    expect(added.status).toBe(201);
+    const afterAdd = stageOf(added);
+    expect(afterAdd.stages.map((stage) => [stage.name, stage.position, stage.outcome])).toEqual([
+      ["Received", 0, "open"], ["Done", 1, "won"], ["Quote sent", 2, "open"],
+    ]);
+    const quote = afterAdd.stages[2]!.id;
+
+    const renamed = await post(`/stages/${quote}/rename`, { name: "Quote" });
+    expect(renamed.status).toBe(200);
+    expect(stageOf(renamed).stages[2]!.name).toBe("Quote");
+
+    const order = [quote, stages[0], stages[1]];
+    const reordered = await post(`/pipelines/${pipelineId}/stages/order`, { stageIds: order });
+    expect(stageOf(reordered).stages.map((stage) => stage.id)).toEqual(order);
+
+    const archived = await post(`/stages/${quote}/archive`, {});
+    expect(stageOf(archived).archivedStages.map((stage) => stage.name)).toEqual(["Quote"]);
+    expect(stageOf(archived).stages.map((stage) => stage.id)).toEqual([stages[0], stages[1]]);
+
+    const restored = await post(`/stages/${quote}/restore`, {});
+    expect(stageOf(restored).stages.at(-1)).toMatchObject({ id: quote, name: "Quote" });
+    expect(stageOf(restored).archivedStages).toEqual([]);
+
+    const listed = (await call(h.app, "GET", "/v1/crm/pipelines", { token: h.a.token })).body.items
+      .map((item: unknown) => pipelineSummarySchema.parse(item)).find((item: { id: string }) => item.id === pipelineId);
+    expect(listed.stages.map((stage: { id: string }) => stage.id)).toEqual([stages[0], stages[1], quote]);
+  });
+
+  it("replays a key, refuses it for another body, and answers conflicts with their reason", async () => {
+    const { pipelineId, stages } = await ownPipeline();
+    const key = randomUUID();
+    const first = await post(`/pipelines/${pipelineId}/stages`, { name: "Wait" }, h.a.token, key);
+    const replay = await post(`/pipelines/${pipelineId}/stages`, { name: "Wait" }, h.a.token, key);
+    expect([first.status, replay.status]).toEqual([201, 201]);
+    expect(replay.body).toEqual(first.body);
+    const reused = await post(`/pipelines/${pipelineId}/stages`, { name: "Other" }, h.a.token, key);
+    expect(reused.status).toBe(409);
+
+    const duplicate = await post(`/pipelines/${pipelineId}/stages`, { name: "received" });
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body.error.details.reason).toBe("name_in_use");
+    const partial = await post(`/pipelines/${pipelineId}/stages/order`, { stageIds: [stages[1], stages[0]] });
+    expect(partial.status).toBe(409);
+    expect(partial.body.error.details.reason).toBe("stage_set_changed");
+  });
+
+  it("will not archive a stage that holds deals unless they move, and never the last stage", async () => {
+    const { pipelineId, stages } = await ownPipeline();
+    const contact = await post("/contacts", { displayName: "Stage Owner", email: `stage.${randomUUID().slice(0, 8)}@example.com` });
+    const contactId = (contact.body.result.contact as { id: string }).id;
+    const deal = await post("/deals", { contactId, pipelineId, stageId: stages[0], title: "Repair" });
+    expect(deal.status).toBe(201);
+    const refused = await post(`/stages/${stages[0]}/archive`, {});
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.details).toMatchObject({ reason: "stage_has_deals", dealCount: 1 });
+
+    const moved = await post(`/stages/${stages[0]}/archive`, { moveDealsTo: stages[1] });
+    expect(moved.status).toBe(200);
+    const deals = dealPageSchema.parse((await call(h.app, "GET", `/v1/crm/deals?pipelineId=${pipelineId}`, { token: h.a.token })).body);
+    expect(deals.items.map((item) => [item.stageId, item.revision])).toEqual([[stages[1], 2]]);
+
+    const last = await post(`/stages/${stages[1]}/archive`, { moveDealsTo: null });
+    expect(last.status).toBe(409);
+    expect(last.body.error.details.reason).toBe("last_stage");
+
+    const archivedStage = await post("/deals", { contactId, pipelineId, stageId: stages[0], title: "Late" });
+    expect(archivedStage.status).toBe(409);
+    expect(archivedStage.body.error.details.reason).toBe("stage_archived");
+  });
+
+  it("lets staff edit stages, requires the key and the right body, and denies another tenant", async () => {
+    const { pipelineId, stages } = await ownPipeline();
+    const staff = await signedInMember(h.database, h.fixture, h.a.tenantId, "staff");
+    expect((await post(`/pipelines/${pipelineId}/stages`, { name: "By staff" }, staff.token)).status).toBe(201);
+    const noKey = await call(h.app, "POST", `/v1/crm/pipelines/${pipelineId}/stages`, { token: h.a.token, body: { name: "x" } });
+    expect(noKey.status).toBe(400);
+    expect((await post(`/pipelines/${pipelineId}/stages`, { name: "   " })).status).toBe(400);
+    expect((await post(`/pipelines/${pipelineId}/stages`, { name: "x", outcome: "maybe" })).status).toBe(400);
+    expect((await post("/stages/not-a-uuid/rename", { name: "x" })).status).toBe(400);
+    // The other business sees neither the pipeline nor its stages.
+    expect((await post(`/pipelines/${pipelineId}/stages`, { name: "Intruder" }, h.b.token)).status).toBe(403);
+    expect((await post(`/stages/${stages[0]}/rename`, { name: "Intruder" }, h.b.token)).status).toBe(403);
+    expect((await post(`/stages/${stages[0]}/archive`, {}, h.b.token)).status).toBe(403);
   });
 });

@@ -29,6 +29,7 @@ import {
   moveDealStageOutputSchema,
   observeSourceOutputSchema,
   pipelineSummarySchema,
+  stageOutputSchema,
   resourceSummarySchema,
   slotsResponseSchema,
   sourceListSchema,
@@ -158,10 +159,10 @@ describe("MCP tools over an in-memory transport", () => {
   it("lists every write and read tool", async () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
-      "cancel_booking", "create_booking", "create_deal", "discard_reply", "draft_reply", "find_slots", "get_approval", "get_contact",
+      "archive_stage", "cancel_booking", "create_booking", "create_deal", "create_stage", "discard_reply", "draft_reply", "find_slots", "get_approval", "get_contact",
       "get_followup_agent", "get_followup_run", "get_thread", "home_results", "list_approvals", "list_bookings", "list_contacts",
       "list_deals", "list_followup_runs", "list_pipelines", "list_resources", "list_sources", "list_threads", "move_deal_stage",
-      "observe_source", "request_approval", "set_deal_details", "stop_followup_agent", "upsert_contact",
+      "observe_source", "rename_stage", "reorder_stages", "request_approval", "restore_stage", "set_deal_details", "stop_followup_agent", "upsert_contact",
     ]);
     // Only an owner turns the agent on, resumes it or runs it (agents.md G-11).
     expect(names.filter((name) => /resume|settings|run_followup/.test(name))).toEqual([]);
@@ -220,7 +221,7 @@ describe("MCP tools over an in-memory transport", () => {
     const pipelines = ((await callTool(client, "list_pipelines")).value as { items: unknown[] }).items;
     expect(pipelines.map((item) => pipelineSummarySchema.parse(item))).toEqual([{ id: tenant.pipelineId, name: "Sales", stages: [
       { id: tenant.stages[0], name: "New", position: 0, outcome: "open" }, { id: tenant.stages[1], name: "Won", position: 1, outcome: "won" },
-    ] }]);
+    ], archivedStages: [] }]);
     const resources = ((await callTool(client, "list_resources")).value as { items: unknown[] }).items;
     expect(resources.map((item) => resourceSummarySchema.parse(item))).toEqual([
       { id: tenant.resourceId, name: "Showroom", timeZone: "UTC", slotLengthMinutes: 60 },
@@ -381,6 +382,29 @@ describe("MCP tools over an in-memory transport", () => {
       code: "Conflict", details: { reason: "stale_revision", currentRevision: 3 },
     });
     const foreign = await callTool(other, "set_deal_details", { idempotencyKey: "dd-3", dealId, expectedRevision: 3, value: null, leadSource: null });
+    expect(apiErrorBodySchema.parse(foreign.value).error.code).toBe("Forbidden");
+  });
+
+  it("edits a pipeline's stages: create, rename, reorder, archive, restore; a foreign tenant is refused", async () => {
+    const pipelineId = randomUUID();
+    const first = randomUUID();
+    await fixture.service(async (tx) => {
+      await tx.query("INSERT INTO crm_pipelines (tenant_id,id,name) VALUES ($1,$2,'Lessons')", [fixture.a.tenantId, pipelineId]);
+      await tx.query("INSERT INTO crm_stages (tenant_id,id,pipeline_id,name,position) VALUES ($1,$2,$3,'Enquiry',0)", [fixture.a.tenantId, first, pipelineId]);
+    });
+    const created = await callTool(client, "create_stage", { idempotencyKey: "st-1", pipelineId, name: "Trial lesson" });
+    const board = stageOutputSchema.parse(created.value).result;
+    expect(board.stages.map((stage) => stage.name)).toEqual(["Enquiry", "Trial lesson"]);
+    const trial = board.stages[1]!.id;
+    const renamed = stageOutputSchema.parse((await callTool(client, "rename_stage", { idempotencyKey: "st-2", stageId: trial, name: "Trial" })).value).result;
+    expect(renamed.stages[1]!.name).toBe("Trial");
+    const reordered = stageOutputSchema.parse((await callTool(client, "reorder_stages", { idempotencyKey: "st-3", pipelineId, stageIds: [trial, first] })).value).result;
+    expect(reordered.stages.map((stage) => stage.name)).toEqual(["Trial", "Enquiry"]);
+    const archived = stageOutputSchema.parse((await callTool(client, "archive_stage", { idempotencyKey: "st-4", stageId: first })).value).result;
+    expect(archived.archivedStages.map((stage) => stage.name)).toEqual(["Enquiry"]);
+    const restored = stageOutputSchema.parse((await callTool(client, "restore_stage", { idempotencyKey: "st-5", stageId: first })).value).result;
+    expect(restored.stages.map((stage) => stage.name)).toEqual(["Trial", "Enquiry"]);
+    const foreign = await callTool(other, "archive_stage", { idempotencyKey: "st-6", stageId: first });
     expect(apiErrorBodySchema.parse(foreign.value).error.code).toBe("Forbidden");
   });
 

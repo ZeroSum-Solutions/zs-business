@@ -14,7 +14,7 @@ import { templateHandlers } from "../src/templates/handlers.js";
 import { templatedKindHandlers } from "../src/templates/send.js";
 import {
   AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
-  crmHandlers, dealDetailsHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
+  crmHandlers, dealDetailsHandlers, stageHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, planHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
 } from "../src/index.js";
@@ -44,6 +44,12 @@ const EXPECTED_ACTIONS: Record<string, Permission> = {
   "crm.deal.create": "customers",
   "crm.deal.move-stage": "customers",
   "crm.deal.set-details": "customers",
+  // crm.md C-25: editing a pipeline's stages needs `customers`.
+  "crm.stage.create": "customers",
+  "crm.stage.rename": "customers",
+  "crm.stage.reorder": "customers",
+  "crm.stage.archive": "customers",
+  "crm.stage.restore": "customers",
   "inbox.reply.draft": "inbox.drafts",
   "inbox.reply.discard": "inbox.drafts",
   "inbox.reply.send": "inbox.drafts",
@@ -249,6 +255,11 @@ async function stagedVariant(): Promise<{ id: string; sha256: string }> {
 }
 
 /** A booking made by the tenant's owner, for the booking-contact steps. */
+/** A live stage of its own (the owner makes it), for the stage steps that act on one. */
+async function ownerStage(): Promise<string> {
+  const made = await sessionFor(tenant.ownerId).createStage(tenant.pipelineId, { name: `Own ${randomUUID()}` }, randomUUID());
+  return made.result.stages.at(-1)!.id;
+}
 let customerSlot = 0;
 let customerResource: string | undefined;
 async function ownerBooking(): Promise<string> {
@@ -293,6 +304,18 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
       const current = deals.items.find((deal) => deal.id === tenant.dealId)!;
       return session.setDealDetails(tenant.dealId,
         { expectedRevision: current.revision, value: { amountMinor: 1_000, currency: "USD" }, leadSource: "referral" }, randomUUID());
+    } },
+    createStage: { permission: "customers", run: () => session.createStage(tenant.pipelineId, { name: `Stage ${randomUUID()}` }, randomUUID()) },
+    renameStage: { permission: "customers", run: async () => session.renameStage(await ownerStage(), { name: `Renamed ${randomUUID()}` }, randomUUID()) },
+    reorderStages: { permission: "customers", run: async () => {
+      const pipeline = (await sessionFor(tenant.ownerId).listPipelines()).find((item) => item.id === tenant.pipelineId)!;
+      return session.reorderStages(tenant.pipelineId, { stageIds: pipeline.stages.map((stage) => stage.id) }, randomUUID());
+    } },
+    archiveStage: { permission: "customers", run: async () => session.archiveStage(await ownerStage(), { moveDealsTo: null }, randomUUID()) },
+    restoreStage: { permission: "customers", run: async () => {
+      const stageId = await ownerStage();
+      await sessionFor(tenant.ownerId).archiveStage(stageId, { moveDealsTo: null }, randomUUID());
+      return session.restoreStage(stageId, randomUUID());
     } },
     draftReply: { permission: "inbox.drafts", run: () => session.draftReply({ contactId: tenant.contactId, body: "Hello from the shop" }, randomUUID()) },
     approveReply: { permission: "approve", run: async () => session.approveReply(await ownerDraft(), {}, randomUUID()) },
@@ -492,7 +515,7 @@ describe("permission map", () => {
     // The public request is the one action no member session may run (public-intake.md P-1).
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
-      ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...dealDetailsHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
+      ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...dealDetailsHandlers, ...stageHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
       ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...outreachHandlers, ...documentIntakeHandlers,
       ...setupHandlers,
     })

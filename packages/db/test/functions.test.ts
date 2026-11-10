@@ -82,6 +82,9 @@ const expectedPath: Record<string, string> = {
   "calendar_connections_runtime_guard()": "pg_catalog, pg_temp",
   // M3c (20261020200000_inbox_home.sql): the won-date and reply-guard triggers.
   "crm_deals_won_at()": "pg_catalog, pg_temp",
+  // Stage editor (20261110400000_crm_stage_editor.sql, C-31): no deal enters an archived stage, no archive with deals.
+  "crm_deals_stage_live()": "pg_catalog, pg_temp",
+  "crm_stages_archive_empty()": "pg_catalog, pg_temp",
   // Enrichment (20261023600000_enrichment.sql, E-7): a changed email or phone clears the region mark.
   "crm_contacts_clear_region_attest()": "pg_catalog, pg_temp",
   "inbox_replies_guard()": "pg_catalog, pg_temp",

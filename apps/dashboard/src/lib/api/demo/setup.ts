@@ -95,7 +95,7 @@ export function createDemoSetup(ctx: DemoSetupContext): SetupApi & DemoSetupCont
     ctx.confirmTimeZone(timeZone);
     const pipelineId = ctx.newId();
     const stages = template.pipeline.stages.map((stage, index) => ({ id: ctx.newId(), name: stage.name, position: index, outcome: stage.outcome }));
-    ctx.addPipeline({ id: pipelineId, name: template.pipeline.name, stages });
+    ctx.addPipeline({ id: pipelineId, name: template.pipeline.name, stages, archivedStages: [] });
 
     const { resource } = template;
     const hours: DemoResource["hours"] = {};

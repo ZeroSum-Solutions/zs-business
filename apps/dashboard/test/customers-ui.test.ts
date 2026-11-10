@@ -127,7 +127,7 @@ describe("customers page", () => {
 
 // The business's calendar is in New York; the viewer is in Tokyo.
 const newYork = { id: uuid(71), tenantId: DEMO_TENANT_ID, name: "Front desk", timeZone: "America/New_York" } as never;
-const sales = { id: uuid(1), name: "Sales", stages: [{ id: uuid(11), name: "Inquiry", position: 0, outcome: "open" }, { id: uuid(12), name: "Won", position: 1, outcome: "won" }] };
+const sales = { id: uuid(1), name: "Sales", stages: [{ id: uuid(11), name: "Inquiry", position: 0, outcome: "open" }, { id: uuid(12), name: "Won", position: 1, outcome: "won" }], archivedStages: [] };
 
 describe("pipeline board", () => {
   it("shows when a deal was won in the viewer's time zone, not the calendar's (U2-1)", () => {

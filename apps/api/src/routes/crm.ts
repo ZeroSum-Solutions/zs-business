@@ -11,6 +11,17 @@ export const crmRoutes = new Hono<AppEnv>()
     return c.json(output, output.result.created ? 201 : 200);
   })
   .get("/pipelines", async (c) => c.json({ items: await c.var.session.listPipelines() }))
+  // crm.md C-32: the stage editor. Each answers with the whole edited pipeline.
+  .post("/pipelines/:id/stages", async (c) =>
+    c.json(await c.var.session.createStage(c.req.param("id"), await jsonBody(c), idempotencyKey(c)), 201))
+  .post("/pipelines/:id/stages/order", async (c) =>
+    c.json(await c.var.session.reorderStages(c.req.param("id"), await jsonBody(c), idempotencyKey(c))))
+  .post("/stages/:id/rename", async (c) =>
+    c.json(await c.var.session.renameStage(c.req.param("id"), await jsonBody(c), idempotencyKey(c))))
+  .post("/stages/:id/archive", async (c) =>
+    c.json(await c.var.session.archiveStage(c.req.param("id"), await jsonBody(c), idempotencyKey(c))))
+  .post("/stages/:id/restore", async (c) =>
+    c.json(await c.var.session.restoreStage(c.req.param("id"), idempotencyKey(c))))
   .get("/deals", async (c) => c.json(await c.var.session.listDeals(c.req.query())))
   .post("/deals", async (c) =>
     c.json(await c.var.session.createDeal(await jsonBody(c), idempotencyKey(c)), 201))
