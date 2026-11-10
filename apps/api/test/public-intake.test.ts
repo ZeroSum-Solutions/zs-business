@@ -387,8 +387,9 @@ describe("one transaction (P-9)", () => {
       intake: before.intake + 1,
       intakeConsent: before.intakeConsent,
       bookings: before.bookings + 1,
-      actions: before.actions + 1,
-      outbox: before.outbox + 1,
+      // The winner's request and its confirmation email (booking-self-service.md BS-3); the loser left nothing.
+      actions: before.actions + 2,
+      outbox: before.outbox + 2,
     });
   });
 

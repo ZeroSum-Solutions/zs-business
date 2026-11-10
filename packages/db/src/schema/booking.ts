@@ -81,6 +81,8 @@ export const bookings = pgTable(
     cancelledAt: instant("cancelled_at"),
     cancelledBy: uuid("cancelled_by"),
     cancelReason: text("cancel_reason"),
+    /** booking-self-service.md BS-11: the booking a customer moved this one from. */
+    rescheduledFrom: uuid("rescheduled_from"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
@@ -90,6 +92,12 @@ export const bookings = pgTable(
       columns: [table.tenantId, table.resourceId],
       foreignColumns: [bookingResources.tenantId, bookingResources.id],
     }),
+    foreignKey({
+      name: "bookings_rescheduled_from_fk",
+      columns: [table.tenantId, table.rescheduledFrom],
+      foreignColumns: [table.tenantId, table.id],
+    }),
+    check("bookings_rescheduled_from_other", sql`${table.rescheduledFrom} IS NULL OR ${table.rescheduledFrom} <> ${table.id}`),
     check("bookings_source", sql`${table.source} IN ('owner', 'website')`),
     check("bookings_source_intake", sql`(${table.source} = 'website') = (${table.intakeItemId} IS NOT NULL)`),
     check("bookings_positive_range", sql`${table.startsAt} < ${table.endsAt}`),
@@ -106,6 +114,7 @@ export const bookings = pgTable(
     // Also covers the (tenant_id, resource_id) foreign key.
     index("bookings_tenant_resource_start").on(table.tenantId, table.resourceId, table.startsAt, table.id),
     index("bookings_tenant_created").on(table.tenantId, table.createdAt),
+    index("bookings_tenant_rescheduled_from").on(table.tenantId, table.rescheduledFrom).where(sql`${table.rescheduledFrom} IS NOT NULL`),
     index("bookings_tenant_intake_item").on(table.tenantId, table.intakeItemId).where(sql`${table.intakeItemId} IS NOT NULL`),
     tenantPolicy(table.tenantId),
   ],

@@ -23,6 +23,9 @@ export const BOOKING_PAGE_CSP = [
   "frame-ancestors *",
 ].join("; ");
 
+/** BS-10: the customer's link page is never framed, so a booking can not be clicked through a hostile page. */
+export const MANAGE_PAGE_CSP = BOOKING_PAGE_CSP.replace("frame-ancestors *", "frame-ancestors 'none'");
+
 export function bookerAssets() {
   const common = { "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" };
   return {
@@ -31,6 +34,9 @@ export function bookerAssets() {
     bookerJs: read("booker.js"),
     bookerCss: read("booker.css"),
     embedJs: read("embed.js"),
+    manageHtml: read("manage.html"),
+    manageJs: read("manage.js"),
+    manageHeaders: { ...common, "Content-Security-Policy": MANAGE_PAGE_CSP, "Cache-Control": "no-store", "X-Robots-Tag": "noindex" },
     pageHeaders: { ...common, "Content-Security-Policy": BOOKING_PAGE_CSP, "Cache-Control": "no-store" },
     scriptHeaders: { ...common, "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "public, max-age=300" },
     styleHeaders: { ...common, "Content-Type": "text/css; charset=utf-8", "Cache-Control": "public, max-age=300" },

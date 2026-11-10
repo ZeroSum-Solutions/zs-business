@@ -97,6 +97,7 @@ export class NotFound extends ActionError<"NotFound"> {
 export * from "./approvals.js";
 export * from "./booking.js";
 export * from "./booking-customer.js";
+export * from "./booking-self-service.js";
 export * from "./business.js";
 export * from "./crm.js";
 export * from "./enrichment.js";

@@ -1,6 +1,7 @@
 // M3a public edge session (public-intake.md P-2, P-3, P-5, P-6, P-11). The tenant and page come
 // from a verified booking key, never from the request; the server builds the principal itself.
 import {
+  CONFIRMATION_SEND_ACTION,
   NotFound,
   TenantDenied,
   publicBookingRequestBodySchema,
@@ -18,21 +19,27 @@ import { requestPublicBooking } from "../intake/index.js";
 import type { BookingPageRef } from "../intake/keys.js";
 import { findSlots } from "../reads/booking.js";
 import { loadPublishedPage, pageHasResource, publicPage } from "../reads/intake.js";
+import { confirmBooking } from "./confirm-booking.js";
 import { derivedId } from "./ids.js";
 import { directDispatch, parseInput, type Authorize, type EdgeDependencies } from "./session.js";
 
 /** The one actor every anonymous request runs as, per tenant (P-3). */
 export const publicIntakeActorId = (tenantId: string) => derivedId(tenantId, "public-intake", "actor");
 
-/** P-1, P-3: the public principal is no member and may run the one public action only. */
+/**
+ * P-1, P-3: the public principal is no member and may run the one public action only, plus the
+ * confirmation email the server sends for the booking it just made (booking-self-service.md BS-3).
+ */
 const publicAuthorize: Authorize = async (_tx, binding) => {
-  if (binding.actionType !== PUBLIC_REQUEST_ACTION) throw new TenantDenied();
+  if (binding.actionType !== PUBLIC_REQUEST_ACTION && binding.actionType !== CONFIRMATION_SEND_ACTION) throw new TenantDenied();
 };
 
 export function createPublicSession(deps: EdgeDependencies, ref: BookingPageRef) {
   const tenantId = uuidSchema.parse(ref.tenantId);
   const pageId = uuidSchema.parse(ref.pageId);
-  const run = directDispatch(deps, tenantId, publicIntakeActorId(tenantId), publicAuthorize);
+  // BS-3: with no booking-key secret or public address there is no link to send, so no confirmation either.
+  const manage = deps.bookingKeys ? { manage: { secret: deps.bookingKeys.secret, publicBaseUrl: deps.bookingKeys.publicBaseUrl } } : {};
+  const run = directDispatch(deps, tenantId, publicIntakeActorId(tenantId), publicAuthorize, manage);
   const read = <T>(work: (tx: Transaction) => Promise<T>) => deps.db.tenant(tenantId, work);
 
   /** P-4: an unpublished page and an unlinked resource look exactly like a forged key. */
@@ -74,6 +81,8 @@ export function createPublicSession(deps: EdgeDependencies, ref: BookingPageRef)
           pageId,
         },
       }, { dispatch: run });
+      // BS-3: the booking is committed; its confirmation is a second action, and its failure changes nothing.
+      if (deps.bookingKeys) await confirmBooking(run, tenantId, bookingId, "booked");
       // P-6: the outcome and contact stay on the server; every caller sees this shape.
       const { result } = output;
       return {

@@ -80,7 +80,10 @@ export async function loadBusy(tx: Transaction, tenantId: string, resourceId: st
 }
 
 /** Where a booking came from: the owner, or a website visitor's intake item (public-intake.md P-9). */
-export type BookingOrigin = { source: "owner" } | { source: "website"; intakeItemId: string };
+export type BookingOrigin =
+  | { source: "owner" }
+  // `rescheduledFrom`: the booking a customer moved this one from (booking-self-service.md BS-8).
+  | { source: "website"; intakeItemId: string; rescheduledFrom?: string };
 
 /**
  * B-19, B-21, B-22 inside the caller's dispatcher transaction: take the resource lock and
@@ -141,12 +144,13 @@ export async function insertBooking(
   // bookings_resource_occupied_excl (B-20) arbitrates anything the lock did not serialize.
   await tx.query(
     `INSERT INTO bookings (tenant_id, id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
-       buffer_before_minutes, buffer_after_minutes, status, created_at, source, intake_item_id)
+       buffer_before_minutes, buffer_after_minutes, status, created_at, source, intake_item_id, rescheduled_from)
      VALUES ($1, $2, $3, $4::timestamptz, $5::timestamptz, $6::timestamptz, $7::timestamptz, $8, $9, 'confirmed',
-       $10::timestamptz, $11, $12)`,
+       $10::timestamptz, $11, $12, $13)`,
     [record.tenantId, record.id, record.resourceId, record.startsAt, record.endsAt, record.occupiedStartsAt,
       record.occupiedEndsAt, record.bufferBeforeMinutes, record.bufferAfterMinutes, record.createdAt,
-      origin.source, origin.source === "website" ? origin.intakeItemId : null],
+      origin.source, origin.source === "website" ? origin.intakeItemId : null,
+      origin.source === "website" ? origin.rescheduledFrom ?? null : null],
   );
   return record;
 }

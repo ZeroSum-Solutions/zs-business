@@ -23,6 +23,7 @@ export {
   type OutreachOperator,
   type OutreachSession,
 } from "./outreach-session.js";
+export { createManageSession, type ManageHandle, type ManageSession } from "./manage-session.js";
 export { createPublicSession, publicIntakeActorId, type PublicSession } from "./public-session.js";
 export {
   createInboundSmsSession,

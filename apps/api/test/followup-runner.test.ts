@@ -338,8 +338,10 @@ describe("scheduled runs against Postgres (G-13)", () => {
     const approvals = await service((tx) => tx.query<{ status: string; action_type: string }>(
       "SELECT status, action_type FROM approvals WHERE tenant_id=$1", [h.a.tenantId]));
     expect(approvals.rows).toEqual([{ status: "pending", action_type: "inbox.reply.send" }]);
+    // The agent sent nothing. The only mail is each inquiry's booking confirmation (booking-self-service.md BS-3).
     const sends = await service((tx) => tx.query(
-      "SELECT 1 FROM outbox WHERE event_type='message.send_requested' AND tenant_id = ANY($1::uuid[])", [[h.a.tenantId, h.b.tenantId]]));
+      `SELECT 1 FROM outbox WHERE event_type='message.send_requested' AND tenant_id = ANY($1::uuid[])
+          AND payload->>'body' NOT LIKE '%/manage/zsm1_%'`, [[h.a.tenantId, h.b.tenantId]]));
     expect(sends.rows).toEqual([]);
   });
 

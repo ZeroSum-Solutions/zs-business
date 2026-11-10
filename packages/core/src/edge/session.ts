@@ -166,7 +166,7 @@ import { loadSetup, readSetup, setupHandlers, storedApplyResult, zoneKnown } fro
 import { transcriptionHandlers } from "../transcription/handlers.js";
 import { documentIntakeHandlers } from "../document-intake/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
-import { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, createBooking } from "../booking/index.js";
+import { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
@@ -311,7 +311,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 }
 
 const dispatch = createDispatcher({
-  ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
+  ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...outreachHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
