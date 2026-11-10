@@ -46,7 +46,7 @@ export async function homeResults(tx: Transaction, tenantId: string, query: Resu
   const bookings = { ...zero(), bySource: new Map<"website" | "owner", Tally>([["website", zero()], ["owner", zero()]]) };
   for (const row of (await tx.query<{ week: Week; source: "website" | "owner"; n: string }>(
     `SELECT ${week("created_at")} AS week, source, count(*)::text AS n
-       FROM bookings WHERE tenant_id=$1 AND ${inRanges("created_at")} GROUP BY 1, 2`, params,
+       FROM bookings WHERE tenant_id=$1 AND status = 'confirmed' AND ${inRanges("created_at")} GROUP BY 1, 2`, params,
   )).rows) {
     add(bookings, row.week, count(row.n));
     add(bookings.bySource.get(row.source)!, row.week, count(row.n));

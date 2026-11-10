@@ -50,6 +50,10 @@ import {
   changeMemberRoleRequestSchema,
   bookingContactOutputSchema,
   createBookingRequestSchema,
+  cancelBookingOutputSchema,
+  cancelBookingRequestSchema,
+  CANCEL_BOOKING_ACTION,
+  type CancelBookingOutput,
   linkBookingContactRequestSchema,
   unlinkBookingContactRequestSchema,
   createDealRequestSchema,
@@ -162,7 +166,7 @@ import { loadSetup, readSetup, setupHandlers, storedApplyResult, zoneKnown } fro
 import { transcriptionHandlers } from "../transcription/handlers.js";
 import { documentIntakeHandlers } from "../document-intake/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
-import { bookingContactHandlers, bookingHandlers, createBooking } from "../booking/index.js";
+import { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
@@ -307,7 +311,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 }
 
 const dispatch = createDispatcher({
-  ...bookingHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
+  ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...crmHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...outreachHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
@@ -322,6 +326,8 @@ const dispatch = createDispatcher({
  */
 export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.freeze({
   "booking.create": "calendar",
+  // booking.md B-29: staff work the calendar, so they cancel too.
+  "booking.cancel": "calendar",
   // booking-customer.md BC-3: also needs `customers` (ALSO_REQUIRED_PERMISSIONS below).
   "booking.contact.link": "calendar",
   "booking.contact.unlink": "calendar",
@@ -685,6 +691,18 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const request = parseInput(createBookingRequestSchema, body);
       const { id, ...rest } = envelope(key, "booking");
       return createBooking({ actionType: "booking.create", ...rest, payload: { bookingId: id, ...request } }, writeContext);
+    },
+
+    /** booking.md B-29: cancel a booking and, unless told not to, email the customer. */
+    async cancelBooking(bookingId: unknown, body: unknown, key: unknown): Promise<CancelBookingOutput> {
+      const id = parseInput(uuidSchema, bookingId, "booking ID");
+      const request = parseInput(cancelBookingRequestSchema, body ?? {});
+      const { id: _target, ...rest } = envelope(key, "booking", id);
+      return parseInput(cancelBookingOutputSchema,
+        await run({
+          actionType: CANCEL_BOOKING_ACTION, ...rest,
+          payload: toJson({ bookingId: id, reason: request.reason ?? null, notifyCustomer: request.notifyCustomer ?? true }),
+        }), "result");
     },
 
     /** booking-customer.md BC-3: link a booking to a contact, or change it; `expectedRevision` is the detail's. */

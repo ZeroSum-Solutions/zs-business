@@ -211,7 +211,7 @@ export async function getThread(tx: Transaction, tenantId: string, id: ThreadId)
   const requests = (await tx.query<RequestRow>(
     `SELECT i.id, i.created_at, i.channel, i.status, i.submitted_name, i.notes,
             b.id AS booking_id, b.resource_id AS booking_resource_id, b.starts_at AS booking_starts_at, b.ends_at AS booking_ends_at
-       FROM intake_items i LEFT JOIN bookings b ON b.tenant_id = i.tenant_id AND b.intake_item_id = i.id
+       FROM intake_items i LEFT JOIN bookings b ON b.tenant_id = i.tenant_id AND b.intake_item_id = i.id AND b.status = 'confirmed'
       WHERE i.tenant_id=$1 AND ${kind === "customer" ? "i.contact_id" : "i.id"} = $2
       ORDER BY i.created_at DESC, i.id DESC LIMIT $3`,
     [tenantId, key, limit],

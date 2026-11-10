@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { supportedInstantSchema } from "./instant.js";
+import { isPostgresText } from "./json.js";
 import {
   actionCommandSchema,
   actionResultSchema,
@@ -114,7 +115,8 @@ export const bookingRecordSchema = z.strictObject({
   occupiedEndsAt: bookingInstantSchema,
   bufferBeforeMinutes: minutesSchema,
   bufferAfterMinutes: minutesSchema,
-  status: z.literal("confirmed"),
+  /** B-29: `cancelled` rows are kept for the record and take no part in availability. */
+  status: z.enum(["confirmed", "cancelled"]),
   createdAt: bookingInstantSchema,
 }).refine((value) => value.startsAt < value.endsAt &&
   Date.parse(value.occupiedStartsAt) === Date.parse(value.startsAt) - value.bufferBeforeMinutes * 60000 &&
@@ -123,6 +125,45 @@ export const bookingRecordSchema = z.strictObject({
 export type BookingRecord = z.infer<typeof bookingRecordSchema>;
 export const createBookingOutputSchema = z.lazy(() => actionResultSchema.extend({ result: bookingRecordSchema }));
 export type CreateBookingOutput = z.infer<typeof createBookingOutputSchema>;
+
+/** B-29: why an owner cancelled, shown to nobody but the owner. One line of plain text, up to 500 characters. */
+export const bookingCancelReasonSchema = z.string().trim().min(1).max(500).refine(isPostgresText, "Invalid Postgres text");
+/** B-29: the HTTP and tool body. Both fields are optional; the server fills the defaults before it binds the action. */
+export const cancelBookingRequestSchema = z.strictObject({
+  reason: bookingCancelReasonSchema.nullish(),
+  notifyCustomer: z.boolean().optional(),
+});
+export type CancelBookingRequest = z.infer<typeof cancelBookingRequestSchema>;
+/** B-29: the bound payload: every field present, so one cancellation has one canonical form. */
+export const cancelBookingInputSchema = z.strictObject({
+  bookingId: idSchema,
+  reason: bookingCancelReasonSchema.nullable(),
+  notifyCustomer: z.boolean(),
+});
+export type CancelBookingInput = z.infer<typeof cancelBookingInputSchema>;
+export const CANCEL_BOOKING_ACTION = "booking.cancel";
+export const cancelBookingCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal(CANCEL_BOOKING_ACTION),
+  target: targetSchema.extend({ type: z.literal("booking") }),
+  payload: cancelBookingInputSchema,
+}).refine((command) => command.target.id === command.payload.bookingId, "Target must equal the booking"));
+export type CancelBookingCommand = z.infer<typeof cancelBookingCommandSchema>;
+/**
+ * B-33: what happened to the customer's notice. `queued`: one transactional email was handed to delivery.
+ * `off`: the owner chose not to notify. `no_customer` / `no_email`: nobody to write to. `already_cancelled`: this call
+ * changed nothing, so it sent nothing.
+ */
+export const cancelNoticeSchema = z.enum(["queued", "off", "no_customer", "no_email", "already_cancelled"]);
+export type CancelNotice = z.infer<typeof cancelNoticeSchema>;
+export const cancelBookingResultSchema = z.strictObject({
+  booking: bookingRecordSchema,
+  cancelledAt: bookingInstantSchema,
+  reason: z.string().nullable(),
+  customerNotice: cancelNoticeSchema,
+});
+export type CancelBookingResult = z.infer<typeof cancelBookingResultSchema>;
+export const cancelBookingOutputSchema = z.lazy(() => actionResultSchema.extend({ result: cancelBookingResultSchema }));
+export type CancelBookingOutput = z.infer<typeof cancelBookingOutputSchema>;
 
 export const getAvailableSlotsErrorCodeSchema = z.enum(["ValidationFailed", "NotImplemented"]);
 export type GetAvailableSlotsErrorCode = z.infer<typeof getAvailableSlotsErrorCodeSchema>;

@@ -91,3 +91,19 @@ describe("customer change messages", () => {
     expect(customerChangeMessage(new ApiError("server", "x", 500))).toBeUndefined();
   });
 });
+
+describe("calendar day: cancelling (booking.md B-29, B-30)", () => {
+  it("offers Cancel booking on a booking that has not ended, named by its time", () => {
+    const html = calendar([booking(0, {})]);
+    expect(html).toMatch(/aria-label="Cancel the booking at \d{1,2}:\d{2} [AP]M"/);
+    expect(html).toContain("Cancel booking");
+  });
+
+  it("offers it on a website booking too, but not on one that has ended", () => {
+    const web = calendar([booking(0, { source: "website", intakeItemId: uuid(9) })]);
+    expect(web).toContain("Cancel booking");
+    // 09:00-10:00 UTC is before the clock (15:00).
+    const over = calendar([booking(0, { startsAt: "2026-10-21T09:00:00.000Z", endsAt: "2026-10-21T10:00:00.000Z" })]);
+    expect(over).not.toContain("Cancel booking");
+  });
+});

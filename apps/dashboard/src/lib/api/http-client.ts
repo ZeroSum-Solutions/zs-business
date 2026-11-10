@@ -40,6 +40,7 @@ import {
   contactPageSchema,
   contactRecordSchema,
   applyTemplateResponseSchema,
+  cancelBookingOutputSchema,
   createBookingOutputSchema,
   createDealOutputSchema,
   setBookingPagePublishedResponseSchema,
@@ -329,7 +330,7 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     },
 
     async listBookings(query = {}, options = {}) {
-      const filters = { resourceId: query.resourceId, from: query.from, to: query.to, contactId: query.contactId };
+      const filters = { resourceId: query.resourceId, from: query.from, to: query.to, contactId: query.contactId, status: query.status };
       if (query.limit === undefined) return listAll("/v1/booking/bookings", bookingPageSchema, filters, options.signal);
       const page = await request({
         method: "GET", path: "/v1/booking/bookings", query: { ...filters, limit: query.limit },
@@ -355,6 +356,14 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
     async unlinkBookingContact(input, options) {
       const body = { expectedRevision: input.expectedRevision };
       return (await write(`/v1/booking/bookings/${encodeURIComponent(input.bookingId)}/contact/unlink`, body, bookingContactOutputSchema, options)).result;
+    },
+
+    async cancelBooking(input, options) {
+      const body = {
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+        ...(input.notifyCustomer !== undefined ? { notifyCustomer: input.notifyCustomer } : {}),
+      };
+      return (await write(`/v1/booking/bookings/${encodeURIComponent(input.bookingId)}/cancel`, body, cancelBookingOutputSchema, options)).result;
     },
 
     async listPipelines(options = {}) {

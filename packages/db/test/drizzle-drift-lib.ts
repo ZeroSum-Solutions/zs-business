@@ -20,7 +20,7 @@ import * as schema from "../src/schema/index.js";
 /** EXCLUDE constraints that exist on mirrored tables. Drizzle has no way to declare them, so the test pins name and definition. */
 export const EXCLUSION_CONSTRAINTS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   bookings: {
-    bookings_resource_occupied_excl: "EXCLUDE USING gist (tenant_id WITH =, resource_id WITH =, tstzrange(occupied_starts_at, occupied_ends_at, '[)'::text) WITH &&)",
+    bookings_resource_occupied_excl: "EXCLUDE USING gist (tenant_id WITH =, resource_id WITH =, tstzrange(occupied_starts_at, occupied_ends_at, '[)'::text) WITH &&) WHERE ((status = 'confirmed'::text))",
   },
 };
 

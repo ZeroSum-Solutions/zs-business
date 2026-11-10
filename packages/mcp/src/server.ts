@@ -10,6 +10,7 @@ import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/m
 import { CallToolRequestSchema, ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
+  cancelBookingRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
   createOutreachCampaignRequestSchema,
@@ -109,6 +110,12 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     inputSchema: keyed(createBookingRequestSchema.shape),
     annotations: write,
   }, ({ idempotencyKey, ...body }, session) => session.createBooking(body, idempotencyKey));
+
+  tool("cancel_booking", {
+    description: "Cancel a booking and free its slot. The customer gets a cancellation email unless notifyCustomer is false. A booking that already ended cannot be cancelled. Reuse the idempotencyKey to retry safely.",
+    inputSchema: keyed({ bookingId: uuidSchema, ...cancelBookingRequestSchema.shape }),
+    annotations: write,
+  }, ({ idempotencyKey, bookingId, ...body }, session) => session.cancelBooking(bookingId, body, idempotencyKey));
 
   tool("upsert_contact", {
     description: "Create a contact, or return the existing one that has the same email or phone.",

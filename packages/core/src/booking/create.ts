@@ -56,7 +56,7 @@ export async function loadResource(tx: Transaction, tenantId: string, resourceId
 }
 
 /**
- * Busy spans intersecting [from,to) (B-13/B-15). Intersection uses the same half-open semantics as
+ * Busy spans intersecting [from,to) (B-13/B-15). Cancelled bookings are not busy (B-32). Intersection uses the same half-open semantics as
  * bookings_resource_occupied_excl, in SQL at full timestamptz precision, and every span is clipped to the
  * whole-millisecond window first. Rounding a sub-millisecond bound to milliseconds therefore stays inside
  * a window the row really overlaps, so an exact touch never becomes an overlap and an overlap never vanishes.
@@ -66,7 +66,7 @@ export async function loadBusy(tx: Transaction, tenantId: string, resourceId: st
     `SELECT floor(extract(epoch FROM greatest(occupied_starts_at, $3::timestamptz)) * 1000)::bigint AS start_ms,
             ceil(extract(epoch FROM least(occupied_ends_at, $4::timestamptz)) * 1000)::bigint AS end_ms
        FROM bookings
-      WHERE tenant_id=$1 AND resource_id=$2
+      WHERE tenant_id=$1 AND resource_id=$2 AND status = 'confirmed'
         AND tstzrange(occupied_starts_at, occupied_ends_at, '[)') && tstzrange($3::timestamptz, $4::timestamptz, '[)')
      UNION ALL
      SELECT floor(extract(epoch FROM greatest(starts_at, $3::timestamptz)) * 1000)::bigint,

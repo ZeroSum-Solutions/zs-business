@@ -1,5 +1,5 @@
 export * from "./actions/dispatch.js";
-export { bookingContactHandlers, bookingHandlers, createBooking, getAvailableSlots } from "./booking/index.js";
+export { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, createBooking, getAvailableSlots } from "./booking/index.js";
 export { createDeal, createOrFindContact, crmHandlers, moveDealStage } from "./crm/index.js";
 export * from "./edge/index.js";
 export { findSlots, getBooking, listBookings, listResources } from "./reads/booking.js";

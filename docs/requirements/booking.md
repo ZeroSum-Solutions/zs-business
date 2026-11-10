@@ -8,6 +8,11 @@ time of writing, `pnpm --filter @zs/core test:booking` runs 81 tests in four fil
 all pass. The public examples cover a small part of the contract; the acceptance tests
 cover the rest.
 
+Revision 3 (2026-11-10, first-client week): cancellation. B-1 brings owner cancellation into scope; B-20 and
+B-24 let a booking be `confirmed` or `cancelled` and limit the overlap constraint to confirmed rows; B-29 to B-35 add
+the `booking.cancel` action. B-17 to B-19 and B-21 to B-23 do not change: `booking.create` still accepts only
+`{bookingId,resourceId,startsAt}`. Rescheduling and the customer's own link are in `booking-self-service.md`.
+
 Revision 2 (2026-10-22): B-3 accepts client-supplied instants in UTC years 0001 through 9999
 only. The frozen booking instant schema refuses anything outside that range, so every booking
 boundary (create, the availability recheck, slot search, availability and list range filters)
@@ -44,8 +49,8 @@ specific inspected behavior, not a claim about an entire product.
 resource per tenant; M1 (migration `20261018120000_booking_multi_resource.sql`) lifts
 that limit so a tenant may own several resources, each locked and constrained on its
 own (B-20, B-21). F1 supports its schedule, external busy periods, and confirmed bookings.
-Round robin, multiple hosts, reminders, payments, recurring bookings, cancellation
-and rescheduling APIs are outside this slice. Resource provisioning and connector
+Round robin, multiple hosts, reminders, payments, recurring bookings and rescheduling
+APIs are outside this slice. Cancellation by an owner is inside it from revision 3 (B-29). Resource provisioning and connector
 sync will get separate write actions; they must obey B-21 before shipping.
 
 **B-2. Desired (S1/S2 comparison).** `getAvailableSlots(input, deps)` is synchronous
@@ -266,7 +271,7 @@ the typed domain errors, not every possible transport/database outage.
 | Table | Required columns and constraints |
 | --- | --- |
 | `booking_resources` | `tenant_id`, `id`, `time_zone`, `weekly` JSONB, `overrides` JSONB, `slot_length_minutes`, `slot_step_minutes`, `buffer_before_minutes`, `buffer_after_minutes`, `minimum_notice_minutes`, `booking_horizon_minutes`; PK `(tenant_id,id)`, FK to tenant, schema-equivalent config validation; M1 dropped the original one-per-tenant unique constraint on `tenant_id` and added a nullable `name` (1 to 200 characters) that B-28 inserts may omit |
-| `bookings` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `occupied_starts_at`, `occupied_ends_at`, `buffer_before_minutes`, `buffer_after_minutes`, `status`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive appointment range, saved buffer bounds and exact occupied-bound checks, confirmed status only |
+| `bookings` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `occupied_starts_at`, `occupied_ends_at`, `buffer_before_minutes`, `buffer_after_minutes`, `status`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive appointment range, saved buffer bounds and exact occupied-bound checks; from revision 3 `status` is `confirmed` or `cancelled`, with nullable `cancelled_at`, `cancelled_by` (the owner member who cancelled) and `cancel_reason` that are set together with `cancelled` and only then (B-30) |
 | `booking_external_blocks` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `source`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive range, nonempty source |
 
 Use `timestamptz` for instants. Define `bookings_resource_occupied_excl` using
@@ -364,3 +369,56 @@ Fixtures in `packages/core/fixtures/public/booking/`:
 and `create-booking.json`. They contain synthetic IDs and data only. Five public
 tests consume these examples; a sixth is the SQL integration template. All six pass
 at the time of writing.
+
+## Cancellation (revision 3)
+
+**B-29. Desired, the action.** `booking.cancel` has target type `booking` and payload
+`{bookingId, reason, notifyCustomer}`. `reason` is null or one line of 1..500 characters (trimmed, Postgres text),
+kept for the owner and never sent to the customer. `notifyCustomer` is a boolean. The HTTP and tool bodies
+(`POST /v1/bookings/:id/cancel`, MCP `cancel_booking`) may omit both; the server fills `reason: null` and
+`notifyCustomer: true` before it binds the action, so one cancellation has one canonical payload. The action needs the
+`calendar` permission, so staff and owners cancel. It runs through the shared dispatcher with an idempotency key like
+every other write. `BookingRecord.status` is `confirmed` or `cancelled`.
+
+**B-30. Desired, state.** `confirmed` becomes `cancelled` once and never goes back. The handler sets `cancelled_at` to
+the dispatcher's time, `cancelled_by` to the acting member and `cancel_reason`; a check keeps the three columns set
+exactly when the status is `cancelled`. The runtime role may update only those four columns, and a trigger refuses any
+runtime update of a row that is already `cancelled`. The booking row, its ID and its customer link stay: a cancelled
+booking can still be read, and its ID is never reused (B-19 still sees it).
+
+**B-31. Desired, the write.** After the dispatcher's idempotency lock, take the B-21 resource lock, lock the booking
+row `FOR UPDATE`, then decide on the locked state:
+- `confirmed` and not over (`ends_at` after the dispatcher's time): cancel it.
+- already `cancelled` (a second call under another key, or a customer link that got there first): change nothing, return
+  the stored cancellation with `customerNotice: "already_cancelled"`, send nothing.
+- `ends_at` at or before the dispatcher's time: `Conflict` `details.reason = "booking_over"`.
+A booking ID that does not exist for the caller's tenant, including one that exists only in another tenant, is
+`NotFound` before any lock: tenant B learns nothing about tenant A's bookings.
+
+**B-32. Desired, the slot is free.** A cancelled booking takes no part in availability. The exclusion constraint ignores it
+(B-20), `loadBusy` ignores it (B-13), and the calendar push to Google ignores it (google-calendar.md G-10). Lists return
+`confirmed` bookings by default; `status=cancelled` or `status=all` read the history. Those two reads use a plain
+overlap test, because cancelled rows may overlap anything. The booking detail read always works and adds `cancelledAt`
+and `cancellationReason` to a cancelled booking only. A new booking can take the freed slot at once (the same
+transaction order as B-21 makes the cancel and the new create serialize).
+
+**B-33. Desired, the customer's notice.** When the booking is cancelled by this call and `notifyCustomer` is true, the
+handler looks up the customer (an owner's link, else the contact of the website request, `booking-customer.md` BC-6).
+With a contact that has a usable email, the action's one outbox event is `message.send_requested` (delivery.md D-1):
+a `transactional` email whose message ID derives from the tenant and booking, so a booking is ever noticed once. The
+email names the business, the local start time and the zone, and never the owner's reason. Delivery re-checks
+suppression, the approval of this action and the wallet (D-5, D-6). The result's `customerNotice` says what happened:
+`queued`, `off`, `no_customer`, `no_email` or `already_cancelled`. A cancellation never fails because a notice cannot
+be sent.
+
+**B-34. Desired, audit.** The audit trail of a cancellation is the `actions` row (actor, time, payload with the reason,
+result) written with the booking change in one transaction, plus the three `cancelled_*` columns. With no notice the
+outbox event is the dispatcher's default `booking.cancel` event; with a notice it is the `message.send_requested` event
+(`outbox_one_per_action`), and the action row remains the record. An identical retry returns the stored action and
+result and writes nothing.
+
+**B-35. Desired, tenancy.** Tests cover: tenant B cannot cancel, read the cancellation of, or list tenant A's bookings
+through the action or the reads; the runtime role of tenant B updating tenant A's booking by direct SQL changes zero rows
+(RLS); the runtime role cannot reopen a cancelled booking, change another column, or cancel without `cancelled_at`; the
+overlap constraint accepts a booking over a cancelled one and still rejects a booking over a confirmed one (two concurrent
+creates for one freed slot: one wins, one gets `Conflict`).

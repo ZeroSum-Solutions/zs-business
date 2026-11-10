@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
+import { bookingInstantSchema } from "./booking.js";
 import { bookingSummarySchema } from "./intake.js";
 
 // The booking customer link (docs/requirements/booking-customer.md BC-1..BC-10). Root re-exports this
@@ -70,5 +71,10 @@ export type BookingContactOutput = z.infer<typeof bookingContactOutputSchema>;
  * (older dashboards parse that shape strictly), so the detail adds `customerRevision`: 0 while the
  * booking has never had a link row, then the revision of the latest change, also after an unlink.
  */
-export const bookingDetailSchema = bookingSummarySchema.extend({ customerRevision: bookingContactRevisionSchema });
+export const bookingDetailSchema = bookingSummarySchema.extend({
+  customerRevision: bookingContactRevisionSchema,
+  /** booking.md B-29: present only on a cancelled booking, so a confirmed booking reads as it always did. */
+  cancelledAt: bookingInstantSchema.optional(),
+  cancellationReason: z.string().nullable().optional(),
+});
 export type BookingDetail = z.infer<typeof bookingDetailSchema>;

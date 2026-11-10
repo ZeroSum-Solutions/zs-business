@@ -52,6 +52,8 @@ const expectedPath: Record<string, string> = {
   // Hub access (20261106100000, H-8): usage counters only grow; the retention prune the API runs as the runtime role.
   "automation_token_usage_grow_only()": "pg_catalog, pg_temp",
   "prune_automation_token_usage(timestamp with time zone,integer)": "pg_catalog, pg_temp",
+  // Booking cancellation (20261110200000_booking_cancel.sql, B-30): a cancelled booking never changes for the runtime role.
+  "booking_cancel_guard()": "pg_catalog, pg_temp",
   // Booking customer link (20261023200000_booking_contacts.sql): the revision and owner-made guard, and the
   // trigger that clears a deleted contact's links (BC-7).
   "booking_contacts_contact_deleted()": "pg_catalog, pg_temp",

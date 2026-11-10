@@ -30,7 +30,10 @@ interface BookingRow {
   occupied_ends_at: Date;
   buffer_before_minutes: number;
   buffer_after_minutes: number;
+  status: "confirmed" | "cancelled";
   created_at: Date;
+  cancelled_at?: Date | null;
+  cancel_reason?: string | null;
 }
 interface SummaryRow extends BookingRow {
   source: "owner" | "website";
@@ -44,7 +47,7 @@ interface SummaryRow extends BookingRow {
   link_revision: number | null;
 }
 
-const bookingRecord = (row: BookingRow): BookingRecord => ({
+export const bookingRecord = (row: BookingRow): BookingRecord => ({
   id: row.id,
   tenantId: row.tenant_id,
   resourceId: row.resource_id,
@@ -54,7 +57,7 @@ const bookingRecord = (row: BookingRow): BookingRecord => ({
   occupiedEndsAt: row.occupied_ends_at.toISOString(),
   bufferBeforeMinutes: row.buffer_before_minutes,
   bufferAfterMinutes: row.buffer_after_minutes,
-  status: "confirmed",
+  status: row.status,
   createdAt: row.created_at.toISOString(),
 });
 
@@ -73,8 +76,8 @@ const bookingSummary = (row: SummaryRow): BookingSummary => ({
       : null,
 });
 
-const bookingColumns = `id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
-            buffer_before_minutes, buffer_after_minutes, created_at, source, intake_item_id`;
+export const bookingColumns = `id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
+            buffer_before_minutes, buffer_after_minutes, status, created_at, source, intake_item_id`;
 
 /**
  * P-12, BC-6: name each page's customers after the page is chosen, so the joins never change
@@ -93,10 +96,14 @@ const withCustomers = (hits: string) => `SELECT b.*, i.status AS intake_status, 
 /** BC-6, BC-9: one booking with its customer and the revision to send with the next change. */
 export async function getBooking(tx: Transaction, tenantId: string, id: string): Promise<BookingDetail> {
   const row = (await tx.query<SummaryRow>(
-    withCustomers(`SELECT ${bookingColumns} FROM bookings WHERE tenant_id=$1 AND id=$2`), [tenantId, id],
+    withCustomers(`SELECT ${bookingColumns}, cancelled_at, cancel_reason FROM bookings WHERE tenant_id=$1 AND id=$2`), [tenantId, id],
   )).rows[0];
   if (!row) throw new NotFound();
-  return { ...bookingSummary(row), customerRevision: row.link_revision ?? 0 };
+  // B-29: a cancelled booking says when and why; a confirmed one reads as it always did.
+  const cancelled = row.status === "cancelled" && row.cancelled_at
+    ? { cancelledAt: row.cancelled_at.toISOString(), cancellationReason: row.cancel_reason ?? null }
+    : {};
+  return { ...bookingSummary(row), customerRevision: row.link_revision ?? 0, ...cancelled };
 }
 
 /**
@@ -108,8 +115,9 @@ export async function getBooking(tx: Transaction, tenantId: string, id: string):
  * overlap (`&&`) is not one, so the overlap test is split into btree ranges on starts_at:
  * the bookings starting inside the range, plus, per resource, the latest one starting before
  * `from` if it is still running. The occupied-range exclusion constraint keeps one resource's
- * bookings apart, so no earlier booking can still be running at `from`. If cancelled bookings
- * ever stop taking part in that constraint, both parts must filter to confirmed ones.
+ * confirmed bookings apart, so no earlier confirmed booking can still be running at `from`. Cancelled
+ * bookings are outside the constraint (B-20) and may overlap anything, so a `confirmed` read filters
+ * both parts to confirmed rows, and a `cancelled` or `all` read takes the plain overlap test below.
  */
 export async function listBookings(tx: Transaction, tenantId: string, query: ListBookingsQuery): Promise<BookingPage> {
   const cursor = decodeCursor("bookings.start", query);
@@ -118,23 +126,26 @@ export async function listBookings(tx: Transaction, tenantId: string, query: Lis
     ? `AND (${alias}starts_at > ${microsToTimestamp(start)} OR (${alias}starts_at = ${microsToTimestamp(start)} AND ${alias}id > ${id}::uuid))`
     : "";
   const columns = `${bookingColumns}, ${timestampToMicros("starts_at")} AS sort_value`;
+  // B-32: a closed set of literals, never caller text.
+  const statusWhere = ({ confirmed: "AND status = 'confirmed'", cancelled: "AND status = 'cancelled'", all: "" } as const)[query.status];
   const scope = [tenantId, query.resourceId ?? null, query.limit + 1, query.offset];
   const cursorParams = cursor ? [...cursor] : [];
   type Row = SummaryRow & { sort_value: string };
   const toPage = (rows: Row[]) =>
     page(rows.map(bookingSummary), query, (index) => encodeCursor("bookings.start", [rows[index]!.sort_value, rows[index]!.id]));
-  if (query.contactId !== undefined) {
-    // BC-6: one contact's bookings, owner links and website matches alike. The set is small, so a
-    // plain overlap test replaces the range split below, which assumes any booking can be next.
+  if (query.contactId !== undefined || query.status !== "confirmed") {
+    // BC-6: one contact's bookings, owner links and website matches alike; B-32: or the cancelled ones. The set is
+    // small, so a plain overlap test replaces the range split below, which assumes any booking can be next.
     const rows = (await tx.query<Row>(
       withCustomers(`SELECT ${columns} FROM bookings
         WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2)
           AND ($5::timestamptz IS NULL OR ends_at > $5) AND ($6::timestamptz IS NULL OR starts_at < $6)
-          AND (EXISTS (SELECT 1 FROM booking_contacts l WHERE l.tenant_id = bookings.tenant_id AND l.booking_id = bookings.id AND l.contact_id = $7)
+          AND ($7::uuid IS NULL OR EXISTS (SELECT 1 FROM booking_contacts l WHERE l.tenant_id = bookings.tenant_id AND l.booking_id = bookings.id AND l.contact_id = $7)
             OR EXISTS (SELECT 1 FROM intake_items m WHERE m.tenant_id = bookings.tenant_id AND m.id = bookings.intake_item_id AND m.contact_id = $7))
+          ${statusWhere}
           ${position("$8", "$9")}
         ORDER BY starts_at, id LIMIT $3 OFFSET $4`),
-      [...scope, query.from ?? null, query.to ?? null, query.contactId, ...cursorParams],
+      [...scope, query.from ?? null, query.to ?? null, query.contactId ?? null, ...cursorParams],
     )).rows;
     return toPage(rows);
   }
@@ -143,6 +154,7 @@ export async function listBookings(tx: Transaction, tenantId: string, query: Lis
     const rows = (await tx.query<Row>(
       withCustomers(`SELECT ${columns} FROM bookings
         WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2) AND ($5::timestamptz IS NULL OR starts_at < $5)
+          ${statusWhere}
           ${position("$6", "$7")}
         ORDER BY starts_at, id LIMIT $3 OFFSET $4`),
       [...scope, query.to ?? null, ...cursorParams],
@@ -154,13 +166,13 @@ export async function listBookings(tx: Transaction, tenantId: string, query: Lis
           SELECT running.* FROM booking_resources r
           CROSS JOIN LATERAL (
             SELECT ${bookingColumns} FROM bookings b
-             WHERE b.tenant_id=r.tenant_id AND b.resource_id=r.id AND b.starts_at < $5::timestamptz
+             WHERE b.tenant_id=r.tenant_id AND b.resource_id=r.id AND b.starts_at < $5::timestamptz AND b.status = 'confirmed'
              ORDER BY b.starts_at DESC LIMIT 1) running
            WHERE r.tenant_id=$1 AND ($2::uuid IS NULL OR r.id=$2) AND running.ends_at > $5::timestamptz
              ${position("$7", "$8", "running.")}
           UNION ALL
           SELECT ${bookingColumns} FROM bookings
-           WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2)
+           WHERE tenant_id=$1 AND ($2::uuid IS NULL OR resource_id=$2) AND status = 'confirmed'
              AND starts_at >= $5::timestamptz AND ($6::timestamptz IS NULL OR starts_at < $6)
              ${position("$7", "$8")}
            ORDER BY starts_at, id LIMIT $3::int + $4::int

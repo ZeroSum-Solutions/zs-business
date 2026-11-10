@@ -7,6 +7,7 @@
  */
 import type { z } from "zod";
 import {
+  cancelBookingRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
   linkBookingContactInputSchema,
@@ -25,6 +26,8 @@ import {
   upsertContactRequestSchema,
   type BookingContactResult,
   type BookingRecord,
+  type CancelBookingResult,
+  type CancelNotice,
   type ContactRecord,
   type DealRecord,
   type DealSummary,
@@ -176,6 +179,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   const contacts = new Map(seed.contacts.map((item) => [item.id, item]));
   const deals = new Map(seed.deals.map((item) => [item.id, item]));
   const bookings = new Map<string, StoredBooking>(seed.bookings.map((item) => [item.id, item]));
+  /** B-29: when and why a booking was cancelled; a cancelled booking keeps its row but frees its time. */
+  const cancellations = new Map<string, { cancelledAt: string; reason: string | null }>();
   const intakeItems = new Map(seed.intakeItems.map((item) => [item.id, item]));
   /** booking-customer.md BC-3: a booking has a link row from its first change on; `contactId` null once cleared. */
   const links = new Map<string, { contactId: string | null; revision: number }>();
@@ -273,7 +278,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
 
   function clashes(resource: DemoResource, occStart: number, occEnd: number): boolean {
     for (const booking of bookings.values()) {
-      if (booking.resourceId !== resource.id) continue;
+      if (booking.resourceId !== resource.id || booking.status === "cancelled") continue;
       if (Date.parse(booking.occupiedStartsAt) < occEnd && occStart < Date.parse(booking.occupiedEndsAt)) return true;
     }
     return false;
@@ -507,6 +512,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       const rows: BookingView[] = [...bookings.values()]
         .filter((item) => (!query.resourceId || item.resourceId === query.resourceId) &&
           Date.parse(item.endsAt) > fromMs && Date.parse(item.startsAt) < toMs &&
+          (query.status === "all" || item.status === (query.status ?? "confirmed")) &&
           (!query.contactId || toView(item).customer?.contactId === query.contactId))
         .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
         .map(toView);
@@ -531,7 +537,11 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       await wait();
       if (bookingReadsFail) throw networkError();
       parse(uuidSchema, id);
-      return clone({ ...toView(bookingOrThrow(id)), customerRevision: links.get(id)?.revision ?? 0 });
+      const cancelled = cancellations.get(id);
+      return clone({
+        ...toView(bookingOrThrow(id)), customerRevision: links.get(id)?.revision ?? 0,
+        ...(cancelled ? { cancelledAt: cancelled.cancelledAt, cancellationReason: cancelled.reason } : {}),
+      });
     },
 
     async linkBookingContact(input, options) {
@@ -558,6 +568,29 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         if (link?.contactId === request.contactId) return contactResult(booking.id, request.contactId, revision);
         links.set(booking.id, { contactId: request.contactId, revision: revision + 1 });
         return contactResult(booking.id, request.contactId, revision + 1);
+      });
+    },
+
+    cancelBooking(input, options) {
+      return idempotent("booking.cancel", input, options, (): CancelBookingResult => {
+        const { bookingId, ...rest } = input;
+        const request = parse(cancelBookingRequestSchema, rest);
+        parse(uuidSchema, bookingId);
+        const booking = bookingOrThrow(bookingId);
+        const done = cancellations.get(bookingId);
+        if (booking.status === "cancelled" && done) {
+          return { booking: toRecord(booking), cancelledAt: done.cancelledAt, reason: done.reason, customerNotice: "already_cancelled" };
+        }
+        // B-30: a booking that has ended cannot be cancelled.
+        if (Date.parse(booking.endsAt) <= clock.now().getTime()) throw demoError("Conflict", { reason: "booking_over" });
+        booking.status = "cancelled";
+        const record = { cancelledAt: nowIso(), reason: request.reason ?? null };
+        cancellations.set(bookingId, record);
+        // B-33: the notice goes to the linked customer, or the website visitor, when they have an email.
+        const customer = toView(booking).customer;
+        const contact = customer?.contactId ? contacts.get(customer.contactId) : undefined;
+        const notice: CancelNotice = request.notifyCustomer === false ? "off" : !customer?.contactId ? "no_customer" : contact?.email ? "queued" : "no_email";
+        return { booking: toRecord(booking), cancelledAt: record.cancelledAt, reason: record.reason, customerNotice: notice };
       });
     },
 

@@ -98,7 +98,7 @@ export async function buildPrompt(tx: Transaction, tenantId: string, candidate: 
        FROM intake_items i
        JOIN tenants t ON t.tenant_id=i.tenant_id
        JOIN crm_contacts c ON c.tenant_id=i.tenant_id AND c.id=i.contact_id
-       LEFT JOIN bookings b ON b.tenant_id=i.tenant_id AND b.intake_item_id=i.id
+       LEFT JOIN bookings b ON b.tenant_id=i.tenant_id AND b.intake_item_id=i.id AND b.status='confirmed'
        LEFT JOIN booking_resources r ON r.tenant_id=b.tenant_id AND r.id=b.resource_id
       WHERE i.tenant_id=$1 AND i.id=$2`,
     [tenantId, candidate.intakeItemId],
