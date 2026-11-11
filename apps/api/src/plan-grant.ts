@@ -70,8 +70,13 @@ export function parseGrantUntil(value: string): Date {
   const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   const instant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(value);
   if (!dateOnly && !instant) refuse("--until must be a date (2027-01-31) or an instant with its offset (2027-01-31T17:00:00Z)");
+  // A Date rolls an impossible day over (30 February becomes 2 March), with or without a time. Check the
+  // calendar day on its own first, so a typo cannot move the end of a grant.
+  const day = value.slice(0, 10);
+  const midnight = new Date(`${day}T00:00:00.000Z`);
+  if (Number.isNaN(midnight.getTime()) || midnight.toISOString().slice(0, 10) !== day) refuse("--until is not a real date");
   const date = new Date(dateOnly ? `${value}T23:59:59.999Z` : value);
-  if (Number.isNaN(date.getTime()) || (dateOnly && !date.toISOString().startsWith(value))) refuse("--until is not a real date");
+  if (Number.isNaN(date.getTime())) refuse("--until is not a real date");
   return date;
 }
 

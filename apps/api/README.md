@@ -889,6 +889,9 @@ against the pinned Supabase Root 2021 CA.
    ```sh
    # Workers first, always (see "Moving the crons out of a single project"). Vercel Cron runs only
    # on a production deployment, so the workers' cron fires after --prod.
+   # When a release adds a key to a response the dashboard parses strictly (for example the plan
+   # read's `grant`, plans.md PL-22), deploy the dashboard before the API, and reload open dashboard
+   # tabs: a tab opened before the deploy keeps the old schema and shows an error on that page.
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl \
      mise exec -- pnpm dlx vercel@latest deploy --yes [--environment preview | --prod]   # cron workers
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ \

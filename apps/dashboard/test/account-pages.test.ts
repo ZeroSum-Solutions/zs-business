@@ -59,7 +59,8 @@ describe("plan", () => {
     expect(grantSummary(plan(), "UTC")).toBeNull();
     const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, unlimited));
     expect(html).toContain("Included plan: Pro");
-    expect(html).toContain("Included until Friday, November 20."); // the demo tenant's zone is behind UTC
+    // The page uses the viewer's zone (the machine's, in this render), so the day is either side of UTC midnight.
+    expect(html).toMatch(/Included until (Friday, November 20|Saturday, November 21)\./);
     expect(html).not.toMatch(/Choose a plan|Choose Pro|Choose Solo|Manage billing|Fix billing|read-only/);
     // Even a stale payment failure or read-only date on the provider side shows no banner while the grant lasts.
     const failing = plan({ grant: { source: "grant", plan: "solo", grantedUntil: null }, status: "past_due", paymentFailedAt: "2026-11-14T00:00:00.000Z", readOnlyAfter: NEAR_MIDNIGHT_UTC });

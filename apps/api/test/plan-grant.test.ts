@@ -25,7 +25,7 @@ describe("parseGrantUntil", () => {
     expect(parseGrantUntil("2027-01-31T17:00:00+02:00").toISOString()).toBe("2027-01-31T15:00:00.000Z");
   });
 
-  it.each(["2027-02-30", "2027-13-01", "31/01/2027", "2027-01-31T17:00:00", "soon", ""])("refuses %j", (value) => {
+  it.each(["2027-02-30", "2027-13-01", "2027-02-30T17:00:00Z", "2027-04-31T09:00:00+02:00", "2027-01-31T25:00:00Z", "31/01/2027", "2027-01-31T17:00:00", "soon", ""])("refuses %j", (value) => {
     expect(() => parseGrantUntil(value)).toThrow(/--until/);
   });
 });

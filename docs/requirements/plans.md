@@ -473,6 +473,8 @@ read of the plan record:
 - the tenant is never read-only (PL-8): the plan gate and every other reader of `read_only_after`
   (the outreach send gate, OS-14) ignore `read_only_after` and `payment_failed_at`;
 - the tenant is not comped even when it has no provider subscription.
+- one exception: the Shopify embedded plan screen (C-29) shows the provider subscription only. A granted
+  tenant with no Shopify subscription still reads "No plan yet" there; its limits follow the grant.
 When the grant has ended or was removed, the tenant is exactly what PL-3, PL-8 and PL-10 derive from its
 provider rows, with no grant: its subscription's limits, or comped when it has no plan. The code reads
 the clock at each use, so no job has to clear an ended grant. The other plan columns may hold any state, status `none` included.
