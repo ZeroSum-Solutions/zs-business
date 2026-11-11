@@ -1,49 +1,67 @@
-/* Hosted booking page (public-intake.md P-14). Neutral on purpose: it sits inside client sites. */
+/* Hosted booking page (public-intake.md P-14). Neutral on purpose: it sits inside client sites.
+   P-16: the embedding page may override the tokens below; booker.js validates each value and sets
+   it on :root. With nothing set, these defaults are the look. */
 :root {
   --zs-ink: #1d232a;
   --zs-muted: #5b6672;
   --zs-line: #d8dde3;
   --zs-surface: #ffffff;
+  --zs-bg: #ffffff;
   --zs-accent: #24577a;
   --zs-accent-ink: #ffffff;
+  --zs-link: var(--zs-accent);
   --zs-danger: #a3271f;
   --zs-radius: 8px;
+  --zs-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Set only when the page themes surface, text or accent; otherwise the browser's own. */
+  --zs-field-bg: Field;
+  --zs-field-ink: FieldText;
+  --zs-check: auto;
   color-scheme: light;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--zs-surface); color: var(--zs-ink); }
-body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+html, body { margin: 0; background: var(--zs-bg); color: var(--zs-ink); }
+body { font-size: 16px; line-height: 1.5; font-family: var(--zs-font); }
 .booker { max-width: 640px; margin: 0 auto; padding: 24px 20px 32px; }
 .booker h1 { font-size: 1.4rem; margin: 0 0 4px; }
 .booker h2 { font-size: 1.1rem; margin: 20px 0 12px; }
+/* Headings take focus only to move a screen reader along; they are not controls. */
+.booker [tabindex="-1"]:focus { outline: none; }
 .booker-sub, .booker-status { color: var(--zs-muted); margin: 0 0 12px; }
 .booker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
 .booker button { font: inherit; cursor: pointer; border-radius: var(--zs-radius); }
+.booker button:focus-visible { outline: 2px solid var(--zs-link); outline-offset: 2px; }
 .booker-choice {
   border: 1px solid var(--zs-line); background: var(--zs-surface); color: var(--zs-ink);
   padding: 10px 12px; text-align: left; min-height: 44px; position: relative;
 }
-.booker-choice:hover, .booker-choice:focus-visible { border-color: var(--zs-accent); outline: none; box-shadow: 0 0 0 2px rgb(36 87 122 / 25%); }
-.booker-choice[aria-pressed="true"] { border-color: var(--zs-accent); background: rgb(36 87 122 / 8%); }
+.booker-choice:hover { border-color: var(--zs-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--zs-accent) 25%, transparent); }
+.booker-choice[aria-pressed="true"] { border-color: var(--zs-accent); background: color-mix(in srgb, var(--zs-accent) 8%, var(--zs-surface)); }
 .booker-choice small { display: block; color: var(--zs-muted); }
-.booker-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+[data-header="hidden"] .booker { padding-top: 4px; }
+.booker-sr,
+[data-header="hidden"] .booker > h1,
+[data-header="hidden"] .booker > .booker-desc { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .booker-primary {
   border: 0; background: var(--zs-accent); color: var(--zs-accent-ink); padding: 12px 18px; min-height: 44px; font-weight: 600;
 }
 .booker-primary[disabled] { opacity: .6; cursor: progress; }
-.booker-link { border: 0; background: none; color: var(--zs-accent); padding: 8px 0; text-decoration: underline; }
+.booker-link { border: 0; background: none; color: var(--zs-link); padding: 10px 0; min-height: 44px; text-decoration: underline; }
 .booker-summary { border: 1px solid var(--zs-line); border-radius: var(--zs-radius); padding: 12px; margin: 0 0 16px; }
 .booker-field { display: grid; gap: 4px; margin: 0 0 14px; }
 .booker-field label { font-weight: 600; }
 .booker-field input, .booker-field textarea {
   font: inherit; padding: 10px; border: 1px solid var(--zs-line); border-radius: var(--zs-radius); width: 100%;
+  min-height: 44px; background: var(--zs-field-bg); color: var(--zs-field-ink);
 }
-.booker-field input:focus, .booker-field textarea:focus { outline: 2px solid var(--zs-accent); outline-offset: 1px; }
+.booker-field input:focus, .booker-field textarea:focus { outline: 2px solid var(--zs-link); outline-offset: 1px; }
 .booker-hint { color: var(--zs-muted); font-size: .875rem; }
 .booker-consent { border: 1px solid var(--zs-line); border-radius: var(--zs-radius); padding: 12px; margin: 0 0 16px; }
 .booker-consent legend { font-weight: 600; padding: 0 4px; }
 .booker-consent p { margin: 0 0 8px; color: var(--zs-muted); font-size: .9rem; }
-.booker-check { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+.booker-check { display: flex; gap: 8px; align-items: center; margin: 0; min-height: 44px; cursor: pointer; }
+.booker-check input { width: 20px; height: 20px; margin: 0; accent-color: var(--zs-check); }
+.booker-check input:focus-visible { outline: 2px solid var(--zs-link); outline-offset: 2px; }
 .booker-error { color: var(--zs-danger); margin: 0 0 12px; }
 .booker-trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
 .booker-done { border-left: 4px solid var(--zs-accent); padding: 4px 0 4px 12px; }

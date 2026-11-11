@@ -66,6 +66,7 @@ Decided 2026-10-22 (coordinator, standing approval), within the vendors already 
 | ComfyUI | Later adapter behind the image port, run unmodified as a separate service | supervisor | Site | [image-port.md](requirements/image-port.md) |
 | Nosto and Discovery | Future product for stores with a catalog; waits for a pilot store and an approved store connection | earlier ([future/discovery.md](future/discovery.md)) | Site | [future/discovery.md](future/discovery.md) |
 | Outreach sequencer (cold email from our own Gmail mailboxes) | Build: per-mailbox Internal OAuth (`gmail.send`, `gmail.metadata`), operator-connected; own send record, at most once per prospect and step; two switches before any send; the owner approves each activation | owner's brief (2026-11-08; business Gmail connection approved for the allowed tenant's own outreach mailboxes); supervisor (design) | Customers | [outreach-sequencer.md](requirements/outreach-sequencer.md) |
+| Inbound email (customer replies into the Inbox) | Build: a hub reply address per tenant on a hub subdomain, received through Resend's inbound webhook; per-delivery Reply-To reference; text only; mailbox OAuth deferred; outreach reply bodies only after the owner approves `gmail.readonly` | supervisor (design, 2026-11-10); four owner decisions open | Inbox | [inbound-email.md](requirements/inbound-email.md) |
 | Claude financial-services | Out | supervisor | — | — |
 
 ## Build order
