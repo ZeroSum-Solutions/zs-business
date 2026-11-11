@@ -117,7 +117,7 @@ export async function runTemplatedKind(
       }
       if (!plan!.revision || !plan!.approvalId) { await skip("template_not_approved"); continue; }
       const values = await read(async (tx) => {
-        const booking = await loadBookingFact(tx, tenantId, candidate.bookingId);
+        const booking = await loadBookingFact(tx, tenantId, candidate.bookingId, kind);
         if (!booking) return null;
         return (await computeKindValues(tx, tenantId, kind, booking, plan!.settings, (await deps.bookingLink?.(tx, tenantId)) ?? null))?.values ?? null;
       });

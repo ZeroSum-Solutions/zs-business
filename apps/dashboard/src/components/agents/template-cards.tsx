@@ -368,6 +368,7 @@ function CurrentWording({ kind, revision, formOpen }: { kind: TemplatedKind; rev
       </p>
       <dl className="grid grid-cols-1 gap-3 text-sm">
         <Row term="Sent as">{CHANNEL_LABELS[revision.channel]}, {timingSentence(kind, revision.timingHours)}</Row>
+        {KIND_COPY[kind].condition !== null ? <Row term="Only when"><span data-testid={`${p}-condition`}>{KIND_COPY[kind].condition}</span></Row> : null}
         {revision.subject !== null ? <Row term="Subject"><span className="break-words">{revision.subject}</span></Row> : null}
         <Row term="Message">
           <span className="mt-1 block rounded-md bg-inset p-3 break-words whitespace-pre-wrap" data-testid={`${p}-body`}>{revision.body}</span>

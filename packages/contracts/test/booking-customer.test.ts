@@ -74,7 +74,7 @@ describe("the result and the reads (BC-6, BC-9)", () => {
     id: bookingId, tenantId, resourceId: contactId, startsAt: "2026-11-02T10:00:00.000Z", endsAt: "2026-11-02T10:30:00.000Z",
     occupiedStartsAt: "2026-11-02T10:00:00.000Z", occupiedEndsAt: "2026-11-02T10:30:00.000Z",
     bufferBeforeMinutes: 0, bufferAfterMinutes: 0, status: "confirmed", createdAt: "2026-10-23T09:00:00.000Z",
-    source: "owner", intakeItemId: null, customer: { contactId, name: "Ana Ruiz", status: "linked" },
+    source: "owner", intakeItemId: null, customer: { contactId, name: "Ana Ruiz", status: "linked" }, outcome: null,
   };
   it("keeps the list shape and adds only customerRevision to the detail", () => {
     expect(bookingSummarySchema.safeParse(summary).success).toBe(true);
@@ -83,6 +83,17 @@ describe("the result and the reads (BC-6, BC-9)", () => {
     expect(bookingDetailSchema.safeParse({ ...summary, customerRevision: 0, customer: null }).success).toBe(true);
     expect(bookingDetailSchema.safeParse(summary).success).toBe(false);
     expect(bookingDetailSchema.safeParse({ ...summary, customerRevision: 1, extra: true }).success).toBe(false);
+  });
+
+  it("reads an outcome that is missing or null as unknown, so an old and a new server both parse (B-47)", () => {
+    const { outcome: _unused, ...withoutKey } = summary;
+    expect(bookingSummarySchema.parse(withoutKey)).not.toHaveProperty("outcome");
+    expect(bookingSummarySchema.parse({ ...summary, outcome: null }).outcome).toBeNull();
+    expect(bookingSummarySchema.parse({ ...summary, outcome: "completed" }).outcome).toBe("completed");
+    expect(bookingDetailSchema.parse({ ...summary, customerRevision: 1, outcome: "no_show", outcomeAt: "2026-11-02T11:00:00.000Z" }).outcome).toBe("no_show");
+    expect(bookingSummarySchema.safeParse({ ...summary, outcome: "unknown" }).success).toBe(false);
+    expect(bookingDetailSchema.safeParse({ ...withoutKey, customerRevision: 1 }).success).toBe(true);
+    expect(bookingDetailSchema.safeParse({ ...summary, outcome: null, customerRevision: 1 }).success).toBe(true);
   });
 
   it("lists a contact's bookings with a contactId filter", () => {

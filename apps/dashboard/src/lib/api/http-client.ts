@@ -41,6 +41,7 @@ import {
   contactRecordSchema,
   applyTemplateResponseSchema,
   cancelBookingOutputSchema,
+  setBookingOutcomeOutputSchema,
   createBookingOutputSchema,
   createDealOutputSchema,
   setBookingPagePublishedResponseSchema,
@@ -372,6 +373,11 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
         ...(input.notifyCustomer !== undefined ? { notifyCustomer: input.notifyCustomer } : {}),
       };
       return (await write(`/v1/booking/bookings/${encodeURIComponent(input.bookingId)}/cancel`, body, cancelBookingOutputSchema, options)).result;
+    },
+
+    async setBookingOutcome(input, options) {
+      const body = { outcome: input.outcome };
+      return (await write(`/v1/booking/bookings/${encodeURIComponent(input.bookingId)}/outcome`, body, setBookingOutcomeOutputSchema, options)).result;
     },
 
     async listPipelines(options = {}) {

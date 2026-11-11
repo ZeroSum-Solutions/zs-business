@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
-import { bookingInstantSchema, bookingRecordSchema, bookingTimeZoneSchema } from "./booking.js";
+import { bookingInstantSchema, bookingOutcomeSchema, bookingRecordSchema, bookingTimeZoneSchema } from "./booking.js";
 import { contactEmailInputSchema, contactPhoneSchema, crmInstantSchema } from "./crm.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
 import { isPostgresText } from "./json.js";
@@ -189,6 +189,12 @@ export const bookingSummarySchema = z.strictObject({
   ...bookingRecordSchema.shape,
   source: z.enum(["owner", "website"]),
   intakeItemId: idSchema.nullable(),
+  /**
+   * booking.md B-37, B-47: the owner's mark. A missing value and null both mean `unknown` (also a cancelled booking, B-41).
+   * The server sends the key only on a marked booking, so a dashboard that still parses this object strictly keeps
+   * working until the first mark; the schema accepts both so either side may deploy first.
+   */
+  outcome: bookingOutcomeSchema.nullable().optional(),
   customer: z.strictObject({
     contactId: idSchema.nullable(),
     name: z.string().nullable(),

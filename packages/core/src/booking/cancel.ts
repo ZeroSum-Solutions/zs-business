@@ -52,6 +52,7 @@ export interface CancelledBooking {
 /**
  * B-30, B-31: cancel one booking in the caller's transaction, under the resource lock. A confirmed booking that has not
  * ended becomes `cancelled`; one already cancelled is returned as it is; one that ended is `Conflict` `booking_over`.
+ * A cancelled booking has no outcome (B-41), so the mark of one that had started is cleared in the same update.
  * `actorId` is null when the customer cancels through their own link (booking-self-service.md). `clock` is read once,
  * after the resource lock is held, so a long wait cannot cancel a booking that has since ended. With `notStarted`
  * (the customer's link, booking-self-service.md BS-6) a booking whose start has passed is `Conflict` `too_late`.
@@ -80,7 +81,8 @@ export async function cancelBookingRow(
   if (row.ends_at.getTime() <= now.getTime())
     throw new Conflict("The booking is already over", { reason: "booking_over" });
   const updated = (await tx.query<CancelRow>(
-    `UPDATE bookings SET status='cancelled', cancelled_at=$3::timestamptz, cancelled_by=$4, cancel_reason=$5
+    `UPDATE bookings SET status='cancelled', cancelled_at=$3::timestamptz, cancelled_by=$4, cancel_reason=$5,
+            outcome=NULL, outcome_set_at=NULL, outcome_set_by=NULL
       WHERE tenant_id=$1 AND id=$2 AND status='confirmed'
       RETURNING ${CANCEL_COLUMNS}`,
     [tenantId, bookingId, at, by.actorId, by.reason],

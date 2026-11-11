@@ -53,7 +53,7 @@ export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
 export const deliveryFinalReasonSchema = z.enum([
   "suppressed", "consent_denied", "consent_missing", "approval_revoked", "approval_missing", "no_address",
   "provider_rejected", "max_attempts", "insufficient_funds", "dedupe_window_expired", "outcome_unknown",
-  "settled_not_sent", "worker_error", "address_changed",
+  "settled_not_sent", "worker_error", "address_changed", "booking_not_completed",
 ]);
 export type DeliveryFinalReason = z.infer<typeof deliveryFinalReasonSchema>;
 

@@ -8,6 +8,16 @@ time of writing, `pnpm --filter @zs/core test:booking` runs the booking suites i
 all pass. The public examples cover a small part of the contract; the acceptance tests
 cover the rest.
 
+Revision 4 (2026-11-10, first-client week): booking outcomes. B-37 to B-47 let an owner or staff member mark a booking that
+has started as `completed` or `no_show`, and make review requests (`agents.md` G-20) depend on `completed`, at the queue and
+again at delivery. B-17 to B-19 and B-21 to B-23 do not change; `booking.create` still accepts only
+`{bookingId,resourceId,startsAt}`.
+
+Revision 4 review (2026-11-11): three independent reviews of the first draft changed B-37, B-40, B-43, B-44, B-46 and added
+B-47. The read shape is now present-only-when-marked (B-47); the queue locks the booking row (B-43); delivery stops a
+review request whose booking is not `completed` at send time (B-43, B-44, B-46, `delivery.md` D-6); the stamp check includes
+the actor (B-40).
+
 Revision 3 (2026-11-10, first-client week): cancellation. B-1 brings owner cancellation into scope; B-20 and
 B-24 let a booking be `confirmed` or `cancelled` and limit the overlap constraint to confirmed rows; B-29 to B-35 add
 the `booking.cancel` action. B-17 to B-19 and B-21 to B-23 do not change: `booking.create` still accepts only
@@ -271,7 +281,7 @@ the typed domain errors, not every possible transport/database outage.
 | Table | Required columns and constraints |
 | --- | --- |
 | `booking_resources` | `tenant_id`, `id`, `time_zone`, `weekly` JSONB, `overrides` JSONB, `slot_length_minutes`, `slot_step_minutes`, `buffer_before_minutes`, `buffer_after_minutes`, `minimum_notice_minutes`, `booking_horizon_minutes`; PK `(tenant_id,id)`, FK to tenant, schema-equivalent config validation; M1 dropped the original one-per-tenant unique constraint on `tenant_id` and added a nullable `name` (1 to 200 characters) that B-28 inserts may omit |
-| `bookings` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `occupied_starts_at`, `occupied_ends_at`, `buffer_before_minutes`, `buffer_after_minutes`, `status`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive appointment range, saved buffer bounds and exact occupied-bound checks; from revision 3 `status` is `confirmed` or `cancelled`, with nullable `cancelled_at`, `cancelled_by` (the owner member who cancelled) and `cancel_reason` that are set together with `cancelled` and only then (B-30) |
+| `bookings` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `occupied_starts_at`, `occupied_ends_at`, `buffer_before_minutes`, `buffer_after_minutes`, `status`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive appointment range, saved buffer bounds and exact occupied-bound checks; from revision 3 `status` is `confirmed` or `cancelled`, with nullable `cancelled_at`, `cancelled_by` (the owner member who cancelled) and `cancel_reason` that are set together with `cancelled` and only then (B-30); from revision 4 nullable `outcome` (`completed` or `no_show`), `outcome_set_at` and `outcome_set_by`, set together and only on a `confirmed` booking (B-37, B-38) |
 | `booking_external_blocks` | `tenant_id`, `id`, `resource_id`, `starts_at`, `ends_at`, `source`, `created_at`; PK `(tenant_id,id)`, composite resource FK, positive range, nonempty source |
 
 Use `timestamptz` for instants. Define `bookings_resource_occupied_excl` using
@@ -438,9 +448,122 @@ creates for one freed slot: one wins, one gets `Conflict`).
 - Home's "bookings taken" counts every booking by `created_at` (inbox-home.md H-4), cancelled ones included.
 - A tenant on a read-only plan cannot cancel (PL-8 lists the allowed actions; `booking.cancel` is not one).
 - A reminder or review message already queued before the cancel is not recalled. New ones skip a cancelled booking
-  (`CUSTOMER_BOOKINGS` reads `confirmed` only).
+  (`CUSTOMER_BOOKINGS` reads `confirmed` only). A review request also needs the booking to be `completed` (B-43).
 - There is no automation-catalog `booking.cancelled` event and no `propose_booking_cancel` for automation tokens. Both need
   an `automation_scope` enum change and come with a later revision.
 - The cancellation email is an ordinary charged message (D-6): with an empty wallet, a suppressed address or a revoked
   approval the cancel still succeeds and delivery drops the notice later, so `queued` means handed to delivery, not
   delivered. The dashboard says "queued".
+
+## Outcomes (revision 4)
+
+Evidence and decisions: the first client's owner asked for it. A review request went out on elapsed time alone (`agents.md`
+G-20 selected `confirmed` bookings whose end had passed), so a customer who never came could be asked how the visit was. Only
+the business knows who came, so the business says so, and the review request waits for that answer. The cancel action
+(B-29..B-35) is the style copied: one dispatcher action, the resource lock, a row lock, the injected clock read after the
+locks, one outbox event.
+
+**B-37. Desired, the values.** A booking has an outcome: `completed` (the customer came and was served), `no_show` (the
+customer did not come) or `unknown`. `unknown` is the absence of a mark and the default: a new booking is `unknown`, and so
+is a past booking nobody marked. The database stores no `unknown` value; the column `bookings.outcome` is null for it. The
+reads report `outcome` as `completed` or `no_show`, and leave the key out when the booking is `unknown` (B-47); a request can
+only set `completed` or `no_show`, because a mark is never cleared (B-39).
+
+**B-38. Desired, the action.** `booking.outcome.set` has target type `booking` and payload `{bookingId, outcome}`, with
+`outcome` one of `completed` or `no_show`. The HTTP route is `POST /v1/booking/bookings/:id/outcome` with body
+`{ "outcome": "completed" | "no_show" }` and an `Idempotency-Key`; the MCP tool is `set_booking_outcome`. Both bodies are
+strict: no other field is accepted, and a missing or other `outcome` is `ValidationFailed`. The action needs the `calendar`
+permission, so owners and staff may mark, the same as cancelling (B-29). It runs through the shared dispatcher with an
+idempotency key like every other write, and a tenant on a read-only plan cannot mark one (PL-8; the action is not on its
+allowed list). The reply is `{ booking, outcome, outcomeAt, changed }`: the booking record, the stored mark, when it was
+set, and whether this call changed it.
+
+**B-39. Desired, when and whether it changes.** The time is the injected clock, read once after the B-21 resource lock
+is held, and it must be at or after the booking's `starts_at`. Before the start the action is `Conflict` with
+`details.reason = "booking_not_started"` and nothing changes; there is no upper bound (a booking from last month can still be
+marked). A mark can be replaced by the other value (`completed` to `no_show`, or back): the owner may have tapped the wrong
+button. It is never cleared back to `unknown`. Setting the value the booking already has changes nothing and returns
+`changed: false` (no second write, the stored `outcomeAt` stays). A booking that is `cancelled` has no outcome: the action is
+`Conflict` with `details.reason = "booking_cancelled"`. A booking ID that does not exist for the caller's tenant, including one
+that exists only in another tenant, is `NotFound` before any lock.
+
+**B-40. Desired, the record.** The row keeps the latest mark: `outcome`, `outcome_set_at` (the clock read under the lock) and
+`outcome_set_by` (the acting member). A check (`bookings_outcome_fields`) keeps all three set together or all null, so a
+mark cannot be stored without the member who set it, and keeps them null on a cancelled row. The history is the `actions` rows (`booking.outcome.set`, with actor, time, payload and result): every change is its own
+row, so a mark replaced twice leaves three rows. The runtime role may update only `outcome`, `outcome_set_at` and
+`outcome_set_by` through this action (a column grant), and the trigger of B-30 still refuses any runtime update of a
+cancelled row.
+
+**B-41. Desired, cancel clears it.** `cancelBookingRow` clears the three outcome columns in the same update that cancels (a
+booking that has started but not ended can be marked, then cancelled). A cancelled booking therefore has no outcome (B-39).
+The customer's own cancel and move (`booking-self-service.md` BS-6, BS-8) run the same function and need no change.
+
+**B-42. Desired, the events.** The action writes the dispatcher's default outbox event `booking.outcome.set` with the mark in
+its result; there is no customer message and no automation-catalog event (the same limit as B-36 for cancel). A call that
+changes nothing (`changed: false`) still writes its `actions` row and event, like a repeat cancel.
+
+**B-43. Desired, review requests.** A review request (`agents.md` G-20) is queued only for a booking that is `confirmed` and
+whose `outcome` is `completed`. A `no_show`, a `cancelled` and an `unknown` booking never queue one: they are not candidates,
+so no decision row is written for them either. The check sits where the candidates are read (`findKindCandidates`) and again
+inside the queue action's locks and the skip action (`loadBookingFact`), so a caller that bypasses the runner is refused
+with `Conflict` `not_a_candidate`. Both actions take the booking row `FOR SHARE` (`lockBookingRow`) immediately before that
+read, after the `booking_contacts` lock. A mark or a cancel holds the row `FOR UPDATE` until it commits, so the queue either
+waits for it and reads the committed answer, or commits first and the later mark waits; the mark and the cancel never slip in
+between the read and the queue. The queue is not the last gate: delivery checks again at send time (below and `delivery.md`
+D-6).
+
+Delivery. A message that belongs to a queued `review_request` decision (`agent_decisions.message_id`, `subject_type =
+'booking'`) is sent only while its booking is still `confirmed` and `completed`. Otherwise the delivery is `blocked` with
+final reason `booking_not_completed`, and the provider is not called. This is the stronger half of the rule: it covers an
+owner correcting `completed` to `no_show` after the request was queued, a cancel after the queue, and a request queued before
+outcomes existed (B-44). The check reads the booking row at the delivery's own re-check, after the approval and consent checks. Appointment reminders are unchanged: they still need `confirmed` only, because a reminder
+goes out before the visit, when no outcome can exist. G-20's other rules (consent, window, caps, once per booking) still apply.
+
+**B-44. Desired, bookings that ended before this ships.** The migration adds the columns and writes no data: every existing
+booking is `unknown`, so none of them gets a review request, including one that ended inside the lookback window. This is
+decided, not forgotten: a review request is a message to a customer, and the business never said whether they came. A review
+request that was queued by the earlier code and has not been sent when this ships is stopped at delivery with
+`booking_not_completed`, because its booking is `unknown` (B-43); one already sent is not recalled. An owner
+can mark an old booking `completed` (B-39 has no upper bound); it is then a candidate again if it still lies inside the
+`lookbackDays` window.
+
+**B-45. Desired, tenancy and tests.** Tests cover: staff and owner may mark, a request without the `calendar` permission is
+refused; an outcome before the start time is `booking_not_started` by the injected clock, and one exactly at the start is
+accepted; `completed` replaced by `no_show` and back, each recorded in `actions`; the same value again changes nothing;
+idempotent replay (same key, same result, no second `actions` row; the same key with another body is an
+`IdempotencyConflict`); a cancelled booking is refused and cancelling a marked booking clears the mark; tenant B cannot mark,
+read the mark of, or list the marks of tenant A's bookings, and the runtime role of tenant B updating tenant A's booking
+by direct SQL changes zero rows, and the runtime role cannot set an outcome on a cancelled row or set `outcome` without its
+stamp or the stamp without a mark, including a null `outcome_set_by` (checks and trigger); the `booking.outcome.set` outbox
+row; review requests through queueing and delivery for a `completed` booking (queued and sent) and for `no_show`,
+`cancelled` and unknown bookings (no decision, no message); a queue transaction that starts while a mark or a cancel is
+uncommitted waits for it and then reads the committed answer (and does not wait when nothing is in flight); a request queued
+as `completed` and then corrected to `no_show`, cancelled, or left with no mark, is `blocked` with `booking_not_completed` at
+delivery, and any new request is still refused; a booking body with no `outcome` key and with `outcome: null` both parse
+(B-47); the API route, the MCP tool and the dashboard control, the Agents page condition line and the toast copy.
+
+**B-46. Known limits (revision 4).** These are decided, not forgotten.
+- A review request already queued when the owner changes `completed` to `no_show` is not recalled from the queue, but it is
+  never sent: delivery re-reads the booking and blocks it with `booking_not_completed` (B-43). A request that was already
+  sent cannot be taken back, so the dashboard toast promises only that one "that has not gone out yet" will not be sent.
+- A booking still in progress can be marked (the start has passed); the owner may mark it again after it ends.
+- An `unknown` booking that ended long ago is not flagged or nagged; the dashboard shows an unmarked past booking with the two
+  buttons and nothing more. A reminder for the owner to mark is a later change.
+- There is no "mark all" and no bulk call.
+- Home's counts and the automation catalog do not use the outcome yet.
+
+**B-47. Desired, the read shape and the rollout.** `outcome` follows the API's present-only-when convention (as `cancelledAt`
+and `outcomeAt` do): the booking summary and detail carry `outcome` only on a marked booking, and the key is absent for
+`unknown`. The schema is `outcome: "completed" | "no_show" | null`, optional, so a body with the key missing and a body with
+`null` both parse and both mean `unknown`; the server never sends `null`.
+
+Why the server omits the key: the dashboard that is deployed before this change parses booking bodies with a strict object, so
+it rejects any key it does not know, `outcome: null` included. Omitting the key keeps new API plus old dashboard working for
+every booking nobody has marked. It does not help for a marked booking: the old dashboard cannot read one. So the order is
+fixed:
+1. Deploy the dashboard that carries the tolerant schema (it also hides the controls on a server that sends no `outcome`).
+2. Then deploy the API, MCP server and migration that let a booking be marked.
+3. Reload any open dashboard tab before the first mark; a tab still on the old build fails to read a marked booking.
+
+Old API plus new dashboard works at once, because a missing `outcome` means `unknown`. Rolling the API back after marks exist
+is safe for the dashboard (marked rows are simply not sent). No two-PR split is needed: the only unsafe order is API first.

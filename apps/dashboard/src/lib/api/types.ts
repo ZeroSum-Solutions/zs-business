@@ -20,7 +20,9 @@ import type {
   BookingPageSummary,
   BookingRecord,
   BookingSummary,
+  BookingOutcome,
   CancelBookingResult,
+  SetBookingOutcomeResult,
   CalendarConnection,
   CalendarConnectionStatus,
   ConsentEvidence,
@@ -98,7 +100,9 @@ export type {
   BookingContactResult,
   BookingPageSummary,
   BookingRecord,
+  BookingOutcome,
   CancelBookingResult,
+  SetBookingOutcomeResult,
   CalendarConnection,
   CalendarConnectionStatus,
   ConsentEvidence,
@@ -199,6 +203,8 @@ export type BookingView = BookingRecord & {
   source?: BookingSummary["source"];
   intakeItemId?: string | null;
   customer?: BookingSummary["customer"];
+  /** The owner's mark on a started booking (booking.md B-37); `null` or absent is unknown. */
+  outcome?: BookingSummary["outcome"];
 };
 
 /** One booking as the detail read shows it: the revision to send with the next customer change (BC-3). */
@@ -236,6 +242,12 @@ export interface BookingCancel {
   /** Why, for the owner's own record; the customer never sees it. */
   reason?: string | null;
   notifyCustomer?: boolean;
+}
+
+/** Mark a started booking completed or no-show (booking.md B-38). */
+export interface BookingOutcomeInput {
+  bookingId: string;
+  outcome: BookingOutcome;
 }
 
 /** The API filters: bookings overlapping [from, to), in start order. */
@@ -332,6 +344,12 @@ export interface BookingApi {
    * Cancelling a booking twice is not an error: the result says `already_cancelled`.
    */
   cancelBooking(input: BookingCancel, options: WriteOptions): Promise<CancelBookingResult>;
+  /**
+   * Mark a booking that has started `completed` or `no_show` (B-37..B-46). Only these review requests follow `completed`.
+   * Throws a conflict with reason `booking_not_started` before the start time and `booking_cancelled` on a cancelled booking.
+   * The same mark twice is not an error: the result says `changed: false`.
+   */
+  setBookingOutcome(input: BookingOutcomeInput, options: WriteOptions): Promise<SetBookingOutcomeResult>;
 }
 
 export interface CrmApi {

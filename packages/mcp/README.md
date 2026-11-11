@@ -1,6 +1,6 @@
 # @zs/mcp
 
-MCP server (stdio) over `@zs/core`. Tools: `create_booking`, `cancel_booking`, `upsert_contact`,
+MCP server (stdio) over `@zs/core`. Tools: `create_booking`, `cancel_booking`, `set_booking_outcome`, `upsert_contact`,
 `create_deal`, `move_deal_stage`, `set_deal_details`, `create_stage`, `rename_stage`, `reorder_stages`,
 `archive_stage`, `restore_stage`, `draft_reply`, `discard_reply`,
 `request_approval`, `observe_source` (writes, each needs an `idempotencyKey`) and `list_contacts`, `get_contact`,
