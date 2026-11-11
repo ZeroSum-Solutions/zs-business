@@ -38,6 +38,14 @@ const form = (patch: Partial<ReturnType<typeof toTemplateForm>> = {}) => ({
 });
 
 describe("templated kinds: copy", () => {
+  it("says a review request goes only after the visit is marked Completed, and a reminder has no such condition (B-43, B-46)", () => {
+    expect(KIND_COPY.review_request.description).toMatch(/after a visit you marked completed/);
+    expect(KIND_COPY.review_request.description).not.toMatch(/after a visit,|after every visit/i);
+    expect(KIND_COPY.review_request.condition).toBe(
+      "Sent only after the visit is marked Completed in the calendar. No-shows, cancelled and unmarked visits get none.");
+    expect(KIND_COPY.appointment_reminder.condition).toBeNull();
+  });
+
   it("has a title, a timing label and help for every variable each kind takes", () => {
     for (const kind of ["appointment_reminder", "review_request"] as const) {
       expect(KIND_COPY[kind].title).toMatch(/\w/);

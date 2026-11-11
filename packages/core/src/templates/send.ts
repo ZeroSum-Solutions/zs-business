@@ -74,19 +74,29 @@ const fact = (row: FactRow): BookingFact => ({
 });
 /**
  * A confirmed booking with its customer (booking-customer.md BC-1: an owner's link, or the
- * contact of the website request that made the booking).
+ * contact of the website request that made the booking). A review request also needs the owner's
+ * mark: `completed` and nothing else (booking.md B-43), so a no-show, a cancelled booking and one
+ * nobody marked are never candidates. A reminder goes out before the visit, so it has no such need.
  */
-const CUSTOMER_BOOKINGS = `
+const customerBookings = (kind: TemplatedKind) => `
   SELECT b.id AS booking_id, b.starts_at, b.ends_at, r.time_zone, coalesce(l.contact_id, i.contact_id) AS contact_id
     FROM bookings b
     JOIN booking_resources r ON r.tenant_id = b.tenant_id AND r.id = b.resource_id
     LEFT JOIN booking_contacts l ON l.tenant_id = b.tenant_id AND l.booking_id = b.id
     LEFT JOIN intake_items i ON i.tenant_id = b.tenant_id AND i.id = b.intake_item_id AND i.status IN ('new_contact','linked')
-   WHERE b.tenant_id = $1 AND b.status = 'confirmed'`;
+   WHERE b.tenant_id = $1 AND b.status = 'confirmed'${kind === "review_request" ? " AND b.outcome = 'completed'" : ""}`;
 
-export async function loadBookingFact(tx: Transaction, tenantId: string, bookingId: string): Promise<BookingFact | null> {
+/**
+ * B-43: share-lock the booking row. `booking.outcome.set` and `booking.cancel` update it under `FOR UPDATE`, so a mark or a
+ * cancel that has started finishes before the fact is read, and one that starts after waits until this transaction ends.
+ * A missing row locks nothing; `loadBookingFact` then finds no candidate.
+ */
+export const lockBookingRow = (tx: Transaction, tenantId: string, bookingId: string) =>
+  tx.query("SELECT 1 FROM bookings WHERE tenant_id=$1 AND id=$2 FOR SHARE", [tenantId, bookingId]);
+
+export async function loadBookingFact(tx: Transaction, tenantId: string, bookingId: string, kind: TemplatedKind): Promise<BookingFact | null> {
   const row = (await tx.query<FactRow>(
-    `SELECT * FROM (${CUSTOMER_BOOKINGS} AND b.id = $2) f WHERE contact_id IS NOT NULL`, [tenantId, bookingId],
+    `SELECT * FROM (${customerBookings(kind)} AND b.id = $2) f WHERE contact_id IS NOT NULL`, [tenantId, bookingId],
   )).rows[0];
   return row ? fact(row) : null;
 }
@@ -118,7 +128,7 @@ export async function findKindCandidates(
   if (limit < 1) return [];
   const sql = windowSql(kind, now, window);
   const rows = (await tx.query<FactRow>(
-    `SELECT f.* FROM (${CUSTOMER_BOOKINGS}) f
+    `SELECT f.* FROM (${customerBookings(kind)}) f
       WHERE f.contact_id IS NOT NULL AND ${sql.where}
         AND NOT EXISTS (SELECT 1 FROM agent_decisions d WHERE d.tenant_id = $1 AND d.agent_kind = '${kind}'
               AND d.subject_id = f.booking_id AND (d.outcome = 'queued' OR d.run_id = $4))
@@ -364,7 +374,8 @@ export const skipKindHandler: ActionHandler = {
     const tenantId = binding.tenantId;
     requireKindActor(tenantId, binding.actorId, payload.agentKind);
     await requireOpenKindRun(tx, tenantId, payload.runId, payload.agentKind);
-    const booking = await loadBookingFact(tx, tenantId, payload.bookingId);
+    await lockBookingRow(tx, tenantId, payload.bookingId);
+    const booking = await loadBookingFact(tx, tenantId, payload.bookingId, payload.agentKind);
     if (!booking || booking.contactId !== payload.contactId) throw new Conflict("Not a candidate", { reason: "not_a_candidate" });
     return recordSkip(tx, tenantId, payload, payload.reason, now);
   },
@@ -392,7 +403,10 @@ function queueHandler(kind: TemplatedKind, schema: typeof reminderQueueCommandSc
       await requireOpenKindRun(tx, tenantId, payload.runId, kind);
       // An owner changing the customer holds this row, so the customer below is the current one.
       await tx.query("SELECT 1 FROM booking_contacts WHERE tenant_id=$1 AND booking_id=$2 FOR SHARE", [tenantId, payload.bookingId]);
-      const booking = await loadBookingFact(tx, tenantId, payload.bookingId);
+      // B-43: a mark or a cancel holds this row until it commits, so the outcome read below is the one that stays true until
+      // this queue commits (a mark that arrives later waits for us, and delivery re-checks it, D-6).
+      await lockBookingRow(tx, tenantId, payload.bookingId);
+      const booking = await loadBookingFact(tx, tenantId, payload.bookingId, kind);
       if (!booking || booking.contactId !== payload.contactId) throw new Conflict("Not a candidate", { reason: "not_a_candidate" });
       const ref = { decisionId: payload.decisionId, runId: payload.runId, agentKind: kind, bookingId: payload.bookingId, contactId: payload.contactId };
       // Read the clock once the locks are held, so a wait on them counts toward quiet hours.

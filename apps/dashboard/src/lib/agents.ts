@@ -249,6 +249,8 @@ export function timeZoneChoices(current: string): string[] {
 
 export const KIND_COPY: Record<TemplatedKind, {
   title: string; description: string; sendLabel: string; noun: string; timingLabel: string; when: "before" | "after";
+  /** booking.md B-43: what else must be true before one goes out; null when only the timing and consent matter. */
+  condition: string | null;
 }> = {
   appointment_reminder: {
     title: "Appointment reminders",
@@ -257,14 +259,16 @@ export const KIND_COPY: Record<TemplatedKind, {
     noun: "appointment reminders",
     timingLabel: "Hours before the appointment",
     when: "before",
+    condition: null,
   },
   review_request: {
     title: "Review requests",
-    description: "Asks customers for a review after their appointment, in wording an owner approved. Only customers who said yes to marketing messages get one.",
+    description: "Asks customers for a review after a visit you marked completed, in wording an owner approved. Only customers who said yes to marketing messages get one.",
     sendLabel: "Send review requests",
     noun: "review requests",
-    timingLabel: "Hours after the appointment",
+    timingLabel: "Hours after the appointment ends",
     when: "after",
+    condition: "Sent only after the visit is marked Completed in the calendar. No-shows, cancelled and unmarked visits get none.",
   },
 };
 

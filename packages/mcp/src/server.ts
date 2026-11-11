@@ -12,6 +12,7 @@ import { z } from "zod";
 import {
   archiveStageRequestSchema,
   cancelBookingRequestSchema,
+  setBookingOutcomeRequestSchema,
   createStageRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
@@ -122,6 +123,12 @@ export function createMcpServer(deps: McpDependencies): McpServer {
     inputSchema: keyed({ bookingId: uuidSchema, ...cancelBookingRequestSchema.shape }),
     annotations: destructive,
   }, ({ idempotencyKey, bookingId, ...body }, session) => session.cancelBooking(bookingId, body, idempotencyKey));
+
+  tool("set_booking_outcome", {
+    description: "Mark a booking that has started as completed (the customer came) or no_show (they did not). Review requests go only to completed bookings. A mark can be replaced by the other value but not cleared; a booking that has not started or is cancelled is refused. Reuse the idempotencyKey to retry safely.",
+    inputSchema: keyed({ bookingId: uuidSchema, ...setBookingOutcomeRequestSchema.shape }),
+    annotations: write,
+  }, ({ idempotencyKey, bookingId, ...body }, session) => session.setBookingOutcome(bookingId, body, idempotencyKey));
 
   tool("upsert_contact", {
     description: "Create a contact, or return the existing one that has the same email or phone.",

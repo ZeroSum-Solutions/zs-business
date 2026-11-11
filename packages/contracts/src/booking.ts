@@ -166,6 +166,35 @@ export type CancelBookingResult = z.infer<typeof cancelBookingResultSchema>;
 export const cancelBookingOutputSchema = z.lazy(() => actionResultSchema.extend({ result: cancelBookingResultSchema }));
 export type CancelBookingOutput = z.infer<typeof cancelBookingOutputSchema>;
 
+/**
+ * B-37: what the business says happened at a booking that has started. `unknown` is the absence of a mark, so a
+ * request can set only these two, and the reads report `null` for `unknown`.
+ */
+export const bookingOutcomeSchema = z.enum(["completed", "no_show"]);
+export type BookingOutcome = z.infer<typeof bookingOutcomeSchema>;
+/** B-38: the HTTP and tool body. Strict: the booking comes from the path, the actor from the session. */
+export const setBookingOutcomeRequestSchema = z.strictObject({ outcome: bookingOutcomeSchema });
+export type SetBookingOutcomeRequest = z.infer<typeof setBookingOutcomeRequestSchema>;
+export const setBookingOutcomeInputSchema = z.strictObject({ bookingId: idSchema, outcome: bookingOutcomeSchema });
+export type SetBookingOutcomeInput = z.infer<typeof setBookingOutcomeInputSchema>;
+export const SET_BOOKING_OUTCOME_ACTION = "booking.outcome.set";
+export const setBookingOutcomeCommandSchema = z.lazy(() => actionCommandSchema.extend({
+  actionType: z.literal(SET_BOOKING_OUTCOME_ACTION),
+  target: targetSchema.extend({ type: z.literal("booking") }),
+  payload: setBookingOutcomeInputSchema,
+}).refine((command) => command.target.id === command.payload.bookingId, "Target must equal the booking"));
+export type SetBookingOutcomeCommand = z.infer<typeof setBookingOutcomeCommandSchema>;
+/** B-38: `changed` is false when the booking already had this mark (B-39). */
+export const setBookingOutcomeResultSchema = z.strictObject({
+  booking: bookingRecordSchema,
+  outcome: bookingOutcomeSchema,
+  outcomeAt: bookingInstantSchema,
+  changed: z.boolean(),
+}).refine((value) => value.booking.status === "confirmed", "A marked booking is confirmed");
+export type SetBookingOutcomeResult = z.infer<typeof setBookingOutcomeResultSchema>;
+export const setBookingOutcomeOutputSchema = z.lazy(() => actionResultSchema.extend({ result: setBookingOutcomeResultSchema }));
+export type SetBookingOutcomeOutput = z.infer<typeof setBookingOutcomeOutputSchema>;
+
 export const getAvailableSlotsErrorCodeSchema = z.enum(["ValidationFailed", "NotImplemented"]);
 export type GetAvailableSlotsErrorCode = z.infer<typeof getAvailableSlotsErrorCodeSchema>;
 export type GetAvailableSlotsError = ActionError<GetAvailableSlotsErrorCode>;

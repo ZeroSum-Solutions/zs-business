@@ -342,7 +342,21 @@ export function createDeliveryWorker(deps: DeliveryWorkerDeps) {
     });
     if (standing === "revoked") return { reason: "approval_revoked", address };
     if (standing !== "approved") return { reason: "approval_missing", address };
+    // booking.md B-43: a review request goes only for a booking that is still confirmed and marked completed. This covers a
+    // request queued before the owner corrected the mark to no-show, one queued before outcomes existed, and a cancel.
+    if (await reviewBookingNotCompleted(tx, row)) return { reason: "booking_not_completed", address };
     return { reason: null, address };
+  }
+
+  /** True when this delivery is the message of a queued review request whose booking is not `confirmed` and `completed` now. */
+  async function reviewBookingNotCompleted(tx: Transaction, row: DeliveryRow): Promise<boolean> {
+    const booking = (await tx.query<{ status: string | null; outcome: string | null }>(
+      `SELECT b.status, b.outcome
+         FROM agent_decisions d
+         LEFT JOIN bookings b ON b.tenant_id = d.tenant_id AND b.id = d.subject_id
+        WHERE d.tenant_id=$1 AND d.message_id=$2 AND d.agent_kind='review_request' AND d.subject_type='booking' AND d.outcome='queued'`,
+      [row.tenant_id, row.message_id])).rows[0];
+    return booking !== undefined && !(booking.status === "confirmed" && booking.outcome === "completed");
   }
 
   /** What the provider receives: the approved text plus the opt-out the law and D-9 require. */

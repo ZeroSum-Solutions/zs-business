@@ -7,9 +7,10 @@ import {
   contactPageSchema,
   createBookingOutputSchema,
   dealPageSchema,
+  setBookingOutcomeOutputSchema,
   slotsResponseSchema,
 } from "@zs/contracts";
-import { call, contactAndDeal, createApiHarness, type ApiHarness } from "./helpers.js";
+import { call, contactAndDeal, createApiHarness, NOW, type ApiHarness } from "./helpers.js";
 
 let h: ApiHarness;
 beforeAll(async () => { h = await createApiHarness(); });
@@ -249,5 +250,99 @@ describe("POST /v1/booking/bookings/:id/cancel (B-29..B-35)", () => {
     expect((await call(h.app, "POST", `/v1/booking/bookings/${id}/cancel`, { key: randomUUID(), body: {} })).status).toBe(401);
     const row = await call(h.app, "GET", `/v1/booking/bookings/${id}`, { token: h.a.token });
     expect(row.body).not.toHaveProperty("cancellationReason");
+  });
+});
+
+describe("POST /v1/booking/bookings/:id/outcome (B-37..B-46)", () => {
+  const mark = (id: string, body: unknown = { outcome: "completed" }, key = randomUUID(), tenant = h.a) =>
+    call(h.app, "POST", `/v1/booking/bookings/${id}/outcome`, { token: tenant.token, key, body });
+  /** A confirmed booking that starts before the harness clock (08:00), as the service role writes it. */
+  async function started(startsAt: string, endsAt: string, tenant = h.a, resourceId = tenant.resourceId): Promise<string> {
+    const id = randomUUID();
+    await h.fixture.service((tx) => tx.query(
+      `INSERT INTO bookings (tenant_id,id,resource_id,starts_at,ends_at,occupied_starts_at,occupied_ends_at,
+         buffer_before_minutes,buffer_after_minutes,status,created_at)
+       VALUES ($1,$2,$3,$4,$5,$4,$5,0,0,'confirmed',$6)`, [tenant.tenantId, id, resourceId, startsAt, endsAt, NOW]));
+    return id;
+  }
+  const detailOf = async (id: string, tenant = h.a) => call(h.app, "GET", `/v1/booking/bookings/${id}`, { token: tenant.token });
+
+  it("marks completed, then replaces it; the list and the detail show the mark, and the same value again changes nothing", async () => {
+    const id = await started("2026-09-14T09:00:00.000Z", "2026-09-14T10:00:00.000Z");
+    const list = async () => bookingPageSchema.parse((await call(h.app, "GET",
+      "/v1/booking/bookings?from=2026-09-14T00:00:00.000Z&to=2026-09-15T00:00:00.000Z", { token: h.a.token })).body).items.find((item) => item.id === id);
+    // B-47: an unmarked booking carries no outcome key.
+    expect(await list()).not.toHaveProperty("outcome");
+
+    const done = await mark(id, { outcome: "completed" });
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    expect(setBookingOutcomeOutputSchema.parse(done.body).result).toMatchObject({
+      booking: { id, status: "confirmed" }, outcome: "completed", outcomeAt: NOW, changed: true,
+    });
+    expect(await list()).toMatchObject({ outcome: "completed" });
+    expect((await detailOf(id)).body).toMatchObject({ id, outcome: "completed", outcomeAt: NOW });
+
+    const replaced = await mark(id, { outcome: "no_show" });
+    expect(setBookingOutcomeOutputSchema.parse(replaced.body).result).toMatchObject({ outcome: "no_show", changed: true });
+    const same = await mark(id, { outcome: "no_show" });
+    expect(setBookingOutcomeOutputSchema.parse(same.body).result).toMatchObject({ outcome: "no_show", changed: false });
+    expect(await list()).toMatchObject({ outcome: "no_show" });
+  });
+
+  it("replays one key, and answers 409 for the same key with another body", async () => {
+    const id = await started("2026-09-14T11:00:00.000Z", "2026-09-14T12:00:00.000Z");
+    const key = randomUUID();
+    const first = await mark(id, { outcome: "completed" }, key);
+    const again = await mark(id, { outcome: "completed" }, key);
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual(first.body);
+    const reused = await mark(id, { outcome: "no_show" }, key);
+    expect(reused.status).toBe(409);
+    expect(apiErrorBodySchema.parse(reused.body).error.details).toEqual({ reason: "idempotency_key_reused" });
+    expect((await detailOf(id)).body).toMatchObject({ outcome: "completed" });
+  });
+
+  it("refuses a booking that has not started, and a cancelled one, with their reasons", async () => {
+    const future = createBookingOutputSchema.parse((await book("2026-10-26T15:00:00.000Z")).body).result.id;
+    const early = await mark(future);
+    expect(early.status).toBe(409);
+    expect(apiErrorBodySchema.parse(early.body).error).toMatchObject({ code: "Conflict", details: { reason: "booking_not_started" } });
+    expect((await detailOf(future)).body).not.toHaveProperty("outcome");
+
+    // Running at the harness clock (07:00 to 08:30): it can be marked, then cancelled, which clears the mark.
+    const running = await started("2026-10-19T07:00:00.000Z", "2026-10-19T08:30:00.000Z");
+    expect((await mark(running)).status).toBe(200);
+    const cancelled = await call(h.app, "POST", `/v1/booking/bookings/${running}/cancel`, { token: h.a.token, key: randomUUID(), body: {} });
+    expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
+    const detail = await detailOf(running);
+    expect(detail.body).toMatchObject({ status: "cancelled" });
+    expect(detail.body).not.toHaveProperty("outcome");
+    expect(detail.body).not.toHaveProperty("outcomeAt");
+    const refused = await mark(running);
+    expect(refused.status).toBe(409);
+    expect(apiErrorBodySchema.parse(refused.body).error.details).toEqual({ reason: "booking_cancelled" });
+  });
+
+  it("needs a key, a token and a valid body, and answers 404 across tenants", async () => {
+    const id = await started("2026-09-14T13:00:00.000Z", "2026-09-14T14:00:00.000Z");
+    expect((await call(h.app, "POST", `/v1/booking/bookings/${id}/outcome`, { token: h.a.token, body: { outcome: "completed" } })).status).toBe(400);
+    for (const body of [{}, { outcome: "unknown" }, { outcome: null }, { outcome: "completed", extra: 1 }, { outcome: "COMPLETED" }])
+      expect((await mark(id, body)).status, JSON.stringify(body)).toBe(400);
+    expect((await mark(id, { outcome: "completed" }, randomUUID(), h.b)).status).toBe(404);
+    expect((await mark(randomUUID())).status).toBe(404);
+    expect((await call(h.app, "POST", `/v1/booking/bookings/${id}/outcome`, { key: randomUUID(), body: { outcome: "completed" } })).status).toBe(401);
+    expect((await call(h.app, "POST", "/v1/booking/bookings/not-an-id/outcome", { token: h.a.token, key: randomUUID(), body: { outcome: "completed" } })).status).toBe(400);
+    // Tenant B read nothing of tenant A's booking, marked or not.
+    expect((await detailOf(id, h.b)).status).toBe(404);
+    expect((await detailOf(id)).body).not.toHaveProperty("outcome");
+  });
+
+  it("lets a staff member mark too (calendar permission)", async () => {
+    const id = await started("2026-09-14T15:00:00.000Z", "2026-09-14T16:00:00.000Z");
+    const { signedInMember, tokenFor } = await import("./helpers.js");
+    const staff = await signedInMember(h.database, h.fixture, h.a.tenantId, "staff");
+    const done = await call(h.app, "POST", `/v1/booking/bookings/${id}/outcome`, { token: await tokenFor(staff), key: randomUUID(), body: { outcome: "no_show" } });
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    expect(setBookingOutcomeOutputSchema.parse(done.body).result).toMatchObject({ outcome: "no_show" });
   });
 });

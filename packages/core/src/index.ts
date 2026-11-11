@@ -1,6 +1,6 @@
 export * from "./actions/dispatch.js";
 export {
-  bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, confirmationMessageId, createBooking,
+  bookingCancelHandlers, bookingContactHandlers, bookingOutcomeHandlers, bookingHandlers, bookingSelfServiceHandlers, confirmationMessageId, createBooking,
   getAvailableSlots, manageExpiry, manageUrl, manageView, signManageToken, verifyManageToken,
 } from "./booking/index.js";
 export type { ManageLinkConfig, ManageRef, ManageSecrets } from "./booking/index.js";

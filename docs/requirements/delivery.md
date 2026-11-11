@@ -1,6 +1,7 @@
 # M3d: prepaid wallet and message delivery
 
-Status: draft contract for M3d (2026-10-20), revision 5 (2026-10-22). Code follows this file;
+Status: draft contract for M3d (2026-10-20), revision 5 (2026-10-22), with a D-6 addition on 2026-11-11 (a queued review
+request needs a `completed` booking at send time). Code follows this file;
 a change to a numbered rule needs a new revision of this file first. Revision 5 changes D-6 and
 D-9 so a one-click unsubscribe stops marketing email only, and adds D-11 (wallet reservations
 for any priced job). D-11 is built (migration `20261023300000_wallet_job_reservations.sql`,
@@ -95,6 +96,12 @@ worker re-checks, for every attempt:
   blocks `approval_revoked` or `approval_missing`. `approvalsFromRecords` implements the port
   over M3b's `approvalForAction` (approvals.md A-10): a direct approval stands; a stored one
   stands only while `approved`; revoked, expired and rejected block `approval_revoked`;
+- for a message that belongs to a queued `review_request` decision (`agent_decisions.message_id`, 2026-11-11), the
+  booking it is about: it must still be `confirmed` with outcome `completed`, or the delivery blocks
+  `booking_not_completed` and the provider is never called. This stops a request queued before the owner corrected the
+  mark to `no_show`, one queued before outcomes existed (its booking is unmarked), and one queued before a cancel
+  (`booking.md` B-43, B-44, B-46). It reads the booking row inside the same transaction and runs after the approval
+  checks, so a revoked approval still reports `approval_revoked`;
 - a usable address (`no_address`). The send goes to the contact's current address, except
   that while an outcome is unknown it may only be repeated to the address it went to; if the
   contact's address changed, the delivery blocks `address_changed` (after a lookup, D-8). A

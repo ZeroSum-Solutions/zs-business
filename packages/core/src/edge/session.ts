@@ -51,6 +51,10 @@ import {
   bookingContactOutputSchema,
   createBookingRequestSchema,
   cancelBookingOutputSchema,
+  setBookingOutcomeOutputSchema,
+  setBookingOutcomeRequestSchema,
+  SET_BOOKING_OUTCOME_ACTION,
+  type SetBookingOutcomeOutput,
   cancelBookingRequestSchema,
   CANCEL_BOOKING_ACTION,
   type CancelBookingOutput,
@@ -170,7 +174,7 @@ import { loadSetup, readSetup, setupHandlers, storedApplyResult, zoneKnown } fro
 import { transcriptionHandlers } from "../transcription/handlers.js";
 import { documentIntakeHandlers } from "../document-intake/handlers.js";
 import { APPROVAL_POLICIES, approvalHandlers, approvalPolicy, listApprovals, loadApproval, approvalRecord, resolveStoredApproval, type ApprovalPolicy } from "../approvals/index.js";
-import { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, createBooking } from "../booking/index.js";
+import { bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingOutcomeHandlers, bookingSelfServiceHandlers, createBooking } from "../booking/index.js";
 import { readClock } from "../booking/slots.js";
 import { archiveStage, createDeal, createOrFindContact, createStage, crmHandlers, moveDealStage, renameStage, reorderStages, restoreStage, stageHandlers } from "../crm/index.js";
 import { dealDetailsHandlers, setDealDetails } from "../deals/details.js";
@@ -315,7 +319,7 @@ export function parseInput<T>(schema: Parser<T>, value: unknown, what = "request
 }
 
 const dispatch = createDispatcher({
-  ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...stageHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
+  ...bookingHandlers, ...bookingCancelHandlers, ...bookingOutcomeHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...stageHandlers, ...dealDetailsHandlers, ...intakeHandlers, ...inboxHandlers, ...memberHandlers,
   ...approvalHandlers, ...sourceHandlers, ...suppressionHandlers, ...smsStatusHandlers, ...voiceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...automationHandlers, ...siteHandlers,
   ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...enrichmentHandlers, ...outreachHandlers, ...transcriptionHandlers, ...imageHandlers, ...documentIntakeHandlers,
   ...setupHandlers,
@@ -332,6 +336,8 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   "booking.create": "calendar",
   // booking.md B-29: staff work the calendar, so they cancel too.
   "booking.cancel": "calendar",
+  // booking.md B-38: staff say who came, so they mark too.
+  "booking.outcome.set": "calendar",
   // booking-customer.md BC-3: also needs `customers` (ALSO_REQUIRED_PERMISSIONS below).
   "booking.contact.link": "calendar",
   "booking.contact.unlink": "calendar",
@@ -713,6 +719,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
           actionType: CANCEL_BOOKING_ACTION, ...rest,
           payload: toJson({ bookingId: id, reason: request.reason ?? null, notifyCustomer: request.notifyCustomer ?? true }),
         }), "result");
+    },
+
+    /** booking.md B-38: mark a booking that has started as completed or no_show (B-39). */
+    async setBookingOutcome(bookingId: unknown, body: unknown, key: unknown): Promise<SetBookingOutcomeOutput> {
+      const id = parseInput(uuidSchema, bookingId, "booking ID");
+      const request = parseInput(setBookingOutcomeRequestSchema, body);
+      const { id: _target, ...rest } = envelope(key, "booking", id);
+      return parseInput(setBookingOutcomeOutputSchema,
+        await run({ actionType: SET_BOOKING_OUTCOME_ACTION, ...rest, payload: toJson({ bookingId: id, outcome: request.outcome }) }), "result");
     },
 
     /** booking-customer.md BC-3: link a booking to a contact, or change it; `expectedRevision` is the detail's. */

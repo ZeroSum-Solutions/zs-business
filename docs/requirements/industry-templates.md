@@ -76,7 +76,7 @@ data), and any vertical integration beyond the connections catalog (`connections
   email."; fitness "At the gym. Wear training clothes. We confirm the details by email."
   Disclosure text is non-empty. Messages, each with an email subject and the business display-name
   placeholder that `parseTemplateDraft` accepts: `appointment_reminder` by email 24 hours before;
-  `review_request` (jewelry, crafts, fitness only) by email 24 hours after the appointment, worded
+  `review_request` (jewelry, crafts, fitness only) by email 24 hours after an appointment the owner marked completed (`booking.md` B-43), worded
   about the visit, not a delivered product, with the consent purpose the review-request kind
   already requires. Labels and summaries in code keep jewelry and crafts to custom, bridal and
   commission work and fitness to winning a client and booking a first session. Recommended
