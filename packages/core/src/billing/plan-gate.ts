@@ -9,15 +9,30 @@ export async function lockTenantPlan(tx: Transaction, tenantId: string): Promise
   await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('plan:' || $1::uuid::text, 0))", [tenantId]);
 }
 
-/** PL-1: the limits in force; null for a comped tenant. */
-export function planLimits(row: { readonly plan: HubPlan | null; readonly extra_connections: number } | null): PlanLimits | null {
+/** PL-21: the grant columns of `tenant_plans`, as the gate and the reads select them. */
+export interface PlanGrantColumns { readonly granted_plan: HubPlan | null; readonly granted_until: Date | null }
+export const GRANT_COLUMNS = "granted_plan, granted_until";
+
+/** PL-21: the granted plan while the grant is active (set, and no end or an end after the clock), else null. */
+export function activeGrant(row: PlanGrantColumns | null | undefined, now: Date): HubPlan | null {
+  if (!row || row.granted_plan === null) return null;
+  return row.granted_until === null || row.granted_until.getTime() > now.getTime() ? row.granted_plan : null;
+}
+
+/** PL-1, PL-21: the limits in force; null for a comped tenant. An active grant wins over the subscription. */
+export function planLimits(
+  row: ({ readonly plan: HubPlan | null; readonly extra_connections: number } & PlanGrantColumns) | null, now: Date,
+): PlanLimits | null {
+  const granted = activeGrant(row, now);
+  if (granted) return { ...PLAN_CATALOG[granted].limits };
   if (!row || row.plan === null) return null;
   const base = PLAN_CATALOG[row.plan].limits;
   return { ...base, managedConnections: base.managedConnections + row.extra_connections };
 }
 
-export const isReadOnly = (row: { readonly read_only_after: Date | null } | null, now: Date) =>
-  row?.read_only_after != null && row.read_only_after.getTime() <= now.getTime();
+/** PL-8, PL-21: read-only at or after `read_only_after`, never while a grant is active. */
+export const isReadOnly = (row: ({ readonly read_only_after: Date | null } & PlanGrantColumns) | null, now: Date) =>
+  row?.read_only_after != null && row.read_only_after.getTime() <= now.getTime() && activeGrant(row, now) === null;
 
 /** PL-8: what a read-only tenant may still run. */
 export const READ_ONLY_ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
@@ -58,12 +73,12 @@ export async function planGate(tx: Transaction, tenantId: string, actionType: st
   const counted = COUNTED[actionType];
   // Lock before reading, so a plan change that commits meanwhile is the one enforced.
   if (counted) await lockTenantPlan(tx, tenantId);
-  const row = (await tx.query<{ plan: HubPlan | null; status: string; extra_connections: number; read_only_after: Date | null }>(
-    "SELECT plan, status, extra_connections, read_only_after FROM tenant_plans WHERE tenant_id=$1", [tenantId])).rows[0];
+  const row = (await tx.query<{ plan: HubPlan | null; status: string; extra_connections: number; read_only_after: Date | null } & PlanGrantColumns>(
+    `SELECT plan, status, extra_connections, read_only_after, ${GRANT_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0];
   if (!row) return;
   if (isReadOnly(row, now) && !READ_ONLY_ALLOWED_ACTIONS.has(actionType))
     throw new Conflict("The plan has ended or its payment failed; the business is read-only until billing is fixed", { reason: "plan_read_only" });
-  const limits = planLimits(row);
+  const limits = planLimits(row, now);
   if (!counted || !limits) return;
   const limit = limits[counted.resource] as number;
   const used = (await tx.query<{ used: number }>(counted.count, counted.count.includes("$2") ? [tenantId, now] : [tenantId])).rows[0]!.used;

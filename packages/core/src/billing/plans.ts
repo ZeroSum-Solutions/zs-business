@@ -31,7 +31,7 @@ import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
 import { parseOrFail } from "../crm/rows.js";
-import { isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
+import { activeGrant, isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
 import type { StripePlansClient } from "./plan-stripe.js";
 
 /** PL-5: like top-ups, a session lives an hour and a first request may be retried for 25 minutes. */
@@ -80,9 +80,11 @@ interface TenantPlanRow {
   payment_failed_at: Date | null;
   read_only_after: Date | null;
   shopify_shop_domain: string | null;
+  granted_plan: HubPlan | null;
+  granted_until: Date | null;
 }
 const PLAN_COLUMNS = `billing_provider, plan, plan_interval, founding, status, extra_connections, stripe_customer_id, trial_end, current_period_end,
-  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain`;
+  cancel_at_period_end, trial_used, founding_invite, payment_failed_at, read_only_after, shopify_shop_domain, granted_plan, granted_until`;
 const tenantPlan = async (tx: Transaction, tenantId: string): Promise<TenantPlanRow | null> =>
   (await tx.query<TenantPlanRow>(`SELECT ${PLAN_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0] ?? null;
 
@@ -255,6 +257,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   const shopify = row?.billing_provider === "shopify";
   // PL-15, PL-19: the store handle is the myshopify.com name.
   const shopifyManageUrl = shopify ? shopifyPricingUrl(row?.shopify_shop_domain, input.shopifyAppHandle) : null;
+  // PL-22: the key is left out unless a grant is active, so a tenant without one gets the answer it always had.
+  const granted = activeGrant(row, input.now);
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -272,13 +276,14 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     paymentFailedAt: iso(row?.payment_failed_at ?? null),
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly: isReadOnly(row, input.now),
-    limits: planLimits(row),
+    limits: planLimits(row, input.now),
     catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",
     checkoutEnabled: input.checkoutEnabled && stripe,
     portalEnabled: input.checkoutEnabled && stripe && Boolean(row?.stripe_customer_id),
     shopifyManageUrl,
+    ...(granted ? { grant: { source: "grant", plan: granted, grantedUntil: iso(row?.granted_until ?? null) } } : {}),
   });
 }
 

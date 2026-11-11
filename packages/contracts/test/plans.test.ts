@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALL_PLAN_PRICE_KEYS, EXTRA_CONNECTION_PRICE, MAX_EXTRA_CONNECTIONS, PLAN_ADDON_LOOKUP_KEY, PLAN_CATALOG } from "../src/index.js";
+import { ALL_PLAN_PRICE_KEYS, billingPlanSchema, EXTRA_CONNECTION_PRICE, MAX_EXTRA_CONNECTIONS, PLAN_ADDON_LOOKUP_KEY, PLAN_CATALOG, planGrantSchema } from "../src/index.js";
 
 // plans.md PL-1: the one catalog the API, the worker and the dashboard read. Amounts are USD cents.
 describe("PLAN_CATALOG (plans.md PL-1)", () => {
@@ -41,5 +41,37 @@ describe("PLAN_CATALOG (plans.md PL-1)", () => {
       "hub_solo_month", "hub_solo_year", "hub_studio_founding_month", "hub_studio_founding_year", "hub_studio_month", "hub_studio_year",
     ]);
     expect(ALL_PLAN_PRICE_KEYS).toContain(PLAN_ADDON_LOOKUP_KEY);
+  });
+});
+
+// plans.md PL-22: GET /v1/billing/plan with and without the operator-granted plan. The dashboard and the API deploy separately.
+describe("billingPlanSchema grant (plans.md PL-22)", () => {
+  const read = {
+    billingProvider: "stripe", status: "trialing", plan: "solo", interval: "month", founding: false, foundingInvite: false,
+    extraConnections: 0, trialEnd: "2026-11-20T00:00:00.000Z", currentPeriodEnd: "2026-11-20T00:00:00.000Z", cancelAtPeriodEnd: false,
+    trialAvailable: false, trialDays: 0, paymentFailedAt: null, readOnlyAfter: null, readOnly: false,
+    limits: { ...PLAN_CATALOG.solo.limits },
+    catalog: Object.values(PLAN_CATALOG).map((entry) => ({ plan: entry.plan, name: entry.name, prices: { ...entry.prices }, foundingPrices: null, limits: { ...entry.limits } })),
+    extraConnectionPrice: EXTRA_CONNECTION_PRICE, currency: "usd", checkoutEnabled: true, portalEnabled: true, shopifyManageUrl: null,
+  };
+
+  it("parses a read without the grant key, as an API that has none to report sends it", () => {
+    const parsed = billingPlanSchema.parse(read);
+    expect("grant" in parsed).toBe(false);
+  });
+
+  it("parses a read with a grant that ends and one that does not", () => {
+    const grant = { source: "grant", plan: "pro", grantedUntil: "2027-01-31T23:59:59.000Z" };
+    expect(billingPlanSchema.parse({ ...read, grant }).grant).toEqual(grant);
+    expect(billingPlanSchema.parse({ ...read, grant: { ...grant, grantedUntil: null } }).grant).toEqual({ ...grant, grantedUntil: null });
+  });
+
+  it("refuses a grant that names another source or plan, a date that is not an instant, or a field the note would leak through", () => {
+    const grant = { source: "grant", plan: "pro", grantedUntil: null };
+    expect(planGrantSchema.safeParse(grant).success).toBe(true);
+    for (const bad of [
+      { ...grant, source: "stripe" }, { ...grant, plan: "enterprise" }, { ...grant, grantedUntil: "2027-01-31" },
+      { ...grant, note: "retainer" }, { ...grant, grantedBy: "Dana" }, { source: "grant", plan: "pro" },
+    ]) expect(billingPlanSchema.safeParse({ ...read, grant: bad }).success, JSON.stringify(bad)).toBe(false);
   });
 });

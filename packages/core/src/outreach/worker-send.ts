@@ -1,8 +1,9 @@
 // Sending (outreach-sequencer.md OS-12, OS-14, OS-15). Per mailbox the worker lists due prospects and, for each, runs the
 // pre-send check inside one lease-checked transaction that also commits the `sending` row. Only then does it call
 // `messages.send`, once, and settle the row. A follow-up first checks its Gmail thread outside the transaction.
-import { OUTREACH_CAMPAIGN_ACTIVATE_ACTION, OUTREACH_CAMPAIGN_TARGET } from "@zs/contracts";
+import { OUTREACH_CAMPAIGN_ACTIVATE_ACTION, OUTREACH_CAMPAIGN_TARGET, type HubPlan } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { isReadOnly } from "../billing/plan-gate.js";
 import { pgCode } from "../crm/rows.js";
 import { hardSuppressionHit } from "./hard-suppression.js";
 import { INBOUND_HEADER_NAMES } from "./gmail-port.js";
@@ -98,8 +99,10 @@ async function gate(ctx: Ctx, box: Box, tx: Transaction, candidate: Candidate, i
   const mailbox = (await tx.query<{ status: string; paused_until: Date | null; daily_limit: number; history_id: string | null }>(
     "SELECT status, paused_until, daily_limit, history_id FROM outreach_mailboxes WHERE tenant_id=$1 AND id=$2", [tenantId, box.id])).rows[0];
   if (!mailbox || mailbox.status !== "active" || (mailbox.paused_until !== null && mailbox.paused_until.getTime() > at.getTime())) return { kind: "stop_mailbox" };
-  const plan = (await tx.query<{ read_only_after: Date | null }>("SELECT read_only_after FROM tenant_plans WHERE tenant_id=$1 FOR SHARE", [tenantId])).rows[0];
-  if (plan?.read_only_after != null && plan.read_only_after.getTime() <= at.getTime()) return { kind: "stop_mailbox" };
+  const plan = (await tx.query<{ read_only_after: Date | null; granted_plan: HubPlan | null; granted_until: Date | null }>(
+    "SELECT read_only_after, granted_plan, granted_until FROM tenant_plans WHERE tenant_id=$1 FOR SHARE", [tenantId])).rows[0];
+  // PL-21: an active grant means the tenant is never read-only.
+  if (isReadOnly(plan ?? null, at)) return { kind: "stop_mailbox" };
 
   // OS-14: this transaction is the decision point. Every state a send depends on is read under a lock that the competing
   // writer takes too, so a writer that committed first is seen and one that comes later waits for the `sending` row below.

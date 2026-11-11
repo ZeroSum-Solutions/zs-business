@@ -139,6 +139,15 @@ const offerSchema = z.strictObject({
   limits: limitsSchema,
 });
 
+/** PL-22: an operator-granted plan that is active now. The note and the operator's name never leave the server. */
+export const planGrantSchema = z.strictObject({
+  source: z.literal("grant"),
+  plan: hubPlanSchema,
+  /** Null: no end date. */
+  grantedUntil: z.iso.datetime().nullable(),
+});
+export type PlanGrant = z.infer<typeof planGrantSchema>;
+
 /** PL-7: 200 body of GET /v1/billing/plan. */
 export const billingPlanSchema = z.strictObject({
   billingProvider: billingProviderSchema,
@@ -166,5 +175,10 @@ export const billingPlanSchema = z.strictObject({
   portalEnabled: z.boolean(),
   /** PL-19: Shopify's plan selection page for a Shopify-billed tenant; null otherwise. */
   shopifyManageUrl: z.url({ protocol: /^https$/ }).nullable(),
+  /**
+   * PL-21, PL-22: present only while an operator-granted plan is active. `limits` are then the granted plan's
+   * and `readOnly` is false. Optional so a response without it parses and a dashboard deployed first accepts it.
+   */
+  grant: planGrantSchema.optional(),
 });
 export type BillingPlan = z.infer<typeof billingPlanSchema>;
