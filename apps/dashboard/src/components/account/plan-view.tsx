@@ -45,6 +45,14 @@ export function planDateLine(plan: BillingPlan, zone: string): string | null {
   return plan.cancelAtPeriodEnd ? `Ends ${day(plan.currentPeriodEnd, zone)}. Nothing more is charged.` : `Renews ${day(plan.currentPeriodEnd, zone)}`;
 }
 
+/** PL-22: the name of an operator-granted plan and, when it ends, the day. Null without an active grant. */
+export function grantSummary(plan: BillingPlan, zone: string): { name: string; endLine: string | null } | null {
+  const grant = plan.grant;
+  if (!grant) return null;
+  const name = plan.catalog.find((offer) => offer.plan === grant.plan)?.name ?? grant.plan;
+  return { name, endLine: grant.grantedUntil ? `Included until ${day(grant.grantedUntil, zone)}.` : null };
+}
+
 /** PL-8: the banner a failed payment or an ended plan shows; null when billing is fine. */
 export function billingNotice(plan: BillingPlan, zone: string): { tone: "warn" | "danger"; text: string } | null {
   if (plan.readOnly)
@@ -149,7 +157,9 @@ export function PlanView() {
       <PageHeader title="Plan" description="One monthly price, clear limits, and you can leave any time. Usage comes from your prepaid wallet." />
       {plan.isPending ? <LoadingRows rows={4} /> : plan.isError ? <ErrorNote error={plan.error} retry={() => plan.refetch()} /> : (() => {
         const data = plan.data;
-        const notice = billingNotice(data, zone);
+        // PL-22: while an operator-granted plan is active there is nothing to pay and nothing to fix.
+        const granted = grantSummary(data, zone);
+        const notice = granted ? null : billingNotice(data, zone);
         const current = data.plan ? data.catalog.find((offer) => offer.plan === data.plan) : undefined;
         const shopify = data.billingProvider === "shopify";
         return (
@@ -174,7 +184,28 @@ export function PlanView() {
               </div>
             ) : null}
 
-            {current && holds ? (
+            {granted ? (
+              <div className="tray">
+                <Card aria-labelledby="plan-title">
+                  <CardHeader>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <CardTitle id="plan-title">Included plan: {granted.name}</CardTitle>
+                        <Badge tone="success">Included</Badge>
+                      </div>
+                      {granted.endLine ? <p className="mt-2 text-sm text-muted">{granted.endLine}</p> : null}
+                    </div>
+                  </CardHeader>
+                  {data.limits ? (
+                    <ul className="space-y-2">
+                      {limitLines(data.limits).map((item) => (
+                        <li key={item} className="flex items-center gap-2 text-sm text-fg-2"><Check size={16} aria-hidden className="text-success" />{item}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </Card>
+              </div>
+            ) : current && holds ? (
               <div className="tray grid grid-cols-1 gap-1.5 lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-2">
                 <Card aria-labelledby="plan-title">
                   <CardHeader>

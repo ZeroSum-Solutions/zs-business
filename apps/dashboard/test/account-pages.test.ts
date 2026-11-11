@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { billingNotice, PLAN_BADGE, planDateLine, PlanView, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
+import { billingNotice, grantSummary, PLAN_BADGE, planDateLine, PlanView, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
 import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
 import type { BillingPlan, BusinessProfile } from "@zs/contracts";
@@ -49,6 +49,25 @@ describe("plan", () => {
     expect(failed).toEqual({ tone: "warn", text: expect.stringContaining("Update your card by Saturday, November 21") });
     expect(billingNotice(plan({ status: "unpaid", readOnly: true }), "UTC")?.tone).toBe("danger");
     expect(JSON.stringify(failed)).not.toMatch(/refund/i);
+  });
+
+  // plans.md PL-22: an operator-granted plan shows "Included plan: <name>" and its end, with no checkout prompt or billing notice.
+  it("shows an operator-granted plan instead of checkout prompts and billing notices (PL-22)", () => {
+    const unlimited = plan({ grant: { source: "grant", plan: "pro", grantedUntil: NEAR_MIDNIGHT_UTC }, status: "none", plan: null, interval: null, limits: { ...base.catalog[2]!.limits } });
+    expect(grantSummary(unlimited, "Asia/Tokyo")).toEqual({ name: "Pro", endLine: "Included until Saturday, November 21." });
+    expect(grantSummary(plan({ grant: { source: "grant", plan: "studio", grantedUntil: null } }), "UTC")).toEqual({ name: "Studio", endLine: null });
+    expect(grantSummary(plan(), "UTC")).toBeNull();
+    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, unlimited));
+    expect(html).toContain("Included plan: Pro");
+    expect(html).toContain("Included until Friday, November 20."); // the demo tenant's zone is behind UTC
+    expect(html).not.toMatch(/Choose a plan|Choose Pro|Choose Solo|Manage billing|Fix billing|read-only/);
+    // Even a stale payment failure or read-only date on the provider side shows no banner while the grant lasts.
+    const failing = plan({ grant: { source: "grant", plan: "solo", grantedUntil: null }, status: "past_due", paymentFailedAt: "2026-11-14T00:00:00.000Z", readOnlyAfter: NEAR_MIDNIGHT_UTC });
+    const noBanner = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, failing));
+    expect(noBanner).toContain("Included plan: Solo");
+    expect(noBanner).not.toContain("Update your card");
+    // Without a grant the page is as before.
+    expect(render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, base))).not.toContain("Included plan");
   });
 
   it("shows the demo plan and keeps Stripe off in demo mode", () => {
