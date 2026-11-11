@@ -189,8 +189,12 @@ export const bookingSummarySchema = z.strictObject({
   ...bookingRecordSchema.shape,
   source: z.enum(["owner", "website"]),
   intakeItemId: idSchema.nullable(),
-  /** booking.md B-37: the owner's mark; null is `unknown` and also a cancelled booking (B-39). */
-  outcome: bookingOutcomeSchema.nullable(),
+  /**
+   * booking.md B-37, B-47: the owner's mark. A missing value and null both mean `unknown` (also a cancelled booking, B-41).
+   * The server sends the key only on a marked booking, so a dashboard that still parses this object strictly keeps
+   * working until the first mark; the schema accepts both so either side may deploy first.
+   */
+  outcome: bookingOutcomeSchema.nullable().optional(),
   customer: z.strictObject({
     contactId: idSchema.nullable(),
     name: z.string().nullable(),

@@ -36,7 +36,7 @@ const followUp = {
   globalKilled: false, canDraft: true, blockedBy: null, costSpentMicros: 0, costCapMicros: 1_000_000, costWarning: false,
 };
 
-function renderAgents(reminder: TemplateRevision[], options: { staff?: boolean; reminderStatus?: AgentKindStatus } = {}) {
+function renderAgents(reminder: TemplateRevision[], options: { staff?: boolean; reminderStatus?: AgentKindStatus; review?: TemplateRevision[] } = {}) {
   const html = renderScreen(h(AgentsView), {
     staff: options.staff ?? false,
     fill: (client) => {
@@ -44,7 +44,7 @@ function renderAgents(reminder: TemplateRevision[], options: { staff?: boolean; 
       client.setQueryData(keys.agentKind("appointment_reminder"), options.reminderStatus ?? status("appointment_reminder"));
       client.setQueryData(keys.agentKind("review_request"), status("review_request"));
       client.setQueryData(keys.template("appointment_reminder"), template("appointment_reminder", reminder));
-      client.setQueryData(keys.template("review_request"), template("review_request", []));
+      client.setQueryData(keys.template("review_request"), template("review_request", options.review ?? []));
     },
   }).replaceAll("<!-- -->", "");
   return { reminder: cardOf(html, "appointment_reminder"), review: cardOf(html, "review_request") };
@@ -105,6 +105,15 @@ describe("agents screen: templated kinds", () => {
     });
     expect(reminder).toMatch(/data-testid="reminder-state"[^>]*>On, needs approval</);
     expect(textOf(reminder)).toContain("Nothing is sent until an owner approves the wording.");
+  });
+
+  it("a review request card says it is sent only after the visit is marked Completed; a reminder card says nothing of the kind (B-43, B-46)", () => {
+    const { reminder, review } = renderAgents([revision()], {
+      review: [revision({ id: "00000000-0000-4000-8000-000000000102", body: "Hi {customer_first_name}, review us: {review_link}", variables: ["customer_first_name", "review_link"] })],
+    });
+    expect(review).toMatch(/data-testid="review-condition"[^>]*>Sent only after the visit is marked Completed in the calendar\./);
+    expect(textOf(review)).toContain("after a visit you marked completed");
+    expect(reminder).not.toContain('data-testid="reminder-condition"');
   });
 
   it("offers the on/off switch, and a review link for review requests", () => {

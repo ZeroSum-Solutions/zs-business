@@ -85,6 +85,17 @@ describe("the result and the reads (BC-6, BC-9)", () => {
     expect(bookingDetailSchema.safeParse({ ...summary, customerRevision: 1, extra: true }).success).toBe(false);
   });
 
+  it("reads an outcome that is missing or null as unknown, so an old and a new server both parse (B-47)", () => {
+    const { outcome: _unused, ...withoutKey } = summary;
+    expect(bookingSummarySchema.parse(withoutKey)).not.toHaveProperty("outcome");
+    expect(bookingSummarySchema.parse({ ...summary, outcome: null }).outcome).toBeNull();
+    expect(bookingSummarySchema.parse({ ...summary, outcome: "completed" }).outcome).toBe("completed");
+    expect(bookingDetailSchema.parse({ ...summary, customerRevision: 1, outcome: "no_show", outcomeAt: "2026-11-02T11:00:00.000Z" }).outcome).toBe("no_show");
+    expect(bookingSummarySchema.safeParse({ ...summary, outcome: "unknown" }).success).toBe(false);
+    expect(bookingDetailSchema.safeParse({ ...withoutKey, customerRevision: 1 }).success).toBe(true);
+    expect(bookingDetailSchema.safeParse({ ...summary, outcome: null, customerRevision: 1 }).success).toBe(true);
+  });
+
   it("lists a contact's bookings with a contactId filter", () => {
     expect(listBookingsQuerySchema.parse({ contactId }).contactId).toBe(contactId);
     expect(listBookingsQuerySchema.safeParse({ contactId: "nope" }).success).toBe(false);

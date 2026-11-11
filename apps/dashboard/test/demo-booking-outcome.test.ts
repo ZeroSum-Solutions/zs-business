@@ -31,8 +31,8 @@ const outcomeOf = async (api: ReturnType<typeof adapter>, id: string) =>
 describe("demo adapter: marking a booking's outcome", () => {
   it("shows no mark until the owner sets one, then shows it on the list and the detail (B-37, B-38)", async () => {
     const api = adapter();
-    expect(await outcomeOf(api, STARTED)).toBeNull();
-    expect((await api.getBooking(STARTED)).outcome).toBeNull();
+    expect(await outcomeOf(api, STARTED)).toBeUndefined();
+    expect((await api.getBooking(STARTED)).outcome).toBeUndefined();
     const done = setBookingOutcomeResultSchema.parse(await api.setBookingOutcome({ bookingId: STARTED, outcome: "completed" }, key()));
     expect(done).toMatchObject({ booking: { id: STARTED, status: "confirmed" }, outcome: "completed", changed: true });
     expect(await outcomeOf(api, STARTED)).toBe("completed");
@@ -63,7 +63,7 @@ describe("demo adapter: marking a booking's outcome", () => {
     const api = adapter();
     expect(await failure(api.setBookingOutcome({ bookingId: UPCOMING, outcome: "completed" }, key())))
       .toMatchObject({ kind: "conflict", details: { reason: "booking_not_started" } });
-    expect(await outcomeOf(api, UPCOMING)).toBeNull();
+    expect(await outcomeOf(api, UPCOMING)).toBeUndefined();
     // Once the clock reaches the start, the same booking can be marked.
     api.clock.at = new Date("2026-10-19T14:30:00.000Z");
     expect(await api.setBookingOutcome({ bookingId: UPCOMING, outcome: "completed" }, key())).toMatchObject({ changed: true });
@@ -74,8 +74,9 @@ describe("demo adapter: marking a booking's outcome", () => {
     api.clock.at = new Date("2026-10-19T14:45:00.000Z");
     expect(await api.setBookingOutcome({ bookingId: UPCOMING, outcome: "no_show" }, key())).toMatchObject({ outcome: "no_show" });
     await api.cancelBooking({ bookingId: UPCOMING, notifyCustomer: false }, key());
-    expect(await outcomeOf(api, UPCOMING)).toBeNull();
-    expect(await api.getBooking(UPCOMING)).toMatchObject({ status: "cancelled", outcome: null });
+    expect(await outcomeOf(api, UPCOMING)).toBeUndefined();
+    expect(await api.getBooking(UPCOMING)).toMatchObject({ status: "cancelled" });
+    expect((await api.getBooking(UPCOMING)).outcome).toBeUndefined();
     expect(await failure(api.setBookingOutcome({ bookingId: UPCOMING, outcome: "completed" }, key())))
       .toMatchObject({ kind: "conflict", details: { reason: "booking_cancelled" } });
   });

@@ -36,7 +36,7 @@ export function outcomeToast(at: string, outcome: BookingOutcome, changed: boole
   if (!changed) return `${at} was already marked ${outcomeLabel(outcome).toLowerCase()}.`;
   return outcome === "completed"
     ? `Marked ${at} completed. A review request can follow.`
-    : `Marked ${at} as a no-show. No review request will be sent.`;
+    : `Marked ${at} as a no-show. A review request that has not gone out yet will not be sent.`;
 }
 
 /** The outcome on an appointment, once the owner has marked it (B-37). */

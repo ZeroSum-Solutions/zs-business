@@ -71,8 +71,8 @@ const bookingSummary = (row: SummaryRow): BookingSummary => ({
   ...bookingRecord(row),
   source: row.source,
   intakeItemId: row.intake_item_id,
-  // B-37: null is `unknown`; the check of B-40 keeps a cancelled row without a mark.
-  outcome: row.outcome ?? null,
+  // B-47: sent only on a marked booking, so a missing key is `unknown` (the check of B-40 keeps a cancelled row without a mark).
+  ...(row.outcome ? { outcome: row.outcome } : {}),
   customer: row.intake_item_id !== null
     ? { contactId: row.customer_contact_id, name: row.customer_name, status: row.intake_status }
     : row.link_contact_id !== null

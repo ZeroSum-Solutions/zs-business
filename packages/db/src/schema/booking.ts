@@ -117,7 +117,7 @@ export const bookings = pgTable(
       AND (${table.cancelReason} IS NULL OR (${table.status} = 'cancelled' AND char_length(${table.cancelReason}) BETWEEN 1 AND 500))`),
     check("bookings_outcome", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('completed', 'no_show')`),
     check("bookings_outcome_fields", sql`(${table.outcome} IS NULL) = (${table.outcomeSetAt} IS NULL)
-      AND (${table.outcomeSetBy} IS NULL OR ${table.outcome} IS NOT NULL)
+      AND (${table.outcome} IS NULL) = (${table.outcomeSetBy} IS NULL)
       AND (${table.outcome} IS NULL OR ${table.status} = 'confirmed')`),
     index("bookings_tenant_start").on(table.tenantId, table.startsAt, table.id),
     // Also covers the (tenant_id, resource_id) foreign key.

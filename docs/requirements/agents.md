@@ -329,8 +329,8 @@ missing or voice-sourced grant is skipped `consent_missing` before anything is q
 `delivery.md` D-6 refuses the same grant again at delivery. A test proves that a contact whose
 only grant came from pressing 1 gets no review request at queue time and, if one is forced into
 the outbox, none at delivery. Candidates are `confirmed` bookings with a customer
-whose outcome the owner or staff marked `completed` (`booking.md` B-37..B-43; a `no_show`, `cancelled` or unmarked booking is
-never asked) and whose end is at least `timing_hours` (1..720, default 24) and at most `lookbackDays` (1..30,
+whose outcome the owner or staff marked `completed` (`booking.md` B-37..B-47; a `no_show`, `cancelled` or unmarked booking is
+never asked, and a request already queued for one is blocked at delivery, `delivery.md` D-6) and whose end is at least `timing_hours` (1..720, default 24) and at most `lookbackDays` (1..30,
 default 7) before now. Caps: one request per customer in `contactWindowDays` (1..730, default
 180), at most `maxSendsPerDay` (1..100, default 20). Every eligible customer gets the same
 request: the kind has no setting, variable or step that asks about satisfaction or filters by

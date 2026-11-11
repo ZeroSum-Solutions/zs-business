@@ -2,7 +2,8 @@
 
 import { CaretLeft, CaretRight, Globe, Plus } from "@phosphor-icons/react";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { currentMinute, subscribeMinute } from "@/components/home/home-model";
 import { Segmented } from "@/components/ui/segmented";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +43,7 @@ function WebsiteBadge({ booking }: { booking: BookingView }) {
   );
 }
 
-function BookingRow({ booking, resource, zone, onCustomer, onCancel, canMark = false }: { booking: BookingView; resource: ResourceSummary; zone: string; onCustomer?: ((id: string) => void) | undefined; onCancel?: ((id: string) => void) | undefined; canMark?: boolean }) {
+function BookingRow({ booking, resource, zone, onCustomer, onCancel, canMark = false, now = null }: { booking: BookingView; resource: ResourceSummary; zone: string; onCustomer?: ((id: string) => void) | undefined; onCancel?: ((id: string) => void) | undefined; canMark?: boolean; now?: number | null }) {
   const customer = bookingCustomerName(booking);
   const time = formatTime(booking.startsAt, zone);
   return (
@@ -61,7 +62,7 @@ function BookingRow({ booking, resource, zone, onCustomer, onCancel, canMark = f
         </div>
         <p className="truncate text-sm text-muted">{customer ?? "No customer linked"}</p>
         {/* B-39: a started appointment can be marked Completed or No-show; staff and owners both hold `calendar`. */}
-        {canMark && canMarkOutcome(booking, Date.now()) ? <BookingOutcomeControl booking={booking} zone={zone} /> : null}
+        {canMark && now !== null && canMarkOutcome(booking, now) ? <BookingOutcomeControl booking={booking} zone={zone} /> : null}
         {/* A website booking takes its customer from the request; only owner-made ones can be linked (BC-2). */}
         <div className="flex flex-wrap items-center gap-x-4">
           {fromWebsite(booking) || !onCustomer ? null : (
@@ -107,6 +108,8 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
   const canCancel = useCan("calendar");
   // Marking an outcome needs `calendar` only (booking.md B-38).
   const canMark = canCancel;
+  // The current minute, client only: an appointment gets its control when its start passes, with no reload (B-39).
+  const now = useSyncExternalStore(subscribeMinute, currentMinute, () => null);
   const [cancelFor, setCancelFor] = useState<{ id: string; open: boolean } | null>(null);
   // Looked up by ID on every render, so the sheet shows the booking as the list has it now.
   const customerBooking = bookings.data?.items.find((item) => item.id === customerFor?.id) ?? null;
@@ -128,7 +131,7 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
         {bookings.data.items.length === 0 ? (
           <EmptyState title={past ? "Nothing was booked" : "Nothing booked yet"}>{!past && open.length > 0 ? "Pick an open time to book one." : null}</EmptyState>
         ) : (
-          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} resource={resource} zone={zone} canMark={canMark} {...(canLink ? { onCustomer: (id: string) => setCustomerFor({ id, open: true }) } : {})} {...(canCancel ? { onCancel: (id: string) => setCancelFor({ id, open: true }) } : {})} />)}</ul>
+          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} resource={resource} zone={zone} canMark={canMark} now={now} {...(canLink ? { onCustomer: (id: string) => setCustomerFor({ id, open: true }) } : {})} {...(canCancel ? { onCancel: (id: string) => setCancelFor({ id, open: true }) } : {})} />)}</ul>
         )}
       </section>
       <section aria-labelledby="day-open" className="tray">

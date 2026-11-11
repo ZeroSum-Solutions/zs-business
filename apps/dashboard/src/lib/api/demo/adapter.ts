@@ -345,7 +345,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     const linked = link?.contactId ? contacts.get(link.contactId) : undefined;
     return {
       ...booking,
-      outcome: outcomes.get(booking.id)?.outcome ?? null,
+      // The API sends the key only on a marked booking (B-47).
+      ...(outcomes.has(booking.id) ? { outcome: outcomes.get(booking.id)!.outcome } : {}),
       ...(link ? { contactName: null } : {}),
       customer: item
         ? { contactId: item.contactId, name: contact?.displayName ?? item.submitted.name, status: item.status }

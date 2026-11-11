@@ -40,7 +40,7 @@ test("marks a started appointment Completed, then changes it to No-show", async 
   await viewportShot(page, "booking-outcome-completed", info.project.name);
 
   await noShow.click();
-  await expect(page.getByRole("status").getByText(/^Marked .* as a no-show\. No review request will be sent\.$/)).toBeVisible();
+  await expect(page.getByRole("status").getByText(/^Marked .* as a no-show\. A review request that has not gone out yet will not be sent\.$/)).toBeVisible();
   await expect(row.getByTestId("outcome-badge")).toHaveAttribute("data-outcome", "no_show");
   await expect(noShow).toHaveAttribute("aria-pressed", "true");
   await expect(completed).toHaveAttribute("aria-pressed", "false");

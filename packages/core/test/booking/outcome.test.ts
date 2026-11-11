@@ -110,13 +110,13 @@ describe("marking (B-37, B-38)", () => {
     expect(await rowOf(booking.id)).toMatchObject({ outcome: "no_show", outcome_set_by: owner });
   });
 
-  it("a booking nobody marked reads as unknown (null) and the reads show the mark once set", async () => {
+  it("a booking nobody marked reads as unknown (no outcome key, B-47) and the reads show the mark once set", async () => {
     const booking = await book();
     const now = during(booking);
     const reader = at(now);
     const window = { from: booking.startsAt, to: booking.endsAt };
-    expect((await reader.listBookings(window)).items.find((item) => item.id === booking.id)).toMatchObject({ outcome: null });
-    expect(await reader.getBooking(booking.id)).toMatchObject({ outcome: null });
+    expect((await reader.listBookings(window)).items.find((item) => item.id === booking.id)).not.toHaveProperty("outcome");
+    expect(await reader.getBooking(booking.id)).not.toHaveProperty("outcome");
     expect(await reader.getBooking(booking.id)).not.toHaveProperty("outcomeAt");
     await reader.setBookingOutcome(booking.id, { outcome: "completed" }, randomUUID());
     expect((await reader.listBookings(window)).items.find((item) => item.id === booking.id)).toMatchObject({ outcome: "completed" });
@@ -144,6 +144,33 @@ describe("the clock (B-39)", () => {
     const booking = await book();
     const done = await at(ms(booking.endsAt) + 400 * 86_400_000).setBookingOutcome(booking.id, { outcome: "completed" }, randomUUID());
     expect(done.result.changed).toBe(true);
+  });
+});
+
+describe("the outbox (B-42)", () => {
+  const outboxFor = async (actionId: string) => (await fixture.service((tx) => tx.query<{ event_type: string; payload: Record<string, unknown> }>(
+    "SELECT event_type, payload FROM outbox WHERE tenant_id=$1 AND action_id=$2 ORDER BY created_at, id", [fixture.a.tenantId, actionId],
+  ))).rows;
+
+  it("writes one booking.outcome.set row with the mark, in the same commit as the state and the action", async () => {
+    const booking = await book();
+    const now = during(booking);
+    const done = await at(now).setBookingOutcome(booking.id, { outcome: "no_show" }, randomUUID());
+    const events = await outboxFor(done.actionId);
+    expect(events.map((event) => event.event_type)).toEqual(["booking.outcome.set"]);
+    expect(events[0]!.payload).toMatchObject({
+      actionId: done.actionId, actionType: "booking.outcome.set", target: { type: "booking", id: booking.id }, result: { outcome: "no_show", changed: true },
+    });
+  });
+
+  it("writes one for a repeated mark too, saying changed: false (the call is recorded like a repeat cancel)", async () => {
+    const booking = await book();
+    const now = during(booking);
+    await at(now).setBookingOutcome(booking.id, { outcome: "completed" }, randomUUID());
+    const again = await at(now + 60_000).setBookingOutcome(booking.id, { outcome: "completed" }, randomUUID());
+    const events = await outboxFor(again.actionId);
+    expect(events.map((event) => event.event_type)).toEqual(["booking.outcome.set"]);
+    expect(events[0]!.payload).toMatchObject({ actionId: again.actionId, result: { outcome: "completed", changed: false } });
   });
 });
 
@@ -239,7 +266,8 @@ describe("a cancelled booking has no outcome (B-39, B-41)", () => {
     expect(await rowOf(booking.id)).toMatchObject({ status: "cancelled", outcome: null, outcome_set_at: null, outcome_set_by: null });
     const cancelled = (await at(now).listBookings({ status: "cancelled", from: booking.startsAt, to: booking.endsAt })).items
       .find((item) => item.id === booking.id);
-    expect(cancelled).toMatchObject({ status: "cancelled", outcome: null });
+    expect(cancelled).toMatchObject({ status: "cancelled" });
+    expect(cancelled).not.toHaveProperty("outcome");
   });
 });
 
@@ -302,6 +330,16 @@ describe("two tenants (B-45)", () => {
       "UPDATE bookings SET outcome='completed', outcome_set_at=now(), outcome_set_by=$2 WHERE id=$1", [booking.id, staff]))))
       .toMatchObject({ code: "42501" });
     expect(await rowOf(booking.id)).toMatchObject({ status: "cancelled", outcome: null });
+  });
+
+  it("the runtime role cannot store a mark without the member who set it, nor a member without a mark (B-40)", async () => {
+    const booking = await book();
+    expect(await sqlRejection(fixture.a.run((tx) => tx.query(
+      "UPDATE bookings SET outcome='completed', outcome_set_at=now(), outcome_set_by=NULL WHERE id=$1", [booking.id]))))
+      .toMatchObject({ code: "23514", constraint: "bookings_outcome_fields" });
+    expect(await sqlRejection(fixture.a.run((tx) => tx.query("UPDATE bookings SET outcome_set_by=$2 WHERE id=$1", [booking.id, staff]))))
+      .toMatchObject({ code: "23514", constraint: "bookings_outcome_fields" });
+    expect(await rowOf(booking.id)).toMatchObject({ outcome: null, outcome_set_at: null, outcome_set_by: null });
   });
 
   it("the runtime role can set the three outcome columns together on a confirmed row of its own tenant, and no other column", async () => {

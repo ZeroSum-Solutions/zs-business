@@ -271,7 +271,8 @@ describe("POST /v1/booking/bookings/:id/outcome (B-37..B-46)", () => {
     const id = await started("2026-09-14T09:00:00.000Z", "2026-09-14T10:00:00.000Z");
     const list = async () => bookingPageSchema.parse((await call(h.app, "GET",
       "/v1/booking/bookings?from=2026-09-14T00:00:00.000Z&to=2026-09-15T00:00:00.000Z", { token: h.a.token })).body).items.find((item) => item.id === id);
-    expect(await list()).toMatchObject({ outcome: null });
+    // B-47: an unmarked booking carries no outcome key.
+    expect(await list()).not.toHaveProperty("outcome");
 
     const done = await mark(id, { outcome: "completed" });
     expect(done.status, JSON.stringify(done.body)).toBe(200);
@@ -306,7 +307,7 @@ describe("POST /v1/booking/bookings/:id/outcome (B-37..B-46)", () => {
     const early = await mark(future);
     expect(early.status).toBe(409);
     expect(apiErrorBodySchema.parse(early.body).error).toMatchObject({ code: "Conflict", details: { reason: "booking_not_started" } });
-    expect((await detailOf(future)).body).toMatchObject({ outcome: null });
+    expect((await detailOf(future)).body).not.toHaveProperty("outcome");
 
     // Running at the harness clock (07:00 to 08:30): it can be marked, then cancelled, which clears the mark.
     const running = await started("2026-10-19T07:00:00.000Z", "2026-10-19T08:30:00.000Z");
@@ -314,7 +315,8 @@ describe("POST /v1/booking/bookings/:id/outcome (B-37..B-46)", () => {
     const cancelled = await call(h.app, "POST", `/v1/booking/bookings/${running}/cancel`, { token: h.a.token, key: randomUUID(), body: {} });
     expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
     const detail = await detailOf(running);
-    expect(detail.body).toMatchObject({ status: "cancelled", outcome: null });
+    expect(detail.body).toMatchObject({ status: "cancelled" });
+    expect(detail.body).not.toHaveProperty("outcome");
     expect(detail.body).not.toHaveProperty("outcomeAt");
     const refused = await mark(running);
     expect(refused.status).toBe(409);
@@ -332,7 +334,7 @@ describe("POST /v1/booking/bookings/:id/outcome (B-37..B-46)", () => {
     expect((await call(h.app, "POST", "/v1/booking/bookings/not-an-id/outcome", { token: h.a.token, key: randomUUID(), body: { outcome: "completed" } })).status).toBe(400);
     // Tenant B read nothing of tenant A's booking, marked or not.
     expect((await detailOf(id, h.b)).status).toBe(404);
-    expect((await detailOf(id)).body).toMatchObject({ outcome: null });
+    expect((await detailOf(id)).body).not.toHaveProperty("outcome");
   });
 
   it("lets a staff member mark too (calendar permission)", async () => {

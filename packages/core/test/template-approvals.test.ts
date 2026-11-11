@@ -702,7 +702,7 @@ describe("review requests need outcome = completed (booking.md B-43, agents.md G
     expect(run.decisions.find((d) => d.subjectId === upcoming.bookingId)?.outcome).toBe("queued");
   });
 
-  it("a mark changed to no_show before the run stops the request; one changed after the queue is not recalled", async () => {
+  it("a mark changed to no_show before the run stops the request; one changed after the queue stops at delivery", async () => {
     const early = await booked({ hour: 9, consent: "granted", outcome: "completed" });
     const late = await booked({ hour: 10, base: early.base, consent: "granted", outcome: "completed" });
     now = late.endsAt.getTime() + 26 * HOUR;
@@ -716,14 +716,89 @@ describe("review requests need outcome = completed (booking.md B-43, agents.md G
     const run = await runNow("review_request");
     expect(run.decisions.map((d) => [d.subjectId, d.outcome])).toEqual([[late.bookingId, "queued"]]);
     expect(await decisionRows(early.bookingId)).toHaveLength(0);
-    // Changing the queued booking to no_show now recalls nothing (B-46), and delivery does not read the mark.
+    // Changing the queued booking to no_show recalls nothing that exists, but delivery stops the unsent request (B-46, D-6).
     await markOutcome(late.bookingId, late.startsAt, "no_show");
     now += 60_000;
     await worker().runOnce();
-    expect(await deliveryOf(late.bookingId)).toMatchObject({ status: "sent" });
-    // But it blocks any new request: no second decision appears.
+    expect(await deliveryOf(late.bookingId)).toMatchObject({ status: "blocked", final_reason: "booking_not_completed" });
+    // And it blocks any new request: no second decision appears.
     const again = await runNow("review_request");
     expect(again.decisions.filter((d) => d.subjectId === late.bookingId)).toHaveLength(0);
+  });
+
+  /**
+   * Hold a change to the booking row open in another transaction, start the agent run, and check that the queue waits for the
+   * row (it cannot read the old mark), then reads what was committed (B-43). Without the row lock the queue would not wait.
+   */
+  async function queueDuringChange(bookingId: string, change: string, params: unknown[]) {
+    let release!: () => void;
+    let held!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const changing = service(async (tx) => {
+      await tx.query(change, [tenantId, bookingId, ...params]);
+      held();
+      await gate;
+    });
+    await holding;
+    let finished = false;
+    const run = runNow("review_request").finally(() => { finished = true; });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const waited = !finished;
+    release();
+    await changing;
+    return { waited, result: await run };
+  }
+
+  it("the queue waits for a mark that has not committed, then reads the committed no_show and queues nothing (B-43)", async () => {
+    const s = await booked({ hour: 9, consent: "granted", outcome: "completed" });
+    now = s.endsAt.getTime() + 26 * HOUR;
+    await ready("review_request");
+    const { waited, result } = await queueDuringChange(s.bookingId, "UPDATE bookings SET outcome='no_show' WHERE tenant_id=$1 AND id=$2", []);
+    expect(waited).toBe(true);
+    expect(result.decisions.filter((d) => d.outcome === "queued")).toHaveLength(0);
+    expect(await sendEvents(s.bookingId)).toHaveLength(0);
+  });
+
+  it("the queue waits for a cancel that has not committed, then reads the cancelled booking and queues nothing (B-43)", async () => {
+    const s = await booked({ hour: 9, consent: "granted", outcome: "completed" });
+    now = s.endsAt.getTime() + 26 * HOUR;
+    await ready("review_request");
+    const { waited, result } = await queueDuringChange(s.bookingId,
+      `UPDATE bookings SET status='cancelled', cancelled_at=now(), cancelled_by=$3, outcome=NULL, outcome_set_at=NULL, outcome_set_by=NULL
+        WHERE tenant_id=$1 AND id=$2`, [staff]);
+    expect(waited).toBe(true);
+    expect(result.decisions.filter((d) => d.outcome === "queued")).toHaveLength(0);
+    expect(await sendEvents(s.bookingId)).toHaveLength(0);
+  });
+
+  it("with no change in flight the same completed booking queues at once (the wait above is the lock, not slowness)", async () => {
+    const s = await booked({ hour: 9, consent: "granted", outcome: "completed" });
+    now = s.endsAt.getTime() + 26 * HOUR;
+    await ready("review_request");
+    const started = Date.now();
+    const run = await runNow("review_request");
+    expect(run.decisions.filter((d) => d.outcome === "queued")).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("delivery stops a queued request whose booking has no mark (queued before outcomes shipped) or was cancelled after the queue (B-44, D-6)", async () => {
+    const unmarked = await booked({ hour: 9, consent: "granted", outcome: "completed" });
+    const cancelled = await booked({ hour: 10, base: unmarked.base, consent: "granted", outcome: "completed" });
+    now = cancelled.endsAt.getTime() + 26 * HOUR;
+    await ready("review_request");
+    const run = await runNow("review_request");
+    expect(run.decisions.filter((d) => d.outcome === "queued")).toHaveLength(2);
+    // A request queued by the old code has a booking with no mark at all: clear it as the migration left it.
+    await fixture.service((tx) => tx.query(
+      "UPDATE bookings SET outcome=NULL, outcome_set_at=NULL, outcome_set_by=NULL WHERE tenant_id=$1 AND id=$2", [tenantId, unmarked.bookingId]));
+    const saved = now;
+    now = cancelled.startsAt.getTime() + HOUR / 2;
+    try { await sessionFor(staff).cancelBooking(cancelled.bookingId, {}, randomUUID()); } finally { now = saved; }
+    now += 60_000;
+    await worker().runOnce();
+    expect(await deliveryOf(unmarked.bookingId)).toMatchObject({ status: "blocked", final_reason: "booking_not_completed" });
+    expect(await deliveryOf(cancelled.bookingId)).toMatchObject({ status: "blocked", final_reason: "booking_not_completed" });
   });
 
   it("a marked old booking inside the lookback is a candidate again; one outside it is not", async () => {

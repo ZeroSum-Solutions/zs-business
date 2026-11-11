@@ -29,7 +29,7 @@ describe("outcomeLabel and outcomeToast", () => {
   });
   it("says what the mark does for review requests, and when nothing changed", () => {
     expect(outcomeToast(at, "completed", true)).toBe(`Marked ${at} completed. A review request can follow.`);
-    expect(outcomeToast(at, "no_show", true)).toBe(`Marked ${at} as a no-show. No review request will be sent.`);
+    expect(outcomeToast(at, "no_show", true)).toBe(`Marked ${at} as a no-show. A review request that has not gone out yet will not be sent.`);
     expect(outcomeToast(at, "completed", false)).toBe(`${at} was already marked completed.`);
     expect(outcomeToast(at, "no_show", false)).toBe(`${at} was already marked no-show.`);
   });
