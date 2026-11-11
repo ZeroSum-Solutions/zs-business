@@ -15,6 +15,134 @@
   const RANGE_DAYS = 14;
   const REFRESH_MS = 3 * 60 * 1000;
 
+  // Theming (public-intake.md P-16). The embedding page passes its look as query parameters
+  // (embed.js reads them from --zs-booking-* custom properties). A value is kept only when it
+  // passes a strict grammar, is a real opaque colour (or font list, or radius) to the browser,
+  // and keeps every text colour readable; it is only ever set as a custom property through the
+  // CSSOM, so it can not close a rule, load a URL or run script. Nothing set: today's look.
+  const COLOR = /^(#[0-9a-f]{3}|#[0-9a-f]{4}|#[0-9a-f]{6}|#[0-9a-f]{8}|(rgba?|hsla?)\([0-9.%deg\s,/+-]{1,60}\)|[a-z]{3,24})$/i;
+  const NOT_A_COLOUR = /^(inherit|initial|unset|revert|revert-layer|transparent|currentcolor|none)$/i;
+  const RADIUS = /^(0|(\d{1,2}(\.\d{1,2})?)(px|rem|em))$/;
+  const FAMILY = /^("[A-Za-z0-9 _-]{1,40}"|'[A-Za-z0-9 _-]{1,40}'|-?[A-Za-z][A-Za-z0-9 _-]{0,39})$/;
+  // Unquoted, these are keywords or system fonts, not families.
+  const NOT_A_FAMILY = /^(inherit|initial|unset|revert|revert-layer|default|none|caption|icon|menu|message-box|small-caption|status-bar)$/i;
+  const MIN_CONTRAST = 4.5;
+
+  const hex = (css) => {
+    const digits = css.slice(1);
+    return { css, c: { r: Number.parseInt(digits.slice(0, 2), 16), g: Number.parseInt(digits.slice(2, 4), 16), b: Number.parseInt(digits.slice(4, 6), 16) } };
+  };
+  // booker.css defaults, plus the fallbacks tried when a theme makes a default unreadable.
+  const DEFAULT = {
+    bg: hex("#ffffff"), surface: hex("#ffffff"), text: hex("#1d232a"), muted: hex("#5b6672"),
+    accent: hex("#24577a"), accentText: hex("#ffffff"), error: hex("#a3271f"),
+  };
+  const LIGHT_MUTED = hex("#a1a1aa");
+  const LIGHT_ERROR = hex("#ff8a80");
+  const INKS = [hex("#000000"), hex("#ffffff")];
+
+  function isFont(value) {
+    if (value.length > 200 || (typeof CSS !== "undefined" && !CSS.supports("font-family", value))) return false;
+    return value.split(",").every((part) => {
+      const name = part.trim();
+      return FAMILY.test(name) && !NOT_A_FAMILY.test(name);
+    });
+  }
+  const isRadius = (value) => RADIUS.test(value) && Number.parseFloat(value) <= (value.endsWith("px") ? 48 : 3);
+
+  /** { css, c: {r,g,b} } for a value the browser itself reads as an opaque colour, else null. */
+  function resolveColour(value) {
+    if (!value || value.length > 200 || !COLOR.test(value) || NOT_A_COLOUR.test(value)) return null;
+    if (typeof CSS === "undefined" || !CSS.supports("color", value)) return null;
+    const probe = document.createElement("span");
+    probe.style.color = value;
+    (document.body || document.documentElement).append(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    const parts = /^rgba?\(([^)]*)\)$/.exec(computed || "");
+    if (!parts) return null;
+    const n = parts[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+    if (n.length < 3 || n.some((x) => !Number.isFinite(x))) return null;
+    if (n.length > 3 && n[3] < 1) return null;
+    return { css: value, c: { r: n[0], g: n[1], b: n[2] } };
+  }
+
+  function luminance({ r, g, b }) {
+    const [lr, lg, lb] = [r, g, b].map((v) => {
+      const channel = v / 255;
+      return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+  }
+
+  function contrast(a, b) {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  /** color-mix(in srgb, a share, b). */
+  const mix = (a, b, share) => ({ r: a.r * share + b.r * (1 - share), g: a.g * share + b.g * (1 - share), b: a.b * share + b.b * (1 - share) });
+
+  /** The colours to set: { cssVar: value }. Empty when nothing usable was passed. */
+  function themeFrom(search) {
+    const colour = (name) => resolveColour((search.get(name) || "").trim());
+    const bgIn = colour("bg");
+    const surfaceIn = colour("surface");
+    const accent = colour("accent") || DEFAULT.accent;
+    // One of bg and surface alone: the other follows it, so a dark page never keeps white buttons.
+    let bg = bgIn || surfaceIn || DEFAULT.bg;
+    let surface = surfaceIn || bgIn || DEFAULT.surface;
+    // Text sits on the page, on buttons and on a selected button (8% accent over the surface).
+    const grounds = () => [bg.c, surface.c, mix(accent.c, surface.c, 0.08)];
+    const reads = (fg, on) => fg && on.every((ground) => contrast(fg.c, ground) >= MIN_CONTRAST);
+    const someInkReads = () => INKS.some((ink) => reads(ink, grounds()));
+    // No ink reads on both: the surface follows the page; failing that, both keep the defaults.
+    if (!someInkReads()) surface = bg;
+    if (!someInkReads()) { bg = DEFAULT.bg; surface = DEFAULT.surface; }
+    const pick = (candidates, on = grounds()) => candidates.find((candidate) => reads(candidate, on))
+      || INKS.slice().sort((x, y) => Math.min(...on.map((g) => contrast(y.c, g))) - Math.min(...on.map((g) => contrast(x.c, g))))[0];
+    const text = pick([colour("text"), DEFAULT.text, ...INKS]);
+    const muted = pick([colour("muted"), DEFAULT.muted, LIGHT_MUTED, text]);
+    const error = pick([colour("error"), DEFAULT.error, LIGHT_ERROR, text]);
+    const link = pick([colour("link"), accent, DEFAULT.accent, text]);
+    const accentText = pick([colour("accent-text"), DEFAULT.accentText, ...INKS], [accent.c]);
+    const border = colour("border");
+
+    const out = {};
+    const set = (cssVar, value, fallback) => { if (value !== fallback) out[cssVar] = value.css; };
+    set("--zs-bg", bg, DEFAULT.bg);
+    set("--zs-surface", surface, DEFAULT.surface);
+    set("--zs-ink", text, DEFAULT.text);
+    set("--zs-muted", muted, DEFAULT.muted);
+    set("--zs-accent", accent, DEFAULT.accent);
+    set("--zs-accent-ink", accentText, DEFAULT.accentText);
+    set("--zs-danger", error, DEFAULT.error);
+    set("--zs-link", link, accent);
+    if (border) out["--zs-line"] = border.css;
+    const radius = (search.get("radius") || "").trim();
+    if (radius && isRadius(radius)) out["--zs-radius"] = radius;
+    const font = (search.get("font") || "").trim();
+    if (font && isFont(font)) out["--zs-font"] = font;
+    // Fields follow a themed page; otherwise they keep the browser's own colours.
+    if (bg !== DEFAULT.bg || surface !== DEFAULT.surface) {
+      out["--zs-field-bg"] = surface.css;
+      out["--zs-field-ink"] = text.css;
+    }
+    if (accent !== DEFAULT.accent) out["--zs-check"] = accent.css;
+    // A dark page gets dark scrollbars and controls; the value is ours, never the input.
+    if (luminance(bg.c) < 0.18) out["color-scheme"] = "dark";
+    return out;
+  }
+
+  function applyTheme() {
+    const theme = themeFrom(params);
+    const style = document.documentElement.style;
+    for (const [property, value] of Object.entries(theme)) style.setProperty(property, value);
+    // A host page that shows its own title may hide the booker's; a page opened on its own
+    // always shows it.
+    if (embedded && params.get("header") === "0") document.documentElement.setAttribute("data-header", "hidden");
+  }
+
   const state = {
     page: null,
     resourceId: null,
@@ -141,9 +269,28 @@
     return element;
   }
 
+  // A focus move on the first paint would pull the host page's focus into the frame; headings
+  // take focus only after the visitor has acted.
+  let acted = false;
+  const markActed = () => { acted = true; };
+  // Focus moves only when the view changes, never on a re-render of the same view (slot refreshes).
+  let shownView = null;
+
+  /** A control's identity across re-renders: its id, else its tag and text. */
+  const focusId = (node) => node.id ? `#${node.id}` : `${node.tagName}|${node.textContent}`;
+
+  function viewKey() {
+    if (!state.page) return "status";
+    if (state.attempt && state.attempt.uncertain) return "unconfirmed";
+    if (state.step === "details" && !stillAvailable()) return "details:gone";
+    return state.step === "time" ? `time:${state.day}` : state.step;
+  }
+
   function postHeight() {
     if (!embedded) return;
-    const height = Math.ceil(document.documentElement.scrollHeight);
+    // The body's own height, not the document's scroll height: that never drops below the
+    // frame's current height, so the frame could grow but never shrink back.
+    const height = Math.ceil(document.body.getBoundingClientRect().height);
     window.parent.postMessage({ type: "zs-booking:height", height }, "*");
   }
 
@@ -174,10 +321,22 @@
     // An unconfirmed attempt may hold the slot, so its recovery panel wins over any step.
     const view = !state.page ? h("p", { class: "booker-status" }, state.notice || "Loading…")
       : state.attempt && state.attempt.uncertain ? unconfirmedView() : viewFor(state.step);
+    const active = typeof root.contains === "function" && root.contains(document.activeElement) ? document.activeElement : null;
+    const held = active ? focusId(active) : null;
     // Views are arrays with optional parts (null when absent); replaceChildren would print "null".
     root.replaceChildren(...(Array.isArray(view) ? view : [view]).filter((node) => node !== null && node !== undefined && node !== false));
-    const focus = root.querySelector("[data-focus]");
-    if (focus) focus.focus({ preventScroll: true });
+    const key = viewKey();
+    const moved = key !== shownView;
+    shownView = key;
+    const heading = root.querySelector("[data-focus]");
+    if (moved) {
+      if (heading && acted) heading.focus({ preventScroll: true });
+    } else if (held) {
+      // Same view drawn again: focus stays on the same control, or on the heading if it is gone.
+      const same = [...root.querySelectorAll("button, input, textarea, [tabindex]")].find((node) => focusId(node) === held);
+      if (same) same.focus({ preventScroll: true });
+      else if (heading) heading.focus({ preventScroll: true });
+    }
     postHeight();
   }
 
@@ -186,7 +345,7 @@
     return [
       h("h1", { tabindex: "-1", "data-focus": state.step === "date" ? true : null }, page.title),
       h("p", { class: "booker-sub" }, page.businessName),
-      page.description ? h("p", { class: "booker-sub" }, page.description) : null,
+      page.description ? h("p", { class: "booker-sub booker-desc" }, page.description) : null,
     ];
   }
 
@@ -557,6 +716,11 @@
   }
 
   async function start() {
+    applyTheme();
+    document.addEventListener("pointerdown", markActed, true);
+    document.addEventListener("keydown", markActed, true);
+    // Assistive tech and voice control activate buttons with a click and no pointer or key event.
+    document.addEventListener("click", markActed, true);
     if (!match) { state.notice = "This booking page is not available."; render(); return; }
     if (await loadPage()) await loadSlots(false);
     render();
@@ -571,7 +735,7 @@
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
     window.addEventListener("focus", refresh);
     setInterval(refresh, REFRESH_MS);
-    if (embedded && "ResizeObserver" in window) new ResizeObserver(postHeight).observe(document.documentElement);
+    if (embedded && "ResizeObserver" in window) new ResizeObserver(postHeight).observe(document.body);
   }
 
   start();
