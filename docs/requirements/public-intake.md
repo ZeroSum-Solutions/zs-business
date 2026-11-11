@@ -1,6 +1,6 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 9 (2026-11-10; revision 5 text kept below). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 10 (2026-11-10; revision 5 text kept below). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
@@ -17,6 +17,9 @@ by a signed per-booking link and defined in `booking-self-service.md` (`booking.
 Revision 9 (2026-11-10, demo polish): P-14 shows times in the business's zone with a readable
 zone name, adds the visitor's own time where it differs, and reads a ten-digit phone as +1 when
 both the business and the visitor's device are in a US or Canada zone.
+Revision 10 (2026-11-10, embed theming): P-16 lets the embedding page set the booker's colours,
+radius and font through `--zs-booking-*` custom properties, validated inside the booking page, and
+makes the frame grow and shrink with its content so it never scrolls inside itself.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -247,3 +250,89 @@ consent (contact row and denial unchanged, `possible_match` created), concurrent
 conflicting requests (one 201, one 409, no partial rows), rollback when a later step
 fails, rate limits and body caps, and owner link/reject. Dashboard e2e: a booking made
 through the widget appears in Calendar marked as from the website and in Customers.
+
+**P-16. Theming and layout of the embed.** The booker serves every tenant, so it carries no
+tenant's colours or fonts. The page that embeds it sets the look; with nothing set, the booker
+looks exactly as before revision 10.
+- The host sets these CSS custom properties on the `[data-zs-booking]` element or any ancestor:
+  `--zs-booking-bg`, `-surface`, `-text`, `-muted`, `-accent`, `-accent-text`, `-border`, `-link`,
+  `-error`, `-radius`, `-font` (meanings and defaults in "Theming the embed" below). `embed.js`
+  reads their computed values and passes each one as a query parameter of the same name without
+  the prefix (`bg`, `surface`, … `font`) on the frame URL; a plain iframe passes the same
+  parameters itself. `embed.js` drops a value longer than 200 characters and nothing else; the
+  booking page is the only gate. `embed.js` also mounts elements added after it loaded
+  (single-page sites).
+- The booking page accepts a value only when it matches a fixed grammar: a colour is a hex colour
+  (3, 4, 6 or 8 digits), `rgb()`/`rgba()`/`hsl()`/`hsla()` with numbers only, or one colour keyword
+  (letters only); a radius is `0` or a number in `px` (at most 48), `rem` or `em` (at most 3); a font
+  is a comma list of family names, each letters, digits, spaces, `_` and `-` (an optional leading
+  `-`), quoted or not. Anything else (`url(`, `var(`, `;`, braces, extra quotes, longer than 200
+  characters) is dropped and that token keeps its default; the other tokens still apply. An
+  accepted value is set only as a custom property through the CSSOM
+  (`style.setProperty`), never as markup, so the page CSP keeps `style-src 'self'`.
+- Form fields, checkboxes and the colour scheme follow the theme only when it sets surface, text
+  or accent (a hex background darker than luminance 0.18 sets `color-scheme: dark`); otherwise
+  they stay the browser's own, as before.
+- `data-zs-header="hidden"` on the element (`header=0` on the URL) keeps the page title, business
+  name and description for screen readers only, for hosts whose page already shows a title.
+- Layout: the frame's height follows the booking page's body height on every change, up and
+  down (P-14 `postMessage`, clamped 160 to 4000 px; the 480 px placeholder height lasts only
+  until the first report), so the frame never scrolls inside itself and
+  the host page scrolls. The date list, time list and details form fit 390 px without sideways
+  scrolling. Every control and checkbox row is at least 44 by 44 px. Buttons and fields show a
+  2 px outline in the link colour on keyboard focus. Headings take focus only after the visitor
+  has clicked or typed, so the first paint never moves the host page's focus into the frame.
+- Contrast: with the default tokens every text colour reaches 4.5:1 on the colours it sits on.
+  A host that sets tokens owns the contrast of its own choices; the "Theming the embed" example
+  passes 4.5:1.
+- Tests: the default render sets no property and builds the same frame URL as before; each
+  property is applied; hostile values are dropped (unit tests in
+  `apps/api/test/booker-render.test.ts`); under the real CSP at 390 and 1440 px the theme applies,
+  the frame never scrolls inside itself and shrinks back, targets are 44 px and focus is visible
+  (`apps/dashboard/e2e/booker-theme.spec.ts`).
+
+## Theming the embed
+
+Set the properties on the element that holds the widget (or any ancestor). Each one is optional.
+
+| Property | Sets | Default |
+|---|---|---|
+| `--zs-booking-bg` | page background | `#ffffff` |
+| `--zs-booking-surface` | day and time buttons, form fields | `#ffffff` |
+| `--zs-booking-text` | body text and headings | `#1d232a` |
+| `--zs-booking-muted` | secondary text and hints | `#5b6672` |
+| `--zs-booking-accent` | primary button, selected and hover borders | `#24577a` |
+| `--zs-booking-accent-text` | text on the primary button | `#ffffff` |
+| `--zs-booking-border` | button, field and panel borders | `#d8dde3` |
+| `--zs-booking-link` | text links and the focus outline | the accent |
+| `--zs-booking-error` | error messages | `#a3271f` |
+| `--zs-booking-radius` | corner radius | `8px` |
+| `--zs-booking-font` | font family list | `system-ui, -apple-system, "Segoe UI", Roboto, sans-serif` |
+
+A dark site:
+
+```html
+<style>
+  .booking {
+    --zs-booking-bg: #111113;
+    --zs-booking-surface: #000000;
+    --zs-booking-text: #ffffff;
+    --zs-booking-muted: #8a8a93;
+    --zs-booking-accent: #5b4cff;
+    --zs-booking-accent-text: #ffffff;
+    --zs-booking-border: #2a2a30;
+    --zs-booking-link: #a99fff;
+    --zs-booking-error: #ff6b5e;
+    --zs-booking-radius: 12px;
+    --zs-booking-font: Geist, -apple-system, "Segoe UI", sans-serif;
+  }
+</style>
+<div class="booking" data-zs-booking="KEY" data-zs-header="hidden"></div>
+<script src="https://<api>/embed.js" async></script>
+```
+
+Do not give the container a fixed height or `overflow`; the widget sets the frame's height.
+The frame can not use the host page's web fonts: name a font the visitor's device has, or end
+the list with a system fallback as above. A plain iframe takes the same values as query
+parameters: `https://<api>/book/KEY?bg=%23111113&text=%23ffffff&accent=%235b4cff`; it does not
+resize itself, so prefer `embed.js`.

@@ -15,6 +15,66 @@
   const RANGE_DAYS = 14;
   const REFRESH_MS = 3 * 60 * 1000;
 
+  // Theming (public-intake.md P-16). The embedding page passes its look as query parameters
+  // (embed.js reads them from --zs-booking-* custom properties). Each value must match a strict
+  // grammar or it is dropped, and a kept value is only ever set as a custom property through the
+  // CSSOM, so it can not close a rule, load a URL or run script. Nothing set: today's look.
+  const COLOR = /^(#[0-9a-f]{3,4}|#[0-9a-f]{6}|#[0-9a-f]{8}|(rgba?|hsla?)\(\s*[0-9.%deg\s,/+-]{1,60}\)|[a-z]{3,24})$/i;
+  const RADIUS = /^(0|(\d{1,2}(\.\d{1,2})?)(px|rem|em))$/;
+  const FAMILY = /^("[A-Za-z0-9 _-]{1,40}"|'[A-Za-z0-9 _-]{1,40}'|-?[A-Za-z][A-Za-z0-9 _-]{0,39})$/;
+  const isFont = (value) => value.length <= 200 && value.split(",").every((part) => FAMILY.test(part.trim()));
+  const isRadius = (value) => RADIUS.test(value) && Number.parseFloat(value) <= (value.endsWith("px") ? 48 : 3);
+  const THEME = {
+    bg: ["--zs-bg", COLOR],
+    surface: ["--zs-surface", COLOR],
+    text: ["--zs-ink", COLOR],
+    muted: ["--zs-muted", COLOR],
+    accent: ["--zs-accent", COLOR],
+    "accent-text": ["--zs-accent-ink", COLOR],
+    border: ["--zs-line", COLOR],
+    link: ["--zs-link", COLOR],
+    error: ["--zs-danger", COLOR],
+    radius: ["--zs-radius", { test: isRadius }],
+    font: ["--zs-font", { test: isFont }],
+  };
+
+  /** The validated theme from the page's own URL: { cssVar: value } for each accepted parameter. */
+  function themeFrom(search) {
+    const accepted = {};
+    for (const [name, [cssVar, rule]] of Object.entries(THEME)) {
+      const value = (search.get(name) || "").trim();
+      if (value && value.length <= 200 && rule.test(value)) accepted[cssVar] = value;
+    }
+    return accepted;
+  }
+
+  /** Relative luminance of a hex colour, or null for any other form. */
+  function luminance(value) {
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value);
+    if (!hex) return null;
+    const digits = hex[1].length === 3 ? hex[1].replace(/./g, "$&$&") : hex[1];
+    const [r, g, b] = [0, 2, 4].map((at) => {
+      const channel = Number.parseInt(digits.slice(at, at + 2), 16) / 255;
+      return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+
+  function applyTheme() {
+    const theme = themeFrom(params);
+    const style = document.documentElement.style;
+    for (const [cssVar, value] of Object.entries(theme)) style.setProperty(cssVar, value);
+    // Form fields keep the browser's own colours unless the page themes surface or text.
+    if (theme["--zs-surface"]) style.setProperty("--zs-field-bg", theme["--zs-surface"]);
+    if (theme["--zs-ink"]) style.setProperty("--zs-field-ink", theme["--zs-ink"]);
+    if (theme["--zs-accent"]) style.setProperty("--zs-check", theme["--zs-accent"]);
+    // A dark background gets dark scrollbars and controls; the value is ours, never the input.
+    const bg = luminance(theme["--zs-bg"] || theme["--zs-surface"] || "");
+    if (bg !== null && bg < 0.18) style.setProperty("color-scheme", "dark");
+    // The host page already shows a title: the header stays for screen readers only.
+    if (params.get("header") === "0") document.documentElement.setAttribute("data-header", "hidden");
+  }
+
   const state = {
     page: null,
     resourceId: null,
@@ -141,9 +201,16 @@
     return element;
   }
 
+  // A focus move on the first paint would pull the host page's focus into the frame; headings
+  // take focus only after the visitor has acted.
+  let acted = false;
+  const markActed = () => { acted = true; };
+
   function postHeight() {
     if (!embedded) return;
-    const height = Math.ceil(document.documentElement.scrollHeight);
+    // The body's own height, not the document's scroll height: that never drops below the
+    // frame's current height, so the frame could grow but never shrink back.
+    const height = Math.ceil(document.body.getBoundingClientRect().height);
     window.parent.postMessage({ type: "zs-booking:height", height }, "*");
   }
 
@@ -177,7 +244,7 @@
     // Views are arrays with optional parts (null when absent); replaceChildren would print "null".
     root.replaceChildren(...(Array.isArray(view) ? view : [view]).filter((node) => node !== null && node !== undefined && node !== false));
     const focus = root.querySelector("[data-focus]");
-    if (focus) focus.focus({ preventScroll: true });
+    if (focus && acted) focus.focus({ preventScroll: true });
     postHeight();
   }
 
@@ -557,6 +624,9 @@
   }
 
   async function start() {
+    applyTheme();
+    document.addEventListener("pointerdown", markActed, true);
+    document.addEventListener("keydown", markActed, true);
     if (!match) { state.notice = "This booking page is not available."; render(); return; }
     if (await loadPage()) await loadSlots(false);
     render();
@@ -571,7 +641,7 @@
     document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
     window.addEventListener("focus", refresh);
     setInterval(refresh, REFRESH_MS);
-    if (embedded && "ResizeObserver" in window) new ResizeObserver(postHeight).observe(document.documentElement);
+    if (embedded && "ResizeObserver" in window) new ResizeObserver(postHeight).observe(document.body);
   }
 
   start();
