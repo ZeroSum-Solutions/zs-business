@@ -34,6 +34,8 @@ interface BookingRow {
   created_at: Date;
   cancelled_at?: Date | null;
   cancel_reason?: string | null;
+  outcome?: "completed" | "no_show" | null;
+  outcome_set_at?: Date | null;
 }
 interface SummaryRow extends BookingRow {
   source: "owner" | "website";
@@ -69,6 +71,8 @@ const bookingSummary = (row: SummaryRow): BookingSummary => ({
   ...bookingRecord(row),
   source: row.source,
   intakeItemId: row.intake_item_id,
+  // B-37: null is `unknown`; the check of B-40 keeps a cancelled row without a mark.
+  outcome: row.outcome ?? null,
   customer: row.intake_item_id !== null
     ? { contactId: row.customer_contact_id, name: row.customer_name, status: row.intake_status }
     : row.link_contact_id !== null
@@ -77,7 +81,7 @@ const bookingSummary = (row: SummaryRow): BookingSummary => ({
 });
 
 export const bookingColumns = `id, tenant_id, resource_id, starts_at, ends_at, occupied_starts_at, occupied_ends_at,
-            buffer_before_minutes, buffer_after_minutes, status, created_at, source, intake_item_id`;
+            buffer_before_minutes, buffer_after_minutes, status, created_at, source, intake_item_id, outcome`;
 
 /**
  * P-12, BC-6: name each page's customers after the page is chosen, so the joins never change
@@ -96,14 +100,15 @@ const withCustomers = (hits: string) => `SELECT b.*, i.status AS intake_status, 
 /** BC-6, BC-9: one booking with its customer and the revision to send with the next change. */
 export async function getBooking(tx: Transaction, tenantId: string, id: string): Promise<BookingDetail> {
   const row = (await tx.query<SummaryRow>(
-    withCustomers(`SELECT ${bookingColumns}, cancelled_at, cancel_reason FROM bookings WHERE tenant_id=$1 AND id=$2`), [tenantId, id],
+    withCustomers(`SELECT ${bookingColumns}, cancelled_at, cancel_reason, outcome_set_at FROM bookings WHERE tenant_id=$1 AND id=$2`), [tenantId, id],
   )).rows[0];
   if (!row) throw new NotFound();
   // B-29: a cancelled booking says when and why; a confirmed one reads as it always did.
   const cancelled = row.status === "cancelled" && row.cancelled_at
     ? { cancelledAt: row.cancelled_at.toISOString(), cancellationReason: row.cancel_reason ?? null }
     : {};
-  return { ...bookingSummary(row), customerRevision: row.link_revision ?? 0, ...cancelled };
+  const marked = row.outcome && row.outcome_set_at ? { outcomeAt: row.outcome_set_at.toISOString() } : {};
+  return { ...bookingSummary(row), customerRevision: row.link_revision ?? 0, ...cancelled, ...marked };
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   pipelineSummarySchema,
   stageOutputSchema,
   resourceSummarySchema,
+  setBookingOutcomeOutputSchema,
   slotsResponseSchema,
   sourceListSchema,
 } from "@zs/contracts";
@@ -162,7 +163,7 @@ describe("MCP tools over an in-memory transport", () => {
       "archive_stage", "cancel_booking", "create_booking", "create_deal", "create_stage", "discard_reply", "draft_reply", "find_slots", "get_approval", "get_contact",
       "get_followup_agent", "get_followup_run", "get_thread", "home_results", "list_approvals", "list_bookings", "list_contacts",
       "list_deals", "list_followup_runs", "list_pipelines", "list_resources", "list_sources", "list_threads", "move_deal_stage",
-      "observe_source", "rename_stage", "reorder_stages", "request_approval", "restore_stage", "set_deal_details", "stop_followup_agent", "upsert_contact",
+      "observe_source", "rename_stage", "reorder_stages", "request_approval", "restore_stage", "set_booking_outcome", "set_deal_details", "stop_followup_agent", "upsert_contact",
     ]);
     // Only an owner turns the agent on, resumes it or runs it (agents.md G-11).
     expect(names.filter((name) => /resume|settings|run_followup/.test(name))).toEqual([]);
@@ -749,5 +750,45 @@ describe("outreach tools (outreach-sequencer.md OS-22)", () => {
     expect(apiErrorBodySchema.parse(missing.value).error.code).toBe("NotFound");
     const bad = await callTool(client, "cancel_booking", { idempotencyKey: "cx-5", bookingId: booking.id, reason: "x".repeat(501) });
     expect(bad.isError).toBe(true);
+  });
+  it("set_booking_outcome marks a started booking; a replayed key returns the same result and refusals carry their reason", async () => {
+    const insert = async (tenantId: string, startsAt: string, endsAt: string) => {
+      const id = randomUUID();
+      await fixture.service((tx) => tx.query(
+        `INSERT INTO bookings (tenant_id,id,resource_id,starts_at,ends_at,occupied_starts_at,occupied_ends_at,
+           buffer_before_minutes,buffer_after_minutes,status,created_at)
+         VALUES ($1,$2,$3,$4,$5,$4,$5,0,0,'confirmed',$6)`, [tenantId, id, tenant.resourceId, startsAt, endsAt, NOW]));
+      return id;
+    };
+    // Started a month before the fixed clock, so home_results (this week) does not count it.
+    const id = await insert(fixture.a.tenantId, "2026-09-14T09:00:00.000Z", "2026-09-14T10:00:00.000Z");
+    const args = { idempotencyKey: "oc-1", bookingId: id, outcome: "completed" };
+    const first = await callTool(client, "set_booking_outcome", args);
+    expect(setBookingOutcomeOutputSchema.parse(first.value).result).toMatchObject({
+      booking: { id, status: "confirmed" }, outcome: "completed", outcomeAt: NOW, changed: true,
+    });
+    expect((await callTool(client, "set_booking_outcome", args)).value).toEqual(first.value);
+    const replaced = await callTool(client, "set_booking_outcome", { idempotencyKey: "oc-2", bookingId: id, outcome: "no_show" });
+    expect(setBookingOutcomeOutputSchema.parse(replaced.value).result).toMatchObject({ outcome: "no_show", changed: true });
+    const same = await callTool(client, "set_booking_outcome", { idempotencyKey: "oc-3", bookingId: id, outcome: "no_show" });
+    expect(setBookingOutcomeOutputSchema.parse(same.value).result).toMatchObject({ changed: false });
+    const listed = bookingPageSchema.parse((await callTool(client, "list_bookings", {
+      from: "2026-09-14T00:00:00.000Z", to: "2026-09-15T00:00:00.000Z",
+    })).value);
+    expect(listed.items.find((item) => item.id === id)).toMatchObject({ outcome: "no_show" });
+
+    // A booking that starts after the clock is refused with its reason; nothing is written.
+    const future = await insert(fixture.a.tenantId, "2026-12-07T09:00:00.000Z", "2026-12-07T10:00:00.000Z");
+    const early = await callTool(client, "set_booking_outcome", { idempotencyKey: "oc-4", bookingId: future, outcome: "completed" });
+    expect(early.isError).toBe(true);
+    expect(apiErrorBodySchema.parse(early.value).error).toMatchObject({ code: "Conflict", details: { reason: "booking_not_started" } });
+    await fixture.service((tx) => tx.query("DELETE FROM bookings WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, future]));
+
+    // A foreign or unknown ID is not found; a bad body is refused.
+    const foreign = await callTool(other, "set_booking_outcome", { idempotencyKey: "oc-5", bookingId: id, outcome: "completed" });
+    expect(apiErrorBodySchema.parse(foreign.value).error.code).toBe("NotFound");
+    const missing = await callTool(client, "set_booking_outcome", { idempotencyKey: "oc-6", bookingId: randomUUID(), outcome: "completed" });
+    expect(apiErrorBodySchema.parse(missing.value).error.code).toBe("NotFound");
+    expect((await callTool(client, "set_booking_outcome", { idempotencyKey: "oc-7", bookingId: id, outcome: "unknown" })).isError).toBe(true);
   });
 });

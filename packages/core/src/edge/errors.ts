@@ -89,6 +89,8 @@ const CONFLICT_REASONS = new Set([
   // booking.md B-31 (booking_over; the dashboard already words it) and booking-self-service.md BS-1, BS-6, BS-8: why the
   // customer's link refuses a change.
   "booking_over", "link_expired", "too_late", "same_time", "not_changeable",
+  // booking.md B-39: why an outcome mark is refused (the dashboard words both).
+  "booking_not_started", "booking_cancelled",
   // crm.md C-27..C-31: why a stage edit, or a deal into an archived stage, is refused.
   "name_in_use", "stage_limit", "last_stage", "stage_archived", "stage_set_changed", "stage_has_deals",
   // industry-templates.md IT-4: a tenant applies one template.

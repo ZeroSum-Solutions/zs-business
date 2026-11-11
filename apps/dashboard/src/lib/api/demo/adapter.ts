@@ -8,6 +8,7 @@
 import type { z } from "zod";
 import {
   cancelBookingRequestSchema,
+  setBookingOutcomeRequestSchema,
   createBookingRequestSchema,
   createDealRequestSchema,
   linkBookingContactInputSchema,
@@ -28,6 +29,7 @@ import {
   type BookingRecord,
   type CancelBookingResult,
   type CancelNotice,
+  type SetBookingOutcomeResult,
   type ContactRecord,
   type DealRecord,
   type DealSummary,
@@ -182,6 +184,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   const bookings = new Map<string, StoredBooking>(seed.bookings.map((item) => [item.id, item]));
   /** B-29: when and why a booking was cancelled; a cancelled booking keeps its row but frees its time. */
   const cancellations = new Map<string, { cancelledAt: string; reason: string | null }>();
+  /** B-40: the owner's marks. A booking not in the map is unknown. */
+  const outcomes = new Map<string, { outcome: "completed" | "no_show"; at: string }>();
   const intakeItems = new Map(seed.intakeItems.map((item) => [item.id, item]));
   /** booking-customer.md BC-3: a booking has a link row from its first change on; `contactId` null once cleared. */
   const links = new Map<string, { contactId: string | null; revision: number }>();
@@ -341,6 +345,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     const linked = link?.contactId ? contacts.get(link.contactId) : undefined;
     return {
       ...booking,
+      outcome: outcomes.get(booking.id)?.outcome ?? null,
       ...(link ? { contactName: null } : {}),
       customer: item
         ? { contactId: item.contactId, name: contact?.displayName ?? item.submitted.name, status: item.status }
@@ -555,6 +560,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
       return clone({
         ...toView(bookingOrThrow(id)), customerRevision: links.get(id)?.revision ?? 0,
         ...(cancelled ? { cancelledAt: cancelled.cancelledAt, cancellationReason: cancelled.reason } : {}),
+        ...(outcomes.has(id) ? { outcomeAt: outcomes.get(id)!.at } : {}),
       });
     },
 
@@ -600,6 +606,8 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         // B-30: a booking that has ended cannot be cancelled.
         if (Date.parse(booking.endsAt) <= clock.now().getTime()) throw demoError("Conflict", { reason: "booking_over" });
         booking.status = "cancelled";
+        // B-41: a cancelled booking has no outcome.
+        outcomes.delete(bookingId);
         const record = { cancelledAt: nowIso(), reason: canonical.reason };
         cancellations.set(bookingId, record);
         // B-33: the notice goes to the linked customer, or the website visitor, when they have a usable email
@@ -609,6 +617,26 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         const usable = contact?.email && !/[@.]invalid$/i.test(contact.email);
         const notice: CancelNotice = !canonical.notifyCustomer ? "off" : !customer?.contactId ? "no_customer" : usable ? "queued" : "no_email";
         return { booking: toRecord(booking), cancelledAt: record.cancelledAt, reason: record.reason, customerNotice: notice };
+      });
+    },
+
+    async setBookingOutcome(input, options) {
+      // Parse first, so the replay fingerprint is the canonical request the live edge binds (B-38).
+      const { bookingId: rawId, ...rest } = input;
+      const request = parse(setBookingOutcomeRequestSchema, rest);
+      const bookingId = parse(uuidSchema, rawId);
+      return idempotent("booking.outcome.set", { bookingId, outcome: request.outcome }, options, (): SetBookingOutcomeResult => {
+        const booking = bookingOrThrow(bookingId);
+        // B-39: a cancelled booking has no outcome.
+        if (booking.status === "cancelled") throw demoError("Conflict", { reason: "booking_cancelled" });
+        // B-39: only once the booking has started, by the clock.
+        if (Date.parse(booking.startsAt) > clock.now().getTime()) throw demoError("Conflict", { reason: "booking_not_started" });
+        const current = outcomes.get(bookingId);
+        // B-39: the same mark again changes nothing.
+        if (current?.outcome === request.outcome) return { booking: toRecord(booking), outcome: current.outcome, outcomeAt: current.at, changed: false };
+        const mark = { outcome: request.outcome, at: nowIso() };
+        outcomes.set(bookingId, mark);
+        return { booking: toRecord(booking), outcome: mark.outcome, outcomeAt: mark.at, changed: true };
       });
     },
 

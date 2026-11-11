@@ -13,7 +13,7 @@ import { PUBLIC_REQUEST_ACTION } from "../src/intake/public-request.js";
 import { templateHandlers } from "../src/templates/handlers.js";
 import { templatedKindHandlers } from "../src/templates/send.js";
 import {
-  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingSelfServiceHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
+  AGENT_ACTIONS, agentHandlers, browserHandlers, createFakeImageWorkflowPort, createImageWorker, creditWallet, enrichmentHandlers, outreachHandlers, approvalHandlers, bookingCancelHandlers, bookingContactHandlers, bookingHandlers, bookingOutcomeHandlers, bookingSelfServiceHandlers, businessHandlers, calendarHandlers, connectionHandlers, createDispatcher, createMemorySiteStore,
   crmHandlers, dealDetailsHandlers, stageHandlers, documentIntakeHandlers, setupHandlers, generateSealKeyPair, imageHandlers, inboxHandlers, intakeHandlers, memberHandlers, parseSealPublicKey,
   parseImageConfig, pendingGrantId, plainSiteCompiler, sealRefreshToken, signPendingGrant, siteHandlers, sourceHandlers, stripeConfigSchema, topUpHandlers, planHandlers, type DispatchContext,
   type GoogleClient, type StripeClient,
@@ -33,6 +33,8 @@ const IMAGE_WORKER_ACTIONS = ["media.variant.stage", "media.variant.fail"];
 const EXPECTED_ACTIONS: Record<string, Permission> = {
   "booking.create": "calendar",
   "booking.cancel": "calendar",
+  // booking.md B-38: marking an outcome needs the calendar permission, like cancelling.
+  "booking.outcome.set": "calendar",
   "media.asset.upload": "publish",
   "media.variant.generate": "publish",
   "media.variant.approve": "publish",
@@ -262,7 +264,7 @@ async function ownerStage(): Promise<string> {
 }
 let customerSlot = 0;
 let customerResource: string | undefined;
-async function ownerBooking(): Promise<string> {
+async function openEveryDayResource(): Promise<string> {
   // A resource open every day, so these steps never use the Monday hours the other operations count on.
   if (!customerResource) {
     customerResource = await freshResource();
@@ -271,6 +273,24 @@ async function ownerBooking(): Promise<string> {
       [tenant.tenantId, customerResource, JSON.stringify([1, 2, 3, 4, 5, 6, 7].map((weekday) => ({ weekday, windows: [{ startMinute: 540, endMinute: 1020 }] })))],
     ));
   }
+  return customerResource;
+}
+/** A confirmed booking whose start is before this suite's clock (booking.md B-39), inserted as the service role. */
+let startedSlot = 0;
+async function startedBooking(): Promise<string> {
+  const resourceId = await openEveryDayResource();
+  const id = randomUUID();
+  const n = startedSlot++;
+  const startsAt = new Date(Date.parse("2026-09-01T09:00:00.000Z") + n * 3600_000);
+  const endsAt = new Date(startsAt.getTime() + 3600_000);
+  await fixture.service((tx) => tx.query(
+    `INSERT INTO bookings (tenant_id,id,resource_id,starts_at,ends_at,occupied_starts_at,occupied_ends_at,
+       buffer_before_minutes,buffer_after_minutes,status,created_at)
+     VALUES ($1,$2,$3,$4,$5,$4,$5,0,0,'confirmed',$4)`, [tenant.tenantId, id, resourceId, startsAt, endsAt]));
+  return id;
+}
+async function ownerBooking(): Promise<string> {
+  const customerResource = await openEveryDayResource();
   const n = customerSlot++;
   const startsAt = `2026-10-${20 + Math.floor(n / 8)}T${String(9 + (n % 8)).padStart(2, "0")}:00:00.000Z`;
   return (await sessionFor(tenant.ownerId).createBooking({ resourceId: customerResource, startsAt }, randomUUID())).result.id;
@@ -294,6 +314,8 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     getBooking: { permission: "calendar", run: async () => session.getBooking(await ownerBooking()) },
     // booking.md B-29: cancelling needs the calendar permission, like booking.
     cancelBooking: { permission: "calendar", run: async () => session.cancelBooking(await ownerBooking(), {}, randomUUID()) },
+    // booking.md B-38: marking needs `calendar`; the booking started before the suite's clock.
+    setBookingOutcome: { permission: "calendar", run: async () => session.setBookingOutcome(await startedBooking(), { outcome: "completed" }, randomUUID()) },
     upsertContact: { permission: "customers", run: () => session.upsertContact({ displayName: "Bo", email: `${randomUUID()}@example.com` }, randomUUID()) },
     createDeal: { permission: "customers", run: async () => {
       const contact = await sessionFor(tenant.ownerId).upsertContact({ email: `${randomUUID()}@example.com` }, randomUUID());
@@ -515,7 +537,7 @@ describe("permission map", () => {
     // The public request is the one action no member session may run (public-intake.md P-1).
     // M3b: three actions take their permission from the payload (approvals.md A-8, A-9, F-2).
     const registered = Object.keys({
-      ...bookingHandlers, ...bookingCancelHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...dealDetailsHandlers, ...stageHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
+      ...bookingHandlers, ...bookingCancelHandlers, ...bookingOutcomeHandlers, ...bookingContactHandlers, ...bookingSelfServiceHandlers, ...crmHandlers, ...dealDetailsHandlers, ...stageHandlers, ...inboxHandlers, ...intakeHandlers, ...memberHandlers,
       ...approvalHandlers, ...sourceHandlers, ...topUpHandlers, ...planHandlers, ...calendarHandlers, ...connectionHandlers, ...siteHandlers, ...agentHandlers, ...templateHandlers, ...templatedKindHandlers, ...browserHandlers, ...businessHandlers, ...imageHandlers, ...enrichmentHandlers, ...outreachHandlers, ...documentIntakeHandlers,
       ...setupHandlers,
     })

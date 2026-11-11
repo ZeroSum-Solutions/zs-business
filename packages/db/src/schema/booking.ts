@@ -83,6 +83,11 @@ export const bookings = pgTable(
     cancelReason: text("cancel_reason"),
     /** booking-self-service.md BS-11: the booking a customer moved this one from. */
     rescheduledFrom: uuid("rescheduled_from"),
+    // Added after rescheduled_from by migration 20261110500000, so the column order matches the database.
+    /** booking.md B-37, B-40: the owner's mark. Null is `unknown`; a cancelled booking has none. */
+    outcome: text("outcome").$type<"completed" | "no_show">(),
+    outcomeSetAt: instant("outcome_set_at"),
+    outcomeSetBy: uuid("outcome_set_by"),
   },
   (table) => [
     primaryKey({ columns: [table.tenantId, table.id] }),
@@ -110,6 +115,10 @@ export const bookings = pgTable(
     check("bookings_cancelled_fields", sql`(${table.status} = 'cancelled') = (${table.cancelledAt} IS NOT NULL)
       AND (${table.cancelledBy} IS NULL OR ${table.status} = 'cancelled')
       AND (${table.cancelReason} IS NULL OR (${table.status} = 'cancelled' AND char_length(${table.cancelReason}) BETWEEN 1 AND 500))`),
+    check("bookings_outcome", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('completed', 'no_show')`),
+    check("bookings_outcome_fields", sql`(${table.outcome} IS NULL) = (${table.outcomeSetAt} IS NULL)
+      AND (${table.outcomeSetBy} IS NULL OR ${table.outcome} IS NOT NULL)
+      AND (${table.outcome} IS NULL OR ${table.status} = 'confirmed')`),
     index("bookings_tenant_start").on(table.tenantId, table.startsAt, table.id),
     // Also covers the (tenant_id, resource_id) foreign key.
     index("bookings_tenant_resource_start").on(table.tenantId, table.resourceId, table.startsAt, table.id),

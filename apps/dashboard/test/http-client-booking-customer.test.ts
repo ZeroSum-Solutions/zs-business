@@ -31,7 +31,7 @@ const summary = {
   startsAt: "2026-10-19T14:00:00.000Z", endsAt: "2026-10-19T14:30:00.000Z",
   occupiedStartsAt: "2026-10-19T14:00:00.000Z", occupiedEndsAt: "2026-10-19T14:30:00.000Z",
   bufferBeforeMinutes: 0, bufferAfterMinutes: 0, status: "confirmed", createdAt: "2026-10-18T12:00:00.000Z",
-  source: "owner", intakeItemId: null,
+  source: "owner", intakeItemId: null, outcome: null,
 };
 const customer = { contactId: CONTACT, name: "Ana Ruiz", status: "linked" };
 const result = (revision: number, linked: boolean) => ({

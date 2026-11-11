@@ -27,7 +27,7 @@ import {
   type TemplatedAgents,
 } from "../src/index.js";
 import { suggestionRequest } from "../src/templates/suggest.js";
-import { templatedSettings } from "../src/templates/send.js";
+import { loadBookingFact, templatedSettings } from "../src/templates/send.js";
 import { controlsFromRow } from "../src/agents/controls.js";
 
 const HOUR = 3_600_000;
@@ -93,6 +93,8 @@ interface Scenario { bookingId: string; contactId: string; startsAt: Date; endsA
 /** A confirmed booking with a linked customer. `hour` picks the slot so one test may book several. */
 async function booked(opts: {
   hour?: number; email?: string | null; consent?: "granted" | "denied" | null; consentSource?: string; base?: number; contactId?: string;
+  /** The owner's mark (booking.md B-37), set through the action once the booking has started. A review request needs `completed`. */
+  outcome?: "completed" | "no_show";
 } = {}): Promise<Scenario> {
   const base = opts.base ?? START + period * 40 * DAY;
   const startsAt = new Date(base + (opts.hour ?? 10) * HOUR);
@@ -108,7 +110,14 @@ async function booked(opts: {
       `INSERT INTO crm_contact_consent (tenant_id,contact_id,channel,status,source,recorded_at)
        VALUES ($1,$2,'email'::crm_consent_channel,$3,$4,$5)`,
       [tenantId, contactId, opts.consent, opts.consentSource ?? "test", new Date(now)]));
+  if (opts.outcome) await markOutcome(bookingId, startsAt, opts.outcome);
   return { bookingId, contactId, startsAt, endsAt: new Date(startsAt.getTime() + HOUR), base };
+}
+/** Mark a booking through the real action, with the clock one hour after its start; the clock is put back after. */
+async function markOutcome(bookingId: string, startsAt: Date, outcome: "completed" | "no_show") {
+  const saved = now;
+  now = startsAt.getTime() + HOUR;
+  try { await sessionFor(staff).setBookingOutcome(bookingId, { outcome }, randomUUID()); } finally { now = saved; }
 }
 
 async function enable(kind: TemplatedKind, over: { config?: Record<string, unknown>; quiet?: [number, number]; cost?: number } = {}) {
@@ -561,8 +570,8 @@ describe("review requests (G-20)", () => {
   }
 
   it("queues a marketing message only with a granted marketing consent, with the review link", async () => {
-    const consented = await ended({ hour: 10, consent: "granted" });
-    const noConsent = await booked({ hour: 11, base: consented.base });
+    const consented = await ended({ hour: 10, consent: "granted", outcome: "completed" });
+    const noConsent = await booked({ hour: 11, base: consented.base, outcome: "completed" });
     await sessionFor(staff);
     now = consented.endsAt.getTime() + 26 * HOUR;
     const approved = await ready("review_request");
@@ -577,7 +586,7 @@ describe("review requests (G-20)", () => {
   });
 
   it("is delivered with its unsubscribe link and the consent re-checked", async () => {
-    const s = await ended({ consent: "granted" });
+    const s = await ended({ consent: "granted", outcome: "completed" });
     await ready("review_request");
     await runNow("review_request");
     now += 60_000;
@@ -589,21 +598,21 @@ describe("review requests (G-20)", () => {
   });
 
   it("a denied consent is a skip, and so is a missing one", async () => {
-    const denied = await ended({ hour: 10, consent: "denied" });
+    const denied = await ended({ hour: 10, consent: "denied", outcome: "completed" });
     await ready("review_request");
     const run = await runNow("review_request");
     expect(run.decisions.find((d) => d.subjectId === denied.bookingId)).toMatchObject({ outcome: "skipped", reason: "consent_denied" });
   });
 
   it("a grant recorded by a phone call (twilio-voice:) never counts, at queue time or at delivery", async () => {
-    const voice = await ended({ hour: 10, consent: "granted", consentSource: "twilio-voice:CA123" });
+    const voice = await ended({ hour: 10, consent: "granted", consentSource: "twilio-voice:CA123", outcome: "completed" });
     await ready("review_request");
     const run = await runNow("review_request");
     expect(run.decisions.find((d) => d.subjectId === voice.bookingId)).toMatchObject({ outcome: "skipped", reason: "consent_missing" });
     expect(await sendEvents(voice.bookingId)).toHaveLength(0);
 
     // A real grant is queued; then the record is replaced by a voice grant before delivery.
-    const web = await booked({ hour: 11, base: voice.base, consent: "granted", consentSource: "booking_page" });
+    const web = await booked({ hour: 11, base: voice.base, consent: "granted", consentSource: "booking_page", outcome: "completed" });
     now = web.endsAt.getTime() + 26 * HOUR;
     const second = await runNow("review_request");
     expect(second.decisions.find((d) => d.subjectId === web.bookingId)?.outcome).toBe("queued");
@@ -615,9 +624,9 @@ describe("review requests (G-20)", () => {
   });
 
   it("asks a customer at most once in the contact window (contact_cap) and once per booking", async () => {
-    const first = await booked({ hour: 10, consent: "granted" });
+    const first = await booked({ hour: 10, consent: "granted", outcome: "completed" });
     // The same customer has a later booking too.
-    const second = await booked({ hour: 12, base: first.base, contactId: first.contactId });
+    const second = await booked({ hour: 12, base: first.base, contactId: first.contactId, outcome: "completed" });
     now = second.endsAt.getTime() + 26 * HOUR;
     await ready("review_request");
     const run = await runNow("review_request");
@@ -630,11 +639,110 @@ describe("review requests (G-20)", () => {
   });
 
   it("does not ask too early, and not for a booking past the lookback", async () => {
-    const recent = await booked({ hour: 10, consent: "granted" });
+    const recent = await booked({ hour: 10, consent: "granted", outcome: "completed" });
     now = recent.endsAt.getTime() + 2 * HOUR;
     await ready("review_request");
     expect((await runNow("review_request")).decisions).toHaveLength(0);
     now = recent.endsAt.getTime() + 9 * DAY;
+    expect((await runNow("review_request")).decisions).toHaveLength(0);
+  });
+});
+
+describe("review requests need outcome = completed (booking.md B-43, agents.md G-20)", () => {
+  /** Four customers with the same consent and the same ended slot, one per outcome the gate must tell apart. */
+  async function fourOutcomes() {
+    const completed = await booked({ hour: 9, consent: "granted", outcome: "completed" });
+    const noShow = await booked({ hour: 10, base: completed.base, consent: "granted", outcome: "no_show" });
+    const unknown = await booked({ hour: 11, base: completed.base, consent: "granted" });
+    // Marked, then cancelled while it was running: the cancel clears the mark (B-41).
+    const cancelled = await booked({ hour: 12, base: completed.base, consent: "granted", outcome: "completed" });
+    const during = cancelled.startsAt.getTime() + HOUR / 2;
+    const saved = now;
+    now = during;
+    try { await sessionFor(staff).cancelBooking(cancelled.bookingId, {}, randomUUID()); } finally { now = saved; }
+    now = cancelled.endsAt.getTime() + 26 * HOUR;
+    return { completed, noShow, unknown, cancelled };
+  }
+  const decisionRows = (bookingId: string) => rows("SELECT 1 FROM agent_decisions WHERE tenant_id=$1 AND subject_id=$2", [tenantId, bookingId]);
+
+  it("queues and delivers for completed only: no_show, cancelled and unknown get no decision and no message", async () => {
+    const s = await fourOutcomes();
+    await ready("review_request");
+    const run = await runNow("review_request");
+    expect(run.decisions.map((d) => d.subjectId)).toEqual([s.completed.bookingId]);
+    expect(run.decisions[0]).toMatchObject({ outcome: "queued" });
+    for (const other of [s.noShow, s.unknown, s.cancelled]) {
+      expect(await decisionRows(other.bookingId)).toHaveLength(0);
+      expect(await sendEvents(other.bookingId)).toHaveLength(0);
+    }
+    expect(await sendEvents(s.completed.bookingId)).toHaveLength(1);
+    now += 60_000;
+    await worker().runOnce();
+    expect(await deliveryOf(s.completed.bookingId)).toMatchObject({ status: "sent", final_reason: null });
+    for (const other of [s.noShow, s.unknown, s.cancelled]) expect(await deliveryOf(other.bookingId)).toBeUndefined();
+    // A second run decides nothing new for them either.
+    expect((await runNow("review_request")).decisions.filter((d) => d.outcome === "queued")).toHaveLength(0);
+  });
+
+  it("is a gate on the booking, not on the run: the shared check the queue and skip actions use refuses all but completed", async () => {
+    const s = await fourOutcomes();
+    const fact = (bookingId: string, kind: TemplatedKind) => service((tx) => loadBookingFact(tx, tenantId, bookingId, kind));
+    expect(await fact(s.completed.bookingId, "review_request")).not.toBeNull();
+    for (const other of [s.noShow, s.unknown, s.cancelled]) expect(await fact(other.bookingId, "review_request"), other.bookingId).toBeNull();
+    // A reminder is unchanged: it goes out before the visit, so it needs a confirmed booking only.
+    for (const open of [s.completed, s.noShow, s.unknown]) expect(await fact(open.bookingId, "appointment_reminder"), open.bookingId).not.toBeNull();
+    expect(await fact(s.cancelled.bookingId, "appointment_reminder")).toBeNull();
+  });
+
+  it("does not remind differently: an unmarked booking still gets its appointment reminder", async () => {
+    const upcoming = await booked({ hour: 10, consent: "granted" });
+    now = upcoming.startsAt.getTime() - 2 * HOUR;
+    await ready("appointment_reminder");
+    const run = await runNow("appointment_reminder");
+    expect(run.decisions.find((d) => d.subjectId === upcoming.bookingId)?.outcome).toBe("queued");
+  });
+
+  it("a mark changed to no_show before the run stops the request; one changed after the queue is not recalled", async () => {
+    const early = await booked({ hour: 9, consent: "granted", outcome: "completed" });
+    const late = await booked({ hour: 10, base: early.base, consent: "granted", outcome: "completed" });
+    now = late.endsAt.getTime() + 26 * HOUR;
+    await ready("review_request");
+    // The owner corrects the first one before the agent runs.
+    const wrongButton = early.startsAt.getTime() + 2 * HOUR;
+    const saved = now;
+    now = wrongButton;
+    await sessionFor(staff).setBookingOutcome(early.bookingId, { outcome: "no_show" }, randomUUID());
+    now = saved;
+    const run = await runNow("review_request");
+    expect(run.decisions.map((d) => [d.subjectId, d.outcome])).toEqual([[late.bookingId, "queued"]]);
+    expect(await decisionRows(early.bookingId)).toHaveLength(0);
+    // Changing the queued booking to no_show now recalls nothing (B-46), and delivery does not read the mark.
+    await markOutcome(late.bookingId, late.startsAt, "no_show");
+    now += 60_000;
+    await worker().runOnce();
+    expect(await deliveryOf(late.bookingId)).toMatchObject({ status: "sent" });
+    // But it blocks any new request: no second decision appears.
+    const again = await runNow("review_request");
+    expect(again.decisions.filter((d) => d.subjectId === late.bookingId)).toHaveLength(0);
+  });
+
+  it("a marked old booking inside the lookback is a candidate again; one outside it is not", async () => {
+    const old = await booked({ hour: 9, consent: "granted" });
+    now = old.endsAt.getTime() + 3 * DAY;
+    await ready("review_request");
+    expect((await runNow("review_request")).decisions).toHaveLength(0);
+    await markOutcome(old.bookingId, old.startsAt, "completed");
+    const run = await runNow("review_request");
+    expect(run.decisions.find((d) => d.subjectId === old.bookingId)?.outcome).toBe("queued");
+  });
+
+  it("an unmarked booking is no candidate, and another tenant running the same kind finds nothing of it", async () => {
+    const unmarked = await booked({ hour: 9, consent: "granted" });
+    now = unmarked.endsAt.getTime() + 26 * HOUR;
+    await ready("review_request");
+    const runB = await createTemplatedAgents(deps(), { maxCandidatesPerRun: 20, bookingLink: async () => BOOKING_LINK })
+      .runForMember({ tenantId: tenantB, actorId: ownerB }, "review_request", {}, randomUUID());
+    expect(runB.decisions).toEqual([]);
     expect((await runNow("review_request")).decisions).toHaveLength(0);
   });
 });

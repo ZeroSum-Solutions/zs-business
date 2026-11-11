@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
-import { bookingInstantSchema, bookingRecordSchema, bookingTimeZoneSchema } from "./booking.js";
+import { bookingInstantSchema, bookingOutcomeSchema, bookingRecordSchema, bookingTimeZoneSchema } from "./booking.js";
 import { contactEmailInputSchema, contactPhoneSchema, crmInstantSchema } from "./crm.js";
 import { pageQuerySchema, pageSchema } from "./page.js";
 import { isPostgresText } from "./json.js";
@@ -189,6 +189,8 @@ export const bookingSummarySchema = z.strictObject({
   ...bookingRecordSchema.shape,
   source: z.enum(["owner", "website"]),
   intakeItemId: idSchema.nullable(),
+  /** booking.md B-37: the owner's mark; null is `unknown` and also a cancelled booking (B-39). */
+  outcome: bookingOutcomeSchema.nullable(),
   customer: z.strictObject({
     contactId: idSchema.nullable(),
     name: z.string().nullable(),

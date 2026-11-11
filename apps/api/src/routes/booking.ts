@@ -18,4 +18,7 @@ export const bookingRoutes = new Hono<AppEnv>()
     c.json(await c.var.session.unlinkBookingContact(c.req.param("id"), await jsonBody(c), idempotencyKey(c))))
   // booking.md B-29..B-35: cancel one booking and, unless told not to, email the customer.
   .post("/bookings/:id/cancel", async (c) =>
-    c.json(await c.var.session.cancelBooking(c.req.param("id"), await jsonBody(c), idempotencyKey(c))));
+    c.json(await c.var.session.cancelBooking(c.req.param("id"), await jsonBody(c), idempotencyKey(c))))
+  // booking.md B-37..B-40: mark a booking that has started as completed or no_show.
+  .post("/bookings/:id/outcome", async (c) =>
+    c.json(await c.var.session.setBookingOutcome(c.req.param("id"), await jsonBody(c), idempotencyKey(c))));

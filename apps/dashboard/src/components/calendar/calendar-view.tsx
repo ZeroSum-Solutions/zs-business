@@ -15,6 +15,7 @@ import { addDays, formatDateKey, formatTime, startOfZonedDay, weekdayOf, zonedDa
 import { useCan } from "@/lib/session";
 import { cn } from "@/lib/utils";
 import { BookingCancelDialog } from "./booking-cancel-dialog";
+import { BookingOutcomeControl, canMarkOutcome, OutcomeBadge, outcomeLabel } from "./booking-outcome";
 import { BookingCustomerDialog } from "./booking-customer-dialog";
 import { BookingDialog } from "./booking-dialog";
 import { BookingPageCard } from "./booking-page-card";
@@ -41,7 +42,7 @@ function WebsiteBadge({ booking }: { booking: BookingView }) {
   );
 }
 
-function BookingRow({ booking, resource, zone, onCustomer, onCancel }: { booking: BookingView; resource: ResourceSummary; zone: string; onCustomer?: ((id: string) => void) | undefined; onCancel?: ((id: string) => void) | undefined }) {
+function BookingRow({ booking, resource, zone, onCustomer, onCancel, canMark = false }: { booking: BookingView; resource: ResourceSummary; zone: string; onCustomer?: ((id: string) => void) | undefined; onCancel?: ((id: string) => void) | undefined; canMark?: boolean }) {
   const customer = bookingCustomerName(booking);
   const time = formatTime(booking.startsAt, zone);
   return (
@@ -56,8 +57,11 @@ function BookingRow({ booking, resource, zone, onCustomer, onCancel }: { booking
         <div className="flex flex-wrap items-center gap-2">
           <p className="truncate text-body font-semibold text-fg">{bookingTitle(booking, resource).text}</p>
           <WebsiteBadge booking={booking} />
+          <OutcomeBadge booking={booking} />
         </div>
         <p className="truncate text-sm text-muted">{customer ?? "No customer linked"}</p>
+        {/* B-39: a started appointment can be marked Completed or No-show; staff and owners both hold `calendar`. */}
+        {canMark && canMarkOutcome(booking, Date.now()) ? <BookingOutcomeControl booking={booking} zone={zone} /> : null}
         {/* A website booking takes its customer from the request; only owner-made ones can be linked (BC-2). */}
         <div className="flex flex-wrap items-center gap-x-4">
           {fromWebsite(booking) || !onCustomer ? null : (
@@ -101,6 +105,8 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
   const [customerFor, setCustomerFor] = useState<{ id: string; open: boolean } | null>(null);
   // Cancelling needs `calendar` only (booking.md B-29).
   const canCancel = useCan("calendar");
+  // Marking an outcome needs `calendar` only (booking.md B-38).
+  const canMark = canCancel;
   const [cancelFor, setCancelFor] = useState<{ id: string; open: boolean } | null>(null);
   // Looked up by ID on every render, so the sheet shows the booking as the list has it now.
   const customerBooking = bookings.data?.items.find((item) => item.id === customerFor?.id) ?? null;
@@ -122,7 +128,7 @@ function DayView({ resource, dateKey, today, onPickSlot }: { resource: ResourceS
         {bookings.data.items.length === 0 ? (
           <EmptyState title={past ? "Nothing was booked" : "Nothing booked yet"}>{!past && open.length > 0 ? "Pick an open time to book one." : null}</EmptyState>
         ) : (
-          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} resource={resource} zone={zone} {...(canLink ? { onCustomer: (id: string) => setCustomerFor({ id, open: true }) } : {})} {...(canCancel ? { onCancel: (id: string) => setCancelFor({ id, open: true }) } : {})} />)}</ul>
+          <ul className="grid gap-1.5 lg:gap-2">{bookings.data.items.map((booking) => <BookingRow key={booking.id} booking={booking} resource={resource} zone={zone} canMark={canMark} {...(canLink ? { onCustomer: (id: string) => setCustomerFor({ id, open: true }) } : {})} {...(canCancel ? { onCancel: (id: string) => setCancelFor({ id, open: true }) } : {})} />)}</ul>
         )}
       </section>
       <section aria-labelledby="day-open" className="tray">
@@ -200,6 +206,7 @@ export function WeekView({ resource, weekStart, today, onOpenDay }: {
                   <li key={booking.id} className="rounded-[10px] bg-accent-tint px-2 py-1.5 text-xs" data-source={booking.source ?? "owner"}>
                     <span className="tabular font-bold text-accent-ink">{formatTime(booking.startsAt, zone)}</span>{" "}
                     <span className="text-fg-2">{bookingCustomerName(booking) ?? bookingTitle(booking, resource).text}</span>
+                    {booking.outcome ? <span className="ml-1 font-bold text-meta" data-testid="week-outcome">· {outcomeLabel(booking.outcome)}</span> : null}
                     {fromWebsite(booking) ? <span className="ml-1 inline-flex align-middle text-accent" title="Booked on your website"><Globe size={14} aria-label="Website" /></span> : null}
                   </li>
                 ))}

@@ -74,7 +74,7 @@ describe("the result and the reads (BC-6, BC-9)", () => {
     id: bookingId, tenantId, resourceId: contactId, startsAt: "2026-11-02T10:00:00.000Z", endsAt: "2026-11-02T10:30:00.000Z",
     occupiedStartsAt: "2026-11-02T10:00:00.000Z", occupiedEndsAt: "2026-11-02T10:30:00.000Z",
     bufferBeforeMinutes: 0, bufferAfterMinutes: 0, status: "confirmed", createdAt: "2026-10-23T09:00:00.000Z",
-    source: "owner", intakeItemId: null, customer: { contactId, name: "Ana Ruiz", status: "linked" },
+    source: "owner", intakeItemId: null, customer: { contactId, name: "Ana Ruiz", status: "linked" }, outcome: null,
   };
   it("keeps the list shape and adds only customerRevision to the detail", () => {
     expect(bookingSummarySchema.safeParse(summary).success).toBe(true);

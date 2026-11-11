@@ -76,5 +76,7 @@ export const bookingDetailSchema = bookingSummarySchema.extend({
   /** booking.md B-29: present only on a cancelled booking, so a confirmed booking reads as it always did. */
   cancelledAt: bookingInstantSchema.optional(),
   cancellationReason: z.string().nullable().optional(),
+  /** booking.md B-40: when the mark was set; present only on a marked booking. */
+  outcomeAt: bookingInstantSchema.optional(),
 });
 export type BookingDetail = z.infer<typeof bookingDetailSchema>;
