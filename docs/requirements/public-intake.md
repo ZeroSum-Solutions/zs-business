@@ -20,6 +20,11 @@ both the business and the visitor's device are in a US or Canada zone.
 Revision 10 (2026-11-10, embed theming): P-16 lets the embedding page set the booker's colours,
 radius and font through `--zs-booking-*` custom properties, validated inside the booking page, and
 makes the frame grow and shrink with its content so it never scrolls inside itself.
+Revision 11 (2026-11-11, embed theming fix round): P-16 accepts a colour only when the browser
+reads it as an opaque colour and every text colour still reaches 4.5:1 (it derives readable ink
+or drops the token), rejects font keywords, honours `header=0` only inside a frame and keeps the
+business name visible, keeps the 480 px frame floor unless the host opts into a smaller one, and
+has `embed.js` mount again when the host replaces the widget's children.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -260,36 +265,76 @@ looks exactly as before revision 10.
   reads their computed values and passes each one as a query parameter of the same name without
   the prefix (`bg`, `surface`, … `font`) on the frame URL; a plain iframe passes the same
   parameters itself. `embed.js` drops a value longer than 200 characters and nothing else; the
-  booking page is the only gate. `embed.js` also mounts elements added after it loaded
-  (single-page sites).
-- The booking page accepts a value only when it matches a fixed grammar: a colour is a hex colour
-  (3, 4, 6 or 8 digits), `rgb()`/`rgba()`/`hsl()`/`hsla()` with numbers only, or one colour keyword
-  (letters only); a radius is `0` or a number in `px` (at most 48), `rem` or `em` (at most 3); a font
-  is a comma list of family names, each letters, digits, spaces, `_` and `-` (an optional leading
-  `-`), quoted or not. Anything else (`url(`, `var(`, `;`, braces, extra quotes, longer than 200
-  characters) is dropped and that token keeps its default; the other tokens still apply. An
-  accepted value is set only as a custom property through the CSSOM
+  booking page is the only gate.
+- Mounting (single-page sites): `embed.js` mounts elements added after it loaded and elements
+  that gain a `data-zs-booking` attribute later. When the host removes or replaces the frame
+  (for example `element.replaceChildren()`), it mounts again in the same element with the key it
+  first mounted there; a key written into an already mounted element is not followed. It forgets
+  frames that left the page. Any valid key mounts, another tenant's included: the key is public
+  by design and the host page chooses it, and a script that can write markup into the host page
+  could add an iframe itself.
+- Grammar: the booking page first checks each value against a fixed grammar: a colour is a hex
+  colour (3, 4, 6 or 8 digits), `rgb()`/`rgba()`/`hsl()`/`hsla()` with numbers only, or one colour
+  keyword (letters only); a radius is `0` or a number in `px` (at most 48), `rem` or `em` (at most
+  3); a font is a comma list of family names, each letters, digits, spaces, `_` and `-` (an
+  optional leading `-`), quoted or not. Anything else (`url(`, `var(`, `;`, braces, extra quotes,
+  longer than 200 characters) is dropped and that token keeps its default; the other tokens still
+  apply. An accepted value is set only as a custom property through the CSSOM
   (`style.setProperty`), never as markup, so the page CSP keeps `style-src 'self'`.
-- Form fields, checkboxes and the colour scheme follow the theme only when it sets surface, text
-  or accent (a hex background darker than luminance 0.18 sets `color-scheme: dark`); otherwise
-  they stay the browser's own, as before.
-- `data-zs-header="hidden"` on the element (`header=0` on the URL) keeps the page title, business
-  name and description for screen readers only, for hosts whose page already shows a title.
+- Colours: a colour is kept only when the browser itself accepts it (`CSS.supports("color", …)`)
+  and resolves it to an opaque colour (alpha 1, read back from a probe element). CSS-wide
+  keywords (`inherit`, `initial`, `unset`, `revert`, `revert-layer`), `transparent`,
+  `currentcolor` and `none` are dropped, and so are `#ffffff00`, `#0000` and any other alpha
+  below 1.
+- Readable text, for every accepted query: text, muted text, errors and links reach 4.5:1 on the
+  page background, on the surface and on a selected button (8% accent over the surface), and the
+  primary button's text reaches 4.5:1 on the accent. When one of bg and surface is set alone,
+  the other follows it, so a dark page never keeps white buttons with dark text. When no ink
+  can read on both, the surface follows the page; when none reads even then, both keep their
+  defaults. For each text token the page keeps the host's colour if it reads; otherwise it uses
+  the default, then a fixed readable fallback (black or white for text and button text, a light
+  grey for muted text, a light red for errors, the accent or the text colour for links). The
+  focus outline uses the link colour, so it reads too. Typed text in fields uses the text colour
+  on the surface whenever the page themes bg or surface; otherwise fields keep the browser's own
+  colours. A background darker than luminance 0.18 sets `color-scheme: dark`.
+- Fonts: CSS-wide keywords (`inherit`, `initial`, `unset`, `revert`, `revert-layer`), `default`,
+  `none` and the system-font keywords (`caption`, `icon`, `menu`, `message-box`, `small-caption`,
+  `status-bar`) are not family names; a list that holds one unquoted is dropped. A quoted name
+  (`"caption"`) is a family name and is kept. The list must also pass
+  `CSS.supports("font-family", …)`.
+- `data-zs-header="hidden"` on the element (`header=0` on the URL) hides the page title and
+  description visually and keeps them for screen readers, for hosts whose page already shows
+  that title. The business name stays visible, so the visitor still sees who they book with.
+  It applies only when the page runs inside a frame (`embed=1` and a parent window); a page
+  opened on its own always shows its header.
 - Layout: the frame's height follows the booking page's body height on every change, up and
-  down (P-14 `postMessage`, clamped 160 to 4000 px; the 480 px placeholder height lasts only
-  until the first report), so the frame never scrolls inside itself and
-  the host page scrolls. The date list, time list and details form fit 390 px without sideways
-  scrolling. Every control and checkbox row is at least 44 by 44 px. Buttons and fields show a
-  2 px outline in the link colour on keyboard focus. Headings take focus only after the visitor
-  has clicked or typed, so the first paint never moves the host page's focus into the frame.
-- Contrast: with the default tokens every text colour reaches 4.5:1 on the colours it sits on.
-  A host that sets tokens owns the contrast of its own choices; the "Theming the embed" example
-  passes 4.5:1.
-- Tests: the default render sets no property and builds the same frame URL as before; each
-  property is applied; hostile values are dropped (unit tests in
-  `apps/api/test/booker-render.test.ts`); under the real CSP at 390 and 1440 px the theme applies,
-  the frame never scrolls inside itself and shrinks back, targets are 44 px and focus is visible
-  (`apps/dashboard/e2e/booker-theme.spec.ts`).
+  down (P-14 `postMessage`), within 160 to 4000 px. The frame keeps a 480 px minimum height, as
+  embeds had before revision 10, so a short step leaves space below the content rather than
+  moving the host page. A host can opt into a smaller minimum with `data-zs-min-height="N"` on
+  the element (N in px, clamped 160 to 480). Content taller than 4000 px (a very long day of
+  times on a narrow phone) scrolls inside the frame; below that the frame never scrolls inside
+  itself and the host page scrolls. The date list, time list and details form fit 390 px
+  without sideways scrolling.
+- Changes to the default look in revision 10, with no tokens set: every control and checkbox row
+  is at least 44 by 44 px (checkboxes are 20 px), buttons and fields show a 2 px outline in the
+  link colour on keyboard focus, and the font is set as `font-family` only (the size stays
+  16 px).
+- Focus: headings take focus only when the step changes and only after the visitor has acted
+  (a pointer, a key or a click event, which also covers assistive tech and voice control), so
+  the first paint never moves the host page's focus into the frame. A re-render of the same
+  step (a slot refresh) leaves focus on the control that had it, or moves it to the heading
+  when that control is gone.
+- Tests: unit tests in `apps/api/test/booker-render.test.ts` cover the default render (no
+  property, same frame URL), each property, hostile values, the rejected colours (`transparent`,
+  `inherit`, `currentcolor`, `none`, `notacolour`, `rgb(1)`, `rgb(1,2,3,)`, `#ffffff00`, `#0000`)
+  on every token, partial and all-white themes, rejected fonts, `header=0` only in a frame, and
+  `embed.js` remounting, re-keying, the frame floor and message checks. Under the real CSP at
+  390 and 1440 px, `apps/dashboard/e2e/booker-theme.spec.ts` walks every step and measures the
+  computed colours: every visible text and typed field text is opaque and reaches 4.5:1 on the
+  background behind it, and the focus ring reaches 3:1. It also covers focus on first paint, a
+  slot refresh and a click-only step change, remounting after `replaceChildren()`, the 480 px
+  floor and its opt-in, the theme applying, no inner scrolling, shrinking back, and 44 px
+  targets.
 
 ## Theming the embed
 
@@ -327,12 +372,20 @@ A dark site:
     --zs-booking-font: Geist, -apple-system, "Segoe UI", sans-serif;
   }
 </style>
+<h2>Book a call</h2>
 <div class="booking" data-zs-booking="KEY" data-zs-header="hidden"></div>
 <script src="https://<api>/embed.js" async></script>
 ```
 
-Do not give the container a fixed height or `overflow`; the widget sets the frame's height.
+`data-zs-header="hidden"` is for a page that already shows the booking's title, as the
+`<h2>` does here. Without one, leave it out.
+
+Do not give the container a fixed height or `overflow`; the widget sets the frame's height. Add
+`data-zs-min-height="320"` (160 to 480) to let the frame be shorter than 480 px on short steps.
+A colour that would leave any text below 4.5:1 is replaced or dropped, as P-16 describes, so
+check the result in a browser.
 The frame can not use the host page's web fonts: name a font the visitor's device has, or end
 the list with a system fallback as above. A plain iframe takes the same values as query
-parameters: `https://<api>/book/KEY?bg=%23111113&text=%23ffffff&accent=%235b4cff`; it does not
-resize itself, so prefer `embed.js`.
+parameters:
+`https://<api>/book/KEY?bg=%23111113&surface=%23000000&text=%23ffffff&muted=%238a8a93&accent=%235b4cff&link=%23a99fff`.
+A plain iframe does not resize itself and so scrolls inside; prefer `embed.js`.

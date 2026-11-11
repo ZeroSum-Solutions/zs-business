@@ -21,7 +21,7 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--zs-bg); color: var(--zs-ink); }
-body { font: 16px/1.5 var(--zs-font); }
+body { font-size: 16px; line-height: 1.5; font-family: var(--zs-font); }
 .booker { max-width: 640px; margin: 0 auto; padding: 24px 20px 32px; }
 .booker h1 { font-size: 1.4rem; margin: 0 0 4px; }
 .booker h2 { font-size: 1.1rem; margin: 20px 0 12px; }
@@ -35,13 +35,13 @@ body { font: 16px/1.5 var(--zs-font); }
   border: 1px solid var(--zs-line); background: var(--zs-surface); color: var(--zs-ink);
   padding: 10px 12px; text-align: left; min-height: 44px; position: relative;
 }
-.booker-choice:hover { border-color: var(--zs-accent); box-shadow: 0 0 0 2px rgb(36 87 122 / 25%); box-shadow: 0 0 0 2px color-mix(in srgb, var(--zs-accent) 25%, transparent); }
-.booker-choice[aria-pressed="true"] { border-color: var(--zs-accent); background: rgb(36 87 122 / 8%); background: color-mix(in srgb, var(--zs-accent) 8%, var(--zs-surface)); }
+.booker-choice:hover { border-color: var(--zs-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--zs-accent) 25%, transparent); }
+.booker-choice[aria-pressed="true"] { border-color: var(--zs-accent); background: color-mix(in srgb, var(--zs-accent) 8%, var(--zs-surface)); }
 .booker-choice small { display: block; color: var(--zs-muted); }
 [data-header="hidden"] .booker { padding-top: 4px; }
 .booker-sr,
 [data-header="hidden"] .booker > h1,
-[data-header="hidden"] .booker > .booker-sub { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+[data-header="hidden"] .booker > .booker-desc { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .booker-primary {
   border: 0; background: var(--zs-accent); color: var(--zs-accent-ink); padding: 12px 18px; min-height: 44px; font-weight: 600;
 }
