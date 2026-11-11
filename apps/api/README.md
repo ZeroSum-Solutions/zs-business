@@ -83,6 +83,57 @@ Locally the Supabase user is looked up, and given the claim, in the auth stub's 
 Hosted, `db:hosted-provision-owner` (`src/hosted-provision.ts`) runs the same step with the
 Supabase Auth admin API in place of the stub; see "Hosted deploy", step 4.
 
+## Grant a plan to a tenant
+
+A tenant's limits come from its provider subscription (`docs/requirements/plans.md`). The
+operator can instead give one tenant a Hub plan that wins over the subscription while it lasts
+(PL-21..PL-24): the operator's own tenant, or a client whose retainer includes a plan with no
+Stripe or Shopify subscription. While a grant is active the limits are the granted plan's,
+the tenant is never read-only because of plan status, and the plan page shows "Included plan".
+After `--until` passes, or after `--clear`, the tenant is as the provider rows say. The
+billing workers never write the grant, and the grant never writes a provider row. Only this
+owner-run step writes it (`src/plan-grant.ts`); the runtime role cannot.
+
+```sh
+# Report the grant before and after, then roll back.
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api \
+  db:plan-grant --tenant <tenant uuid> --plan pro --until 2027-01-31 --note "Retainer Q1" --by Dana --dry-run
+# Apply. --receipt must not exist yet: it is reserved before any database work and always
+# records the outcome (result, failed phase, redacted error, committed true/false/"unknown").
+DATABASE_URL=postgres://postgres@127.0.0.1:55432/zs_dev mise exec -- pnpm --filter @zs/api \
+  db:plan-grant --tenant <tenant uuid> --plan pro --until 2027-01-31 --note "Retainer Q1" --by Dana \
+  --apply --receipt grant-receipt.json
+# Remove the grant (--by is recorded in the receipt).
+DATABASE_URL=... mise exec -- pnpm --filter @zs/api db:plan-grant --tenant <tenant uuid> --clear --by Dana --apply --receipt clear-receipt.json
+```
+
+`--plan` is `solo`, `studio` or `pro`. `--until` is optional (no end without it): a date such
+as `2027-01-31` ends at the end of that day in UTC, and a full instant such as
+`2027-01-31T17:00:00+02:00` is used as given; it must be after now. `--note` (1 to 200
+characters) says why, and `--by` (1 to 80) says who; both are stored with the grant and only
+the operator sees them (the plan read sends the plan and the end date only). Running it again
+replaces the grant. One service_role transaction under the tenant's plan lock inserts the
+tenant's plan record when it has none (holding only the grant) and refuses an unknown tenant.
+Clearing a tenant with no grant answers `unchanged`. Output and receipts hold ids, names, the
+plan and the note only.
+
+Hosted, `db:hosted-plan-grant` (`src/hosted-plan-grant.ts`) takes the same arguments with the
+guards of `db:hosted-provision-owner`: `ZS_TARGET_REF` and `SERVICE_DATABASE_URL` (postgres,
+port 5432, the pooler of that project) must agree or it refuses before connecting, and
+`--apply` needs `--backup <file>` from `db:hosted-backup` (this project, under two hours old)
+as well as `--receipt <file>`. It needs no Supabase Auth key.
+
+```sh
+mise exec -- pnpm --filter @zs/api db:hosted-plan-grant --tenant <uuid> --plan pro --note "Retainer Q1" --by Dana --dry-run
+mise exec -- pnpm --filter @zs/api db:hosted-backup --out ~/Backups/zs-business/<ref>-<date>.dump
+mise exec -- pnpm --filter @zs/api db:hosted-plan-grant --tenant <uuid> --plan pro --note "Retainer Q1" --by Dana \
+  --apply --backup ~/Backups/zs-business/<ref>-<date>.dump --receipt ~/Backups/zs-business/receipts/<file>.json
+```
+
+The migration `20261111100000_plan_grant.sql` must be applied first. Deploy the dashboard
+before the API: a granted tenant's plan read carries a `grant` key that an older dashboard's
+strict schema rejects.
+
 ## Environment
 
 | Variable | Meaning |
@@ -831,11 +882,16 @@ against the pinned Supabase Root 2021 CA.
    checks (this project, under two hours old, the live ledger and every table), and the
    receipt records every outcome (`failedPhase`: `dry-run`, `backup-check`, `apply` or
    `verify`) with ids and role facts only; errors are redacted, and the key is never printed.
+   To include a plan in a client retainer or the operator's own tenant without a subscription,
+   `db:hosted-plan-grant` takes the same guards ("Grant a plan to a tenant"); it needs no key.
 5. **Deploy.** From the repo root (`.vercelignore` keeps secrets and build output out of the
    upload), with `VERCEL_TOKEN` in the environment:
    ```sh
    # Workers first, always (see "Moving the crons out of a single project"). Vercel Cron runs only
    # on a production deployment, so the workers' cron fires after --prod.
+   # When a release adds a key to a response the dashboard parses strictly (for example the plan
+   # read's `grant`, plans.md PL-22), deploy the dashboard before the API, and reload open dashboard
+   # tabs: a tab opened before the deploy keeps the old schema and shows an error on that page.
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl \
      mise exec -- pnpm dlx vercel@latest deploy --yes [--environment preview | --prod]   # cron workers
    VERCEL_ORG_ID=team_ZovXSbiQdKR8CvRpDYfAzbAr VERCEL_PROJECT_ID=prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ \

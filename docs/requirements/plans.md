@@ -1,6 +1,7 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
+Status: draft contract, revision 5 (2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
+the provider subscription). Revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
 booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
 Shopify App Pricing, read back from the Partner API). Revision 2 added PL-14, a billing provider
 per tenant and per subscription. Revision 1 followed a
@@ -452,6 +453,61 @@ Sources (fetched 2026-11-07):
 - https://shopify.dev/docs/api/app-events (client-credentials token for usage events)
 - https://shopify.dev/docs/apps/launch/shopify-app-store/best-practices (C. Pricing)
 
+## Operator-granted plan (revision 5)
+
+Why: plan limits come only from a provider subscription (PL-3, PL-10). An operator cannot give a
+tenant that once held one a different entitlement: the operator's own tenant holds a Shopify test
+subscription (`solo`, `trialing`), so it has no automation tokens (PL-1). The agency also includes a
+Hub plan in a client retainer, with no Stripe or Shopify subscription behind it. A **grant** is a plan
+the operator gives one tenant by hand. It wins over the provider subscription while it lasts.
+
+**PL-21. The grant and the limits.** `tenant_plans` carries the grant in five columns: `granted_plan`
+(`solo`, `studio` or `pro`), `granted_until` (null = no end), `grant_note` (1 to 200 characters,
+required), `granted_at` and `granted_by` (1 to 80 characters, the operator's name from the script
+argument). `granted_plan`, `grant_note`, `granted_at` and `granted_by` are all set or all null;
+`granted_until` is null when there is no grant. A grant is **active** when `granted_plan` is set and
+`granted_until` is null or after the injected clock (at the instant itself it has ended). While a grant is active, on every
+read of the plan record:
+- the limits in force are the granted plan's PL-1 limits, whatever the provider subscription says. The
+  extra-connection add-on does not add to them (`extra_connections` belongs to the subscription);
+- the tenant is never read-only (PL-8): the plan gate and every other reader of `read_only_after`
+  (the outreach send gate, OS-14) ignore `read_only_after` and `payment_failed_at`;
+- the tenant is not comped even when it has no provider subscription.
+- one exception: the Shopify embedded plan screen (C-29) shows the provider subscription only. A granted
+  tenant with no Shopify subscription still reads "No plan yet" there; its limits follow the grant.
+When the grant has ended or was removed, the tenant is exactly what PL-3, PL-8 and PL-10 derive from its
+provider rows, with no grant: its subscription's limits, or comped when it has no plan. The code reads
+the clock at each use, so no job has to clear an ended grant. The other plan columns may hold any state, status `none` included.
+
+**PL-22. Reading it.** `GET /v1/billing/plan` (PL-7) adds `grant` while a grant is active, and leaves the key out
+otherwise: `{ source: "grant", plan, grantedUntil }` (`grantedUntil` is an ISO instant or null). The
+note and the operator's name are not sent. While a grant is active, `limits` are the granted plan's (PL-21)
+and `readOnly` is false; `status`, `plan`, `interval`, `trialEnd`, `currentPeriodEnd`, `paymentFailedAt`
+and `readOnlyAfter` stay what the provider rows say. The schema keeps `grant` optional and the dashboard
+parse tolerates its absence. The API must not send it before the dashboard reads it (the response schema is
+strict), so the dashboard deploys first. The dashboard plan page shows "Included plan: <name>" and the end
+date when there is one, with no checkout prompts and no billing notice, while `grant` is present.
+
+**PL-23. Who writes it.** Only the service role, through the PL-24 script. The runtime role (`authenticated`,
+`zs_runtime`) reads its own tenant's row (PL-12) and never writes any column of `tenant_plans`, the grant
+columns included; another tenant cannot read or change it. The billing workers (PL-10, PL-18) and
+`setFoundingInvite` (PL-11) name their own columns in every statement and never write, clear or
+overwrite a grant; a grant never writes `plan_subscriptions`, `plan_invoices` or any other
+provider-synced column. A provider event for a granted tenant stores as before.
+
+**PL-24. The operator script.** `db:hosted-plan-grant` in `apps/api`, with a local variant `db:plan-grant`,
+as `db:hosted-provision-owner` and `db:provision-owner` (same target guards: `ZS_TARGET_REF`,
+`SERVICE_DATABASE_URL` on that project's pooler, a refused non-hosted or wrong-ref target, a receipt
+reserved first, a project-bound backup taken within two hours before `--apply`). The hosted script needs no Supabase Auth key. Arguments:
+`--tenant <uuid> --plan <solo|studio|pro> [--until <ISO date>] --note <text> --by <name>` sets (or replaces) the
+grant; `--tenant <uuid> --clear --by <name>` removes it. A date without a time (`2027-01-31`) means the end
+of that day, UTC; a full instant with an offset is used as given; `--until` must be after the clock. Exactly one
+of `--dry-run` and `--apply`. One service-role transaction under the tenant's plan lock (PL-10), which inserts the
+`tenant_plans` row when the tenant has none (nothing but the grant set) and refuses an unknown tenant. A dry run
+reports the grant before and after and rolls back. An `--apply` run reads the row back and writes the receipt
+(`before`, `after`, who, the backup facts). Clearing a tenant with no grant answers `unchanged`. The run changes
+no provider row.
+
 ## Known limits (revision 3)
 
 - **Before the listing is submitted:** an App Store install does not yet create or bind a hub
@@ -482,3 +538,13 @@ Sources (fetched 2026-11-07):
   refused by PL-8; nothing they store is used until an action runs, and that action is refused.
 - A second paying subscription (possible only through Stripe itself) is reported, not cancelled.
 - The founding cap counts invites, not sign-ups; the operator invites.
+
+## Known limits (revision 5)
+
+- A grant does not stop or refund a provider subscription the tenant holds: the operator cancels that in
+  Stripe or Shopify. A granted tenant that never had a subscription is not billed at all.
+- A granted tenant can still start a Stripe Checkout (PL-4); the dashboard hides the prompt, the API does not refuse it.
+- When a grant ends on a tenant with no provider subscription (status `none`) the tenant is comped again, with no limits:
+  an ended grant never restricts a tenant.
+- A new grant replaces the old one; only receipts keep the earlier terms. There is no grant history table.
+- Only plan limits and read-only come from the grant; the wallet (S-1) and usage prices are unaffected.
