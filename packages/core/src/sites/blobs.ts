@@ -33,7 +33,8 @@ export function createBlobReader(store: Pick<SiteObjectStore, "get">, tenantId: 
     async read(digest) {
       const parsed = sha256HexSchema.safeParse(digest);
       if (!parsed.success) throw validationError("The spec names an invalid picture digest", [{ path: ["spec"], message: "A blob digest is 64 lowercase hex characters" }]);
-      const object = await store.get(siteObjectKeys.blob(tenantId, parsed.data));
+      // A store that does not answer is retryable (503), unlike a blob that is absent (400) or corrupt (500).
+      const object = await store.get(siteObjectKeys.blob(tenantId, parsed.data)).catch((cause: unknown) => { throw new SiteStoreUnavailable({ cause }); });
       if (!object) throw missingBlob(parsed.data);
       if (sha256(object.body) !== parsed.data) throw new Error("A stored blob does not match its digest");
       return object.body;

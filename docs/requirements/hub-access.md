@@ -327,7 +327,11 @@ the CSP `<meta>` of a link page, and how a blob-route image passes the image gat
   4. Any other `kind`, or a `kind` that is not a string: 400 `ValidationFailed`.
   Every compile, for a publish and for a preview, receives a blob reader bound to the caller's tenant:
   `read(sha256)` reads `t/<tenantId>/blobs/<sha256>` and nothing else, checks the bytes against the digest,
-  and throws 400 `ValidationFailed` ("blob not uploaded") when the object is absent. A spec that names a
+  and throws 400 `ValidationFailed` ("blob not uploaded") when the object is absent. A store that does not
+  answer is 503 `Unavailable` with `Retry-After`, as for any site store failure. A publish retried with a key
+  that already recorded a release of the site compiles nothing and reads no blob: it takes the entry, digest
+  and files from the recorded action and goes through dispatch with the request's own spec, so a retry after a
+  lost answer works during a store outage and a changed spec is still refused as a reused key. A spec that names a
   digest only another tenant holds therefore fails exactly like one nobody holds, and no read touches
   another tenant's prefix (X-17). The refusal happens in the compile step, before anything is stored,
   recorded or moved: the site stays as it was. The blob reader is the only door from a spec to stored

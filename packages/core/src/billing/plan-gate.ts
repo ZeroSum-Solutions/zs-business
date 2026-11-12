@@ -67,8 +67,9 @@ async function enforceSitePublishLimit(tx: Transaction, tenantId: string, row: P
   const limit = sitePublishLimit(row, now);
   if (limit === null) return;
   const used = (await tx.query<{ used: number }>(
-    "SELECT count(*)::int AS used FROM site_releases WHERE tenant_id=$1 AND created_at > $2::timestamptz - interval '1 day'",
-    [tenantId, now])).rows[0]!.used;
+    "SELECT count(*)::int AS used FROM site_releases WHERE tenant_id=$1 AND created_at > $2::timestamptz",
+    // The cutoff is 24 elapsed hours before the injected clock; SQL `interval '1 day'` would follow the session's time zone.
+    [tenantId, new Date(now.getTime() - DAY_MS)])).rows[0]!.used;
   if (used >= limit)
     throw new Conflict("The plan's daily publish limit is reached; try again later or choose a bigger plan",
       { reason: "plan_limit", resource: "sitePublishesPerDay", limit, used });
@@ -79,8 +80,14 @@ async function enforceSitePublishLimit(tx: Transaction, tenantId: string, row: P
  * anything (the gate checks again under the lock). Read in the caller's transaction.
  */
 export async function assertSitePublishRoom(tx: Transaction, tenantId: string, now: Date): Promise<void> {
-  await enforceSitePublishLimit(tx, tenantId, await readPlanRow(tx, tenantId), now);
+  const row = await readPlanRow(tx, tenantId);
+  // PL-8 first, as the plan gate: a read-only tenant is told to fix billing, not to buy a bigger plan.
+  if (row && isReadOnly(row, now)) throw readOnlyRefusal();
+  await enforceSitePublishLimit(tx, tenantId, row, now);
 }
+
+const readOnlyRefusal = () =>
+  new Conflict("The plan has ended or its payment failed; the business is read-only until billing is fixed", { reason: "plan_read_only" });
 
 /** PL-8: what a read-only tenant may still run. */
 export const READ_ONLY_ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
@@ -126,7 +133,7 @@ export async function planGate(tx: Transaction, tenantId: string, actionType: st
   const row = await readPlanRow(tx, tenantId);
   if (!row) return;
   if (isReadOnly(row, now) && !READ_ONLY_ALLOWED_ACTIONS.has(actionType))
-    throw new Conflict("The plan has ended or its payment failed; the business is read-only until billing is fixed", { reason: "plan_read_only" });
+    throw readOnlyRefusal();
   if (publishes) await enforceSitePublishLimit(tx, tenantId, row, now);
   const limits = planLimits(row, now);
   if (!counted || !limits) return;

@@ -534,7 +534,8 @@ The numbers are the catalog's `PLAN_SITE_PUBLISHES_PER_DAY` and `FREE_SITE_PUBLI
 the free one is the hosting decision's. They are tunable by a later revision. They are not part of
 `PlanLimits` (PL-1), so `GET /v1/billing/plan` does not change.
 - **Counted by the releases themselves.** The count is `site_releases` rows of the tenant with `created_at`
-  after the injected clock minus 24 hours. A release is append-only, so the count needs no counter table
+  after the injected clock minus 24 elapsed hours (the cutoff is a timestamp from the clock, never a SQL
+  `interval '1 day'`, which follows the session's time zone and shifts on a daylight-saving day). A release is append-only, so the count needs no counter table
   and cannot drift. A window that rolls is chosen over a calendar day because a calendar day resets at
   midnight and lets a tenant publish the whole limit twice in a minute.
 - **Checked twice.** The publish path checks the count before it compiles and stores anything (a refused
@@ -546,7 +547,8 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
 - **The refusal** is the PL-8 conflict: 409 `Conflict`, `reason: "plan_limit"`, `resource:
   "sitePublishesPerDay"`, with the `limit` and the `used` count. It is the same for a member and for a
   `sites:publish` token. The count is not a rate limit: there is no `Retry-After`.
-- **Read-only (PL-8)** still refuses a publish first, for a tenant whose plan lapsed.
+- **Read-only (PL-8)** still refuses a publish first, for a tenant whose plan lapsed, in the pre-check as well
+  as in the plan gate: the answer is `plan_read_only`, never `plan_limit`.
 - **No script yet.** Nothing in this revision sets `free_tier`: the operator script and the full "Creator Free"
   plan rule (one link-page site and one token per tenant, creator identity spec D-9) are hosting step 5.
   Until then an operator sets the column in a service-role transaction.

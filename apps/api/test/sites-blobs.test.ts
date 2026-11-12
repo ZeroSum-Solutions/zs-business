@@ -13,10 +13,11 @@ import {
   siteReleaseListSchema,
   siteReleaseResponseSchema,
   SITE_LIMITS,
+  type SiteObjectStore,
   ValidationFailed,
   type AutomationScope,
 } from "@zs/contracts";
-import { createKindSiteCompiler, createMemorySiteStore, plainSiteCompiler, type SiteCompiler } from "@zs/core";
+import { assertSitePublishRoom, createKindSiteCompiler, createMemorySiteStore, plainSiteCompiler, type SiteCompiler } from "@zs/core";
 import { signDevToken } from "../src/dev-token.js";
 import { appOnDatabase, call, createApiHarness, NOW, SECRET, type ApiHarness, type TenantSetup } from "./helpers.js";
 
@@ -51,17 +52,26 @@ const fakePublisher: SiteCompiler = {
 };
 
 const memory = createMemorySiteStore();
+/** The real store with a switch: every call fails while `storeDown` is set (an R2 outage). */
+let storeDown = false;
+const down = () => { if (storeDown) throw new Error("R2 answered 500"); };
+const store: SiteObjectStore = {
+  get: async (key) => { down(); return memory.get(key); },
+  head: async (key) => { down(); return memory.head(key); },
+  put: async (key, body, options) => { down(); return memory.put(key, body, options); },
+  delete: async (key) => { down(); return memory.delete(key); },
+};
 let clockMs = Date.parse(NOW);
 const clock = { now: () => new Date(clockMs) };
 let h: ApiHarness;
 beforeAll(async () => {
   h = await createApiHarness({
     clock, activepieces: {},
-    sites: { store: memory, compiler: createKindSiteCompiler({ plain: plainSiteCompiler, publisher: fakePublisher, linkpage: fakeLinkpage }) },
+    sites: { store, compiler: createKindSiteCompiler({ plain: plainSiteCompiler, publisher: fakePublisher, linkpage: fakeLinkpage }) },
   });
 });
 afterAll(async () => { await h?.close(); });
-afterEach(() => { clockMs = Date.parse(NOW); });
+afterEach(() => { clockMs = Date.parse(NOW); storeDown = false; });
 const DAY = 24 * 3600 * 1000;
 
 const errorOf = (response: { body: unknown }) => apiErrorBodySchema.parse(response.body).error;
@@ -307,8 +317,38 @@ describe("the blob reader and the site kinds (H-17)", () => {
     }
   });
 
+  it("replays a recorded blob-backed publish during a store outage without reading a blob, and answers a fresh one 503", async () => {
+    const mine = await createSite(h.a, "Outage");
+    const bytes = png(200);
+    const digest = sha(bytes);
+    expect((await member(h.a, mine.id, bytes)).status).toBe(201);
+    const key = randomUUID();
+    const spec = { kind: "linkpage", title: "Me", avatar: digest };
+    const first = await publishVia(h.a, mine.id, spec, key);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+
+    storeDown = true;
+    memory.resetLog();
+    const replay = await publishVia(h.a, mine.id, spec, key);
+    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
+    expect(siteReleaseResponseSchema.parse(replay.body).result.release.id).toBe(siteReleaseResponseSchema.parse(first.body).result.release.id);
+    expect(memory.reads()).toEqual([]);
+    // The same key with another spec is a reused key, not a store error.
+    const reused = await publishVia(h.a, mine.id, { ...spec, title: "Other" }, key);
+    expect(reused.status).toBe(409);
+    expect(errorOf(reused).details).toEqual({ reason: "idempotency_key_reused" });
+    // A new key needs the blob: the store is down, so the answer is 503 with Retry-After, not 500.
+    const fresh = await h.app.request(`/v1/sites/${mine.id}/releases`, {
+      method: "POST", headers: { Authorization: `Bearer ${h.a.token}`, "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify({ spec }),
+    });
+    expect(fresh.status).toBe(503);
+    expect(fresh.headers.get("retry-after")).not.toBeNull();
+    const preview = await call(h.app, "POST", `/v1/sites/${mine.id}/preview`, { token: h.a.token, body: { spec } });
+    expect(preview.status).toBe(503);
+  });
+
   it("answers 400 for linkpage until its adapter is wired, and for an untagged spec when no publisher is wired", async () => {
-    const bare = appOnDatabase(h.database.db, { clock, sites: { store: memory, compiler: createKindSiteCompiler({ plain: plainSiteCompiler }) } });
+    const bare = appOnDatabase(h.database.db, { clock, sites: { store, compiler: createKindSiteCompiler({ plain: plainSiteCompiler }) } });
     const mine = await createSite(h.a, "Unwired");
     const send = (spec: unknown) => call(bare, "POST", `/v1/sites/${mine.id}/releases`, { token: h.a.token, key: randomUUID(), body: { spec } });
     const linkpage = await send({ kind: "linkpage", title: "Me", avatar: sha(png()) });
@@ -412,8 +452,42 @@ describe("the daily publish limit (PL-25)", () => {
       const results = await Promise.all([publishAs(h.b, one.id, plain("Race A")), publishAs(h.b, two.id, plain("Race B"))]);
       expect(results.map((result) => result.status).sort()).toEqual([201, 409]);
       expect(await inWindow(h.b)).toBe(20);
+      // PL-8 comes first: a free tenant at its number whose plan is read-only is told about billing, not the limit.
+      await sql("UPDATE tenant_plans SET read_only_after=$2 WHERE tenant_id=$1", [h.b.tenantId, new Date(clockMs - 1000)]);
+      const readOnly = await publishAs(h.b, one.id, plain("Read only"));
+      expect(readOnly.status).toBe(409);
+      expect(errorOf(readOnly).details).toEqual({ reason: "plan_read_only" });
     } finally {
       await clearPlan(h.b);
+    }
+  });
+  it("counts 24 elapsed hours whatever time zone the database session uses", async () => {
+    // US spring transition, 2027-03-14 10:00Z: 23.5 hours before 10:15Z is 10:45Z the day before. A calendar day
+    // taken in America/Los_Angeles would put the cutoff at 11:15Z and miss those releases.
+    const site = await createSite(h.a, "Zone");
+    const published = Date.parse("2027-03-13T10:45:00Z");
+    for (let n = 0; n < 20; n += 1)
+      await sql(
+        `INSERT INTO site_releases (tenant_id, id, site_id, number, spec, entry, digest, file_count, total_bytes, created_by, created_at)
+         VALUES ($1,$2,$3,$4,'{}'::jsonb,'index.html',$5,1,1,$6,$7)`,
+        [h.a.tenantId, randomUUID(), site.id, 1000 + n, "a".repeat(64), h.a.actorId, new Date(published)]);
+    await freeTier(h.a);
+    try {
+      const now = new Date("2027-03-14T10:15:00Z");
+      for (const zone of ["UTC", "America/Los_Angeles", "Pacific/Auckland"]) {
+        await expect(h.database.db.tenant(h.a.tenantId, async (tx) => {
+          await tx.query(`SET LOCAL TIME ZONE '${zone}'`);
+          await assertSitePublishRoom(tx, h.a.tenantId, now);
+        }), zone).rejects.toMatchObject({ details: { reason: "plan_limit", used: 20 } });
+      }
+      // Exactly a day later nothing counts.
+      await h.database.db.tenant(h.a.tenantId, async (tx) => {
+        await tx.query("SET LOCAL TIME ZONE 'America/Los_Angeles'");
+        await assertSitePublishRoom(tx, h.a.tenantId, new Date(published + DAY));
+      });
+    } finally {
+      // Release history is append-only: the rows stay, a year after every other release in this file's database.
+      await clearPlan(h.a);
     }
   });
 });
