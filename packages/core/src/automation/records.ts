@@ -113,8 +113,13 @@ export interface TokenRow {
   expires_at: Date | null;
   revoked_at: Date | null;
   revoked_by: string | null;
+  /** hub-access.md H-14: the sites the token names, ordered; empty without `sites:publish`. */
+  site_ids: string[];
 }
-export const TOKEN_COLUMNS = "tenant_id, id, name, scopes::text[] AS scopes, created_by, created_at, expires_at, revoked_at, revoked_by";
+// The allowlist is immutable (H-14), so reading it under the token row's lock needs no lock of its own.
+export const TOKEN_COLUMNS = `tenant_id, id, name, scopes::text[] AS scopes, created_by, created_at, expires_at, revoked_at, revoked_by,
+  coalesce((SELECT array_agg(s.site_id::text ORDER BY s.site_id) FROM automation_token_sites s
+    WHERE s.tenant_id = automation_tokens.tenant_id AND s.token_id = automation_tokens.id), '{}') AS site_ids`;
 
 export async function loadToken(tx: Transaction, tenantId: string, id: string, lock?: "update" | "share"): Promise<TokenRow | null> {
   const suffix = lock ? ` FOR ${lock === "update" ? "UPDATE" : "SHARE"}` : "";
@@ -132,6 +137,7 @@ export function tokenRecord(row: TokenRow): AutomationToken {
     tenantId: row.tenant_id,
     name: row.name,
     scopes: [...row.scopes],
+    siteIds: [...row.site_ids],
     actorId: automationActorId(row.tenant_id, row.id),
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),

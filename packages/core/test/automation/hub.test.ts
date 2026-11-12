@@ -23,7 +23,14 @@ const DAY = 86_400_000;
 const HOUR = 3_600_000;
 const code = (error: unknown) => (error instanceof ActionError ? error.code : error instanceof Unauthenticated ? "Unauthenticated" : String(error));
 
-async function mint(scopes: AutomationScope[], tenant = h.a, extra: { expiresInDays?: number | null } = {}) {
+/** A site row of the tenant, for a token that names one (H-14). */
+async function seedSite(tenantId: string): Promise<string> {
+  const siteId = randomUUID();
+  await h.database.pool.query("INSERT INTO sites (tenant_id,id,name,created_at,updated_at) VALUES ($1,$2,'Site',now(),now())", [tenantId, siteId]);
+  return siteId;
+}
+
+async function mint(scopes: AutomationScope[], tenant = h.a, extra: { expiresInDays?: number | null; siteIds?: string[] } = {}) {
   const created = await h.admin(tenant).createToken({ name: `Hub ${scopes.length}`, scopes, ...extra }, randomUUID());
   const principal = await h.inbound().authenticate(`Bearer ${created.secret}`);
   return { ...created, principal };
@@ -63,9 +70,36 @@ describe("expiry of a read token (H-1, H-12)", () => {
     expect((await admin.createToken({ name: "Old", scopes: ["bookings:propose"], expiresInDays: null }, randomUUID())).token.expiresAt).toBeNull();
   });
 
-  it("holds all nine scopes", async () => {
-    const all = await mint([...AUTOMATION_SCOPES]);
+  it("holds all eleven scopes", async () => {
+    const siteId = await seedSite(h.a.tenantId);
+    const all = await mint([...AUTOMATION_SCOPES], h.a, { siteIds: [siteId] });
     expect([...all.principal.scopes].sort()).toEqual([...AUTOMATION_SCOPES].sort());
+    expect(all.token.siteIds).toEqual([siteId]);
+  });
+
+  it("gives sites:publish an expiry and a site list, names only the tenant's own sites, and shows both in whoami (H-13, H-14)", async () => {
+    const own = await seedSite(h.a.tenantId);
+    const foreign = await seedSite(h.b.tenantId);
+    const admin = h.admin(h.a);
+    // The scope needs 1 to 10 distinct sites, and the list needs the scope.
+    for (const request of [
+      { scopes: ["sites:publish"] }, { scopes: ["sites:publish"], siteIds: [] }, { scopes: ["sites:publish"], siteIds: [own, own] },
+      { scopes: ["sites:publish"], siteIds: Array.from({ length: 11 }, () => randomUUID()) },
+      { scopes: ["contacts:read"], siteIds: [own] }, { scopes: ["sites:publish"], siteIds: [own], expiresInDays: null },
+    ] as const)
+      expect(await admin.createToken({ name: "No", ...request } as never, randomUUID()).catch(code), JSON.stringify(request)).toBe("ValidationFailed");
+    // A foreign or unknown site is refused the same way, and no token is left behind.
+    const before = (await h.database.pool.query("SELECT count(*)::int AS n FROM automation_tokens WHERE tenant_id=$1", [h.a.tenantId])).rows[0].n;
+    for (const siteId of [foreign, randomUUID()])
+      expect(await admin.createToken({ name: "No", scopes: ["sites:publish"], siteIds: [siteId] }, randomUUID()).catch(code)).toBe("ValidationFailed");
+    expect((await h.database.pool.query("SELECT count(*)::int AS n FROM automation_tokens WHERE tenant_id=$1", [h.a.tenantId])).rows[0].n).toBe(before);
+
+    const { token, principal } = await mint(["sites:publish"], h.a, { siteIds: [own] });
+    expect(token).toMatchObject({ scopes: ["sites:publish"], siteIds: [own] });
+    expect(token.expiresAt).not.toBeNull();
+    expect(await h.inbound().whoAmI(principal)).toMatchObject({ tenantId: h.a.tenantId, siteIds: [own], scopes: ["sites:publish"] });
+    const plain = await mint(["contacts:propose"]);
+    expect(await h.inbound().whoAmI(plain.principal)).toMatchObject({ tenantId: h.a.tenantId, siteIds: [] });
   });
 
   it("is enforced by the database too: a read token cannot lose its expiry, or outlive 365 days", async () => {

@@ -268,3 +268,19 @@ export interface SiteObjectStore {
 }
 /** All the dispatch Worker needs. */
 export type SiteObjectReader = Pick<SiteObjectStore, "get">;
+
+/**
+ * hub-access.md H-15 step 7: the bodies of the token routes. The tenant is the token's, and the
+ * origin, click-counter base and sign-up target come from the site record, so a spec that carries
+ * any of them at its top level is refused (creator identity spec X-12) instead of passed to the compiler.
+ */
+export const TOKEN_SPEC_REFUSED_KEYS = Object.freeze(["tenantId", "origin", "trackBase", "signup"] as const);
+const tokenSiteSpecSchema = siteSpecSchema.refine(
+  (spec) => !TOKEN_SPEC_REFUSED_KEYS.some((key) => Object.hasOwn(spec, key)),
+  { message: `The spec may not set ${TOKEN_SPEC_REFUSED_KEYS.join(", ")}` },
+);
+export const tokenPublishSiteRequestSchema = z.strictObject({
+  spec: tokenSiteSpecSchema,
+  expectedCurrentReleaseId: idSchema.nullable().optional(),
+});
+export type TokenPublishSiteRequest = z.infer<typeof tokenPublishSiteRequestSchema>;

@@ -134,12 +134,19 @@ export const PROPOSE_SCOPES = Object.freeze(["contacts:propose", "deals:propose"
 export const READ_SCOPES = Object.freeze([
   "contacts:read", "deals:read", "bookings:read", "inbox:read", "results:read", "business:read", "connections:read",
 ] as const);
-export const AUTOMATION_SCOPES = Object.freeze([...PROPOSE_SCOPES, ...READ_SCOPES] as const);
+/** hub-access.md H-13: act on the sites named at creation (publish, roll back, sync). Not a read scope. */
+export const SITE_SCOPES = Object.freeze(["sites:publish"] as const);
+export const AUTOMATION_SCOPES = Object.freeze([...PROPOSE_SCOPES, ...READ_SCOPES, ...SITE_SCOPES] as const);
 export const automationScopeSchema = z.enum(AUTOMATION_SCOPES);
 export type AutomationScope = z.infer<typeof automationScopeSchema>;
 export const readScopeSchema = z.enum(READ_SCOPES);
 export type ReadScope = z.infer<typeof readScopeSchema>;
 export const hasReadScope = (scopes: readonly AutomationScope[]) => scopes.some((scope) => (READ_SCOPES as readonly string[]).includes(scope));
+export const hasSiteScope = (scopes: readonly AutomationScope[]) => scopes.some((scope) => (SITE_SCOPES as readonly string[]).includes(scope));
+/** H-1, H-13: a token with a read scope or `sites:publish` always expires. */
+export const scopesNeedExpiry = (scopes: readonly AutomationScope[]) => hasReadScope(scopes) || hasSiteScope(scopes);
+/** H-14: the most sites one token may name. */
+export const MAX_TOKEN_SITES = 10;
 
 /** hub-access.md "What each read scope discloses": the text an owner sees when choosing scopes. */
 export const READ_SCOPE_DISCLOSURES: Readonly<Record<ReadScope, string>> = Object.freeze({
@@ -153,6 +160,11 @@ export const READ_SCOPE_DISCLOSURES: Readonly<Record<ReadScope, string>> = Objec
   "connections:read": "Orders from every store the business connects, now or later: customer names and emails, line items and totals.",
 });
 
+/** hub-access.md H-13: the text an owner sees beside `sites:publish`. */
+export const SITE_SCOPE_DISCLOSURES: Readonly<Record<(typeof SITE_SCOPES)[number], string>> = Object.freeze({
+  "sites:publish": "Publish and roll back the named sites. Cannot read customers.",
+});
+
 /** One-line meaning of each propose scope, beside the read disclosures (hub-access.md H-9). */
 export const PROPOSE_SCOPE_DESCRIPTIONS: Readonly<Record<(typeof PROPOSE_SCOPES)[number], string>> = Object.freeze({
   "contacts:propose": "Propose adding a customer; an owner approves before anything is created. Reads nothing.",
@@ -162,35 +174,47 @@ export const PROPOSE_SCOPE_DESCRIPTIONS: Readonly<Record<(typeof PROPOSE_SCOPES)
 /** H-9: every scope with the text an owner sees when choosing scopes. */
 export const automationScopeInfoSchema = z.strictObject({
   scope: automationScopeSchema,
-  kind: z.enum(["propose", "read"]),
+  kind: z.enum(["propose", "read", "publish"]),
   disclosure: z.string().min(1).max(500),
 });
 export const automationScopeListSchema = z.strictObject({ items: z.array(automationScopeInfoSchema) });
 export type AutomationScopeList = z.infer<typeof automationScopeListSchema>;
 export const AUTOMATION_SCOPE_INFO: AutomationScopeList = Object.freeze({
-  items: AUTOMATION_SCOPES.map((scope) => (scope.endsWith(":read")
-    ? { scope, kind: "read" as const, disclosure: READ_SCOPE_DISCLOSURES[scope as ReadScope] }
-    : { scope, kind: "propose" as const, disclosure: PROPOSE_SCOPE_DESCRIPTIONS[scope as (typeof PROPOSE_SCOPES)[number]] })),
+  items: AUTOMATION_SCOPES.map((scope) => {
+    if (scope === "sites:publish") return { scope, kind: "publish" as const, disclosure: SITE_SCOPE_DISCLOSURES[scope] };
+    return scope.endsWith(":read")
+      ? { scope, kind: "read" as const, disclosure: READ_SCOPE_DISCLOSURES[scope as ReadScope] }
+      : { scope, kind: "propose" as const, disclosure: PROPOSE_SCOPE_DESCRIPTIONS[scope as (typeof PROPOSE_SCOPES)[number]] };
+  }),
 });
 
-/** H-1: a token with a read scope expires in 1 to 365 days; the request default is 90. */
+/** H-1, H-13: a token with a read scope or `sites:publish` expires in 1 to 365 days; the request default is 90. */
 export const READ_TOKEN_DEFAULT_DAYS = 90;
 const expiryDaysSchema = z.number().int().min(1).max(365);
 const scopeListSchema = z.array(automationScopeSchema).min(1).max(AUTOMATION_SCOPES.length).refine(unique, "Scopes must not repeat");
 const readNeedsExpiry = (value: { scopes: readonly AutomationScope[]; expiresInDays: number | null }) =>
-  !hasReadScope(value.scopes) || value.expiresInDays !== null;
-const READ_EXPIRY_MESSAGE = "A token with a read scope needs an expiry of 1 to 365 days";
+  !scopesNeedExpiry(value.scopes) || value.expiresInDays !== null;
+const READ_EXPIRY_MESSAGE = "A token with a read scope or sites:publish needs an expiry of 1 to 365 days";
+/** H-14: 1 to 10 distinct sites, with `sites:publish` and only then. */
+const siteIdListSchema = z.array(idSchema).max(MAX_TOKEN_SITES).refine(unique, "Sites must not repeat");
+const SITE_IDS_MESSAGE = "siteIds (1 to 10 sites) are required with sites:publish and refused without it";
+const siteIdsMatchScopes = (value: { scopes: readonly AutomationScope[]; siteIds?: readonly string[] | undefined }) =>
+  hasSiteScope(value.scopes) ? (value.siteIds?.length ?? 0) >= 1 : value.siteIds === undefined;
 export const createAutomationTokenRequestSchema = z.strictObject({
   name: postgresText(1, 100),
   scopes: scopeListSchema,
-  /** Left out: 90 days when the token holds a read scope, else no expiry (W-9). An explicit null is refused for a read scope. */
+  /** Left out: 90 days when the token holds a read scope or sites:publish, else no expiry (W-9). An explicit null is refused for those. */
   expiresInDays: expiryDaysSchema.nullable().optional(),
-}).refine((value) => value.expiresInDays !== null || !hasReadScope(value.scopes), {
+  /** H-14: the sites `sites:publish` acts on. Required with that scope, refused without it. */
+  siteIds: siteIdListSchema.optional(),
+}).refine((value) => value.expiresInDays !== null || !scopesNeedExpiry(value.scopes), {
   message: READ_EXPIRY_MESSAGE, path: ["expiresInDays"],
-}).transform((value) => ({
+}).refine(siteIdsMatchScopes, { message: SITE_IDS_MESSAGE, path: ["siteIds"] })
+  .transform((value) => ({
   name: value.name,
   scopes: value.scopes,
-  expiresInDays: value.expiresInDays ?? (hasReadScope(value.scopes) ? READ_TOKEN_DEFAULT_DAYS : null),
+  expiresInDays: value.expiresInDays ?? (scopesNeedExpiry(value.scopes) ? READ_TOKEN_DEFAULT_DAYS : null),
+  siteIds: value.siteIds ?? [],
 }));
 export type CreateAutomationTokenRequest = z.input<typeof createAutomationTokenRequestSchema>;
 export const createAutomationTokenCommandSchema = z.lazy(() => actionCommandSchema.extend({
@@ -201,7 +225,9 @@ export const createAutomationTokenCommandSchema = z.lazy(() => actionCommandSche
     name: postgresText(1, 100),
     scopes: scopeListSchema,
     expiresInDays: expiryDaysSchema.nullable(),
-  }).refine(readNeedsExpiry, { message: READ_EXPIRY_MESSAGE, path: ["expiresInDays"] }),
+    siteIds: siteIdListSchema,
+  }).refine(readNeedsExpiry, { message: READ_EXPIRY_MESSAGE, path: ["expiresInDays"] })
+    .refine((value) => hasSiteScope(value.scopes) ? value.siteIds.length >= 1 : value.siteIds.length === 0, { message: SITE_IDS_MESSAGE, path: ["siteIds"] }),
 }).refine((command) => command.target.id === command.payload.tokenId, "Target must equal the token ID"));
 export const revokeAutomationTokenCommandSchema = z.lazy(() => actionCommandSchema.extend({
   actionType: z.literal("automation.token.revoke"),
@@ -215,6 +241,8 @@ export const automationTokenSchema = z.strictObject({
   tenantId: idSchema,
   name: z.string(),
   scopes: z.array(automationScopeSchema),
+  /** H-14: the sites `sites:publish` acts on; empty for a token without that scope. */
+  siteIds: z.array(idSchema),
   /** The actor the token's proposals carry as `requestedBy` (W-11). */
   actorId: idSchema,
   createdBy: idSchema,
@@ -303,8 +331,11 @@ export const proposalRecordSchema = z.strictObject({
 export type ProposalRecord = z.infer<typeof proposalRecordSchema>;
 export const automationWhoAmISchema = z.strictObject({
   tokenId: idSchema,
+  /** W-13 amendment (revision 4): the token's own tenant and the sites it names. */
+  tenantId: idSchema,
   name: z.string(),
   scopes: z.array(automationScopeSchema),
+  siteIds: z.array(idSchema),
   expiresAt: instantSchema.nullable(),
 });
 export type AutomationWhoAmI = z.infer<typeof automationWhoAmISchema>;

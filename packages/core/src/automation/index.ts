@@ -19,6 +19,7 @@ export {
   CREATE_PROPOSAL_ACTION,
   INTEGRATION_ACTIONS,
 } from "./handlers.js";
+export { createAutomationSites, type AutomationSites, type AutomationSiteSession } from "./sites.js";
 export { createAutomationInbound, type AutomationInbound, type AutomationPrincipal } from "./inbound.js";
 export {
   signAutomationToken,
