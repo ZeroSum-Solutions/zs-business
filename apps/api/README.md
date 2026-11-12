@@ -372,6 +372,13 @@ release live, and releases, their files and activations are append-only for ever
 Site actions cannot be proposed through `/v1/approvals` (`ValidationFailed`): an approved
 action runs its handler alone, and a publish needs the compile, upload and edge steps around it.
 
+A `zsap1_` token that holds `sites:publish` and names up to 10 sites (`automation_token_sites`)
+reaches the same logic through `/automation/v1/sites/:siteId/...` (read, preview, publish,
+releases, activate, sync). It has no create or list route, a site it does not name answers 404,
+and the tenant, origin, click-counter base and sign-up target come from the token and the site
+record, never from the body. `/v1/sites` still takes member sessions only. Contract:
+`docs/requirements/hub-access.md` H-13 to H-15.
+
 Host names are attached by the service role only (`attachSiteHost` in `@zs/core`), since a
 host belongs to one site in the whole system and must be verified first. Attaches and
 detaches of one host run one at a time (a transaction advisory lock on the host), and each

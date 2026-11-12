@@ -1,14 +1,18 @@
 # Hub access: one agent surface for every client
 
-Status: draft contract, revision 3 (2026-11-06; revision 3 answers the four-model audit of the
+Status: draft contract, revision 4 (2026-11-11; revision 4 adds the `sites:publish` scope, the
+site allowlist and the `/automation/v1/sites` routes, H-13..H-15, and amends W-13 so `/me`
+names the tenant and the sites; it follows `/Users/zero-suminc./Inbox/plans/mishmash/2026-11/2026-11-11-mishmash-creator-identity-spec.md`
+decisions D-3 and A-2. Revision 3 (2026-11-06) answered the four-model audit of the
 build: check order, refusals charge nothing, guarded `whoami` and proposals, one accounting
 path, bounded lists, usage-table integrity, retention wiring, scopes route, notices. Revision 2
 answered the Sol contract review: proposal retries, read adapter, migration, transport
 statuses, quota unit, usage table, deadline, SDK acceptance, expiry, tool table,
 disclosures). Code follows this file; a change
 to a numbered rule needs a new revision of this file first. Extends `activepieces.md`
-(W-9..W-15); where the two disagree, this file wins for tokens that hold a read scope.
-Tokens that hold only propose scopes behave exactly as W-9..W-13 say.
+(W-9..W-15); where the two disagree, this file wins for tokens that hold a read scope or
+`sites:publish`. Tokens that hold only propose scopes behave exactly as W-9..W-13 say, except
+that `GET /me` answers the two added fields of the W-13 amendment below.
 
 Scope: let any agent the owner trusts (Mish, Hermes, an agent fleet, Claude, Codex, an
 Activepieces flow) work with one business through one remote MCP endpoint and one kind of
@@ -18,6 +22,10 @@ proposal. Nothing here lets an agent approve, act directly, or reach another ten
 Out of scope for this revision: external connections (Shopify, Gmail and the rest; the next
 contract, `connections.md`), drafting replies, executing approved writes in other services,
 dashboard screens beyond the token list, per-call billing, reduced output schemas.
+Out of scope for revision 4: the blob upload route, the public sign-up route, the operator
+script that creates a creator, a dashboard screen for site tokens, the free-tier limit of 20
+publishes a day, site tools on `/mcp`, and usage rows for the site routes (H-8 counts `/mcp`
+only).
 
 ## Evidence and decisions
 
@@ -31,6 +39,10 @@ dashboard screens beyond the token list, per-call billing, reduced output schema
   credential with a proposal path (W-11, W-12). The tag binds tenant and token IDs; what a
   token may do comes from its checked row. Reusing them keeps one credential, one key and
   one proposal path (Sol contract review, 2026-11-06).
+- Revision 4 (creator identity spec, D-3): local Mish publishes a creator's link page with a
+  `zsap1_` token. `/v1/*` accepts member sessions only, so the token gets sibling routes that
+  reuse the same site logic through a token adapter, and it is bound to named sites so a token
+  for a link page cannot replace the same tenant's business website.
 - Member reads (`createSession`) require a membership on every read and must keep doing so.
   Token reads therefore use the lower-level read functions (`packages/core/src/reads/`)
   through their own adapter, not the member session.
@@ -40,11 +52,13 @@ dashboard screens beyond the token list, per-call billing, reduced output schema
 ## Numbered rules
 
 - **H-1 One credential.** Agents use automation tokens (W-9). Expiry stays optional for
-  propose-only tokens (W-9 unchanged). A token created with any read scope must have an
-  expiry of 1 to 365 days; the request default is 90. Existing tokens are unchanged.
+  propose-only tokens (W-9 unchanged). A token created with any read scope, or with
+  `sites:publish` (H-13), must have an expiry of 1 to 365 days; the request default is 90.
+  Existing tokens are unchanged.
 - **H-2 Read scopes.** New scopes beside the W-10 propose scopes: `contacts:read`,
   `deals:read`, `bookings:read`, `inbox:read`, `results:read`, `business:read`. A token may
-  hold all nine scopes. The scopes are operation scopes, not field filters; the disclosures
+  hold all nine scopes (revision 3 and the connections contract added `connections:read`, and
+  revision 4 adds `sites:publish`: a token may hold all eleven). The scopes are operation scopes, not field filters; the disclosures
   each one makes are listed under "What each read scope discloses".
 - **H-3 Token guard.** Every token request that touches the database after authentication
   runs the same guard: `whoami`, `get_proposal`, every read and every proposal, on `/mcp` and
@@ -171,6 +185,83 @@ dashboard screens beyond the token list, per-call billing, reduced output schema
   holds a read scope) and creates `automation_token_usage` with a trigger that refuses any decrease of a counter
   (H-8). The contracts' scope enum,
   request, command and output schemas change with it.
+- **H-13 Publish scope (revision 4).** The scope `sites:publish` lets a token act on its
+  bound sites (H-14) and nowhere else. It may: read the site, publish a release and make it
+  live, preview a spec, list and read releases, make an earlier release live again
+  (rollback), and sync the site to the edge. It may not: create or delete a site, attach or
+  detach a host (service role only), read customers, sign-ups or any other business data (each
+  is a separate read scope), create, list or revoke tokens, or call any `/v1` route. A token
+  holding it must have an expiry of 1 to 365 days (H-1), checked in the database as 24 to 8760
+  hours after creation, the same check the read scopes use, and it must name 1 to 10 sites at
+  creation (H-14). The scope is not a read scope for H-3 purposes beyond the lock mode in H-15.
+  It adds no tool to `/mcp`: H-6 is unchanged, and `whoami` on `/mcp` answers the W-13 fields
+  below like `GET /me`. Owners choose it with the disclosure text under "What each read scope
+  discloses"; the scopes route (H-9) lists it with that text, as kind `publish`.
+- **H-14 Site allowlist (revision 4).** Table `automation_token_sites (tenant_id, token_id,
+  site_id)`, primary key `(tenant_id, token_id, site_id)`, composite foreign keys to
+  `automation_tokens (tenant_id, id)` and `sites (tenant_id, id)`, forced RLS, the tenant
+  policy and a two-tenant denial test under the runtime role. The runtime and service roles
+  may read and insert rows and nothing else: the allowlist is immutable, and a change is a new
+  token (revoke the old one). The database refuses, at commit (a deferred constraint
+  trigger, because the token row is inserted before its allowlist rows), a token that holds
+  `sites:publish` with fewer than 1 or more than 10 rows, and a token without the scope with
+  any row. The create path writes the token and its rows in one transaction and refuses a site
+  that is not the tenant's (`ValidationFailed` on `siteIds`; a foreign site and an unknown one
+  answer alike). `siteIds` is required with `sites:publish`, refused without it, 1 to 10
+  distinct UUIDs. The token record shows `siteIds` (empty without the scope). Allowlist rows
+  are read through the same locked token row as the scopes (H-3), so a revoke stops a site
+  request exactly as it stops a read.
+- **H-15 Site routes (revision 4).** `/automation/v1/sites/:siteId/...`, outside `/v1`,
+  `Authorization: Bearer zsap1_…`. They are mounted only when the automation key and a site
+  store are both configured; otherwise every path is 404. The routes, with the request and
+  response shapes of the same `/v1/sites` routes (the publish and preview bodies are stricter,
+  below): `GET /:siteId`; `POST /:siteId/preview`; `GET /:siteId/releases`;
+  `POST /:siteId/releases` (publish, `Idempotency-Key` required, 201); `GET
+  /:siteId/releases/:releaseId`; `POST /:siteId/releases/:releaseId/activate`
+  (`Idempotency-Key` required, body `{ expectedCurrentReleaseId }`); `POST /:siteId/sync`.
+  There is no create and no list route. The checks run in this fixed order and the first that
+  fails answers:
+  1. The token tag check: a missing, malformed or tampered token is the W-9 401. Pure CPU, no
+     database access.
+  2. A body over 64 KiB is 413, counted on the stream (H-5 step 3).
+  3. The quota: two fixed-window buckets `sites-minute:<tenantId>:<tokenId>` (30 per minute)
+     and `sites-hour:<tenantId>:<tokenId>` (300 per hour) in the shared Postgres limiter, one
+     unit each per request with a valid tag, charged in one all-or-nothing statement before
+     the token row is read. Over either limit is 429 with `Retry-After`. These numbers are the
+     spec's choice and are tunable by a later revision.
+  4. The token guard (H-3) in the request's tenant transaction under the runtime role: lock the
+     token row, read the clock after the lock, a missing, revoked or expired token is the W-9
+     401, and a token without `sites:publish` is `TenantDenied` (403 `Forbidden`) before any
+     site row is read, with the same answer for any site ID. Reads take the shared lock; publish,
+     activate and sync take the exclusive lock, inside the transaction that does the work, so a
+     revoke that commits first stops them.
+  5. The site: it must be in the token's allowlist (H-14) and visible under RLS, else
+     `NotFound` (404) with the body an unknown ID gets, raised before any handler runs. A
+     site of the same tenant that the token does not name answers 404, never 403.
+  6. For a release route, the release must belong to that site, else 404 like an unknown ID.
+     An activate that sends a stale `expectedCurrentReleaseId` is 409 `stale_release` first;
+     that answer is the same for any release ID and discloses nothing.
+  7. The body, strict: the publish and preview bodies hold only `spec` and (publish)
+     `expectedCurrentReleaseId`, and the spec may not carry the top-level keys `tenantId`,
+     `origin`, `trackBase` or `signup`, because the tenant is the token's and the origin,
+     click-counter base and sign-up target come from the site record, never from the caller.
+     Any of them is 400 `ValidationFailed`, and nothing is recorded.
+  8. The existing publish rules: stale release 409, size limits, image approval, the compile,
+     store and record steps of `apps/api/README.md` "Sites".
+
+  The actor recorded as `created_by` and `actor_id` is the token's actor ID (W-11, one per
+  token); those columns hold plain UUIDs with no member foreign key. The idempotency key a
+  caller sends is stored under the server prefix `activepieces:` derived from the tenant, the
+  token and the caller's key, so two tokens, or a token and a member, never share a stored
+  action. Member behaviour of `/v1/sites` does not change: the site logic is one function that
+  a member session and a token adapter both use, and the existing `/v1/sites` tests are its
+  regression check. A foreign object answering 404 on these routes, where `/v1/sites` writes
+  may answer 403 or 404, is deliberate (creator identity spec, deviation 6).
+- **W-13 amendment (revision 4).** `GET /me` (and `whoami` on `/mcp`) names the token and its
+  scopes as before and adds `tenantId` and `siteIds`: the token's own tenant, and the sites
+  its allowlist names (empty for a token without `sites:publish`). Both come from the locked
+  token row (H-3), never from a request. A client that connects with a token learns from this
+  which tenant and sites it may touch.
 
 ## What each read scope discloses
 
@@ -183,6 +274,8 @@ Owners see this text when they choose scopes.
   and the names and emails of staff who replied.
 - `results:read`: lead, booking and revenue totals by source.
 - `business:read`: the business profile (name, contact details, address, currency, zone).
+- `sites:publish` (not a read scope; revision 4): "Publish and roll back the named sites.
+  Cannot read customers." The owner sees the names of the bound sites next to it.
 
 ## Acceptance
 
@@ -195,6 +288,11 @@ Owners see this text when they choose scopes.
 - A token with no read scope reads nothing; one with only propose scopes proposes and reads
   back only its own proposals; another token of the same tenant gets not found for them.
 - A legacy propose-only token, a read-only token and an all-nine-scope token each work.
+- Revision 4: a `sites:publish` token publishes and rolls back its named sites through
+  `/automation/v1/sites`; it gets 404 for another site of its tenant and for another tenant's
+  site; a token without the scope, or a revoked or expired one, gets 403 or 401 as H-15 says;
+  `/v1/*` and `/mcp` tools reject it; the allowlist cannot be changed and the database
+  refuses a token whose rows break the 1 to 10 rule; `GET /me` names `tenantId` and `siteIds`.
 - A revoked or expired token gets 401 on its next request. A tampered token gets 401 before
   any database query. A revoke during a read waits for it; the next read is refused.
 - Two tenants: each token sees only its own tenant's rows, also when given the other's IDs.
