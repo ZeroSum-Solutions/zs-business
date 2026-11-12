@@ -5,12 +5,17 @@
 import {
   activateSiteReleaseRequestSchema,
   publishSiteRequestSchema,
+  sha256HexSchema,
+  siteFilesSchema,
+  sitePathSchema,
   SITE_PREVIEW_HTML_BYTES,
   uuidSchema,
   Conflict,
+  IdempotencyConflict,
   NotFound,
   type ActionCommand,
   type ActionResult,
+  type SiteBlob,
   type SiteEdgeStatus,
   type PublishSiteRequest,
   type SitePreview,
@@ -19,10 +24,11 @@ import {
   type SiteSyncResponse,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { assertSitePublishRoom } from "../billing/plan-gate.js";
 import { assertImagesApproved } from "../images/gate.js";
 import {
-  activateSiteRelease, getRelease, getSite, listReleases, publishSiteRelease,
-  storeReleaseFiles, syncSiteEdge, verifyCompiledSite, type ProjectOptions,
+  activateSiteRelease, createBlobReader, getRelease, getSite, listReleases, publishSiteRelease, putSiteBlob,
+  storeReleaseFiles, syncSiteEdge, verifyCompiledSite, type ProjectOptions, type VerifiedRelease,
 } from "../sites/index.js";
 import { SiteStoreUnavailable } from "./errors.js";
 import { derivedId } from "./ids.js";
@@ -40,11 +46,24 @@ function withinBudget(work: Promise<SiteEdgeStatus>, ms: number): Promise<SiteEd
   return Promise.race([work, expired]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * The entry, digest and files an earlier publish with this key recorded, or null when the key belongs to
+ * something else (then the caller refuses the reused key before it compiles or stores anything).
+ */
+function recordedRelease(earlier: { action_type: string; payload: unknown }, siteId: string): VerifiedRelease | null {
+  const payload = earlier.payload as { siteId?: unknown; entry?: unknown; digest?: unknown; files?: unknown };
+  if (earlier.action_type !== "site.release.publish" || payload.siteId !== siteId) return null;
+  const entry = sitePathSchema.safeParse(payload.entry);
+  const digest = sha256HexSchema.safeParse(payload.digest);
+  const files = siteFilesSchema.safeParse(payload.files);
+  return entry.success && digest.success && files.success ? { entry: entry.data, digest: digest.data, files: files.data, bytes: new Map() } : null;
+}
+
 type BodySchema = Parameters<typeof parseInput<PublishSiteRequest>>[0];
 
 /** What a caller must supply: its checks, and how its idempotency key becomes an action envelope. */
 export interface SiteMethodsHost {
-  readonly deps: Pick<EdgeDependencies, "db" | "sites" | "timeLeft">;
+  readonly deps: Pick<EdgeDependencies, "clock" | "db" | "sites" | "timeLeft">;
   readonly tenantId: string;
   /** A tenant transaction in which the caller has been checked for this site, then `work`. */
   readonly read: <T>(siteId: string, work: (tx: Transaction) => Promise<T>) => Promise<T>;
@@ -104,8 +123,9 @@ export function createSiteMethods(host: SiteMethodsHost) {
     },
     /**
      * Compile the spec, store its files, record the release and make it live, then move the
-     * edge. Retried with its key, it compiles the same files and replays the recorded result
-     * without touching the store, so a retry after a lost answer works during a store outage.
+     * edge. Retried with its key, it compiles nothing and reads no blob: the files come from the
+     * action it recorded, and the dispatcher replays the recorded result (or refuses a changed
+     * request as a reused key), so a retry after a lost answer works during a store outage.
      */
     async publishSite(siteId: unknown, body: unknown, key: unknown, bodySchema: BodySchema = publishSiteRequestSchema): Promise<SiteReleaseResponse> {
       const sites = requireSites();
@@ -115,13 +135,22 @@ export function createSiteMethods(host: SiteMethodsHost) {
       // Permission and ownership first, so nobody else's request stores bytes under this tenant.
       const recorded = await read(id, async (tx) => {
         const site = await getSite(tx, tenantId, id);
-        const replay = (await tx.query("SELECT 1 FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, rest.idempotencyKey])).rowCount === 1;
+        const earlier = (await tx.query<{ action_type: string; payload: unknown }>(
+          "SELECT action_type, payload FROM actions WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, rest.idempotencyKey])).rows[0];
         // Fail a stale edit before compiling and storing; the handler checks again under the site lock.
-        if (!replay && request.expectedCurrentReleaseId !== undefined && site.currentReleaseId !== request.expectedCurrentReleaseId)
+        if (!earlier && request.expectedCurrentReleaseId !== undefined && site.currentReleaseId !== request.expectedCurrentReleaseId)
           throw new Conflict("Another release went live since this edit started", { reason: "stale_release" });
-        return replay;
+        // PL-25: a tenant past its daily publish number stores nothing; the plan gate checks again under the plan lock.
+        if (!earlier) await assertSitePublishRoom(tx, tenantId, new Date(deps.clock.now().getTime()));
+        if (earlier === undefined) return null;
+        // A key that recorded another action or another site is a reused key: refuse before compiling or storing anything.
+        const release = recordedRelease(earlier, id);
+        if (!release) throw new IdempotencyConflict();
+        return release;
       });
-      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      // A key that already recorded a publish of this site keeps the release it recorded. It is put through
+      // dispatch with the request's own spec, so a different spec is still refused as a reused key.
+      const release = recorded ?? await verifyCompiledSite(await sites.compiler.compile(request.spec, { blobs: createBlobReader(sites.store, tenantId) }));
       // image-port.md IM-14: no unapproved image is stored; the handler checks again under the site lock.
       if (!recorded) await read(id, (tx) => assertImagesApproved(tx, tenantId, release.files));
       // A recorded key replays (or is refused as reused) in dispatch; its files were stored then.
@@ -145,11 +174,22 @@ export function createSiteMethods(host: SiteMethodsHost) {
       const id = parseInput(uuidSchema, siteId, "site ID");
       const request = parseInput(bodySchema, body);
       await read(id, (tx) => getSite(tx, tenantId, id));
-      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec, { blobs: createBlobReader(sites.store, tenantId) }));
       const entry = release.files.find((file) => file.path === release.entry)!;
       const html = entry.mediaType.startsWith("text/html") && entry.bytes <= SITE_PREVIEW_HTML_BYTES
         ? new TextDecoder("utf-8", { fatal: false }).decode(release.bytes.get(entry.path)) : null;
       return { entry: release.entry, digest: release.digest, files: [...release.files], entryHtml: html };
+    },
+    /**
+     * H-16: store a picture ahead of a release, content-addressed under the caller's tenant. The caller is
+     * checked for this site first, so nobody else's request stores bytes under this tenant; the bytes are
+     * checked against the path before the store is touched.
+     */
+    async putSiteBlob(siteId: unknown, sha256: unknown, bytes: Uint8Array): Promise<SiteBlob> {
+      const sites = requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      await read(id, (tx) => getSite(tx, tenantId, id));
+      return putSiteBlob(sites.store, tenantId, sha256, bytes);
     },
     /** Make an earlier (or later) release live again: the rollback. */
     async activateSiteRelease(siteId: unknown, releaseId: unknown, body: unknown, key: unknown): Promise<SiteReleaseResponse> {

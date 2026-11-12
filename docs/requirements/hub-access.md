@@ -1,6 +1,7 @@
 # Hub access: one agent surface for every client
 
-Status: draft contract, revision 4 (2026-11-11; revision 4 adds the `sites:publish` scope, the
+Status: draft contract, revision 5 (2026-11-12; revision 5 adds the blob upload route, H-16, and the site kind dispatch
+with its blob reader, H-17; the daily publish limit is PL-25 in `plans.md`. Revision 4 (2026-11-11) added the `sites:publish` scope, the
 site allowlist and the `/automation/v1/sites` routes, H-13..H-15, and amends W-13 so `/me`
 names the tenant and the sites; it follows `/Users/zero-suminc./Inbox/plans/mishmash/2026-11/2026-11-11-mishmash-creator-identity-spec.md`
 decisions D-3 and A-2. Revision 3 (2026-11-06) answered the four-model audit of the
@@ -24,10 +25,12 @@ publish, roll back and sync the sites it was bound to at creation, and nothing e
 Out of scope for this revision: external connections (Shopify, Gmail and the rest; the next
 contract, `connections.md`), drafting replies, executing approved writes in other services,
 dashboard screens beyond the token list, per-call billing, reduced output schemas.
-Out of scope for revision 4: the blob upload route, the public sign-up route, the operator
-script that creates a creator, a dashboard screen for site tokens, the free-tier limit of 20
-publishes a day, site tools on `/mcp`, and usage rows for the site routes (H-8 counts `/mcp`
-only).
+Out of scope for revisions 4 and 5: the public sign-up route, the operator script that creates a
+creator, a dashboard screen for site tokens, site tools on `/mcp`, and usage rows for the site
+routes (H-8 counts `/mcp` only). Revision 4 left out the blob upload route and the free-tier
+limit of 20 publishes a day; revision 5 adds them (H-16, `plans.md` PL-25). Still out of scope after
+revision 5: the `linkpage` compiler adapter (it needs the `@mish/linkpage` package from Mish),
+the CSP `<meta>` of a link page, and how a blob-route image passes the image gate (H-17).
 
 ## Evidence and decisions
 
@@ -233,12 +236,13 @@ only).
   below): `GET /:siteId`; `POST /:siteId/preview`; `GET /:siteId/releases`;
   `POST /:siteId/releases` (publish, `Idempotency-Key` required, 201); `GET
   /:siteId/releases/:releaseId`; `POST /:siteId/releases/:releaseId/activate`
-  (`Idempotency-Key` required, body `{ expectedCurrentReleaseId }`); `POST /:siteId/sync`.
+  (`Idempotency-Key` required, body `{ expectedCurrentReleaseId }`); `POST /:siteId/sync`; and, from
+  revision 5, `PUT /:siteId/blobs/:sha256` (H-16, which has its own body cap in step 2).
   There is no create and no list route. The checks run in this fixed order and the first that
   fails answers:
   1. The token tag check: a missing, malformed or tampered token is the W-9 401. Pure CPU, no
      database access.
-  2. A body over 64 KiB is 413, counted on the stream (H-5 step 3).
+  2. A body over 64 KiB is 413, counted on the stream (H-5 step 3). The blob route's cap is 4 MiB (H-16).
   3. The quota: two fixed-window buckets `sites-minute:<tenantId>:<tokenId>` (30 per minute)
      and `sites-hour:<tenantId>:<tokenId>` (300 per hour) in the shared Postgres limiter, one
      unit each per request with a valid tag, charged in one all-or-nothing statement before
@@ -279,6 +283,67 @@ only).
   a member session and a token adapter both use, and the existing `/v1/sites` tests are its
   regression check. A foreign object answering 404 on these routes, where `/v1/sites` writes
   may answer 403 or 404, is deliberate (creator identity spec, deviation 6).
+- **H-16 Blob upload (revision 5).** `PUT /v1/sites/:siteId/blobs/:sha256` for a member (owners, the
+  `publish` permission, as every `/v1/sites` route) and `PUT /automation/v1/sites/:siteId/blobs/:sha256`
+  for a `sites:publish` token. The body is the raw bytes; its `Content-Type` is ignored. The blob is
+  stored once at `t/<tenantId>/blobs/<sha256>`, the key `storeReleaseFiles` uses, so a release that lists
+  the same bytes finds it. The tenant is the member's or the token's, never the path's or the body's.
+  - **Byte cap: 4 MiB (`SITE_BLOB_MAX_BYTES`).** The Hub API runs as Vercel Functions, which answer a
+    request body over 4.5 MB with their own 413 before the app runs, so the cap sits under that limit with a
+    margin (raw body, no multipart overhead). It is lower than the release file limit (10 MiB,
+    `SITE_LIMITS.fileBytes`), which stays: a release may carry a larger inline file, and a blob-route file is
+    at most 4 MiB. The cap is counted on the stream (413). It replaces the 64 KiB cap of the other site
+    routes for this route only; the `/v1` JSON cap does not apply to it. A picture over 4 MiB needs a
+    presigned upload straight to the object store; that is later work and is not in this revision.
+  - **Types.** The bytes are sniffed, not trusted: PNG, JPEG, WebP or GIF (the header must say so), else 400.
+    The sniffed type is the object's content type and is returned.
+  - **Check order, token route.** The H-15 order up to step 5, with the body cap of this rule in step 2:
+    tag (401), body over 4 MiB (413), quota (429, the same two buckets as the other site routes, one unit
+    for the request), token guard (401, 403), the site in the allowlist (404). Then the path and the body:
+    `:sha256` must be 64 lowercase hex characters, the body 1 byte to 4 MiB, a supported type, and the
+    SHA-256 of the body must equal `:sha256`, else 400 `ValidationFailed` and **no store call of any kind**.
+    Only then the store is asked. Member route: session (401), body cap (413), permission and site under
+    RLS (403, 404 for a site of another tenant or an unknown ID), then the same 400 checks.
+  - **Idempotent.** The same bytes again: `200 { sha256, bytes, mediaType, created: false }` and no write.
+    A new blob: `201` with `created: true` (one conditional write, put only if absent; a lost race answers
+    `200`). An object already at the key with another size is a server fault (500), never overwritten. A
+    store failure is 503 `Unavailable`, as in a publish.
+  - **Tenancy.** A token or member of tenant A that names tenant B's site gets 404 and nothing is written
+    (creator identity spec X-16). Identical bytes in two tenants are two objects; content addressing never
+    shares bytes across tenants.
+  - **Not a publish.** The route records nothing in the database and does not count toward the daily
+    publish limit (`plans.md` PL-25). An upload whose release never commits stays an unreferenced object
+    (as in `apps/api/README.md` "Sites", step 2); there is no sweep and no per-tenant storage cap yet. A
+    revoke that commits while an upload is in flight does not undo that upload, as for the store step of
+    a publish.
+  - **Tests.** X-16 (cross-tenant upload), X-17 (a release naming a blob only another tenant holds), X-18
+    (hash mismatch) and the member and size cases, in `apps/api/test/sites-blobs.test.ts`.
+- **H-17 Site kinds and the blob reader (revision 5).** The compiler the API holds dispatches on the
+  spec's top-level `kind`:
+  1. `kind` absent: the publisher slot, the compiler passed to `createServer` as `siteCompiler` (a Mish recipe
+     carries no `kind`, so today's publisher specs keep working unchanged). With none wired, 400.
+  2. `kind: "plain"`: the built-in plain compiler.
+  3. `kind: "linkpage"`: the link page slot. **Not wired in this revision**: the answer is 400
+     `ValidationFailed` ("not available") until the `@mish/linkpage` adapter lands. That later change also
+     owns the CSP `<meta>` (hosting decision: hash of the inline script, `connect-src` for the Hub API)
+     and the golden digest against the Mish render.
+  4. Any other `kind`, or a `kind` that is not a string: 400 `ValidationFailed`.
+  Every compile, for a publish and for a preview, receives a blob reader bound to the caller's tenant:
+  `read(sha256)` reads `t/<tenantId>/blobs/<sha256>` and nothing else, checks the bytes against the digest,
+  and throws 400 `ValidationFailed` ("blob not uploaded") when the object is absent. A store that does not
+  answer is 503 `Unavailable` with `Retry-After`, as for any site store failure. A publish retried with a key
+  that already recorded a release of the site compiles nothing and reads no blob: it takes the entry, digest
+  and files from the recorded action and goes through dispatch with the request's own spec, so a retry after a
+  lost answer works during a store outage and a changed spec is still refused as a reused key. A spec that names a
+  digest only another tenant holds therefore fails exactly like one nobody holds, and no read touches
+  another tenant's prefix (X-17). The refusal happens in the compile step, before anything is stored,
+  recorded or moved: the site stays as it was. The blob reader is the only door from a spec to stored
+  bytes. The rules of H-15 step 7 (no `tenantId`, `origin`, `trackBase`, `signup` in a token's spec) stand.
+  - **Image gate unchanged.** `image-port.md` IM-14 still refuses a release file with an `image/*` type whose
+    SHA-256 is not a tenant `media_assets` row. A picture uploaded through H-16 is not a media asset, so a
+    release that serves it as an image fails with 409 `image_not_approved` until a later revision decides how
+    owner-uploaded blobs pass the gate. That decision belongs with the `linkpage` adapter, which is the
+    first spec kind that serves uploaded pictures.
 - **W-13 amendment (revision 4).** `GET /me` (and `whoami` on `/mcp`) names the token and its
   scopes as before and adds `tenantId` and `siteIds`: the token's own tenant, and the sites
   its allowlist names (empty for a token without `sites:publish`). Both come from the locked
@@ -318,6 +383,11 @@ Owners see this text when they choose scopes.
   `get_proposal` and the tools its other scopes grant, and answers -32601 for a tool it lacks);
   the allowlist cannot be changed and the database
   refuses a token whose rows break the 1 to 10 rule; `GET /me` names `tenantId` and `siteIds`.
+- Revision 5: a token or owner uploads a picture to a named site and gets 201, then 200 with no second write;
+  a body whose hash differs from the path is 400 with no store call; another tenant's site is 404 with no
+  object written; a release that names a blob only another tenant holds is 400 with no read of that tenant's
+  prefix and the site unchanged; a spec of unknown kind is 400, an untagged one still compiles through the
+  publisher slot, and the `linkpage` kind answers 400 until the adapter is wired.
 - A revoked or expired token gets 401 on its next request. A tampered token gets 401 before
   any database query. A revoke during a read waits for it; the next read is refused.
 - Two tenants: each token sees only its own tenant's rows, also when given the other's IDs.

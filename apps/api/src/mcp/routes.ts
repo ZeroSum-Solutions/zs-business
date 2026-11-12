@@ -76,11 +76,11 @@ interface ToolOutcome { reads: number; proposals: number; refused: boolean }
  * reading; a missing or false one cannot get past, because the bytes actually read are counted.
  * Returns null when the body is too large.
  */
-export async function readBody(request: Request, limit: number): Promise<string | null> {
+export async function readBodyBytes(request: Request, limit: number): Promise<Uint8Array | null> {
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) return null;
   const reader = request.body?.getReader();
-  if (!reader) return "";
+  if (!reader) return new Uint8Array(0);
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (;;) {
@@ -96,7 +96,13 @@ export async function readBody(request: Request, limit: number): Promise<string 
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(bytes);
+  return bytes;
+}
+
+/** The same, as UTF-8 text. */
+export async function readBody(request: Request, limit: number): Promise<string | null> {
+  const bytes = await readBodyBytes(request, limit);
+  return bytes === null ? null : new TextDecoder().decode(bytes);
 }
 
 /** A JSON-RPC request or notification: an object naming a method. */

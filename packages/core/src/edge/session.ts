@@ -942,6 +942,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     previewSite: (siteId: unknown, body: unknown) => siteMethods.previewSite(siteId, body),
     activateSiteRelease: siteMethods.activateSiteRelease,
     syncSite: siteMethods.syncSite,
+    putSiteBlob: siteMethods.putSiteBlob,
 
     /**
      * image-port.md IM-3: store an uploaded image under its SHA-256 and record it as a media asset.
