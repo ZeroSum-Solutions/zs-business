@@ -210,8 +210,8 @@ only).
   policy and a two-tenant denial test under the runtime role. The runtime and service roles
   may read and insert rows and nothing else (no update, no delete, no truncate). Grants alone
   would still let a later insert widen an existing token, so a trigger refuses an insert
-  unless the token row was inserted by the same transaction (its `xmin` is the current
-  transaction's ID; the create path uses no savepoint). The allowlist is therefore
+  unless the token row was inserted by the same transaction (the row is visible and the
+  transaction that wrote it, a savepoint of the current one included, is still in progress). The allowlist is therefore
   immutable once the token exists, and a change is a new token (revoke the old one). The
   isolation tests try a later insert under the runtime role and the service role and expect
   a refusal from both. The database refuses, at commit (a deferred constraint

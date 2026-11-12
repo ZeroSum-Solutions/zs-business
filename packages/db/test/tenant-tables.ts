@@ -50,6 +50,22 @@ export async function seedTenantTables(tx: Transaction, tenantId: string, tables
         progress = true;
         continue;
       }
+      // Hub access H-14: the sites of a token are written only by the transaction that creates the token, and a
+      // token with sites:publish holds 1 to 10 of them. So the row comes with its own token, once a site exists.
+      if (name === "automation_token_sites") {
+        if (pending.has("sites") || pending.has("automation_tokens")) continue;
+        const siteId = (await tx.query<{ id: string }>("select id from public.sites where tenant_id=$1 limit 1", [tenantId])).rows[0]?.id;
+        if (!siteId) continue;
+        const tokenId = randomUUID();
+        await tx.query(
+          `insert into public.automation_tokens (tenant_id,id,name,scopes,created_by,created_at,expires_at)
+           values ($1,$2,'fixture','{sites:publish}',$3,'2026-10-17T12:00:00Z','2026-11-17T12:00:00Z')`,
+          [tenantId, tokenId, randomUUID()]);
+        await tx.query("insert into public.automation_token_sites (tenant_id,token_id,site_id) values ($1,$2,$3)", [tenantId, tokenId, siteId]);
+        pending.delete(name);
+        progress = true;
+        continue;
+      }
       const fields = (await tx.query<{
         name: string; type: string; required: boolean; automatic: boolean; enum_value: string | null;
       }>(`SELECT a.attname AS name,t.typname AS type,a.attnotnull AS required,
