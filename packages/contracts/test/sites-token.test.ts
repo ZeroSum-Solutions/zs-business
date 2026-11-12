@@ -1,7 +1,7 @@
 // hub-access.md H-13, H-14: the `sites:publish` scope, the token's site list and the token publish body.
 import { describe, expect, it } from "vitest";
 import {
-  AUTOMATION_SCOPE_INFO, MAX_TOKEN_SITES, createAutomationTokenRequestSchema, tokenPublishSiteRequestSchema,
+  AUTOMATION_SCOPE_INFO, MAX_TOKEN_SITES, createAutomationTokenRequestSchema, tokenPreviewSiteRequestSchema, tokenPublishSiteRequestSchema,
 } from "../src/index.js";
 
 const id = () => crypto.randomUUID();
@@ -42,5 +42,12 @@ describe("token publish body (H-15 step 7, X-12)", () => {
     for (const key of ["tenantId", "origin", "trackBase", "signup"])
       expect(tokenPublishSiteRequestSchema.safeParse({ spec: { ...spec, [key]: "x" } }).success, key).toBe(false);
     expect(tokenPublishSiteRequestSchema.safeParse({ spec, tenantId: id() }).success).toBe(false);
+  });
+
+  it("takes only the spec for a preview, and a baseline only for a publish", () => {
+    expect(tokenPreviewSiteRequestSchema.safeParse({ spec }).success).toBe(true);
+    expect(tokenPreviewSiteRequestSchema.safeParse({ spec, expectedCurrentReleaseId: null }).success).toBe(false);
+    expect(tokenPreviewSiteRequestSchema.safeParse({ spec: { ...spec, tenantId: id() } }).success).toBe(false);
+    expect(tokenPublishSiteRequestSchema.safeParse({ spec, expectedCurrentReleaseId: null }).success).toBe(true);
   });
 });

@@ -49,7 +49,8 @@ export function automationSiteRoutes(config: AutomationSitesRouteConfig, request
       // 401 (tag): pure CPU, before any body or database work.
       const ref = inbound.verifyTag(c.req.header("Authorization"));
       // 413: the stream's own byte count. A GET carries no body of interest, but one that is too large is still refused.
-      const text = await readBody(c.req.raw, BODY_LIMIT_BYTES);
+      // A stream that fails mid-read (the caller went away) is an unreadable body: held back like a malformed one.
+      const text = await readBody(c.req.raw, BODY_LIMIT_BYTES).catch(() => "");
       if (text === null) return c.json(apiErrorBody("ValidationFailed", "Request body is too large"), 413);
       // 429: both units or neither, charged before the token row is read.
       const taken = await config.limiter.take([

@@ -54,8 +54,13 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM public.automation_tokens t
     WHERE t.tenant_id = NEW.tenant_id AND t.id = NEW.token_id
+      -- A revoked token takes no row: the first revoke re-writes the token row (a new writer in that
+      -- transaction), and a revoked token's list is as fixed as a live one's.
+      AND t.revoked_at IS NULL
       -- A token row this statement can see whose writer is still running was written by this
-      -- transaction (or one of its savepoints): another transaction's uncommitted row is invisible.
+      -- transaction (or one of its savepoints): another transaction's uncommitted row is invisible. The
+      -- epoch is the top-level transaction's; a savepoint that took its XID after a wraparound (once in 4
+      -- billion XIDs) is refused, which fails closed and is retried.
       AND pg_catalog.pg_xact_status(
         (((pg_catalog.pg_current_xact_id()::text::bigint >> 32) << 32) + t.xmin::text::bigint)::text::xid8) = 'in progress') THEN
     RAISE EXCEPTION 'The sites of a token are set when the token is created (insert refused)'

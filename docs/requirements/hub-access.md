@@ -254,8 +254,10 @@ only).
      `NotFound` (404) with the body an unknown ID gets, raised before any handler runs. A
      site of the same tenant that the token does not name answers 404, never 403.
   6. For a release route, the release must belong to that site, else 404 like an unknown ID.
-     An activate that sends a stale `expectedCurrentReleaseId` is 409 `stale_release` first;
-     that answer is the same for any release ID and discloses nothing.
+     An activate needs its body and key before it can compare the baseline, so a bad body or
+     key (400, step 7) and a stale `expectedCurrentReleaseId` (409 `stale_release`) come first
+     for that route; both answers are the same for any release ID, an own one, a foreign one
+     and an unknown one, and disclose nothing.
   7. The body, strict: the publish and preview bodies hold only `spec` and (publish)
      `expectedCurrentReleaseId`, and the spec may not carry the top-level keys `tenantId`,
      `origin`, `trackBase` or `signup`, because the tenant is the token's and the origin,

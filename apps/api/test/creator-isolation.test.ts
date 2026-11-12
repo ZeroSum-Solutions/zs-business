@@ -300,3 +300,14 @@ describe("what /me tells the flow (X-35)", () => {
     expect(other).toMatchObject({ tenantId: h.b.tenantId, siteIds: [siteB.id] });
   });
 });
+
+describe("a site token is not a member (H-13)", () => {
+  it("is 401 on the member /v1 routes, which take a session token only", async () => {
+    const siteA = await createSite(h.a, "A shop");
+    const { secret } = await mint(h.a, ["sites:publish"], [siteA.id]);
+    expect((await tokenCall(secret, "GET", `/v1/sites/${siteA.id}`)).status).toBe(401);
+    expect((await tokenCall(secret, "GET", "/v1/sites")).status).toBe(401);
+    expect((await publishAs(secret, siteA.id, "Sideways")).status).toBe(201);
+    expect((await tokenCall(secret, "POST", `/v1/sites/${siteA.id}/releases`, { key: randomUUID(), body: { spec: spec("Sideways") } })).status).toBe(401);
+  });
+});

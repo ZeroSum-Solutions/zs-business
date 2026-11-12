@@ -284,3 +284,5 @@ export const tokenPublishSiteRequestSchema = z.strictObject({
   expectedCurrentReleaseId: idSchema.nullable().optional(),
 });
 export type TokenPublishSiteRequest = z.infer<typeof tokenPublishSiteRequestSchema>;
+/** H-15 step 7: a preview body holds the spec and nothing else (no baseline: a preview records nothing). */
+export const tokenPreviewSiteRequestSchema = z.strictObject({ spec: tokenSiteSpecSchema });

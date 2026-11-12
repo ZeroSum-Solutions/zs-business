@@ -14,12 +14,14 @@ import {
   type AutomationScope,
 } from "@zs/contracts";
 import { createMemorySiteStore, plainSiteCompiler } from "@zs/core";
-import { call, createApiHarness, type ApiHarness, type TenantSetup } from "./helpers.js";
+import { appOnDatabase, call, createApiHarness, NOW, type ApiHarness, type TenantSetup } from "./helpers.js";
 
 const BASE = "/automation/v1/sites";
 const memory = createMemorySiteStore();
 let h: ApiHarness;
-beforeAll(async () => { h = await createApiHarness({ activepieces: {}, sites: { store: memory, compiler: plainSiteCompiler } }); });
+let clockMs = Date.parse(NOW);
+const clock = { now: () => new Date(clockMs) };
+beforeAll(async () => { h = await createApiHarness({ clock, activepieces: {}, sites: { store: memory, compiler: plainSiteCompiler } }); });
 afterAll(async () => { await h?.close(); });
 
 const spec = (title: string) => ({ kind: "plain", title, sections: [{ heading: "Hours", body: "Mon to Fri" }] });
@@ -141,5 +143,90 @@ describe("a site token on its own site", () => {
     expect((await send(calm.secret, "GET", `${BASE}/${site.id}`)).status).toBe(200);
     await busy.revoke();
     await calm.revoke();
+  });
+
+  it("counts 300 requests an hour per token across minute windows, and shares the buckets with a second API instance", async () => {
+    const site = await createSite(h.a, "A shop");
+    const busy = await mint(["sites:publish"], [site.id]);
+    const second = appOnDatabase(h.database.db, { clock, sites: { store: memory, compiler: plainSiteCompiler } });
+    const start = clockMs;
+    try {
+      for (let minute = 0; minute < 10; minute += 1) {
+        for (let n = 0; n < 30; n += 1) expect((await send(busy.secret, "GET", `${BASE}/${site.id}`)).status).toBe(200);
+        // The minute bucket is full; a second instance over the same database sees it.
+        expect((await call(second, "GET", `${BASE}/${site.id}`, { headers: auth(busy.secret) })).status).toBe(429);
+        clockMs += 61_000;
+      }
+      const hourly = await send(busy.secret, "GET", `${BASE}/${site.id}`);
+      expect(hourly.status).toBe(429);
+      expect(Number(hourly.headers.get("retry-after"))).toBeGreaterThan(60);
+    } finally {
+      clockMs = start;
+      await busy.revoke();
+    }
+  });
+
+  it("keeps the idempotency key of one token apart from another token's and from a member's", async () => {
+    const site = await createSite(h.a, "A shop");
+    const first = await mint(["sites:publish"], [site.id]);
+    const other = await mint(["sites:publish"], [site.id]);
+    const key = randomUUID();
+    const bodyOf = { spec: spec("Same key") };
+    const viaFirst = await send(first.secret, "POST", `${BASE}/${site.id}/releases`, { key, body: bodyOf });
+    const viaOther = await send(other.secret, "POST", `${BASE}/${site.id}/releases`, { key, body: bodyOf });
+    const viaMember = await call(h.app, "POST", `/v1/sites/${site.id}/releases`, { token: h.a.token, key, body: bodyOf });
+    expect([viaFirst.status, viaOther.status, viaMember.status]).toEqual([201, 201, 201]);
+    const ids = [viaFirst, viaOther, viaMember].map((response) => siteReleaseResponseSchema.parse(response.body).result.release.id);
+    expect(new Set(ids).size).toBe(3);
+    // A replay with the first token still answers the first release; after its revoke it is a 401, not a replay.
+    expect(siteReleaseResponseSchema.parse((await send(first.secret, "POST", `${BASE}/${site.id}/releases`, { key, body: bodyOf })).body).result.release.id).toBe(ids[0]);
+    await first.revoke();
+    expect((await send(first.secret, "POST", `${BASE}/${site.id}/releases`, { key, body: bodyOf })).status).toBe(401);
+    await other.revoke();
+  });
+
+  it("takes only a spec for a preview, and answers a bad activate body the same for an own, a foreign and an unknown release", async () => {
+    const site = await createSite(h.a, "A shop");
+    const foreign = await createSite(h.b, "B shop");
+    const { secret, revoke } = await mint(["sites:publish"], [site.id]);
+    expect((await send(secret, "POST", `${BASE}/${site.id}/preview`, { body: { spec: spec("x"), expectedCurrentReleaseId: null } })).status).toBe(400);
+    expect((await send(secret, "POST", `${BASE}/${site.id}/preview`, { body: { spec: spec("x") } })).status).toBe(200);
+    const own = siteReleaseResponseSchema.parse((await send(secret, "POST", `${BASE}/${site.id}/releases`, { key: randomUUID(), body: { spec: spec("One") } })).body).result.release;
+    const bad = (releaseId: string) => send(secret, "POST", `${BASE}/${site.id}/releases/${releaseId}/activate`, {
+      key: randomUUID(), body: { expectedCurrentReleaseId: own.id, extra: true },
+    });
+    const answers = [await bad(own.id), await bad(randomUUID()), await bad(foreign.id)];
+    expect(answers.map((answer) => answer.status)).toEqual([400, 400, 400]);
+    expect(new Set(answers.map((answer) => JSON.stringify(answer.body))).size).toBe(1);
+    await revoke();
+  });
+
+  it("treats a body stream that fails mid-read as an unreadable body: the site gate answers first", async () => {
+    const site = await createSite(h.a, "A shop");
+    const foreign = await createSite(h.b, "B shop");
+    const { secret, revoke } = await mint(["sites:publish"], [site.id]);
+    const broken = () => new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error("connection reset")); } });
+    const post = (siteId: string) => h.app.fetch(new Request(`http://hub.test${BASE}/${siteId}/releases`, {
+      method: "POST", headers: { ...auth(secret), "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
+      body: broken(), duplex: "half",
+    } as RequestInit));
+    expect((await post(foreign.id)).status).toBe(404);
+    expect((await post(site.id)).status).toBe(400);
+    await revoke();
+  });
+
+  it("lists no site tool over MCP and tells whoami the tenant and sites", async () => {
+    const site = await createSite(h.a, "A shop");
+    const { secret, revoke } = await mint(["sites:publish"], [site.id]);
+    const rpc = async (body: unknown) => {
+      const response = await h.app.request("/mcp", {
+        method: "POST", headers: { ...auth(secret), "Content-Type": "application/json", Accept: "application/json, text/event-stream" }, body: JSON.stringify(body),
+      });
+      return response.json() as Promise<{ result: { tools?: { name: string }[]; content?: { text: string }[] } }>;
+    };
+    expect((await rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" })).result.tools!.map((tool) => tool.name).sort()).toEqual(["get_proposal", "whoami"]);
+    const me = JSON.parse((await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "whoami", arguments: {} } })).result.content![0]!.text);
+    expect(me).toMatchObject({ tenantId: h.a.tenantId, siteIds: [site.id], scopes: ["sites:publish"] });
+    await revoke();
   });
 });

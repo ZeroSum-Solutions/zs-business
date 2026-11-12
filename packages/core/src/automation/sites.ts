@@ -2,7 +2,7 @@
 // session's (edge/site-methods.ts); this file is how a token is checked. A token acts on a site
 // only while its row is live, holds `sites:publish` and names that site. A site it does not name
 // is NotFound, never Forbidden, and the check runs before any site row is read.
-import { NotFound, TenantDenied, idempotencyKeySchema, tokenPublishSiteRequestSchema, uuidSchema } from "@zs/contracts";
+import { NotFound, TenantDenied, idempotencyKeySchema, tokenPreviewSiteRequestSchema, tokenPublishSiteRequestSchema, uuidSchema } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { derivedId } from "../edge/ids.js";
 import { createSiteMethods, type SiteMethodsHost } from "../edge/site-methods.js";
@@ -67,7 +67,7 @@ export function createAutomationSites(deps: EdgeDependencies) {
         },
         async previewSite(siteId: unknown, body: unknown) {
           methods.requireSites(); await first(siteId);
-          return methods.previewSite(siteId, body, tokenPublishSiteRequestSchema);
+          return methods.previewSite(siteId, body, tokenPreviewSiteRequestSchema);
         },
         async activateSiteRelease(siteId: unknown, releaseId: unknown, body: unknown, key: unknown) {
           methods.requireSites(); await first(siteId);

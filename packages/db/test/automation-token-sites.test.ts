@@ -48,7 +48,8 @@ describe("automation_token_sites (H-14)", () => {
   it("holds 1 to 10 sites with sites:publish and none without it, checked at commit", async () => {
     const sites = await Promise.all(Array.from({ length: 11 }, () => site(fixture.a)));
     await expect(createToken(fixture.a, ["sites:publish"], [])).rejects.toMatchObject({ code: "23514" });
-    await expect(createToken(fixture.a, ["contacts:read"], [sites[0]!])).rejects.toMatchObject({ code: "23514" });
+    // A scope that needs no expiry, so only the allowlist rule can refuse it.
+    await expect(createToken(fixture.a, ["contacts:propose"], [sites[0]!])).rejects.toMatchObject({ code: "23514" });
     await expect(createToken(fixture.a, ["sites:publish"], sites)).rejects.toMatchObject({ code: "23514" });
     await expect(createToken(fixture.a, ["sites:publish"], sites.slice(0, 10))).resolves.toBeTruthy();
   });
@@ -90,6 +91,34 @@ describe("automation_token_sites (H-14)", () => {
     await expect(revoke()).rejects.toMatchObject({ code: "42501" });
     await expect(fixture.a.run((tx) => tx.query(
       "UPDATE automation_tokens SET revoked_at=NULL, revoked_by=NULL WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, tokenId]))).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("refuses the same late insert under the service role, and an insert in the transaction that revokes the token", async () => {
+    const one = await site(fixture.a);
+    const extra = await site(fixture.a);
+    const tokenId = await createToken(fixture.a, ["sites:publish"], [one]);
+    await expect(fixture.service((tx) => tx.query(
+      "INSERT INTO automation_token_sites (tenant_id,token_id,site_id) VALUES ($1,$2,$3)", [fixture.a.tenantId, tokenId, extra]))).rejects.toMatchObject({ code: "42501" });
+    await expect(fixture.a.run(async (tx) => {
+      await tx.query("UPDATE automation_tokens SET revoked_at=$3, revoked_by=$4 WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, tokenId, NOW, randomUUID()]);
+      await tx.query("INSERT INTO automation_token_sites (tenant_id,token_id,site_id) VALUES ($1,$2,$3)", [fixture.a.tenantId, tokenId, extra]);
+    })).rejects.toMatchObject({ code: "42501" });
+    expect(await rows(fixture.a, tokenId)).toEqual([one]);
+  });
+
+  it("gives sites:publish an expiry of 24 hours to 365 days, like a read scope (H-13)", async () => {
+    const one = await site(fixture.a);
+    const insert = (expires: string | null) => fixture.a.run(async (tx) => {
+      const tokenId = randomUUID();
+      await tx.query(
+        `INSERT INTO automation_tokens (tenant_id,id,name,scopes,created_by,created_at,expires_at)
+         VALUES ($1,$2,'T','{sites:publish}',$3,$4,$5)`, [fixture.a.tenantId, tokenId, randomUUID(), NOW, expires]);
+      await tx.query("INSERT INTO automation_token_sites (tenant_id,token_id,site_id) VALUES ($1,$2,$3)", [fixture.a.tenantId, tokenId, one]);
+    });
+    await expect(insert(null)).rejects.toMatchObject({ code: "23514" });
+    await expect(insert("2026-11-11T20:00:00.000Z")).rejects.toMatchObject({ code: "23514" });
+    await expect(insert("2028-01-01T00:00:00.000Z")).rejects.toMatchObject({ code: "23514" });
+    await expect(insert("2026-12-11T12:00:00.000Z")).resolves.toBeUndefined();
   });
 
   it("refuses a site row for a token another open transaction is creating", async () => {
