@@ -58,6 +58,7 @@ import { siteRoutes } from "./routes/sites.js";
 import { setupRoutes } from "./routes/setup.js";
 import { sourceRoutes } from "./routes/sources.js";
 import { MCP_PATH, mcpRoutes } from "./mcp/routes.js";
+import { AUTOMATION_SITES_PREFIX, automationSiteRoutes } from "./routes/automation-sites.js";
 import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public/activepieces.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
@@ -317,6 +318,14 @@ export function createApp(deps: AppDependencies) {
       // The usage write runs on the raw database, off the request's deadline (H-8).
       usage: { db: deps.db, clock: deps.clock },
       ...(deps.onError ? { report: deps.onError } : {}),
+    }, requestEdge));
+  }
+  // hub-access.md H-15: the site routes for a `sites:publish` token; they need the automation key and the site store.
+  if (deps.activepieces && deps.sites) {
+    app.use(`${AUTOMATION_SITES_PREFIX}/*`, deadline);
+    app.route(AUTOMATION_SITES_PREFIX, automationSiteRoutes({
+      keySecrets: deps.activepieces.keySecrets,
+      limiter: createPostgresRateLimiter(deps.db, deps.clock),
     }, requestEdge));
   }
 

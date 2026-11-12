@@ -314,7 +314,7 @@ describe("connections: attempts name a member of their tenant (C-7)", () => {
 });
 
 describe("connections: scopes constraint (C-16)", () => {
-  it("accepts connections:read with an expiry and ten scopes, and refuses it without one", async () => {
+  it("accepts connections:read with an expiry and ten scopes (the cap is eleven since sites:publish), and refuses it without one", async () => {
     const scopes = ["contacts:propose", "deals:propose", "bookings:propose", "contacts:read", "deals:read", "bookings:read", "inbox:read", "results:read", "business:read", "connections:read"];
     const token = (scopeList: string[], expires: string | null) => fixture.service((tx) => tx.query(
       `INSERT INTO automation_tokens (tenant_id,id,name,scopes,created_by,created_at,expires_at)
@@ -323,7 +323,7 @@ describe("connections: scopes constraint (C-16)", () => {
     await expect(token(["connections:read"], null)).rejects.toMatchObject({ code: "23514", constraint: "automation_tokens_read_expiry" });
     await token(["connections:read"], "2026-12-06T12:00:00.000Z");
     await token(scopes, "2026-12-06T12:00:00.000Z");
-    await expect(token([...scopes, "contacts:read"], "2026-12-06T12:00:00.000Z")).rejects.toMatchObject({ code: "23514", constraint: "automation_tokens_scopes_size" });
+    await expect(token([...scopes, "contacts:read", "deals:read"], "2026-12-06T12:00:00.000Z")).rejects.toMatchObject({ code: "23514", constraint: "automation_tokens_scopes_size" });
   });
 });
 

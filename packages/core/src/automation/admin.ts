@@ -181,8 +181,10 @@ export function createAutomationAdmin(deps: EdgeDependencies, config: Automation
     async createToken(body: unknown, key: unknown): Promise<AutomationTokenWithSecret> {
       const request = parseInput(createAutomationTokenRequestSchema, body);
       const { id, ...rest } = envelope(key, "automation_token");
+      // A token without sites sends the payload it always sent, so a retry of a creation stored before revision 4 still matches.
+      const { siteIds, ...legacy } = request;
       const token = parseInput(automationTokenSchema,
-        (await run({ actionType: CREATE_TOKEN_ACTION, ...rest, payload: { tokenId: id, ...request } })).result, "result");
+        (await run({ actionType: CREATE_TOKEN_ACTION, ...rest, payload: { tokenId: id, ...legacy, ...(siteIds.length > 0 ? { siteIds } : {}) } })).result, "result");
       return parseInput(automationTokenWithSecretSchema, {
         token, secret: signAutomationToken(config.keySecrets.current, { tenantId, tokenId: token.id }),
       }, "result");

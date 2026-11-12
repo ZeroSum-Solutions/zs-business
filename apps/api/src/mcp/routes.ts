@@ -76,7 +76,7 @@ interface ToolOutcome { reads: number; proposals: number; refused: boolean }
  * reading; a missing or false one cannot get past, because the bytes actually read are counted.
  * Returns null when the body is too large.
  */
-async function readBody(request: Request, limit: number): Promise<string | null> {
+export async function readBody(request: Request, limit: number): Promise<string | null> {
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) return null;
   const reader = request.body?.getReader();
