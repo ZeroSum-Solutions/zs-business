@@ -1,6 +1,6 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 10 (2026-11-10; revision 5 text kept below). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 12 (2026-11-11; revision 5 text kept below). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
@@ -25,12 +25,22 @@ reads it as an opaque colour and every text colour still reaches 4.5:1 (it deriv
 or drops the token), rejects font keywords, honours `header=0` only inside a frame and keeps the
 business name visible, keeps the 480 px frame floor unless the host opts into a smaller one, and
 has `embed.js` mount again when the host replaces the widget's children.
+Revision 12 (2026-11-11, link-page sign-up): a second anonymous write, `linkpage.signup`, for pages
+a creator publishes as a Hub site. P-1 allows it, authorized by a signed `zsl1_` page key bound to
+one tenant and one site (P-17). P-14 keeps the booker same-origin; this one route is cross-origin,
+with an Origin check and no credentials (P-18). P-19 fixes the body, the order of checks and the
+reply. P-20 fixes the writes, P-21 the monthly cap (over the cap a sign-up is stored and its
+delivery held, never dropped), P-22 the tests and P-23 the hand-off to the delivery contract.
+P-13 gains the storage.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
 website book a published calendar of one business. The hosted booking page and the
 embeddable widget (M3b) are the only clients. The owner reviews the result in the
 dashboard. Messaging, payments, cancellation and outside calendars are out of scope.
+Revision 12 adds one more public write, `linkpage.signup` (P-17 to P-22): a visitor on a
+creator's hosted link page joins that creator's email list. Delivery to an email provider
+(Klaviyo) is out of scope here; this file ends at the stored sign-up, its cap state and its outbox row. P-23 lists what the delivery contract adds and where it differs from the Klaviyo slice spec.
 
 ## Evidence and decisions
 
@@ -41,6 +51,11 @@ dashboard. Messaging, payments, cancellation and outside calendars are out of sc
   constraint, one transaction with action and outbox).
 - Identity and consent: `crm.md` C-1..C-11 (tenant-scoped identity, normalization,
   consent evidence, import preservation).
+- Revision 12 plans (`2026-11-11-mishmash-hosting-architecture.md`, sections "Where sign-ups go
+  (hosted pages only)" and "Per-creator free-tier cap", build-order step 4, decisions 6, 7, 8 and
+  13; `2026-11-11-mishmash-creator-identity-spec.md`, D-5, D-8, A-5 and cases X-19 to X-24).
+  Where the hosting plan says `Access-Control-Allow-Origin: *`, this revision does not: the
+  identity spec (A-5) and the review of this revision require the site's own hosts (P-18).
 - Booker behaviour reference: cal.diy Booker (MIT), studied for behaviour only: steps
   (pick a date, pick a time, enter details, confirm, success), refetch of slots when the
   page regains focus and every few minutes, and a "time no longer available" state when
@@ -48,9 +63,12 @@ dashboard. Messaging, payments, cancellation and outside calendars are out of sc
 
 ## Numbered rules
 
-**P-1. One public action.** The only anonymous write that needs no earlier proof is `booking.public_request`
+**P-1. Two public actions.** The only anonymous writes that need no earlier proof are `booking.public_request`
 (revision 8: the three link-authorized actions of `booking-self-service.md` also run anonymously, each only for the one
-booking its signed token names). It runs
+booking its signed token names) and, since revision 12, `linkpage.signup` (P-17). The signed page key
+`zsl1_` authorizes `linkpage.signup` for one site of one tenant, as `zsb1_` authorizes the booking request
+for one page. The keys are not interchangeable: a booking session runs only the booking actions and a
+sign-up session runs only `linkpage.signup`. Each runs
 through the shared dispatcher (`createDispatcher`) like every other action: idempotency
 key, approval binding, state plus action plus outbox in one transaction. No other
 action is reachable without an owner principal.
@@ -64,7 +82,8 @@ scoped to that tenant. A previous secret (`PUBLIC_BOOKING_KEY_PREVIOUS_SECRET`) 
 verifies during rotation; only the current one signs. Request bodies carry no tenant ID;
 a body field named `tenantId` (or any unknown field) is rejected by the strict schema.
 Hostname-based resolution (a client domain mapped to a tenant) arrives with M4 site
-publishing and will resolve to the same server-built principal.
+publishing and will resolve to the same server-built principal. The sign-up key `zsl1_` follows
+this rule with its own prefix, secret and tag label (P-17).
 
 **P-3. Server-built principal.** The public route has no auth principal. After P-2 the
 server builds one: tenant = the key's tenant, actor = `derivedId(tenantId,
@@ -181,7 +200,8 @@ past trusted hops, and only when the socket peer is one of them. Addresses are
 canonicalized (port, brackets and zone dropped; IPv4-mapped IPv6 as IPv4), and IPv6
 addresses share a bucket per /64. `TRUST_PROXY=1` is refused at startup. Bodies over 8 KiB answer 413. A non-empty honeypot answers 400.
 `BotCheck` is an injected hook `(input: { token, address }) => Promise<boolean>`; the
-default accepts every request, and a `false` answers 400. The limiter is a port
+default accepts every request, and a `false` answers 400. The sign-up route (P-19) uses the same
+limiter, address source and 429 and 503 answers with its own bucket names and no `BotCheck`. The limiter is a port
 (`RateLimiter` in `apps/api/src/public/limiter.ts`), so another shared store can replace
 Postgres behind the same interface.
 
@@ -224,9 +244,23 @@ policy, and tenant-qualified FKs. Runtime may read pages, insert intake items an
 consent, and update only `status`, `contact_id`, `reviewed_at`, `reviewed_by` on intake
 items. Pages are provisioned by service-role setup until a page-editing action ships.
 
+Revision 12 adds, in a migration `*_linkpage_signups.sql`:
+
+| Change | Columns and constraints |
+|---|---|
+| `intake_items` (altered) | `kind` also allows `linkpage_signup` (now `intake_items_kind`, `supabase/migrations/20261018200000_public_intake.sql:96`); `channel` also allows `linkpage` (`:99`); new nullable `site_id` with a tenant-qualified FK to `sites`; `page_id` (`:100`) and `submitted_name` (`:101`) become nullable, with exact checks by kind: for `booking_request`, `page_id`, `submitted_name` and channel `website` are set and `site_id`, `attribution` and `cap_state` are null; for `linkpage_signup`, `site_id` and channel `linkpage` are set and `page_id` and `submitted_name` are null; new nullable `cap_state` (`counted` or `held`), set exactly when `kind='linkpage_signup'`; new nullable `attribution` jsonb (P-19), set only for that kind; a covering index for the `site_id` FK. The runtime role inserts `cap_state` and cannot update it (it holds UPDATE only on `status`, `contact_id`, `reviewed_at`, `reviewed_by`); the service role may update `cap_state` (P-23). |
+| `linkpage_disclosures` (new) | `tenant_id`, `site_id`, `version` (1..50 characters), `seq` (integer, 1 for the first version, +1 each time, unique per site), `text` (1..2000 characters), `created_at`; PK `(tenant_id,site_id,version)`; unique `(tenant_id,site_id,seq)`; FK to `sites` with the tenant; append-only like `booking_page_disclosures` (the service role and the runtime role hold SELECT and INSERT under the tenant policy, because the publish action runs as the runtime role in one transaction with the release insert (`packages/core/src/sites/handlers.ts:102`); a trigger refuses UPDATE, DELETE and TRUNCATE for every role). A version that no release names is never shown, so an insert alone changes no page. `seq` (at least 1, checked) orders a site's versions for the publish step. Which version a page shows is set by the release (next row), not by `seq`. |
+| `site_releases` (altered) | new nullable `disclosure_version`, set when a `linkpage` release is inserted and never changed (releases are immutable). It is the version of `linkpage_disclosures` that this release's page shows; null for other kinds. A tenant-qualified FK `(tenant_id,site_id,disclosure_version)` points to `linkpage_disclosures`, so a publish appends the version before the release row that names it. A check ties it to the kind: `disclosure_version` is set exactly when `spec->>'kind'` is `linkpage`. Both new FKs have a full covering index (`packages/db/test/rls-initplan.test.ts`). |
+| `linkpage_signup_usage` (new) | `tenant_id`, `month` (date, the first day of a UTC calendar month), `counted` (integer, at least 0); a check that `month` is the first day of a month; PK `(tenant_id,month)`. The runtime role holds SELECT, INSERT and UPDATE(`counted`) only, all under the tenant policy: the upsert of P-21 reads `counted` in its condition and returns it. |
+
+Both new tables have `tenant_id`, a tenant FK, forced RLS with the shared `tenant_scope` policy and a
+two-tenant denial test under `zs_runtime` (AGENTS.md, "Hard rules"). The Sites contract specifies the publish
+step that appends a version and sets `disclosure_version` on the release; this file reads the version of the live release (P-19 step 8).
+
 **P-14. Hosted page and widget.** The API serves `GET /book/:key` (HTML) and its static
-script and style, and `GET /embed.js`. Same origin as the public routes, so no CORS and
-no cookies. The page CSP allows only its own scripts, styles and API calls, and allows
+script and style, and `GET /embed.js`. Same origin as the public booking routes, so no CORS and
+no cookies. Revision 12: this holds for the booker and `/public/v1/pages/*`. The one cross-origin
+route is the link-page sign-up (P-18), and it also sets and reads no cookie. The page CSP allows only its own scripts, styles and API calls, and allows
 framing by any site (`frame-ancestors *`) because embedding is the point. The widget is a
 script tag that turns each `[data-zs-booking]` element into an iframe of the hosted page
 and resizes it from validated `postMessage` events; a plain iframe snippet works too.
@@ -248,7 +282,7 @@ and a same-key request whose wait for the idempotency key lock times out answers
 (`in_progress`), because the earlier request may still commit. The booker keeps the attempt
 on both.
 
-**P-15. Tests.** Real Postgres under `zs_runtime`: forged keys, forged and foreign
+**P-15. Tests.** The sign-up route has its own table (P-22). For the booking route, real Postgres under `zs_runtime`: forged keys, forged and foreign
 resource IDs, an unknown body `tenantId`, enumeration (identical replies for unknown,
 known-by-email, known-by-phone and split matches), a victim's email and phone with ticked
 consent (contact row and denial unchanged, `possible_match` created), concurrent
@@ -335,6 +369,281 @@ looks exactly as before revision 10.
   slot refresh and a click-only step change, remounting after `replaceChildren()`, the 480 px
   floor and its opt-in, the theme applying, no inner scrolling, shrinking back, and 44 px
   targets.
+
+**P-17. Link-page sign-up: route, key and site.** `POST /public/v1/linkpages/:key/signups` runs
+the action `linkpage.signup` through the shared dispatcher (P-1), and `OPTIONS` on the same path
+answers the browser preflight (P-18).
+- **Key.** `zsl1_` followed by 64 base64url characters that encode the tenant UUID (16 bytes), the
+  site UUID (16 bytes) and a 16-byte HMAC-SHA-256 tag over `zsl1:<tenantId>:<siteId>`, with the server
+  secret `PUBLIC_LINKPAGE_KEY_SECRET`. `PUBLIC_LINKPAGE_KEY_PREVIOUS_SECRET` still verifies during
+  rotation; only the current secret signs; a previous secret without a current one is refused at startup.
+  Verification is constant time, checks every secret and needs no database, as for `zsb1_`
+  (`packages/core/src/intake/keys.ts:6-8`, `:36-50`; `apps/api/src/config.ts:424-426`).
+  With `PUBLIC_LINKPAGE_KEY_SECRET` unset the route is not mounted, as the booking routes are not
+  without their secret (`apps/api/src/app.ts:296-298`, `apps/api/src/main.ts:14`).
+- **Not interchangeable (domain separation).** The prefix, the secret and the tag label all differ
+  from `zsb1_`. A `zsb1_` key never verifies on the sign-up route and a `zsl1_` key never verifies on
+  `/public/v1/pages/*` (the booking key pattern accepts only `zsb1_`, `keys.ts:8`, `:37`). Both answer
+  404 with the same body as any forged key.
+- **Principal.** P-3 applies: the tenant is the key's tenant, the actor is the fixed per-tenant
+  public actor, the server approves exactly the command it built, and nothing comes from headers,
+  cookies or the body. The sign-up session authorizes `linkpage.signup` and nothing else, the way
+  the booking session authorizes its two actions (`packages/core/src/edge/public-session.ts:34-36`).
+- **Site.** The key names a site. The request is served only while the site (a) exists in the key's
+  tenant, (b) has a live release (a `site_pointers` row, `supabase/migrations/20261020700000_site_releases.sql:52`)
+  and (c) that release's `spec` has `kind` `linkpage` (`site_releases.spec`, same file `:20`). Any other
+  case answers 404 with the one fixed body: forged key, key of another tenant's site, unknown site,
+  site never published, site of another kind. The pre-dispatch step reads only the hosts for the
+  Origin rule (P-19 step 6); the handler checks (a) to (c) inside the write transaction (as P-4),
+  after the replay lookup and the plan check (P-19 step 8). So a committed request whose site has
+  since been unpublished still gets its stored reply. Today the contract knows only the spec kind `plain`
+  (`packages/contracts/src/sites.ts:61`; `siteSpecSchema` accepts any object, so the service role can
+  still seed a `linkpage` release), so until the Mish compiler publishes the `linkpage` kind
+  (hosting step 3) or a release is seeded, every request answers 404. The action's `resolveTarget`
+  compares the tenant only and reads no site row, because the dispatcher runs it before the plan
+  check (`actions/dispatch.ts:182-212`); an unknown site is the handler's 404, not a 403 before the plan gate.
+- **Pages fallback.** A creator page on Cloudflare Pages (hosting doc, "Fallback") has no Hub release
+  and no attached host, so its sign-ups answer 403 or 404. The fallback needs the daemon to register
+  a site, a `linkpage` release and the `.pages.dev` host with the Hub first. That belongs to the
+  Sites contract; until then fallback pages cannot take sign-ups (open decision, P-23).
+- **Preview never takes sign-ups.** Only a live release of a published site is served, and only
+  from an attached host (P-18). A preview page, which the local daemon or the Hub preview route
+  renders without storing a release, has no such host, so its sign-up call answers 403. The Hub compiler gives a preview build no live sign-up endpoint; that
+  belongs to the Sites contract.
+- **Read-only plans.** `linkpage.signup` is not in `READ_ONLY_ALLOWED_ACTIONS`
+  (`packages/core/src/billing/plan-gate.ts:38`), so a read-only business answers 409 `plan_read_only`
+  from the dispatcher's plan check (`plan-gate.ts:79-80`, run at `actions/dispatch.ts:212`), as
+  `booking.public_request` does today.
+
+**P-18. Browser calls: CORS without credentials.** The sign-up route is the one public route called
+from another origin: the page is served from the creator's host (for example `<slug>.<links domain>`)
+and the API from its own host.
+- **Allowed origins.** An `Origin` header must be exactly `https://<host>` (no path, no port, host
+  compared in lower case) for a host attached to the key's site in `site_hosts` (`site_releases.sql:83`,
+  read by the runtime role). Every other `Origin` value answers 403 `Forbidden`, writes nothing and
+  carries no CORS header: another tenant's host, a host of the same tenant's other site, `null`,
+  `http:` origins, a loopback address (this is the preview case) and a host with a port. A request
+  with no `Origin` header (a server-side caller) is not refused by this rule. The Origin check
+  is a guard against other websites using a key that sits in public page source. It is not
+  authentication: a script that sets its own header passes it, and the limiter (P-10) and the cap
+  (P-21) bound the harm. A custom domain is allowed once it is attached to the site.
+- **Response headers.** Every answer made after the Origin check passed (P-19 step 6: 201, 404, 409, 422, and a 503 from
+  the action) carries `Access-Control-Allow-Origin` set to that exact origin and `Vary: Origin`.
+  A 400 or 413 comes earlier and carries no CORS header, so the page script checks the email and
+  the tick box before it sends; a browser shows these two only for a bug or a bot. The route never
+  sends `*`. It never sends `Access-Control-Allow-Credentials`,
+  reads no cookie and sets none; the page script calls `fetch` with `credentials: "omit"`. A
+  429 from the limiter or a 503 from the deadline can come before the Origin is checked and then
+  carries no CORS header; the page treats it like a network error and retries with the same
+  `Idempotency-Key` (P-19).
+- **Preflight.** `OPTIONS /public/v1/linkpages/:key/signups` runs, in order: the key tag
+  check (404, no CORS headers), the limiter with the address read bucket (P-19), then the host
+  check above (403 for a refused `Origin`). An allowed `Origin` gets 204 with
+  `Access-Control-Allow-Origin: <origin>`, `Vary: Origin`, `Access-Control-Allow-Methods: POST`,
+  `Access-Control-Allow-Headers: Content-Type, Idempotency-Key` and `Access-Control-Max-Age: 600`.
+  No other request header is allowed, and `Authorization` is not.
+- **Global CORS middleware.** The API's global `cors()` (`apps/api/src/app.ts:213-220`) answers
+  every path from a fixed allowlist of dashboard origins and allows `Authorization`. It must not run
+  for `/public/v1/linkpages/*`: the route answers its own preflight and headers, and the global
+  allowlist adds nothing there.
+- **Responses are not cached.** `Cache-Control: no-store`, as on every public route
+  (`apps/api/src/public/routes.ts:115`).
+
+**P-19. Sign-up request, order of checks and reply.** JSON, at most 4 KiB (413 over), header
+`Idempotency-Key`. The body is a strict object. The server reads nothing else.
+
+| Field | Rule |
+|---|---|
+| `email` | required, normalized like C-2 |
+| `consent` | `{ email: boolean }`, strict: any other key, `sms` included, answers 400 |
+| `disclosureVersion` | 1..50 characters of valid Postgres text (the existing `postgresText` check): the version the page showed |
+| `website` | honeypot, must be the empty string |
+| `attribution` | optional strict object of optional trimmed strings: `source` and `medium` up to 64 characters, `campaign` up to 100, `referrerHost` a bare host name up to 253 (Klaviyo slice spec D4). Informational only: stored as sent after validation, never used for authorization, limits or routing |
+
+- **Rejected fields.** `tenantId` and every unknown field answer 400, as in P-2. There is no
+  `botToken` and no `BotCheck` call on this route.
+- **Decision on `page` (revision 12): it is not a field.** Reasons: the key already names the one
+  site, so a `page` value adds nothing the server can trust; the body is strict, so every extra
+  field is a way to store visitor-chosen text; and a link page has one address, so the value would
+  always be the same path. The same holds for `kind`. The page script in the plan draft
+  (`mish` branch `feat/link-pages`, `packages/linkpage/src/render.ts:41-44`, read-only) sends
+  `kind` and `page`; it must send only the fields above (`attribution` is optional), `consent.email` and the
+  `Idempotency-Key` header. Until it does, its sign-ups answer 400.
+- **`Idempotency-Key`.** A UUID (lower-cased), required: missing or malformed answers 400. The
+  page script mints one per attempt and reuses it on retry. The stored key is
+  `linkpage:<siteId>:<uuid>`, so it never collides with an owner key or a `public:<pageId>:…` booking
+  key (P-5). The server reserves the prefix `linkpage:` in `SERVER_IDEMPOTENCY_PREFIXES` (`packages/contracts/src/http.ts:27`), so an owner action cannot take it first. The intake item and contact IDs derive from the tenant and the stored key
+  (`derivedId`), so a retry rebuilds the identical command. The same key and body again returns
+  the same reply, writes nothing and takes no cap slot. The same key with another valid body answers
+  409 `idempotency_key_reused` (`actions/dispatch.ts:171-176`); an alternate body that fails step 5 or
+  step 7 is refused there first (400 or 422), before the replay lookup. A same-key request whose wait for the
+  key lock times out answers 503 `in_progress` (`dispatch.ts:157-159`, P-14).
+- **Order of checks.** Each step runs only when the earlier ones passed.
+  1. Key tag, constant time, before any database work. Fails: 404. A forged key charges no
+     limiter bucket, because the check costs one HMAC. This differs on purpose from the booking
+     routes, which charge the address bucket before they answer 404 for a forged key
+     (`routes.ts:63-78`).
+  2. P-10 limiter, before the body is read. Buckets (own names, so sign-ups and bookings do not
+     use each other's allowance; same numbers as P-10): per address, 10 writes per 10 minutes
+     (`linkpage-address-write:<address>`, and `linkpage-address-read:<address>` for the
+     preflight, 300 per 10 minutes); per tenant, 200 writes per hour
+     (`linkpage-tenant-write:<tenantId>`). Refused: 429 `RateLimited` with `Retry-After`. Database
+     down: 503 with `Retry-After`.
+  3. Read the body: over 4 KiB is 413; not JSON, or not `application/json`, is 400
+     (`apps/api/src/routes/request.ts:5-13`).
+  4. Honeypot: a non-empty `website` answers 400 with the fixed `ValidationFailed` body and
+     no issue list, before the schema runs.
+  5. Strict schema and the `Idempotency-Key` header: 400.
+  6. Open the tenant scope and read the hosts attached to the key's site. Apply the `Origin` rule
+     of P-18: a refused `Origin` is 403, and nothing is written. This runs before the site's state
+     is read, so a refused origin gets the same 403 whether the site is live, unpublished or
+     unknown. It also runs on a replay (a lost reply is retried from the same page).
+  7. `consent.email` is `false`: 422 `consent_required`, nothing stored. (Decision: on this form the
+     only purpose is the list, and a stored sign-up with no consent has no use. The booking form
+     differs: an unticked box still books, P-8.) It is a `Refused(422)`, which keeps the code
+     `ValidationFailed` and names the reason (`packages/core/src/edge/errors.ts:195`). It follows
+     the Origin check so the page can read it.
+  8. The action, in one tenant transaction (P-20), in the dispatcher's order: replay lookup (a
+     committed request answers its stored reply even if the site has changed since), plan check,
+     the site rule of P-17 (a missing, unpublished or wrong-kind site is 404), the disclosure check
+     (`disclosureVersion` is not the `disclosure_version` of the site's live release: 409
+     `disclosure_changed`, nothing written), then the writes. The live release is the one the
+     site's pointer names, so after a rollback the version of the release that is live again is the
+     one accepted.
+- **Reply.** Every accepted request answers `201 { "ok": true }`: a new person, a known person
+  (P-6, P-7), a replay and a sign-up held over the cap (P-21) look the same. The reply, status
+  and headers never show whether the email matched a contact or whether the cap held the
+  delivery. Errors depend only on the key, the site, the origin, the body shape and the limits.
+  Errors use the shared body `{ error: { code, message, details } }`
+  (`packages/core/src/edge/errors.ts:66-68`).
+
+**P-20. What a sign-up writes.** One transaction (X-21), with the tenant's rules from P-7 to P-9:
+- **Contact and intake item (P-7).** With the CRM identity locks held, as in P-7 (email only, no
+  phone): no contact has the email, so create a contact (no display name: `display_name` may be
+  null, `supabase/migrations/20261017170100_crm.sql:17`) and an intake item `linkpage_signup`,
+  status `new_contact`, `site_id` set, `page_id` and `submitted_name` null, channel `linkpage`. A
+  contact has the email, so change no contact row and no consent row, and create an intake
+  item with status `possible_match` holding the matched contact IDs. The owner links or
+  rejects it as in P-12. A uniqueness race is retried in a savepoint and becomes a
+  `possible_match`.
+- **Consent (P-8).** One `intake_item_consent` row: channel `email`, status `granted`, purpose
+  `marketing_updates`, the disclosure version of the site's live release, the exact text of that
+  version from `linkpage_disclosures`, source `linkpage:<siteId>`, the server's transaction time. For a
+  `new_contact` the consent is copied to the contact with source `intake:<intakeItemId>`. For a
+  `possible_match` nothing is written to the contact, and `intake.item.link` fills only channels
+  with no recorded evidence. The client sends no status, time, source or purpose. No address, user
+  agent or other device data is stored.
+- **Cap slot (P-21).** Taken in this transaction; the result sets `cap_state` on the intake item.
+- **Outbox.** One row, written with the action row by the dispatcher with its default event: type
+  `linkpage.signup`, payload `{ actionId, actionType, target, result }` (`packages/core/src/actions/dispatch.ts:232-235`).
+  That keeps the event name the Klaviyo slice spec expects (D4 step 5) and carries only IDs and flags
+  (the stored result below, which includes `held`). A consumer reads the email and the consent from the
+  stored rows, never from the payload. Neither `linkpage.signup` nor `lead.created` is added to
+  `SOURCE_EVENT_TYPES` (`packages/core/src/automation/events.ts:19`), so no Activepieces
+  webhook sees a link-page sign-up (the worker scans only those types,
+  `packages/core/src/automation/worker.ts:139`). A webhook would bypass the cap. A consumer that delivers
+  to a provider picks the credential from the outbox row's own `tenant_id` and from no other source
+  (creator-identity plan, D-5), and never delivers a row whose result has `held: true`.
+- **Attribution.** The validated object is stored in `intake_items.attribution`. It holds no address,
+  user agent or other device data; `referrerHost` is a host name the page script read, not proof.
+- **Stored action result.** `{ intakeItemId, siteId, outcome, contactId, held }` (`outcome` is `new_contact` or `possible_match`). It never leaves
+  the server (P-6).
+- **Other readers of `intake_items`.** A sign-up is not a booking request, so each reader that
+  assumes one needs a rule in the code change, with a test: the follow-up agent's candidate
+  query takes every `new_contact` or `linked` item with a contact
+  (`packages/core/src/agents/candidates.ts:29-33`, `:51`, `:98`), so it adds
+  `kind='booking_request'` to the root query and to every check that reads `intake_items` to decide
+  whether a later request replaced the inquiry (`:33`, `:51`, `:67`, `:98`); without it a sign-up
+  linked later would suppress a real booking follow-up; the Inbox read builds request threads from every item
+  (`packages/core/src/reads/inbox.ts:94`, `:113`, `:137`, `:214`), so a sign-up is no request
+  thread; the owner review list reads `page_id` and `submitted_name`
+  (`packages/core/src/reads/intake.ts:44-50`) and its record fixes `kind` to `booking_request`
+  (`packages/contracts/src/intake.ts:135`, `reads/intake.ts:80`). The record becomes a union on
+  `kind`: a `linkpage_signup` record carries `siteId`, no page, no name, `capState` (so `held` is
+  visible) and no booking, and a `possible_match` sign-up stays in the list. List, link and reject
+  work for both kinds. The Home results read counts a contact with a `new_contact` intake item as a website lead
+  (`packages/core/src/reads/home.ts:36`). Decision: a sign-up that creates a contact is a website lead,
+  so that query does not change (S-13 asserts it). Readers that join through `bookings.intake_item_id` never reach a sign-up.
+
+**P-21. Monthly sign-up cap.** The free tier limits sign-ups a creator can deliver, not page views.
+- **Counter.** `linkpage_signup_usage` (P-13), one row per tenant and UTC calendar month, month
+  taken from the injected clock. In the sign-up transaction one statement takes a slot:
+  `INSERT … (tenant_id, month, 1) ON CONFLICT (tenant_id, month) DO UPDATE SET counted =
+  counted + 1 WHERE counted < $limit RETURNING counted`. A returned row means counted
+  (`cap_state='counted'`); no row means over the cap (`cap_state='held'`). For a tenant with no
+  limit the `WHERE` is left out and the counter still counts. The row lock serializes concurrent
+  sign-ups, so exactly `limit` are counted in a month. A rolled-back transaction gives its slot
+  back; a replay (P-19) takes none.
+- **Limit.** An injected resolver `(tenantId) => limit | null`, where `limit` is an integer of at least 1 (the setting is checked at startup and a smaller value stops the server; with `$limit` 0 the first insert would still count one) (the core takes config as an
+  argument; AGENTS.md, "Hard rules"). The server setting `LINKPAGE_FREE_SIGNUP_LIMIT`, default 250, is
+  the value the plans contract's "Creator Free" rule (hosting step 5) hands to it for a Creator Free
+  tenant. Every other tenant has no limit: a comped tenant keeps "no plan limits"
+  (`docs/requirements/plans.md:104-110`), and the counter still counts for it. Until that rule
+  lands, the resolver returns null for every tenant, and no outside creator is provisioned before
+  it does. The plans contract may also say which sign-ups do not count (for example a duplicate
+  address); until it does, every accepted sign-up counts, whether the person is new or known (P-6).
+- **Over the cap.** The sign-up is stored in full with its consent and shows in the owner's
+  Customers and intake review like any other. Its `cap_state` is `held` and the outbox event has
+  `held: true`; a consumer must not deliver a held sign-up. The visitor gets the same `201 { "ok": true }`.
+  Releasing held sign-ups (a higher limit, a new month) is a service-role job, specified with the
+  delivery contract; it takes a slot in the month it runs.
+- **Abuse limit stays separate.** The cap never answers 429. The only 429 is the P-10 limiter
+  (P-19 step 2).
+
+**P-22. Tests (sign-up).** Real Postgres under `zs_runtime`, two tenants A and B, each with a link-page
+site, an attached host and a live release whose `spec.kind` is `linkpage` (inserted by the service role
+until the compiler ships). Files: `apps/api/test/linkpage-signup.test.ts` and
+`packages/core/test/linkpage-keys.test.ts`. "Unchanged" means row counts of contacts, consent rows,
+intake items, outbox rows and the usage counter. X-numbers are the cases of the creator-identity plan.
+
+| ID | Plan case | Case | Expected |
+|---|---|---|---|
+| S-1 | X-19 | Key with A's tenant and site UUIDs and a tag made for B; a key with a flipped character; a wrong length; a key signed with an unknown secret | 404, same body for all; a counting database double sees zero statements and no limiter charge; nothing written |
+| S-2 | X-20 | A's valid key, body with `tenantId: B`; again with `page`, `kind`, `consent.sms`, an extra key, an unknown key inside `attribution`, an oversize `attribution.source`, a NUL in `disclosureVersion` | 400 each; B and A unchanged |
+| S-3 | X-21 | A's valid key and host origin, good body | 201 `{ok:true}`; A has one contact, one consent row (version and text of A's site), one intake item and one `linkpage.signup` outbox row, the attribution stored as sent; B's contacts, intake items, outbox rows and counter unchanged. A fault injected after the contact insert leaves no contact, consent, intake, outbox or action row and no counter change. |
+| S-4 | X-22 | A `zsb1_` key on the sign-up route; A's `zsl1_` key on `/public/v1/pages/:key` and on the booking route | 404 each, same body; nothing written |
+| S-5 | X-23 | A's valid key with `Origin: https://<B host>`; also `null`, `http://<A host>`, `https://<A host>:8443`, `http://127.0.0.1:3000`, `https://<host of another site of A>` | 403 each, no CORS headers, nothing written. The same 403 for an unpublished site and for an unknown site, before any site state is read. A's own host: 201 with `Access-Control-Allow-Origin` equal to it, `Vary: Origin` and no `Allow-Credentials`; a 409 and a 422 from that host carry the same header, a 400 does not. No `Origin`: 201. |
+| S-6 | X-24 | Limit set to 2 for the test. A sends 3 sign-ups, then B sends 1 | A's third: 201 same body, stored in full with consent, `cap_state='held'`, outbox `held:true`, counter stays 2, visible to the owner. B's: `counted`, B's counter 1. A month later (injected clock) A's next sign-up is counted. A tenant with no limit is never held, and its counter still counts. "B's sign-up is delivered normally" means, at this contract, counted and not held, with an unheld outbox row; S-21 adds the delivery-port half. |
+| S-7 | P-19 step 2 | 11 requests from one address within 10 minutes; separately, 201 sign-ups past the limit of S-6, sent with the limiter allowances raised in the fixture (the 200 per hour tenant bucket would otherwise answer 429 first) | The 11th: 429 with `Retry-After`; a booking from the same address still works (own buckets). Past the cap: never 429. |
+| S-8 | P-19 | Replay with the same key and body, also after the site was unpublished; same key with another body; missing, malformed key; two concurrent requests with one key; 20 concurrent requests with the counter at limit minus 1, from 20 addresses or with the address allowance raised so every request is admitted | Same 201 each time, one set of rows, one slot; 409 `idempotency_key_reused`; 400; one set of rows; exactly one `counted` |
+| S-9 | P-19 steps 4, 7, 8 | Non-empty `website` with an otherwise invalid body; `consent.email: false` from an allowed host; a `disclosureVersion` that is not the live release's | 400 with the fixed body and no issue list; 422 `consent_required`; 409 `disclosure_changed`; nothing written each time |
+| S-10 | P-6, P-7 | A new email, a known email with a consenting contact, a known email whose contact denied email | Same status, headers and body. The known ones create a `possible_match` and change no contact and no consent row. |
+| S-11 | P-17 | Site unpublished (no pointer); site whose live release is `plain`; a site UUID of B with A's tenant in a validly signed key | 404, same body as S-1 |
+| S-12 | P-18 | `OPTIONS` from A's host; from B's host; with a forged key; request header list including `Authorization` | 204 with `Allow-Origin`, `Allow-Methods: POST`, `Allow-Headers: Content-Type, Idempotency-Key`, `Max-Age: 600`; 403 without CORS headers; 404; `Authorization` not allowed. The global dashboard allowlist does not answer this path. |
+| S-13 | P-20 | A sign-up with a contact for the same tenant; also an earlier booking request and a later sign-up for the same contact, then the sign-up is linked | Never a follow-up candidate; the booking request stays a candidate after the link; never an Inbox request thread; a `possible_match` sign-up shows in the owner list (union record; list, link and reject work for both kinds); no Activepieces delivery is queued; Home counts the sign-up's new contact as a website lead |
+| S-14 | P-17 | Tenant with a read-only plan | 409 `plan_read_only`; nothing written |
+| S-15 | P-17 | Key signed with the previous secret after rotation; with the current secret | 201 each; only the current secret signs new keys |
+| S-16 | P-13, P-21 | `linkpage_disclosures` and `linkpage_signup_usage`: A's runtime session reads and updates B's rows; UPDATE, DELETE and TRUNCATE on `linkpage_disclosures`. The exact P-21 upsert, run as the runtime role | The upsert returns a row under the limit and no row at it. Reads and updates of B's rows from A: 0 rows (tenant policy). UPDATE, DELETE and TRUNCATE on `linkpage_disclosures`: refused by the trigger for every role; INSERT of A's own version by the runtime role: allowed. |
+| S-17 | P-19 step 8 | A site's disclosure changes (version 2), then release 1 is made live again by rollback | A sign-up with version 1 is 201; version 2 is 409 `disclosure_changed`; the consent row holds version 1 and its text |
+| S-18 | P-19 step 8 | A request is committed, the response is lost, the site is unpublished, the same request is retried | The stored 201; nothing new written |
+| S-19 | P-19 step 3, P-18 | A 5 KiB body; a body with another content type; malformed JSON; an injected handler fault after the Origin check | 413; 400; 400, each with `Cache-Control: no-store`, no CORS header, nothing written. The fault answers 503 with `Access-Control-Allow-Origin` (the deadline path of `app.ts:433` is the one place `no-store` is added by the error handler). |
+| S-20 | P-19 | An owner action (member session) with `Idempotency-Key` `linkpage:<siteId>:<uuid>` | 400, the reserved-prefix refusal of `idempotencyKeySchema` |
+| S-21 | X-24, P-20 | A delivery-port double holds distinct credentials for A and B. A's sign-up is held, B's is counted | The port is called for B's row with B's credential and never for A's held row. This case runs when the delivery contract adds the port. |
+
+**P-23. Hand-off to the delivery contract and differences from the Klaviyo slice spec.** This file
+ends at the stored sign-up, its `cap_state` and its outbox row. The delivery contract (Klaviyo slice
+spec D4, D6, D7; build steps K3 to K5) extends this transaction and owns the rest. Where this file
+and that spec differ, this is the decision, each open for Devin:
+1. **Delivery row.** Any `klaviyo_deliveries` row, `delivery_state` and the duplicate and
+   `no_destination` outcomes are written inside the sign-up transaction (P-20), never by a later
+   scan, so one place decides the cap. The delivery contract adds those steps after the consent row
+   and moves the P-21 slot statement after them.
+2. **What counts.** Until then every accepted sign-up takes a slot. The slice spec counts only a
+   sign-up that gets a delivery row, so a 30-day duplicate or a sign-up with no destination takes none.
+   That rule needs the delivery tables, so it lands with them; S-6 tests the base rule.
+3. **Release and expiry of held sign-ups.** A held sign-up keeps `cap_state='held'` and its outbox row
+   is never delivered. A release (a higher limit or a new month) is a service-role job: it moves
+   the item to `counted` (the service role may update `cap_state`), takes a slot in the month it
+   runs and writes its own outbox row, which a consumer delivers. A held sign-up older than 30
+   days expires and is never released (slice spec D7). The delivery contract names the release
+   event and tests it.
+4. **Error body.** This route uses the shared envelope `{ error: { code, message, details } }`. The
+   slice spec's string codes map to it: 404 `NotFound`; 400 `ValidationFailed`; 403 `Forbidden`;
+   409 `Conflict` with `details.reason` `disclosure_changed`; 422 `ValidationFailed` with
+   `details.reason` `consent_required`. The page script reads the status and `details.reason`.
+5. **Event name and body.** The outbox event is `linkpage.signup` (the slice spec's name). The body
+   adds the optional `attribution` object (slice spec D4, for sign-ups by source).
+6. **Pages fallback.** See P-17: no sign-ups from fallback pages until the Sites contract registers them.
 
 ## Theming the embed
 
