@@ -372,7 +372,7 @@ release live, and releases, their files and activations are append-only for ever
 Site actions cannot be proposed through `/v1/approvals` (`ValidationFailed`): an approved
 action runs its handler alone, and a publish needs the compile, upload and edge steps around it.
 
-A `zsap1_` token that holds `sites:publish` and names up to 10 sites (`automation_token_sites`)
+From revision 4 of the Hub contract (`sites:publish`), a `zsap1_` token that holds `sites:publish` and names up to 10 sites (`automation_token_sites`)
 reaches the same logic through `/automation/v1/sites/:siteId/...` (read, preview, publish,
 releases, activate, sync). It has no create or list route, a site it does not name answers 404,
 and the tenant, origin, click-counter base and sign-up target come from the token and the site
