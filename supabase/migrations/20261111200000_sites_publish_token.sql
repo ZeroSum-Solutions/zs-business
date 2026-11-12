@@ -91,10 +91,25 @@ CREATE CONSTRAINT TRIGGER automation_tokens_sites_check AFTER INSERT ON public.a
 CREATE CONSTRAINT TRIGGER automation_token_sites_check AFTER INSERT ON public.automation_token_sites
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.automation_token_sites_check();
 
+-- H-14: the creation-only check above reads the token row's writer (`xmin`), and a no-op update of
+-- the token would give a committed token a new writer. The only update the runtime role holds is
+-- `revoked_at, revoked_by`, and its only legitimate use is the one-way revoke: refuse any other use.
+CREATE FUNCTION public.automation_tokens_revoke_only() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL THEN
+    RAISE EXCEPTION 'A token can only be revoked once (update refused)'
+      USING ERRCODE = 'insufficient_privilege', SCHEMA = 'public', TABLE = TG_TABLE_NAME;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER automation_tokens_revoke_only BEFORE UPDATE OF revoked_at, revoked_by ON public.automation_tokens
+  FOR EACH ROW EXECUTE FUNCTION public.automation_tokens_revoke_only();
+
 DO $$
 DECLARE f text;
 BEGIN
-  FOREACH f IN ARRAY ARRAY['automation_token_sites_creation_only', 'automation_token_sites_check'] LOOP
+  FOREACH f IN ARRAY ARRAY['automation_token_sites_creation_only', 'automation_token_sites_check', 'automation_tokens_revoke_only'] LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION public.%I() FROM PUBLIC', f);
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='anon') THEN
       EXECUTE format('REVOKE ALL ON FUNCTION public.%I() FROM anon', f);
@@ -105,4 +120,5 @@ END $$;
 GRANT CREATE ON SCHEMA public TO zs_function_owner;
 ALTER FUNCTION public.automation_token_sites_creation_only() OWNER TO zs_function_owner;
 ALTER FUNCTION public.automation_token_sites_check() OWNER TO zs_function_owner;
+ALTER FUNCTION public.automation_tokens_revoke_only() OWNER TO zs_function_owner;
 REVOKE CREATE ON SCHEMA public FROM zs_function_owner;

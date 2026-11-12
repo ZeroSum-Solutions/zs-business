@@ -71,6 +71,27 @@ describe("automation_token_sites (H-14)", () => {
     expect(await rows(fixture.a, tokenId)).toEqual([one]);
   });
 
+  it("refuses to widen a committed token by re-writing its row first, and a token revokes once and stays revoked", async () => {
+    const one = await site(fixture.a);
+    const extra = await site(fixture.a);
+    const tokenId = await createToken(fixture.a, ["sites:publish"], [one]);
+    const insertExtra = (tx: Parameters<Parameters<Tenant["run"]>[0]>[0]) => tx.query(
+      "INSERT INTO automation_token_sites (tenant_id,token_id,site_id) VALUES ($1,$2,$3)", [fixture.a.tenantId, tokenId, extra]);
+    // A no-op update gives the row a new writer; the update itself is refused, so the insert never gets there.
+    await expect(fixture.a.run(async (tx) => {
+      await tx.query("UPDATE automation_tokens SET revoked_at=revoked_at WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, tokenId]);
+      await insertExtra(tx);
+    })).rejects.toMatchObject({ code: "42501" });
+    expect(await rows(fixture.a, tokenId)).toEqual([one]);
+    // The one legitimate update still works, once.
+    const revoke = () => fixture.a.run((tx) => tx.query(
+      "UPDATE automation_tokens SET revoked_at=$3, revoked_by=$4 WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, tokenId, NOW, randomUUID()]));
+    await revoke();
+    await expect(revoke()).rejects.toMatchObject({ code: "42501" });
+    await expect(fixture.a.run((tx) => tx.query(
+      "UPDATE automation_tokens SET revoked_at=NULL, revoked_by=NULL WHERE tenant_id=$1 AND id=$2", [fixture.a.tenantId, tokenId]))).rejects.toMatchObject({ code: "42501" });
+  });
+
   it("refuses a site row for a token another open transaction is creating", async () => {
     const one = await site(fixture.a);
     const tokenId = randomUUID();

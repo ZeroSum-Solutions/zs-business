@@ -225,7 +225,8 @@ export const createAutomationTokenCommandSchema = z.lazy(() => actionCommandSche
     name: postgresText(1, 100),
     scopes: scopeListSchema,
     expiresInDays: expiryDaysSchema.nullable(),
-    siteIds: siteIdListSchema,
+    /** Absent in an action stored before revision 4: a token without sites. */
+    siteIds: siteIdListSchema.default([]),
   }).refine(readNeedsExpiry, { message: READ_EXPIRY_MESSAGE, path: ["expiresInDays"] })
     .refine((value) => hasSiteScope(value.scopes) ? value.siteIds.length >= 1 : value.siteIds.length === 0, { message: SITE_IDS_MESSAGE, path: ["siteIds"] }),
 }).refine((command) => command.target.id === command.payload.tokenId, "Target must equal the token ID"));
@@ -241,8 +242,8 @@ export const automationTokenSchema = z.strictObject({
   tenantId: idSchema,
   name: z.string(),
   scopes: z.array(automationScopeSchema),
-  /** H-14: the sites `sites:publish` acts on; empty for a token without that scope. */
-  siteIds: z.array(idSchema),
+  /** H-14: the sites `sites:publish` acts on; empty for a token without that scope (and for a result stored before revision 4). */
+  siteIds: z.array(idSchema).default([]),
   /** The actor the token's proposals carry as `requestedBy` (W-11). */
   actorId: idSchema,
   createdBy: idSchema,

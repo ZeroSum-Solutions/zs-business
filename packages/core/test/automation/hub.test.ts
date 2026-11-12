@@ -102,6 +102,29 @@ describe("expiry of a read token (H-1, H-12)", () => {
     expect(await h.inbound().whoAmI(plain.principal)).toMatchObject({ tenantId: h.a.tenantId, siteIds: [] });
   });
 
+  it("replays a token creation and a revoke stored before revision 4, whose payload and result have no siteIds", async () => {
+    const admin = h.admin(h.a);
+    const body = { name: "Before revision 4", scopes: ["contacts:propose"] };
+    const createKey = randomUUID();
+    const made = await admin.createToken(body, createKey);
+    // A token without sites sends the payload it always sent, so a stored creation still matches the retry.
+    const stored = (await h.database.pool.query("SELECT payload FROM actions WHERE tenant_id=$1 AND payload->>'tokenId'=$2", [h.a.tenantId, made.token.id])).rows;
+    expect(stored).toHaveLength(1);
+    expect(stored[0].payload).not.toHaveProperty("siteIds");
+    // The result an older release stored has no siteIds.
+    const stripResults = () => h.database.pool.query(
+      "UPDATE actions SET result = result - 'siteIds' WHERE tenant_id=$1 AND payload->>'tokenId'=$2", [h.a.tenantId, made.token.id]);
+    await stripResults();
+    const again = await admin.createToken(body, createKey);
+    expect(again.token.id).toBe(made.token.id);
+    expect(again.token.siteIds).toEqual([]);
+
+    const revokeKey = randomUUID();
+    await admin.revokeToken(made.token.id, {}, revokeKey);
+    await stripResults();
+    expect((await admin.revokeToken(made.token.id, {}, revokeKey)).siteIds).toEqual([]);
+  });
+
   it("is enforced by the database too: a read token cannot lose its expiry, or outlive 365 days", async () => {
     const { token } = await mint(["results:read"]);
     const bad = (expires: string) => h.database.pool.query(

@@ -55,6 +55,7 @@ const expectedPath: Record<string, string> = {
   // Hub access revision 4 (20261111200000, H-14): a token's sites are set at its creation, and counted at commit.
   "automation_token_sites_check()": "pg_catalog, pg_temp",
   "automation_token_sites_creation_only()": "pg_catalog, pg_temp",
+  "automation_tokens_revoke_only()": "pg_catalog, pg_temp",
   // Booking cancellation (20261110200000_booking_cancel.sql, B-30): a cancelled booking never changes for the runtime role.
   "booking_cancel_guard()": "pg_catalog, pg_temp",
   // Booking customer link (20261023200000_booking_contacts.sql): the revision and owner-made guard, and the
