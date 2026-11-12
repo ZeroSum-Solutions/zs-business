@@ -36,7 +36,7 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
     WHERE n.nspname NOT IN ('pg_catalog','information_schema','zs_local_auth') AND n.nspname !~ '^pg_(toast|temp)'
       AND NOT EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')
-    ORDER BY 1`, [runtimeRoles, plantedLoginPattern])).rows;
+    ORDER BY p.oid::regprocedure::text COLLATE "C"`, [runtimeRoles, plantedLoginPattern])).rows;
 }
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
