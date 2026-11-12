@@ -1,6 +1,7 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 5 (2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
+Status: draft contract, revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
+(2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
 the provider subscription). Revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
 booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
 Shopify App Pricing, read back from the Partner API). Revision 2 added PL-14, a billing provider
@@ -508,6 +509,48 @@ reports the grant before and after and rolls back. An `--apply` run reads the ro
 (`before`, `after`, who, the backup facts). Clearing a tenant with no grant answers `unchanged`. The run changes
 no provider row.
 
+## Site publish limit (revision 6)
+
+Why: the hosting decision (Mishmash link pages, step 3) caps a free creator at 20 publishes a day, to
+bound writes to the site store. Until this revision no tenant had a free tier: a tenant that never
+subscribed is comped and unlimited (Evidence and decisions), so a free creator would have no cap.
+
+**PL-25. The free marker and the daily publish limit.** `tenant_plans.free_tier` (boolean, not null,
+default false) marks a tenant as free. Only the service role writes it (as the grant columns, PL-23);
+the runtime role reads its own row (PL-12) and never writes the column. The limit is the number of
+releases a tenant may record in any 24 hours, counted over all its sites. The limit in force is the first
+that applies, in this order:
+1. an active grant (PL-21): the granted plan's limit;
+2. a provider plan (PL-3, PL-10; the held plan of PL-2 included): that plan's limit;
+3. `free_tier`: 20;
+4. otherwise the tenant is comped: no limit.
+
+| | Free | Solo | Studio | Pro | Comped |
+|---|---|---|---|---|---|
+| Site publishes in 24 hours | 20 | 100 | 200 | 500 | none |
+
+The numbers are the catalog's `PLAN_SITE_PUBLISHES_PER_DAY` and `FREE_SITE_PUBLISHES_PER_DAY` in
+`packages/contracts`. The paid numbers are a first choice (five, ten and twenty-five times the free one);
+the free one is the hosting decision's. They are tunable by a later revision. They are not part of
+`PlanLimits` (PL-1), so `GET /v1/billing/plan` does not change.
+- **Counted by the releases themselves.** The count is `site_releases` rows of the tenant with `created_at`
+  after the injected clock minus 24 hours. A release is append-only, so the count needs no counter table
+  and cannot drift. A window that rolls is chosen over a calendar day because a calendar day resets at
+  midnight and lets a tenant publish the whole limit twice in a minute.
+- **Checked twice.** The publish path checks the count before it compiles and stores anything (a refused
+  publish writes no object), and the plan gate (PL-8) checks it again for `site.release.publish` under the
+  tenant's plan lock (PL-4, PL-10), in the action's transaction before the handler, so two publishes of two
+  sites cannot both take the last slot. A replay of a recorded idempotency key is answered before the gate
+  and counts nothing. Rollback (`site.release.activate`) and blob uploads are not publishes and are not
+  counted. A publish whose action fails after the gate records no release and uses no slot.
+- **The refusal** is the PL-8 conflict: 409 `Conflict`, `reason: "plan_limit"`, `resource:
+  "sitePublishesPerDay"`, with the `limit` and the `used` count. It is the same for a member and for a
+  `sites:publish` token. The count is not a rate limit: there is no `Retry-After`.
+- **Read-only (PL-8)** still refuses a publish first, for a tenant whose plan lapsed.
+- **No script yet.** Nothing in this revision sets `free_tier`: the operator script and the full "Creator Free"
+  plan rule (one link-page site and one token per tenant, creator identity spec D-9) are hosting step 5.
+  Until then an operator sets the column in a service-role transaction.
+
 ## Known limits (revision 3)
 
 - **Before the listing is submitted:** an App Store install does not yet create or bind a hub
@@ -548,3 +591,12 @@ no provider row.
   an ended grant never restricts a tenant.
 - A new grant replaces the old one; only receipts keep the earlier terms. There is no grant history table.
 - Only plan limits and read-only come from the grant; the wallet (S-1) and usage prices are unaffected.
+
+## Known limits (revision 6)
+
+- Only publishes are limited. The number of sites, tokens and files per tenant follows PL-1 and the
+  release limits; the free tier's one-site and one-token rules are step 5.
+- The window is rolling 24 hours of recorded releases. A publish refused for any other reason (a stale
+  edit, a bad spec) records nothing and does not count.
+- A tenant that is both `free_tier` and subscribed gets the paid plan's limit; clearing `free_tier` on
+  upgrade is the operator's job and changes nothing in the meantime.

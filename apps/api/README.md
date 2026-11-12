@@ -163,7 +163,7 @@ strict schema rejects.
 | `PUBLIC_TRUSTED_PROXIES` | Optional, instead of the header: comma-separated CIDRs whose `X-Forwarded-For` entries count. |
 | `PUBLIC_RATE_ADDRESS_WRITES`, `PUBLIC_RATE_ADDRESS_READS`, `PUBLIC_RATE_TENANT_WRITES` | Optional overrides of the public rate limits. |
 | `SITES_STORE` | Optional: turns site publishing on. `r2` stores releases in Cloudflare R2 (needs the four `R2_*` variables); `memory` keeps them in the process, loopback `DATABASE_URL` only. Unset, every `/v1/sites` route answers 404 and nothing is written. |
-| `SITE_COMPILER` | `plain` (the default and only value): the built-in compiler for `{ kind: "plain" }` specs. The Mish publisher is passed to `createServer` in code, not named here. |
+| `SITE_COMPILER` | `plain` (the default and only value): the built-in compiler for `{ kind: "plain" }` specs. The server always dispatches on the spec's `kind` (see "Sites", step 1). The Mish publisher is passed to `createServer` in code, not named here. |
 | `R2_ENDPOINT` | `r2` only: `https://<account-id>.r2.cloudflarestorage.com`. https only. |
 | `R2_BUCKET` | `r2` only: the bucket the dispatch Worker binds as `SITES`. |
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `r2` only: an R2 API token's S3 credentials, object read and write on that bucket only. They live on Vercel and the Mac, never in a cloud session. |
@@ -298,6 +298,7 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/sites/:id/releases/:releaseId` | one release with its spec and files |
 | `POST /v1/sites/:id/releases/:releaseId/activate` `{ expectedCurrentReleaseId }` | 200, the rollback; 409 `stale_release` when another release went live since |
 | `POST /v1/sites/:id/sync` | `{ site, edge }`: writes the edge objects again |
+| `PUT /v1/sites/:id/blobs/:sha256` | The raw bytes of a picture (PNG, JPEG, WebP or GIF, 1 byte to 10 MiB; the 64 KiB limit does not apply). 201 `{ sha256, bytes, mediaType, created: true }` when stored, 200 with `created: false` and no write when the tenant already holds it; 400 when the bytes do not hash to `:sha256` or are not a supported picture (nothing is stored); 413 over 10 MiB; 404 for a site that is not the caller's |
 | `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
 | `GET /v1/wallet/top-ups` | `{ items: TopUp[] }`, newest first, at most 20; owners only |
 | `POST /v1/wallet/top-ups` | `{ amount }` in minor units with `Idempotency-Key`: 201 `{ topup, checkoutUrl }` (stripe.md S-1, S-2). The same key replays the same top-up and Checkout Session. 409 `topup_closed` once the top-up is no longer pending or 25 minutes old; 409 `wallet_currency` when the wallet already holds another currency; 503 when Stripe is unreachable or busy (retry with the same key); 404 when Stripe is not configured. Owners only |
@@ -337,9 +338,16 @@ one fixed `message`.
 A site is published as an immutable release: the files one spec compiles to. The dispatch
 Worker (`apps/site-worker`) serves each host's live release from R2.
 
-1. **Compile.** `POST /v1/sites/:id/releases` hands the spec to the site compiler. The
-   compiler port (`SiteCompiler` in `@zs/core`) has the shape of `@mish/publisher`'s
-   `compile` result: `{ entry, files: [{ path, mediaType, bytes, sha256 }], digest }`. The API
+1. **Compile.** `POST /v1/sites/:id/releases` hands the spec to the site compiler. The server
+   dispatches on the spec's top-level `kind` (hub-access.md H-17): no `kind` goes to the compiler
+   passed to `createServer` as `siteCompiler` (the Mish publisher; a recipe carries no `kind`), `plain`
+   to the built-in compiler, `linkpage` to a slot that is **not wired yet** (400 until the
+   `@mish/linkpage` adapter lands, with its CSP `<meta>`), and any other `kind` is 400. The
+   compiler port (`SiteCompiler` in `@zs/core`) takes `compile(spec, { blobs })` and has the shape of
+   `@mish/publisher`'s `compile` result: `{ entry, files: [{ path, mediaType, bytes, sha256 }], digest }`.
+   `blobs.read(sha256)` returns a picture the caller's tenant uploaded with `PUT .../blobs/:sha256`
+   (and nothing else: it reads `t/<tenant>/blobs/<sha256>` only); a digest the tenant never uploaded is
+   400 and nothing is stored or recorded. The API
    recomputes every SHA-256 and the release digest, and refuses unsafe paths, over 500 files,
    10 MB a file or 50 MB a release. Only owners get this far, and the check runs before any
    bytes are stored.
@@ -377,7 +385,14 @@ reaches the same logic through `/automation/v1/sites/:siteId/...` (read, preview
 releases, activate, sync). It has no create or list route, a site it does not name answers 404,
 and the tenant, origin, click-counter base and sign-up target come from the token and the site
 record, never from the body. `/v1/sites` still takes member sessions only. Contract:
-`docs/requirements/hub-access.md` H-13 to H-15.
+`docs/requirements/hub-access.md` H-13 to H-15. The same token also uploads pictures with
+`PUT /automation/v1/sites/:siteId/blobs/:sha256` (H-16): the body cap is 10 MiB for this route
+(a release refuses any file over that, so a larger blob could never be used), the checks run in the
+H-15 order, and the quota is the same two buckets.
+
+A publish is limited to the tenant's daily number (plans.md PL-25): 20 in 24 hours for a free tenant,
+more on a paid plan, none for a comped tenant. Past it the answer is 409 `plan_limit` with
+`resource: "sitePublishesPerDay"`, before anything is compiled or stored.
 
 Host names are attached by the service role only (`attachSiteHost` in `@zs/core`), since a
 host belongs to one site in the whole system and must be verified first. Attaches and
