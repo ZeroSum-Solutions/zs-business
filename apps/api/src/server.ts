@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertRuntimeLogin, checkDatabase, createRuntimePool, createScopedDatabase } from "@zs/db";
-import { createGoogleClient, createHttpConnectorPort, createHttpShopifyPort, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, createStripePlansClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
+import { createGoogleClient, createHttpConnectorPort, createHttpShopifyPort, createKindSiteCompiler, createMemorySiteStore, createSessionCheckFromConfig, createStripeClient, createStripePlansClient, plainSiteCompiler, type EnrichmentConfigInput, type SiteCompiler } from "@zs/core";
 import { createApp, DEFAULT_RATE_LIMITS, type PublicIntakeConfig, type RateLimits, type UnsubscribeConfig } from "./app.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { createVerifierFromConfig } from "./auth.js";
@@ -62,7 +62,12 @@ export async function createServer(env: ServerEnv, clock: { now(): Date }, optio
     store: env.sites.store.kind === "memory"
       ? createMemorySiteStore()
       : createR2SiteStore(env.sites.store, { fetch: globalThis.fetch, clock }),
-    compiler: options.siteCompiler ?? plainSiteCompiler,
+    // H-17: one compiler per server that dispatches on `spec.kind`. The option fills the untagged (publisher) slot;
+    // without it an untagged spec is a 400. The `linkpage` slot stays empty until its adapter lands.
+    compiler: createKindSiteCompiler({
+      plain: plainSiteCompiler,
+      ...(options.siteCompiler === undefined ? {} : { publisher: options.siteCompiler }),
+    }),
   };
   // image-port.md IM-21: images share the site store (parseServerEnv requires SITES_STORE); the
   // API only queues jobs, so it holds no vendor port. The image worker calls the vendor.

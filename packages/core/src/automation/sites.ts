@@ -73,6 +73,11 @@ export function createAutomationSites(deps: EdgeDependencies) {
           methods.requireSites(); await first(siteId);
           return methods.activateSiteRelease(siteId, releaseId, body, key);
         },
+        /** H-16: the token and the site are checked before the path or the bytes are looked at. */
+        async putSiteBlob(siteId: unknown, sha256: unknown, bytes: Uint8Array) {
+          methods.requireSites(); await first(siteId);
+          return methods.putSiteBlob(siteId, sha256, bytes);
+        },
         async syncSite(siteId: unknown) { methods.requireSites(); await first(siteId); return methods.syncSite(siteId); },
       };
     },

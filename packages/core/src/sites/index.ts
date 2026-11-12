@@ -15,7 +15,9 @@ import {
 import { parseOrFail } from "../crm/rows.js";
 
 export { siteHandlers } from "./handlers.js";
-export { plainSiteCompiler, verifyCompiledSite, type CompiledSite, type CompiledSiteFile, type SiteCompiler, type VerifiedRelease } from "./compiler.js";
+export { plainSiteCompiler, verifyCompiledSite, type CompiledSite, type CompiledSiteFile, type SiteBlobReader, type SiteCompileContext, type SiteCompiler, type VerifiedRelease } from "./compiler.js";
+export { createBlobReader, noBlobs, putSiteBlob, sniffBlobType } from "./blobs.js";
+export { createKindSiteCompiler, SITE_KINDS, type SiteKindCompilers } from "./kinds.js";
 export { createMemorySiteStore, type MemorySiteStore } from "./memory-store.js";
 export { storeReleaseFiles } from "./publish.js";
 export { loadSiteEdgeState, projectSiteEdge, retractHostPointer, syncSiteEdge, type ProjectOptions, type SiteEdgeState } from "./sync.js";

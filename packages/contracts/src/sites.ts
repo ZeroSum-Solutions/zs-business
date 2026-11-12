@@ -65,6 +65,22 @@ export const plainSiteSpecSchema = z.strictObject({
 });
 export type PlainSiteSpec = z.input<typeof plainSiteSpecSchema>;
 
+/**
+ * A picture uploaded ahead of a release (hub-access.md H-16): `PUT .../blobs/:sha256`, raw bytes. The cap is
+ * SITE_LIMITS.fileBytes: a release refuses any larger file, so a larger blob could never be used.
+ */
+export const SITE_BLOB_TYPES = Object.freeze(["image/png", "image/jpeg", "image/webp", "image/gif"] as const);
+export const siteBlobTypeSchema = z.enum(SITE_BLOB_TYPES);
+export type SiteBlobType = z.infer<typeof siteBlobTypeSchema>;
+export const siteBlobSchema = z.strictObject({
+  sha256: sha256HexSchema,
+  bytes: z.number().int().min(1).max(SITE_LIMITS.fileBytes),
+  mediaType: siteBlobTypeSchema,
+  /** False when the tenant already held the blob: nothing was written. */
+  created: z.boolean(),
+});
+export type SiteBlob = z.infer<typeof siteBlobSchema>;
+
 /** The release digest: SHA-256 over each file's `${path}\0${sha256}\n`, in path order (as @mish/publisher). */
 export async function siteReleaseDigest(files: readonly Pick<SiteFile, "path" | "sha256">[]): Promise<string> {
   const text = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))

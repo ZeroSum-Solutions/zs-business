@@ -11,6 +11,7 @@ import {
   NotFound,
   type ActionCommand,
   type ActionResult,
+  type SiteBlob,
   type SiteEdgeStatus,
   type PublishSiteRequest,
   type SitePreview,
@@ -19,9 +20,10 @@ import {
   type SiteSyncResponse,
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
+import { assertSitePublishRoom } from "../billing/plan-gate.js";
 import { assertImagesApproved } from "../images/gate.js";
 import {
-  activateSiteRelease, getRelease, getSite, listReleases, publishSiteRelease,
+  activateSiteRelease, createBlobReader, getRelease, getSite, listReleases, publishSiteRelease, putSiteBlob,
   storeReleaseFiles, syncSiteEdge, verifyCompiledSite, type ProjectOptions,
 } from "../sites/index.js";
 import { SiteStoreUnavailable } from "./errors.js";
@@ -44,7 +46,7 @@ type BodySchema = Parameters<typeof parseInput<PublishSiteRequest>>[0];
 
 /** What a caller must supply: its checks, and how its idempotency key becomes an action envelope. */
 export interface SiteMethodsHost {
-  readonly deps: Pick<EdgeDependencies, "db" | "sites" | "timeLeft">;
+  readonly deps: Pick<EdgeDependencies, "clock" | "db" | "sites" | "timeLeft">;
   readonly tenantId: string;
   /** A tenant transaction in which the caller has been checked for this site, then `work`. */
   readonly read: <T>(siteId: string, work: (tx: Transaction) => Promise<T>) => Promise<T>;
@@ -119,9 +121,11 @@ export function createSiteMethods(host: SiteMethodsHost) {
         // Fail a stale edit before compiling and storing; the handler checks again under the site lock.
         if (!replay && request.expectedCurrentReleaseId !== undefined && site.currentReleaseId !== request.expectedCurrentReleaseId)
           throw new Conflict("Another release went live since this edit started", { reason: "stale_release" });
+        // PL-25: a tenant past its daily publish number stores nothing; the plan gate checks again under the plan lock.
+        if (!replay) await assertSitePublishRoom(tx, tenantId, new Date(deps.clock.now().getTime()));
         return replay;
       });
-      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec, { blobs: createBlobReader(sites.store, tenantId) }));
       // image-port.md IM-14: no unapproved image is stored; the handler checks again under the site lock.
       if (!recorded) await read(id, (tx) => assertImagesApproved(tx, tenantId, release.files));
       // A recorded key replays (or is refused as reused) in dispatch; its files were stored then.
@@ -145,11 +149,22 @@ export function createSiteMethods(host: SiteMethodsHost) {
       const id = parseInput(uuidSchema, siteId, "site ID");
       const request = parseInput(bodySchema, body);
       await read(id, (tx) => getSite(tx, tenantId, id));
-      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec));
+      const release = await verifyCompiledSite(await sites.compiler.compile(request.spec, { blobs: createBlobReader(sites.store, tenantId) }));
       const entry = release.files.find((file) => file.path === release.entry)!;
       const html = entry.mediaType.startsWith("text/html") && entry.bytes <= SITE_PREVIEW_HTML_BYTES
         ? new TextDecoder("utf-8", { fatal: false }).decode(release.bytes.get(entry.path)) : null;
       return { entry: release.entry, digest: release.digest, files: [...release.files], entryHtml: html };
+    },
+    /**
+     * H-16: store a picture ahead of a release, content-addressed under the caller's tenant. The caller is
+     * checked for this site first, so nobody else's request stores bytes under this tenant; the bytes are
+     * checked against the path before the store is touched.
+     */
+    async putSiteBlob(siteId: unknown, sha256: unknown, bytes: Uint8Array): Promise<SiteBlob> {
+      const sites = requireSites();
+      const id = parseInput(uuidSchema, siteId, "site ID");
+      await read(id, (tx) => getSite(tx, tenantId, id));
+      return putSiteBlob(sites.store, tenantId, sha256, bytes);
     },
     /** Make an earlier (or later) release live again: the rollback. */
     async activateSiteRelease(siteId: unknown, releaseId: unknown, body: unknown, key: unknown): Promise<SiteReleaseResponse> {
