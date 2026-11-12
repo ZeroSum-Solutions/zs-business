@@ -3,7 +3,7 @@
 // `storeReleaseFiles` uses). Original code.
 import { createHash } from "node:crypto";
 import {
-  SITE_LIMITS, sha256HexSchema, siteBlobTypeSchema, siteObjectKeys, ValidationFailed,
+  SITE_BLOB_MAX_BYTES, sha256HexSchema, siteBlobTypeSchema, siteObjectKeys, ValidationFailed,
   type SiteBlob, type SiteBlobType, type SiteObjectStore,
 } from "@zs/contracts";
 import { SiteStoreUnavailable, validationError } from "../edge/errors.js";
@@ -57,7 +57,7 @@ export async function putSiteBlob(
 ): Promise<SiteBlob> {
   const parsed = sha256HexSchema.safeParse(digest);
   if (!parsed.success) throw validationError("Invalid request", [{ path: ["sha256"], message: "Lowercase hex SHA-256" }]);
-  if (bytes.byteLength < 1 || bytes.byteLength > SITE_LIMITS.fileBytes) throw new ValidationFailed("Picture size is not allowed");
+  if (bytes.byteLength < 1 || bytes.byteLength > SITE_BLOB_MAX_BYTES) throw new ValidationFailed("Picture size is not allowed");
   const mediaType = sniffBlobType(bytes);
   if (!mediaType) throw new ValidationFailed("Not a supported picture");
   if (sha256(bytes) !== parsed.data) throw new ValidationFailed("The bytes do not match the SHA-256 in the path");

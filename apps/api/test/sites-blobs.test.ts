@@ -12,7 +12,7 @@ import {
   sitePreviewSchema,
   siteReleaseListSchema,
   siteReleaseResponseSchema,
-  SITE_LIMITS,
+  SITE_BLOB_MAX_BYTES, SITE_LIMITS,
   type SiteObjectStore,
   ValidationFailed,
   type AutomationScope,
@@ -152,19 +152,25 @@ describe("PUT /v1/sites/:id/blobs/:sha256 (members)", () => {
     expect((await member(h.a, site.id, empty)).status).toBe(400);
     const text = encoder.encode("<svg onload=alert(1)/>");
     expect((await member(h.a, site.id, text)).status).toBe(400);
-    const big = new Uint8Array(SITE_LIMITS.fileBytes + 1);
+    const big = new Uint8Array(SITE_BLOB_MAX_BYTES + 1);
     big.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     expect((await member(h.a, site.id, big)).status).toBe(413);
     expect(memory.writes()).toEqual([]);
     expect(memory.reads()).toEqual([]);
   });
 
-  it("accepts a picture of exactly the release file limit", async () => {
+  it("keeps the cap at 4 MiB, under the host's 4.5 MB body limit and the release file limit", () => {
+    expect(SITE_BLOB_MAX_BYTES).toBe(4 * 1024 * 1024);
+    expect(SITE_BLOB_MAX_BYTES).toBeLessThan(4_500_000);
+    expect(SITE_BLOB_MAX_BYTES).toBeLessThanOrEqual(SITE_LIMITS.fileBytes);
+  });
+
+  it("accepts a picture of exactly the blob cap", async () => {
     const site = await createSite(h.a, "Edge");
-    const bytes = png(SITE_LIMITS.fileBytes);
+    const bytes = png(SITE_BLOB_MAX_BYTES);
     const response = await member(h.a, site.id, bytes);
     expect(response.status).toBe(201);
-    expect(siteBlobSchema.parse(response.body).bytes).toBe(SITE_LIMITS.fileBytes);
+    expect(siteBlobSchema.parse(response.body).bytes).toBe(SITE_BLOB_MAX_BYTES);
   });
 
   it("X-16: a site of another tenant is a 404 and no object is written", async () => {
@@ -233,7 +239,7 @@ describe("PUT /automation/v1/sites/:siteId/blobs/:sha256 (sites:publish tokens)"
     const site = await createSite(h.a, "Order");
     const propose = await mint(["contacts:read"], [site.id]);
     const { secret, token } = await mint(["sites:publish"], [site.id]);
-    const big = new Uint8Array(SITE_LIMITS.fileBytes + 1);
+    const big = new Uint8Array(SITE_BLOB_MAX_BYTES + 1);
     memory.resetLog();
     // A body over the cap is 413 before the token row is read; a forged tag is 401 first.
     expect((await viaToken(secret, site.id, big, sha(png()))).status).toBe(413);
@@ -452,6 +458,11 @@ describe("the daily publish limit (PL-25)", () => {
       const results = await Promise.all([publishAs(h.b, one.id, plain("Race A")), publishAs(h.b, two.id, plain("Race B"))]);
       expect(results.map((result) => result.status).sort()).toEqual([201, 409]);
       expect(await inWindow(h.b)).toBe(20);
+      // A blob upload is not a publish: the tenant at its number still uploads, and the count does not move.
+      const picture = png();
+      const uploaded = await readJson(await putRaw(h.app, await nowToken(h.b), one.id, sha(picture), picture));
+      expect(uploaded.status).toBe(201);
+      expect(await inWindow(h.b)).toBe(20);
       // PL-8 comes first: a free tenant at its number whose plan is read-only is told about billing, not the limit.
       await sql("UPDATE tenant_plans SET read_only_after=$2 WHERE tenant_id=$1", [h.b.tenantId, new Date(clockMs - 1000)]);
       const readOnly = await publishAs(h.b, one.id, plain("Read only"));
@@ -489,5 +500,70 @@ describe("the daily publish limit (PL-25)", () => {
       // Release history is append-only: the rows stay, a year after every other release in this file's database.
       await clearPlan(h.a);
     }
+  });
+});
+
+describe("escalation audit fixes", () => {
+  it("counts the body actually read: a false small Content-Length does not get an oversized blob past the cap", async () => {
+    const site = await createSite(h.a, "False length");
+    const big = new Uint8Array(SITE_BLOB_MAX_BYTES + 1);
+    big.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    memory.resetLog();
+    const member413 = await h.app.request(`/v1/sites/${site.id}/blobs/${sha(big)}`, {
+      method: "PUT", headers: { Authorization: `Bearer ${h.a.token}`, "Content-Length": "100" }, body: big as Uint8Array<ArrayBuffer>,
+    });
+    expect(member413.status).toBe(413);
+    const { secret } = await mint(["sites:publish"], [site.id]);
+    const token413 = await h.app.request(`/automation/v1/sites/${site.id}/blobs/${sha(big)}`, {
+      method: "PUT", headers: { Authorization: `Bearer ${secret}`, "Content-Length": "100" }, body: big as Uint8Array<ArrayBuffer>,
+    });
+    expect(token413.status).toBe(413);
+    expect(memory.writes()).toEqual([]);
+  });
+
+  it("identical bytes in two tenants are two objects, each under its own tenant prefix", async () => {
+    const mine = await createSite(h.a, "Same bytes A");
+    const theirs = await createSite(h.b, "Same bytes B");
+    const bytes = png();
+    const digest = sha(bytes);
+    memory.resetLog();
+    expect((await member(h.a, mine.id, bytes)).status).toBe(201);
+    expect((await member(h.b, theirs.id, bytes)).status).toBe(201);
+    expect(memory.writes().sort()).toEqual([blobKey(h.a, digest), blobKey(h.b, digest)].sort());
+    expect(blobKey(h.a, digest)).not.toBe(blobKey(h.b, digest));
+  });
+
+  it("X-17 through a site token: publish and preview naming another tenant's blob fail like a blob nobody holds, and read nothing of theirs", async () => {
+    const mine = await createSite(h.a, "Token reader");
+    const theirs = await createSite(h.b, "B token reader");
+    const bytes = png();
+    const digest = sha(bytes);
+    expect((await member(h.b, theirs.id, bytes)).status).toBe(201);
+    const { secret } = await mint(["sites:publish"], [mine.id]);
+    const send = (path: string, avatar: string) => call(h.app, "POST", `/automation/v1/sites/${mine.id}/${path}`, {
+      headers: { Authorization: `Bearer ${secret}` }, key: randomUUID(), body: { spec: { kind: "linkpage", title: "Me", avatar } },
+    });
+    memory.resetLog();
+    const strip = (body: unknown) => JSON.stringify(body).replace(/[0-9a-f]{64}/g, "<digest>");
+    const named = await send("releases", digest);
+    const nobody = await send("releases", sha(png()));
+    expect([named.status, nobody.status]).toEqual([400, 400]);
+    expect(strip(named.body)).toBe(strip(nobody.body));
+    expect((await send("preview", digest)).status).toBe(400);
+    expect(memory.reads().filter((key) => key.startsWith(`t/${h.b.tenantId}/`))).toEqual([]);
+    expect(memory.writes()).toEqual([]);
+    expect(siteReleaseListSchema.parse((await call(h.app, "GET", `/v1/sites/${mine.id}/releases`, { token: h.a.token })).body).items).toEqual([]);
+  });
+
+  it("a key that recorded another site's publish is refused as a reused key before anything is compiled or stored", async () => {
+    const one = await createSite(h.a, "Key one");
+    const two = await createSite(h.a, "Key two");
+    const key = randomUUID();
+    expect((await publishVia(h.a, one.id, plain("First"), key)).status).toBe(201);
+    memory.resetLog();
+    const reused = await publishVia(h.a, two.id, { kind: "plain", title: "Other site, new files", sections: [{ heading: "H", body: randomUUID() }] }, key);
+    expect(reused.status).toBe(409);
+    expect(memory.writes()).toEqual([]);
+    expect(memory.reads()).toEqual([]);
   });
 });

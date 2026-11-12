@@ -538,10 +538,13 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
   `interval '1 day'`, which follows the session's time zone and shifts on a daylight-saving day). A release is append-only, so the count needs no counter table
   and cannot drift. A window that rolls is chosen over a calendar day because a calendar day resets at
   midnight and lets a tenant publish the whole limit twice in a minute.
-- **Checked twice.** The publish path checks the count before it compiles and stores anything (a refused
-  publish writes no object), and the plan gate (PL-8) checks it again for `site.release.publish` under the
+- **Checked twice.** The publish path checks the count before it compiles and stores anything (a publish
+  that is already over the number writes no object; a key that was used for another action or site is refused
+  before any object is written too), and the plan gate (PL-8) checks it again for `site.release.publish` under the
   tenant's plan lock (PL-4, PL-10), in the action's transaction before the handler, so two publishes of two
-  sites cannot both take the last slot. A replay of a recorded idempotency key is answered before the gate
+  sites cannot both take the last slot. Two publishes that both pass the pre-check at the last slot may each
+  have stored their content-addressed files before the plan gate refuses the loser: those objects stay under
+  the tenant's own prefix and are reused by the next publish of the same bytes (orphans have no sweep yet, H-16). A replay of a recorded idempotency key is answered before the gate
   and counts nothing. Rollback (`site.release.activate`) and blob uploads are not publishes and are not
   counted. A publish whose action fails after the gate records no release and uses no slot.
 - **The refusal** is the PL-8 conflict: 409 `Conflict`, `reason: "plan_limit"`, `resource:

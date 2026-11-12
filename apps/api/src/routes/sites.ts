@@ -1,8 +1,8 @@
 import { Hono } from "hono";
-import { bodyLimit } from "hono/body-limit";
-import { SITE_LIMITS } from "@zs/contracts";
+import { SITE_BLOB_MAX_BYTES } from "@zs/contracts";
 import { apiErrorBody } from "@zs/core";
 import type { AppEnv } from "../app.js";
+import { readBodyBytes } from "../mcp/routes.js";
 import { idempotencyKey, jsonBody } from "./request.js";
 
 // M4b site releases. Owners only (the "publish" permission). Publishing compiles the spec,
@@ -23,12 +23,11 @@ export const siteRoutes = new Hono<AppEnv>()
   .post("/:id/releases/:releaseId/activate", async (c) =>
     c.json(await c.var.session.activateSiteRelease(c.req.param("id"), c.req.param("releaseId"), await jsonBody(c), idempotencyKey(c))))
   .post("/:id/sync", async (c) => c.json(await c.var.session.syncSite(c.req.param("id"))))
-  // The cap is the release file limit, checked after authentication like the image upload (IM-22).
-  .put("/:id/blobs/:sha256", bodyLimit({
-    maxSize: SITE_LIMITS.fileBytes,
-    onError: (c) => c.json(apiErrorBody("ValidationFailed", "Blob is too large"), 413),
-  }), async (c) => {
-    const bytes = new Uint8Array(await c.req.arrayBuffer());
+  // The cap is SITE_BLOB_MAX_BYTES (4 MiB, under the host's 4.5 MB body limit), checked after authentication like the
+  // image upload (IM-22). The bytes actually read are counted (H-5 step 3): a false `Content-Length` cannot get past.
+  .put("/:id/blobs/:sha256", async (c) => {
+    const bytes = await readBodyBytes(c.req.raw, SITE_BLOB_MAX_BYTES).catch(() => new Uint8Array(0));
+    if (bytes === null) return c.json(apiErrorBody("ValidationFailed", "Blob is too large"), 413);
     const blob = await c.var.session.putSiteBlob(c.req.param("id"), c.req.param("sha256"), bytes);
     return c.json(blob, blob.created ? 201 : 200);
   });

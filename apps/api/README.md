@@ -298,7 +298,7 @@ The verifiers (`createHs256Verifier`, `createJwksVerifier`) and the steps above 
 | `GET /v1/sites/:id/releases/:releaseId` | one release with its spec and files |
 | `POST /v1/sites/:id/releases/:releaseId/activate` `{ expectedCurrentReleaseId }` | 200, the rollback; 409 `stale_release` when another release went live since |
 | `POST /v1/sites/:id/sync` | `{ site, edge }`: writes the edge objects again |
-| `PUT /v1/sites/:id/blobs/:sha256` | The raw bytes of a picture (PNG, JPEG, WebP or GIF, 1 byte to 10 MiB; the 64 KiB limit does not apply). 201 `{ sha256, bytes, mediaType, created: true }` when stored, 200 with `created: false` and no write when the tenant already holds it; 400 when the bytes do not hash to `:sha256` or are not a supported picture (nothing is stored); 413 over 10 MiB; 404 for a site that is not the caller's |
+| `PUT /v1/sites/:id/blobs/:sha256` | The raw bytes of a picture (PNG, JPEG, WebP or GIF, 1 byte to 4 MiB; the 64 KiB limit does not apply). 201 `{ sha256, bytes, mediaType, created: true }` when stored, 200 with `created: false` and no write when the tenant already holds it; 400 when the bytes do not hash to `:sha256` or are not a supported picture (nothing is stored); 413 over 4 MiB; 404 for a site that is not the caller's |
 | `GET /v1/wallet` | `{ currency, balance, reserved, available }` in minor units (`walletSummarySchema`); all zero before the first credit; owners only (`billing`) |
 | `GET /v1/wallet/top-ups` | `{ items: TopUp[] }`, newest first, at most 20; owners only |
 | `POST /v1/wallet/top-ups` | `{ amount }` in minor units with `Idempotency-Key`: 201 `{ topup, checkoutUrl }` (stripe.md S-1, S-2). The same key replays the same top-up and Checkout Session. 409 `topup_closed` once the top-up is no longer pending or 25 minutes old; 409 `wallet_currency` when the wallet already holds another currency; 503 when Stripe is unreachable or busy (retry with the same key); 404 when Stripe is not configured. Owners only |
@@ -386,8 +386,8 @@ releases, activate, sync). It has no create or list route, a site it does not na
 and the tenant, origin, click-counter base and sign-up target come from the token and the site
 record, never from the body. `/v1/sites` still takes member sessions only. Contract:
 `docs/requirements/hub-access.md` H-13 to H-15. The same token also uploads pictures with
-`PUT /automation/v1/sites/:siteId/blobs/:sha256` (H-16): the body cap is 10 MiB for this route
-(a release refuses any file over that, so a larger blob could never be used), the checks run in the
+`PUT /automation/v1/sites/:siteId/blobs/:sha256` (H-16): the body cap is 4 MiB for this route
+(under the 4.5 MB request-body limit of Vercel Functions; a larger picture needs a presigned upload, later work), the checks run in the
 H-15 order, and the quota is the same two buckets.
 
 A publish is limited to the tenant's daily number (plans.md PL-25): 20 in 24 hours for a free tenant,

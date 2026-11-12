@@ -11,6 +11,7 @@ import {
   SITE_PREVIEW_HTML_BYTES,
   uuidSchema,
   Conflict,
+  IdempotencyConflict,
   NotFound,
   type ActionCommand,
   type ActionResult,
@@ -47,7 +48,7 @@ function withinBudget(work: Promise<SiteEdgeStatus>, ms: number): Promise<SiteEd
 
 /**
  * The entry, digest and files an earlier publish with this key recorded, or null when the key belongs to
- * something else (then the request compiles and dispatch refuses the reused key).
+ * something else (then the caller refuses the reused key before it compiles or stores anything).
  */
 function recordedRelease(earlier: { action_type: string; payload: unknown }, siteId: string): VerifiedRelease | null {
   const payload = earlier.payload as { siteId?: unknown; entry?: unknown; digest?: unknown; files?: unknown };
@@ -141,7 +142,11 @@ export function createSiteMethods(host: SiteMethodsHost) {
           throw new Conflict("Another release went live since this edit started", { reason: "stale_release" });
         // PL-25: a tenant past its daily publish number stores nothing; the plan gate checks again under the plan lock.
         if (!earlier) await assertSitePublishRoom(tx, tenantId, new Date(deps.clock.now().getTime()));
-        return earlier === undefined ? null : recordedRelease(earlier, id);
+        if (earlier === undefined) return null;
+        // A key that recorded another action or another site is a reused key: refuse before compiling or storing anything.
+        const release = recordedRelease(earlier, id);
+        if (!release) throw new IdempotencyConflict();
+        return release;
       });
       // A key that already recorded a publish of this site keeps the release it recorded. It is put through
       // dispatch with the request's own spec, so a different spec is still refused as a reused key.

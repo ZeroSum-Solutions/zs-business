@@ -4,10 +4,10 @@
 // before the token row is read), then the token session: 401 (the row), 403 (no scope), 404 (a site the token
 // does not name; the same answer for a foreign site, an unnamed one and an ID nothing holds), and last the
 // body (400) and the publish rules. A body that cannot be read is held back as a value no schema accepts, so
-// it is refused only after the site gate. The blob route (H-16) takes raw bytes under its own 10 MiB cap in the
+// it is refused only after the site gate. The blob route (H-16) takes raw bytes under its own 4 MiB cap in the
 // same order. Original code.
 import { Hono, type Context } from "hono";
-import { SITE_LIMITS } from "@zs/contracts";
+import { SITE_BLOB_MAX_BYTES } from "@zs/contracts";
 import {
   apiErrorBody, createAutomationInbound, createAutomationSites, type AutomationKeySecrets, type EdgeDependencies,
 } from "@zs/core";
@@ -21,7 +21,7 @@ export const SITES_MINUTE_LIMIT: RateLimit = { limit: 30, windowMs: 60_000 };
 export const SITES_HOUR_LIMIT: RateLimit = { limit: 300, windowMs: 3_600_000 };
 const BODY_LIMIT_BYTES = 64 * 1024;
 /** H-16: a blob is a release file, and a release refuses a file over this. */
-export const BLOB_LIMIT_BYTES = SITE_LIMITS.fileBytes;
+export const BLOB_LIMIT_BYTES = SITE_BLOB_MAX_BYTES;
 
 /** What a route reads from the body: nothing, JSON (64 KiB) or raw bytes (up to a limit). */
 type BodyMode = "none" | "json" | { readonly bytes: number };

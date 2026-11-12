@@ -66,15 +66,20 @@ export const plainSiteSpecSchema = z.strictObject({
 export type PlainSiteSpec = z.input<typeof plainSiteSpecSchema>;
 
 /**
- * A picture uploaded ahead of a release (hub-access.md H-16): `PUT .../blobs/:sha256`, raw bytes. The cap is
- * SITE_LIMITS.fileBytes: a release refuses any larger file, so a larger blob could never be used.
+ * The blob route's byte cap: 4 MiB. The Hub API runs as Vercel Functions, which refuse a request body over
+ * 4.5 MB with their own 413 before the app runs, so the cap sits under that with a margin. It is below
+ * SITE_LIMITS.fileBytes on purpose (a release may carry a larger inline file; a blob never exceeds this).
+ * A bigger picture needs a presigned upload, which is later work (hub-access.md H-16).
  */
+export const SITE_BLOB_MAX_BYTES = 4 * 1024 * 1024;
+
+/** A picture uploaded ahead of a release (hub-access.md H-16): `PUT .../blobs/:sha256`, raw bytes. */
 export const SITE_BLOB_TYPES = Object.freeze(["image/png", "image/jpeg", "image/webp", "image/gif"] as const);
 export const siteBlobTypeSchema = z.enum(SITE_BLOB_TYPES);
 export type SiteBlobType = z.infer<typeof siteBlobTypeSchema>;
 export const siteBlobSchema = z.strictObject({
   sha256: sha256HexSchema,
-  bytes: z.number().int().min(1).max(SITE_LIMITS.fileBytes),
+  bytes: z.number().int().min(1).max(SITE_BLOB_MAX_BYTES),
   mediaType: siteBlobTypeSchema,
   /** False when the tenant already held the blob: nothing was written. */
   created: z.boolean(),

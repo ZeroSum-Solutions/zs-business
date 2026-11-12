@@ -242,7 +242,7 @@ the CSP `<meta>` of a link page, and how a blob-route image passes the image gat
   fails answers:
   1. The token tag check: a missing, malformed or tampered token is the W-9 401. Pure CPU, no
      database access.
-  2. A body over 64 KiB is 413, counted on the stream (H-5 step 3). The blob route's cap is 10 MiB (H-16).
+  2. A body over 64 KiB is 413, counted on the stream (H-5 step 3). The blob route's cap is 4 MiB (H-16).
   3. The quota: two fixed-window buckets `sites-minute:<tenantId>:<tokenId>` (30 per minute)
      and `sites-hour:<tenantId>:<tokenId>` (300 per hour) in the shared Postgres limiter, one
      unit each per request with a valid tag, charged in one all-or-nothing statement before
@@ -288,16 +288,19 @@ the CSP `<meta>` of a link page, and how a blob-route image passes the image gat
   for a `sites:publish` token. The body is the raw bytes; its `Content-Type` is ignored. The blob is
   stored once at `t/<tenantId>/blobs/<sha256>`, the key `storeReleaseFiles` uses, so a release that lists
   the same bytes finds it. The tenant is the member's or the token's, never the path's or the body's.
-  - **Byte cap: 10 MiB (`SITE_LIMITS.fileBytes`).** A release refuses any file over that size, so a larger
-    blob could never be part of a release, and the media upload takes the same size. The cap is counted on
-    the stream (413). It replaces the 64 KiB cap of the other site routes for this route only; the `/v1`
-    JSON cap does not apply to it.
+  - **Byte cap: 4 MiB (`SITE_BLOB_MAX_BYTES`).** The Hub API runs as Vercel Functions, which answer a
+    request body over 4.5 MB with their own 413 before the app runs, so the cap sits under that limit with a
+    margin (raw body, no multipart overhead). It is lower than the release file limit (10 MiB,
+    `SITE_LIMITS.fileBytes`), which stays: a release may carry a larger inline file, and a blob-route file is
+    at most 4 MiB. The cap is counted on the stream (413). It replaces the 64 KiB cap of the other site
+    routes for this route only; the `/v1` JSON cap does not apply to it. A picture over 4 MiB needs a
+    presigned upload straight to the object store; that is later work and is not in this revision.
   - **Types.** The bytes are sniffed, not trusted: PNG, JPEG, WebP or GIF (the header must say so), else 400.
     The sniffed type is the object's content type and is returned.
   - **Check order, token route.** The H-15 order up to step 5, with the body cap of this rule in step 2:
-    tag (401), body over 10 MiB (413), quota (429, the same two buckets as the other site routes, one unit
+    tag (401), body over 4 MiB (413), quota (429, the same two buckets as the other site routes, one unit
     for the request), token guard (401, 403), the site in the allowlist (404). Then the path and the body:
-    `:sha256` must be 64 lowercase hex characters, the body 1 byte to 10 MiB, a supported type, and the
+    `:sha256` must be 64 lowercase hex characters, the body 1 byte to 4 MiB, a supported type, and the
     SHA-256 of the body must equal `:sha256`, else 400 `ValidationFailed` and **no store call of any kind**.
     Only then the store is asked. Member route: session (401), body cap (413), permission and site under
     RLS (403, 404 for a site of another tenant or an unknown ID), then the same 400 checks.
@@ -314,7 +317,7 @@ the CSP `<meta>` of a link page, and how a blob-route image passes the image gat
     revoke that commits while an upload is in flight does not undo that upload, as for the store step of
     a publish.
   - **Tests.** X-16 (cross-tenant upload), X-17 (a release naming a blob only another tenant holds), X-18
-    (hash mismatch) and the member and size cases, in `apps/api/test/site-blobs.test.ts`.
+    (hash mismatch) and the member and size cases, in `apps/api/test/sites-blobs.test.ts`.
 - **H-17 Site kinds and the blob reader (revision 5).** The compiler the API holds dispatches on the
   spec's top-level `kind`:
   1. `kind` absent: the publisher slot, the compiler passed to `createServer` as `siteCompiler` (a Mish recipe
