@@ -1,0 +1,118 @@
+name: plane-link
+
+# Links a pull request to its Plane work items. Put a ZSB-<n> key in the branch name, the PR
+# title or the PR body: the work item gets the PR as a link and a comment, moves to
+# In Progress when the PR opens and to Done when it merges. Best effort: it never fails a PR.
+# Secrets: PLANE_URL (https base URL of the tracker) and PLANE_API_KEY. A fork gets neither,
+# so the job is skipped there. The script is inline on purpose: no PR code is checked out.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, closed]
+
+permissions: {}
+
+concurrency:
+  group: plane-link-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  link:
+    name: link work items
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Link ZSB keys to Plane
+        env:
+          PLANE_URL: ${{ secrets.PLANE_URL }}
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 - <<'PLANE_LINK_PY'
+          import html, json, os, re, sys, urllib.error, urllib.request
+
+          base = os.environ.get("PLANE_URL", "").rstrip("/")
+          key = os.environ.get("PLANE_API_KEY", "")
+          if not base.startswith("https://") or not key:
+              print("PLANE_URL or PLANE_API_KEY is not set (a fork has no secrets): nothing to do")
+              sys.exit(0)
+
+          WS, PREFIX, MAX_KEYS = "zerosum", "ZSB", 5
+          action, merged = os.environ["PR_ACTION"], os.environ["PR_MERGED"] == "true"
+          pr_url, pr_number, pr_title = os.environ["PR_URL"], os.environ["PR_NUMBER"], os.environ["PR_TITLE"]
+          text = "\n".join(os.environ.get(n, "") for n in ("PR_BRANCH", "PR_TITLE", "PR_BODY"))
+          pattern = r"(?<![A-Za-z0-9])%s-0*([0-9]+)(?![A-Za-z0-9])" % PREFIX
+          numbers = sorted({int(n) for n in re.findall(pattern, text, re.I)})
+          if not numbers:
+              print("no %s-n key in the branch, title or body: nothing to do" % PREFIX)
+              sys.exit(0)
+          if len(numbers) > MAX_KEYS:
+              print("::warning::%d %s keys found; linking the first %d" % (len(numbers), PREFIX, MAX_KEYS))
+              numbers = numbers[:MAX_KEYS]
+
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):  # never re-send the key to another origin
+                  return None
+
+
+          opener = urllib.request.build_opener(NoRedirect)
+
+
+          def api(method, path, body=None):
+              req = urllib.request.Request(
+                  "%s/api/v1/workspaces/%s/%s" % (base, WS, path), method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"X-API-Key": key, "Content-Type": "application/json"})
+              with opener.open(req, timeout=20) as r:
+                  return json.loads(r.read() or b"{}")
+
+
+          def rows(path):
+              d = api("GET", path + "?per_page=100")
+              return d.get("results", []) if isinstance(d, dict) else d
+
+
+          if action == "closed" and merged:
+              verb, target = "Merged", "completed"
+          elif action == "closed":
+              verb, target = "Closed without merge", None
+          else:
+              verb, target = "Opened", "started"
+          note = "%s: pull request #%s %s" % (verb, pr_number, pr_url)
+          failed = 0
+          for n in numbers:
+              ident = "%s-%d" % (PREFIX, n)
+              try:
+                  item = api("GET", "issues/%s/" % ident)
+                  root = "projects/%s/issues/%s" % (item["project"], item["id"])
+                  if not any(l.get("url") == pr_url for l in rows(root + "/links/")):
+                      api("POST", root + "/links/", {"title": ("PR #%s: %s" % (pr_number, pr_title))[:250], "url": pr_url})
+                  if not any(note in html.unescape(re.sub(r"<[^>]+>", "", c.get("comment_html") or "")) for c in rows(root + "/comments/")):
+                      api("POST", root + "/comments/", {"comment_html": "<p>%s</p>" % html.escape(note)})
+                  if target:
+                      states = rows("projects/%s/states/" % item["project"])
+                      group = {s["id"]: s["group"] for s in states}.get(item.get("state"))
+                      # Open: only pull an item forward (never reopen finished work). Merge: finish it.
+                      move = group in ("backlog", "unstarted") if target == "started" else group not in ("completed", "cancelled")
+                      want = sorted((s for s in states if s["group"] == target), key=lambda s: s.get("sequence") or 0)
+                      if move and want:
+                          api("PATCH", root + "/", {"state": want[0]["id"]})
+                          print("%s -> %s" % (ident, want[0]["name"]))
+                  print("%s linked (%s)" % (ident, verb.lower()))
+              except urllib.error.HTTPError as e:
+                  failed += 1
+                  print("::warning::%s: Plane answered HTTP %s" % (ident, e.code))
+              except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
+                  failed += 1
+                  print("::warning::%s: %s" % (ident, type(e).__name__))
+          # Best effort: a Plane outage must never block a pull request.
+          print("done, %d of %d failed" % (failed, len(numbers)))
+          PLANE_LINK_PY

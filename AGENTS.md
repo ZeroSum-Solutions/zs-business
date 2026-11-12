@@ -36,6 +36,15 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
   `git push origin HEAD:refs/heads/<branch>`: a branch that tracks `origin/main` pushes to
   `main` under `push.default=upstream`.
 
+## Work tracking (Plane, project ZSB)
+- Work for this repo is tracked in the Plane project "ZS Business" (key `ZSB`). Plans and
+  research live there as work items and Pages; code lives here.
+- Put the work item key (`ZSB-<n>`) in the branch name or the PR title. The `plane-link`
+  workflow then adds the PR to the work item, moves it to In Progress when the PR opens and to
+  Done when it merges. It is best effort and never fails a PR.
+- The tracker address and API key are repo secrets (`PLANE_URL`, `PLANE_API_KEY`). Never write
+  them in this public repo.
+
 ## Cloud sessions (Claude Code on the web / desktop cloud)
 - `scripts/cloud-setup.sh` runs at session start (`.claude/settings.json`). It installs Node 24,
   pnpm and Postgres on `127.0.0.1:55432`, so `pnpm -r test`, `test:booking` and `test:crm` work
