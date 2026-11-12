@@ -42,8 +42,9 @@ adapter over core), `apps/api`, later `apps/dashboard` (Next.js, phone PWA), `su
 - Put the work item key (`ZSB-<n>`) in the branch name or the PR title. The `plane-link`
   workflow then adds the PR to the work item, moves it to In Progress when the PR opens and to
   Done when it merges. It is best effort and never fails a PR.
-- The tracker address and API key are repo secrets (`PLANE_URL`, `PLANE_API_KEY`). Never write
-  them in this public repo.
+- The tracker address and API key are secrets of the `plane` environment (`PLANE_URL`,
+  `PLANE_API_KEY`), which only `main` may use. Never write them in this public repo, and keep
+  the workflow on `pull_request_target` with no checkout.
 
 ## Cloud sessions (Claude Code on the web / desktop cloud)
 - `scripts/cloud-setup.sh` runs at session start (`.claude/settings.json`). It installs Node 24,

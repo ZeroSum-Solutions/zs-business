@@ -2,26 +2,32 @@ name: plane-link
 
 # Links a pull request to its Plane work items. Put a ZSB-<n> key in the branch name, the PR
 # title or the PR body: the work item gets the PR as a link and a comment, moves to
-# In Progress when the PR opens and to Done when it merges. Best effort: it never fails a PR.
-# Secrets: PLANE_URL (https base URL of the tracker) and PLANE_API_KEY. A fork gets neither,
-# so the job is skipped there. The script is inline on purpose: no PR code is checked out.
+# In Progress while the PR is open and to Done when it merges into the default branch.
+# Best effort: it never fails a PR.
+#
+# Security. The trigger is pull_request_target, so the workflow file always comes from the
+# default branch: a pull request cannot change what runs with the secrets. The job checks out
+# no code and reads the PR title, branch and body only as data through env. The secrets
+# PLANE_URL and PLANE_API_KEY live in the "plane" environment, which only the default branch
+# may use, so a workflow pushed on another branch cannot read them. Forks are skipped.
+# There is no concurrency group on purpose: GitHub drops queued runs in a group, and a
+# dropped "closed" event would leave a work item open.
 
 on:
-  pull_request:
-    types: [opened, reopened, ready_for_review, closed]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, edited, closed]
 
 permissions: {}
-
-concurrency:
-  group: plane-link-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
 
 jobs:
   link:
     name: link work items
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 6
+    environment: plane
     steps:
       - name: Link ZSB keys to Plane
         env:
@@ -29,6 +35,9 @@ jobs:
           PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
           PR_ACTION: ${{ github.event.action }}
           PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_STATE: ${{ github.event.pull_request.state }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -36,20 +45,28 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           python3 - <<'PLANE_LINK_PY'
-          import html, json, os, re, sys, urllib.error, urllib.request
+          import html, json, os, re, sys, urllib.error, urllib.parse, urllib.request
 
           base = os.environ.get("PLANE_URL", "").rstrip("/")
           key = os.environ.get("PLANE_API_KEY", "")
           if not base.startswith("https://") or not key:
-              print("PLANE_URL or PLANE_API_KEY is not set (a fork has no secrets): nothing to do")
+              print("::warning::PLANE_URL or PLANE_API_KEY is not set: nothing linked")
               sys.exit(0)
 
-          WS, PREFIX, MAX_KEYS = "zerosum", "ZSB", 5
-          action, merged = os.environ["PR_ACTION"], os.environ["PR_MERGED"] == "true"
-          pr_url, pr_number, pr_title = os.environ["PR_URL"], os.environ["PR_NUMBER"], os.environ["PR_TITLE"]
-          text = "\n".join(os.environ.get(n, "") for n in ("PR_BRANCH", "PR_TITLE", "PR_BODY"))
-          pattern = r"(?<![A-Za-z0-9])%s-0*([0-9]+)(?![A-Za-z0-9])" % PREFIX
-          numbers = sorted({int(n) for n in re.findall(pattern, text, re.I)})
+          WS, PREFIX, MAX_KEYS, MAX_PAGES = "zerosum", "ZSB", 5, 20
+          env = os.environ
+          action, merged, is_open = env["PR_ACTION"], env["PR_MERGED"] == "true", env["PR_STATE"] == "open"
+          pr_url, pr_number, pr_title = env["PR_URL"], env["PR_NUMBER"], env["PR_TITLE"]
+          to_default = env["PR_BASE"] == env["DEFAULT_BRANCH"]
+
+          # Keys in order: branch, then title, then body, so the cap never drops the branch's own key.
+          # A key must not touch a letter or digit on either side; at most 7 digits.
+          pattern = re.compile(r"(?<![A-Za-z0-9])%s-0*([0-9]{1,7})(?![A-Za-z0-9])" % PREFIX, re.I)
+          numbers = []
+          for field in ("PR_BRANCH", "PR_TITLE", "PR_BODY"):
+              for n in pattern.findall(env.get(field, "")):
+                  if int(n) not in numbers:
+                      numbers.append(int(n))
           if not numbers:
               print("no %s-n key in the branch, title or body: nothing to do" % PREFIX)
               sys.exit(0)
@@ -71,42 +88,60 @@ jobs:
                   "%s/api/v1/workspaces/%s/%s" % (base, WS, path), method=method,
                   data=json.dumps(body).encode() if body is not None else None,
                   headers={"X-API-Key": key, "Content-Type": "application/json"})
-              with opener.open(req, timeout=20) as r:
+              with opener.open(req, timeout=8) as r:
                   return json.loads(r.read() or b"{}")
 
 
           def rows(path):
-              d = api("GET", path + "?per_page=100")
-              return d.get("results", []) if isinstance(d, dict) else d
+              out, cursor = [], None
+              for _ in range(MAX_PAGES):
+                  d = api("GET", path + "?per_page=100" + ("&cursor=" + urllib.parse.quote(cursor) if cursor else ""))
+                  if not isinstance(d, dict):
+                      return out + list(d)
+                  out += d.get("results", [])
+                  cursor = d.get("next_cursor")
+                  if not d.get("next_page_results") or not cursor:
+                      break
+              return out
 
 
-          if action == "closed" and merged:
-              verb, target = "Merged", "completed"
+          if action == "closed" and merged and to_default:
+              note, target = "Merged", "completed"
+          elif action == "closed" and merged:
+              note, target = "Merged into %s (not the default branch)" % env["PR_BASE"], None
           elif action == "closed":
-              verb, target = "Closed without merge", None
-          else:
-              verb, target = "Opened", "started"
-          note = "%s: pull request #%s %s" % (verb, pr_number, pr_url)
+              note, target = "Closed without merge", None
+          else:  # opened, reopened, ready_for_review, edited
+              note, target = "Linked", "started" if is_open else None
+          note = "%s: pull request #%s %s" % (note, pr_number, pr_url)
           failed = 0
           for n in numbers:
               ident = "%s-%d" % (PREFIX, n)
               try:
                   item = api("GET", "issues/%s/" % ident)
                   root = "projects/%s/issues/%s" % (item["project"], item["id"])
-                  if not any(l.get("url") == pr_url for l in rows(root + "/links/")):
-                      api("POST", root + "/links/", {"title": ("PR #%s: %s" % (pr_number, pr_title))[:250], "url": pr_url})
-                  if not any(note in html.unescape(re.sub(r"<[^>]+>", "", c.get("comment_html") or "")) for c in rows(root + "/comments/")):
+                  try:  # the link is a convenience: a refusal (for example a duplicate) must not stop the rest
+                      if not any(l.get("url") == pr_url for l in rows(root + "/links/")):
+                          api("POST", root + "/links/", {"title": ("PR #%s: %s" % (pr_number, pr_title))[:250], "url": pr_url})
+                  except urllib.error.HTTPError as e:
+                      print("::warning::%s: link not added (HTTP %s)" % (ident, e.code))
+                  seen = (html.unescape(re.sub(r"<[^>]+>", "", c.get("comment_html") or "")) for c in rows(root + "/comments/"))
+                  if not any(note in text for text in seen):
                       api("POST", root + "/comments/", {"comment_html": "<p>%s</p>" % html.escape(note)})
                   if target:
                       states = rows("projects/%s/states/" % item["project"])
-                      group = {s["id"]: s["group"] for s in states}.get(item.get("state"))
+                      want = sorted((s for s in states if s["group"] == target), key=lambda s: s.get("sequence") or 0)
+                      # Read the state again just before the move: another pull request may have finished the item.
+                      group = {s["id"]: s["group"] for s in states}.get(api("GET", root + "/").get("state"))
                       # Open: only pull an item forward (never reopen finished work). Merge: finish it.
                       move = group in ("backlog", "unstarted") if target == "started" else group not in ("completed", "cancelled")
-                      want = sorted((s for s in states if s["group"] == target), key=lambda s: s.get("sequence") or 0)
-                      if move and want:
+                      if move and not want:
+                          failed += 1
+                          print("::warning::%s: the project has no state in group %s" % (ident, target))
+                      elif move:
                           api("PATCH", root + "/", {"state": want[0]["id"]})
                           print("%s -> %s" % (ident, want[0]["name"]))
-                  print("%s linked (%s)" % (ident, verb.lower()))
+                  print("%s done (%s)" % (ident, note.split(":")[0].lower()))
               except urllib.error.HTTPError as e:
                   failed += 1
                   print("::warning::%s: Plane answered HTTP %s" % (ident, e.code))
@@ -114,5 +149,5 @@ jobs:
                   failed += 1
                   print("::warning::%s: %s" % (ident, type(e).__name__))
           # Best effort: a Plane outage must never block a pull request.
-          print("done, %d of %d failed" % (failed, len(numbers)))
+          print("finished, %d of %d failed" % (failed, len(numbers)))
           PLANE_LINK_PY
