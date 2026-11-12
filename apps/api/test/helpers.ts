@@ -225,7 +225,7 @@ export async function createApiHarness(options: HarnessOptions = {}): Promise<Ap
  * statements), with the Activepieces routes and the remote MCP endpoint on. Owner tokens from
  * `ApiHarness.a.token` work on it as long as `clock` does not pass their hour.
  */
-export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number; signInLimit?: { limiter?: RateLimiter; secrets?: SignInLimitConfig["secrets"] } } = {}): App {
+export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Date }; onError?: (error: unknown) => void; activepieces?: boolean; requestTimeoutMs?: number; signInLimit?: { limiter?: RateLimiter; secrets?: SignInLimitConfig["secrets"] }; sites?: { store: SiteObjectStore; compiler: SiteCompiler } } = {}): App {
   const appClock = options.clock ?? clock;
   return createApp({
     verifier: createHs256Verifier(SECRET, { clock: appClock }),
@@ -236,6 +236,7 @@ export function appOnDatabase(db: ScopedDatabase, options: { clock?: { now(): Da
     config: { allowedOrigins: [ORIGIN], ...(options.requestTimeoutMs ? { requestTimeoutMs: options.requestTimeoutMs } : {}) },
     ...(options.activepieces === false ? {} : { activepieces: { keySecrets: { current: ACTIVEPIECES_KEY_SECRET } } }),
     ...(options.onError ? { onError: options.onError } : {}),
+    ...(options.sites ? { sites: options.sites } : {}),
     ...(options.signInLimit ? { signInLimit: { secrets: options.signInLimit.secrets ?? { current: SIGN_IN_LIMITER_SECRET }, limiter: options.signInLimit.limiter ?? createPostgresRateLimiter(db, appClock) } } : {}),
   });
 }

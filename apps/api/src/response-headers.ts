@@ -14,7 +14,7 @@ import type { MiddlewareHandler } from "hono";
  * never cacheable.
  */
 const PRIVATE_PREFIXES = [
-  "/v1", "/worker/v1", "/browser-runner/v1", "/integrations/activepieces/v1", "/mcp", "/cron", "/internal", "/webhooks",
+  "/v1", "/worker/v1", "/browser-runner/v1", "/integrations/activepieces/v1", "/mcp", "/automation/v1", "/cron", "/internal", "/webhooks",
 ] as const;
 /** OAuth redirects land here with a code in the query; the answer must not be cached or leak the URL. */
 const CALLBACK_PREFIXES = ["/oauth"] as const;
