@@ -124,6 +124,8 @@ async function closePlanPriceAlert(tx: Transaction, at: Date): Promise<void> {
 export interface PlanEventDeps {
   readonly subscriptions?: StripeSubscriptionReader;
   readonly graceDays: number;
+  /** The injected clock, read again once Stripe has answered: that moment dates a resolution (PL-10). */
+  readonly now: () => Date;
 }
 
 /** PL-10: returns null for an event that is not a plan event, so the top-up rules apply. */
@@ -170,6 +172,8 @@ export function createPlanEvents(deps: PlanEventDeps) {
     if (!deps.subscriptions) return "wait";
     const answer = await deps.subscriptions.retrieve(subscriptionId);
     if (!answer) return "not_ours";
+    // PL-10: Stripe's answer reflects every event created before it came back; this is the first moment the worker knows that.
+    const observedAt = new Date(deps.now().getTime());
     const customerId = id(answer.customer, "cus_");
     const claimed = uuid(meta(answer).zs_tenant);
     if (claimed !== null && claimed !== tenantId) return "not_ours";
@@ -224,14 +228,15 @@ export function createPlanEvents(deps: PlanEventDeps) {
         seconds(answer.trial_end), periodEnd, answer.cancel_at_period_end === true, startedAt, endedAt, statusSince, at]);
     // PL-10: when a past-due subscription pays again, its failed invoices are settled (paid, voided
     // or forgiven), so a later failure starts a fresh grace. A failure seen while the subscription is
-    // still active stays: Stripe may move it to past_due next. `resolved_at` is the worker's clock now, not the time
-    // of the event that led here (an old webhook can be the one that shows a later recovery): a failure event
-    // Stripe created at or before it is stale and never reopens the invoice (see `invoice`).
+    // still active stays: Stripe may move it to past_due next. `resolved_at` is the injected clock read right after
+    // Stripe's answer, not the time of the event that led here and not the start of the pass (an old webhook can be
+    // the one that shows a later recovery): a failure event Stripe created at or before it is stale and never
+    // reopens the invoice (see `invoice`).
     if ((status === "active" || status === "trialing") && (previous?.status === "past_due" || previous?.status === "unpaid"))
       await tx.query(
-        `UPDATE plan_invoices SET status='resolved', resolved_at=$3, updated_at=$3
+        `UPDATE plan_invoices SET status='resolved', resolved_at=$4, updated_at=$3
           WHERE tenant_id=$1 AND provider='stripe' AND stripe_subscription_id=$2 AND status='failed'`,
-        [tenantId, subscriptionId, at]);
+        [tenantId, subscriptionId, at, observedAt]);
     // PL-11: a founding subscription first seen ended gives up the invite; the slot stays used.
     if (plan.founding && ENDED.has(status) && !(previous && ENDED.has(previous.status)))
       await tx.query("UPDATE tenant_plans SET founding_invite=false, updated_at=$2 WHERE tenant_id=$1", [tenantId, at]);
@@ -316,12 +321,18 @@ export function createPlanEvents(deps: PlanEventDeps) {
            status=CASE WHEN plan_invoices.status='paid' THEN 'paid' ELSE 'failed' END,
            first_failed_at=CASE WHEN plan_invoices.status='resolved' OR plan_invoices.first_failed_at IS NULL THEN EXCLUDED.first_failed_at
              ELSE least(plan_invoices.first_failed_at, EXCLUDED.first_failed_at) END,
+           -- The resolution time outlives a reopen, so a delayed copy of the earlier failure stays stale. A row the worker
+           -- from before resolved_at resolved has none, or an older one: its updated_at is when it was resolved.
+           resolved_at=CASE WHEN plan_invoices.status='resolved' THEN greatest(plan_invoices.resolved_at, plan_invoices.updated_at)
+             ELSE plan_invoices.resolved_at END,
            updated_at=EXCLUDED.updated_at
-         -- PL-10: an invoice that was resolved ignores any failure Stripe created at or before that time, and one with
-         -- no event time cannot be ordered, so it never reopens it: a delayed event cannot bring back the old first_failed_at.
-         -- A row the worker from before resolved_at resolved has none: its updated_at is the same moment.
-         WHERE coalesce(plan_invoices.resolved_at, CASE WHEN plan_invoices.status='resolved' THEN plan_invoices.updated_at END) IS NULL
-            OR $8::timestamptz > coalesce(plan_invoices.resolved_at, plan_invoices.updated_at)`,
+         -- PL-10: a paid invoice stays as it is. A resolved one ignores any failure Stripe created at or before its resolution,
+         -- and one with no event time cannot be ordered, so it never reopens it: a delayed event cannot bring back the old
+         -- first_failed_at. A failed one that was reopened before ignores a copy of a failure older than its resolution.
+         WHERE plan_invoices.status <> 'paid' AND (
+           CASE WHEN plan_invoices.status = 'resolved'
+             THEN $8::timestamptz > greatest(plan_invoices.resolved_at, plan_invoices.updated_at)
+             ELSE plan_invoices.resolved_at IS NULL OR $8::timestamptz > plan_invoices.resolved_at END)`,
         [tenantId, invoiceId, subscriptionId, amount, currency, when, at, created]);
     }
     return sync(tx, tenantId, subscriptionId, at);

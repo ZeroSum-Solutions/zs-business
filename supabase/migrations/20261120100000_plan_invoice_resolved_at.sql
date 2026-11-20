@@ -1,5 +1,5 @@
 -- PL-10: a delayed `invoice.payment_failed` for an invoice that was already resolved must not reopen it
--- with the old failure time. `resolved_at` is the worker's clock when it resolved the invoice; a failure
+-- with the old failure time. `resolved_at` is the worker's clock when it saw the recovery; a failure
 -- event Stripe created at or before it is stale. It stays set when a later failure reopens the invoice, so
 -- a delayed copy of the first failure is still refused then.
 --

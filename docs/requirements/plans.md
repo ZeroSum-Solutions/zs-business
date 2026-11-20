@@ -204,13 +204,16 @@ back, so a retry starts from the same rows. Rules:
   among the effective subscription's `failed` invoices while Stripe says it is `past_due` (so an
   invoice Stripe voided or forgave never counts), else null. When a `past_due` or `unpaid`
   subscription turns `trialing` or `active`, its `failed` invoices become `resolved` and
-  `plan_invoices.resolved_at` takes the Stripe time of the event that showed it (`created` of a
-  `customer.subscription.*` or `invoice.paid` event, else the worker's clock), so a later failure
-  starts a fresh grace. A failure event created after `resolved_at` counts from its own time and
-  reopens the invoice. One created at or before it, or one with no `created`, is stale: it changes
-  nothing, so a delayed `invoice.payment_failed` never brings back an old `first_failed_at`.
-  `resolved_at` stays set when the invoice reopens, so a delayed copy of its first failure is
-  refused then too. `read_only_after` is
+  `plan_invoices.resolved_at` takes the injected clock read right after Stripe's answer, the moment
+  the worker sees the recovery (not the `created` of the event that led there, which can be old, and
+  not the start of the pass), so a later failure starts a fresh grace. A failure event created after
+  `resolved_at` counts from its own time and reopens the invoice. One created at or before it
+  (Stripe's `created` has second precision, so the same second counts as stale), or one with no
+  `created`, is stale: it changes nothing, so a delayed `invoice.payment_failed` never brings back an
+  old `first_failed_at`. `resolved_at` stays set when the invoice reopens, so a delayed copy of its
+  first failure is refused then too. A resolved row without `resolved_at` (the worker from before
+  this column resolved it) is dated by its `updated_at`, the later of the two when both exist, and a
+  reopen writes that time into `resolved_at`. A `paid` invoice is terminal: a failure changes nothing. `read_only_after` is
   `payment_failed_at + grace` (or null) while the effective subscription is in one of those three;
   otherwise it is the `status_since` of the latest subscription in `canceled`, `unpaid`,
   `incomplete_expired` or `paused`, or null when none ever ended. So an `incomplete` replacement
