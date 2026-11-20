@@ -991,7 +991,7 @@ against the pinned Supabase Root 2021 CA.
    | `RESEND_API_KEY`, `RESEND_FROM`, `RESEND_REPLY_TO`, `RESEND_BASE_URL` | **no** | yes |
    | `OPS_ALERT_EMAIL` | **no** | yes (one address; without it a cron failure is recorded in `cron_alerts` but not emailed) |
    | `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_BASE_URL`, `TWILIO_OUTCOME_WAIT_MS` | **no** | only with `SMS_PROVIDER=twilio` (`TWILIO_API_KEY_SID` and `TWILIO_API_KEY_SECRET` come together) |
-   | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS`, `BILLING_STRIPE_KEY`, `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS`, `BILLING_SHOPIFY_*` | **no** | yes |
+   | `BILLING_WORKER`, `BILLING_DATABASE_URL`, `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS`, `BILLING_STRIPE_KEY`, `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS`, `BILLING_SHOPIFY_*` | **no** | yes (with `BILLING_STRIPE_KEY` it also needs `STRIPE_LIVEMODE`, `true` or `false`: PL-13) |
    | `SHOPIFY_BILLING_APP_HANDLE` | yes | no |
    | `CALENDAR_WORKER`, `CALENDAR_DATABASE_URL`, `CALENDAR_RUN_BUDGET_MS`, `CALENDAR_INTERVAL_MS`, `GOOGLE_TOKEN_PRIVATE_KEY`, `GOOGLE_WEBHOOK_URL`, `GOOGLE_EVENT_TITLE` | **no** | yes |
    | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_WORKER_ID`, `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS` (this row does not cover `ACTIVEPIECES_KEY_SECRET`: the API needs it for the owner routes) | **no** | yes |
@@ -1265,7 +1265,7 @@ and the wallet reserves nothing until it is repaid). Off unless `BILLING_WORKER=
 | `CRON_SECRET` | The same bearer as `/cron/delivery`. Unset, the route is 404. |
 | `BILLING_DATABASE_URL` | A login that may `SET ROLE service_role`, never the runtime login. Non-loopback hosts need `DATABASE_CA_CERT` and no query string. |
 | `BILLING_CLAIM_LIMIT`, `BILLING_RUN_BUDGET_MS`, `BILLING_INTERVAL_MS` | Optional tuning: 50, 20000 and 30000 (Node worker only). The cron function allows a budget of at most 20000. |
-| `BILLING_STRIPE_KEY` | Hub plan events (plans.md PL-13): a restricted key that may only read subscriptions (`rk_`), in the mode of `STRIPE_LIVEMODE`. Unset, plan events wait and end `orphaned`. |
+| `BILLING_STRIPE_KEY` | Hub plan events (plans.md PL-13): a restricted key that may only read subscriptions (`rk_`), in the mode of `STRIPE_LIVEMODE`. With a key the worker must also hold `STRIPE_LIVEMODE` (`true` or `false`): unset, empty, invalid or the other mode fails the start. Without a key, plan events wait and end `orphaned`. |
 | `BILLING_STRIPE_BASE_URL`, `BILLING_PLAN_GRACE_DAYS` | Optional: `https://api.stripe.com`, and the days from a failed plan invoice to read-only, 1 to 30 (7). |
 | `BILLING_SHOPIFY_PARTNER_ID`, `BILLING_SHOPIFY_PARTNER_TOKEN`, `BILLING_SHOPIFY_APP_ID`, `BILLING_SHOPIFY_PLAN_HANDLES` | Shopify App Pricing (plans.md PL-18, PL-20), all four or none: the Partner organisation number, a Partner API client token with only "Manage apps", the numeric app ID, and JSON from the five PL-16 keys to distinct plan handles. Set, each run ends with a Shopify pass that reads linked shops' contracts. |
 | `BILLING_SHOPIFY_SYNC_LIMIT`, `BILLING_SHOPIFY_API_VERSION`, `BILLING_SHOPIFY_BASE_URL` | Optional: shops per run, 1 to 100 (20); `2026-10`; `https://partners.shopify.com` (http only on loopback, for tests). |

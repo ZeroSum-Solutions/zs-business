@@ -68,7 +68,7 @@ const createdAt = (value: unknown): Date | null =>
 export function createBillingWorker(deps: BillingWorkerDeps) {
   const config = billingWorkerConfigSchema.parse(deps.config ?? {});
   const now = () => new Date(deps.clock.now().getTime());
-  const plans = createPlanEvents({ graceDays: config.planGraceDays, ...(deps.subscriptions ? { subscriptions: deps.subscriptions } : {}) });
+  const plans = createPlanEvents({ graceDays: config.planGraceDays, now, ...(deps.subscriptions ? { subscriptions: deps.subscriptions } : {}) });
 
   const bySession = async (tx: Transaction, object: Record<string, unknown>): Promise<TopUpRow | null> => {
     const meta = metadata(object);

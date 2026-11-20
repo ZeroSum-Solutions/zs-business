@@ -39,6 +39,7 @@ export {
   type ParsedPlanConfig,
   type PlanConfig,
   type StripePlansClient,
+  type StripeSubscriptionRead,
   type StripeSubscriptionReader,
   type SubscriptionCheckoutRequest,
   type SubscriptionReaderConfig,

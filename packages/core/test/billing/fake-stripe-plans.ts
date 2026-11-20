@@ -35,6 +35,8 @@ export interface FakeStripePlans {
   readonly url: string;
   readonly received: readonly FakePlanRequest[];
   readonly subscriptions: Map<string, FakeSubscription>;
+  /** Stripe's clock as the Date header shows it: the test clock plus this many milliseconds (a worker clock that runs behind or ahead). */
+  skewMs: number;
   /** Answers the next requests with this status (Stripe's error envelope), in order. */
   fail(...statuses: number[]): void;
   close(): Promise<void>;
@@ -56,11 +58,14 @@ function reply(res: ServerResponse, status: number, body: unknown, headers: Read
   res.end(JSON.stringify(body));
 }
 
-export async function startFakeStripePlans(options: { readonly secretKeys: readonly string[] }): Promise<FakeStripePlans> {
+export async function startFakeStripePlans(options: { readonly secretKeys: readonly string[]; readonly clock: () => Date }): Promise<FakeStripePlans> {
+  const state = { skewMs: 0 };
   const received: FakePlanRequest[] = [];
   const subscriptions = new Map<string, FakeSubscription>();
   const keys = new Map<string, { raw: string; body: unknown }>();
   const failures: number[] = [];
+  // Every answer carries Stripe's clock in its Date header, as the real API does; the test clock stands in for it.
+  const stripeDate = () => new Date(options.clock().getTime() + state.skewMs).toUTCString();
 
   function handle(request: FakePlanRequest, res: ServerResponse) {
     const auth = request.headers.authorization;
@@ -69,7 +74,7 @@ export async function startFakeStripePlans(options: { readonly secretKeys: reado
     if (failure !== undefined) return reply(res, failure, stripeError("Scripted failure."));
     if (request.method === "GET" && request.path.startsWith("/v1/subscriptions/")) {
       const found = subscriptions.get(decodeURIComponent(request.path.slice("/v1/subscriptions/".length)));
-      return found ? reply(res, 200, found) : reply(res, 404, stripeError("No such subscription."));
+      return found ? reply(res, 200, found, { date: stripeDate() }) : reply(res, 404, stripeError("No such subscription."));
     }
     if (request.method !== "POST") return reply(res, 404, stripeError("Unrecognized request URL."));
     if (request.path === "/v1/checkout/sessions") {
@@ -116,6 +121,8 @@ export async function startFakeStripePlans(options: { readonly secretKeys: reado
     url: `http://127.0.0.1:${port}`,
     received,
     subscriptions,
+    get skewMs() { return state.skewMs; },
+    set skewMs(value: number) { state.skewMs = value; },
     fail(...statuses) { failures.push(...statuses); },
     close() {
       server.closeAllConnections();

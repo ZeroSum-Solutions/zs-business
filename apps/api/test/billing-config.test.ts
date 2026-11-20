@@ -194,9 +194,9 @@ describe("parseBillingEnv (S-8, S-9)", () => {
 
   it("reads the plan read key and grace (plans.md PL-13), naming variables, never values", () => {
     const key = ["rk", "test", "k".repeat(24)].join("_");
-    expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, BILLING_PLAN_GRACE_DAYS: "3" }).runner)
+    expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, STRIPE_LIVEMODE: "false", BILLING_PLAN_GRACE_DAYS: "3" }).runner)
       .toMatchObject({ stripeReader: { secretKey: key }, planGraceDays: 3 });
-    expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, BILLING_STRIPE_BASE_URL: "http://127.0.0.1:9999" }).runner)
+    expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, STRIPE_LIVEMODE: "false", BILLING_STRIPE_BASE_URL: "http://127.0.0.1:9999" }).runner)
       .toMatchObject({ stripeReader: { secretKey: key, baseUrl: "http://127.0.0.1:9999" } });
     const bad = billingError({ ...ON, BILLING_STRIPE_KEY: "pk_test_notasecretkey123" });
     expect(bad).toMatch(/BILLING_STRIPE_KEY/);
@@ -204,7 +204,7 @@ describe("parseBillingEnv (S-8, S-9)", () => {
     for (const value of ["0", "31", "x"]) expect(billingError({ ...ON, BILLING_PLAN_GRACE_DAYS: value })).toMatch(/BILLING_PLAN_GRACE_DAYS/);
   });
 
-  it("refuses a read key whose mode differs from STRIPE_LIVEMODE, and checks nothing when it is unset (plans.md PL-13)", () => {
+  it("refuses a read key whose mode differs from STRIPE_LIVEMODE (plans.md PL-13)", () => {
     const test = ["rk", "test", "k".repeat(24)].join("_");
     const live = ["rk", "live", "k".repeat(24)].join("_");
     for (const [key, livemode] of [[test, "true"], [live, "false"]] as const) {
@@ -214,11 +214,22 @@ describe("parseBillingEnv (S-8, S-9)", () => {
     }
     for (const [key, livemode] of [[test, "false"], [live, "true"]] as const)
       expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: key, STRIPE_LIVEMODE: livemode }).runner).toMatchObject({ stripeReader: { secretKey: key } });
-    // Unset or empty STRIPE_LIVEMODE (the workers project holds none) leaves the key unchecked; so does no key.
-    for (const livemode of [undefined, ""])
-      expect(parseBillingEnv({ ...ON, BILLING_STRIPE_KEY: live, ...(livemode === undefined ? {} : { STRIPE_LIVEMODE: livemode }) }).runner)
-        .toMatchObject({ stripeReader: { secretKey: live } });
+    // No key, nothing to check: a declared mode alone is fine.
     expect(parseBillingEnv({ ...ON, STRIPE_LIVEMODE: "true" }).runner).toMatchObject({ stripeReader: null });
+  });
+
+  // PL-13: the check is not optional. A key with an unset or empty STRIPE_LIVEMODE fails closed, for either key mode.
+  it("fails closed on a read key with no declared STRIPE_LIVEMODE (plans.md PL-13)", () => {
+    const test = ["rk", "test", "k".repeat(24)].join("_");
+    const live = ["rk", "live", "k".repeat(24)].join("_");
+    for (const key of [test, live])
+      for (const livemode of [undefined, ""]) {
+        const message = billingError({ ...ON, BILLING_STRIPE_KEY: key, ...(livemode === undefined ? {} : { STRIPE_LIVEMODE: livemode }) });
+        expect(message, `${key.slice(0, 7)} ${JSON.stringify(livemode)}`).toMatch(/BILLING_STRIPE_KEY needs STRIPE_LIVEMODE/);
+        expect(message).not.toContain(key);
+      }
+    // With the worker switched off no key is read, so nothing is checked.
+    expect(parseBillingEnv({ BILLING_WORKER: "off", BILLING_STRIPE_KEY: live })).toEqual({ runner: null, cronSecret: null });
   });
 
   // A STRIPE_LIVEMODE that is set but is not true or false is a typo, not "unset": the mode check must not be skipped by it.
