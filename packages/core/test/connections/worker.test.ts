@@ -1217,15 +1217,24 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect((await makeWorker(database, fake, clock, {}, reports).pass()).stopped).toBe("budget");
   });
 
-  it("C-9: a provider call that hangs is cut at the pass deadline, not at its own 1.5 s timeout", async () => {
+  it("C-9: a provider call that hangs is cut at the pass deadline, not at its own client timeout", async () => {
     const t = await newTenant(fixture);
     await seedConnection(fixture, { tenantId: t.tenantId, memberId: t.memberId, accountId: seedAccount(t.tenantId), lastChecked: new Date(T0 - 2 * DAY) });
     fake.override(/^GET \/connected_accounts\//, { hang: true });
+    // The client gets a call 60 s, far past the test timeout (15 s), and the pass allows 300 ms in all. A call that
+    // only the client's own timeout could end would fail this test by timing out, so a pass that returns shows
+    // the pass deadline aborted it. The bound below is wide on purpose: a tight wall-clock bound failed on loaded hosts.
+    const worker60 = createConnectionsWorker({
+      service: (work) => asService(database.servicePool, work),
+      composio: createComposioClient({ apiKey: "test-key", baseUrl: "https://composio.test/api/v3.1", fetch: fake.fetch, timeoutMs: 60_000 }),
+      clock,
+      config: { env: ENV, callbackUrl: CALLBACK_URL, authConfigIds: { shopify: AUTH_CONFIG }, passMs: 300 },
+      report: (event) => reports.push(event),
+    });
     const started = Date.now();
-    const out = await makeWorker(database, fake, clock, { passMs: 300 }, reports).pass();
+    const out = await worker60.pass();
     const took = Date.now() - started;
-    // The harness client gives a call 1,500 ms; the pass allows 300 ms in all, so the call is aborted there.
-    expect(took).toBeLessThan(1000);
+    expect(took).toBeLessThan(10_000);
     expect(out).toMatchObject({ checked: 1, composioCalls: 1 });
     expect((await database.pool.query("SELECT last_error_code FROM connections")).rows[0].last_error_code).toBe("provider_unavailable");
   });
@@ -1257,13 +1266,20 @@ describe("the pass (C-8, C-9, C-12)", () => {
       const t = await newTenant(fixture);
       await seedConnection(fixture, { tenantId: t.tenantId, memberId: t.memberId, accountId: seedAccount(t.tenantId), lastChecked: new Date(stale.getTime() + i * 60_000) });
     };
-    await seed(0);
-    await database.pool.query("ANALYZE connections");
-    for (let i = 1; i < 4; i += 1) await seed(i);
-    const out = await worker.pass();
-    expect(out.checked).toBe(4);
-    expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(4);
-    expect((await database.pool.query("SELECT count(*)::int AS n FROM connections WHERE claimed_until IS NOT NULL")).rows[0].n).toBe(0);
+    // Autovacuum is held off for this table while the stale statistics are needed: a vacuum or an auto-analyze
+    // between the seeding and the pass would refresh them and let the old statement pass.
+    await database.pool.query("ALTER TABLE connections SET (autovacuum_enabled = false)");
+    try {
+      await seed(0);
+      await database.pool.query("ANALYZE connections");
+      for (let i = 1; i < 4; i += 1) await seed(i);
+      const out = await worker.pass();
+      expect(out.checked).toBe(4);
+      expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(4);
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM connections WHERE claimed_until IS NOT NULL")).rows[0].n).toBe(0);
+    } finally {
+      await database.pool.query("ALTER TABLE connections RESET (autovacuum_enabled)");
+    }
   });
 });
 
