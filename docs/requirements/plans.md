@@ -212,9 +212,9 @@ back, so a retry starts from the same rows. Rules:
   invoice it settled). A failure event created after both counts from its own time and reopens the
   invoice. One created at or before either (Stripe's `created` has second precision, so the same
   second counts as stale), or one with no `created` once a recovery is on record, is stale: it
-  changes nothing, for an invoice with a row or without one, so a delayed `invoice.payment_failed`
+  changes no invoice row, for an invoice with a row or without one (the event is still processed and the subscription still read), so a delayed `invoice.payment_failed`
   never brings back an old `first_failed_at`, however many times the subscription failed and
-  recovered before. `resolved_at` stays set when the invoice reopens. A genuine failure created in
+  recovered before. A recovery the worker never saw as past due or unpaid leaves no date. `resolved_at` stays set when the invoice reopens. A genuine failure created in
   the second of the recovery is dropped as stale; Stripe sends the next one with its retry. The
   migration dates every row from before these columns at the migration time (a subscription with a
   resolved or failed invoice, and each resolved invoice), and a resolved invoice always has a
