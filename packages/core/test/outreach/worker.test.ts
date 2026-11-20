@@ -379,7 +379,8 @@ describe("the holiday calendar (OS-11)", () => {
     world.time.ms = Date.parse("2026-11-26T20:30:00.000Z");
     await r.run();
     expect(r.fake.sendCalls()).toBe(0);
-    // Monday 2026-11-30 09:30 local.
+    // Monday 2026-11-30 09:30 local, a prospect due that day: 2026-11-29T20:30Z is still Sunday in UTC.
+    await world.rows("UPDATE outreach_prospects SET next_due_on='2026-11-30' WHERE tenant_id=$1", [r.tenant]);
     world.time.ms = Date.parse("2026-11-29T20:30:00.000Z");
     await r.run();
     expect(r.fake.sendCalls()).toBe(1);

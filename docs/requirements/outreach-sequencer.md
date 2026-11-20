@@ -299,7 +299,8 @@ Friday before and one on a Sunday on the Monday after (so 1 Jan 2028 is observed
 clock. A "send day" is a business day that is not a holiday: `mayStartSend` is false on any other
 day, so a prospect that is due on a holiday waits and sends in the next open window. When a send
 settles, `next_due_on` is the delay's business-day date moved forward to the next send day, so a
-stored due date is never a weekend or holiday; the following delay counts from the real send date.
+follow-up's stored due date is never a weekend or holiday (a campaign activated on a holiday still
+stores that day as step 1's due date and waits); the following delay counts from the real send date.
 There is no setting: the calendar is the same for every tenant.
 Test (`holidays.test.ts`, `worker.test.ts` "the holiday calendar"): Thanksgiving 2026-11-26, the
 day after and Christmas 2026-12-25 send nothing and the next send day sends; a step 2 due on 27
