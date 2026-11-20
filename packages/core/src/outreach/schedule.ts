@@ -1,6 +1,7 @@
-// Outreach schedule (outreach-sequencer.md OS-11, OS-12): local dates, business days, the send window and the warm-up
+// Outreach schedule (outreach-sequencer.md OS-11, OS-12): local dates, business days, holidays, the send window and the warm-up
 // ramp. Everything is a pure function of an instant the caller read from the injected clock and a time zone name.
 import { civilFromDays, DAY_MS, daysFromCivil, isoDate, isoWeekday, MINUTE_MS, offsetAt } from "../booking/time-zone.js";
+import { isHolidayDays } from "./holidays.js";
 
 export interface LocalMoment {
   /** `YYYY-MM-DD` in the tenant's zone. */
@@ -32,6 +33,19 @@ export function dateToDays(date: string): number {
 /** Monday to Friday (OS-11). */
 export const isBusinessDay = (date: string): boolean => isoWeekday(dateToDays(date)) <= 5;
 
+/** A US federal holiday (observed dates included) or the day after Thanksgiving, by the tenant's local date (OS-11). */
+export const isHoliday = (date: string): boolean => isHolidayDays(dateToDays(date));
+
+/** A day outreach may send on: a business day that is not a holiday (OS-11). */
+export const isSendDay = (date: string): boolean => isBusinessDay(date) && !isHoliday(date);
+
+/** The first send day on or after `date`: a step that falls on a weekend or a holiday waits for the next open day. */
+export function nextSendDay(date: string): string {
+  let days = dateToDays(date);
+  while (isoWeekday(days) > 5 || isHolidayDays(days)) days += 1;
+  return isoDate(days);
+}
+
 /** D plus `count` business days: Friday + 1 is Monday; Wednesday + 3 is Monday. A weekend start counts from the next weekday. */
 export function addBusinessDays(date: string, count: number): string {
   if (!Number.isInteger(count) || count < 0) throw new RangeError("Expected a whole number of business days of at least 0");
@@ -54,12 +68,12 @@ export function clockMinutes(clock: string): number {
 export const inWindow = (minutes: number, startMin: number, endMin: number): boolean => minutes >= startMin && minutes < endMin;
 
 /**
- * OS-11: whether a send may start now. Today must be a business day and now in the window; a prospect is due when its
- * `next_due_on` is today or earlier.
+ * OS-11: whether a send may start now. Today must be a send day (a business day that is not a holiday) and now in the
+ * window; a prospect is due when its `next_due_on` is today or earlier.
  */
 export function mayStartSend(input: { readonly timeZone: string; readonly nowMs: number; readonly windowStartMin: number; readonly windowEndMin: number }): boolean {
   const local = localMoment(input.timeZone, input.nowMs);
-  return isBusinessDay(local.date) && inWindow(local.minutes, input.windowStartMin, input.windowEndMin);
+  return isSendDay(local.date) && inWindow(local.minutes, input.windowStartMin, input.windowEndMin);
 }
 
 export const isDue = (nextDueOn: string, today: string): boolean => nextDueOn <= today;
