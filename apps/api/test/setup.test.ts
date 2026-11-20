@@ -295,7 +295,7 @@ describe("POST /v1/setup/booking-pages/:id/published (IT-11, acceptance 5)", () 
     const error = errorOf(response.body);
     expect(error.code).toBe("ValidationFailed");
     expect(error.message).toBe("Invalid request");
-    expect(error.details).toEqual({ issues: [{ path: "", message: "An idempotency key is required: send a unique value, such as a UUID, with each write (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)." }] });
+    expect(error.details).toEqual({ issues: [{ path: "", message: "An idempotency key is required: send a unique value, such as a UUID, once per operation and reuse it when you retry (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)." }] });
     expect(JSON.stringify(response.body)).not.toContain("received undefined");
   });
 });

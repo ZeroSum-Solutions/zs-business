@@ -319,8 +319,8 @@ belongs to one list and sort; it is not combined with `offset`.
 
 Every `POST` and `DELETE` that takes a caller-supplied key needs an `Idempotency-Key` header (1-200 characters;
 the few server-keyed routes, such as `POST /v1/setup/apply`, do not). Without one the answer is 400
-`ValidationFailed` and `details.issues[0].message` says "An idempotency key is required: send a unique value, such as a UUID, with each write (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)." Repeating a request with
-the same key returns the stored result with the original status; reusing a key with a
+`ValidationFailed` and `details.issues[0].message` says "An idempotency key is required: send a unique value, such as a UUID, once per operation and reuse it when you retry (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)." Repeating a request with
+the same key returns the stored result with the original status, unless the route documents its own retry rule (a wallet top-up answers 409 `topup_closed` once it is closed); reusing a key with a
 different body, or on another endpoint, is 409 `idempotency_key_reused`. Keys are per tenant.
 Target IDs derive from the tenant and the key.
 

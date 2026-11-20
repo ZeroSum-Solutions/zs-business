@@ -108,7 +108,7 @@ test("says so when another owner approved the draft first, or the customer has n
   await page.evaluate((id) => window.__zsDemo!.approveReplyElsewhere(id!), replyId);
   await draft.getByRole("button", { name: "Approve and queue" }).click();
   // Once the thread reloads it names who approved it, as information rather than an error.
-  await expect(page.getByTestId("reply-step-error").getByRole("status")).toHaveText(/^Already approved by .+\. It is queued for delivery\.$/);
+  await expect(page.getByTestId("reply-step-error").getByRole("status")).toHaveText(/^Already approved by you\. It is queued for delivery\.$/);
   await expect(page.getByTestId("reply-step-error").getByRole("alert")).toHaveCount(0);
   await expect(page.locator(`[data-reply-id="${replyId}"]`).getByTestId("reply-status")).toHaveText("Approved and queued");
 
