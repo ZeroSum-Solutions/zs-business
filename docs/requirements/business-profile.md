@@ -1,7 +1,10 @@
 # Business profile
 
-Status: draft contract, not built (2026-10-22). Code follows this file once its first slice
-lands; a change to a numbered rule needs a new revision of this file first.
+Status: built, first slice (2026-10-23, PR #48: BP-1 to BP-12, migration
+`supabase/migrations/20261023100000_business_profiles.sql`, `packages/core/src/business/handlers.ts`,
+`apps/api/src/routes/business.ts`). Open: a business description and a services list are not
+fields of this profile; they are tracked as ZSB-4 and need a new revision of this file first.
+Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one profile per tenant that says who the business is: the name customers see, the legal
 name, a phone number, a time zone, a default currency and a postal address. The owner edits it
