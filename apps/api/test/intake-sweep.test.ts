@@ -2,6 +2,8 @@
 // and real runs against the test database with an in-memory object store. The sweep is off unless
 // INTAKE_SWEEP_WORKER=on, runs one bounded batch per call, and a repeated call finds nothing left to do.
 import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { asService } from "@zs/db";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "@zs/db/testing";
@@ -53,12 +55,14 @@ describe("parseIntakeSweepEnv", () => {
       databaseCaCert: undefined,
       r2: { endpoint: "https://account.r2.cloudflarestorage.com", bucket: "zs-sites", accessKeyId: "access-key-id", secretAccessKey: "secret-access-key-value" },
       batch: 50,
+      runBudgetMs: 15_000,
     });
-    expect(parseIntakeSweepEnv(base({ INTAKE_SWEEP_BATCH: "200" })).runner?.batch).toBe(200);
+    expect(parseIntakeSweepEnv(base({ INTAKE_SWEEP_BATCH: "200", INTAKE_SWEEP_RUN_BUDGET_MS: "20000" })).runner).toMatchObject({ batch: 200, runBudgetMs: 20_000 });
   });
 
-  it("refuses a batch outside 1 to 200", () => {
+  it("refuses a batch outside 1 to 200 and a run budget outside 1000 to 20000 ms", () => {
     for (const batch of ["0", "201", "-1", "1.5", "many"]) expect(() => parseIntakeSweepEnv(base({ INTAKE_SWEEP_BATCH: batch }))).toThrow(/INTAKE_SWEEP_BATCH/);
+    for (const budget of ["999", "20001", "0", "soon"]) expect(() => parseIntakeSweepEnv(base({ INTAKE_SWEEP_RUN_BUDGET_MS: budget }))).toThrow(/INTAKE_SWEEP_RUN_BUDGET_MS/);
   });
 
   it("names a missing variable and a placeholder secret, without printing a value", () => {
@@ -91,7 +95,7 @@ describe("GET /cron/intake-sweep", () => {
 
   it("is not found without CRON_SECRET, 401 without the bearer, and never runs either way", async () => {
     let runs = 0;
-    const runner = { async run() { runs += 1; return { removed: 0, batch: 50 }; } };
+    const runner = { async run() { runs += 1; return { removed: 0, batch: 50, stopped: "empty" as const }; } };
     expect((await app({ cronSecret: null, runner }).request("/cron/intake-sweep", authed)).status).toBe(404);
     const guarded = app({ cronSecret: CRON_SECRET, runner });
     expect((await guarded.request("/cron/intake-sweep")).status).toBe(401);
@@ -108,11 +112,11 @@ describe("GET /cron/intake-sweep", () => {
 
   it("runs once and answers the counts", async () => {
     const calls: number[] = [];
-    const runner = createIntakeSweepRunner({ sweep: { async sweepFiles(limit) { calls.push(limit); return 3; } }, batch: 7 });
+    const runner = createIntakeSweepRunner({ sweep: { async sweepFiles(limit) { calls.push(limit); return 3; } }, batch: 7, budgetMs: 15_000, now: () => 0 });
     const response = await app({ cronSecret: CRON_SECRET, runner }).request("/cron/intake-sweep", authed);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ ran: true, removed: 3, batch: 7 });
-    expect(calls).toEqual([7]);
+    expect(await response.json()).toEqual({ ran: true, removed: 3, batch: 7, stopped: "empty" });
+    expect(calls).toEqual([5]);
   });
 
   it("answers 503 and reports the error when the sweep throws", async () => {
@@ -121,6 +125,75 @@ describe("GET /cron/intake-sweep", () => {
     const response = await app({ cronSecret: CRON_SECRET, runner, onError: (error) => reported.push(error) }).request("/cron/intake-sweep", authed);
     expect(response.status).toBe(503);
     expect(reported).toHaveLength(1);
+  });
+});
+
+describe("createIntakeSweepRunner", () => {
+  /** A sweep with `due` jobs left that takes `ms` of the fake clock per call. */
+  const fake = (due: number, ms: number) => {
+    const state = { due, at: 0, asks: [] as number[] };
+    return {
+      state,
+      sweep: { async sweepFiles(limit: number) { state.asks.push(limit); state.at += ms; const done = Math.min(limit, state.due); state.due -= done; return done; } },
+      now: () => state.at,
+    };
+  };
+
+  it("asks for a few jobs at a time and stops when the batch is full", async () => {
+    const f = fake(100, 10);
+    expect(await createIntakeSweepRunner({ sweep: f.sweep, batch: 12, budgetMs: 15_000, now: f.now }).run()).toEqual({ removed: 12, batch: 12, stopped: "batch" });
+    expect(f.state.asks).toEqual([5, 5, 2]);
+  });
+
+  it("stops when the work runs out, with the last short chunk", async () => {
+    const f = fake(7, 10);
+    expect(await createIntakeSweepRunner({ sweep: f.sweep, batch: 50, budgetMs: 15_000, now: f.now }).run()).toEqual({ removed: 7, batch: 50, stopped: "empty" });
+    expect(f.state.asks).toEqual([5, 5]);
+    expect(await createIntakeSweepRunner({ sweep: fake(0, 10).sweep, batch: 50, budgetMs: 15_000, now: () => 0 }).run()).toEqual({ removed: 0, batch: 50, stopped: "empty" });
+  });
+
+  it("stops starting chunks once the time budget is spent, however much is left", async () => {
+    const f = fake(1000, 4000);
+    expect(await createIntakeSweepRunner({ sweep: f.sweep, batch: 200, budgetMs: 10_000, now: f.now }).run()).toEqual({ removed: 15, batch: 200, stopped: "budget" });
+    expect(f.state.asks).toEqual([5, 5, 5]);
+  });
+
+  it("lets a failing sweep fail the run, so the cron answers 503", async () => {
+    const runner = createIntakeSweepRunner({ sweep: { async sweepFiles() { throw new Error("R2 delete failed with status 500"); } }, batch: 50, budgetMs: 15_000, now: () => 0 });
+    await expect(runner.run()).rejects.toThrow(/status 500/);
+  });
+});
+
+describe("the deployed cron function (vercel-intake-sweep)", () => {
+  const saved = new Map<string, string | undefined>();
+  const NAMES = ["CRON_SECRET", "INTAKE_SWEEP_WORKER", "OPS_ALERT_EMAIL"];
+  let server: Server;
+  let origin: string;
+  beforeAll(async () => {
+    for (const name of NAMES) saved.set(name, process.env[name]);
+    process.env.CRON_SECRET = CRON_SECRET;
+    delete process.env.INTAKE_SWEEP_WORKER;
+    delete process.env.OPS_ALERT_EMAIL;
+    const { default: listener } = await import("../src/vercel-intake-sweep.js");
+    server = createServer(listener);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+
+  it("answers only GET /cron/intake-sweep with the bearer, and runs nothing while the switch is off", async () => {
+    expect((await fetch(`${origin}/cron/intake-sweep`)).status).toBe(401);
+    expect((await fetch(`${origin}/cron/intake-sweep`, { headers: { Authorization: "Bearer wrong" } })).status).toBe(401);
+    const off = await fetch(`${origin}/cron/intake-sweep`, authed);
+    expect(off.status).toBe(200);
+    expect(await off.json()).toEqual({ ran: false, reason: "INTAKE_SWEEP_WORKER is off" });
+    expect((await fetch(`${origin}/cron/other`, authed)).status).toBe(404);
   });
 });
 
@@ -212,20 +285,20 @@ describe("real sweeps against the test database", () => {
 
     // Not yet due: the run answers, deletes nothing and leaves every file.
     now = START + 29 * DAY;
-    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 0, batch: 2 } });
+    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 0, batch: 2, stopped: "empty" } });
     expect(objects.keys()).toHaveLength(3);
 
     // Due: two per run, then the last, then nothing. The batch bounds one call, never the work.
     now = START + 31 * DAY;
-    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 2, batch: 2 } });
+    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 2, batch: 2, stopped: "batch" } });
     expect(objects.keys()).toHaveLength(1);
-    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 1, batch: 2 } });
+    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 1, batch: 2, stopped: "empty" } });
     expect(objects.keys()).toEqual([]);
-    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 0, batch: 2 } });
+    expect(await sweep(cron)).toEqual({ status: 200, body: { ran: true, removed: 0, batch: 2, stopped: "empty" } });
     expect(await unmarked()).toBe(0);
   }, 60_000);
 
-  it("two overlapping calls delete each file once and both succeed", async () => {
+  it("two overlapping calls both succeed and leave no file behind (a file may be counted by both)", async () => {
     const path = await endedJob();
     now += 31 * DAY;
     const cron = await sweepApp(50);
@@ -257,7 +330,7 @@ describe("real sweeps against the test database", () => {
 
     broken = false;
     await sleep(15);
-    expect(await sweep(failing)).toEqual({ status: 200, body: { ran: true, removed: 1, batch: 50 } });
+    expect(await sweep(failing)).toEqual({ status: 200, body: { ran: true, removed: 1, batch: 50, stopped: "empty" } });
     expect(objects.keys()).not.toContain(path);
     expect(await unmarked()).toBe(0);
     expect(await listOpenCronAlerts((work) => asService(database.pool, work))).toEqual([]);

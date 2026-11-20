@@ -40,7 +40,7 @@ export async function startIntakeSweep(env: IntakeSweepRunnerEnv, deps: {
       clock: deps.clock,
       generateId: deps.generateId,
     }, { store: createIntakeFileStore(objects) });
-    return { runner: createIntakeSweepRunner({ sweep: session, batch: env.batch }), servicePool, close };
+    return { runner: createIntakeSweepRunner({ sweep: session, batch: env.batch, budgetMs: env.runBudgetMs, now: () => deps.clock.now().getTime() }), servicePool, close };
   } catch (error) {
     await close();
     throw error;

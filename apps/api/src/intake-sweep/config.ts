@@ -19,8 +19,10 @@ const onSchema = z.object({
   R2_BUCKET: z.string().min(3).max(63),
   R2_ACCESS_KEY_ID: z.string().min(1),
   R2_SECRET_ACCESS_KEY: z.string().min(1),
-  // Jobs examined per run: one sequential delete each, so a run stays inside the cron function's 30 s.
+  // Jobs examined per run at most, and the time one run may spend starting more of them. The deletes are sequential,
+  // so the budget (not the batch) keeps a run inside the cron function's 30 s with time left to answer and alert.
   INTAKE_SWEEP_BATCH: int(1, 200).default(50),
+  INTAKE_SWEEP_RUN_BUDGET_MS: int(1000, 20_000).default(15_000),
 });
 
 export interface IntakeSweepRunnerEnv {
@@ -29,6 +31,7 @@ export interface IntakeSweepRunnerEnv {
   readonly databaseCaCert: string | undefined;
   readonly r2: { readonly endpoint: string; readonly bucket: string; readonly accessKeyId: string; readonly secretAccessKey: string };
   readonly batch: number;
+  readonly runBudgetMs: number;
 }
 
 export interface IntakeSweepEnv {
@@ -74,6 +77,7 @@ export function parseIntakeSweepEnv(env: Readonly<Record<string, string | undefi
       databaseCaCert: data.DATABASE_CA_CERT,
       r2: { endpoint: data.R2_ENDPOINT, bucket: data.R2_BUCKET, accessKeyId: data.R2_ACCESS_KEY_ID, secretAccessKey: data.R2_SECRET_ACCESS_KEY },
       batch: data.INTAKE_SWEEP_BATCH,
+      runBudgetMs: data.INTAKE_SWEEP_RUN_BUDGET_MS,
     },
   };
 }

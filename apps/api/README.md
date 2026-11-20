@@ -984,7 +984,7 @@ against the pinned Supabase Root 2021 CA.
    | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_WORKER_ID`, `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS` (this row does not cover `ACTIVEPIECES_KEY_SECRET`: the API needs it for the owner routes) | **no** | yes |
    | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `FOLLOWUP_MODEL`, `FOLLOWUP_SLOT_MINUTES`, `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS`, `FOLLOWUP_INTERVAL_MS`, `AGENT_MODEL_PERSONAL_DATA`, `AGENT_MODEL_NO_PERSONAL_DATA`, `AGENT_TEMPLATED`, `AGENT_TEMPLATED_MAX_CANDIDATES`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `COMPOSIO_API_KEY` | **no** | yes |
    | `OUTREACH_WORKER`, `OUTREACH_DATABASE_URL`, `OUTREACH_RUNTIME_DATABASE_URL`, `OUTREACH_GOOGLE_CLIENT_ID`, `OUTREACH_GOOGLE_CLIENT_SECRET`, `OUTREACH_TOKEN_PRIVATE_KEY`, `OUTREACH_SEND_ENABLED`, `OUTREACH_GMAIL_BASE_URL`, `OUTREACH_MAILBOX_DAILY_LIMIT`, `OUTREACH_SENDS_PER_TICK`, `OUTREACH_MIN_GAP_MS`, `OUTREACH_PROBE_DELAY_MS`, `OUTREACH_RUN_BUDGET_MS` | **no** | yes |
-   | `INTAKE_SWEEP_WORKER`, `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL`, `INTAKE_SWEEP_BATCH` (with `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, listed above) | **no** | yes |
+   | `INTAKE_SWEEP_WORKER`, `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL`, `INTAKE_SWEEP_BATCH`, `INTAKE_SWEEP_RUN_BUDGET_MS` (with `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, listed above) | **no** | yes |
    | `OUTREACH_TENANTS` (the tenant allowlist, comma-separated tenant UUIDs; no secret) | yes (turns `/v1/outreach` on) | yes |
    | `ENRICHMENT_WORKER`, `ENRICHMENT_DATABASE_URL`, `ENRICHMENT_WORKER_ID`, `ENRICHMENT_CLAIM_LIMIT`, `ENRICHMENT_MAX_ATTEMPTS`, `ENRICHMENT_PROVIDER_TIMEOUT_MS`, `ENRICHMENT_INTERVAL_MS`, `TREG_TOKEN`, `TREG_BASE_URL` | **no** | no (the Mac's enrichment worker) |
    | `IMAGE_WORKER`, `IMAGE_DATABASE_URL`, `IMAGE_SERVICE_DATABASE_URL`, `IMAGE_INTERVAL_MS` | **no** | no (the Mac's image worker) |
@@ -1353,10 +1353,14 @@ file is deleted and the job is marked (docs/requirements/document-intake.md, DL-
 unless the build sets `INTAKE_SWEEP_CRON_SCHEDULE`, and the function runs only with `INTAKE_SWEEP_WORKER=on`
 (any other value, or unset, answers `{ ran: false }`; a value other than `on` or `off` stops the function at start).
 
-Each call runs one bounded batch: at most `INTAKE_SWEEP_BATCH` jobs (default 50, 1 to 200), oldest first, and it answers
-`{ ran: true, removed, batch }`. A `removed` equal to `batch` means more may be waiting for the next call. The sweep is
-idempotent: deleting a missing file succeeds and a marked job is never picked again, so a repeated or overlapping
-call is safe. If a delete fails (R2 down, wrong keys) the call answers 503, records a `cron_alerts` row and emails
+Each call runs one bounded batch: it asks for five jobs at a time, oldest first, and stops at `INTAKE_SWEEP_BATCH`
+jobs (default 50, 1 to 200), when nothing is due, or when `INTAKE_SWEEP_RUN_BUDGET_MS` (default 15000, 1000 to 20000)
+is spent, whichever comes first, so a slow R2 cannot carry it past the function's 30 seconds. It answers
+`{ ran: true, removed, batch, stopped }` with `stopped` one of `empty`, `batch`, `budget`; `batch` or `budget` means more
+may be waiting for the next call. The sweep is idempotent: deleting a missing key succeeds and a marked job is never
+picked again, so a repeated call is safe. Two overlapping calls may both delete, and both count, the same file.
+A missing bucket is not a missing key: R2's `NoSuchBucket` fails the delete, so a wrong `R2_BUCKET` raises an alert
+instead of marking jobs as swept. If a delete fails (R2 down, wrong keys) the call answers 503, records a `cron_alerts` row and emails
 `OPS_ALERT_EMAIL`; the job stays unmarked and the next call starts at it again.
 
 | Variable | Meaning |
@@ -1366,19 +1370,21 @@ call is safe. If a delete fails (R2 down, wrong keys) the call answers 503, reco
 | `INTAKE_SWEEP_DATABASE_URL` | The runtime LOGIN role (unprivileged). The sweep reads and marks jobs through a platform transaction under RLS, so a privileged login is refused at start. |
 | `INTAKE_SWEEP_SERVICE_DATABASE_URL` | A login that may `SET ROLE service_role`, used only to write the cron alerts. Non-loopback hosts need `DATABASE_CA_CERT` and no query string on either URL. |
 | `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The same bucket and keys the API uses to store the PDFs. The path has no key prefix; a different bucket would delete nothing and still mark the jobs. |
-| `INTAKE_SWEEP_BATCH` | Optional, 1 to 200, default 50. |
-| `INTAKE_SWEEP_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/intake-sweep`, for example `17 3 * * *` (daily; run it more often if a day can end more than 50 jobs). Unset, there is no cron. |
+| `INTAKE_SWEEP_BATCH`, `INTAKE_SWEEP_RUN_BUDGET_MS` | Optional: jobs per call, 1 to 200, default 50; milliseconds one call may spend starting more deletes, 1000 to 20000, default 15000. |
+| `INTAKE_SWEEP_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/intake-sweep`, for example `17 3 * * *` (daily; run it more often if a day can end more than 50 jobs, or if a run answers `stopped: "budget"`). Unset, there is no cron. |
 
 ### Turning it on
 
-Nothing here is set by the repository; an operator does it once, in the workers project only:
+Nothing here is set by the repository; an operator does it once, in the workers project only. The sweep deletes
+files the intake upload routes wrote, so it has work only where those routes run; the hosted API does not mount them
+yet (`documentIntake` is unset in `src/server.ts`), so turning the sweep on there changes nothing until it does.
 
 1. Set `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL` and the four `R2_*` variables (and `CRON_SECRET`, `DATABASE_CA_CERT`, `OPS_ALERT_EMAIL` if not already there), with the bucket the API uploads to.
 2. Set `INTAKE_SWEEP_WORKER=on`.
 3. Set the build variable `INTAKE_SWEEP_CRON_SCHEDULE` (for example `17 3 * * *`) and deploy the workers project to production.
 4. Check: `curl -H "Authorization: Bearer $CRON_SECRET" https://<workers host>/cron/intake-sweep` answers `{ "ran": true, ... }`.
 
-To turn it off, set `INTAKE_SWEEP_WORKER=off` (the cron still fires and answers `ran: false`) or unset the schedule and redeploy.
+To turn it off, set `INTAKE_SWEEP_WORKER=off` (the cron still fires and answers `ran: false`) or unset the schedule. Either takes effect only on the next workers deployment: Vercel keeps the values a deployment was built with, so redeploy after changing it.
 
 ## Activepieces (`/v1/integrations/activepieces`, `/integrations/activepieces/v1`, `/cron/activepieces`)
 

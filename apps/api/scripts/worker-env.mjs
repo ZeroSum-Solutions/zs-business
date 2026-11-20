@@ -58,7 +58,7 @@ export const WORKER_ONLY_ENV = [
   "OUTREACH_RUN_BUDGET_MS",
   // document intake sweep (src/intake-sweep/config.ts, document-intake.md DL-16). It reads the R2_* names the API's site store
   // reads, so those are not here.
-  "INTAKE_SWEEP_WORKER", "INTAKE_SWEEP_DATABASE_URL", "INTAKE_SWEEP_SERVICE_DATABASE_URL", "INTAKE_SWEEP_BATCH",
+  "INTAKE_SWEEP_WORKER", "INTAKE_SWEEP_DATABASE_URL", "INTAKE_SWEEP_SERVICE_DATABASE_URL", "INTAKE_SWEEP_BATCH", "INTAKE_SWEEP_RUN_BUDGET_MS",
   // cron failure alert email (src/cron-alert-mail.ts); it sends with the RESEND_* sender above
   "OPS_ALERT_EMAIL",
   // build variables of the workers project
