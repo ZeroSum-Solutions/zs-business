@@ -101,4 +101,13 @@ describe("inbox: who drafted a reply", () => {
     expect(actorName({ userId: AGENT, email: null }, null)).toBe("a former team member");
     expect(actorName(null, AGENT)).toBe("a former team member");
   });
+
+  it("calls the signed-in member \"you\", never their own email, and still names a colleague by email", () => {
+    const me = "9a1b3c5d-7e9f-4a1b-8c2d-000000000001";
+    expect(actorName({ userId: me, email: "viewer@example.test" }, AGENT, me)).toBe("you");
+    expect(actorName({ userId: me, email: null }, null, me)).toBe("you");
+    expect(actorName({ userId: AGENT, email: "mara@haldenrowe.example" }, AGENT, me)).toBe("mara@haldenrowe.example");
+    expect(actorName({ userId: AGENT, email: null }, AGENT, me)).toBe(AGENT_AUTHOR);
+    expect(actorName(null, AGENT, me)).toBe("a former team member");
+  });
 });

@@ -38,14 +38,14 @@ test("drafts a reply, approves it into the delivery queue, and discards another"
   const draft = replyBubble(page, "three sapphire halos");
   await expect(draft.getByTestId("reply-status")).toHaveText("Draft");
   await expect(draft).toContainText("Sapphire halos");
-  await expect(draft).toContainText("Drafted by mara@haldenrowe.example");
+  await expect(draft).toContainText("Drafted by you");
   await expect(pane.getByLabel("Reply to Linnea Castellanos")).toHaveValue("");
   await shot(page, "21-inbox-draft", info.project.name);
 
   await draft.getByRole("button", { name: "Approve and queue" }).click();
   await expect(page.getByRole("status").getByText("Approved. The reply is queued for delivery.")).toBeVisible();
   await expect(draft.getByTestId("reply-status")).toHaveText("Approved and queued");
-  await expect(draft).toContainText("Approved by mara@haldenrowe.example");
+  await expect(draft).toContainText("Approved by you");
   await expect(draft.getByRole("button")).toHaveCount(0);
   // The buttons went away with the draft: focus lands on the approved reply, not on the page.
   await expect(draft).toBeFocused();
@@ -108,7 +108,7 @@ test("says so when another owner approved the draft first, or the customer has n
   await page.evaluate((id) => window.__zsDemo!.approveReplyElsewhere(id!), replyId);
   await draft.getByRole("button", { name: "Approve and queue" }).click();
   // Once the thread reloads it names who approved it, as information rather than an error.
-  await expect(page.getByTestId("reply-step-error").getByRole("status")).toHaveText(/^Already approved by .+\. It is queued for delivery\.$/);
+  await expect(page.getByTestId("reply-step-error").getByRole("status")).toHaveText(/^Already approved by you\. It is queued for delivery\.$/);
   await expect(page.getByTestId("reply-step-error").getByRole("alert")).toHaveCount(0);
   await expect(page.locator(`[data-reply-id="${replyId}"]`).getByTestId("reply-status")).toHaveText("Approved and queued");
 
