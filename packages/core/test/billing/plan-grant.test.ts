@@ -201,6 +201,8 @@ describe("tenancy of the grant columns (PL-23)", () => {
     for (const [sql, params] of [
       ["UPDATE tenant_plans SET granted_plan='pro', grant_note='x', granted_at=now(), granted_by='me'", []],
       ["UPDATE tenant_plans SET granted_until=NULL", []],
+      ["UPDATE tenant_plans SET free_tier=true", []],
+      ["INSERT INTO tenant_plans (tenant_id, free_tier, created_at, updated_at) VALUES ($1,true,now(),now())", [other.tenantId]],
       ["UPDATE tenant_plans SET granted_plan=NULL, grant_note=NULL, granted_at=NULL, granted_by=NULL, granted_until=NULL", []],
       ["INSERT INTO tenant_plans (tenant_id, granted_plan, grant_note, granted_at, granted_by, created_at, updated_at) VALUES ($1,'pro','x',now(),'me',now(),now())", [other.tenantId]],
     ] as const) {
@@ -214,7 +216,7 @@ describe("tenancy of the grant columns (PL-23)", () => {
     // The privilege itself: no write on any grant column for the runtime login or `authenticated`.
     const privilege = async (role: string, column: string, kind: string) => (await b.h.rows<{ ok: boolean }>(
       "SELECT has_column_privilege($1, 'public.tenant_plans', $2, $3) AS ok", [role, column, kind]))[0]!.ok;
-    for (const column of ["granted_plan", "granted_until", "grant_note", "granted_at", "granted_by"])
+    for (const column of ["granted_plan", "granted_until", "grant_note", "granted_at", "granted_by", "free_tier"])
       for (const role of ["authenticated", "zs_runtime"]) {
         expect(await privilege(role, column, "UPDATE"), `${role} UPDATE ${column}`).toBe(false);
         expect(await privilege(role, column, "INSERT"), `${role} INSERT ${column}`).toBe(false);

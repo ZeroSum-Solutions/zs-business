@@ -1,6 +1,9 @@
 // The PL-8 plan gate and the plan lock. Original code. The dispatcher calls `planGate` inside
 // every action's transaction; this module imports nothing from the action layer.
-import { Conflict, PLAN_CATALOG, PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanLimits } from "@zs/contracts";
+import {
+  Conflict, FREE_SITE_PUBLISHES_PER_DAY, PLAN_CATALOG, PLAN_CHECKOUT_CREATE_ACTION, PLAN_SITE_PUBLISHES_PER_DAY,
+  type HubPlan, type PlanLimits,
+} from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 
 /** PL-4, PL-10: one tenant's plan decisions and plan events never interleave. */
@@ -33,6 +36,58 @@ export function planLimits(
 /** PL-8, PL-21: read-only at or after `read_only_after`, never while a grant is active. */
 export const isReadOnly = (row: ({ readonly read_only_after: Date | null } & PlanGrantColumns) | null, now: Date) =>
   row?.read_only_after != null && row.read_only_after.getTime() <= now.getTime() && activeGrant(row, now) === null;
+
+/** PL-25: the action a publish dispatches; its daily limit is checked by the plan gate. */
+export const SITE_PUBLISH_ACTION = "site.release.publish";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * PL-25: releases a tenant may record in 24 hours. First that applies: an active grant, a provider plan
+ * (the held plan included), the free marker (20); otherwise the tenant is comped and null means no limit.
+ */
+export function sitePublishLimit(
+  row: ({ readonly plan: HubPlan | null; readonly free_tier: boolean } & PlanGrantColumns) | null | undefined, now: Date,
+): number | null {
+  if (!row) return null;
+  const plan = activeGrant(row, now) ?? row.plan;
+  if (plan) return PLAN_SITE_PUBLISHES_PER_DAY[plan];
+  return row.free_tier ? FREE_SITE_PUBLISHES_PER_DAY : null;
+}
+
+interface PlanGateRow extends PlanGrantColumns {
+  readonly plan: HubPlan | null; readonly status: string; readonly extra_connections: number;
+  readonly read_only_after: Date | null; readonly free_tier: boolean;
+}
+const readPlanRow = async (tx: Transaction, tenantId: string): Promise<PlanGateRow | undefined> =>
+  (await tx.query<PlanGateRow>(
+    `SELECT plan, status, extra_connections, read_only_after, free_tier, ${GRANT_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0];
+
+/** PL-25: refuse one more publish when the tenant has used its releases of the last 24 hours. */
+async function enforceSitePublishLimit(tx: Transaction, tenantId: string, row: PlanGateRow | undefined, now: Date): Promise<void> {
+  const limit = sitePublishLimit(row, now);
+  if (limit === null) return;
+  const used = (await tx.query<{ used: number }>(
+    "SELECT count(*)::int AS used FROM site_releases WHERE tenant_id=$1 AND created_at > $2::timestamptz",
+    // The cutoff is 24 elapsed hours before the injected clock; SQL `interval '1 day'` would follow the session's time zone.
+    [tenantId, new Date(now.getTime() - DAY_MS)])).rows[0]!.used;
+  if (used >= limit)
+    throw new Conflict("The plan's daily publish limit is reached; try again later or choose a bigger plan",
+      { reason: "plan_limit", resource: "sitePublishesPerDay", limit, used });
+}
+
+/**
+ * PL-25: the same check without the plan lock, for the publish path to run before it compiles and stores
+ * anything (the gate checks again under the lock). Read in the caller's transaction.
+ */
+export async function assertSitePublishRoom(tx: Transaction, tenantId: string, now: Date): Promise<void> {
+  const row = await readPlanRow(tx, tenantId);
+  // PL-8 first, as the plan gate: a read-only tenant is told to fix billing, not to buy a bigger plan.
+  if (row && isReadOnly(row, now)) throw readOnlyRefusal();
+  await enforceSitePublishLimit(tx, tenantId, row, now);
+}
+
+const readOnlyRefusal = () =>
+  new Conflict("The plan has ended or its payment failed; the business is read-only until billing is fixed", { reason: "plan_read_only" });
 
 /** PL-8: what a read-only tenant may still run. */
 export const READ_ONLY_ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
@@ -71,13 +126,15 @@ const COUNTED: Readonly<Record<string, { resource: keyof PlanLimits; count: stri
  */
 export async function planGate(tx: Transaction, tenantId: string, actionType: string, now: Date): Promise<void> {
   const counted = COUNTED[actionType];
-  // Lock before reading, so a plan change that commits meanwhile is the one enforced.
-  if (counted) await lockTenantPlan(tx, tenantId);
-  const row = (await tx.query<{ plan: HubPlan | null; status: string; extra_connections: number; read_only_after: Date | null } & PlanGrantColumns>(
-    `SELECT plan, status, extra_connections, read_only_after, ${GRANT_COLUMNS} FROM tenant_plans WHERE tenant_id=$1`, [tenantId])).rows[0];
+  const publishes = actionType === SITE_PUBLISH_ACTION;
+  // Lock before reading, so a plan change that commits meanwhile is the one enforced. A publish takes the
+  // same lock: its count spans the tenant's sites, which the per-site lock does not serialize (PL-25).
+  if (counted || publishes) await lockTenantPlan(tx, tenantId);
+  const row = await readPlanRow(tx, tenantId);
   if (!row) return;
   if (isReadOnly(row, now) && !READ_ONLY_ALLOWED_ACTIONS.has(actionType))
-    throw new Conflict("The plan has ended or its payment failed; the business is read-only until billing is fixed", { reason: "plan_read_only" });
+    throw readOnlyRefusal();
+  if (publishes) await enforceSitePublishLimit(tx, tenantId, row, now);
   const limits = planLimits(row, now);
   if (!counted || !limits) return;
   const limit = limits[counted.resource] as number;

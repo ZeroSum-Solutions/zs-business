@@ -28,6 +28,7 @@ import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { loadApproval, standing } from "../approvals/records.js";
 import { parseOrFail, pgCode, pgConstraint, tenantVisible } from "../crm/rows.js";
+import { validationError } from "../edge/errors.js";
 import { requireMember } from "../members/access.js";
 import {
   automationActorId,
@@ -189,6 +190,17 @@ export const createTokenHandler: ActionHandler = {
       `INSERT INTO automation_tokens (tenant_id, id, name, scopes, created_by, created_at, expires_at)
        VALUES ($1,$2,$3,$4::automation_token_scope[],$5,$6,$7)`,
       [binding.tenantId, payload.tokenId, payload.name, payload.scopes, binding.actorId, now, expiresAt]);
+    // H-14: the allowlist goes in with the token, in this transaction. A site that is not the tenant's
+    // is invisible under RLS, so a foreign site and an unknown one are refused alike.
+    if (payload.siteIds.length > 0) {
+      const own = (await tx.query<{ id: string }>(
+        "SELECT id FROM sites WHERE tenant_id=$1 AND id = ANY($2::uuid[])", [binding.tenantId, payload.siteIds])).rows;
+      if (own.length !== payload.siteIds.length)
+        throw validationError("Invalid request", [{ path: ["siteIds"], message: "Unknown site" }]);
+      await tx.query(
+        "INSERT INTO automation_token_sites (tenant_id, token_id, site_id) SELECT $1, $2, unnest($3::uuid[])",
+        [binding.tenantId, payload.tokenId, payload.siteIds]);
+    }
     const row = (await loadToken(tx, binding.tenantId, payload.tokenId))!;
     return {
       result: tokenRecord(row),

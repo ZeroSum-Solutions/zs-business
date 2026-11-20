@@ -24,12 +24,25 @@ export interface CompiledSite {
   readonly digest?: string;
 }
 /**
+ * The pictures a compile may read (hub-access.md H-17): `read` answers the bytes of a blob the caller's
+ * tenant uploaded, checked against its digest, and throws `ValidationFailed` when there is none. It is
+ * bound to the tenant of the request and cannot name another tenant's object.
+ */
+export interface SiteBlobReader {
+  read(sha256: string): Promise<Uint8Array>;
+}
+/** What the server hands every compile. */
+export interface SiteCompileContext {
+  readonly blobs: SiteBlobReader;
+}
+/**
  * The compiler port: a spec in, deterministic static files out. Same spec, same bytes, so a
  * publish retried with its idempotency key rebuilds the release it already recorded. Throw
- * `ValidationFailed` for a spec the compiler refuses; anything else is a server fault.
+ * `ValidationFailed` for a spec the compiler refuses; anything else is a server fault. A compiler
+ * that needs a picture asks `context.blobs`; one that needs none ignores the context.
  */
 export interface SiteCompiler {
-  compile(spec: SiteSpec): Promise<CompiledSite>;
+  compile(spec: SiteSpec, context: SiteCompileContext): Promise<CompiledSite>;
 }
 
 /** A compiled release, checked: every digest recomputed from the bytes, files sorted by path. */

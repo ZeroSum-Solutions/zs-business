@@ -109,7 +109,7 @@ const CONFLICT_REASONS = new Set([
   "plan_read_only", "plan_limit", "plan_price_hold",
 ]);
 /** PL-8: the counted resources a plan_limit conflict may name. */
-const PLAN_LIMIT_RESOURCES = new Set(["seats", "bookableResources", "managedConnections", "automationTokens"]);
+const PLAN_LIMIT_RESOURCES = new Set(["seats", "bookableResources", "managedConnections", "automationTokens", "sitePublishesPerDay"]);
 const count = (value: JsonValue | undefined): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 /** inbox-home.md I-6, I-7: a not_draft conflict names the reply's current status. */

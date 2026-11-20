@@ -9,7 +9,7 @@ import {
 describe("connections contracts (C-4, C-6, C-10, C-14, C-16)", () => {
   it("adds connections:read as a read scope and reserves the connect: key prefix", () => {
     expect(READ_SCOPES).toContain("connections:read");
-    expect(AUTOMATION_SCOPES).toHaveLength(10);
+    expect(AUTOMATION_SCOPES).toHaveLength(11);
     expect(SERVER_IDEMPOTENCY_PREFIXES).toContain("connect:");
     expect(idempotencyKeySchema.safeParse("connect:abc").success).toBe(false);
     expect(idempotencyKeySchema.safeParse("CONNECT:abc").success).toBe(false);

@@ -112,7 +112,8 @@ export function createAutomationInbound(deps: EdgeDependencies, config: { readon
       const { row } = await deps.db.tenant(principal.tenantId, (tx) =>
         guardToken(tx, deps.clock, principal.tenantId, principal.tokenId, "share"));
       return parseInput(automationWhoAmISchema, {
-        tokenId: row.id, name: row.name, scopes: [...row.scopes], expiresAt: row.expires_at?.toISOString() ?? null,
+        tokenId: row.id, tenantId: row.tenant_id, name: row.name, scopes: [...row.scopes], siteIds: [...row.site_ids],
+        expiresAt: row.expires_at?.toISOString() ?? null,
       }, "result");
     },
 

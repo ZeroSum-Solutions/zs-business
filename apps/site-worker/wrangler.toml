@@ -1,0 +1,15 @@
+# Deployed from the Mac: zsvault run --env CLOUDFLARE_API_TOKEN=cloudflare_wrangler_deploy_token -- npx wrangler@4.160.1 deploy
+# No account id here: wrangler takes it from CLOUDFLARE_ACCOUNT_ID (Cloudflare account 69960e8094cfd4f065915fedb8dbc721).
+name = "zs-site-worker"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+
+# The bucket the API projects releases into (hosts/<host>, t/<tenant>/releases, t/<tenant>/blobs).
+[[r2_buckets]]
+binding = "SITES"
+bucket_name = "zs-sites"
+
+# Creator pages: <slug>.mishmash.page. The zone has a proxied wildcard DNS record (*) so the route is reached.
+[[routes]]
+pattern = "*.mishmash.page/*"
+zone_name = "mishmash.page"

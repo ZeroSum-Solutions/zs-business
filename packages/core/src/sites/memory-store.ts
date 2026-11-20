@@ -4,6 +4,11 @@ import type { SiteObjectStore, SitePutCondition, SiteStoredObject } from "@zs/co
 export interface MemorySiteStore extends SiteObjectStore {
   /** Every key, sorted; for tests. */
   keys(): string[];
+  /** Every key a `get` or `head` asked for since the last `resetLog`, in order (a miss included); for tests. */
+  reads(): string[];
+  /** Every key a `put` or `delete` was called on since the last `resetLog` (a refused conditional put included); for tests. */
+  writes(): string[];
+  resetLog(): void;
 }
 
 /**
@@ -14,6 +19,8 @@ export interface MemorySiteStore extends SiteObjectStore {
 export function createMemorySiteStore(): MemorySiteStore {
   const objects = new Map<string, { body: Uint8Array; contentType: string; etag: string }>();
   let writes = 0;
+  let readLog: string[] = [];
+  let writeLog: string[] = [];
   const holds = (key: string, condition: SitePutCondition | undefined) => {
     if (!condition) return true;
     const current = objects.get(key);
@@ -21,14 +28,17 @@ export function createMemorySiteStore(): MemorySiteStore {
   };
   return {
     async get(key): Promise<SiteStoredObject | null> {
+      readLog.push(key);
       const object = objects.get(key);
       return object ? { body: object.body.slice(), contentType: object.contentType, etag: object.etag } : null;
     },
     async head(key) {
+      readLog.push(key);
       const object = objects.get(key);
       return object ? { etag: object.etag, size: object.body.byteLength } : null;
     },
     async put(key, body, options) {
+      writeLog.push(key);
       if (!holds(key, options.onlyIf)) return null;
       // Like R2, an etag names one write, not just the bytes: a rewrite of equal bytes gets a new one.
       writes += 1;
@@ -37,8 +47,12 @@ export function createMemorySiteStore(): MemorySiteStore {
       return { etag };
     },
     async delete(key) {
+      writeLog.push(key);
       objects.delete(key);
     },
     keys: () => [...objects.keys()].sort(),
+    reads: () => [...readLog],
+    writes: () => [...writeLog],
+    resetLog: () => { readLog = []; writeLog = []; },
   };
 }

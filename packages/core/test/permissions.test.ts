@@ -2,7 +2,7 @@
 // run as an owner, a staff member and a signed-in stranger under the runtime role. M3 intake
 // review is owner-only; the public principal runs the one public action and nothing else.
 // M3b: owners decide approvals; source records need their subject's permission.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ROLE_PERMISSIONS, TenantDenied, roleCan, type MemberRole, type Permission } from "@zs/contracts";
 import { asService, type Transaction } from "@zs/db";
@@ -430,6 +430,11 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     } },
     previewSite: { permission: "publish", run: () => session.previewSite(tenant.siteId, { spec: siteSpec }) },
     syncSite: { permission: "publish", run: () => session.syncSite(tenant.siteId) },
+    putSiteBlob: { permission: "publish", run: () => {
+      const picture = new Uint8Array(32);
+      picture.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 8, 0, 0, 0, 8]);
+      return session.putSiteBlob(tenant.siteId, createHash("sha256").update(picture).digest("hex"), picture);
+    } },
     me: { permission: null, run: () => session.me() },
     // M3b approvals: anyone may request what they may do; owners decide (approvals.md A-5, A-6).
     requestApproval: { permission: "calendar", run: () => session.requestApproval({ action: proposal(), summary: "Book" }, randomUUID()) },

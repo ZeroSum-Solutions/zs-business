@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { siteReleaseDigest } from "@zs/contracts";
-import { plainSiteCompiler, verifyCompiledSite } from "../src/sites/index.js";
+import { noBlobs, plainSiteCompiler, verifyCompiledSite } from "../src/sites/index.js";
 
+const context = { blobs: noBlobs };
 const encode = (text: string) => new TextEncoder().encode(text);
 
 describe("the plain site compiler", () => {
   it("escapes every text field and is deterministic", async () => {
     const spec = { kind: "plain", title: "<script>alert(1)</script>", tagline: "A & B", sections: [{ heading: "\"Hi\"", body: "One\n\nTwo <b>" }] };
-    const first = await verifyCompiledSite(await plainSiteCompiler.compile(spec));
-    const second = await verifyCompiledSite(await plainSiteCompiler.compile(structuredClone(spec)));
+    const first = await verifyCompiledSite(await plainSiteCompiler.compile(spec, context));
+    const second = await verifyCompiledSite(await plainSiteCompiler.compile(structuredClone(spec), context));
     expect(second.digest).toBe(first.digest);
     const html = new TextDecoder().decode(first.bytes.get("index.html"));
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
@@ -18,7 +19,7 @@ describe("the plain site compiler", () => {
   });
 
   it("refuses a spec it does not know", async () => {
-    await expect(plainSiteCompiler.compile({ kind: "recipe" })).rejects.toMatchObject({ code: "ValidationFailed" });
+    await expect(plainSiteCompiler.compile({ kind: "recipe" }, context)).rejects.toMatchObject({ code: "ValidationFailed" });
   });
 });
 

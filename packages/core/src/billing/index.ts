@@ -54,7 +54,7 @@ export {
   setFoundingInvite,
   startPlanCheckout,
 } from "./plans.js";
-export { activeGrant, isReadOnly, lockTenantPlan, planGate, planLimits, READ_ONLY_ALLOWED_ACTIONS } from "./plan-gate.js";
+export { activeGrant, assertSitePublishRoom, isReadOnly, lockTenantPlan, planGate, planLimits, READ_ONLY_ALLOWED_ACTIONS, SITE_PUBLISH_ACTION, sitePublishLimit } from "./plan-gate.js";
 export { clearPlanGrant, PLAN_GRANT_BY_MAX, PLAN_GRANT_NOTE_MAX, readPlanGrant, setPlanGrant, type PlanGrantChange, type PlanGrantState } from "./plan-grant.js";
 export { createPlanEvents, PLAN_PRICE_ALERT_JOB, type PlanOutcome } from "./plan-events.js";
 export { derivePlanRecord } from "./plan-events.js";

@@ -54,10 +54,11 @@ import { intakeRoutes } from "./routes/intake.js";
 import { MEDIA_UPLOAD_PATH, mediaRoutes } from "./routes/media.js";
 import { memberRoutes } from "./routes/members.js";
 import { outreachRoutes } from "./routes/outreach.js";
-import { siteRoutes } from "./routes/sites.js";
+import { SITE_BLOB_PATH, siteRoutes } from "./routes/sites.js";
 import { setupRoutes } from "./routes/setup.js";
 import { sourceRoutes } from "./routes/sources.js";
 import { MCP_PATH, mcpRoutes } from "./mcp/routes.js";
+import { AUTOMATION_SITES_PREFIX, automationSiteRoutes } from "./routes/automation-sites.js";
 import { ACTIVEPIECES_INBOUND_PREFIX, activepiecesInboundRoutes } from "./public/activepieces.js";
 import { createPostgresRateLimiter } from "./public/postgres-limiter.js";
 import { publicRoutes, RateLimited, type PublicIntakeConfig } from "./public/routes.js";
@@ -319,6 +320,14 @@ export function createApp(deps: AppDependencies) {
       ...(deps.onError ? { report: deps.onError } : {}),
     }, requestEdge));
   }
+  // hub-access.md H-15: the site routes for a `sites:publish` token; they need the automation key and the site store.
+  if (deps.activepieces && deps.sites) {
+    app.use(`${AUTOMATION_SITES_PREFIX}/*`, deadline);
+    app.route(AUTOMATION_SITES_PREFIX, automationSiteRoutes({
+      keySecrets: deps.activepieces.keySecrets,
+      limiter: createPostgresRateLimiter(deps.db, deps.clock),
+    }, requestEdge));
+  }
 
   // The runner's calls carry a runner token and a lease, not a member session (BT-7).
   if (deps.browser?.runner) {
@@ -351,8 +360,11 @@ export function createApp(deps: AppDependencies) {
   // IM-22: an image upload is raw bytes with its own limit, checked after auth in mediaRoutes.
   // Only that exact route skips this one; with images off it keeps 64 KiB and answers 404.
   const images = deps.images;
+  const hasSites = deps.sites !== undefined;
   app.use("/v1/*", (c, next) => {
     if (c.req.path === DOCUMENT_INTAKE_UPLOAD_PATH) return next();
+    // hub-access.md H-16: a site blob is raw bytes with its own limit, checked after auth in siteRoutes.
+    if (hasSites && c.req.method === "PUT" && SITE_BLOB_PATH.test(c.req.path)) return next();
     if (images && c.req.method === "POST" && c.req.path === MEDIA_UPLOAD_PATH) return next();
     if (c.req.method === "POST" && OUTREACH_IMPORT_PATH.test(c.req.path)) return outreachImportLimit(c, next);
     return (DOCUMENT_INTAKE_APPLY_PATH.test(c.req.path) ? intakeApplyLimit : jsonLimit)(c, next);

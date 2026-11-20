@@ -36,7 +36,7 @@ async function ourFunctions(tx: Transaction, runtimeRoles = ["authenticated", "s
     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
     WHERE n.nspname NOT IN ('pg_catalog','information_schema','zs_local_auth') AND n.nspname !~ '^pg_(toast|temp)'
       AND NOT EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')
-    ORDER BY 1`, [runtimeRoles, plantedLoginPattern])).rows;
+    ORDER BY p.oid::regprocedure::text COLLATE "C"`, [runtimeRoles, plantedLoginPattern])).rows;
 }
 /** Each function keeps the path it was created with, plus pg_temp last. */
 const expectedPath: Record<string, string> = {
@@ -52,6 +52,10 @@ const expectedPath: Record<string, string> = {
   // Hub access (20261106100000, H-8): usage counters only grow; the retention prune the API runs as the runtime role.
   "automation_token_usage_grow_only()": "pg_catalog, pg_temp",
   "prune_automation_token_usage(timestamp with time zone,integer)": "pg_catalog, pg_temp",
+  // Hub access revision 4 (20261111200000, H-14): a token's sites are set at its creation, and counted at commit.
+  "automation_token_sites_check()": "pg_catalog, pg_temp",
+  "automation_token_sites_creation_only()": "pg_catalog, pg_temp",
+  "automation_tokens_revoke_only()": "pg_catalog, pg_temp",
   // Booking cancellation (20261110200000_booking_cancel.sql, B-30): a cancelled booking never changes for the runtime role.
   "booking_cancel_guard()": "pg_catalog, pg_temp",
   // Booking customer link (20261023200000_booking_contacts.sql): the revision and owner-made guard, and the

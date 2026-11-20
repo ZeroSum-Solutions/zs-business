@@ -49,6 +49,14 @@ export const PLAN_CATALOG: Readonly<Record<HubPlan, PlanCatalogEntry>> = Object.
   },
 });
 
+/**
+ * PL-25: releases a tenant may record in any 24 hours (all its sites). A free tenant (`tenant_plans.free_tier`)
+ * gets the hosting decision's 20; paid plans get more; a comped tenant has no limit. Not part of `PlanLimits`,
+ * so the plan response is unchanged.
+ */
+export const FREE_SITE_PUBLISHES_PER_DAY = 20;
+export const PLAN_SITE_PUBLISHES_PER_DAY: Readonly<Record<HubPlan, number>> = Object.freeze({ solo: 100, studio: 200, pro: 500 });
+
 /** PL-2: the plan whose limits a subscription with an unknown price holds: the lowest paid plan. */
 export const HELD_PLAN: HubPlan = "solo";
 export const HELD_PLAN_INTERVAL: PlanInterval = "month";
