@@ -268,6 +268,7 @@ export function createApp(deps: AppDependencies) {
       : {}),
     ...(deps.stripe ? { billing: { stripe: deps.stripe, ...(deps.stripePlans ? { plans: deps.stripePlans } : {}) } } : {}),
     ...(deps.shopifyAppHandle ? { shopifyBilling: { appHandle: deps.shopifyAppHandle } } : {}),
+    ...(deps.twilioWebhook ? { voiceWebhook: true } : {}),
     ...(deps.googleCalendar ? {
       calendar: {
         google: deps.googleCalendar.google,

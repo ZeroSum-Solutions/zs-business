@@ -17,6 +17,7 @@ import {
 } from "@zs/contracts";
 import type { Transaction } from "@zs/db";
 import { agentKindStatus } from "../agents/controls.js";
+import { smsSenderNumber } from "../delivery/sms-status.js";
 import { currentRevision, usableStandingApproval } from "../templates/store.js";
 
 /** What the runtime reads for one feature, before the plan's own state (read-only) is applied. */
@@ -24,6 +25,13 @@ export interface PlanFeatureFacts {
   readonly running: boolean;
   readonly blockedBy: PlanFeatureBlock | null;
   readonly approved: boolean;
+  readonly equipped: boolean;
+}
+
+/** What only the API process knows, passed in by the session: the routes this deploy mounts. */
+export interface PlanFeatureDeploy {
+  /** The Twilio webhook routes are mounted, so a missed call reaches the voice handler at all (twilio.md T-10). */
+  readonly voiceWebhook: boolean;
 }
 
 const TEMPLATED_FEATURES: readonly TemplatedKind[] = ["appointment_reminder", "review_request"];
@@ -43,7 +51,9 @@ export async function freshRunners(tx: Transaction, now: Date): Promise<Readonly
  * G-15) and whether a message kind has a template a run may send. Read inside the caller's transaction, which the
  * session opens as one snapshot, so the answer cannot straddle a change.
  */
-export async function planFeatureFacts(tx: Transaction, tenantId: string, now: Date): Promise<Record<PlanFeatureKind, PlanFeatureFacts>> {
+export async function planFeatureFacts(
+  tx: Transaction, tenantId: string, now: Date, deploy: PlanFeatureDeploy,
+): Promise<Record<PlanFeatureKind, PlanFeatureFacts>> {
   const runners = await freshRunners(tx, now);
   const live = (kind: PlanFeatureKind, channel: "email" | "sms" | null) => planFeatureRunners(kind, channel).every((runner) => runners.has(runner));
   const facts = {} as Record<PlanFeatureKind, PlanFeatureFacts>;
@@ -51,19 +61,35 @@ export async function planFeatureFacts(tx: Transaction, tenantId: string, now: D
     const status = await agentKindStatus(tx, tenantId, kind, now);
     const blockedBy = planFeatureBlock(status.blockedBy);
     if (kind === "inquiry_followup") {
-      facts[kind] = { running: live(kind, null), blockedBy, approved: true };
+      facts[kind] = { running: live(kind, null), blockedBy, approved: true, equipped: true };
       continue;
     }
     // A run queues only from the current revision, under a standing approval that names its digest (G-19, A-15).
     const revision = await currentRevision(tx, tenantId, kind);
     const approved = revision !== null && (await usableStandingApproval(tx, tenantId, revision, now)) !== null;
-    facts[kind] = { running: live(kind, revision?.channel ?? null), blockedBy, approved };
+    // A message needs what its wording sends with: a text goes out from the tenant's own sending number (twilio.md
+    // T-7), and a `{booking_link}` or `{review_link}` the tenant has none for makes every run skip as `no_link`.
+    let equipped = true;
+    if (revision !== null && approved) {
+      if (revision.channel === "sms" && (await smsSenderNumber(tx, tenantId)) === null) equipped = false;
+      if (revision.variables.includes("booking_link") && !(await tx.query(
+        "SELECT 1 FROM booking_pages WHERE tenant_id=$1 AND published LIMIT 1", [tenantId])).rowCount) equipped = false;
+      if (revision.variables.includes("review_link") && !(status.settings.config as { reviewUrl?: unknown }).reviewUrl) equipped = false;
+    }
+    facts[kind] = { running: live(kind, revision?.channel ?? null), blockedBy, approved, equipped };
   }
   // Missed-call text back is no agent kind: the voice webhook reads the number's own switch, and support's agent
   // pause does not reach it. Its text goes out through the delivery worker's SMS provider.
+  // The reply goes out from the tenant's sending number, and the voice routes answer only where the Twilio webhook is
+  // mounted: without it a missed call never reaches the handler.
   const voice = (await tx.query<{ textback_enabled: boolean }>(
     "SELECT textback_enabled FROM voice_numbers WHERE tenant_id=$1", [tenantId])).rows[0];
-  facts.missed_call_textback = { running: live("missed_call_textback", null), blockedBy: voice?.textback_enabled ? null : "disabled", approved: true };
+  facts.missed_call_textback = {
+    running: deploy.voiceWebhook && live("missed_call_textback", null),
+    blockedBy: voice?.textback_enabled ? null : "disabled",
+    approved: true,
+    equipped: (await smsSenderNumber(tx, tenantId)) !== null,
+  };
   return facts;
 }
 

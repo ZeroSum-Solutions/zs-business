@@ -45,6 +45,10 @@ export function createRunnerHeartbeats(deps: {
       const now = deps.clock.now().getTime();
       const due = beats.filter((entry) => now - (last.get(entry.runner) ?? Number.NEGATIVE_INFINITY) >= minGap);
       if (due.length === 0) return;
+      // Claim the slot before the write starts: a second call for the same runner while this one is in flight finds
+      // it not due, so one runner never has two writes pending. A failed write gives the claim back.
+      const before = new Map(due.map((entry) => [entry.runner, last.get(entry.runner)] as const));
+      for (const entry of due) last.set(entry.runner, now);
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -59,8 +63,8 @@ export function createRunnerHeartbeats(deps: {
           }),
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("heartbeat write timed out")), cap); }),
         ]);
-        for (const entry of due) last.set(entry.runner, now);
       } catch (error) {
+        for (const [runner, previous] of before) { if (previous === undefined) last.delete(runner); else last.set(runner, previous); }
         // The run itself finished; a missing beat only makes the plan page say "not running" until the next one.
         try { (deps.report ?? ((message, problem) => console.error(message, problem)))("Runner heartbeat not recorded", error); } catch { /* the log is the last resort */ }
       } finally {

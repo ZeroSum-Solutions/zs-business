@@ -225,6 +225,8 @@ export interface EdgeDependencies {
   };
   /** plans.md PL-19: the app handle in Shopify's plan selection URL; absent means no manage link. */
   readonly shopifyBilling?: { readonly appHandle: string };
+  /** plans.md PL-26: the Twilio webhook routes are mounted in this deploy, so a missed call can reach the text-back handler. */
+  readonly voiceWebhook?: boolean;
   /**
    * Google Calendar busy sync (google-calendar.md G-1..G-3); absent means connecting is off. The
    * API holds only the public key that seals refresh tokens; the calendar worker opens them.
@@ -586,8 +588,23 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
   const read = <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>, options?: TransactionOptions) =>
     deps.db.tenant(tenantId, async (tx) => {
       await requireMember(tx, tenantId, actorId, permission);
+      // A repeatable-read transaction takes its snapshot before the membership lock above can wait, so a demotion
+      // that committed during the wait is not visible to `findMembership`. Locking the member's own row fails closed:
+      // a row changed or removed since the snapshot ends this attempt with 40001, and the caller starts over.
+      if (options?.isolation === "repeatable read")
+        await tx.query("SELECT 1 FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 FOR SHARE", [tenantId, actorId]);
       return work(tx);
     }, options);
+  /** Run a repeatable-read read again when its membership row changed under it (SQLSTATE 40001); denied on the second look. */
+  const readSnapshot = async <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>): Promise<T> => {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await read(permission, work, { isolation: "repeatable read" });
+      } catch (error) {
+        if (attempt >= 3 || (error as { code?: unknown } | null)?.code !== "40001") throw error;
+      }
+    }
+  };
   /** Dispatch, and tell whether the answer is a stored action (a replay) rather than this call's own. */
   const runTracked = async (command: ActionCommand): Promise<{ output: ActionResult; replayed: boolean }> => {
     const minted = new Set<string>();
@@ -1159,11 +1176,12 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       const plans = deps.billing?.plans;
       // PL-26: the plan row, the runners' heartbeats, the agent switches and the template approval are read as one
       // snapshot, so a change that lands between two statements cannot show a feature against a state that never was.
-      return read("billing", (tx) => getBillingPlan(tx, tenantId, {
+      return readSnapshot("billing", (tx) => getBillingPlan(tx, tenantId, {
         now: new Date(readClock(deps.clock)), trialDays: plans?.config.trialDays ?? 0, checkoutEnabled: plans !== undefined,
         shopifyAppHandle: deps.shopifyBilling?.appHandle ?? null,
         features: options.features === true,
-      }), { isolation: "repeatable read" });
+        deploy: { voiceWebhook: deps.voiceWebhook === true },
+      }));
     },
     /** PL-4, PL-5: a pending plan checkout and its Stripe Checkout URL. */
     async startPlanCheckout(body: unknown, key: unknown, signal?: AbortSignal): Promise<StartPlanCheckoutResponse> {

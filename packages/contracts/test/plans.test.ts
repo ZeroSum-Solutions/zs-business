@@ -114,11 +114,11 @@ describe("planFeatures (PL-26)", () => {
     expect(planFeatures({ ...PLAN_CATALOG.pro.limits, modelAgents: false }, allOn).map((feature) => feature.kind)).not.toContain("inquiry_followup");
   });
 
-  const base = { readOnly: false, running: true, blockedBy: null, approved: true } as const;
+  const base = { readOnly: false, running: true, blockedBy: null, approved: true, equipped: true } as const;
 
   it("orders the switch by what stops a run first: read-only, no runner, support's pause, the off setting, the kill switch, quiet hours, budget, approval", () => {
     expect(planFeatureSwitch(base)).toBe("on");
-    const worst = { readOnly: true, running: false, blockedBy: "global_killed", approved: false } as const;
+    const worst = { readOnly: true, running: false, blockedBy: "global_killed", approved: false, equipped: false } as const;
     expect(planFeatureSwitch(worst)).toBe("read_only");
     expect(planFeatureSwitch({ ...worst, readOnly: false })).toBe("not_running");
     expect(planFeatureSwitch({ ...worst, readOnly: false, running: true })).toBe("paused");
@@ -126,7 +126,9 @@ describe("planFeatures (PL-26)", () => {
     expect(planFeatureSwitch({ ...base, blockedBy: "tenant_killed" })).toBe("stopped");
     expect(planFeatureSwitch({ ...base, blockedBy: "quiet_hours", approved: false })).toBe("quiet_hours");
     expect(planFeatureSwitch({ ...base, blockedBy: "cost_cap", approved: false })).toBe("no_budget");
-    expect(planFeatureSwitch({ ...base, approved: false })).toBe("not_approved");
+    expect(planFeatureSwitch({ ...base, approved: false, equipped: false })).toBe("not_approved");
+    // Approved wording with nothing to send it with (no sending number, no link) is the last stop before `on`.
+    expect(planFeatureSwitch({ ...base, equipped: false })).toBe("missing_setup");
   });
 
   it("reads the gate's stop reasons: a daily draft cap or a stalled run is no off switch", () => {

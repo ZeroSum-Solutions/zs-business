@@ -632,6 +632,10 @@ list of what is live:
      and never reads the budget.
   8. `not_approved`: a message kind has no current revision under a usable standing approval (G-19, A-15), so a
      scheduled run would stop at `template_not_approved`.
+  9. `missing_setup`: a message kind is approved but a run could not send it: an SMS wording with no sending number
+     for the tenant (twilio.md T-7), a `{booking_link}` with no published booking page, or a `{review_link}` with no
+     review URL in the tenant's agent settings (every run would skip as `no_link`). Missed-call text back needs the
+     tenant's sending number the same way.
   The agent reasons come from `agentKindStatus`, the function the Agents page and the runners' gate share, and the
   approval from `usableStandingApproval`. The daily draft cap and a `stalled` run end one run, not the feature, and are
   not reasons.
@@ -644,17 +648,24 @@ list of what is live:
   the delivery runner for its current revision's channel (`delivery_email` or `delivery_sms`; only `templated` while
   it has no revision). Windows: the follow-up and templated runners beat for `max(2 * slotMinutes * 60,
   2 * ceil(intervalMs / 1000))` seconds, the delivery runners for `max(1800, 4 * intervalSeconds)`. `delivery_sms` is
-  written only when Twilio is configured, `templated` only when the templated agent is.
+  written only when Twilio is configured, `templated` only when the templated agent is. Missed-call text back is also
+  `not_running` where the API does not mount the Twilio webhook routes (`deps.twilioWebhook`), because a missed call
+  then never reaches the voice handler.
 - One snapshot: the plan, the agent switches, the approvals, quiet hours, the budget and the heartbeats are read
   inside one `REPEATABLE READ` transaction (`session.getBillingPlan`), so a change cannot land between two of them.
+  The snapshot is taken at the login check, before the membership lock can wait, so the read takes `FOR SHARE` on the
+  member's own row first; a concurrent change then fails the read with `40001` and the session retries it (three
+  attempts) instead of answering from a stale snapshot.
 - The dashboard shows an `off` feature as "<name>: <reason words>" with no check mark (for example "off until you turn
   it on", "paused by support", "waiting for quiet hours to end", "waiting for you to approve its message", "not running
-  right now"); `read_only` reads "paused until the plan is paid". The dashboard reads the plan again each time the
-  page opens and names no feature until that read answers, so a cached "included" never outlives a switch.
+  right now", "waiting for a sending number or link its message needs"); `read_only` reads "paused until the plan is paid". The dashboard reads the plan again
+  each time the page opens, each time the window regains focus and every 60 seconds while it stays open, and names no
+  feature until that read answers, so a cached "included" never outlives a switch for long.
 - Deploy order. The response schema is strict, so the API adds `features` only when the request carries
   `?features=1`. The dashboard sends it; an older dashboard does not, and never receives the unknown key. Deploy
   the dashboard first as for PL-22 `grant`; either order is safe, an API deployed first just sends no `features`
-  and the page names no feature. Apply `20261120100000_runner_heartbeats.sql` before the runners are deployed.
+  and the page names no feature. Apply `20261120100000_runner_heartbeats.sql` first, before the API and the runners are
+  deployed: the plan read selects from `runner_heartbeats`.
 - Prices, limits and the other plan lines are unchanged. Demo mode derives the switches from its demo agents and
   has no runners, so none is `not_running`; text back is not named there (the demo has no voice number).
 
@@ -670,3 +681,15 @@ list of what is live:
   there (the Agents page shows it).
 - A feature reads `not_running` for up to its window after a runner starts for the first time, or after a deploy
   turns it on, until the first clean run beats.
+- The reverse holds too: after a deploy switches a runner off, its last beat counts until its window ends (twice the
+  slot for the follow-up and templated runners, 30 minutes or more for delivery), so the page can still say
+  "included" for that long. The tenant's own switches, support's pause, the budget, quiet hours and approval show at
+  once; only a deploy-level off is bounded by the window.
+- The delivery window assumes the delivery cron runs at least every 15 minutes (the example is `*/5 * * * *`). A
+  slower cron reads `not_running` between runs.
+- The `templated` beat comes from the same slot run as the follow-up agent, so it proves that the scheduled run
+  finished, not that every due template was serviced in it.
+- The budget is read as "zero or used up". A positive balance too small for one model call still reads `included`
+  until a run is refused for it.
+- `heartbeat` writes are single-flight per runner and capped at 2 s on the runner's side; a write that times out
+  can still land afterwards. Both cases only move a beat later, never earlier (`GREATEST`).

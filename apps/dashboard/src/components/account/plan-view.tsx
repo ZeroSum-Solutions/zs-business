@@ -83,6 +83,7 @@ const OFF_WORDS: Record<PlanFeatureOffReason, string> = {
   quiet_hours: "waiting for quiet hours to end",
   no_budget: "paused, its daily AI budget is used up or set to zero",
   not_approved: "waiting for you to approve its message",
+  missing_setup: "waiting for a sending number or link its message needs",
 };
 
 /**

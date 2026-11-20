@@ -490,12 +490,16 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         agents.getFollowUpStatus(), templates.getAgentKindStatus("appointment_reminder"), templates.getAgentKindStatus("review_request")]);
       // The demo has no runners, so none can be stopped: its agents are as live as their own switches say. It reads the
       // same facts the API does (the gate's first stop reason, the template approval) and `planFeatureSwitch` orders them.
-      const of = (status: { blockedBy: FollowUpStopReason | null }, approved: boolean) =>
-        planFeatureSwitch({ readOnly: false, running: true, blockedBy: planFeatureBlock(status.blockedBy), approved });
+      // A message kind makes no model call, so a zero AI budget never stops it (agents.md G-15, as `agentKindStatus`).
+      const of = (status: { blockedBy: FollowUpStopReason | null }, approved: boolean, model: boolean) =>
+        planFeatureSwitch({
+          readOnly: false, running: true, approved, equipped: true,
+          blockedBy: planFeatureBlock(!model && status.blockedBy === "cost_cap" ? null : status.blockedBy),
+        });
       return {
-        appointment_reminder: of(reminder, templates.hasUsableApproval("appointment_reminder")),
-        review_request: of(review, templates.hasUsableApproval("review_request")),
-        inquiry_followup: of(followUp, true),
+        appointment_reminder: of(reminder, templates.hasUsableApproval("appointment_reminder"), false),
+        review_request: of(review, templates.hasUsableApproval("review_request"), false),
+        inquiry_followup: of(followUp, true, true),
         missed_call_textback: "disabled",
       };
     },

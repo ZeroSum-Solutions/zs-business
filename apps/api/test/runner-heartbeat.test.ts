@@ -72,6 +72,22 @@ describe("createRunnerHeartbeats", () => {
     expect(await stored()).toHaveLength(2);
   });
 
+  it("keeps one write in flight per runner: a second call while the first is pending writes nothing", async () => {
+    const time = manual();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const slow = (async (work: (tx: Transaction) => Promise<unknown>) => { calls += 1; await gate; return service(work); }) as typeof service;
+    const beats = createRunnerHeartbeats({ service: slow, clock: time.clock });
+    await reset();
+    const first = beats.beat(BEATS);
+    await beats.beat(BEATS);
+    expect(calls).toBe(1);
+    release();
+    await first;
+    expect(await stored()).toHaveLength(2);
+  });
+
   it("gives up on a write that hangs, so the run is never held past its budget", async () => {
     const time = manual();
     const report = vi.fn();

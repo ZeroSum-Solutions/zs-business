@@ -35,7 +35,7 @@ import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
 import { parseOrFail } from "../crm/rows.js";
 import { activeGrant, isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
-import { planFeatureFacts, planFeatureSwitches } from "./plan-features.js";
+import { planFeatureFacts, planFeatureSwitches, type PlanFeatureDeploy } from "./plan-features.js";
 import type { StripePlansClient } from "./plan-stripe.js";
 
 /** PL-5: like top-ups, a session lives an hour and a first request may be retried for 25 minutes. */
@@ -260,6 +260,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
    * no other caller gets a key it does not know.
    */
   readonly features?: boolean;
+  /** PL-26: what only the API process knows about its own deploy; read only with `features`. */
+  readonly deploy?: PlanFeatureDeploy;
 }): Promise<BillingPlan> {
   const row = await tenantPlan(tx, tenantId);
   // PL-11: a new founding offer follows the invite alone; a past founding subscription is no offer.
@@ -275,7 +277,7 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   // PL-26: read in the caller's transaction, which the session opens as one snapshot with the plan row above. A read-only
   // plan is refused every agent run by the dispatcher (PL-8), so what it holds is not live; the offers are other plans'
   // lists for this business, so they do not take the current plan's read-only state.
-  const facts = input.features ? await planFeatureFacts(tx, tenantId, input.now) : null;
+  const facts = input.features ? await planFeatureFacts(tx, tenantId, input.now, input.deploy ?? { voiceWebhook: false }) : null;
   const currentSwitches = facts ? planFeatureSwitches(facts, readOnly) : null;
   const offerSwitches = facts ? planFeatureSwitches(facts, false) : null;
   return billingPlanSchema.parse({

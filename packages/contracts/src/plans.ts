@@ -65,11 +65,13 @@ export type PlanFeatureKind = z.infer<typeof planFeatureKindSchema>;
  * `read_only` the plan is read-only (PL-8); `not_running` no live runner for the feature (see `PLAN_RUNNERS`);
  * `paused` support's global switch; `disabled` the tenant's own off setting (the default); `stopped` the tenant's kill
  * switch; `quiet_hours` the tenant's quiet window is open now (G-5); `no_budget` the kind's daily model budget is spent
- * or zero (G-15); `not_approved` a message kind has no usable standing template approval (G-19). A daily draft cap
+ * or zero (G-15); `not_approved` a message kind has no usable standing template approval (G-19); `missing_setup` an
+ * approved message kind has nothing to send with (no sending number for a text, no booking page or review link for a
+ * link its wording uses), so every run would skip or fail. A daily draft cap
  * (G-4) is a rate limit, not an off switch, and is left out.
  */
 export const PLAN_FEATURE_OFF_REASONS = [
-  "read_only", "not_running", "paused", "disabled", "stopped", "quiet_hours", "no_budget", "not_approved",
+  "read_only", "not_running", "paused", "disabled", "stopped", "quiet_hours", "no_budget", "not_approved", "missing_setup",
 ] as const;
 export type PlanFeatureOffReason = (typeof PLAN_FEATURE_OFF_REASONS)[number];
 export type PlanFeatureSwitch = "on" | PlanFeatureOffReason;
@@ -86,7 +88,7 @@ const BLOCK_REASONS: Readonly<Record<PlanFeatureBlock, PlanFeatureOffReason>> = 
 });
 
 /**
- * PL-26: one feature's state from the four facts the runtime decides it by. The core read builds them from the
+ * PL-26: one feature's state from the facts the runtime decides it by. The core read builds them from the
  * database (the plan row, the runners' heartbeats, `agent_settings`, the template approval); the demo builds
  * them from its demo agents. This function holds the order, so no caller keeps a second copy of it.
  */
@@ -99,13 +101,16 @@ export interface PlanFeatureInputs {
   readonly blockedBy: PlanFeatureBlock | null;
   /** A message kind has a current template with a usable standing approval; true for a kind with no template. */
   readonly approved: boolean;
+  /** A message kind has what its current wording sends with: a sending number for a text, the links it names. */
+  readonly equipped: boolean;
 }
 export const planFeatureSwitch = (input: PlanFeatureInputs): PlanFeatureSwitch =>
   input.readOnly ? "read_only"
     : !input.running ? "not_running"
       : input.blockedBy !== null ? BLOCK_REASONS[input.blockedBy]
         : !input.approved ? "not_approved"
-          : "on";
+          : !input.equipped ? "missing_setup"
+            : "on";
 
 /**
  * PL-26: the runners whose heartbeat (`runner_heartbeats`) says a feature can run. A deploy whose flag is off

@@ -20,3 +20,17 @@ describe("plan read", () => {
     expect(requests[0]?.searchParams.get("features")).toBe("1");
   });
 });
+
+// plans.md PL-26: an open plan page must not keep naming a feature after its switch changed elsewhere. (The timers
+// themselves belong to TanStack Query, which does not run them outside a browser; the page's settings are checked.)
+describe("plan page refresh", () => {
+  it("reads the plan again on focus and every minute while open, and faster while a checkout settles", async () => {
+    const { PLAN_IDLE_REFRESH_MS, PLAN_POLL_MS, planReadBehavior } = await import("../src/lib/queries");
+    expect(PLAN_IDLE_REFRESH_MS).toBeLessThanOrEqual(60_000);
+    const behavior = planReadBehavior();
+    expect(behavior.staleTime).toBe(0);
+    expect(behavior.refetchOnWindowFocus).toBe(true);
+    expect(behavior.refetchInterval({ state: { data: undefined } })).toBe(PLAN_IDLE_REFRESH_MS);
+    expect(planReadBehavior({ poll: true }).refetchInterval({ state: { data: { status: "none" } as never } })).toBe(PLAN_POLL_MS);
+  });
+});

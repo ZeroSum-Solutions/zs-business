@@ -57,6 +57,25 @@ describe("demo plan features", () => {
     expect(await states(night)).toMatchObject({ inquiry_followup: "quiet_hours" });
   });
 
+  it("lets a zero AI budget leave a message kind on: it makes no model call (agents.md G-15)", async () => {
+    const api = adapter();
+    const followUp = await api.getFollowUpStatus();
+    await api.updateFollowUpSettings({ ...followUp.settings, enabled: true, expectedRevision: followUp.revision }, key());
+    const reminder = await settings(api, "appointment_reminder");
+    await api.updateAgentKindSettings("appointment_reminder", { ...reminder, enabled: true }, key());
+    const state = await api.createTemplateRevision("appointment_reminder", {
+      expectedRevision: 0, channel: "email", subject: "See you soon at {business_name}",
+      body: "Hi {customer_first_name}, your appointment is {booking_start_local}. Change it at {booking_link}.", timingHours: 24,
+    }, key());
+    await api.approveTemplate("appointment_reminder", { revision: 1, contentDigest: state.revisions[0]!.contentDigest }, key());
+    expect(await states(api)).toMatchObject({ inquiry_followup: "included", appointment_reminder: "included" });
+
+    // The demo's follow-up has a fixed cap; a message kind's budget is its own setting.
+    const current = await settings(api, "appointment_reminder");
+    await api.updateAgentKindSettings("appointment_reminder", { ...current, maxCostMicrosPerDay: 0 }, key());
+    expect(await states(api)).toMatchObject({ inquiry_followup: "included", appointment_reminder: "included" });
+  });
+
   it("keeps missed-call text back off: the demo has no voice number", async () => {
     const plan = await adapter().getBillingPlan();
     expect(plan.features!.some((feature) => feature.kind === "missed_call_textback")).toBe(false);

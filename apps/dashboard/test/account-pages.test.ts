@@ -94,6 +94,7 @@ describe("plan", () => {
       quiet_hours: "Appointment reminders: waiting for quiet hours to end",
       no_budget: "Appointment reminders: paused, its daily AI budget is used up or set to zero",
       not_approved: "Appointment reminders: waiting for you to approve its message",
+      missing_setup: "Appointment reminders: waiting for a sending number or link its message needs",
     });
     expect(Object.values(reasons).every((line) => !line.on)).toBe(true);
     // An older API sends no features: the page names none rather than guess.
