@@ -127,6 +127,8 @@ export interface DemoTemplateInternals {
    * IT-4). Answers the kind's template id, or null when the kind already had wording.
    */
   seedWording(kind: TemplatedKind, draft: { channel: DeliveryChannel; subject: string | null; body: string; timingHours: number }): string | null;
+  /** PL-26: whether the kind's current wording has a standing approval that is still in force, as a scheduled run checks it. */
+  hasUsableApproval(kind: TemplatedKind): boolean;
 }
 
 export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi & DemoTemplateControls & DemoTemplateInternals {
@@ -186,7 +188,7 @@ export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi
     if (ctx.globalKilled()) return "global_killed";
     if (!state.settings.enabled) return "disabled";
     if (inQuietHours(state.settings, now)) return "quiet_hours";
-    if (costSpent(state, now) >= state.settings.maxCostMicrosPerDay) return "cost_cap";
+    // A message kind makes no model call, so its budget never stops a run (agents.md G-15, as `agentKindStatus`).
     return null;
   }
 
@@ -337,6 +339,10 @@ export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi
 
     setTemplateSuggestions(available) {
       suggestionsOn = available;
+    },
+
+    hasUsableApproval(kind) {
+      return view(kind).revisions.some((revision) => revision.current && revision.approved);
     },
 
     seedWording(kind, draft) {

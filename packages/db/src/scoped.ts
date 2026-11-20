@@ -57,6 +57,12 @@ export interface TransactionOptions {
    * when the statement abandoned was COMMIT.
    */
   remainingMs?: () => number;
+  /**
+   * `"repeatable read"` gives every statement of the work one snapshot, for a read that must agree with
+   * itself across statements (the plan page: plan row, agent switches and template approval). Default:
+   * read committed. Reads only; a write under it can fail with a serialization error.
+   */
+  isolation?: "repeatable read";
 }
 export interface ScopedDatabase {
   tenant<T>(
@@ -308,6 +314,8 @@ async function transaction<T>(
     onResetFailure?.(error);
   };
   let stage: "setup" | "work" | "cleanup" = "setup";
+  // A fixed pair of literals, never caller text.
+  const isolation = options.isolation === "repeatable read" ? "REPEATABLE READ" : "READ COMMITTED";
   try {
     // Postgres takes whole milliseconds and treats 0 as no limit.
     const remaining = options.remainingMs ? Math.max(1, Math.ceil(options.remainingMs())) : Number.POSITIVE_INFINITY;
@@ -322,12 +330,12 @@ async function transaction<T>(
     // transaction-local.
     if (role === "authenticated") {
       const [, login] = (await tx.query(
-        `BEGIN ISOLATION LEVEL READ COMMITTED; ${RUNTIME_LOGIN_CHECK}`,
+        `BEGIN ISOLATION LEVEL ${isolation}; ${RUNTIME_LOGIN_CHECK}`,
       )) as unknown as [unknown, { rows: { safe: boolean }[] }];
       if (!login.rows[0]?.safe)
         throw new Error("Runtime pool requires an unprivileged LOGIN member of authenticated only");
     } else {
-      await tx.query("BEGIN ISOLATION LEVEL READ COMMITTED");
+      await tx.query(`BEGIN ISOLATION LEVEL ${isolation}`);
     }
     await tx.query(
       `SELECT set_config('lock_timeout',$1,true),set_config('statement_timeout',$2,true),

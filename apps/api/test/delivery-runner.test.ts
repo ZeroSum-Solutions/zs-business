@@ -10,6 +10,7 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import { assertDeliveryCronFits, parseDeliveryEnv, PLACEHOLDER_CRON_SECRET } from "../src/delivery/config.js";
 import { cronRoutes } from "../src/delivery/cron.js";
 import { createDeliveryRunner, createDeliveryWorkerFromEnv, type DeliveryRunner, type RunSummary } from "../src/delivery/runner.js";
+import { startDeliveryRunner } from "../src/delivery/start.js";
 import { PLACEHOLDER_UNSUBSCRIBE_TOKEN_SECRET } from "../src/config.js";
 import { UNSUBSCRIBE_SECRET } from "./helpers.js";
 
@@ -541,5 +542,28 @@ describe("the production runner against Postgres", () => {
     expect(await reply(replyId)).toMatchObject({ status: "failed" });
     expect(await balance()).toBe(before);
     expect((await fixture.b.run((tx) => tx.query("SELECT id FROM message_deliveries"))).rows).toEqual([]);
+  });
+  // plans.md PL-26: the plan page learns the delivery worker is on from the beat its runs leave in the database.
+  it("leaves a beat for the email worker, and one for SMS only when the Twilio provider is configured", async () => {
+    const twilio = {
+      SMS_PROVIDER: "twilio", TWILIO_ACCOUNT_SID: TWILIO_ACCOUNT, TWILIO_API_KEY_SID: TWILIO_KEY_SID,
+      TWILIO_API_KEY_SECRET: TWILIO_KEY_SECRET, TWILIO_WEBHOOK_BASE_URL: "https://api.example.test",
+    };
+    const beats = async () => (await database.pool.query<{ runner: string; fresh_for_seconds: number }>(
+      "SELECT runner, fresh_for_seconds FROM runner_heartbeats WHERE runner LIKE 'delivery_%' ORDER BY runner")).rows;
+    const runWith = async (extra: Record<string, string>) => {
+      await database.pool.query("TRUNCATE runner_heartbeats");
+      const parsed = parseDeliveryEnv({ ...ON, ...extra, CRON_SECRET, DELIVERY_DATABASE_URL: database.url, DELIVERY_WORKER_ID: "api-beat" }).runner!;
+      const started = startDeliveryRunner(parsed, { clock: { now: () => new Date() }, generateId: randomUUID });
+      try {
+        await started.runner.run();
+      } finally {
+        await started.pool.end();
+      }
+    };
+    await runWith({});
+    expect(await beats()).toEqual([{ runner: "delivery_email", fresh_for_seconds: 1800 }]);
+    await runWith(twilio);
+    expect(await beats()).toEqual([{ runner: "delivery_email", fresh_for_seconds: 1800 }, { runner: "delivery_sms", fresh_for_seconds: 1800 }]);
   });
 });

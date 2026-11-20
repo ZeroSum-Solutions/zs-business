@@ -649,6 +649,17 @@ Inbox for an owner's approval.
 | `FOLLOWUP_INTERVAL_MS` | The Node worker's pause between runs (300000). |
 | `FOLLOWUP_CRON_SCHEDULE` | Build time, workers project: adds the Vercel cron, for example `0 * * * *`. Unset: no cron. |
 
+Runner heartbeats (plans.md PL-26): the plan page cannot read these variables, so each runner that finishes a
+run with no failed job upserts one row in `runner_heartbeats` (service role, at most once a minute per runner, capped
+at 2 s, never fails the run). The page shows a feature as "not running right now" when its row is older than the
+window the runner wrote. Windows: `followup` and `templated`, the larger of twice the slot and twice the loop
+interval (the follow-up variables above); `delivery_email` and `delivery_sms`, the larger of 30 minutes and four times
+the delivery interval. `delivery_sms` beats only with Twilio set, `templated` only with the templated agent on. Apply
+`20261120100000_runner_heartbeats.sql` before deploying the API and the runners. Runners write one beat at a time per
+runner (a second call while one is pending is dropped). The delivery window assumes a cron at least every 15 minutes; the follow-up and templated window assumes one run per slot
+(`FOLLOWUP_CRON_SCHEDULE` no slower than `FOLLOWUP_SLOT_MINUTES`). `GET /v1/billing/plan` adds `features` only for
+`?features=1`, which the dashboard sends, so deploy the dashboard before the API.
+
 `pnpm followup:global-switch off "reason"` stops new drafts for every tenant at once (G-3);
 `on` lets them draft again. It uses `FOLLOWUP_SERVICE_DATABASE_URL`.
 
@@ -938,7 +949,7 @@ against the pinned Supabase Root 2021 CA.
    | Project | Build command | Output |
    |---|---|---|
    | API (`prj_rQtMc5wZyNnH6MnVmFvfRwFepawQ`) | `pnpm build:vercel` | One Node 24 function from `src/vercel.ts` for every path. No cron functions, no crons. **The build fails while any `*_CRON_SCHEDULE` is set**, so a deploy cannot drop a live cron unnoticed. |
-   | Workers (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`) | `pnpm build:vercel:worker` | Twenty-two functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces`, `/cron/followup`, `/cron/connections`, `/cron/outreach` and the five `/internal/connections/<operation>` routes, each reached only by its exact path (anchored routes, `^/cron/<name>$`), and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
+   | Workers (`prj_9lJeWdmlzOJ8WMx99PaCU7l8UGdl`) | `pnpm build:vercel:worker` | Twenty-three functions, `/cron/delivery`, `/cron/billing`, `/cron/calendar`, `/cron/activepieces`, `/cron/followup`, `/cron/connections`, `/cron/outreach`, `/cron/intake-sweep` and the five `/internal/connections/<operation>` routes, each reached only by its exact path (anchored routes, `^/cron/<name>$`), and the `crons` from the `*_CRON_SCHEDULE` build variables. No API app: any other path matches no route and is a 404. |
 
    `build-vercel.mjs <api|worker> [dir]` cleans only its default `.vercel/output`; a directory
    given as `dir` must not exist or be empty, or the script stops before writing anything.
@@ -973,7 +984,7 @@ against the pinned Supabase Root 2021 CA.
    | `GOOGLE_REDIRECT_URL`, `GOOGLE_RETURN_URL`, `GOOGLE_STATE_SECRET`, `GOOGLE_STATE_PREVIOUS_SECRET`, `GOOGLE_TOKEN_PUBLIC_KEY` | yes | no |
    | `TWILIO_ACCOUNT_SID`, `TWILIO_WEBHOOK_BASE_URL` | yes (webhooks, with `TWILIO_AUTH_TOKEN`) | only with `SMS_PROVIDER=twilio` (both required then) |
    | `TWILIO_AUTH_TOKEN` | yes (verifies webhooks) | only with `SMS_PROVIDER=twilio` and no `TWILIO_API_KEY_*` (an API key wins over the token) |
-   | `STRIPE_*`, `TWILIO_PREVIOUS_AUTH_TOKEN`, `TWILIO_KEYWORD_REPLIES`, `SITES_STORE`, `SITE_COMPILER`, `R2_*`, `ALLOWED_ORIGINS`, `IMAGE_ADAPTER` and the other image adapter settings (`IMAGE_ADAPTERS`, `IMAGE_ENVIRONMENT`, `IMAGE_CURRENCY`, `IMAGE_PRESETS`, `IMAGE_PRICES_MINOR`, `IMAGE_VENDOR_COST_MICROS`, `IMAGE_KEYS`), `KIE_API_KEY`, `FAL_API_KEY` (see the limit below) | yes | no |
+   | `STRIPE_*`, `TWILIO_PREVIOUS_AUTH_TOKEN`, `TWILIO_KEYWORD_REPLIES`, `SITES_STORE`, `SITE_COMPILER`, `R2_*` (the workers project holds the four `R2_*` connection variables only with `INTAKE_SWEEP_WORKER=on`), `ALLOWED_ORIGINS`, `IMAGE_ADAPTER` and the other image adapter settings (`IMAGE_ADAPTERS`, `IMAGE_ENVIRONMENT`, `IMAGE_CURRENCY`, `IMAGE_PRESETS`, `IMAGE_PRICES_MINOR`, `IMAGE_VENDOR_COST_MICROS`, `IMAGE_KEYS`), `KIE_API_KEY`, `FAL_API_KEY` (see the limit below) | yes | no |
    | `ENRICHMENT_PROVIDER`, `TREG_ARCHIVE_CONFIRMED_OFF`, `ENRICHMENT_DISABLED`, `ENRICHMENT_PRICE_COMPANY_CENTS`, `ENRICHMENT_TENANT_DAILY_CAP`, `ENRICHMENT_GLOBAL_DAILY_CAP` | yes (the service gate; no secret) | only if the enrichment worker ever runs there (it runs on the Mac today) |
    | `CRON_SECRET` | **no** | yes |
    | `DELIVERY_WORKER`, `DELIVERY_WORKER_ID`, `DELIVERY_DATABASE_URL`, `DELIVERY_PRICE_EMAIL`, `DELIVERY_PRICE_SMS_SEGMENT`, `DELIVERY_CURRENCY`, `DELIVERY_UNSUBSCRIBE_BASE_URL`, `DELIVERY_RUN_BUDGET_MS`, `DELIVERY_CLAIM_LIMIT`, `DELIVERY_PROVIDER_TIMEOUT_MS`, `DELIVERY_INTERVAL_MS`, `SMS_PROVIDER` | **no** | yes |
@@ -986,6 +997,7 @@ against the pinned Supabase Root 2021 CA.
    | `ACTIVEPIECES_WEBHOOK_WORKER`, `ACTIVEPIECES_DATABASE_URL`, `ACTIVEPIECES_WORKER_ID`, `ACTIVEPIECES_RUN_BUDGET_MS`, `ACTIVEPIECES_CLAIM_LIMIT`, `ACTIVEPIECES_REQUEST_TIMEOUT_MS`, `ACTIVEPIECES_MAX_ATTEMPTS`, `ACTIVEPIECES_INTERVAL_MS` (this row does not cover `ACTIVEPIECES_KEY_SECRET`: the API needs it for the owner routes) | **no** | yes |
    | `FOLLOWUP_AGENT`, `FOLLOWUP_DATABASE_URL`, `FOLLOWUP_SERVICE_DATABASE_URL`, `FOLLOWUP_MODEL`, `FOLLOWUP_SLOT_MINUTES`, `FOLLOWUP_MAX_CANDIDATES`, `FOLLOWUP_MODEL_TIMEOUT_MS`, `FOLLOWUP_RUN_BUDGET_MS`, `FOLLOWUP_INTERVAL_MS`, `AGENT_MODEL_PERSONAL_DATA`, `AGENT_MODEL_NO_PERSONAL_DATA`, `AGENT_TEMPLATED`, `AGENT_TEMPLATED_MAX_CANDIDATES`, `AGENT_STALL_AFTER_MS`, `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `COMPOSIO_API_KEY` | **no** | yes |
    | `OUTREACH_WORKER`, `OUTREACH_DATABASE_URL`, `OUTREACH_RUNTIME_DATABASE_URL`, `OUTREACH_GOOGLE_CLIENT_ID`, `OUTREACH_GOOGLE_CLIENT_SECRET`, `OUTREACH_TOKEN_PRIVATE_KEY`, `OUTREACH_SEND_ENABLED`, `OUTREACH_GMAIL_BASE_URL`, `OUTREACH_MAILBOX_DAILY_LIMIT`, `OUTREACH_SENDS_PER_TICK`, `OUTREACH_MIN_GAP_MS`, `OUTREACH_PROBE_DELAY_MS`, `OUTREACH_RUN_BUDGET_MS` | **no** | yes |
+   | `INTAKE_SWEEP_WORKER`, `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL`, `INTAKE_SWEEP_BATCH`, `INTAKE_SWEEP_RUN_BUDGET_MS` (with `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, listed above) | **no** | yes |
    | `OUTREACH_TENANTS` (the tenant allowlist, comma-separated tenant UUIDs; no secret) | yes (turns `/v1/outreach` on) | yes |
    | `ENRICHMENT_WORKER`, `ENRICHMENT_DATABASE_URL`, `ENRICHMENT_WORKER_ID`, `ENRICHMENT_CLAIM_LIMIT`, `ENRICHMENT_MAX_ATTEMPTS`, `ENRICHMENT_PROVIDER_TIMEOUT_MS`, `ENRICHMENT_INTERVAL_MS`, `TREG_TOKEN`, `TREG_BASE_URL` | **no** | no (the Mac's enrichment worker) |
    | `IMAGE_WORKER`, `IMAGE_DATABASE_URL`, `IMAGE_SERVICE_DATABASE_URL`, `IMAGE_INTERVAL_MS` | **no** | no (the Mac's image worker) |
@@ -993,7 +1005,7 @@ against the pinned Supabase Root 2021 CA.
    | `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_CLIENT_SECRET_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY`, `SHOPIFY_TOKEN_SEAL_KEY_ID`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS`, `SHOPIFY_TOKEN_SEAL_KEY_PREVIOUS_ID`, `SHOPIFY_API_VERSION`, `SHOPIFY_PLAN_GRACE_DAYS`, `SUPABASE_SERVICE_ROLE_KEY`, `HUB_SIGN_IN_URL` (the native Shopify tier) | **no** | yes |
    | `CONNECTIONS_ENV`, `CONNECTIONS_INTERNAL_SECRET`, `CONNECTIONS_INTERNAL_PREVIOUS_SECRET` (the signing secrets and environment; the same values in both projects) | yes (the API signs with them) | yes |
    | `CONNECTIONS_WORKER_URL`, `CONNECTIONS_STATE_SECRET`, `CONNECTIONS_STATE_PREVIOUS_SECRET`, `CONNECTIONS_RETURN_URL`, `CONNECTIONS_EMBEDDED_ADDRESS_SECRET` (the API side only; the last one also on the dashboard project) | yes | no |
-   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE`, `OUTREACH_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
+   | `DELIVERY_CRON_SCHEDULE`, `BILLING_CRON_SCHEDULE`, `CALENDAR_CRON_SCHEDULE`, `ACTIVEPIECES_CRON_SCHEDULE`, `FOLLOWUP_CRON_SCHEDULE`, `CONNECTIONS_CRON_SCHEDULE`, `OUTREACH_CRON_SCHEDULE`, `INTAKE_SWEEP_CRON_SCHEDULE` (build time) | **no** (the API build fails if one is set) | yes (production deployment only) |
 
    `CEREBRAS_*`, `DEEPSEEK_*` and `AGENT_MODEL_*` are worker-only because `POST /v1/agents/followup/runs`
    and the template-suggestion route are not wired in `createServer` today. Wiring them into the API
@@ -1345,6 +1357,48 @@ default `zerosum-solutions.com`). `--disconnect` clears the stored token; it can
 `GET /cron/outreach` answers like `/cron/delivery`, with `{ ran: true, counts }` after a run. A mailbox
 whose Google sign-in failed is marked `reauthorize` and reported; an unknown send outcome, a bounce-rate
 pause and a lost lease are reported to an operator (logged without a token).
+
+## Document intake sweep (`GET /cron/intake-sweep`)
+
+Document intake keeps an uploaded price-list PDF only while it is needed: 30 days after a job ends, the stored
+file is deleted and the job is marked (docs/requirements/document-intake.md, DL-16). The sweep that does it,
+`sweepFiles`, runs from this cron in the workers project. **It does nothing by default**: there is no schedule
+unless the build sets `INTAKE_SWEEP_CRON_SCHEDULE`, and the function runs only with `INTAKE_SWEEP_WORKER=on`
+(`off` or unset answers `{ ran: false }`; any value other than `on` or `off` fails the function at start with a 503 and a cron alert).
+
+Each call runs one bounded batch: it takes one job at a time, oldest first, and stops at `INTAKE_SWEEP_BATCH`
+jobs (default 50, 1 to 200), when nothing is due, or when `INTAKE_SWEEP_RUN_BUDGET_MS` (default 10000, 1000 to 15000)
+is spent, whichever comes first. The last delete starts inside the budget and R2 calls time out at 10 seconds, so a
+slow R2 cannot carry a run past the function's 30 seconds. It answers
+`{ ran: true, removed, batch, stopped }` with `stopped` one of `empty`, `batch`, `budget`; `batch` or `budget` means more
+may be waiting for the next call. The sweep is idempotent: deleting a missing key succeeds and a marked job is never
+picked again, so a repeated call is safe. Two overlapping calls may both delete, and both count, the same file.
+A missing bucket is not a missing key: R2's `NoSuchBucket` fails the delete, so a wrong `R2_BUCKET` raises an alert
+instead of marking jobs as swept. If a delete fails (R2 down, wrong keys) the call answers 503, records a `cron_alerts` row and emails
+`OPS_ALERT_EMAIL`; the job stays unmarked and the next call starts at it again.
+
+| Variable | Meaning |
+|---|---|
+| `INTAKE_SWEEP_WORKER` | Kill switch. `on` runs; `off` or unset runs nothing. |
+| `CRON_SECRET` | The same bearer as `/cron/delivery`. Unset, the route is 404. |
+| `INTAKE_SWEEP_DATABASE_URL` | The runtime LOGIN role (unprivileged). The sweep reads and marks jobs through a platform transaction under RLS, so a privileged login is refused at start. |
+| `INTAKE_SWEEP_SERVICE_DATABASE_URL` | A login that may `SET ROLE service_role`, used only to write the cron alerts. Non-loopback hosts need `DATABASE_CA_CERT` and no query string on either URL. |
+| `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The same bucket and keys the API uses to store the PDFs. The path has no key prefix; a different bucket would delete nothing and still mark the jobs. |
+| `INTAKE_SWEEP_BATCH`, `INTAKE_SWEEP_RUN_BUDGET_MS` | Optional: jobs per call, 1 to 200, default 50; milliseconds one call may spend starting more deletes, 1000 to 15000, default 10000. |
+| `INTAKE_SWEEP_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/intake-sweep`, for example `17 3 * * *` (daily; run it more often if a day can end more than 50 jobs, or if a run answers `stopped: "budget"`). Unset, there is no cron. |
+
+### Turning it on
+
+Nothing here is set by the repository; an operator does it once, in the workers project only. The sweep deletes
+files the intake upload routes wrote, so it has work only where those routes run; the hosted API does not mount them
+yet (`documentIntake` is unset in `src/server.ts`), so turning the sweep on there changes nothing until it does.
+
+1. Set `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL` and the four `R2_*` variables (and `CRON_SECRET`, `DATABASE_CA_CERT`, and `OPS_ALERT_EMAIL` with `RESEND_API_KEY` and `RESEND_FROM` if you want the failure email, if not already there), with the bucket the API uploads to.
+2. Set `INTAKE_SWEEP_WORKER=on`.
+3. Set the build variable `INTAKE_SWEEP_CRON_SCHEDULE` (for example `17 3 * * *`) and deploy the workers project to production.
+4. Check: `curl -H "Authorization: Bearer $CRON_SECRET" https://<workers host>/cron/intake-sweep` answers `{ "ran": true, ... }`.
+
+To turn it off, set `INTAKE_SWEEP_WORKER=off` (the cron still fires and answers `ran: false`) or unset the schedule. Either takes effect only on the next workers deployment: Vercel keeps the values a deployment was built with, so redeploy after changing it.
 
 ## Activepieces (`/v1/integrations/activepieces`, `/integrations/activepieces/v1`, `/cron/activepieces`)
 

@@ -45,6 +45,25 @@ describe("GET /v1/billing/plan (PL-7)", () => {
     const off = await call(plansApp(false), "GET", "/v1/billing/plan", { token: h.a.token });
     expect(billingPlanSchema.parse(off.body)).toMatchObject({ checkoutEnabled: false, trialAvailable: false });
   });
+
+  // PL-26: the response schema is strict, so an old dashboard must never get a key it does not know. Only a request that
+  // asks for the features gets them, which lets the API deploy before or after the dashboard.
+  it("names the plan's features only for a request that asks, and then never as live without a runner", async () => {
+    const app = plansApp();
+    for (const path of ["/v1/billing/plan", "/v1/billing/plan?features=0", "/v1/billing/plan?features=true"]) {
+      const plain = await call(app, "GET", path, { token: h.a.token });
+      expect(plain.status).toBe(200);
+      expect(Object.keys(plain.body as object)).not.toContain("features");
+      expect((plain.body as { catalog: object[] }).catalog.every((offer) => !("features" in offer))).toBe(true);
+    }
+    const asked = await call(app, "GET", "/v1/billing/plan?features=1", { token: h.a.token });
+    expect(asked.status).toBe(200);
+    const view = billingPlanSchema.parse(asked.body);
+    expect(view.features?.map((feature) => feature.kind)).toEqual(["appointment_reminder", "review_request", "inquiry_followup", "missed_call_textback"]);
+    // The test database has no runner beat: whatever a tenant switched on, no feature reads as included.
+    expect(view.features!.every((feature) => feature.state === "off" && feature.offReason === "not_running")).toBe(true);
+    expect(view.catalog.every((offer) => offer.features!.every((feature) => feature.state === "off"))).toBe(true);
+  });
 });
 
 describe("POST /v1/billing/plan/checkout (PL-4, PL-5)", () => {
