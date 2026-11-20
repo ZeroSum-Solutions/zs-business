@@ -184,11 +184,15 @@ export function createR2SiteStore(config: R2SiteStoreConfig, deps: R2SiteStoreDe
     },
     async delete(key) {
       const response = await send("delete", "DELETE", key);
-      // A missing key is a delete that already happened. A missing bucket is a wrong configuration: it must not
-      // pass for one, or a caller that records the object as gone (the intake sweep) would mark it wrongly.
-      if (response.status === 404 && (await response.text().catch(() => "")).includes("<Code>NoSuchBucket</Code>"))
-        throw new Error("R2 delete failed: the bucket does not exist");
-      if (![200, 204, 404].includes(response.status)) return fail("delete", response);
+      if (response.status === 404) {
+        // Only a 404 that names the missing key is a delete that already happened. A missing bucket is a wrong
+        // configuration, and an unreadable or unnamed 404 proves nothing: neither may pass for a finished delete, or
+        // a caller that records the object as gone (the intake sweep) would mark it wrongly.
+        const body = await response.text().catch(() => null);
+        if (body === null || !body.includes("<Code>NoSuchKey</Code>")) throw new Error("R2 delete failed with status 404");
+        return;
+      }
+      if (![200, 204].includes(response.status)) return fail("delete", response);
       await miss(response);
     },
   };

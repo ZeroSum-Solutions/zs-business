@@ -208,10 +208,18 @@ describe("createR2SiteStore against a local S3 server", () => {
     forceBody = "<Error><Code>NoSuchKey</Code></Error>";
     await expect(store().delete("t/a/blobs/x")).resolves.toBeUndefined();
     forceBody = "<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>";
-    const failure = await rejection(store().delete("t/a/blobs/x"));
-    expect(failure.message).toBe("R2 delete failed: the bucket does not exist");
+    expect((await rejection(store().delete("t/a/blobs/x"))).message).toBe("R2 delete failed with status 404");
+    forceBody = "";
+    expect((await rejection(store().delete("t/a/blobs/x"))).message).toBe("R2 delete failed with status 404");
     forceBody = undefined;
+    forceStatus = undefined;
     await expect(store().delete("t/a/blobs/x")).resolves.toBeUndefined();
+  });
+
+  it("does not take an unreadable 404 for a finished delete", async () => {
+    const broken: typeof fetch = async () => new Response(new ReadableStream({ pull(controller) { controller.error(new Error("connection reset")); } }), { status: 404 });
+    const failing = createR2SiteStore({ endpoint, bucket: "sites-test", accessKeyId: ACCESS_KEY, secretAccessKey: SECRET }, { fetch: broken, clock });
+    expect((await rejection(failing.delete("t/a/blobs/x"))).message).toBe("R2 delete failed with status 404");
   });
 
   it("reports a network failure by operation only", async () => {

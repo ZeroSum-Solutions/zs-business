@@ -1351,11 +1351,12 @@ Document intake keeps an uploaded price-list PDF only while it is needed: 30 day
 file is deleted and the job is marked (docs/requirements/document-intake.md, DL-16). The sweep that does it,
 `sweepFiles`, runs from this cron in the workers project. **It does nothing by default**: there is no schedule
 unless the build sets `INTAKE_SWEEP_CRON_SCHEDULE`, and the function runs only with `INTAKE_SWEEP_WORKER=on`
-(any other value, or unset, answers `{ ran: false }`; a value other than `on` or `off` stops the function at start).
+(`off` or unset answers `{ ran: false }`; any value other than `on` or `off` fails the function at start with a 503 and a cron alert).
 
-Each call runs one bounded batch: it asks for five jobs at a time, oldest first, and stops at `INTAKE_SWEEP_BATCH`
-jobs (default 50, 1 to 200), when nothing is due, or when `INTAKE_SWEEP_RUN_BUDGET_MS` (default 15000, 1000 to 20000)
-is spent, whichever comes first, so a slow R2 cannot carry it past the function's 30 seconds. It answers
+Each call runs one bounded batch: it takes one job at a time, oldest first, and stops at `INTAKE_SWEEP_BATCH`
+jobs (default 50, 1 to 200), when nothing is due, or when `INTAKE_SWEEP_RUN_BUDGET_MS` (default 10000, 1000 to 15000)
+is spent, whichever comes first. The last delete starts inside the budget and R2 calls time out at 10 seconds, so a
+slow R2 cannot carry a run past the function's 30 seconds. It answers
 `{ ran: true, removed, batch, stopped }` with `stopped` one of `empty`, `batch`, `budget`; `batch` or `budget` means more
 may be waiting for the next call. The sweep is idempotent: deleting a missing key succeeds and a marked job is never
 picked again, so a repeated call is safe. Two overlapping calls may both delete, and both count, the same file.
@@ -1370,7 +1371,7 @@ instead of marking jobs as swept. If a delete fails (R2 down, wrong keys) the ca
 | `INTAKE_SWEEP_DATABASE_URL` | The runtime LOGIN role (unprivileged). The sweep reads and marks jobs through a platform transaction under RLS, so a privileged login is refused at start. |
 | `INTAKE_SWEEP_SERVICE_DATABASE_URL` | A login that may `SET ROLE service_role`, used only to write the cron alerts. Non-loopback hosts need `DATABASE_CA_CERT` and no query string on either URL. |
 | `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The same bucket and keys the API uses to store the PDFs. The path has no key prefix; a different bucket would delete nothing and still mark the jobs. |
-| `INTAKE_SWEEP_BATCH`, `INTAKE_SWEEP_RUN_BUDGET_MS` | Optional: jobs per call, 1 to 200, default 50; milliseconds one call may spend starting more deletes, 1000 to 20000, default 15000. |
+| `INTAKE_SWEEP_BATCH`, `INTAKE_SWEEP_RUN_BUDGET_MS` | Optional: jobs per call, 1 to 200, default 50; milliseconds one call may spend starting more deletes, 1000 to 15000, default 10000. |
 | `INTAKE_SWEEP_CRON_SCHEDULE` | Build time only, workers project. Adds the Vercel cron for `/cron/intake-sweep`, for example `17 3 * * *` (daily; run it more often if a day can end more than 50 jobs, or if a run answers `stopped: "budget"`). Unset, there is no cron. |
 
 ### Turning it on
@@ -1379,7 +1380,7 @@ Nothing here is set by the repository; an operator does it once, in the workers 
 files the intake upload routes wrote, so it has work only where those routes run; the hosted API does not mount them
 yet (`documentIntake` is unset in `src/server.ts`), so turning the sweep on there changes nothing until it does.
 
-1. Set `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL` and the four `R2_*` variables (and `CRON_SECRET`, `DATABASE_CA_CERT`, `OPS_ALERT_EMAIL` if not already there), with the bucket the API uploads to.
+1. Set `INTAKE_SWEEP_DATABASE_URL`, `INTAKE_SWEEP_SERVICE_DATABASE_URL` and the four `R2_*` variables (and `CRON_SECRET`, `DATABASE_CA_CERT`, and `OPS_ALERT_EMAIL` with `RESEND_API_KEY` and `RESEND_FROM` if you want the failure email, if not already there), with the bucket the API uploads to.
 2. Set `INTAKE_SWEEP_WORKER=on`.
 3. Set the build variable `INTAKE_SWEEP_CRON_SCHEDULE` (for example `17 3 * * *`) and deploy the workers project to production.
 4. Check: `curl -H "Authorization: Bearer $CRON_SECRET" https://<workers host>/cron/intake-sweep` answers `{ "ran": true, ... }`.

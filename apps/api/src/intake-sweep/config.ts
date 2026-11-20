@@ -20,9 +20,10 @@ const onSchema = z.object({
   R2_ACCESS_KEY_ID: z.string().min(1),
   R2_SECRET_ACCESS_KEY: z.string().min(1),
   // Jobs examined per run at most, and the time one run may spend starting more of them. The deletes are sequential,
-  // so the budget (not the batch) keeps a run inside the cron function's 30 s with time left to answer and alert.
+  // so the budget (not the batch) keeps a run inside the cron function's 30 s: the last delete starts inside the budget
+  // and may take R2's 10 s timeout, which leaves time to mark the job, answer and alert.
   INTAKE_SWEEP_BATCH: int(1, 200).default(50),
-  INTAKE_SWEEP_RUN_BUDGET_MS: int(1000, 20_000).default(15_000),
+  INTAKE_SWEEP_RUN_BUDGET_MS: int(1000, 15_000).default(10_000),
 });
 
 export interface IntakeSweepRunnerEnv {
