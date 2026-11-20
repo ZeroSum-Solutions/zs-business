@@ -562,14 +562,17 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
 
 ## Known limits (revision 3)
 
-- **App Store install path (corrected 2026-11-20).** An App Store install does create and bind a
-  hub tenant, with no operator: the embedded page verifies the shop, the owner makes a hub or
-  claims one, the worker binds the shop to the tenant and PL-17 links the billing, and the page
-  then offers the plan selection page when the app handle is configured (the link needs it, so
-  the page shows none without it; connections.md C-19 to C-30; code
-  `apps/api/src/public/shopify-embedded.ts` and `packages/core/src/shopify/native-worker.ts`).
-  The listing was submitted for review on 2026-11-08 (connections.md, C-25). What still needs a
-  person is the Partner Dashboard plan catalog (PL-16).
+- **App Store install path (corrected 2026-11-20).** An App Store install can end in a hub
+  tenant bound to the shop with no operator: the embedded page forwards Shopify's ID token, the
+  worker verifies it and records the install, and `open` may return a store that is not linked
+  yet. The owner then makes a hub (`createHub`) or confirms a claim (`claimConfirm`); the worker
+  binds the shop to the tenant, PL-17 links the billing, and the page offers the plan selection
+  page when the app handle is configured (the link needs it, so the page shows none without it;
+  connections.md C-19 to C-30; code `apps/api/src/public/shopify-embedded.ts` and
+  `packages/core/src/shopify/native-worker.ts`). The listing was submitted for review on
+  2026-11-08 (connections.md, C-25). The Partner Dashboard plan catalog is configured (five
+  plans, registration fee paid; proof outside the repository); what stays manual is the private
+  plan access of the two founding plans, granted per store (PL-16).
 - Shopify tenants cannot buy the extra-connection add-on (PL-16) or wallet usage (PL-15).
 - A linked Shopify tenant that never chooses a plan is comped, as any tenant without a plan.
 - A Shopify freeze is not told apart from a cancellation: both read as no contract (PL-18), so a

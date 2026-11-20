@@ -1,6 +1,8 @@
 # Connections: one place a business connects its outside accounts
 
-Status: draft contract, revision 4 (2026-11-07). Code follows this file; a change to a
+Status: built, revision 4 (2026-11-07): the managed tier and the native Shopify tier (C-18 to
+C-28) are in code (matrix: `conformance.md`); the App Store listing was submitted on 2026-11-08
+and was awaiting review on 2026-11-20. Code follows this file; a change to a
 numbered rule needs a new revision of this file first. Extends `hub-access.md` (H-1..H-12):
 connection reads are new `/mcp` tools behind a new scope, under the same token guard,
 limits and usage rules. Reuses the connect shapes of `google-calendar.md` (G-1, G-2, G-4).
@@ -749,13 +751,13 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     page opened in a new top-level tab, and, when not linked, the two choices of C-21.
   - Headers (S6): the successful `GET /shopify/app` response (200) carries
     `Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;
-    base-uri 'none'; object-src 'none'` with `<shop>` the `shop` query value only when it
+    base-uri 'none'; object-src 'none'` with `<shop>` the `shop` query value (trimmed and lower-cased first) only when it
     matches `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`; otherwise `frame-ancestors 'none'`.
     The route has no `X-Frame-Options`. When `SHOPIFY_CLIENT_ID` is unset or malformed the route
     answers 404 with no such policy. Every other dashboard route, including any other path under
-    `/shopify/`, keeps the general `'none'` and `DENY`. The route handler sets the policy per
+    `/shopify/` outside `/shopify/app`, keeps the general `'none'` and `DENY`. The route handler sets the policy per
     request (not `proxy.ts`, which would buffer the body), and `next.config.ts:36` leaves only
-    `shopify/app` out of the general frame ban, so the value is never static or wildcard. The
+    `/shopify/app` and any path beneath it (no route exists there) out of the general frame ban, so the value is never static or wildcard. The
     same policy also sets a nonce-based script and style policy.
 - **C-21 Install-to-tenant binding with no operator.** The worker holds the Shopify client
   secret, the token seal key and the Supabase service key; the API and the dashboard hold
@@ -851,8 +853,9 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   - **One at a time per store, while the lease is held.** Every exchange and refresh for a store runs under a
     lease (`LOCK_MS`, 30 s; a later caller may take it over once it lapses, so token writes
     are fenced separately, below) in the `shopify_locks` table keyed by the verified shop domain (taken before any
-    install row exists, so two first opens cannot both exchange; S2 forbids a refresh and an
-    exchange together; `packages/core/src/shopify/native-worker.ts:218`). Token
+    install row exists, so two first opens inside the lease cannot both exchange; after a lapse a
+    second caller may also reach Shopify, and only one first insert of the install row wins; S2 forbids a refresh and an
+    exchange together; `packages/core/src/shopify/native-worker.ts:215`). Token
     writes are conditional on the `generation` read under the lock, so a write that was in
     flight when an uninstall wiped the row (which bumps `generation`) changes nothing.
   - **Use.** A run reads the install, and if the access token expires within 5 minutes it
@@ -900,9 +903,11 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     not covered by the HMAC (only the body is), so none of them is trusted alone: the parsed
     body must carry the same shop domain (`myshopify_domain` for `app/uninstalled`, where
     `domain` is the store's custom domain and is not checked; `shop_domain` for the compliance
-    topics). For an installed store the body's numeric shop id (`id` for `app/uninstalled`,
-    `shop_id` for the compliance topics) must also match the stored `shop_id`. A mismatch of
-    either is 401. The body's
+    topics). The compliance topics must also carry a well-formed `shop_id` (else 401). Once a
+    delivery id is not a repeat, a well-formed body shop id (`id` for `app/uninstalled`,
+    `shop_id` for the compliance topics) must match the stored `shop_id` of an installed store
+    (401 on a mismatch); an uninstall body with no well-formed `id` skips that last check. A
+    mismatch of the shop domain is 401. The body's
     shop is the one acted on. The dedupe id is the header; a changed id only lets an
     authenticated body run again, which is safe because every handler below is idempotent.
   - Deduplication: `shopify_webhook_events` (`webhook_id` primary key, `topic`, `shop_domain`,
@@ -964,8 +969,8 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   by "Open ZS Hub" with no mailbox, code or SSO (C-21); the listing draft carries these
   instructions. The onboarding screencast (4.5.3) is recorded from the dev store run and kept
   with the proof, or marked Open with the reason if the recording cannot be made. Items that
-  need money or a human at Shopify (the registration fee, the listing text review) stay Open
-  and named. **State on 2026-11-20:** the listing was submitted for App Store review on
+  need a human at Shopify (the listing text review) stay Open
+  and named; the registration fee was paid (Partner billing, 2026-11-08, proof outside the repository). **State on 2026-11-20:** the listing was submitted for App Store review on
   2026-11-08 and was awaiting review (proof `proof/L6.txt`, goal run `zs-hub-launch-readiness`,
   outside the repository). No review result is recorded here.
 - **C-26 Migration and wiring (revision 4, built).** One forward migration: creates

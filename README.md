@@ -14,7 +14,7 @@ and billing (`docs/requirements/plans.md`), delivery, the outreach sequencer, si
 Worker (`apps/site-worker`), and first slices of transcription, document intake and browser
 tasks (`services/browser-runner`). Not built: the voice receptionist, marketing email, social
 publishing and inbound email contracts. Each file in `docs/requirements/` states its own build
-status in its first lines; that is the source of truth for a feature.
+status in its first lines (a file with built and unbuilt parts says which); that is the source of truth for a feature.
 Plan: `/Users/zero-suminc./Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
 
 ## Hosting (M6, 2026-10-20)
@@ -65,8 +65,8 @@ mise exec -- pnpm -r test
 mise exec -- pnpm --filter @zs/core test:booking
 mise exec -- pnpm --filter @zs/core test:crm
 mise exec -- pnpm --filter @zs/dashboard e2e         # Playwright on the demo adapter (CI job `e2e`)
-mise exec -- pnpm --filter @zs/dashboard e2e:live    # the same journeys against a real API and Postgres
-mise exec -- pnpm --filter @zs/dashboard check:bundle  # the build runs this; fails if the built bundle holds a token or secret
+mise exec -- pnpm --filter @zs/dashboard e2e:live    # the live suite (`e2e/live`) against a real API and Postgres
+mise exec -- pnpm --filter @zs/dashboard check:bundle  # the build runs this; fails if the built browser files hold a JWT-shaped string or a configured secret (16+ chars)
 (cd services/browser-runner && python3 -m unittest discover -s tests -t .)  # Python runner, no browser
 ```
 

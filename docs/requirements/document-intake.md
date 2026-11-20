@@ -1,7 +1,7 @@
 # Document intake: PDF to catalog and agent knowledge
 
-Status: first slice built (2026-10-24, PR #57: DL-1 to DL-5 and DL-8 to DL-16 for the `catalog`
-target, with the fake port only; `packages/core/src/document-intake/`,
+Status: first slice built (2026-10-24, PR #57: DL-1, DL-2, DL-4, DL-5 and DL-8 to DL-15 for the `catalog`
+target; DL-3 for uploaded bytes only and DL-16 as a tested sweep that no scheduler calls yet, with the fake port only; `packages/core/src/document-intake/`,
 `supabase/migrations/20261024100000_document_intake.sql`). Not built: the Python Docling
 service (DL-6, DL-7) and the `knowledge` target. Code follows this file; a change to a
 numbered rule needs a new revision of this file first.
