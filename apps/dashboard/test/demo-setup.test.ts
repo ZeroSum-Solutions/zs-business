@@ -39,7 +39,7 @@ describe("demo adapter: setup", () => {
 
     const pages = await api.listBookingPages();
     expect(pages.map((page) => page.id)).toEqual([DEMO_BOOKING_PAGE.id, answer.result.bookingPageId]);
-    expect(pages[1]).toMatchObject({ title: template.bookingPage.title, published: false, resourceIds: [answer.result.resourceId] });
+    expect(pages[1]).toMatchObject({ title: template.bookingPage.title, description: template.bookingPage.description, published: false, resourceIds: [answer.result.resourceId] });
 
     expect((await api.getBusiness()).timeZone).toBe("Europe/London");
     const read = await api.getSetup();

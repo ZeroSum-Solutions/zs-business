@@ -28,13 +28,19 @@ export function readBookingPageForm(page: Pick<BookingPageSummary, "title" | "de
   const errors: BookingPageFormErrors = {};
   const changes: BookingPageChanges = {};
 
-  const title = form.title.trim();
-  if (title === "" || [...title].length > PAGE_TITLE_MAX) errors.title = BOOKING_PAGE_MESSAGES.title;
-  else if (title !== page.title) changes.title = title;
+  // A field counts as edited only when its raw text differs from what the editor opened with; only then is it
+  // trimmed and checked. (A stored value with spaces at its ends is not an edit just because trimming changes it.)
+  if (form.title !== page.title) {
+    const title = form.title.trim();
+    if (title === "" || [...title].length > PAGE_TITLE_MAX) errors.title = BOOKING_PAGE_MESSAGES.title;
+    else if (title !== page.title) changes.title = title;
+  }
 
-  const description = form.description.trim();
-  if ([...description].length > PAGE_DESCRIPTION_MAX) errors.description = BOOKING_PAGE_MESSAGES.description;
-  else if (description !== (page.description ?? "")) changes.description = description === "" ? null : description;
+  if (form.description !== (page.description ?? "")) {
+    const description = form.description.trim();
+    if ([...description].length > PAGE_DESCRIPTION_MAX) errors.description = BOOKING_PAGE_MESSAGES.description;
+    else if (description !== (page.description ?? "")) changes.description = description === "" ? null : description;
+  }
 
   return Object.keys(errors).length > 0 ? { ok: false, errors } : { ok: true, changes };
 }

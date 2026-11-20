@@ -74,7 +74,8 @@ function serverErrors(error: unknown): BusinessFormErrors | null {
     const field = typeof path === "string" ? fieldFromIssuePath(path) : null;
     if (field) errors[field] = serverFieldMessage(field);
   }
-  return errors;
+  // Issues that name no field of this form (an older API refusing a new field) show as the general error.
+  return Object.keys(errors).length > 0 ? errors : null;
 }
 
 export function SettingsView() {

@@ -653,7 +653,7 @@ and that spec differ, this is the decision, each open for Devin:
 body `{ changes }` with an `Idempotency-Key` header. `changes` holds only the fields being set
 and at least one: `title` 1..200 characters after trimming (it cannot be cleared) and
 `description` null or 1..2000 characters, not blank (null clears it). Any other key, such as
-`published` or `disclosureText`, is `ValidationFailed` with its path; publishing stays on
+`published` or `disclosureText`, is `ValidationFailed` at the path `changes`; publishing stays on
 `booking.page.set_published` and the disclosure stays frozen (P-8). Owner only, under the
 `business` permission, so staff get 403 before any 404 or 400 (as `set_published` does). The
 action runs through the dispatcher on target `booking_page`; the payload's `pageId` must equal
@@ -665,12 +665,13 @@ there is no revision column, because a page holds two short text fields and the 
 reloads after each save. A replay of the same key and body returns the first answer. The
 migration only grants `UPDATE (title, description)` on `booking_pages` to the runtime role (the
 columns and their CHECKs predate it), so the table keeps its forced RLS by `tenant_id` and no
-other column is writable. A visitor sees the change on the next `GET /public/v1/pages/:key`
+other column is writable through this action (`published` keeps its own grant and action). A visitor sees the change on the next `GET /public/v1/pages/:key`
 (P-11) and in the hosted booker (P-14), which already renders `page.description`. Duration of a
 booking is out of scope: it belongs to the resource's `slotLengthMinutes`, not the page.
 Deploy order: the dashboard first, then the API. The dashboard reads a page list without
 `description` as `null`; a dashboard older than this revision rejects the extra key, so the API
-must not ship before the dashboard does (the pattern of `business-profile.md` BP-10). A body the
+must not ship before the dashboard does (the pattern of `business-profile.md` BP-10). A tab opened
+before the dashboard deploy hides the booking page card against the new API until it is reloaded. A body the
 HTTP layer cannot read (wrong Content-Type, malformed JSON) is 403 for staff and 400 for an
 owner: the permission check comes first.
 Tests: contracts (command and body shapes), db as `zs_runtime` (own update, tenant B denied,

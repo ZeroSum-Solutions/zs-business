@@ -33,6 +33,11 @@ describe("readBookingPageForm", () => {
     expect(readBookingPageForm(newer, form)).toEqual({ ok: true, changes: { title: "Visit us", description: "Pick a time." } });
   });
 
+  it("does not count a stored value with spaces at its ends as an edit when only the other field changed", () => {
+    const opened = page({ description: "  Old text  " });
+    expect(readBookingPageForm(opened, { ...toBookingPageForm(opened), title: "Visit us" })).toEqual({ ok: true, changes: { title: "Visit us" } });
+  });
+
   it("clears the description with null", () => {
     const saved = page({ description: "Pick a time." });
     expect(readBookingPageForm(saved, { title: saved.title, description: "   " })).toEqual({ ok: true, changes: { description: null } });

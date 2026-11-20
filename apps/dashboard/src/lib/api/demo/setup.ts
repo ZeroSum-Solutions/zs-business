@@ -118,7 +118,7 @@ export function createDemoSetup(ctx: DemoSetupContext): SetupApi & DemoSetupCont
     ctx.bookingPages.push({
       id: bookingPageId,
       title: template.bookingPage.title,
-      description: null,
+      description: template.bookingPage.description ?? null,
       // IT-4: the page starts off line; the owner takes it live with IT-11.
       published: false,
       disclosureVersion: ctx.now().toISOString().slice(0, 7),

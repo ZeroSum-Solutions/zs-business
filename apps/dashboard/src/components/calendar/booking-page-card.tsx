@@ -34,7 +34,8 @@ type Snippet = "embedScript" | "embedIframe";
 export function BookingPageCard() {
   const pages = useBookingPages();
   // A business without pages, or an API without public booking, shows nothing here.
-  if (!pages.isSuccess || pages.data.length === 0) return null;
+  // Pages already read stay on screen while a refresh fails, so a draft open in an editor is not lost.
+  if (!pages.data || pages.data.length === 0) return null;
   return (
     <Tray className="mt-4" aria-labelledby="booking-pages-title">
       <TrayHeader>
