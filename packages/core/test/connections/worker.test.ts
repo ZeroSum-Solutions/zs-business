@@ -1245,6 +1245,26 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect(one.checked + two.checked).toBe(4);
     expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(4);
   });
+
+  it("a lease takes exactly one row, also when the table's statistics say it holds one row", async () => {
+    // Regression for the intermittent "two passes at once" failure on PostgreSQL 16. With statistics from a
+    // one-row table (what an autovacuum leaves between tests) the planner joined the locking subselect as the
+    // inner side of a nested loop; it ran again for every outer row and one statement leased every free row, but
+    // `lease` returns only the first. Rows are seeded oldest first, in the order the lease picks them, which is the
+    // order that made the old statement lease all of them.
+    const stale = new Date(T0 - 2 * DAY);
+    const seed = async (i: number) => {
+      const t = await newTenant(fixture);
+      await seedConnection(fixture, { tenantId: t.tenantId, memberId: t.memberId, accountId: seedAccount(t.tenantId), lastChecked: new Date(stale.getTime() + i * 60_000) });
+    };
+    await seed(0);
+    await database.pool.query("ANALYZE connections");
+    for (let i = 1; i < 4; i += 1) await seed(i);
+    const out = await worker.pass();
+    expect(out.checked).toBe(4);
+    expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(4);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM connections WHERE claimed_until IS NOT NULL")).rows[0].n).toBe(0);
+  });
 });
 
 describe("nonces (C-3)", () => {
