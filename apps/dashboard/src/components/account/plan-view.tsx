@@ -1,9 +1,9 @@
 "use client";
 
-import { Check, Info, WarningCircle } from "@phosphor-icons/react";
+import { Check, Info, Minus, WarningCircle } from "@phosphor-icons/react";
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { BillingPlan, HubPlan, PlanInterval, PlanStatus } from "@zs/contracts";
+import type { BillingPlan, HubPlan, PlanFeature, PlanInterval, PlanStatus } from "@zs/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
@@ -70,9 +70,38 @@ function limitLines(limits: NonNullable<BillingPlan["limits"]>): string[] {
     `${limits.managedConnections} managed ${limits.managedConnections === 1 ? "connection" : "connections"}`,
     limits.automationTokens > 0 ? `${limits.automationTokens} automation tokens` : "No automation tokens",
     `${formatNumber(limits.emailsPerMonth)} emails a month`,
-    limits.modelAgents ? "Agents that draft with AI" : "Rule-based agents",
-    ...(limits.voice ? ["Voice and missed-call text back"] : []),
   ];
+}
+
+/** Why a feature in the plan is not running, in words (plans.md PL-26). */
+const OFF_WORDS = { disabled: "off until you turn it on", stopped: "stopped", paused: "paused by support" } as const;
+
+/**
+ * PL-26: one line per feature the plan holds. The server derives them from the agent switches the runners
+ * read, so a feature that is off reads as off, never as included. A response without them (an older API)
+ * names no feature at all.
+ */
+export function featureLines(features: readonly PlanFeature[] | undefined): { text: string; on: boolean }[] {
+  return (features ?? []).map((feature) => ({
+    text: feature.state === "included" ? feature.label : `${feature.label}: ${OFF_WORDS[feature.offReason ?? "disabled"]}`,
+    on: feature.state === "included",
+  }));
+}
+
+/** The limits, then the features, as the plan cards list them. */
+function PlanLines({ limits, features, className }: { limits: NonNullable<BillingPlan["limits"]>; features: readonly PlanFeature[] | undefined; className?: string }) {
+  return (
+    <ul className={className ?? "space-y-2"}>
+      {limitLines(limits).map((item) => (
+        <li key={item} className="flex items-center gap-2 text-sm text-fg-2"><Check size={16} aria-hidden className="text-success" />{item}</li>
+      ))}
+      {featureLines(features).map((line) => (
+        <li key={line.text} data-feature-state={line.on ? "included" : "off"} className={`flex items-center gap-2 text-sm ${line.on ? "text-fg-2" : "text-muted"}`}>
+          {line.on ? <Check size={16} aria-hidden className="text-success" /> : <Minus size={16} aria-hidden />}{line.text}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** Sends the browser to a Stripe page. */
@@ -196,13 +225,7 @@ export function PlanView() {
                       {granted.endLine ? <p className="mt-2 text-sm text-muted">{granted.endLine}</p> : null}
                     </div>
                   </CardHeader>
-                  {data.limits ? (
-                    <ul className="space-y-2">
-                      {limitLines(data.limits).map((item) => (
-                        <li key={item} className="flex items-center gap-2 text-sm text-fg-2"><Check size={16} aria-hidden className="text-success" />{item}</li>
-                      ))}
-                    </ul>
-                  ) : null}
+                  {data.limits ? <PlanLines limits={data.limits} features={data.features} /> : null}
                 </Card>
               </div>
             ) : current && holds ? (
@@ -224,11 +247,7 @@ export function PlanView() {
                       {planDateLine(data, zone) ? <p className="text-sm text-muted">{planDateLine(data, zone)}</p> : null}
                     </div>
                   </CardHeader>
-                  <ul className="space-y-2">
-                    {limitLines(data.limits ?? current.limits).map((item) => (
-                      <li key={item} className="flex items-center gap-2 text-sm text-fg-2"><Check size={16} aria-hidden className="text-success" />{item}</li>
-                    ))}
-                  </ul>
+                  <PlanLines limits={data.limits ?? current.limits} features={data.limits ? data.features : current.features} />
                   {data.extraConnections > 0 ? (
                     <p className="mt-4 text-sm text-muted">Includes {data.extraConnections} extra {data.extraConnections === 1 ? "connection" : "connections"} at {price(data.extraConnectionPrice)} a month each.</p>
                   ) : null}
@@ -287,11 +306,7 @@ export function PlanView() {
                             {offer.foundingPrices ? <p className="text-xs text-muted">List price {price(offer.prices[interval])}</p> : null}
                           </div>
                         </CardHeader>
-                        <ul className="mb-4 space-y-2">
-                          {limitLines(offer.limits).map((item) => (
-                            <li key={item} className="flex items-center gap-2 text-sm text-fg-2"><Check size={16} aria-hidden className="text-success" />{item}</li>
-                          ))}
-                        </ul>
+                        <PlanLines limits={offer.limits} features={offer.features} className="mb-4 space-y-2" />
                         {shopify ? null : (
                           <Button className="w-full" onClick={() => checkout.mutate(offer.plan)} disabled={!data.checkoutEnabled || checkout.isPending}
                             aria-busy={busy} aria-describedby={data.checkoutEnabled ? undefined : "checkout-off"}>

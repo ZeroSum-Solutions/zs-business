@@ -17,6 +17,7 @@ import {
   linkIntakeItemRequestSchema,
   listIntakeItemsQuerySchema,
   listThreadsQuerySchema,
+  planFeatureSwitch,
   uuidSchema,
   moveDealStageRequestSchema,
   resultsQuerySchema,
@@ -479,7 +480,17 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   });
   const managedConnections = createDemoManagedConnections({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
   // The plan and wallet share the adapter's wait and actor, so offline, an expired session and staff apply to them too.
-  const billing = createDemoBilling({ clock, wait, actor: () => actor });
+  // The plan page names a feature as included only while its demo agent is on (plans.md PL-26).
+  const billing = createDemoBilling({
+    clock, wait, actor: () => actor,
+    switches: async () => {
+      const [followUp, reminder, review] = await Promise.all([
+        agents.getFollowUpStatus(), templates.getAgentKindStatus("appointment_reminder"), templates.getAgentKindStatus("review_request")]);
+      const of = (status: { globalKilled: boolean; settings: { enabled: boolean }; killed: unknown }) =>
+        planFeatureSwitch({ paused: status.globalKilled, enabled: status.settings.enabled, killed: status.killed !== null });
+      return { appointment_reminder: of(reminder), review_request: of(review), inquiry_followup: of(followUp), voice_receptionist: "disabled" };
+    },
+  });
 
   /** B-12: the first instant too far ahead to book; none for a calendar without a horizon. */
   const horizonOf = (resource: DemoResource) =>

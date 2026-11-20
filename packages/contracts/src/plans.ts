@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentKind } from "./agents.js";
 import { actionCommandSchema, targetSchema, uuidSchema } from "./index.js";
 
 // Hub plan subscriptions (docs/requirements/plans.md). Root re-exports this module, so shared
@@ -48,6 +49,64 @@ export const PLAN_CATALOG: Readonly<Record<HubPlan, PlanCatalogEntry>> = Object.
     limits: { seats: 15, bookableResources: 10, managedConnections: 10, automationTokens: 10, modelAgents: true, voice: true, agentDailyCapCents: 300, emailsPerMonth: 15_000 },
   },
 });
+
+/**
+ * PL-26: the agent features a plan page may name. Each is one agent kind, so the page reads the same
+ * `agent_settings` switch the runners read (agents.md G-3, G-14). The list is the copy; nothing else
+ * in the hub names a feature as included.
+ */
+export const PLAN_FEATURE_KINDS = ["appointment_reminder", "review_request", "inquiry_followup", "voice_receptionist"] as const satisfies readonly AgentKind[];
+export const planFeatureKindSchema = z.enum(PLAN_FEATURE_KINDS);
+export type PlanFeatureKind = z.infer<typeof planFeatureKindSchema>;
+
+/**
+ * PL-26: where one agent kind's switch stands for a tenant, in the order the runners check it (G-3):
+ * `paused` is support's global switch, `disabled` the tenant's own off setting (the default), `stopped`
+ * the tenant's kill switch. Quiet hours and daily caps pass by themselves and are not an off switch.
+ */
+export const PLAN_FEATURE_OFF_REASONS = ["paused", "disabled", "stopped"] as const;
+export type PlanFeatureSwitch = "on" | (typeof PLAN_FEATURE_OFF_REASONS)[number];
+
+/** PL-26: one switch from its three inputs, in the runners' order (G-3): support's pause, the tenant's off setting, its kill switch. */
+export const planFeatureSwitch = (input: { readonly paused: boolean; readonly enabled: boolean; readonly killed: boolean }): PlanFeatureSwitch =>
+  input.paused ? "paused" : !input.enabled ? "disabled" : input.killed ? "stopped" : "on";
+
+export interface PlanFeatureDefinition {
+  readonly kind: PlanFeatureKind;
+  /** The name the plan page shows. */
+  readonly label: string;
+  /** Whether the plan's limits include the feature. A comped tenant (null limits) has every feature. */
+  readonly entitled: (limits: PlanLimits) => boolean;
+}
+export const PLAN_FEATURES: readonly PlanFeatureDefinition[] = Object.freeze([
+  { kind: "appointment_reminder", label: "Appointment reminders", entitled: () => true },
+  { kind: "review_request", label: "Review requests", entitled: () => true },
+  { kind: "inquiry_followup", label: "Agents that draft with AI", entitled: (limits) => limits.modelAgents },
+  { kind: "voice_receptionist", label: "Voice and missed-call text back", entitled: (limits) => limits.voice },
+]);
+
+export const planFeatureSchema = z.strictObject({
+  kind: planFeatureKindSchema,
+  label: z.string(),
+  /** `included`: in the plan and switched on. `off`: in the plan, but switched off, so the page must not call it live. */
+  state: z.enum(["included", "off"]),
+  /** Why it is off; null when included. */
+  offReason: z.enum(PLAN_FEATURE_OFF_REASONS).nullable(),
+});
+export type PlanFeature = z.infer<typeof planFeatureSchema>;
+
+/**
+ * PL-26: the features a plan names, each `included` only while its switch is on. A feature the plan does not
+ * hold is left out. `switches` is read from the tenant's agent settings, never written by hand.
+ */
+export function planFeatures(limits: PlanLimits | null, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>>): PlanFeature[] {
+  return PLAN_FEATURES.filter((feature) => limits === null || feature.entitled(limits)).map((feature) => {
+    const state = switches[feature.kind];
+    return state === "on"
+      ? { kind: feature.kind, label: feature.label, state: "included" as const, offReason: null }
+      : { kind: feature.kind, label: feature.label, state: "off" as const, offReason: state };
+  });
+}
 
 /**
  * PL-25: releases a tenant may record in any 24 hours (all its sites). A free tenant (`tenant_plans.free_tier`)
@@ -145,6 +204,8 @@ const offerSchema = z.strictObject({
   /** Only for an invited tenant (PL-7, PL-11). */
   foundingPrices: z.strictObject({ month: z.number().int(), year: z.number().int() }).nullable(),
   limits: limitsSchema,
+  /** PL-26. Optional so a response without it parses and a dashboard deployed first accepts it; the page then names no feature. */
+  features: z.array(planFeatureSchema).optional(),
 });
 
 /** PL-22: an operator-granted plan that is active now. The note and the operator's name never leave the server. */
@@ -176,6 +237,8 @@ export const billingPlanSchema = z.strictObject({
   readOnly: z.boolean(),
   /** Null for a comped tenant: no plan limits apply. */
   limits: limitsSchema.nullable(),
+  /** PL-26: what `limits` names, each feature on or off for this business. Optional like `offerSchema.features`. */
+  features: z.array(planFeatureSchema).optional(),
   catalog: z.array(offerSchema),
   extraConnectionPrice: z.number().int(),
   currency: z.literal("usd"),

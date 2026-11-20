@@ -14,6 +14,9 @@ import {
   PLAN_CHECKOUT_CREATE_ACTION,
   planCheckoutCommandSchema,
   planCheckoutSchema,
+  planFeatures,
+  PLAN_FEATURE_KINDS,
+  planFeatureSwitch,
   planLookupKey,
   ValidationFailed,
   type ActionCommand,
@@ -23,6 +26,8 @@ import {
   type HubPlan,
   type PlanCatalogEntry,
   type PlanCheckout,
+  type PlanFeatureKind,
+  type PlanFeatureSwitch,
   type PlanInterval,
   type PlanLimits,
   type PlanStatus,
@@ -30,6 +35,7 @@ import {
 import type { Transaction } from "@zs/db";
 import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
+import { loadControls, readGlobalKilled } from "../agents/controls.js";
 import { parseOrFail } from "../crm/rows.js";
 import { activeGrant, isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
 import type { StripePlansClient } from "./plan-stripe.js";
@@ -227,11 +233,27 @@ export async function portalCustomer(tx: Transaction, tenantId: string): Promise
 }
 
 const iso = (value: Date | null) => (value ? value.toISOString() : null);
-const offer = (entry: PlanCatalogEntry, founding: boolean) => ({
+const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>>) => ({
   plan: entry.plan, name: entry.name, prices: { ...entry.prices },
   foundingPrices: founding && entry.foundingPrices ? { ...entry.foundingPrices } : null,
   limits: { ...entry.limits },
+  features: planFeatures(entry.limits, switches),
 });
+
+/**
+ * PL-26: where each plan-page feature's agent switch stands for the tenant. These are the rows and the
+ * global switch the runners gate on (agents.md G-3), read in the same order: support's pause, then the
+ * tenant's off setting, then its kill switch. Quiet hours and caps are not read: they end by themselves.
+ */
+export async function planFeatureSwitches(tx: Transaction, tenantId: string): Promise<Record<PlanFeatureKind, PlanFeatureSwitch>> {
+  const paused = await readGlobalKilled(tx, false);
+  const switches = {} as Record<PlanFeatureKind, PlanFeatureSwitch>;
+  for (const kind of PLAN_FEATURE_KINDS) {
+    const controls = await loadControls(tx, tenantId, false, kind);
+    switches[kind] = planFeatureSwitch({ paused, enabled: controls.settings.enabled, killed: controls.killed !== null });
+  }
+  return switches;
+}
 
 /** PL-15, PL-19, connections.md C-29:Shopify's plan selection page for a store; null without a store or an app handle. `store` is the myshopify.com name or the full domain. */
 export function shopifyPricingUrl(store: string | null | undefined, appHandle: string | null | undefined): string | null {
@@ -259,6 +281,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   const shopifyManageUrl = shopify ? shopifyPricingUrl(row?.shopify_shop_domain, input.shopifyAppHandle) : null;
   // PL-22: the key is left out unless a grant is active, so a tenant without one gets the answer it always had.
   const granted = activeGrant(row, input.now);
+  const limits = planLimits(row, input.now);
+  const switches = await planFeatureSwitches(tx, tenantId);
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -276,8 +300,9 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     paymentFailedAt: iso(row?.payment_failed_at ?? null),
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly: isReadOnly(row, input.now),
-    limits: planLimits(row, input.now),
-    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited)),
+    limits,
+    features: planFeatures(limits, switches),
+    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, switches)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",
     checkoutEnabled: input.checkoutEnabled && stripe,

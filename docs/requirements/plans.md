@@ -1,6 +1,6 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
+Status: draft contract, revision 7 (2026-11-20: PL-26, the plan page names an agent feature as included only while its switch is on). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
 (2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
 the provider subscription). Revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
 booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
@@ -605,3 +605,30 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
   edit, a bad spec) records nothing and does not count.
 - A tenant that is both `free_tier` and subscribed gets the paid plan's limit; clearing `free_tier` on
   upgrade is the operator's job and changes nothing in the meantime.
+
+## Plan copy follows the switches (revision 7)
+
+**PL-26. Features on the plan page.** The plan page lists an agent feature as included only while the
+switch the runners read is on for the tenant. `GET /v1/billing/plan` (PL-7) adds `features`, and each
+catalog offer adds `features`, from one rule in `packages/contracts` (`planFeatures`):
+- The features are four agent kinds: `appointment_reminder` ("Appointment reminders"), `review_request`
+  ("Review requests"), `inquiry_followup` ("Agents that draft with AI") and `voice_receptionist`
+  ("Voice and missed-call text back"). A plan holds a feature by its limits: reminders and review requests
+  on every plan, the AI line when `modelAgents`, the voice line when `voice`. A comped tenant (null limits)
+  holds all four. A feature the plan does not hold is left out.
+- Each feature is `included` or `off`. It is `included` only when the tenant's `agent_settings` row for the
+  kind is enabled, not killed, and support's global switch (`agent_global_switch`) is not on: the same inputs,
+  in the same order, as the runners' gate (agents.md G-3). Otherwise it is `off` with the first reason:
+  `paused` (support's switch), `disabled` (the tenant's setting, which is the default), `stopped` (the tenant's
+  kill switch). Quiet hours and caps pass by themselves and do not turn a feature off.
+- The dashboard shows an `off` feature as "<name>: off until you turn it on", "stopped" or "paused by support",
+  with no check mark. A response without `features` (an API deployed before the dashboard) names no feature.
+  The key is optional in the schema so a dashboard deployed first accepts either response.
+- Prices, limits and the other plan lines are unchanged. Demo mode derives the switches from its demo agents.
+
+## Known limits (revision 7)
+
+- The switch is the tenant's setting. A deploy whose runner is off (`FOLLOWUP_AGENT`, `AGENT_TEMPLATED`, delivery
+  worker) is a separate project's environment that the API cannot read, so a feature a tenant switched on can still
+  send nothing there until the runner is on.
+- `voice_receptionist` has no runner yet (voice-receptionist.md is a draft), so it stays `off` until one reads its row.

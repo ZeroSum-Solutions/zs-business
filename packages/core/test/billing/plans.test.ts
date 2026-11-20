@@ -840,3 +840,56 @@ describe("tenancy of the plan tables (PL-12)", () => {
     await expect(asService("failed", null)).resolves.toBeDefined();
   });
 });
+
+// plans.md PL-26: the plan page names an agent feature as included only while the switch the runners
+// read is on for the tenant; an off one reads as off, whatever the plan holds.
+describe("plan features follow the agent switches (PL-26)", () => {
+  const setAgent = (tenantId: string, kind: string, change: { enabled: boolean; killed?: boolean }) => b.h.service((tx) => tx.query(
+    `INSERT INTO agent_settings (tenant_id, agent_kind, enabled, killed_at, killed_by, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (tenant_id, agent_kind) DO UPDATE SET enabled=$3, killed_at=$4, killed_by=$5, updated_at=$6`,
+    [tenantId, kind, change.enabled, change.killed ? b.h.clock.now() : null, change.killed ? randomUUID() : null, b.h.clock.now()]));
+  const featureStates = (view: { features?: readonly { kind: string; state: string; offReason: string | null }[] | undefined }) =>
+    Object.fromEntries((view.features ?? []).map((feature) => [feature.kind, feature.offReason ?? feature.state]));
+
+  it("shows every feature the plan holds as off until its switch is turned on, then as included", async () => {
+    const tenantId = await b.tenant();
+    await subscribe(tenantId, { plan: "studio" });
+    await b.settle();
+    await worker().runOnce();
+    // Nothing is switched on: no feature may read as included.
+    const before = await (await planSession(tenantId)).getBillingPlan();
+    expect(before.plan).toBe("studio");
+    expect(featureStates(before)).toEqual({ appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled" });
+    expect(before.features!.every((feature) => feature.state === "off")).toBe(true);
+    // Studio holds no voice, so voice is not named at all; Pro names it, still off.
+    expect(featureStates({ features: before.catalog.find((offer) => offer.plan === "pro")!.features })).toEqual({
+      appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "disabled" });
+    expect(before.catalog.find((offer) => offer.plan === "solo")!.features!.map((feature) => feature.kind)).toEqual(["appointment_reminder", "review_request"]);
+
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    await setAgent(tenantId, "inquiry_followup", { enabled: true });
+    const on = await (await planSession(tenantId)).getBillingPlan();
+    expect(featureStates(on)).toEqual({ appointment_reminder: "included", review_request: "disabled", inquiry_followup: "included" });
+    // The cards read the same switches as the plan the tenant holds.
+    expect(featureStates({ features: on.catalog.find((offer) => offer.plan === "studio")!.features })).toEqual(featureStates(on));
+
+    // The tenant's kill switch and support's global pause both turn a feature back to off.
+    await setAgent(tenantId, "inquiry_followup", { enabled: true, killed: true });
+    expect(featureStates(await (await planSession(tenantId)).getBillingPlan())).toMatchObject({ inquiry_followup: "stopped", appointment_reminder: "included" });
+    await b.h.service((tx) => tx.query("UPDATE agent_global_switch SET killed=true, note='test', updated_at=$1 WHERE id", [b.h.clock.now()]));
+    try {
+      const paused = await (await planSession(tenantId)).getBillingPlan();
+      expect(paused.features!.every((feature) => feature.state === "off" && feature.offReason === "paused")).toBe(true);
+    } finally {
+      await b.h.service((tx) => tx.query("UPDATE agent_global_switch SET killed=false, note=NULL, updated_at=$1 WHERE id", [b.h.clock.now()]));
+    }
+  });
+
+  it("reads another tenant's switches never: one tenant's on switch does not show for a second", async () => {
+    const [first, second] = [await b.tenant(), await b.tenant()];
+    await setAgent(first, "review_request", { enabled: true });
+    expect(featureStates(await (await planSession(first)).getBillingPlan())).toMatchObject({ review_request: "included" });
+    expect(featureStates(await (await planSession(second)).getBillingPlan())).toMatchObject({ review_request: "disabled" });
+  });
+});

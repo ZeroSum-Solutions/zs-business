@@ -2,7 +2,9 @@
  * The demo Hub plan (plans.md PL-7): a Studio plan in its trial, with the real catalog, and a demo
  * wallet (delivery.md D-4). Demo mode never reaches Stripe, so Checkout and the Portal are off and say so.
  */
-import { EXTRA_CONNECTION_PRICE, PLAN_CATALOG, type BillingPlan, type PlanCatalogEntry, type WalletSummary } from "@zs/contracts";
+import {
+  EXTRA_CONNECTION_PRICE, PLAN_CATALOG, planFeatures, type BillingPlan, type PlanCatalogEntry, type PlanFeatureKind, type PlanFeatureSwitch, type WalletSummary,
+} from "@zs/contracts";
 import { ApiError, demoError } from "../errors";
 import type { BillingApi } from "../types";
 import type { DemoClock } from "./adapter";
@@ -17,7 +19,13 @@ export interface DemoBillingOptions {
   wait?: () => Promise<void>;
   /** Who the demo session is: the wallet needs `billing`, which only an owner has (D-4). */
   actor?: () => DemoActor;
+  /** Where each plan-page feature's agent switch stands in the demo (PL-26). Without it every feature reads as off. */
+  switches?: () => Promise<Record<PlanFeatureKind, PlanFeatureSwitch>>;
 }
+
+const ALL_OFF: Record<PlanFeatureKind, PlanFeatureSwitch> = {
+  appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "disabled",
+};
 
 export function createDemoBilling(options: DemoBillingOptions = {}): BillingApi {
   const clock = options.clock ?? { now: () => new Date() };
@@ -26,7 +34,7 @@ export function createDemoBilling(options: DemoBillingOptions = {}): BillingApi 
   const actor = options.actor;
   const ahead = (days: number) => new Date(clock.now().getTime() + days * 86_400_000).toISOString();
 
-  const plan = (): BillingPlan => ({
+  const plan = (switches: Record<PlanFeatureKind, PlanFeatureSwitch>): BillingPlan => ({
     billingProvider: "stripe",
     status: "trialing",
     plan: "studio",
@@ -43,8 +51,10 @@ export function createDemoBilling(options: DemoBillingOptions = {}): BillingApi 
     readOnlyAfter: null,
     readOnly: false,
     limits: { ...PLAN_CATALOG.studio.limits },
+    features: planFeatures(PLAN_CATALOG.studio.limits, switches),
     catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => ({
       plan: entry.plan, name: entry.name, prices: { ...entry.prices }, foundingPrices: null, limits: { ...entry.limits },
+      features: planFeatures(entry.limits, switches),
     })),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",
@@ -56,7 +66,7 @@ export function createDemoBilling(options: DemoBillingOptions = {}): BillingApi 
   const wallet = (): WalletSummary => ({ currency: "usd", balance: 4118, reserved: 250, available: 3868 });
 
   return {
-    async getBillingPlan() { await wait(); return plan(); },
+    async getBillingPlan() { await wait(); return plan(await (options.switches?.() ?? ALL_OFF)); },
     async getWallet() {
       await wait();
       if (actor && actor().role !== "owner") throw demoError("Forbidden");
