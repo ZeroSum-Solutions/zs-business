@@ -169,9 +169,16 @@ export function parsePlanEnv(env: Readonly<Record<string, string | undefined>>):
   return config;
 }
 
+/** A subscription as Stripe answered, with Stripe's own clock at that moment. */
+export interface StripeSubscriptionRead {
+  readonly subscription: Record<string, unknown>;
+  /** The `Date` header of the answer: Stripe's clock, the one an event's `created` is in. Null when absent or malformed. */
+  readonly providerTime: Date | null;
+}
+
 /** PL-10: reads a subscription as Stripe has it now; null when Stripe does not know it. */
 export interface StripeSubscriptionReader {
-  retrieve(subscriptionId: string): Promise<Record<string, unknown> | null>;
+  retrieve(subscriptionId: string): Promise<StripeSubscriptionRead | null>;
 }
 
 export const subscriptionReaderConfigSchema = z.strictObject({
@@ -205,7 +212,11 @@ export function createStripeSubscriptionReader(deps: { readonly config: Subscrip
       }
       const body = await readLimited(response).catch(() => null) as Record<string, unknown> | null;
       if (response.status === 404) return null;
-      if (response.status >= 200 && response.status < 300 && body && body.object === "subscription" && body.id === subscriptionId) return body;
+      if (response.status >= 200 && response.status < 300 && body && body.object === "subscription" && body.id === subscriptionId) {
+        const header = response.headers.get("date");
+        const parsed = header ? new Date(header) : null;
+        return { subscription: body, providerTime: parsed && Number.isFinite(parsed.getTime()) ? parsed : null };
+      }
       throw new StripeRequestFailed(`stripe_${response.status}`, true);
     },
   };

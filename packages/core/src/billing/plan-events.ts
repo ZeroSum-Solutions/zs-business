@@ -167,13 +167,17 @@ export function createPlanEvents(deps: PlanEventDeps) {
     return row !== undefined && row.billing_provider !== "stripe";
   }
 
-  async function sync(tx: Transaction, tenantId: string, subscriptionId: string, at: Date): Promise<PlanOutcome> {
+  async function sync(tx: Transaction, tenantId: string, subscriptionId: string, created: Date | null, at: Date): Promise<PlanOutcome> {
     if (await otherProvider(tx, tenantId)) return "not_ours";
     if (!deps.subscriptions) return "wait";
-    const answer = await deps.subscriptions.retrieve(subscriptionId);
-    if (!answer) return "not_ours";
-    // PL-10: Stripe's answer reflects every event created before it came back; this is the first moment the worker knows that.
-    const observedAt = new Date(deps.now().getTime());
+    const read = await deps.subscriptions.retrieve(subscriptionId);
+    if (!read) return "not_ours";
+    const answer = read.subscription;
+    // PL-10: Stripe's answer reflects every event it created before it answered. The boundary is in Stripe's clock, the
+    // one an event's `created` is in: the Date header of the answer. A reader that has none falls back to the worker's
+    // injected clock, read once the answer is back. Never earlier than the event that led here: that event shows a
+    // state that is already in the answer.
+    const observedAt = new Date(Math.max((read.providerTime ?? deps.now()).getTime(), created?.getTime() ?? 0));
     const customerId = id(answer.customer, "cus_");
     const claimed = uuid(meta(answer).zs_tenant);
     if (claimed !== null && claimed !== tenantId) return "not_ours";
@@ -228,15 +232,20 @@ export function createPlanEvents(deps: PlanEventDeps) {
         seconds(answer.trial_end), periodEnd, answer.cancel_at_period_end === true, startedAt, endedAt, statusSince, at]);
     // PL-10: when a past-due subscription pays again, its failed invoices are settled (paid, voided
     // or forgiven), so a later failure starts a fresh grace. A failure seen while the subscription is
-    // still active stays: Stripe may move it to past_due next. `resolved_at` is the injected clock read right after
-    // Stripe's answer, not the time of the event that led here and not the start of the pass (an old webhook can be
-    // the one that shows a later recovery): a failure event Stripe created at or before it is stale and never
-    // reopens the invoice (see `invoice`).
-    if ((status === "active" || status === "trialing") && (previous?.status === "past_due" || previous?.status === "unpaid"))
+    // still active stays: Stripe may move it to past_due next. The recovery is dated `observedAt`, not the start of
+    // the pass (an old webhook can be the one that shows a later recovery). The date is kept on the subscription as
+    // well as on each invoice it settled: a failure Stripe created at or before it is stale and never reaches an
+    // invoice, even one this worker has not seen yet (see `invoice`). It only moves forward.
+    if ((status === "active" || status === "trialing") && (previous?.status === "past_due" || previous?.status === "unpaid")) {
       await tx.query(
-        `UPDATE plan_invoices SET status='resolved', resolved_at=$4, updated_at=$3
+        `UPDATE plan_subscriptions SET recovered_at=greatest(recovered_at, $3::timestamptz)
+          WHERE tenant_id=$1 AND provider='stripe' AND id=$2`,
+        [tenantId, subscriptionId, observedAt]);
+      await tx.query(
+        `UPDATE plan_invoices SET status='resolved', resolved_at=greatest(resolved_at, $4::timestamptz), updated_at=$3
           WHERE tenant_id=$1 AND provider='stripe' AND stripe_subscription_id=$2 AND status='failed'`,
         [tenantId, subscriptionId, at, observedAt]);
+    }
     // PL-11: a founding subscription first seen ended gives up the invite; the slot stays used.
     if (plan.founding && ENDED.has(status) && !(previous && ENDED.has(previous.status)))
       await tx.query("UPDATE tenant_plans SET founding_invite=false, updated_at=$2 WHERE tenant_id=$1", [tenantId, at]);
@@ -251,7 +260,7 @@ export function createPlanEvents(deps: PlanEventDeps) {
     return duplicate ? "plan_duplicate" : "plan_synced";
   }
 
-  async function checkout(tx: Transaction, type: string, object: Json, at: Date): Promise<PlanOutcome> {
+  async function checkout(tx: Transaction, type: string, object: Json, created: Date | null, at: Date): Promise<PlanOutcome> {
     const tenantId = await checkoutTenant(tx, object);
     if (!tenantId) return "not_ours";
     await lockTenantPlan(tx, tenantId);
@@ -282,16 +291,16 @@ export function createPlanEvents(deps: PlanEventDeps) {
         [tenantId, customerId, at]);
     const subscriptionId = id(object.subscription, "sub_");
     if (!subscriptionId) return "checkout_completed";
-    return sync(tx, tenantId, subscriptionId, at);
+    return sync(tx, tenantId, subscriptionId, created, at);
   }
 
-  async function subscription(tx: Transaction, object: Json, at: Date): Promise<PlanOutcome> {
+  async function subscription(tx: Transaction, object: Json, created: Date | null, at: Date): Promise<PlanOutcome> {
     const subscriptionId = id(object.id, "sub_");
     if (!subscriptionId) return "ignored";
     const tenantId = (await checkoutTenant(tx, object)) ?? (await storedTenant(tx, subscriptionId, id(object.customer, "cus_")));
     if (!tenantId) return "wait";
     await lockTenantPlan(tx, tenantId);
-    return sync(tx, tenantId, subscriptionId, at);
+    return sync(tx, tenantId, subscriptionId, created, at);
   }
 
   async function invoice(tx: Transaction, type: string, object: Json, created: Date | null, at: Date): Promise<PlanOutcome> {
@@ -314,28 +323,29 @@ export function createPlanEvents(deps: PlanEventDeps) {
          ON CONFLICT (tenant_id, id) DO UPDATE SET status='paid', paid_at=coalesce(plan_invoices.paid_at, EXCLUDED.paid_at), updated_at=EXCLUDED.updated_at`,
         [tenantId, invoiceId, subscriptionId, amount, currency, paidAt, at]);
     } else {
+      // PL-10: a failure Stripe created at or before the last recovery of its subscription, or of this invoice, is stale
+      // and changes nothing: not a new row (its first_failed_at would date the next grace from before the recovery), not
+      // a reopened one. An event with no `created` cannot be ordered, so it is stale once a recovery is on record.
+      // The recovery times only move forward, so any number of fail and recover cycles stay ordered.
       await tx.query(
         `INSERT INTO plan_invoices (tenant_id, id, stripe_subscription_id, status, amount_due, currency, first_failed_at, created_at, updated_at)
-         VALUES ($1,$2,$3,'failed',$4,$5,$6,$7,$7)
+         SELECT $1,$2,$3,'failed',$4,$5,$6,$7,$7
+          WHERE NOT EXISTS (SELECT 1 FROM plan_subscriptions s
+                          WHERE s.tenant_id=$1 AND s.provider='stripe' AND s.id=$3
+                            AND NOT coalesce($8::timestamptz > s.recovered_at, s.recovered_at IS NULL))
          ON CONFLICT (tenant_id, id) DO UPDATE SET
            status=CASE WHEN plan_invoices.status='paid' THEN 'paid' ELSE 'failed' END,
            first_failed_at=CASE WHEN plan_invoices.status='resolved' OR plan_invoices.first_failed_at IS NULL THEN EXCLUDED.first_failed_at
              ELSE least(plan_invoices.first_failed_at, EXCLUDED.first_failed_at) END,
-           -- The resolution time outlives a reopen, so a delayed copy of the earlier failure stays stale. A row the worker
-           -- from before resolved_at resolved has none, or an older one: its updated_at is when it was resolved.
-           resolved_at=CASE WHEN plan_invoices.status='resolved' THEN greatest(plan_invoices.resolved_at, plan_invoices.updated_at)
-             ELSE plan_invoices.resolved_at END,
            updated_at=EXCLUDED.updated_at
-         -- PL-10: a paid invoice stays as it is. A resolved one ignores any failure Stripe created at or before its resolution,
-         -- and one with no event time cannot be ordered, so it never reopens it: a delayed event cannot bring back the old
-         -- first_failed_at. A failed one that was reopened before ignores a copy of a failure older than its resolution.
-         WHERE plan_invoices.status <> 'paid' AND (
-           CASE WHEN plan_invoices.status = 'resolved'
-             THEN $8::timestamptz > greatest(plan_invoices.resolved_at, plan_invoices.updated_at)
-             ELSE plan_invoices.resolved_at IS NULL OR $8::timestamptz > plan_invoices.resolved_at END)`,
+         WHERE plan_invoices.status <> 'paid'
+           AND coalesce($8::timestamptz > plan_invoices.resolved_at, plan_invoices.resolved_at IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM plan_subscriptions s
+                          WHERE s.tenant_id=$1 AND s.provider='stripe' AND s.id=$3
+                            AND NOT coalesce($8::timestamptz > s.recovered_at, s.recovered_at IS NULL))`,
         [tenantId, invoiceId, subscriptionId, amount, currency, when, at, created]);
     }
-    return sync(tx, tenantId, subscriptionId, at);
+    return sync(tx, tenantId, subscriptionId, created, at);
   }
 
   /** A plan event's outcome, or null when the event is not about plans. */
@@ -343,14 +353,14 @@ export function createPlanEvents(deps: PlanEventDeps) {
     switch (type) {
       case "checkout.session.completed":
       case "checkout.session.expired":
-        return object.mode === "subscription" ? checkout(tx, type, object, at) : null;
+        return object.mode === "subscription" ? checkout(tx, type, object, created, at) : null;
       case "checkout.session.async_payment_succeeded":
       case "checkout.session.async_payment_failed":
         return object.mode === "subscription" ? "ignored" : null;
       case "customer.subscription.created":
       case "customer.subscription.updated":
       case "customer.subscription.deleted":
-        return subscription(tx, object, at);
+        return subscription(tx, object, created, at);
       case "invoice.paid":
       case "invoice.payment_failed":
         return invoice(tx, type, object, created, at);

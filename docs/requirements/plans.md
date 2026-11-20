@@ -203,17 +203,23 @@ back, so a retry starts from the same rows. Rules:
   plan; with none, the latest-started recognised one. `payment_failed_at` is the earliest failure
   among the effective subscription's `failed` invoices while Stripe says it is `past_due` (so an
   invoice Stripe voided or forgave never counts), else null. When a `past_due` or `unpaid`
-  subscription turns `trialing` or `active`, its `failed` invoices become `resolved` and
-  `plan_invoices.resolved_at` takes the injected clock read right after Stripe's answer, the moment
-  the worker sees the recovery (not the `created` of the event that led there, which can be old, and
-  not the start of the pass), so a later failure starts a fresh grace. A failure event created after
-  `resolved_at` counts from its own time and reopens the invoice. One created at or before it
-  (Stripe's `created` has second precision, so the same second counts as stale), or one with no
-  `created`, is stale: it changes nothing, so a delayed `invoice.payment_failed` never brings back an
-  old `first_failed_at`. `resolved_at` stays set when the invoice reopens, so a delayed copy of its
-  first failure is refused then too. A resolved row without `resolved_at` (the worker from before
-  this column resolved it) is dated by its `updated_at`, the later of the two when both exist, and a
-  reopen writes that time into `resolved_at`. A `paid` invoice is terminal: a failure changes nothing. `read_only_after` is
+  subscription turns `trialing` or `active`, its `failed` invoices become `resolved`, so a later
+  failure starts a fresh grace. The recovery is dated in Stripe's clock, the clock an event's
+  `created` is in: the `Date` header of the answer that shows it (the injected worker clock when the
+  answer has none), and never earlier than the `created` of the event that led there. The date is
+  kept twice and only moves forward: `plan_subscriptions.recovered_at` (the last recovery of the
+  subscription, whether or not it had a failed invoice row) and `plan_invoices.resolved_at` (each
+  invoice it settled). A failure event created after both counts from its own time and reopens the
+  invoice. One created at or before either (Stripe's `created` has second precision, so the same
+  second counts as stale), or one with no `created` once a recovery is on record, is stale: it
+  changes nothing, for an invoice with a row or without one, so a delayed `invoice.payment_failed`
+  never brings back an old `first_failed_at`, however many times the subscription failed and
+  recovered before. `resolved_at` stays set when the invoice reopens. A genuine failure created in
+  the second of the recovery is dropped as stale; Stripe sends the next one with its retry. The
+  migration dates every row from before these columns at the migration time (a subscription with a
+  resolved or failed invoice, and each resolved invoice), and a resolved invoice always has a
+  `resolved_at` (a CHECK, so a billing worker from before it fails loudly instead of resolving an
+  undated row): stop the billing worker, apply the migration, deploy the new worker. A `paid` invoice is terminal: a failure changes nothing. `read_only_after` is
   `payment_failed_at + grace` (or null) while the effective subscription is in one of those three;
   otherwise it is the `status_since` of the latest subscription in `canceled`, `unpaid`,
   `incomplete_expired` or `paused`, or null when none ever ended. So an `incomplete` replacement

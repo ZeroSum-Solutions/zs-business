@@ -18,7 +18,7 @@ let b: BillingHarness;
 let fake: FakeStripePlans;
 beforeAll(async () => {
   b = await createBillingHarness();
-  fake = await startFakeStripePlans({ secretKeys: [PLAN_SECRET_KEY, READ_KEY] });
+  fake = await startFakeStripePlans({ secretKeys: [PLAN_SECRET_KEY, READ_KEY], clock: () => b.h.clock.now() });
 });
 afterEach(async () => {
   await b.settle();
