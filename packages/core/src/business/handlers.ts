@@ -70,6 +70,12 @@ const FIELDS: readonly { key: keyof BusinessProfileChanges; column: string; cast
 
 export const updateBusinessHandler: ActionHandler = {
   resolveTarget: resolveProfile,
+  // BP-13, BP-14: a save stored before the two fields existed replays with them empty, not as an invalid result.
+  async upgradeStoredResult(_tx, result) {
+    return result !== null && typeof result === "object" && !Array.isArray(result)
+      ? { description: null, services: [], ...result }
+      : result;
+  },
   async handle({ tx, command, binding, now }) {
     await requireMember(tx, binding.tenantId, binding.actorId, "business");
     const { payload } = parseOrFail(updateBusinessProfileCommandSchema, command);

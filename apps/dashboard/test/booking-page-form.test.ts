@@ -23,6 +23,16 @@ describe("readBookingPageForm", () => {
     expect(readBookingPageForm(page(), { title: "Visit us", description: "" })).toEqual({ ok: true, changes: { title: "Visit us" } });
   });
 
+  it("reads against the page as the editor opened it, so a newer description elsewhere is never overwritten", () => {
+    const opened = page({ description: "Pick a time." });
+    const form = { ...toBookingPageForm(opened), title: "Visit us" };
+    // Another owner saved a new description after the editor opened; reading against that newer page
+    // would count the untouched field as an edit and send the stale text. Against `opened` it is not sent.
+    const newer = page({ description: "Walk-ins welcome." });
+    expect(readBookingPageForm(opened, form)).toEqual({ ok: true, changes: { title: "Visit us" } });
+    expect(readBookingPageForm(newer, form)).toEqual({ ok: true, changes: { title: "Visit us", description: "Pick a time." } });
+  });
+
   it("clears the description with null", () => {
     const saved = page({ description: "Pick a time." });
     expect(readBookingPageForm(saved, { title: saved.title, description: "   " })).toEqual({ ok: true, changes: { description: null } });

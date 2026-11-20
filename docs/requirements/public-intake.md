@@ -668,6 +668,11 @@ columns and their CHECKs predate it), so the table keeps its forced RLS by `tena
 other column is writable. A visitor sees the change on the next `GET /public/v1/pages/:key`
 (P-11) and in the hosted booker (P-14), which already renders `page.description`. Duration of a
 booking is out of scope: it belongs to the resource's `slotLengthMinutes`, not the page.
+Deploy order: the dashboard first, then the API. The dashboard reads a page list without
+`description` as `null`; a dashboard older than this revision rejects the extra key, so the API
+must not ship before the dashboard does (the pattern of `business-profile.md` BP-10). A body the
+HTTP layer cannot read (wrong Content-Type, malformed JSON) is 403 for staff and 400 for an
+owner: the permission check comes first.
 Tests: contracts (command and body shapes), db as `zs_runtime` (own update, tenant B denied,
 other columns closed, CHECK limits), core (action, outbox, replay, validation, staff refused,
 payload mismatch), API (status codes, public read) and the dashboard (form, demo adapter, HTTP

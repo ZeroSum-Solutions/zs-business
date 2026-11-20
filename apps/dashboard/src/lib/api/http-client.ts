@@ -162,7 +162,10 @@ const byPosition = (pipeline: PipelineSummary): PipelineSummary => ({
   stages: [...pipeline.stages].sort((a, b) => a.position - b.position),
   archivedStages: [...pipeline.archivedStages].sort((a, b) => a.position - b.position),
 });
-const bookingPageListSchema = z.object({ items: z.array(bookingPageSummarySchema) });
+/** P-24: an API that predates page descriptions omits the field; a page then reads as having none. */
+const bookingPageListSchema = z.object({
+  items: z.array(bookingPageSummarySchema.extend({ description: z.string().nullable().default(null) })),
+});
 /** POST /v1/calendar/connections/:id/disconnect answers the action and the connection as it is now. */
 const disconnectCalendarOutputSchema = z.object({ actionId: uuidSchema, result: calendarConnectionSchema });
 /** POST /v1/connections/:id/disconnect answers the action and the connection as it is now (connections.md C-13). */

@@ -10,14 +10,15 @@ ALTER TABLE public.business_profiles
     CONSTRAINT business_profiles_description CHECK (char_length(description) BETWEEN 1 AND 2000 AND btrim(description) <> '');
 
 -- BP-14: the services the business offers, a JSON array of at most 20 names. Each name is a string of 1..80
--- characters with no space at either end (the regex runs per element: `.` matches any character, flag s).
+-- characters with no space at either end (the regex runs per element: `.` matches any character, flag s). The path
+-- is strict and tests the element's type, so a nested array or a number is refused, not unwrapped (lax mode).
 -- A CASE keeps jsonb_array_length from running on a value that is not an array. Empty is `[]`, never null.
 ALTER TABLE public.business_profiles
   ADD COLUMN services jsonb NOT NULL DEFAULT '[]'::jsonb
     CONSTRAINT business_profiles_services CHECK (
       CASE WHEN jsonb_typeof(services) = 'array' THEN
         jsonb_array_length(services) <= 20
-        AND jsonb_array_length(jsonb_path_query_array(services, '$[*] ? (@ like_regex "^[^\\s](.{0,78}[^\\s])?$" flag "s")'))
+        AND jsonb_array_length(jsonb_path_query_array(services, 'strict $[*] ? (@.type() == "string" && @ like_regex "^[^\\s](.{0,78}[^\\s])?$" flag "s")'))
           = jsonb_array_length(services)
       ELSE false END);
 

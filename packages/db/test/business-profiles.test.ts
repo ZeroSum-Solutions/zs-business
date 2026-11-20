@@ -213,6 +213,8 @@ describe("description and services (BP-13, BP-14)", () => {
     ["a services string", "services", JSON.stringify("Repairs")],
     ["21 services", "services", JSON.stringify(Array.from({ length: 21 }, (_, i) => `Service ${i}`))],
     ["a service that is not a string", "services", JSON.stringify(["Repairs", 7])],
+    ["a nested array of names", "services", JSON.stringify([["Repairs"]])],
+    ["a nested array beside a name", "services", JSON.stringify(["Resizing", ["Repairs"]])],
     ["an empty service name", "services", JSON.stringify([""])],
     ["a service with a space at an end", "services", JSON.stringify([" Repairs"])],
     ["an 81-character service name", "services", JSON.stringify(["s".repeat(81)])],

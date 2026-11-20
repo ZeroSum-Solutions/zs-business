@@ -178,6 +178,19 @@ describe("description and services (BP-13, BP-14)", () => {
     expect((await sessionFor(owner).getBusiness()).revision).toBe(before.revision + 1);
   });
 
+  it("replays a save stored before the two fields existed with them empty, not as an invalid result", async () => {
+    const before = await sessionFor(owner).getBusiness();
+    const key = randomUUID();
+    const body = { expectedRevision: before.revision, changes: { legalName: "Old Wording Ltd" } };
+    const first = await sessionFor(owner).updateBusiness(body, key);
+    // What an older server stored: the result without description and services.
+    await fixture.service((tx) => tx.query(
+      "UPDATE actions SET result = result - 'description' - 'services' WHERE tenant_id=$1 AND idempotency_key=$2", [tenantId, key]));
+    const replay = await sessionFor(owner).updateBusiness(body, key);
+    expect(replay.actionId).toBe(first.actionId);
+    expect(replay.result).toMatchObject({ legalName: "Old Wording Ltd", revision: first.result.revision, description: null, services: [] });
+  });
+
   it("clears the description with null and the services with [], and keeps what the change does not name", async () => {
     const before = await sessionFor(owner).getBusiness();
     const cleared = await sessionFor(owner).updateBusiness({ expectedRevision: before.revision, changes: { description: null } }, randomUUID());

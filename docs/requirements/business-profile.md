@@ -113,7 +113,8 @@ every member, like the other fields (BP-5). The runtime role may `UPDATE` only t
 action writes: the migration grants `UPDATE (description, services)` to `authenticated` beside
 the existing column grants, and the table keeps forced RLS by `tenant_id`. An older API that
 does not send the fields is read as `description: null` and `services: []` by the dashboard
-(BP-10). The MCP `get_business` tool is read-only and returns the new fields; there is no MCP
+(BP-10), and a `business.profile.update` saved before this revision replays with them empty
+(the stored result is upgraded on replay, never rewritten). The MCP `get_business` tool is read-only and returns the new fields; there is no MCP
 write tool for the profile, so none is added for them.
 
 **BP-12. Tenancy.** A member of tenant A cannot read or update tenant B's profile through the

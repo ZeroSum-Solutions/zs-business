@@ -115,7 +115,10 @@ function PageEditForm({ page, onDone }: { page: BookingPageSummary; onDone: () =
   const { keys } = useKeys();
   const toast = useToast();
   const intents = useIntentKey();
-  const [form, setForm] = useState<BookingPageForm>(() => toBookingPageForm(page));
+  // What the page held when the editor opened. A list refresh while the owner types must not change what
+  // counts as an edit, or an untouched field could be sent with an older value over a newer one.
+  const [opened] = useState(page);
+  const [form, setForm] = useState<BookingPageForm>(() => toBookingPageForm(opened));
   const [errors, setErrors] = useState<BookingPageFormErrors>({});
   const idBase = `page-${page.id}`;
 
@@ -147,7 +150,7 @@ function PageEditForm({ page, onDone }: { page: BookingPageSummary; onDone: () =
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const read = readBookingPageForm(page, form);
+    const read = readBookingPageForm(opened, form);
     if (!read.ok) {
       setErrors(read.errors);
       document.getElementById(read.errors.title ? `${idBase}-title` : `${idBase}-description`)?.focus();

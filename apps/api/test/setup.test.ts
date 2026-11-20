@@ -349,6 +349,12 @@ describe("PUT /v1/booking/pages/:id (P-24)", () => {
       expect(error.code).toBe("ValidationFailed");
       expect((error.details as { issues: Array<{ path: string }> }).issues.map((issue) => issue.path), JSON.stringify(body)).toContain(path);
     }
+    // An unreadable body is 403 for staff and 400 for the owner: the permission check comes first.
+    const raw = (token: string) => h.app.request(`/v1/booking/pages/${bookingPageId}`, {
+      method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: "{not json",
+    });
+    expect((await raw(staff.token)).status).toBe(403);
+    expect((await raw(owner.token)).status).toBe(400);
     expect((await updatePage(owner, bookingPageId, { changes: { description: "Fine." } }, null)).status).toBe(400);
     expect((await call(h.app, "PUT", `/v1/booking/pages/${bookingPageId}`, { body: { changes: { description: "x" } }, key: randomUUID() })).status).toBe(401);
     expect((await call(h.app, "GET", "/v1/booking/pages", { token: owner.token })).body).toEqual(before);

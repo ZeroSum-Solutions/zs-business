@@ -198,6 +198,7 @@ import { getTopUpForCheckout, listTopUps, rememberCheckoutUrl, startTopUp, topUp
 import type { StripeClient } from "../billing/stripe.js";
 import { getBillingPlan, getStoredCheckout, planHandlers, portalCustomer, rememberPlanCheckoutUrl, startPlanCheckout, type PlanDispatchConfig } from "../billing/plans.js";
 import type { StripePlansClient } from "../billing/plan-stripe.js";
+import { UnreadBody } from "../connections/edge.js";
 import { connectionHandlers } from "../connections/handlers.js";
 import type { ConnectorPort } from "../connections/port.js";
 import type { ShopifyPort } from "../shopify/port.js";
@@ -1130,6 +1131,8 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       await read("business", async () => undefined);
       const page = uuidSchema.safeParse(pageId);
       if (!page.success) throw new NotFound("No such booking page");
+      // A body the HTTP layer could not read is reported only now, after the owner check (403 before 400).
+      if (body instanceof UnreadBody) throw body.error;
       const request = parseInput(updateBookingPageRequestSchema, body);
       const { id: _id, ...rest } = envelope(key, "booking_page", page.data);
       const { output, replayed } = await runTracked({
