@@ -10,3 +10,5 @@ coverage/
 .DS_Store
 Icon?
 .vercel/
+__pycache__/
+*.pyc
