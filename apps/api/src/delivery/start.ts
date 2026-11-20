@@ -2,6 +2,7 @@
 // the Vercel cron function and the Node worker script, which own process.env and the clock.
 import { createRuntimePool } from "@zs/db";
 import type { Pool } from "pg";
+import { createRunnerHeartbeats, DELIVERY_HEARTBEAT_SECONDS, serviceOnPool, withHeartbeats } from "../runner-heartbeat.js";
 import type { DeliveryRunnerEnv } from "./config.js";
 import { createDeliveryRunner, createDeliveryWorkerFromEnv, type DeliveryRunner } from "./runner.js";
 
@@ -22,7 +23,14 @@ export function startDeliveryRunner(env: DeliveryRunnerEnv, deps: {
       env, pool, clock: deps.clock, generateId: deps.generateId,
       report: (event) => console.warn("Delivery worker", event),
     });
-    return { runner: createDeliveryRunner({ worker, clock: deps.clock, budgetMs: env.budgetMs, claimLimit: env.claimLimit }), pool };
+    // PL-26: each finished run tells the plan page the delivery worker is live, and SMS only when its provider is configured.
+    const window = Math.max(DELIVERY_HEARTBEAT_SECONDS, Math.ceil(env.intervalMs / 1000) * 4);
+    const runner = withHeartbeats(createDeliveryRunner({ worker, clock: deps.clock, budgetMs: env.budgetMs, claimLimit: env.claimLimit }), {
+      job: "delivery",
+      heartbeats: createRunnerHeartbeats({ service: serviceOnPool(pool), clock: deps.clock }),
+      beats: [{ runner: "delivery_email", freshForSeconds: window }, ...(env.twilio !== null ? [{ runner: "delivery_sms" as const, freshForSeconds: window }] : [])],
+    });
+    return { runner, pool };
   } catch (error) {
     void pool.end().catch(() => undefined);
     throw error;

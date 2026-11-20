@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   BindingMismatch,
+  BOOKING_PAGE_UPDATE_ACTION,
   Conflict,
   INDUSTRY_TEMPLATE_IDS,
   INDUSTRY_TEMPLATES,
@@ -19,7 +20,7 @@ import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type Two
 import { createSession, type EdgeDependencies } from "../src/edge/session.js";
 import { memberAuthorize } from "../src/edge/session.js";
 import { NEVER_APPROVED_ACTIONS, cannotBeApproved } from "../src/approvals/policy.js";
-import { applyTemplateHandler, createDispatcher, createTemplateSession, derivedId, type ActionHandler } from "../src/index.js";
+import { applyTemplateHandler, createDispatcher, createTemplateSession, derivedId, updateBookingPageHandler, type ActionHandler } from "../src/index.js";
 
 const NOW = "2026-10-19T08:00:00.000Z";
 const clock = { now: () => new Date(NOW) };
@@ -367,6 +368,122 @@ describe("booking.page.set_published (IT-11)", () => {
     for (const [page, body] of [[randomUUID(), { published: true }], ["not-a-page", { published: true }], [pageA, { published: "yes" }]] as const)
       await expect(sessionFor(a.tenantId, staff).setBookingPagePublished(page, body, randomUUID()), String(page)).rejects.toBeInstanceOf(TenantDenied);
     expect((await sessionFor(a.tenantId, staff).getSetup()).applied?.published).toBe(false);
+  });
+});
+
+describe("booking.page.update (P-24)", () => {
+  const eventsFor = (tenantId: string, key: string) => fixture.service(async (tx) => (await tx.query<{ event_type: string }>(
+    `SELECT o.event_type FROM outbox o JOIN actions a ON a.tenant_id=o.tenant_id AND a.id=o.action_id
+      WHERE o.tenant_id=$1 AND a.idempotency_key=$2`, [tenantId, key])).rows);
+  const pageRow = (tenantId: string, pageId: string) => fixture.service(async (tx) => (await tx.query<{ title: string; description: string | null; published: boolean }>(
+    "SELECT title, description, published FROM booking_pages WHERE tenant_id=$1 AND id=$2", [tenantId, pageId])).rows[0]!);
+
+  it("sets the description and the title, lists them for the owner, and keeps the page's other columns", async () => {
+    const { tenantId, ownerId } = await freshTenant();
+    const session = sessionFor(tenantId, ownerId);
+    const { result } = await session.applyTemplate({ templateId: "jewelry", timeZone: "UTC" });
+    const page = result.bookingPageId;
+    const original = await pageRow(tenantId, page);
+    const keys = { secret: ["test", "booking", "k".repeat(32)].join("-"), publicBaseUrl: "http://book.test/" };
+    const listed = () => createSession({ ...deps(), bookingKeys: keys }, { tenantId, actorId: ownerId }).listBookingPages();
+    expect((await listed())[0]).toMatchObject({ id: page, title: original.title, description: INDUSTRY_TEMPLATES.jewelry.bookingPage.description ?? null });
+
+    const key = randomUUID();
+    const first = await session.updateBookingPage(page, { changes: { title: "  Visit us  ", description: "  Rings, repairs and resizing.  " } }, key);
+    expect(first).toMatchObject({ result: { pageId: page, title: "Visit us", description: "Rings, repairs and resizing.", changed: true }, replayed: false });
+    expect(await pageRow(tenantId, page)).toEqual({ title: "Visit us", description: "Rings, repairs and resizing.", published: original.published });
+    expect((await listed())[0]).toMatchObject({ title: "Visit us", description: "Rings, repairs and resizing." });
+    // The setup read shows the new title to every member.
+    expect((await session.getSetup()).applied?.bookingPageTitle).toBe("Visit us");
+    // One action, one outbox event, written together.
+    expect(await eventsFor(tenantId, key)).toHaveLength(1);
+
+    // A title alone leaves the description; null clears it.
+    expect((await session.updateBookingPage(page, { changes: { title: "Book now" } }, randomUUID())).result).toMatchObject({ title: "Book now", description: "Rings, repairs and resizing." });
+    expect((await session.updateBookingPage(page, { changes: { description: null } }, randomUUID())).result).toMatchObject({ title: "Book now", description: null, changed: true });
+    expect((await pageRow(tenantId, page)).description).toBeNull();
+  });
+
+  it("answers a repeat of the same key from the stored action, and the same values under a new key as changed:false", async () => {
+    const { tenantId, ownerId } = await freshTenant();
+    const session = sessionFor(tenantId, ownerId);
+    const page = (await session.applyTemplate({ templateId: "fitness", timeZone: "UTC" })).result.bookingPageId;
+    const key = randomUUID();
+    const body = { changes: { description: "Train with us." } };
+    const first = await session.updateBookingPage(page, body, key);
+    expect(await session.updateBookingPage(page, body, key)).toEqual({ ...first, replayed: true });
+    await session.updateBookingPage(page, { changes: { description: "Something else." } }, randomUUID());
+    // The replay still shows the first answer, not today's page.
+    expect(await session.updateBookingPage(page, body, key)).toEqual({ ...first, replayed: true });
+    const same = await session.updateBookingPage(page, { changes: { description: "Something else." } }, randomUUID());
+    expect(same).toMatchObject({ result: { changed: false }, replayed: false });
+    expect(await eventsFor(tenantId, key)).toHaveLength(1);
+  });
+
+  it("changes nothing when two keys race to the same edit, and an edit at the same time never tears title from description", async () => {
+    const { tenantId, ownerId } = await freshTenant();
+    const session = sessionFor(tenantId, ownerId);
+    const page = (await session.applyTemplate({ templateId: "agency", timeZone: "UTC" })).result.bookingPageId;
+    const edits = await Promise.all([
+      session.updateBookingPage(page, { changes: { title: "One", description: "First." } }, randomUUID()),
+      session.updateBookingPage(page, { changes: { title: "Two", description: "Second." } }, randomUUID()),
+    ]);
+    expect(edits.every((edit) => edit.replayed === false)).toBe(true);
+    const final = await pageRow(tenantId, page);
+    expect([{ title: "One", description: "First." }, { title: "Two", description: "Second." }]).toContainEqual({ title: final.title, description: final.description });
+  });
+
+  it("answers 404 for no page, another tenant's page or a malformed ID, and 403 for staff before any 404 or 422", async () => {
+    const a = await freshTenant();
+    const b = await freshTenant();
+    const pageA = (await sessionFor(a.tenantId, a.ownerId).applyTemplate({ templateId: "agency", timeZone: "UTC" })).result.bookingPageId;
+    const before = await pageRow(a.tenantId, pageA);
+    const change = { changes: { description: "Hijacked" } };
+    await expect(sessionFor(b.tenantId, b.ownerId).updateBookingPage(pageA, change, randomUUID())).rejects.toBeInstanceOf(NotFound);
+    await expect(sessionFor(a.tenantId, a.ownerId).updateBookingPage(randomUUID(), change, randomUUID())).rejects.toBeInstanceOf(NotFound);
+    await expect(sessionFor(a.tenantId, a.ownerId).updateBookingPage("not-a-page", change, randomUUID())).rejects.toBeInstanceOf(NotFound);
+    const staff = await addMember(a.tenantId, "staff");
+    for (const [page, body] of [[pageA, change], [randomUUID(), change], ["not-a-page", change], [pageA, { changes: {} }]] as const)
+      await expect(sessionFor(a.tenantId, staff).updateBookingPage(page, body, randomUUID()), String(page)).rejects.toBeInstanceOf(TenantDenied);
+    expect(await pageRow(a.tenantId, pageA)).toEqual(before);
+  });
+
+  it("names the field for an empty change set, a blank title, a long description or an unknown key, and writes nothing", async () => {
+    const { tenantId, ownerId } = await freshTenant();
+    const session = sessionFor(tenantId, ownerId);
+    const page = (await session.applyTemplate({ templateId: "agency", timeZone: "UTC" })).result.bookingPageId;
+    const before = await pageRow(tenantId, page);
+    for (const body of [{ changes: {} }, { changes: { title: "  " } }, { changes: { title: null } }, { changes: { description: "x".repeat(2001) } },
+      { changes: { published: true } }, {}]) {
+      await expect(session.updateBookingPage(page, body as never, randomUUID()), JSON.stringify(body).slice(0, 40)).rejects.toMatchObject({ code: "ValidationFailed" });
+    }
+    expect(await pageRow(tenantId, page)).toEqual(before);
+    expect(await fixture.service(async (tx) => (await tx.query("SELECT 1 FROM actions WHERE tenant_id=$1 AND action_type='booking.page.update'", [tenantId])).rowCount)).toBe(0);
+  });
+
+  it("refuses a direct dispatch whose payload page differs from its target, or whose actor is staff", async () => {
+    const { tenantId, ownerId } = await freshTenant();
+    const page = (await sessionFor(tenantId, ownerId).applyTemplate({ templateId: "agency", timeZone: "UTC" })).result.bookingPageId;
+    const staff = await addMember(tenantId, "staff");
+    const dispatch = createDispatcher({ [BOOKING_PAGE_UPDATE_ACTION]: updateBookingPageHandler });
+    const run = (actorId: string, targetId: string, payloadPage: string) => {
+      const command = {
+        actionType: BOOKING_PAGE_UPDATE_ACTION,
+        target: { tenantId, type: "booking_page", id: targetId },
+        approvalReference: { tenantId, id: derivedId(tenantId, randomUUID(), "approval") },
+        idempotencyKey: randomUUID(),
+        payload: { pageId: payloadPage, changes: { description: "Direct." } },
+      } satisfies ActionCommand;
+      const { idempotencyKey: _key, ...fields } = command;
+      return dispatch({
+        tenantId, actor: { id: actorId, tenantId }, db: database.db, clock, config: {}, generateId: randomUUID,
+        resolveApproval: async () => ({ ...fields, tenantId, actorId }),
+        authorize: memberAuthorize(tenantId, actorId),
+      }, command);
+    };
+    await expect(run(ownerId, page, randomUUID())).rejects.toBeDefined();
+    await expect(run(staff, page, page)).rejects.toBeInstanceOf(TenantDenied);
+    expect((await pageRow(tenantId, page)).description).not.toBe("Direct.");
   });
 });
 

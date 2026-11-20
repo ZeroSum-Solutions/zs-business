@@ -202,7 +202,7 @@ test("a double tap on Stop the agent stops it once, with one toast", async ({ pa
   expect((await writes(page, "agent.resume")).map((write) => write.outcome)).toEqual(["applied"]);
 });
 
-test("turned off, Run now waits but Stop still latches, so turning it on needs a Resume", async ({ page }) => {
+test("turned off, Run now waits but Stop still latches, so turning it on needs a Resume", async ({ page }, info) => {
   await openAgents(page);
   const form = settings(page);
   const enabled = form.getByRole("switch", { name: "Draft follow-ups" });
@@ -210,6 +210,10 @@ test("turned off, Run now waits but Stop still latches, so turning it on needs a
   await form.getByRole("button", { name: "Save settings" }).click();
   await expect(card(page).getByTestId("followup-state")).toHaveText("Off");
   await expect(card(page).getByRole("button", { name: "Run now" })).toBeDisabled();
+  // Off is not a dead end: the card offers the way to the switch, and it lands there.
+  await card(page).getByRole("button", { name: "Go to the Draft follow-ups switch" }).click();
+  await expect(enabled).toBeFocused();
+  await shot(page, "25-agents-off", info.project.name);
   await card(page).getByRole("button", { name: "Stop the agent" }).click();
   await expect(card(page).getByRole("button", { name: "Resume" })).toBeVisible();
   await enabled.click();

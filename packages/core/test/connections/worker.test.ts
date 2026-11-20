@@ -1217,15 +1217,24 @@ describe("the pass (C-8, C-9, C-12)", () => {
     expect((await makeWorker(database, fake, clock, {}, reports).pass()).stopped).toBe("budget");
   });
 
-  it("C-9: a provider call that hangs is cut at the pass deadline, not at its own 1.5 s timeout", async () => {
+  it("C-9: a provider call that hangs is cut at the pass deadline, not at its own client timeout", async () => {
     const t = await newTenant(fixture);
     await seedConnection(fixture, { tenantId: t.tenantId, memberId: t.memberId, accountId: seedAccount(t.tenantId), lastChecked: new Date(T0 - 2 * DAY) });
     fake.override(/^GET \/connected_accounts\//, { hang: true });
+    // The client gets a call 60 s, far past the test timeout (15 s), and the pass allows 300 ms in all. Only the pass
+    // deadline can end the call early, so a pass that returns within 5 s shows that deadline aborted it. The bound is
+    // wide on purpose: the old bound of 1 s against a 1.5 s client timeout failed on loaded hosts (1.0 to 1.6 s).
+    const worker60 = createConnectionsWorker({
+      service: (work) => asService(database.servicePool, work),
+      composio: createComposioClient({ apiKey: "test-key", baseUrl: "https://composio.test/api/v3.1", fetch: fake.fetch, timeoutMs: 60_000 }),
+      clock,
+      config: { env: ENV, callbackUrl: CALLBACK_URL, authConfigIds: { shopify: AUTH_CONFIG }, passMs: 300 },
+      report: (event) => reports.push(event),
+    });
     const started = Date.now();
-    const out = await makeWorker(database, fake, clock, { passMs: 300 }, reports).pass();
+    const out = await worker60.pass();
     const took = Date.now() - started;
-    // The harness client gives a call 1,500 ms; the pass allows 300 ms in all, so the call is aborted there.
-    expect(took).toBeLessThan(1000);
+    expect(took).toBeLessThan(5_000);
     expect(out).toMatchObject({ checked: 1, composioCalls: 1 });
     expect((await database.pool.query("SELECT last_error_code FROM connections")).rows[0].last_error_code).toBe("provider_unavailable");
   });
@@ -1244,6 +1253,33 @@ describe("the pass (C-8, C-9, C-12)", () => {
     const [one, two] = await Promise.all([worker.pass(), makeWorker(database, fake, clock, {}, reports).pass()]);
     expect(one.checked + two.checked).toBe(4);
     expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(4);
+  });
+
+  it("a lease takes exactly one row, also when the table's statistics say it holds one row", async () => {
+    // Regression for the intermittent "two passes at once" failure on PostgreSQL 16. With statistics from a
+    // one-row table (what an autovacuum leaves between tests) the planner joined the locking subselect as the
+    // inner side of a nested loop; it ran again for every outer row and one statement leased every free row, but
+    // `lease` returns only the first. Rows are seeded oldest first, in the order the lease picks them, which is the
+    // order that made the old statement lease all of them.
+    const stale = new Date(T0 - 2 * DAY);
+    const seed = async (i: number) => {
+      const t = await newTenant(fixture);
+      await seedConnection(fixture, { tenantId: t.tenantId, memberId: t.memberId, accountId: seedAccount(t.tenantId), lastChecked: new Date(stale.getTime() + i * 60_000) });
+    };
+    // Autovacuum is held off for this table while the stale statistics are needed: a vacuum or an auto-analyze
+    // between the seeding and the pass would refresh them and let the old statement pass.
+    await database.pool.query("ALTER TABLE connections SET (autovacuum_enabled = false)");
+    try {
+      await seed(0);
+      await database.pool.query("ANALYZE connections");
+      for (let i = 1; i < 4; i += 1) await seed(i);
+      const out = await worker.pass();
+      expect(out.checked).toBe(4);
+      expect(fake.callsTo(/^GET \/connected_accounts\//)).toHaveLength(4);
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM connections WHERE claimed_until IS NOT NULL")).rows[0].n).toBe(0);
+    } finally {
+      await database.pool.query("ALTER TABLE connections RESET (autovacuum_enabled)");
+    }
   });
 });
 

@@ -65,4 +65,15 @@ describe("idempotencyKeySchema", () => {
       "approval:4f1c2a9e-0b7d-4c43-9a51-3e8f6d2b7c10", "APPROVAL:x", "inbox:propose:1", "Inbox:withdraw:1"])
       expect(idempotencyKeySchema.safeParse(key).success, key).toBe(false);
   });
+
+  it("says what is wrong when the header is missing, empty or too long, never a bare type error", () => {
+    const messages = (value: unknown) => {
+      const parsed = idempotencyKeySchema.safeParse(value);
+      return parsed.success ? [] : parsed.error.issues.map((issue) => issue.message);
+    };
+    expect(messages(undefined)).toEqual(["An idempotency key is required: send a unique value, such as a UUID, once per operation and reuse it when you retry (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)."]);
+    expect(messages(7)).toEqual(["The idempotency key must be a string, such as a UUID."]);
+    expect(messages("")).toEqual(["The idempotency key must not be empty."]);
+    expect(messages("k".repeat(201))).toEqual(["The idempotency key is at most 200 characters."]);
+  });
 });

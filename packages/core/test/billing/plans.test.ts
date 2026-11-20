@@ -3,11 +3,13 @@
 // limits, founding, the Portal and tenancy under the runtime role. All data is synthetic.
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { Transaction, TransactionOptions } from "@zs/db";
 import { CONNECTION_CONNECT_ACTION, PLAN_CATALOG, PLAN_CHECKOUT_CREATE_ACTION, type HubPlan, type PlanInterval } from "@zs/contracts";
 import { cannotBeApproved } from "../../src/approvals/index.js";
+import { lockMembership } from "../../src/members/access.js";
 import { derivedId, mapError, memberDispatch } from "../../src/edge/index.js";
 import {
-  connectIdempotencyKey, createAutomationAdmin, createBillingWorker, createSession, createStripeSubscriptionReader, PLAN_CHECKOUT_LIFETIME_MS,
+  connectIdempotencyKey, createAutomationAdmin, createBillingWorker, createSession, createStripeSubscriptionReader, createTemplateSession, PLAN_CHECKOUT_LIFETIME_MS,
   lockTenantPlan, planGate, READ_ONLY_ALLOWED_ACTIONS, setFoundingInvite,
   setShopifyBilling, SHOPIFY_LINK_CHECKOUT_GATE_MS, type Session,
 } from "../../src/index.js";
@@ -32,10 +34,11 @@ afterAll(async () => {
   await b?.close();
 });
 
-async function planSession(tenantId: string, options: { plans?: boolean; trialDays?: number; actorId?: string } = {}): Promise<Session> {
+async function planSession(tenantId: string, options: { plans?: boolean; trialDays?: number; actorId?: string; voiceWebhook?: boolean } = {}): Promise<Session> {
   const actorId = options.actorId ?? await b.owner(tenantId);
   return createSession({
     db: b.h.database.db, clock: b.h.clock, generateId: randomUUID,
+    ...(options.voiceWebhook === false ? {} : { voiceWebhook: true }),
     billing: { stripe: b.stripe.client, ...(options.plans === false ? {} : { plans: plansClient(fake.url, { trialDays: options.trialDays ?? 14 }) }) },
   }, { tenantId, actorId });
 }
@@ -1067,5 +1070,324 @@ describe("tenancy of the plan tables (PL-12)", () => {
     await expect(asService("resolved", b.h.clock.now())).rejects.toMatchObject({ code: "23514", constraint: "plan_invoices_paid_state" });
     await expect(asService("paid", b.h.clock.now())).resolves.toBeDefined();
     await expect(asService("failed", null)).resolves.toBeDefined();
+  });
+});
+
+// plans.md PL-26: the plan page names a feature as included only while every fact the runtime decides it by says
+// it can act: a live runner (its heartbeat), the agent switches, quiet hours, the model budget and the template approval.
+describe("plan features follow what the runtime checks (PL-26)", () => {
+  const SLOT = 900;
+  const setAgent = (tenantId: string, kind: string, change: { enabled: boolean; killed?: boolean; budget?: number; quiet?: [number, number] }) => b.h.service((tx) => tx.query(
+    `INSERT INTO agent_settings (tenant_id, agent_kind, enabled, killed_at, killed_by, updated_at, max_cost_micros_per_day, quiet_start_minute, quiet_end_minute, time_zone)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'UTC')
+     ON CONFLICT (tenant_id, agent_kind) DO UPDATE SET enabled=$3, killed_at=$4, killed_by=$5, updated_at=$6,
+       max_cost_micros_per_day=$7, quiet_start_minute=$8, quiet_end_minute=$9`,
+    [tenantId, kind, change.enabled, change.killed ? b.h.clock.now() : null, change.killed ? randomUUID() : null, b.h.clock.now(),
+      change.budget ?? 1_000_000, change.quiet?.[0] ?? 0, change.quiet?.[1] ?? 0]));
+  /** A runner's last beat, `ageSeconds` before the test clock, good for `freshForSeconds`. */
+  const beat = (runner: string, ageSeconds = 0, freshForSeconds = 2 * SLOT) => b.h.service((tx) => tx.query(
+    `INSERT INTO runner_heartbeats (runner, beat_at, fresh_for_seconds) VALUES ($1,$2,$3)
+     ON CONFLICT (runner) DO UPDATE SET beat_at=$2, fresh_for_seconds=$3`,
+    [runner, new Date(b.h.clock.now().getTime() - ageSeconds * 1000), freshForSeconds]));
+  const ALL_RUNNERS = ["followup", "templated", "delivery_email", "delivery_sms"] as const;
+  const allLive = async () => { for (const runner of ALL_RUNNERS) await beat(runner); };
+  const noRunners = () => b.h.service((tx) => tx.query("UPDATE runner_heartbeats SET beat_at = beat_at - interval '10 years'"));
+  const read = async (tenantId: string) => (await planSession(tenantId)).getBillingPlan({ features: true });
+  const featureStates = (view: { features?: readonly { kind: string; state: string; offReason: string | null }[] | undefined }) =>
+    Object.fromEntries((view.features ?? []).map((feature) => [feature.kind, feature.offReason ?? feature.state]));
+  /** What an approved message sends with: a sending number for a text and a published booking page for `{booking_link}`. */
+  const equip = (tenantId: string, parts: { sms?: boolean; page?: boolean } = { sms: true, page: true }) => b.h.service(async (tx) => {
+    const at = b.h.clock.now();
+    if (parts.sms) await tx.query("INSERT INTO sms_numbers (tenant_id, phone_number, created_at, updated_at) VALUES ($1,$2,$3,$3) ON CONFLICT DO NOTHING",
+      [tenantId, `+1555${String(Math.floor(Math.random() * 9_000_000) + 1_000_000)}`, at]);
+    if (parts.page) await tx.query("INSERT INTO booking_pages (tenant_id,id,title,published,disclosure_version,created_at) VALUES ($1,$2,'Book',true,'v1',$3)",
+      [tenantId, randomUUID(), at]);
+  });
+  const REMINDER = "Hi {customer_first_name}, see you {booking_start_local} at {business_name}. Change it: {booking_link}";
+  const templatesFor = async (tenantId: string) => createTemplateSession(
+    { db: b.h.database.db, clock: b.h.clock, generateId: randomUUID }, { tenantId, actorId: await b.owner(tenantId) });
+  /** Writes the next revision of the reminder in `channel`; approves it when asked. Returns the approval's digest. */
+  async function wording(tenantId: string, input: { channel?: "email" | "sms"; approve?: boolean | number } = {}) {
+    const templates = await templatesFor(tenantId);
+    const channel = input.channel ?? "email";
+    const state = await templates.getTemplate("appointment_reminder");
+    await templates.createRevision("appointment_reminder", {
+      expectedRevision: state.currentRevision, channel, subject: channel === "sms" ? null : "A note from {business_name}", body: REMINDER, timingHours: 24,
+    }, randomUUID());
+    if (input.approve === false) return;
+    const revision = (await templates.getTemplate("appointment_reminder")).revisions[0]!;
+    await templates.approveTemplate("appointment_reminder", {
+      revision: revision.revision, contentDigest: revision.contentDigest, ...(typeof input.approve === "number" ? { expiresInMinutes: input.approve } : {}),
+    }, randomUUID());
+  }
+  const studio = async () => {
+    const tenantId = await b.tenant();
+    await subscribe(tenantId, { plan: "studio" });
+    await b.settle();
+    await worker().runOnce();
+    return tenantId;
+  };
+  afterEach(() => noRunners());
+
+  it("names no feature unless the caller asks, so an older dashboard never gets the key", async () => {
+    const tenantId = await studio();
+    const plain = await (await planSession(tenantId)).getBillingPlan();
+    expect(plain.features).toBeUndefined();
+    expect(plain.catalog.every((offer) => offer.features === undefined)).toBe(true);
+    expect((await read(tenantId)).features).toBeDefined();
+  });
+
+  it("shows every feature as off until the runner reports and its switch is turned on, then as included", async () => {
+    const tenantId = await studio();
+    await allLive();
+    const before = await read(tenantId);
+    expect(before.plan).toBe("studio");
+    expect(featureStates(before)).toEqual({ appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled" });
+    // Studio holds no voice, so voice is not named at all; Pro names it, still off.
+    expect(featureStates({ features: before.catalog.find((offer) => offer.plan === "pro")!.features })).toEqual({
+      appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", missed_call_textback: "disabled" });
+    expect(before.catalog.find((offer) => offer.plan === "solo")!.features!.map((feature) => feature.kind)).toEqual(["appointment_reminder", "review_request"]);
+
+    await setAgent(tenantId, "inquiry_followup", { enabled: true });
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    await wording(tenantId);
+    await equip(tenantId);
+    const on = await read(tenantId);
+    expect(featureStates(on)).toEqual({ appointment_reminder: "included", review_request: "disabled", inquiry_followup: "included" });
+    // The cards read the same facts as the plan the tenant holds.
+    expect(featureStates({ features: on.catalog.find((offer) => offer.plan === "studio")!.features })).toEqual(featureStates(on));
+
+    // The tenant's kill switch and support's global pause both turn a feature back to off.
+    await setAgent(tenantId, "inquiry_followup", { enabled: true, killed: true });
+    expect(featureStates(await read(tenantId))).toMatchObject({ inquiry_followup: "stopped", appointment_reminder: "included" });
+    await b.h.service((tx) => tx.query("UPDATE agent_global_switch SET killed=true, note='test', updated_at=$1 WHERE id", [b.h.clock.now()]));
+    try {
+      const paused = await read(tenantId);
+      expect(paused.features!.every((feature) => feature.state === "off" && feature.offReason === "paused")).toBe(true);
+    } finally {
+      await b.h.service((tx) => tx.query("UPDATE agent_global_switch SET killed=false, note=NULL, updated_at=$1 WHERE id", [b.h.clock.now()]));
+    }
+  });
+
+  it("shows a feature as not running when its deploy's runner has not reported, whatever the tenant switched on", async () => {
+    const tenantId = await studio();
+    await setAgent(tenantId, "inquiry_followup", { enabled: true });
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    await wording(tenantId);
+    await equip(tenantId);
+    // No heartbeat at all: the deploy runs no runner (FOLLOWUP_AGENT, AGENT_TEMPLATED or DELIVERY_WORKER is off).
+    expect(featureStates(await read(tenantId))).toMatchObject({ inquiry_followup: "not_running", appointment_reminder: "not_running" });
+    // The follow-up runner alone does not make a reminder live: it needs the templated runs and the delivery worker.
+    await beat("followup");
+    expect(featureStates(await read(tenantId))).toMatchObject({ inquiry_followup: "included", appointment_reminder: "not_running" });
+    await beat("templated");
+    expect(featureStates(await read(tenantId))).toMatchObject({ appointment_reminder: "not_running" });
+    await beat("delivery_email");
+    expect(featureStates(await read(tenantId))).toMatchObject({ appointment_reminder: "included" });
+    // A beat counts for the window its runner gave it: past it, the feature is off again, one second before it is not.
+    await beat("followup", 2 * SLOT - 1);
+    expect(featureStates(await read(tenantId)).inquiry_followup).toBe("included");
+    await beat("followup", 2 * SLOT + 1);
+    expect(featureStates(await read(tenantId)).inquiry_followup).toBe("not_running");
+  });
+
+  it("needs the delivery runner of the template's channel: an SMS reminder is not live on an email-only worker", async () => {
+    const tenantId = await studio();
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    await wording(tenantId, { channel: "sms" });
+    await equip(tenantId);
+    await beat("templated");
+    await beat("delivery_email");
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("not_running");
+    await beat("delivery_sms");
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("included");
+  });
+
+  it("shows a feature as off while quiet hours are open, and a zero model budget stops the model-backed follow-up only", async () => {
+    const tenantId = await studio();
+    await allLive();
+    await wording(tenantId);
+    await equip(tenantId);
+    const minute = b.h.clock.now().getUTCHours() * 60 + b.h.clock.now().getUTCMinutes();
+    const around: [number, number] = [(minute + 1440 - 30) % 1440, (minute + 30) % 1440];
+    await setAgent(tenantId, "inquiry_followup", { enabled: true, quiet: around });
+    await setAgent(tenantId, "appointment_reminder", { enabled: true, quiet: around });
+    expect(featureStates(await read(tenantId))).toMatchObject({ inquiry_followup: "quiet_hours", appointment_reminder: "quiet_hours" });
+    await setAgent(tenantId, "inquiry_followup", { enabled: true, budget: 0 });
+    await setAgent(tenantId, "appointment_reminder", { enabled: true, budget: 0 });
+    // A reminder is a fixed message, no model call (G-15): a zero budget leaves it on. The follow-up drafts with a model.
+    expect(featureStates(await read(tenantId))).toMatchObject({ inquiry_followup: "no_budget", appointment_reminder: "included" });
+  });
+
+  it("shows a message kind as not approved until its current wording has a standing approval, and again once it is revoked or expired", async () => {
+    const tenantId = await studio();
+    await allLive();
+    await equip(tenantId);
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    // No wording yet.
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("not_approved");
+    // Wording that nobody approved.
+    await wording(tenantId, { approve: false });
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("not_approved");
+    // Approved for a while.
+    await wording(tenantId, { approve: 60 });
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("included");
+    // The approval runs out.
+    b.h.clock.advance(61 * 60_000);
+    await allLive();
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("not_approved");
+    // A new, unapproved revision ends the approval of the old one (A-15).
+    await wording(tenantId, { approve: 600 });
+    await allLive();
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("included");
+    await wording(tenantId, { approve: false });
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("not_approved");
+    // The approval row itself revoked.
+    await wording(tenantId, { approve: 600 });
+    const revoker = await b.owner(tenantId);
+    await b.h.service((tx) => tx.query("UPDATE approvals SET status='revoked', revoked_by=$2, revoked_at=$3 WHERE tenant_id=$1 AND id IN (SELECT standing_approval_id FROM message_template_revisions WHERE tenant_id=$1)",
+      [tenantId, revoker, b.h.clock.now()]));
+    expect(featureStates(await read(tenantId)).appointment_reminder).toBe("not_approved");
+  });
+
+  it("reads missed-call text back from the number's own switch and the SMS delivery runner, not from an agent row", async () => {
+    const tenantId = await b.tenant();
+    await subscribe(tenantId, { plan: "pro" });
+    await b.settle();
+    await worker().runOnce();
+    const state = async () => featureStates(await read(tenantId)).missed_call_textback;
+    await allLive();
+    expect(await state()).toBe("disabled");
+    const at = b.h.clock.now();
+    const phone = `+1555${String(Math.floor(Math.random() * 9_000_000) + 1_000_000)}`;
+    await b.h.service(async (tx) => {
+      await tx.query("INSERT INTO sms_numbers (tenant_id, phone_number, created_at, updated_at) VALUES ($1,$2,$3,$3)", [tenantId, phone, at]);
+      await tx.query("INSERT INTO voice_textback_disclosures (tenant_id, version, text, created_at) VALUES ($1,'v1','We may text you a booking link.',$2)", [tenantId, at]);
+      await tx.query(`INSERT INTO voice_numbers (tenant_id, phone_number, forward_to_e164, textback_enabled, booking_url, disclosure_version, created_at, updated_at)
+                      VALUES ($1,$2,'+15550000001',false,'https://example.com/book','v1',$3,$3)`, [tenantId, phone, at]);
+    });
+    expect(await state()).toBe("disabled");
+    await b.h.service((tx) => tx.query("UPDATE voice_numbers SET textback_enabled=true WHERE tenant_id=$1", [tenantId]));
+    expect(await state()).toBe("included");
+    // The text goes out through the delivery worker's SMS provider: without it the feature is not running.
+    await b.h.service((tx) => tx.query("UPDATE runner_heartbeats SET beat_at = beat_at - interval '10 years' WHERE runner='delivery_sms'"));
+    expect(await state()).toBe("not_running");
+    await beat("delivery_sms");
+    await b.h.service((tx) => tx.query("UPDATE voice_numbers SET textback_enabled=false WHERE tenant_id=$1", [tenantId]));
+    expect(await state()).toBe("disabled");
+  });
+
+  it("shows no feature as included once the plan is read-only, because the dispatcher refuses agent runs", async () => {
+    const tenantId = await b.tenant();
+    const { sub } = await subscribe(tenantId, { plan: "studio" });
+    await allLive();
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    await wording(tenantId);
+    await equip(tenantId);
+    expect(featureStates(await read(tenantId))).toMatchObject({ appointment_reminder: "included" });
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(invoiceEvent("invoice.payment_failed", sub, stripeId("in")));
+    await worker().runOnce();
+    b.h.clock.advance(8 * DAY);
+    await allLive();
+    const view = await read(tenantId);
+    expect(view.readOnly).toBe(true);
+    expect(view.features!.every((feature) => feature.state === "off" && feature.offReason === "read_only")).toBe(true);
+    // The offers describe a plan, not this business's standing: they still follow the facts.
+    expect(featureStates({ features: view.catalog.find((offer) => offer.plan === "studio")!.features })).toMatchObject({ appointment_reminder: "included" });
+  });
+
+  it("reads another tenant's switches never: one tenant's on switch does not show for a second", async () => {
+    const [first, second] = [await b.tenant(), await b.tenant()];
+    await allLive();
+    await setAgent(first, "inquiry_followup", { enabled: true });
+    expect(featureStates(await read(first))).toMatchObject({ inquiry_followup: "included" });
+    expect(featureStates(await read(second))).toMatchObject({ inquiry_followup: "disabled" });
+  });
+
+  it("shows an approved message as missing setup until it has what it sends with: a sending number for a text, a booking page for its link", async () => {
+    const tenantId = await studio();
+    await allLive();
+    await setAgent(tenantId, "appointment_reminder", { enabled: true });
+    await wording(tenantId, { channel: "sms" });
+    const state = async () => featureStates(await read(tenantId)).appointment_reminder;
+    // Approved wording that names {booking_link} and goes out by text, with no number and no page: every run would skip or fail.
+    expect(await state()).toBe("missing_setup");
+    await equip(tenantId, { sms: true });
+    expect(await state()).toBe("missing_setup");
+    await equip(tenantId, { page: true });
+    expect(await state()).toBe("included");
+    // The page unpublished again: the reminder skips for no_link, so it is no longer live.
+    await b.h.service((tx) => tx.query("UPDATE booking_pages SET published=false WHERE tenant_id=$1", [tenantId]));
+    expect(await state()).toBe("missing_setup");
+    // An email reminder needs no sending number.
+    await b.h.service((tx) => tx.query("UPDATE booking_pages SET published=true WHERE tenant_id=$1", [tenantId]));
+    await b.h.service((tx) => tx.query("DELETE FROM sms_numbers WHERE tenant_id=$1", [tenantId]));
+    await wording(tenantId, { channel: "email" });
+    expect(await state()).toBe("included");
+  });
+
+  it("shows missed-call text back as not running where this deploy mounts no Twilio webhook, whatever the workers report", async () => {
+    const tenantId = await b.tenant();
+    await subscribe(tenantId, { plan: "pro" });
+    await b.settle();
+    await worker().runOnce();
+    await allLive();
+    const at = b.h.clock.now();
+    const phone = `+1555${String(Math.floor(Math.random() * 9_000_000) + 1_000_000)}`;
+    await b.h.service(async (tx) => {
+      await tx.query("INSERT INTO sms_numbers (tenant_id, phone_number, created_at, updated_at) VALUES ($1,$2,$3,$3)", [tenantId, phone, at]);
+      await tx.query("INSERT INTO voice_textback_disclosures (tenant_id, version, text, created_at) VALUES ($1,'v1','We may text you a booking link.',$2)", [tenantId, at]);
+      await tx.query(`INSERT INTO voice_numbers (tenant_id, phone_number, forward_to_e164, textback_enabled, booking_url, disclosure_version, created_at, updated_at)
+                      VALUES ($1,$2,'+15550000001',true,'https://example.com/book','v1',$3,$3)`, [tenantId, phone, at]);
+    });
+    const view = (voiceWebhook: boolean) => planSession(tenantId, { voiceWebhook }).then((session) => session.getBillingPlan({ features: true }));
+    expect(featureStates(await view(true)).missed_call_textback).toBe("included");
+    expect(featureStates(await view(false)).missed_call_textback).toBe("not_running");
+    // Without a sending number a text cannot go out either.
+    await b.h.service((tx) => tx.query("DELETE FROM voice_numbers WHERE tenant_id=$1", [tenantId]));
+    await b.h.service((tx) => tx.query("DELETE FROM sms_numbers WHERE tenant_id=$1", [tenantId]));
+    expect(featureStates(await view(true)).missed_call_textback).toBe("disabled");
+  });
+
+  it("denies a member who was demoted while the plan read waited on the membership lock", async () => {
+    const tenantId = await studio();
+    await allLive();
+    const actorId = await b.owner(tenantId);
+    // A second owner keeps the tenant valid while the first is demoted.
+    await b.session(tenantId, { role: "owner" });
+    const admin = await b.h.database.pool.connect();
+    try {
+      // The demotion holds the exclusive membership lock, as the members handlers do, and commits after the read started.
+      await admin.query("BEGIN");
+      await lockMembership(admin as unknown as Transaction, tenantId, "exclusive");
+      await admin.query("UPDATE tenant_members SET role='staff' WHERE tenant_id=$1 AND user_id=$2", [tenantId, actorId]);
+      const session = await createSession({ db: b.h.database.db, clock: b.h.clock, generateId: randomUUID, billing: { stripe: b.stripe.client, plans: plansClient(fake.url) } },
+        { tenantId, actorId });
+      const read = session.getBillingPlan({ features: true });
+      const outcome = read.then(() => "read" as const, (error: { code?: string }) => error.code);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await admin.query("COMMIT");
+      expect(await outcome).toBe("TenantDenied");
+    } finally {
+      admin.release();
+    }
+  });
+
+  it("reads the plan and every fact in one repeatable-read transaction", async () => {
+    const tenantId = await studio();
+    await allLive();
+    await setAgent(tenantId, "inquiry_followup", { enabled: true });
+    // The session opens its plan read at that level (the isolation test in @zs/db shows what the level guarantees).
+    const levels: string[] = [];
+    const spied = {
+      ...b.h.database.db,
+      tenant: <T,>(id: string, work: (tx: Transaction) => Promise<T>, options?: TransactionOptions) =>
+        b.h.database.db.tenant(id, (tx) => { levels.push(options?.isolation ?? "read committed"); return work(tx); }, options),
+    };
+    const view = await (await createSession({ db: spied, clock: b.h.clock, generateId: randomUUID, billing: { stripe: b.stripe.client, plans: plansClient(fake.url) } },
+      { tenantId, actorId: await b.owner(tenantId) })).getBillingPlan({ features: true });
+    expect(levels).toEqual(["repeatable read"]);
+    expect(featureStates(view).inquiry_followup).toBe("included");
   });
 });

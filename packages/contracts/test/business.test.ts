@@ -161,13 +161,69 @@ describe("the update request (BP-2, BP-6)", () => {
   });
 });
 
+describe("description and services (BP-13, BP-14)", () => {
+  const request = (changes: unknown) => ({ expectedRevision: 1, changes });
+  const ok = (changes: unknown) => updateBusinessProfileRequestSchema.safeParse(request(changes)).success;
+
+  it("takes a description, trimmed, and null to clear it", () => {
+    expect(updateBusinessProfileRequestSchema.parse(request({ description: "  Fine jewelry.  " })).changes).toEqual({ description: "Fine jewelry." });
+    expect(updateBusinessProfileRequestSchema.parse(request({ description: null })).changes).toEqual({ description: null });
+  });
+
+  it("refuses an empty or blank description and counts code points at 2000", () => {
+    expect(ok({ description: "" })).toBe(false);
+    expect(ok({ description: "   " })).toBe(false);
+    expect(ok({ description: "d".repeat(2000) })).toBe(true);
+    expect(ok({ description: "d".repeat(2001) })).toBe(false);
+    // 2000 astral characters are 4000 UTF-16 units but 2000 code points, as Postgres counts them.
+    expect(ok({ description: "😀".repeat(2000) })).toBe(true);
+    expect(ok({ description: "😀".repeat(2001) })).toBe(false);
+    expect(ok({ description: "a\u0000b" })).toBe(false);
+  });
+
+  it("takes a list of services, trimmed, and [] to clear it", () => {
+    expect(updateBusinessProfileRequestSchema.parse(request({ services: [" Repairs ", "Resizing"] })).changes).toEqual({ services: ["Repairs", "Resizing"] });
+    expect(ok({ services: [] })).toBe(true);
+  });
+
+  it("refuses null, a blank or multi-line name, a name over 80 characters, a repeat ignoring case, and more than 20", () => {
+    expect(ok({ services: null })).toBe(false);
+    expect(ok({ services: [""] })).toBe(false);
+    expect(ok({ services: ["  "] })).toBe(false);
+    expect(ok({ services: ["Line one\nline two"] })).toBe(false);
+    expect(ok({ services: ["s".repeat(80)] })).toBe(true);
+    expect(ok({ services: ["s".repeat(81)] })).toBe(false);
+    expect(ok({ services: ["Repairs", "repairs"] })).toBe(false);
+    expect(ok({ services: Array.from({ length: 20 }, (_, i) => `S${i}`) })).toBe(true);
+    expect(ok({ services: Array.from({ length: 21 }, (_, i) => `S${i}`) })).toBe(false);
+    expect(ok({ services: "Repairs" })).toBe(false);
+  });
+
+  it("names the field's path in the issue", () => {
+    expect(issuePaths(request({ description: "" }))).toEqual(["changes.description"]);
+    expect(issuePaths(request({ services: ["a", "A"] }))).toEqual(["changes.services"]);
+  });
+
+  it("is read by an older API's response, which lacks both, and by a newer one that has them", () => {
+    const base = {
+      displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
+      revision: 1, updatedAt: "2026-10-23T08:00:00.000Z",
+    };
+    expect(businessProfileReadSchema.parse(base)).not.toHaveProperty("description");
+    expect(businessProfileReadSchema.parse({ ...base, description: "Hi.", services: ["Repairs"] })).toMatchObject({ description: "Hi.", services: ["Repairs"] });
+  });
+});
+
 describe("the profile record (BP-5)", () => {
   it("carries the values and the revision, and nothing else about the tenant", () => {
     const profile = {
       displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
-      revision: 1, updatedAt: "2026-10-23T08:00:00.000Z",
+      description: null, services: [], revision: 1, updatedAt: "2026-10-23T08:00:00.000Z",
     };
     expect(businessProfileSchema.parse(profile)).toEqual(profile);
+    // BP-13, BP-14: a profile always carries both fields.
+    expect(businessProfileSchema.safeParse({ ...profile, description: undefined }).success).toBe(false);
+    expect(businessProfileSchema.safeParse({ ...profile, services: undefined }).success).toBe(false);
     expect(businessProfileSchema.safeParse({ ...profile, tenantId: "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70" }).success).toBe(false);
   });
 

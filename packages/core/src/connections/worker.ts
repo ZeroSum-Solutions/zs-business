@@ -305,14 +305,23 @@ export function createConnectionsWorker(deps: ConnectionsWorkerDeps) {
   /**
    * C-9: takes the oldest free row `where` finds (not in `skip`) and leases it for LEASE_MS in one short
    * statement. Parameters: $1 the lease end, $2 now, $3 the skip list, then `params` from $4.
+   *
+   * The row is picked in a MATERIALIZED CTE so it runs exactly once. Written as `UPDATE ... FROM (SELECT ... LIMIT 1
+   * FOR UPDATE SKIP LOCKED) c`, the planner may join the subselect as the inner side of a nested loop (it does when
+   * the table's statistics are stale, such as one row left by an autovacuum after a test or a purge). The subselect
+   * then runs again for every outer row, and a row this statement already updated is skipped by the lock step, so
+   * one statement leased several rows. `lease` returns only the first, the others stayed claimed with nobody working
+   * them until the lease lapsed (found as the intermittent "two passes at once" failure on PostgreSQL 16).
    */
   async function lease<Row extends { id: string }>(table: LeaseTable, fields: readonly string[], where: string, order: string, params: readonly unknown[], skip: readonly string[] = []): Promise<Row | null> {
     const until = new Date(now().getTime() + LEASE_MS);
     const row = (await service((tx) => tx.query<Row>(
-      `UPDATE ${table} t SET claimed_until=$1
-        FROM (SELECT tenant_id, id FROM ${table}
-               WHERE (${where}) AND (claimed_until IS NULL OR claimed_until <= $2) AND id <> ALL($3::uuid[])
-               ORDER BY ${order} LIMIT 1 FOR UPDATE SKIP LOCKED) c
+      `WITH c AS MATERIALIZED (
+         SELECT tenant_id, id FROM ${table}
+          WHERE (${where}) AND (claimed_until IS NULL OR claimed_until <= $2) AND id <> ALL($3::uuid[])
+          ORDER BY ${order} LIMIT 1 FOR UPDATE SKIP LOCKED)
+       UPDATE ${table} t SET claimed_until=$1
+        FROM c
        WHERE t.tenant_id=c.tenant_id AND t.id=c.id
        RETURNING ${columns(fields, "t")}`,
       [until, now(), [...skip], ...params]))).rows[0];

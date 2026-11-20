@@ -208,6 +208,12 @@ function FollowUpControls({ status, runnable, onUnrunnable }: { status: FollowUp
       <p ref={stateLine} tabIndex={-1} className="outline-none" data-testid="followup-blocked">
         {blocked ? <><span className="font-medium text-fg">Why it can&apos;t draft right now:</span> {blocked}</> : "It can draft now."}
       </p>
+      {/* Off is the one reason an owner can end here, so the way out is one tap away. */}
+      {status.blockedBy === "disabled" && canManage ? (
+        <Button variant="secondary" data-testid="followup-turn-on" onClick={() => document.getElementById("agent-enabled")?.focus()}>
+          Go to the Draft follow-ups switch
+        </Button>
+      ) : null}
       <p
         data-testid="followup-cost"
         className={cn("text-xs", cost.warning ? "rounded-md bg-warn-tint p-3 text-sm text-fg-2" : "text-meta")}

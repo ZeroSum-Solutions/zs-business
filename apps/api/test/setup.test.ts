@@ -14,6 +14,7 @@ import {
   publicPageSchema,
   renderTemplate,
   setBookingPagePublishedResponseSchema,
+  updateBookingPageResponseSchema,
   setupReadSchema,
   templateStateSchema,
   type IndustryTemplate,
@@ -51,6 +52,8 @@ const apply = (member: MemberSetup, templateId: string, timeZone = ZONE) =>
   call(h.app, "POST", "/v1/setup/apply", { token: member.token, body: { templateId, timeZone } });
 const setPublished = (member: MemberSetup, pageId: string, published: boolean, key: string = randomUUID()) =>
   call(h.app, "POST", `/v1/setup/booking-pages/${pageId}/published`, { token: member.token, key, body: { published } });
+const updatePage = (member: MemberSetup, pageId: string, body: unknown, key: string | null = randomUUID()) =>
+  call(h.app, "PUT", `/v1/booking/pages/${pageId}`, { token: member.token, body, ...(key === null ? {} : { key }) });
 const pagePath = (tenantId: string, pageId: string) => `/public/v1/pages/${signBookingKey(KEY_SECRET, { tenantId, pageId })}`;
 const errorOf = (body: unknown) => apiErrorBodySchema.parse(body).error;
 
@@ -285,5 +288,87 @@ describe("POST /v1/setup/booking-pages/:id/published (IT-11, acceptance 5)", () 
     expect((await setPublished(owner, randomUUID(), true)).status).toBe(404);
     expect((await setPublished(owner, "not-a-page", true)).status).toBe(404);
     expect((await call(h.app, "GET", path)).status).toBe(404);
+  });
+
+  it("answers a missing Idempotency-Key with a 400 that names the header and says what to send", async () => {
+    const { owner } = await freshTenant("Halden Keys");
+    const { bookingPageId } = applyTemplateResponseSchema.parse((await apply(owner, "fitness")).body).result;
+    const response = await call(h.app, "POST", `/v1/setup/booking-pages/${bookingPageId}/published`, { token: owner.token, body: { published: true } });
+    expect(response.status).toBe(400);
+    const error = errorOf(response.body);
+    expect(error.code).toBe("ValidationFailed");
+    expect(error.message).toBe("Invalid request");
+    expect(error.details).toEqual({ issues: [{ path: "", message: "An idempotency key is required: send a unique value, such as a UUID, once per operation and reuse it when you retry (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)." }] });
+    expect(JSON.stringify(response.body)).not.toContain("received undefined");
+  });
+});
+
+describe("PUT /v1/booking/pages/:id (P-24)", () => {
+  it("an owner edits title and description; the owner list and the public page show them; a repeat replays", async () => {
+    const { tenantId, owner } = await freshTenant("Halden Studio");
+    const { bookingPageId } = applyTemplateResponseSchema.parse((await apply(owner, "fitness")).body).result;
+    expect((await setPublished(owner, bookingPageId, true)).status).toBe(200);
+    const path = pagePath(tenantId, bookingPageId);
+
+    const key = randomUUID();
+    const body = { changes: { title: "Book a class", description: "Small groups, Monday to Saturday." } };
+    const first = await updatePage(owner, bookingPageId, body, key);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(updateBookingPageResponseSchema.parse(first.body)).toMatchObject({
+      replayed: false,
+      result: { pageId: bookingPageId, title: "Book a class", description: "Small groups, Monday to Saturday.", changed: true },
+    });
+    const again = await updatePage(owner, bookingPageId, body, key);
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ replayed: true, result: { changed: true } });
+
+    const listed = (await call(h.app, "GET", "/v1/booking/pages", { token: owner.token })).body as { items: Array<{ id: string; title: string; description: string | null }> };
+    expect(listed.items.find((item) => item.id === bookingPageId)).toMatchObject({ title: "Book a class", description: "Small groups, Monday to Saturday." });
+    const visible = publicPageSchema.parse((await call(h.app, "GET", path)).body);
+    expect(visible).toMatchObject({ title: "Book a class", description: "Small groups, Monday to Saturday." });
+
+    // Only the fields named change; null clears the description; the same values report changed:false.
+    const same = await updatePage(owner, bookingPageId, { changes: { title: "Book a class" } });
+    expect(same.body).toMatchObject({ result: { title: "Book a class", description: "Small groups, Monday to Saturday.", changed: false } });
+    const cleared = await updatePage(owner, bookingPageId, { changes: { description: null } });
+    expect(cleared.body).toMatchObject({ result: { title: "Book a class", description: null, changed: true } });
+    expect(publicPageSchema.parse((await call(h.app, "GET", path)).body).description).toBeNull();
+  });
+
+  it("refuses staff with 403 first, another tenant's page with 404, and bad bodies with 400 naming the path", async () => {
+    const { owner, tenantId } = await freshTenant("Halden Fitness 2");
+    const staff = await signedInMember(h.database, h.fixture, tenantId, "staff");
+    const { bookingPageId } = applyTemplateResponseSchema.parse((await apply(owner, "fitness")).body).result;
+    const before = (await call(h.app, "GET", "/v1/booking/pages", { token: owner.token })).body;
+
+    expect((await updatePage(staff, bookingPageId, { changes: { description: "Nope." } })).status).toBe(403);
+    expect((await updatePage(staff, randomUUID(), { changes: {} })).status).toBe(403);
+    expect((await updatePage(staff, "not-a-page", "garbage")).status).toBe(403);
+    expect((await updatePage(h.b, bookingPageId, { changes: { description: "Mine now." } })).status).toBe(404);
+    expect((await updatePage(owner, randomUUID(), { changes: { description: "Gone." } })).status).toBe(404);
+    expect((await updatePage(owner, "not-a-page", { changes: { description: "Gone." } })).status).toBe(404);
+
+    for (const [body, path] of [
+      [{ changes: {} }, "changes"],
+      [{ changes: { title: null } }, "changes.title"],
+      [{ changes: { title: "  " } }, "changes.title"],
+      [{ changes: { description: "x".repeat(2001) } }, "changes.description"],
+      [{ changes: { published: true } }, "changes"],
+    ] as const) {
+      const response = await updatePage(owner, bookingPageId, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      const error = errorOf(response.body);
+      expect(error.code).toBe("ValidationFailed");
+      expect((error.details as { issues: Array<{ path: string }> }).issues.map((issue) => issue.path), JSON.stringify(body)).toContain(path);
+    }
+    // An unreadable body is 403 for staff and 400 for the owner: the permission check comes first.
+    const raw = (token: string) => h.app.request(`/v1/booking/pages/${bookingPageId}`, {
+      method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: "{not json",
+    });
+    expect((await raw(staff.token)).status).toBe(403);
+    expect((await raw(owner.token)).status).toBe(400);
+    expect((await updatePage(owner, bookingPageId, { changes: { description: "Fine." } }, null)).status).toBe(400);
+    expect((await call(h.app, "PUT", `/v1/booking/pages/${bookingPageId}`, { body: { changes: { description: "x" } }, key: randomUUID() })).status).toBe(401);
+    expect((await call(h.app, "GET", "/v1/booking/pages", { token: owner.token })).body).toEqual(before);
   });
 });

@@ -169,24 +169,25 @@ export async function publicPage(tx: Transaction, tenantId: string, row: Publish
 export interface BookingPageRow {
   id: string;
   title: string;
+  description: string | null;
   published: boolean;
   disclosureVersion: string;
   resourceIds: string[];
 }
 
 export async function listBookingPages(tx: Transaction, tenantId: string): Promise<BookingPageRow[]> {
-  const rows = (await tx.query<{ id: string; title: string; published: boolean; disclosure_version: string; resource_ids: string[] }>(
-    `SELECT p.id, p.title, p.published, p.disclosure_version,
+  const rows = (await tx.query<{ id: string; title: string; description: string | null; published: boolean; disclosure_version: string; resource_ids: string[] }>(
+    `SELECT p.id, p.title, p.description, p.published, p.disclosure_version,
             coalesce(array_agg(pr.resource_id::text ORDER BY pr.position, pr.resource_id)
               FILTER (WHERE pr.resource_id IS NOT NULL), '{}') AS resource_ids
        FROM booking_pages p
        LEFT JOIN booking_page_resources pr ON pr.tenant_id = p.tenant_id AND pr.page_id = p.id
-      WHERE p.tenant_id=$1 GROUP BY p.id, p.title, p.published, p.disclosure_version, p.created_at
+      WHERE p.tenant_id=$1 GROUP BY p.id, p.title, p.description, p.published, p.disclosure_version, p.created_at
       ORDER BY p.created_at, p.id`,
     [tenantId],
   )).rows;
   return rows.map((row) => ({
-    id: row.id, title: row.title, published: row.published,
+    id: row.id, title: row.title, description: row.description, published: row.published,
     disclosureVersion: row.disclosure_version, resourceIds: row.resource_ids,
   }));
 }

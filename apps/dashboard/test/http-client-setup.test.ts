@@ -95,6 +95,26 @@ describe("http client: setup", () => {
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ published: true });
   });
 
+  it("edits a booking page with PUT /v1/booking/pages/:id, the caller's key and the changes", async () => {
+    const result = { pageId: PAGE, title: "Visit us", description: null, changed: true };
+    const { api, calls } = client([json(200, { actionId: ACTION, result, replayed: false })]);
+    expect(await api.updateBookingPage(PAGE, { title: "Visit us", description: null }, { idempotencyKey: "key-3" })).toEqual(result);
+    expect(calls[0]!.init.method).toBe("PUT");
+    expect(calls[0]!.url.pathname).toBe(`/api/v1/booking/pages/${PAGE}`);
+    expect(headers(calls[0])["Idempotency-Key"]).toBe("key-3");
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ changes: { title: "Visit us", description: null } });
+  });
+
+  it("lists booking pages, reading a page from an API that predates descriptions as having none", async () => {
+    const summary = {
+      id: PAGE, title: "Book", published: true, disclosureVersion: "v1", resourceIds: [RESOURCE],
+      publicKey: "k", bookingUrl: "https://x.test/book/k", embedScript: "<script>", embedIframe: "<iframe>",
+    };
+    const { api } = client([json(200, { items: [summary, { ...summary, id: RESOURCE, description: "Pick a time." }] })]);
+    const pages = await api.listBookingPages();
+    expect(pages.map((page) => page.description)).toEqual([null, "Pick a time."]);
+  });
+
   it("creates a deal with POST /v1/crm/deals and returns the record", async () => {
     const record = { id: DEAL, tenantId: TENANT, contactId: CONTACT, pipelineId: PIPELINE, stageId: STAGE, title: "Ring resize", revision: 1, createdAt: "2026-11-07T10:00:00.000Z", updatedAt: "2026-11-07T10:00:00.000Z" };
     const { api, calls } = client([json(201, { actionId: ACTION, result: record })]);

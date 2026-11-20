@@ -1,6 +1,6 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 12 (2026-11-11; revision 5 text kept below). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 13 (2026-11-20; revision 5 text kept below). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
@@ -32,6 +32,9 @@ with an Origin check and no credentials (P-18). P-19 fixes the body, the order o
 reply. P-20 fixes the writes, P-21 the monthly cap (over the cap a sign-up is stored and its
 delivery held, never dropped), P-22 the tests and P-23 the hand-off to the delivery contract.
 P-13 gains the storage.
+Revision 13 (2026-11-20, owner content editing): P-24 lets the owner change a booking page's title
+and description after creation; P-12's page list returns `description`; P-11 and P-14 already show
+it to visitors and are unchanged.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -225,8 +228,8 @@ A replay of a link or reject whose stored result predates `disclosureText` fills
 from the consent row, else from `booking_page_disclosures` for the stored version.
 A reviewed item answers 409 `already_reviewed`. `GET /v1/booking/bookings` adds `source`,
 `intakeItemId` and `customer` (`contactId`, `name`, `status`) to each booking.
-`GET /v1/booking/pages` lists the tenant's pages with their public key, hosted URL and
-embed snippets.
+`GET /v1/booking/pages` lists the tenant's pages with their title, description (null when
+unset), public key, hosted URL and embed snippets.
 
 **P-13. Storage.** Migration `*_public_intake.sql`:
 
@@ -644,6 +647,37 @@ and that spec differ, this is the decision, each open for Devin:
 5. **Event name and body.** The outbox event is `linkpage.signup` (the slice spec's name). The body
    adds the optional `attribution` object (slice spec D4, for sign-ups by source).
 6. **Pages fallback.** See P-17: no sign-ups from fallback pages until the Sites contract registers them.
+
+**P-24. Owner edits a page's title and description.** Action `booking.page.update`, route
+`PUT /v1/booking/pages/:id` (PUT, not PATCH, because the API's CORS list does not allow PATCH),
+body `{ changes }` with an `Idempotency-Key` header. `changes` holds only the fields being set
+and at least one: `title` 1..200 characters after trimming (it cannot be cleared) and
+`description` null or 1..2000 characters, not blank (null clears it). Any other key, such as
+`published` or `disclosureText`, is `ValidationFailed` at the path `changes`; publishing stays on
+`booking.page.set_published` and the disclosure stays frozen (P-8). Owner only, under the
+`business` permission, so staff get 403 before any 404 or 400 (as `set_published` does). The
+action runs through the dispatcher on target `booking_page`; the payload's `pageId` must equal
+the target. In one transaction it locks the page row, applies the changes, and writes the action
+row and the outbox event; a page in another tenant, or no page, is 404. The answer is
+`{ replayed, actionId, result: { pageId, title, description, changed } }`, where `changed` is
+false when every value already matched (no row write, still an action record). Last write wins:
+there is no revision column, because a page holds two short text fields and the dashboard
+reloads after each save. A replay of the same key and body returns the first answer. The
+migration only grants `UPDATE (title, description)` on `booking_pages` to the runtime role (the
+columns and their CHECKs predate it), so the table keeps its forced RLS by `tenant_id` and no
+other column is writable through this action (`published` keeps its own grant and action). A visitor sees the change on the next `GET /public/v1/pages/:key`
+(P-11) and in the hosted booker (P-14), which already renders `page.description`. Duration of a
+booking is out of scope: it belongs to the resource's `slotLengthMinutes`, not the page.
+Deploy order: the dashboard first, then the API. The dashboard reads a page list without
+`description` as `null`; a dashboard older than this revision rejects the extra key, so the API
+must not ship before the dashboard does (the pattern of `business-profile.md` BP-10). A tab opened
+before the dashboard deploy hides the booking page card against the new API until it is reloaded. A body the
+HTTP layer cannot read (wrong Content-Type, malformed JSON) is 403 for staff and 400 for an
+owner: the permission check comes first.
+Tests: contracts (command and body shapes), db as `zs_runtime` (own update, tenant B denied,
+other columns closed, CHECK limits), core (action, outbox, replay, validation, staff refused,
+payload mismatch), API (status codes, public read) and the dashboard (form, demo adapter, HTTP
+client).
 
 ## Theming the embed
 

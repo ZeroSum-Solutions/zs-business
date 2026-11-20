@@ -14,15 +14,19 @@ import {
   applyTemplateRequestSchema,
   applyTemplateResponseSchema,
   BOOKING_PAGE_SET_PUBLISHED_ACTION,
+  BOOKING_PAGE_UPDATE_ACTION,
   bookingTimeZoneSchema,
   isIndustryTemplateId,
   Refused,
   setBookingPagePublishedRequestSchema,
+  updateBookingPageRequestSchema,
+  updateBookingPageResponseSchema,
   setBookingPagePublishedResponseSchema,
   TEMPLATE_APPLY_ACTION,
   templateApplyKey,
   type ApplyTemplateResponse,
   type SetBookingPagePublishedResponse,
+  type UpdateBookingPageResponse,
   type SetupRead,
   WALLET_TOPUP_CREATE_ACTION,
   CALENDAR_GOOGLE_CONNECT_ACTION,
@@ -154,7 +158,7 @@ import {
   type WalletSummary,
   type SourceList,
 } from "@zs/contracts";
-import type { ScopedDatabase, Transaction } from "@zs/db";
+import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
 import { BROWSER_MEMBER_PERMISSIONS, browserHandlers } from "../browser/handlers.js";
@@ -194,6 +198,7 @@ import { getTopUpForCheckout, listTopUps, rememberCheckoutUrl, startTopUp, topUp
 import type { StripeClient } from "../billing/stripe.js";
 import { getBillingPlan, getStoredCheckout, planHandlers, portalCustomer, rememberPlanCheckoutUrl, startPlanCheckout, type PlanDispatchConfig } from "../billing/plans.js";
 import type { StripePlansClient } from "../billing/plan-stripe.js";
+import { UnreadBody } from "../connections/edge.js";
 import { connectionHandlers } from "../connections/handlers.js";
 import type { ConnectorPort } from "../connections/port.js";
 import type { ShopifyPort } from "../shopify/port.js";
@@ -225,6 +230,8 @@ export interface EdgeDependencies {
   };
   /** plans.md PL-19: the app handle in Shopify's plan selection URL; absent means no manage link. */
   readonly shopifyBilling?: { readonly appHandle: string };
+  /** plans.md PL-26: the Twilio webhook routes are mounted in this deploy, so a missed call can reach the text-back handler. */
+  readonly voiceWebhook?: boolean;
   /**
    * Google Calendar busy sync (google-calendar.md G-1..G-3); absent means connecting is off. The
    * API holds only the public key that seals refresh tokens; the calendar worker opens them.
@@ -366,6 +373,8 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   // industry-templates.md IT-4, IT-11: only owners apply a template and take its page live.
   [TEMPLATE_APPLY_ACTION]: "business",
   [BOOKING_PAGE_SET_PUBLISHED_ACTION]: "business",
+  // public-intake.md P-24: only owners change what a booking page says.
+  [BOOKING_PAGE_UPDATE_ACTION]: "business",
   // document-intake.md DL-3, DL-13: owners upload and discard; apply is `required` in APPROVAL_POLICIES.
   "catalog.intake.upload": "publish",
   "catalog.intake.apply": "publish",
@@ -583,11 +592,26 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       idempotencyKey,
     };
   };
-  const read = <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>) =>
+  const read = <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>, options?: TransactionOptions) =>
     deps.db.tenant(tenantId, async (tx) => {
       await requireMember(tx, tenantId, actorId, permission);
+      // A repeatable-read transaction takes its snapshot before the membership lock above can wait, so a demotion
+      // that committed during the wait is not visible to `findMembership`. Locking the member's own row fails closed:
+      // a row changed or removed since the snapshot ends this attempt with 40001, and the caller starts over.
+      if (options?.isolation === "repeatable read")
+        await tx.query("SELECT 1 FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 FOR SHARE", [tenantId, actorId]);
       return work(tx);
-    });
+    }, options);
+  /** Run a repeatable-read read again when its membership row changed under it (SQLSTATE 40001); denied on the second look. */
+  const readSnapshot = async <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>): Promise<T> => {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await read(permission, work, { isolation: "repeatable read" });
+      } catch (error) {
+        if (attempt >= 3 || (error as { code?: unknown } | null)?.code !== "40001") throw error;
+      }
+    }
+  };
   /** Dispatch, and tell whether the answer is a stored action (a replay) rather than this call's own. */
   const runTracked = async (command: ActionCommand): Promise<{ output: ActionResult; replayed: boolean }> => {
     const minted = new Set<string>();
@@ -1116,6 +1140,24 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       return parseInput(setBookingPagePublishedResponseSchema, { ...output, replayed }, "result");
     },
 
+    /**
+     * public-intake.md P-24: an owner changes a page's title or description. Staff get 403 before any 404 or 422;
+     * a page of another tenant, or none, is 404.
+     */
+    async updateBookingPage(pageId: unknown, body: unknown, key: unknown): Promise<UpdateBookingPageResponse> {
+      await read("business", async () => undefined);
+      const page = uuidSchema.safeParse(pageId);
+      if (!page.success) throw new NotFound("No such booking page");
+      // A body the HTTP layer could not read is reported only now, after the owner check (403 before 400).
+      if (body instanceof UnreadBody) throw body.error;
+      const request = parseInput(updateBookingPageRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "booking_page", page.data);
+      const { output, replayed } = await runTracked({
+        actionType: BOOKING_PAGE_UPDATE_ACTION, ...rest, payload: { pageId: page.data, changes: toJson(request.changes) },
+      } as ActionCommand);
+      return parseInput(updateBookingPageResponseSchema, { ...output, replayed }, "result");
+    },
+
     /** The caller's own membership; any member may ask. `profile` adds the business name and email. */
     me: (options: { profile?: boolean } = {}): Promise<MeResponse> => deps.db.tenant(tenantId, async (tx) => {
       const access = await requireMember(tx, tenantId, actorId, null);
@@ -1155,11 +1197,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
 
     /** plans.md PL-7: the plan, its limits and what can be bought. */
-    getBillingPlan: (): Promise<BillingPlan> => {
+    getBillingPlan: (options: { readonly features?: boolean } = {}): Promise<BillingPlan> => {
       const plans = deps.billing?.plans;
-      return read("billing", (tx) => getBillingPlan(tx, tenantId, {
+      // PL-26: the plan row, the runners' heartbeats, the agent switches and the template approval are read as one
+      // snapshot, so a change that lands between two statements cannot show a feature against a state that never was.
+      return readSnapshot("billing", (tx) => getBillingPlan(tx, tenantId, {
         now: new Date(readClock(deps.clock)), trialDays: plans?.config.trialDays ?? 0, checkoutEnabled: plans !== undefined,
         shopifyAppHandle: deps.shopifyBilling?.appHandle ?? null,
+        features: options.features === true,
+        deploy: { voiceWebhook: deps.voiceWebhook === true },
       }));
     },
     /** PL-4, PL-5: a pending plan checkout and its Stripe Checkout URL. */

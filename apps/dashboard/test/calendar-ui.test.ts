@@ -135,7 +135,7 @@ describe("calendar week", () => {
 
 describe("booking page card", () => {
   const page: BookingPageSummary = {
-    id: uuid(9), title: "Book a visit", published: true, disclosureVersion: "1", resourceIds: [studio.id], publicKey: "pk",
+    id: uuid(9), title: "Book a visit", description: null, published: true, disclosureVersion: "1", resourceIds: [studio.id], publicKey: "pk",
     bookingUrl: "https://book.example/pk", embedScript: '<div data-zs-booking="pk"></div>\n<script src="https://book.example/embed.js" async></script>', embedIframe: "<iframe></iframe>",
   };
 

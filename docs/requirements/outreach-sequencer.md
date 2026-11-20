@@ -19,7 +19,7 @@ First user: Zero Sum's own hub tenant, sending from `devin@zerosum-solutions.com
 Out of scope: dashboard screens (owners use the API, the MCP adapter and the existing
 approvals screen); HTML email, attachments, images, open and click tracking; A/B tests;
 reading or classifying reply text; creating CRM contacts, deals or Inbox
-threads from replies; holiday calendars; custom variables beyond `first_name`, `company`,
+threads from replies; per-tenant or state holiday calendars (the fixed US federal calendar is in, OS-11); custom variables beyond `first_name`, `company`,
 `industry`, `opener`; mailboxes outside Google Workspace; service-account sending; any tenant not on the
 allowlist (OS-1); a Node loop worker (cron only); importing from Smartlead's API.
 
@@ -282,10 +282,29 @@ computed from the injected clock with `booking/time-zone.ts`. Business days are 
 Friday. After step k is `sent` on local date D, the prospect's `next_step` becomes k+1 and
 `next_due_on` = D plus step k+1's `delayBusinessDays` business days; after the last step the
 prospect is `completed`. A prospect is due when the campaign is `active`, the prospect is
-`active`, `next_due_on` <= today, today is a business day, and now is in
+`active`, `next_due_on` <= today, today is a send day (a business day that is not a holiday, see
+"Holidays" below), and now is in
 `[window.start, window.end)` local time. A step delayed by caps or a pause sends at the next
 open window; later delays count from the real send date. Due prospects of one mailbox are
 taken in order: follow-ups before step 1, then `next_due_on`, then prospect id.
+**Holidays (OS-11).** The worker never starts a send on a holiday. The holidays are the US federal
+holidays plus the day after Thanksgiving, computed from the local date by rule, with no year list
+(`outreach/holidays.ts`): New Year's Day (1 Jan), Martin Luther King Jr. Day (third Monday of
+January), Washington's Birthday (third Monday of February), Memorial Day (last Monday of May),
+Juneteenth (19 Jun), Independence Day (4 Jul), Labor Day (first Monday of September), Columbus Day
+(second Monday of October), Veterans Day (11 Nov), Thanksgiving (fourth Thursday of November), the
+Friday after it, and Christmas Day (25 Dec). A fixed-date holiday on a Saturday is observed on the
+Friday before and one on a Sunday on the Monday after (so 1 Jan 2028 is observed on Friday 31 Dec
+2027). The local date in the tenant's `business_profiles.time_zone` decides, from the injected
+clock. A "send day" is a business day that is not a holiday: `mayStartSend` is false on any other
+day, so a prospect that is due on a holiday waits and sends in the next open window. When a send
+settles, `next_due_on` is the delay's business-day date moved forward to the next send day, so a
+follow-up's stored due date is never a weekend or holiday (a campaign activated on a holiday still
+stores that day as step 1's due date and waits); the following delay counts from the real send date.
+There is no setting: the calendar is the same for every tenant.
+Test (`holidays.test.ts`, `worker.test.ts` "the holiday calendar"): Thanksgiving 2026-11-26, the
+day after and Christmas 2026-12-25 send nothing and the next send day sends; a step 2 due on 27
+November moves to Monday 30 November; the tenant's local date, not the UTC date, decides.
 Test (`business-days.test.ts`): Friday + 1 = Monday; +3 from Wednesday = Monday; a window
 across the US daylight-saving change uses local time; 10:30 exactly is outside; Saturday sends
 nothing.
@@ -538,7 +557,7 @@ drift test asks for one (enrichment's tables have none).
   constants, `OUTREACH_ERROR_CODES`; `members.ts` gains `outreach`; `http.ts`
   `SERVER_IDEMPOTENCY_PREFIXES` gains `outreach:`.
 - `packages/core/src/outreach/`: `hard-suppression.ts` (exists), `templates.ts` (OS-5, OS-6
-  footer, placeholder checks, digests), `schedule.ts` (OS-11 business days and window),
+  footer, placeholder checks, digests), `schedule.ts` (OS-11 business days and window), `holidays.ts` (OS-11 holiday calendar),
   `mime.ts` (OS-17), `classify.ts` (OS-19), `gmail-port.ts`, `gmail.ts`, `fake-gmail.ts`
   (OS-21, OS-25), `handlers.ts` (OS-3, OS-4, OS-7, OS-8, OS-9 actions), `reads.ts` (OS-22),
   `worker.ts` (OS-12..OS-16, OS-19, OS-20), `index.ts` exports.
@@ -638,7 +657,11 @@ The fake recorded exactly the expected sends and nothing reached Google.
   follow-up.
 - Out-of-office detection relies on `Auto-Submitted`; an auto-reply without it stops the
   sequence as a reply.
-- No holidays; business days are Monday to Friday in the tenant zone.
+- Business days are Monday to Friday in the tenant zone, and delays count on that basis: a delay
+  that runs over a holiday still counts the holiday as a business day. A step that lands on a
+  holiday is moved to the next send day instead (OS-11, "Holidays"). The calendar is the US
+  federal one and is the same for every tenant; Inauguration Day (a Washington, DC area holiday),
+  state and local holidays, and a tenant's own closure days are not in it.
 - A password change on a mailbox revokes its grant; the mailbox shows `reauthorize` until
   OS-2 runs again.
 - The unsubscribe link is on the hub's API domain, not the sending domain.

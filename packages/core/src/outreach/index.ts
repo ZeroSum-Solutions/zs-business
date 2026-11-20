@@ -10,6 +10,7 @@ export {
   type SuppressionHit,
 } from "./hard-suppression.js";
 export * from "./templates.js";
+export * from "./holidays.js";
 export * from "./schedule.js";
 export * from "./mime.js";
 export * from "./classify.js";

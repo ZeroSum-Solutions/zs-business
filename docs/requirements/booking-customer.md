@@ -1,7 +1,8 @@
 # Booking customer link
 
-Status: draft contract, not built (2026-10-22). Code follows this file once its first slice
-lands; a change to a numbered rule needs a new revision of this file first.
+Status: built, first slice (2026-10-23, PR #50: BC-1 to BC-10, migration
+`supabase/migrations/20261023200000_booking_contacts.sql`, `packages/core/src/booking/contact.ts`).
+Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: let a member say who an owner-made booking is for, when booking it or later, and change
 or clear that link. A website booking keeps its customer from the intake review
@@ -9,7 +10,8 @@ or clear that link. A website booking keeps its customer from the intake review
 
 Out of scope: creating a contact from the booking dialog (the member picks an existing contact
 or adds one in Customers first), messaging the customer, linking several people to one booking,
-and changing `booking.create`.
+and changing `booking.create`. Editing a booking page's own title and description is a separate
+action (`public-intake.md` P-24); a booking's length stays the resource's `slotLengthMinutes`.
 
 ## Evidence and decisions
 

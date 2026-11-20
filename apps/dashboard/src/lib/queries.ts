@@ -727,13 +727,27 @@ export function usePendingManagedConnect(canManage: boolean) {
 export function usePlan(options: { poll?: boolean | undefined; watchUntil?: number | undefined } = {}) {
   const api = useApi();
   const { keys, enabled } = useKeys();
-  const { poll, watchUntil } = options;
   return useQuery({
     enabled, queryKey: keys.plan, queryFn: ({ signal }) => api.getBillingPlan({ signal }),
-    ...(poll || watchUntil !== undefined ? { refetchInterval: (query: { state: { data?: BillingPlan | undefined } }) =>
-      planRefetchInterval(query.state.data, { poll, watchUntil }, Date.now()) } : {}),
+    ...planReadBehavior(options),
   });
 }
+/**
+ * How the plan page keeps its answer fresh (PL-26). It names features by their agent switches, which change on other
+ * pages, by support, at quiet hours and when an approval runs out, so the answer is stale at once (`staleTime` 0: opening
+ * the page reads it again) and is read again on focus and every `PLAN_IDLE_REFRESH_MS` while the page is open; a Stripe
+ * or Shopify return reads faster until the plan settles.
+ */
+export function planReadBehavior(options: { poll?: boolean | undefined; watchUntil?: number | undefined } = {}) {
+  return {
+    staleTime: 0,
+    refetchOnWindowFocus: true as const,
+    refetchInterval: (query: { state: { data?: BillingPlan | undefined } }): number =>
+      planRefetchInterval(query.state.data, options, Date.now()) || PLAN_IDLE_REFRESH_MS,
+  };
+}
+/** How often an open plan page reads its answer again when nothing faster is watching it. */
+export const PLAN_IDLE_REFRESH_MS = 60_000;
 /** The next read of the plan in ms, or false to stop (see usePlan). */
 export function planRefetchInterval(data: Pick<BillingPlan, "status"> | undefined, options: { poll?: boolean | undefined; watchUntil?: number | undefined }, now: number): number | false {
   if (options.watchUntil !== undefined && now < options.watchUntil) return PLAN_WATCH_POLL_MS;
