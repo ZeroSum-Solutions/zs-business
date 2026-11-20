@@ -26,9 +26,9 @@ const idSchema = z.uuid().toLowerCase();
  */
 export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "public:", "unsubscribe:", "sms-inbound:", "sms-status:", "email-feedback:", "inbox:", "activepieces:", "oauth-google:", "agent:", "transcript:", "image-job:", "enrichment:", "twilio-voice:", "document-intake:", "connect:", "template:", "outreach:", "manage:", "confirm:"] as const);
 export const idempotencyKeySchema = z
-  .string({ error: "Idempotency-Key header is required. Send a unique value, such as a UUID, with each write." })
-  .min(1, "Idempotency-Key must not be empty.")
-  .max(200, "Idempotency-Key is at most 200 characters.")
+  .string({ error: (issue) => (issue.input === undefined ? "An idempotency key is required: send a unique value, such as a UUID, with each write (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)." : "The idempotency key must be a string, such as a UUID.") })
+  .min(1, "The idempotency key must not be empty.")
+  .max(200, "The idempotency key is at most 200 characters.")
   .refine(isPostgresText, "Text is not valid in Postgres")
   .refine((key) => !SERVER_IDEMPOTENCY_PREFIXES.some((prefix) => key.toLowerCase().startsWith(prefix)),
     "Idempotency-Key uses a prefix the server reserves");

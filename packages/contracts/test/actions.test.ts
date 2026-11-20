@@ -71,9 +71,9 @@ describe("idempotencyKeySchema", () => {
       const parsed = idempotencyKeySchema.safeParse(value);
       return parsed.success ? [] : parsed.error.issues.map((issue) => issue.message);
     };
-    expect(messages(undefined)).toEqual(["Idempotency-Key header is required. Send a unique value, such as a UUID, with each write."]);
-    expect(messages(7)).toEqual(["Idempotency-Key header is required. Send a unique value, such as a UUID, with each write."]);
-    expect(messages("")).toEqual(["Idempotency-Key must not be empty."]);
-    expect(messages("k".repeat(201))).toEqual(["Idempotency-Key is at most 200 characters."]);
+    expect(messages(undefined)).toEqual(["An idempotency key is required: send a unique value, such as a UUID, with each write (the Idempotency-Key header over HTTP, idempotencyKey in a tool call)."]);
+    expect(messages(7)).toEqual(["The idempotency key must be a string, such as a UUID."]);
+    expect(messages("")).toEqual(["The idempotency key must not be empty."]);
+    expect(messages("k".repeat(201))).toEqual(["The idempotency key is at most 200 characters."]);
   });
 });
