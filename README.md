@@ -4,10 +4,17 @@ Business service for the Zero Sum Business OS: CRM, booking, inbox, automations,
 approvals and the owner dashboard. Mish (public, Apache-2.0) stays the front door and site
 builder and calls this service over HTTP and MCP. No authoritative business records live in Mish.
 
-Status: the shared action path, booking (F1) and CRM (F2) are implemented. M1 adds the
-HTTP API (`apps/api`) and the MCP adapter (`packages/mcp`) over them. M3 adds public booking
-intake (`docs/requirements/public-intake.md`) and M3c the Inbox and Home results
-(`docs/requirements/inbox-home.md`). Requirements live in `docs/requirements/`.
+Status (2026-11-20): the shared action path, booking (F1) and CRM (F2) are implemented. M1
+adds the HTTP API (`apps/api`) and the MCP adapter (`packages/mcp`) over them. M3 adds public
+booking intake (`docs/requirements/public-intake.md`) and M3c the Inbox and Home results
+(`docs/requirements/inbox-home.md`). Since then the repository also holds the owner dashboard
+(`apps/dashboard`), the connections layer with the native Shopify tier and embedded app page
+(`docs/requirements/connections.md`; the App Store listing was submitted on 2026-11-08), plans
+and billing (`docs/requirements/plans.md`), delivery, the outreach sequencer, site publishing with its Cloudflare
+Worker (`apps/site-worker`), and first slices of transcription, document intake and browser
+tasks (`services/browser-runner`). Not built: the voice receptionist, marketing email, social
+publishing and inbound email contracts. Each file in `docs/requirements/` states its own build
+status in its first lines (a file with built and unbuilt parts says which); that is the source of truth for a feature.
 Plan: `/Users/zero-suminc./Inbox/plans/_unassigned/2026-10/2026-10-17-complete-product-assembly.md`.
 
 ## Hosting (M6, 2026-10-20)
@@ -57,7 +64,14 @@ mise exec -- pnpm -r typecheck
 mise exec -- pnpm -r test
 mise exec -- pnpm --filter @zs/core test:booking
 mise exec -- pnpm --filter @zs/core test:crm
+mise exec -- pnpm --filter @zs/dashboard e2e         # Playwright on the demo adapter (CI job `e2e`)
+mise exec -- pnpm --filter @zs/dashboard e2e:live    # the live suite (`e2e/live`) against a real API and Postgres
+mise exec -- pnpm --filter @zs/dashboard check:bundle  # the build runs this; fails if the built browser files hold a JWT-shaped string or a configured secret (16+ chars)
+(cd services/browser-runner && python3 -m unittest discover -s tests -t .)  # Python runner, no browser
 ```
+
+CI (`.github/workflows/ci.yml`) runs `typecheck`, `test`, `test:booking` and `test:crm` on
+PostgreSQL 16 and 15, and the dashboard `e2e` in a Playwright container. The dashboard `build` runs `check:bundle` itself.
 
 `@zs/contracts` owns zod action types and stable error codes. `@zs/db` owns the
 Drizzle schema, SQL migration runner (`migrate(pool)`), and transaction-scoped tenant
@@ -90,7 +104,8 @@ Start the local cluster with `-c max_locks_per_transaction=256`, or run
 `ALTER SYSTEM SET max_locks_per_transaction = 256` on it and restart it.
 
 Migrations support PostgreSQL 15 and 16+ (some hosted Supabase projects still run 15).
-CI also runs `pnpm -r test` against `postgres:15` on port 55433. Locally:
+CI runs the whole test job twice, on `postgres:16` and `postgres:15`, both on port 55432. To
+try 15 locally:
 `docker run -d --rm --name zs-pg15 -p 127.0.0.1:55433:5432 -e POSTGRES_HOST_AUTH_METHOD=trust postgres:15`,
 then `ZS_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres pnpm -r test`.
 

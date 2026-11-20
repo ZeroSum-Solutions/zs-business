@@ -40,6 +40,7 @@ interface Seen { method: string; url: string; headers: IncomingHttpHeaders }
 const objects = new Map<string, { body: Buffer; contentType: string; etag: string }>();
 const seen: Seen[] = [];
 let forceStatus: number | undefined;
+let forceBody: string | undefined;
 let server: Server;
 let endpoint: string;
 
@@ -80,7 +81,7 @@ beforeAll(async () => {
       seen.push({ method, url, headers: req.headers });
       const problem = verifySignature(method, url, req.headers, body);
       if (problem) return res.writeHead(403, { "x-problem": problem }).end("<Error>SignatureDoesNotMatch</Error>");
-      if (forceStatus) return res.writeHead(forceStatus).end("<Error/>");
+      if (forceStatus) return res.writeHead(forceStatus).end(forceBody ?? "<Error/>");
       const key = decodeURIComponent(url.split("?")[0]!);
       const current = objects.get(key);
       if (method === "GET" || method === "HEAD") {
@@ -114,6 +115,7 @@ beforeEach(() => {
   objects.clear();
   seen.length = 0;
   forceStatus = undefined;
+  forceBody = undefined;
 });
 
 const store = (overrides: Partial<R2SiteStoreConfig> = {}) => createR2SiteStore(
@@ -199,6 +201,25 @@ describe("createR2SiteStore against a local S3 server", () => {
       expect(failure.message).toMatch(/^R2 (head|put|delete) failed with status 500$/);
       expect(failure.message).not.toContain(SECRET);
     }
+  });
+
+  it("treats a missing key as a finished delete but a missing bucket as a failure", async () => {
+    forceStatus = 404;
+    forceBody = "<Error><Code>NoSuchKey</Code></Error>";
+    await expect(store().delete("t/a/blobs/x")).resolves.toBeUndefined();
+    forceBody = "<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>";
+    expect((await rejection(store().delete("t/a/blobs/x"))).message).toBe("R2 delete failed with status 404");
+    forceBody = "";
+    expect((await rejection(store().delete("t/a/blobs/x"))).message).toBe("R2 delete failed with status 404");
+    forceBody = undefined;
+    forceStatus = undefined;
+    await expect(store().delete("t/a/blobs/x")).resolves.toBeUndefined();
+  });
+
+  it("does not take an unreadable 404 for a finished delete", async () => {
+    const broken: typeof fetch = async () => new Response(new ReadableStream({ pull(controller) { controller.error(new Error("connection reset")); } }), { status: 404 });
+    const failing = createR2SiteStore({ endpoint, bucket: "sites-test", accessKeyId: ACCESS_KEY, secretAccessKey: SECRET }, { fetch: broken, clock });
+    expect((await rejection(failing.delete("t/a/blobs/x"))).message).toBe("R2 delete failed with status 404");
   });
 
   it("reports a network failure by operation only", async () => {
