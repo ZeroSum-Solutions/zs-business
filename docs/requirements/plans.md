@@ -565,7 +565,8 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
 - **App Store install path (corrected 2026-11-20).** An App Store install does create and bind a
   hub tenant, with no operator: the embedded page verifies the shop, the owner makes a hub or
   claims one, the worker binds the shop to the tenant and PL-17 links the billing, and the page
-  then offers the plan selection page (connections.md C-19 to C-30; code
+  then offers the plan selection page when the app handle is configured (the link needs it, so
+  the page shows none without it; connections.md C-19 to C-30; code
   `apps/api/src/public/shopify-embedded.ts` and `packages/core/src/shopify/native-worker.ts`).
   The listing was submitted for review on 2026-11-08 (connections.md, C-25). What still needs a
   person is the Partner Dashboard plan catalog (PL-16).

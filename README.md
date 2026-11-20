@@ -10,7 +10,7 @@ booking intake (`docs/requirements/public-intake.md`) and M3c the Inbox and Home
 (`docs/requirements/inbox-home.md`). Since then the repository also holds the owner dashboard
 (`apps/dashboard`), the connections layer with the native Shopify tier and embedded app page
 (`docs/requirements/connections.md`; the App Store listing was submitted on 2026-11-08), plans
-and billing (`plans.md`), delivery, the outreach sequencer, site publishing with its Cloudflare
+and billing (`docs/requirements/plans.md`), delivery, the outreach sequencer, site publishing with its Cloudflare
 Worker (`apps/site-worker`), and first slices of transcription, document intake and browser
 tasks (`services/browser-runner`). Not built: the voice receptionist, marketing email, social
 publishing and inbound email contracts. Each file in `docs/requirements/` states its own build
@@ -66,7 +66,7 @@ mise exec -- pnpm --filter @zs/core test:booking
 mise exec -- pnpm --filter @zs/core test:crm
 mise exec -- pnpm --filter @zs/dashboard e2e         # Playwright on the demo adapter (CI job `e2e`)
 mise exec -- pnpm --filter @zs/dashboard e2e:live    # the same journeys against a real API and Postgres
-mise exec -- pnpm --filter @zs/dashboard check:bundle  # fails if the built dashboard holds a token or secret
+mise exec -- pnpm --filter @zs/dashboard check:bundle  # the build runs this; fails if the built bundle holds a token or secret
 (cd services/browser-runner && python3 -m unittest discover -s tests -t .)  # Python runner, no browser
 ```
 

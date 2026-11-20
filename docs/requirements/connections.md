@@ -747,14 +747,16 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
   - It shows: the connection status (not linked; linked to `<business name>` with
     `Connected`, `Needs attention` or `Disconnected`), a link "Open ZS Hub" to the hub's sign-in
     page opened in a new top-level tab, and, when not linked, the two choices of C-21.
-  - Headers (S6): every response of `/shopify/*` carries
+  - Headers (S6): the successful `GET /shopify/app` response (200) carries
     `Content-Security-Policy: frame-ancestors https://<shop> https://admin.shopify.com;
     base-uri 'none'; object-src 'none'` with `<shop>` the `shop` query value only when it
     matches `^[a-z0-9][a-z0-9-]{0,59}\.myshopify\.com$`; otherwise `frame-ancestors 'none'`.
-    The route has no `X-Frame-Options`. Every other dashboard route keeps `'none'` and `DENY`.
-    The route handler sets it per request (not `proxy.ts`, which would buffer the body), and
-    `next.config.ts` leaves `/shopify/app` out of the general frame ban, so the value is never
-    static or wildcard. It also sends a nonce-based script and style policy.
+    The route has no `X-Frame-Options`. When `SHOPIFY_CLIENT_ID` is unset or malformed the route
+    answers 404 with no such policy. Every other dashboard route, including any other path under
+    `/shopify/`, keeps the general `'none'` and `DENY`. The route handler sets the policy per
+    request (not `proxy.ts`, which would buffer the body), and `next.config.ts:36` leaves only
+    `shopify/app` out of the general frame ban, so the value is never static or wildcard. The
+    same policy also sets a nonce-based script and style policy.
 - **C-21 Install-to-tenant binding with no operator.** The worker holds the Shopify client
   secret, the token seal key and the Supabase service key; the API and the dashboard hold
   none of them. New signed worker operations (same signing, nonce and deadlines as C-3), nine in
@@ -846,8 +848,9 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     authenticated data is `zss1|shop_id|column|key id` (the key id of that column,
     `packages/core/src/shopify/seal.ts:48`), so a sealed value copied to another
     row or column fails to open. Tokens are never logged, never returned, never in an error.
-  - **One at a time per store.** Every exchange and refresh for a store runs under a
-    lease in the `shopify_locks` table keyed by the verified shop domain (taken before any
+  - **One at a time per store, while the lease is held.** Every exchange and refresh for a store runs under a
+    lease (`LOCK_MS`, 30 s; a later caller may take it over once it lapses, so token writes
+    are fenced separately, below) in the `shopify_locks` table keyed by the verified shop domain (taken before any
     install row exists, so two first opens cannot both exchange; S2 forbids a refresh and an
     exchange together; `packages/core/src/shopify/native-worker.ts:218`). Token
     writes are conditional on the `generation` read under the lock, so a write that was in
@@ -895,9 +898,11 @@ Sources (all read 2026-11-07; the Shopify docs change, so a build re-reads the p
     body on any mismatch or missing header (S8). Then it requires `X-Shopify-Topic`,
     `X-Shopify-Shop-Domain` (shop regex above) and `X-Shopify-Webhook-Id`. Those headers are
     not covered by the HMAC (only the body is), so none of them is trusted alone: the parsed
-    body must carry the same shop (`myshopify_domain` for `app/uninstalled`, where `domain` is
-    the store's custom domain and is not checked; `shop_domain` and `shop_id` for the
-    compliance topics) and a mismatch is 401. The body's
+    body must carry the same shop domain (`myshopify_domain` for `app/uninstalled`, where
+    `domain` is the store's custom domain and is not checked; `shop_domain` for the compliance
+    topics). For an installed store the body's numeric shop id (`id` for `app/uninstalled`,
+    `shop_id` for the compliance topics) must also match the stored `shop_id`. A mismatch of
+    either is 401. The body's
     shop is the one acted on. The dedupe id is the header; a changed id only lets an
     authenticated body run again, which is safe because every handler below is idempotent.
   - Deduplication: `shopify_webhook_events` (`webhook_id` primary key, `topic`, `shop_domain`,
