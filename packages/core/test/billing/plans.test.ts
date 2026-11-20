@@ -458,6 +458,23 @@ describe("applying plan events (PL-10)", () => {
     expect(await readOnlyAfter()).toBe(unix(t2) * 1000 + 7 * DAY);
   });
 
+  it("an undated failure of an invoice the worker never saw is dropped once a recovery is on record (PL-10)", async () => {
+    const tenantId = await b.tenant();
+    const { sub } = await subscribe(tenantId);
+    const count = async () => Number((await b.h.rows<Record<string, any>>("SELECT count(*)::int AS n FROM plan_invoices WHERE tenant_id=$1", [tenantId]))[0]!.n);
+    fake.subscriptions.set(sub.id, { ...sub, status: "past_due" });
+    await b.deliver(subEvent("customer.subscription.updated", fake.subscriptions.get(sub.id)!));
+    await worker().runOnce();
+    b.h.clock.advance(DAY);
+    fake.subscriptions.set(sub.id, { ...sub, status: "active" });
+    await b.deliver(subEvent("customer.subscription.updated", fake.subscriptions.get(sub.id)!));
+    await worker().runOnce();
+    await b.deliver({ ...invoiceEvent("invoice.payment_failed", sub, stripeId("in")), created: undefined });
+    await worker().runOnce();
+    expect(await count()).toBe(0);
+    expect((await plan(tenantId))!.read_only_after).toBeNull();
+  });
+
   it("a failure never changes a paid invoice (PL-10)", async () => {
     const tenantId = await b.tenant();
     const { sub } = await subscribe(tenantId);
