@@ -139,6 +139,38 @@ describe("demo adapter: setup", () => {
     expect(await failure(api.setBookingPagePublished(bookingPageId, true, key()))).toMatchObject({ kind: "forbidden" });
   });
 
+  it("edits a page's title and description (P-17): only the named fields, null clears, same values are no change", async () => {
+    const api = adapter();
+    const { bookingPageId } = api.applyTemplateElsewhere("jewelry");
+    const title = (await api.listBookingPages()).find((page) => page.id === bookingPageId)!.title;
+    expect(await api.updateBookingPage(bookingPageId, { description: "  Rings and repairs.  " }, key())).toEqual({ pageId: bookingPageId, title, description: "Rings and repairs.", changed: true });
+    expect(await api.updateBookingPage(bookingPageId, { description: "Rings and repairs." }, key())).toMatchObject({ changed: false });
+    expect(await api.updateBookingPage(bookingPageId, { title: "Visit us" }, key())).toMatchObject({ title: "Visit us", description: "Rings and repairs.", changed: true });
+    expect((await api.listBookingPages()).find((page) => page.id === bookingPageId)).toMatchObject({ title: "Visit us", description: "Rings and repairs." });
+    expect((await api.getSetup()).applied?.bookingPageTitle).toBe("Visit us");
+    expect(await api.updateBookingPage(bookingPageId, { description: null }, key())).toMatchObject({ description: null, changed: true });
+  });
+
+  it("refuses a bad page edit like the API: empty body or title 400-class validation, unknown page 404, staff 403", async () => {
+    const api = adapter();
+    const { bookingPageId } = api.applyTemplateElsewhere("jewelry");
+    expect(await failure(api.updateBookingPage(bookingPageId, {}, key()))).toMatchObject({ kind: "validation" });
+    expect(await failure(api.updateBookingPage(bookingPageId, { title: "  " }, key()))).toMatchObject({ kind: "validation" });
+    expect(await failure(api.updateBookingPage(bookingPageId, { description: "x".repeat(2001) }, key()))).toMatchObject({ kind: "validation" });
+    expect(await failure(api.updateBookingPage("7c9e1b3d-5f7a-4b9c-8d1e-000000000000", { title: "x" }, key()))).toMatchObject({ kind: "not_found" });
+    api.actAs("staff");
+    expect(await failure(api.updateBookingPage(bookingPageId, { title: "x" }, key()))).toMatchObject({ kind: "forbidden" });
+  });
+
+  it("replays a page edit that repeats an Idempotency-Key", async () => {
+    const api = adapter();
+    const { bookingPageId } = api.applyTemplateElsewhere("jewelry");
+    const once = key();
+    const first = await api.updateBookingPage(bookingPageId, { description: "Hello." }, once);
+    await api.updateBookingPage(bookingPageId, { description: "Other." }, key());
+    expect(await api.updateBookingPage(bookingPageId, { description: "Hello." }, once)).toEqual(first);
+  });
+
   it("creates a deal in the given stage, and refuses a stage outside the pipeline", async () => {
     const api = adapter();
     const applied = api.applyTemplateElsewhere("fitness");

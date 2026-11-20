@@ -45,6 +45,7 @@ import {
   createBookingOutputSchema,
   createDealOutputSchema,
   setBookingPagePublishedResponseSchema,
+  updateBookingPageResponseSchema,
   setupReadSchema,
   type CreateDealRequest,
   createOrFindContactOutputSchema,
@@ -177,6 +178,13 @@ const NOTHING_CANCELLED = { cancelled: false, revokeFailed: false };
 /** PUT /v1/business answers the action and the profile as it is now; a newer API's extra keys are dropped (BP-10). */
 /** POST /v1/enrichment/requests answers the action and the request as it is now. */
 const enrichmentOutputSchema = z.object({ actionId: uuidSchema, result: enrichmentRequestRecordSchema });
+/** BP-10: an API that predates the description and services fields omits them; they read as empty. */
+function withContent<T extends { description?: string | null | undefined; services?: string[] | undefined }>(
+  profile: T,
+): Omit<T, "description" | "services"> & { description: string | null; services: string[] } {
+  const { description, services, ...rest } = profile;
+  return { ...rest, description: description ?? null, services: services ?? [] };
+}
 const businessOutputSchema = z.object({ actionId: uuidSchema, result: businessProfileReadSchema });
 /** POST /v1/agents/:agentKind/runs answers the run with each booking's decision (G-14). */
 const kindRunDetailSchema = followUpRunSchema.extend({ decisions: z.array(kindDecisionSchema) });
@@ -478,6 +486,11 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       return (await write(path, { published }, setBookingPagePublishedResponseSchema, options)).result;
     },
 
+    async updateBookingPage(pageId, changes, options) {
+      const path = `/v1/booking/pages/${encodeURIComponent(pageId)}`;
+      return (await write(path, { changes }, updateBookingPageResponseSchema, options, "PUT")).result;
+    },
+
     listIntakeItems(query = {}, options = {}) {
       return listAll("/v1/intake/items", intakeItemPageSchema, { status: query.status }, options.signal);
     },
@@ -727,12 +740,12 @@ export function createHttpClient(config: HttpClientConfig): HttpApi {
       }
     },
 
-    getBusiness(options = {}) {
-      return request({ method: "GET", path: "/v1/business", schema: businessProfileReadSchema, signal: options.signal });
+    async getBusiness(options = {}) {
+      return withContent(await request({ method: "GET", path: "/v1/business", schema: businessProfileReadSchema, signal: options.signal }));
     },
 
     async updateBusiness(input, options) {
-      return (await write("/v1/business", input, businessOutputSchema, options, "PUT")).result;
+      return withContent((await write("/v1/business", input, businessOutputSchema, options, "PUT")).result);
     },
 
     async getContactEnrichment(contactId, options = {}) {

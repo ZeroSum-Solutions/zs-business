@@ -1,10 +1,11 @@
 # Business profile
 
-Status: draft contract, not built (2026-10-22). Code follows this file once its first slice
-lands; a change to a numbered rule needs a new revision of this file first.
+Status: first slice built; revision 2 (2026-11-20) adds the description and services fields
+(BP-13 to BP-15). A change to a numbered rule needs a new revision of this file first.
 
 Scope: one profile per tenant that says who the business is: the name customers see, the legal
-name, a phone number, a time zone, a default currency and a postal address. The owner edits it
+name, a phone number, a time zone, a default currency, a postal address, a short description of
+the business and the list of services it offers. The owner edits it
 in Account → Settings. Other features read it: the deal value field (BP-8), marketing footers
 (`marketing-email.md`), and any screen that needs the business's own day rather than the
 viewer's.
@@ -92,6 +93,29 @@ does not send.
 **BP-11. Demo mode.** The demo adapter stores the profile in its in-memory store, so Save
 works there and says it is sample data that resets, never "saved to your business".
 
+**BP-13. Description.** `business_profiles.description` is null or 1..2000 characters, not blank,
+passing the same text check as BP-2. Null means "not written yet". It is set and cleared through
+`business.profile.update` like every other field (`changes.description`, null clears), so
+BP-6's owner-only permission, BP-7's compare and set and the idempotency key all apply. A new
+profile row starts with a null description; the migration adds the column and changes no row.
+
+**BP-14. Services.** `business_profiles.services` is a JSON array of 0..20 service names (the
+column is `jsonb NOT NULL DEFAULT '[]'`). Each name is 1..80 characters after trimming, has no
+leading or trailing whitespace and no control characters, and no two names match when compared
+without regard to case. A database CHECK enforces the count and the length, and the contract
+schema enforces the rest with the field's path in `ValidationFailed`. `changes.services` replaces
+the whole list (an empty list clears it); it never merges. The list is free text for the owner
+and customers to read: it is not a booking resource, a price list or a template, and it does
+not create or rename a resource.
+
+**BP-15. Read and write notes.** `GET /v1/business` returns `description` and `services` to
+every member, like the other fields (BP-5). The runtime role may `UPDATE` only the columns the
+action writes: the migration grants `UPDATE (description, services)` to `authenticated` beside
+the existing column grants, and the table keeps forced RLS by `tenant_id`. An older API that
+does not send the fields is read as `description: null` and `services: []` by the dashboard
+(BP-10). The MCP `get_business` tool is read-only and returns the new fields; there is no MCP
+write tool for the profile, so none is added for them.
+
 **BP-12. Tenancy.** A member of tenant A cannot read or update tenant B's profile through the
 route, the action or direct SQL as the runtime role: a two-tenant denial test covers all three.
 
@@ -108,6 +132,13 @@ save is 403. Time zone `Mars/Base` and currency `XXZ` are `ValidationFailed` wit
 A new deal's currency select starts at `EUR`; an existing USD deal still shows USD. Tenant B
 cannot read tenant A's profile. The dashboard e2e saves the form in demo mode and the Home
 header shows the new display name.
+
+Acceptance test for revision 2: an owner saves a description and three services in one
+`business.profile.update`; the response carries the next revision and `GET /v1/business` returns
+both for the owner and for staff; a replay with the same key returns the first result; a
+description of 2001 characters, a blank description, two services that differ only by case and a
+21st service are `ValidationFailed` with their paths; staff are 403; tenant B reads
+`description: null` and `services: []` and cannot update tenant A's row as the runtime role.
 
 ## Known limits
 

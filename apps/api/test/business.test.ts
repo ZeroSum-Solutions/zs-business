@@ -87,6 +87,50 @@ describe("GET and PUT /v1/business", () => {
   });
 });
 
+describe("description and services (BP-13, BP-14)", () => {
+  it("starts empty, saves both fields through the one action path, replays, and shows staff the same read", async () => {
+    const start = businessProfileSchema.parse((await get(h.a)).body);
+    expect(start).toMatchObject({ description: null, services: [] });
+    const key = randomUUID();
+    const body = {
+      expectedRevision: start.revision,
+      changes: { description: "Family studio since 1998.", services: ["Cuts", "Colour", "Styling"] },
+    };
+    const saved = await put(h.a, body, key);
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+    expect(businessProfileOutputSchema.parse(saved.body).result).toMatchObject({
+      description: "Family studio since 1998.", services: ["Cuts", "Colour", "Styling"], revision: start.revision + 1,
+    });
+    const again = await put(h.a, body, key);
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual(saved.body);
+    expect(businessProfileSchema.parse((await get(staff)).body)).toMatchObject({
+      description: "Family studio since 1998.", services: ["Cuts", "Colour", "Styling"], revision: start.revision + 1,
+    });
+    const cleared = await put(h.a, { expectedRevision: start.revision + 1, changes: { description: null, services: [] } });
+    expect(cleared.status).toBe(200);
+    expect(businessProfileSchema.parse((await get(h.a)).body)).toMatchObject({ description: null, services: [] });
+  });
+
+  it("names the path of a bad description or services list, refuses staff with 403, and keeps tenant B apart", async () => {
+    const current = businessProfileSchema.parse((await get(h.a)).body);
+    for (const [changes, path] of [
+      [{ description: "x".repeat(2001) }, "changes.description"],
+      [{ description: "   " }, "changes.description"],
+      [{ services: ["Cuts", "cuts"] }, "changes.services"],
+      [{ services: Array.from({ length: 21 }, (_, i) => `Service ${i}`) }, "changes.services"],
+    ] as const) {
+      const response = await put(h.a, { expectedRevision: current.revision, changes });
+      expect(response.status, path).toBe(400);
+      expect(errorOf(response)).toMatchObject({ code: "ValidationFailed", details: { issues: [{ path: expect.stringContaining(path) }] } });
+    }
+    expect((await put(staff, { expectedRevision: current.revision, changes: { description: "Nope." } })).status).toBe(403);
+    expect(businessProfileSchema.parse((await get(h.a)).body)).toEqual(current);
+    const b = businessProfileSchema.parse((await get(h.b)).body);
+    expect(b).toMatchObject({ description: null, services: [] });
+  });
+});
+
 describe("tenancy (BP-12)", () => {
   it("shows tenant B its own profile, never tenant A's, and leaves A untouched by B's save", async () => {
     const a = businessProfileSchema.parse((await get(h.a)).body);

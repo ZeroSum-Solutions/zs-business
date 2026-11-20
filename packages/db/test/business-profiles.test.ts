@@ -197,6 +197,43 @@ describe("time zone (BP-3)", () => {
   });
 });
 
+describe("description and services (BP-13, BP-14)", () => {
+  const set = (column: "description" | "services", value: unknown) => fixture.service((tx) =>
+    tx.query(`UPDATE business_profiles SET ${column}=$1${column === "services" ? "::jsonb" : ""} WHERE tenant_id=$2`, [value, fixture.b.tenantId]));
+
+  it("starts with no description and an empty list", async () => {
+    expect(await profileOf(fixture.a.tenantId)).toMatchObject({ description: null, services: [] });
+  });
+
+  it.each([
+    ["an empty description", "description", ""],
+    ["a blank description", "description", "   "],
+    ["a 2001-character description", "description", "d".repeat(2001)],
+    ["a services value that is not an array", "services", JSON.stringify({ a: 1 })],
+    ["a services string", "services", JSON.stringify("Repairs")],
+    ["21 services", "services", JSON.stringify(Array.from({ length: 21 }, (_, i) => `Service ${i}`))],
+    ["a service that is not a string", "services", JSON.stringify(["Repairs", 7])],
+    ["an empty service name", "services", JSON.stringify([""])],
+    ["a service with a space at an end", "services", JSON.stringify([" Repairs"])],
+    ["an 81-character service name", "services", JSON.stringify(["s".repeat(81)])],
+  ] as const)("refuses %s", async (_, column, value) => {
+    await expect(set(column, value)).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("refuses a null services value", async () => {
+    await expect(set("services", null)).rejects.toMatchObject({ code: "23502" });
+  });
+
+  it("accepts the edges: 2000 characters, 20 services of 1 and 80 characters, and the empty list", async () => {
+    await set("description", "d".repeat(2000));
+    await set("services", JSON.stringify(Array.from({ length: 20 }, (_, i) => `${i}`)));
+    await set("services", JSON.stringify(["s".repeat(80), "a", "Bridal consultation"]));
+    await set("services", "[]");
+    await set("description", null);
+    expect(await profileOf(fixture.b.tenantId)).toMatchObject({ description: null, services: [] });
+  });
+});
+
 describe("tenancy as the runtime role (BP-12, BP-9)", () => {
   it("reads only its own tenant's profile", async () => {
     expect((await asA((tx) => tx.query("SELECT tenant_id FROM business_profiles"))).rows).toEqual([{ tenant_id: fixture.a.tenantId }]);
@@ -230,6 +267,19 @@ describe("tenancy as the runtime role (BP-12, BP-9)", () => {
     expect(await profileOf(fixture.a.tenantId)).toMatchObject({ legal_name: "Halden & Rowe LLC", currency: "EUR", time_zone: "Europe/London" });
     // Tenant B is untouched.
     expect(await profileOf(fixture.b.tenantId)).toMatchObject({ legal_name: null, currency: "USD", revision: 1 });
+  });
+
+  it("updates its own description and services, and cannot touch another tenant's", async () => {
+    const own = await asA((tx) => tx.query(
+      "UPDATE business_profiles SET description=$1, services=$2::jsonb WHERE tenant_id=$3 RETURNING description, services",
+      ["Fine jewelry since 1952.", JSON.stringify(["Repairs", "Resizing"]), fixture.a.tenantId]));
+    expect(own.rows).toEqual([{ description: "Fine jewelry since 1952.", services: ["Repairs", "Resizing"] }]);
+    const before = await profileOf(fixture.b.tenantId);
+    const other = await asA((tx) => tx.query(
+      "UPDATE business_profiles SET description='Hijacked', services='[\"Hijacked\"]'::jsonb WHERE tenant_id=$1", [fixture.b.tenantId]));
+    expect(other.rowCount).toBe(0);
+    expect(await profileOf(fixture.b.tenantId)).toEqual(before);
+    expect((await asA((tx) => tx.query("SELECT description FROM business_profiles WHERE tenant_id=$1", [fixture.b.tenantId]))).rowCount).toBe(0);
   });
 
   it("renames the tenant with the display name, in the same transaction, for its own tenant only", async () => {

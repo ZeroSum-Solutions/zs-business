@@ -1,6 +1,6 @@
 # M3a: public intake contract
 
-Status: frozen contract for M3a/M3b (2026-10-18), revision 10 (2026-11-10; revision 5 text kept below). Revision 2
+Status: frozen contract for M3a/M3b (2026-10-18), revision 12 (2026-11-20; revision 5 text kept below). Revision 2
 (review r1): P-8 and P-13 keep the disclosure text on each consent row and fix one text per
 version; P-9 checks the slot before identity work; P-10 names the client address source;
 P-14 retries. Revision 3 (review r3): P-8 and P-13 make the disclosure history append-only.
@@ -25,6 +25,9 @@ reads it as an opaque colour and every text colour still reaches 4.5:1 (it deriv
 or drops the token), rejects font keywords, honours `header=0` only inside a frame and keeps the
 business name visible, keeps the 480 px frame floor unless the host opts into a smaller one, and
 has `embed.js` mount again when the host replaces the widget's children.
+Revision 12 (2026-11-20, owner content editing): P-17 lets the owner change a booking page's title
+and description after creation; P-12's page list returns `description`; P-11 and P-14 already show
+it to visitors and are unchanged.
 Code follows this file; a change to a numbered rule needs a new revision of this file first.
 
 Scope: one narrow public write, `booking.public_request`, that lets a visitor on any
@@ -205,8 +208,8 @@ A replay of a link or reject whose stored result predates `disclosureText` fills
 from the consent row, else from `booking_page_disclosures` for the stored version.
 A reviewed item answers 409 `already_reviewed`. `GET /v1/booking/bookings` adds `source`,
 `intakeItemId` and `customer` (`contactId`, `name`, `status`) to each booking.
-`GET /v1/booking/pages` lists the tenant's pages with their public key, hosted URL and
-embed snippets.
+`GET /v1/booking/pages` lists the tenant's pages with their title, description (null when
+unset), public key, hosted URL and embed snippets.
 
 **P-13. Storage.** Migration `*_public_intake.sql`:
 
@@ -335,6 +338,31 @@ looks exactly as before revision 10.
   slot refresh and a click-only step change, remounting after `replaceChildren()`, the 480 px
   floor and its opt-in, the theme applying, no inner scrolling, shrinking back, and 44 px
   targets.
+
+**P-17. Owner edits a page's title and description.** Action `booking.page.update`, route
+`PUT /v1/booking/pages/:id` (PUT, not PATCH, because the API's CORS list does not allow PATCH),
+body `{ changes }` with an `Idempotency-Key` header. `changes` holds only the fields being set
+and at least one: `title` 1..200 characters after trimming (it cannot be cleared) and
+`description` null or 1..2000 characters, not blank (null clears it). Any other key, such as
+`published` or `disclosureText`, is `ValidationFailed` with its path; publishing stays on
+`booking.page.set_published` and the disclosure stays frozen (P-8). Owner only, under the
+`business` permission, so staff get 403 before any 404 or 400 (as `set_published` does). The
+action runs through the dispatcher on target `booking_page`; the payload's `pageId` must equal
+the target. In one transaction it locks the page row, applies the changes, and writes the action
+row and the outbox event; a page in another tenant, or no page, is 404. The answer is
+`{ replayed, actionId, result: { pageId, title, description, changed } }`, where `changed` is
+false when every value already matched (no row write, still an action record). Last write wins:
+there is no revision column, because a page holds two short text fields and the dashboard
+reloads after each save. A replay of the same key and body returns the first answer. The
+migration only grants `UPDATE (title, description)` on `booking_pages` to the runtime role (the
+columns and their CHECKs predate it), so the table keeps its forced RLS by `tenant_id` and no
+other column is writable. A visitor sees the change on the next `GET /public/v1/pages/:key`
+(P-11) and in the hosted booker (P-14), which already renders `page.description`. Duration of a
+booking is out of scope: it belongs to the resource's `slotLengthMinutes`, not the page.
+Tests: contracts (command and body shapes), db as `zs_runtime` (own update, tenant B denied,
+other columns closed, CHECK limits), core (action, outbox, replay, validation, staff refused,
+payload mismatch), API (status codes, public read) and the dashboard (form, demo adapter, HTTP
+client).
 
 ## Theming the embed
 

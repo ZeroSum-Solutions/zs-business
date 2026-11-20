@@ -53,6 +53,22 @@ export const postalAddressSchema = z.strictObject({
 });
 export type PostalAddress = z.infer<typeof postalAddressSchema>;
 
+/** BP-13: the description, 1..2000 characters after trimming (null clears it in `changes`). */
+export const businessDescriptionSchema = z.string().trim().min(1).refine(codePointsAtMost(2000), "Expected at most 2000 characters").refine(postgresText, "Text is not valid in Postgres");
+
+/** BP-14: at most this many services, each name at most this many characters. */
+export const BUSINESS_SERVICES_MAX = 20;
+export const BUSINESS_SERVICE_NAME_MAX = 80;
+// A name is one line: no control character (a newline, a tab, NUL) anywhere in it.
+const noControlCharacters = (value: string) => !/\p{Cc}/u.test(value);
+const serviceName = z.string().trim().min(1)
+  .refine(codePointsAtMost(BUSINESS_SERVICE_NAME_MAX), `Expected at most ${BUSINESS_SERVICE_NAME_MAX} characters`)
+  .refine(noControlCharacters, "Expected one line of text")
+  .refine(postgresText, "Text is not valid in Postgres");
+/** BP-14: the services the business offers; names are unique ignoring case, and `[]` means none. */
+export const businessServicesSchema = z.array(serviceName).max(BUSINESS_SERVICES_MAX, `Expected at most ${BUSINESS_SERVICES_MAX} services`)
+  .refine((names) => new Set(names.map((name) => name.toLowerCase())).size === names.length, "Each service must be named once");
+
 /** BP-5: the profile as `GET /v1/business` and a save show it. */
 export const businessProfileSchema = z.strictObject({
   displayName: businessDisplayNameSchema,
@@ -61,6 +77,8 @@ export const businessProfileSchema = z.strictObject({
   timeZone: businessTimeZoneSchema.nullable(),
   currency: currencyCodeSchema,
   postalAddress: postalAddressSchema.nullable(),
+  description: businessDescriptionSchema.nullable(),
+  services: businessServicesSchema,
   revision: z.number().int().min(1).max(2_147_483_647),
   updatedAt: instantSchema,
 });
@@ -74,6 +92,8 @@ export const businessProfileChangesSchema = z.strictObject({
   timeZone: businessTimeZoneSchema.nullable(),
   currency: activeCurrencyCodeSchema,
   postalAddress: postalAddressSchema.nullable(),
+  description: businessDescriptionSchema.nullable(),
+  services: businessServicesSchema,
 }).partial().refine((changes) => Object.keys(changes).length > 0, "Name at least one field to change");
 export type BusinessProfileChanges = z.infer<typeof businessProfileChangesSchema>;
 
@@ -103,6 +123,9 @@ export const businessProfileReadSchema = z.object({
   timeZone: z.string().nullable(),
   currency: z.string(),
   postalAddress: postalAddressReadSchema.nullable(),
+  // BP-10: an older API sends neither; the reader then shows an empty description and no services.
+  description: z.string().nullable().optional(),
+  services: z.array(z.string()).optional(),
   revision: z.number().int(),
   updatedAt: z.string(),
 });

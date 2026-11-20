@@ -1,10 +1,11 @@
 // Industry templates (docs/requirements/industry-templates.md IT-4, IT-5, IT-11): the apply action
-// and the booking page publish action, through the shared dispatcher. Templates are code
+// and the booking page publish action, and the page edit action (public-intake.md P-17), through the shared dispatcher. Templates are code
 // (@zs/contracts), so the apply reads no catalog rows. Original code.
 import {
   actionCommandSchema,
   applyTemplatePayloadSchema,
   BOOKING_PAGE_SET_PUBLISHED_ACTION,
+  BOOKING_PAGE_UPDATE_ACTION,
   Conflict,
   INDUSTRY_TEMPLATES,
   NotFound,
@@ -12,9 +13,11 @@ import {
   TEMPLATE_APPLIED_EVENT,
   TEMPLATE_APPLY_ACTION,
   templateApplyKey,
+  updateBookingPageCommandSchema,
   uuidSchema,
   ValidationFailed,
   type BookingPagePublished,
+  type BookingPageUpdated,
   type JsonValue,
   type Target,
   type TemplateApplied,
@@ -193,7 +196,34 @@ export const setBookingPagePublishedHandler: ActionHandler = {
   },
 };
 
+/**
+ * P-17: sets the title and description an owner named on one page of the caller's tenant. A field
+ * the page already holds is left alone, and when none differs the page is not written (`changed:
+ * false`). The page row is locked first, so two edits at once apply one after the other.
+ */
+export const updateBookingPageHandler: ActionHandler = {
+  resolveTarget: resolvePage,
+  async handle({ tx, command, binding }) {
+    await requireMember(tx, binding.tenantId, binding.actorId, "business");
+    const { payload } = parseOrFail(updateBookingPageCommandSchema, command);
+    const current = (await tx.query<{ title: string; description: string | null }>(
+      "SELECT title, description FROM booking_pages WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [binding.tenantId, payload.pageId])).rows[0];
+    if (!current) throw new NotFound("No such booking page");
+    const next = {
+      title: payload.changes.title ?? current.title,
+      description: "description" in payload.changes ? payload.changes.description ?? null : current.description,
+    };
+    const changed = next.title !== current.title || next.description !== current.description;
+    if (changed)
+      await tx.query("UPDATE booking_pages SET title=$3, description=$4 WHERE tenant_id=$1 AND id=$2",
+        [binding.tenantId, payload.pageId, next.title, next.description]);
+    const result: BookingPageUpdated = { pageId: payload.pageId, title: next.title, description: next.description, changed };
+    return { result: result as unknown as JsonValue };
+  },
+};
+
 export const setupHandlers: Readonly<Record<string, ActionHandler>> = Object.freeze({
   [TEMPLATE_APPLY_ACTION]: applyTemplateHandler,
   [BOOKING_PAGE_SET_PUBLISHED_ACTION]: setBookingPagePublishedHandler,
+  [BOOKING_PAGE_UPDATE_ACTION]: updateBookingPageHandler,
 });

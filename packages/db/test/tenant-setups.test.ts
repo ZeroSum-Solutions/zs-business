@@ -132,7 +132,8 @@ describe("apply and publish grants (IT-4, IT-11)", () => {
       .toEqual({ n: 1 });
     expect((await fixture.b.run((tx) => tx.query("SELECT published FROM booking_pages WHERE id=$1", [pageId]))).rows[0])
       .toEqual({ published: true });
-    await expect(fixture.b.run((tx) => tx.query("UPDATE booking_pages SET title='Changed' WHERE id=$1", [pageId])))
+    // P-17 grants the title and description (booking-page-content.test.ts); no other column is open.
+    await expect(fixture.b.run((tx) => tx.query("UPDATE booking_pages SET disclosure_text='Changed' WHERE id=$1", [pageId])))
       .rejects.toMatchObject({ code: "42501" });
     await expect(fixture.b.run((tx) => tx.query("DELETE FROM booking_pages WHERE id=$1", [pageId])))
       .rejects.toMatchObject({ code: "42501" });

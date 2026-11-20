@@ -14,15 +14,19 @@ import {
   applyTemplateRequestSchema,
   applyTemplateResponseSchema,
   BOOKING_PAGE_SET_PUBLISHED_ACTION,
+  BOOKING_PAGE_UPDATE_ACTION,
   bookingTimeZoneSchema,
   isIndustryTemplateId,
   Refused,
   setBookingPagePublishedRequestSchema,
+  updateBookingPageRequestSchema,
+  updateBookingPageResponseSchema,
   setBookingPagePublishedResponseSchema,
   TEMPLATE_APPLY_ACTION,
   templateApplyKey,
   type ApplyTemplateResponse,
   type SetBookingPagePublishedResponse,
+  type UpdateBookingPageResponse,
   type SetupRead,
   WALLET_TOPUP_CREATE_ACTION,
   CALENDAR_GOOGLE_CONNECT_ACTION,
@@ -366,6 +370,8 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   // industry-templates.md IT-4, IT-11: only owners apply a template and take its page live.
   [TEMPLATE_APPLY_ACTION]: "business",
   [BOOKING_PAGE_SET_PUBLISHED_ACTION]: "business",
+  // public-intake.md P-17: only owners change what a booking page says.
+  [BOOKING_PAGE_UPDATE_ACTION]: "business",
   // document-intake.md DL-3, DL-13: owners upload and discard; apply is `required` in APPROVAL_POLICIES.
   "catalog.intake.upload": "publish",
   "catalog.intake.apply": "publish",
@@ -1114,6 +1120,22 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       // `replayed` is true only when a stored action answered (the same Idempotency-Key and request).
       // A fresh key on a page that already has the value is a new action with changed:false.
       return parseInput(setBookingPagePublishedResponseSchema, { ...output, replayed }, "result");
+    },
+
+    /**
+     * public-intake.md P-17: an owner changes a page's title or description. Staff get 403 before any 404 or 422;
+     * a page of another tenant, or none, is 404.
+     */
+    async updateBookingPage(pageId: unknown, body: unknown, key: unknown): Promise<UpdateBookingPageResponse> {
+      await read("business", async () => undefined);
+      const page = uuidSchema.safeParse(pageId);
+      if (!page.success) throw new NotFound("No such booking page");
+      const request = parseInput(updateBookingPageRequestSchema, body);
+      const { id: _id, ...rest } = envelope(key, "booking_page", page.data);
+      const { output, replayed } = await runTracked({
+        actionType: BOOKING_PAGE_UPDATE_ACTION, ...rest, payload: { pageId: page.data, changes: toJson(request.changes) },
+      } as ActionCommand);
+      return parseInput(updateBookingPageResponseSchema, { ...output, replayed }, "result");
     },
 
     /** The caller's own membership; any member may ask. `profile` adds the business name and email. */

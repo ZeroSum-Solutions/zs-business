@@ -108,6 +108,7 @@ export type PublicPage = z.infer<typeof publicPageSchema>;
 export const bookingPageSummarySchema = z.strictObject({
   id: idSchema,
   title: z.string(),
+  description: z.string().nullable(),
   published: z.boolean(),
   disclosureVersion: z.string(),
   resourceIds: z.array(idSchema),

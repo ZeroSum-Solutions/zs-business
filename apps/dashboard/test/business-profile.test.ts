@@ -6,7 +6,7 @@ import { countryChoices, fieldFromIssuePath, newerProfile, readBusinessForm, toB
 
 const profile = (change: Partial<BusinessProfile> = {}): BusinessProfile => ({
   displayName: "Halden & Rowe", legalName: null, phoneE164: null, timeZone: null, currency: "USD", postalAddress: null,
-  revision: 1, updatedAt: "2026-10-23T10:00:00.000Z", ...change,
+  description: null, services: [], revision: 1, updatedAt: "2026-10-23T10:00:00.000Z", ...change,
 });
 const address = { line1: "12 Mill Lane", city: "Leeds", country: "GB" } as const;
 
@@ -14,13 +14,55 @@ describe("toBusinessForm", () => {
   it("shows nothing for what the profile does not have", () => {
     expect(toBusinessForm(profile())).toEqual({
       displayName: "Halden & Rowe", legalName: "", phone: "", timeZone: "", currency: "USD",
-      line1: "", line2: "", city: "", region: "", postalCode: "", country: "",
+      line1: "", line2: "", city: "", region: "", postalCode: "", country: "", description: "", services: "",
     });
   });
 
   it("spreads the address over its fields", () => {
     const form = toBusinessForm(profile({ postalAddress: { ...address, line2: "Unit 4", postalCode: "LS1 4AB" } }));
     expect(form).toMatchObject({ line1: "12 Mill Lane", line2: "Unit 4", city: "Leeds", region: "", postalCode: "LS1 4AB", country: "GB" });
+  });
+});
+
+describe("description and services (BP-13, BP-14)", () => {
+  it("shows the services one per line", () => {
+    const form = toBusinessForm(profile({ description: "Jewellers since 1952.", services: ["Repairs", "Bridal consultation"] }));
+    expect(form).toMatchObject({ description: "Jewellers since 1952.", services: "Repairs\nBridal consultation" });
+  });
+
+  it("sends the description trimmed, and null when it is emptied", () => {
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), description: "  Jewellers.  " })).toEqual({ ok: true, changes: { description: "Jewellers." } });
+    const saved = profile({ description: "Jewellers." });
+    expect(readBusinessForm(saved, { ...toBusinessForm(saved), description: "  " })).toEqual({ ok: true, changes: { description: null } });
+  });
+
+  it("refuses a description over 2000 characters", () => {
+    expect(readBusinessForm(profile(), { ...toBusinessForm(profile()), description: "x".repeat(2001) })).toMatchObject({ ok: false, errors: { description: expect.any(String) } });
+  });
+
+  it("sends the services as a list: trimmed, blank lines dropped, [] when emptied", () => {
+    const form = { ...toBusinessForm(profile()), services: " Repairs \n\r\n Bridal consultation\n" };
+    expect(readBusinessForm(profile(), form)).toEqual({ ok: true, changes: { services: ["Repairs", "Bridal consultation"] } });
+    const saved = profile({ services: ["Repairs"] });
+    expect(readBusinessForm(saved, { ...toBusinessForm(saved), services: "" })).toEqual({ ok: true, changes: { services: [] } });
+  });
+
+  it("sends no change for the same services in the same order", () => {
+    const saved = profile({ services: ["Repairs", "Resizing"] });
+    expect(readBusinessForm(saved, toBusinessForm(saved))).toEqual({ ok: true, changes: {} });
+  });
+
+  it("refuses a service twice (ignoring case), too many services and a name over 80 characters", () => {
+    const read = (services: string) => readBusinessForm(profile(), { ...toBusinessForm(profile()), services });
+    expect(read("Repairs\nrepairs")).toMatchObject({ ok: false, errors: { services: expect.any(String) } });
+    expect(read(Array.from({ length: 21 }, (_, i) => `Service ${i}`).join("\n"))).toMatchObject({ ok: false });
+    expect(read("x".repeat(81))).toMatchObject({ ok: false });
+    expect(read(Array.from({ length: 20 }, (_, i) => `Service ${i}`).join("\n"))).toMatchObject({ ok: true });
+  });
+
+  it("points a validation issue at the field", () => {
+    expect(fieldFromIssuePath("changes.description")).toBe("description");
+    expect(fieldFromIssuePath("changes.services.0")).toBe("services");
   });
 });
 
