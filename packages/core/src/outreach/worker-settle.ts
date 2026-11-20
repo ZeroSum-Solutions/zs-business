@@ -1,7 +1,7 @@
 // Settling a send attempt (outreach-sequencer.md OS-15, OS-16). `markSent` is the one place an accepted or recovered send
 // advances its prospect's schedule (OS-11); the probe finds a message whose answer was lost by its `X-Zs-Ref` header.
 import type { Transaction } from "@zs/db";
-import { addBusinessDays } from "./schedule.js";
+import { addBusinessDays, nextSendDay } from "./schedule.js";
 import { errorCode, stopProspect, type Box, type Ctx } from "./worker-kit.js";
 
 export interface SendRow {
@@ -15,7 +15,7 @@ export interface SendRow {
 
 /**
  * Marks an open attempt `sent` and moves its prospect on: the next step is due `delay` business days after the send's
- * local date, or the prospect is `completed` after the last step. A prospect stopped meanwhile keeps its status.
+ * local date (moved to the next send day when that is a holiday, OS-11), or the prospect is `completed` after the last step. A prospect stopped meanwhile keeps its status.
  */
 export async function markSent(
   tx: Transaction, ctx: Ctx, box: Box, send: SendRow, result: { messageId: string; threadId: string; rfcMessageId: string | null },
@@ -38,7 +38,7 @@ export async function markSent(
     await tx.query(
       `UPDATE outreach_prospects SET next_step=$3, next_due_on=$4::date, updated_at=$5
         WHERE tenant_id=$1 AND id=$2 AND status='active' AND next_step=$6`,
-      [box.tenantId, send.prospect_id, next.step_number, addBusinessDays(send.local_send_date, next.delay_business_days), at, send.step_number]);
+      [box.tenantId, send.prospect_id, next.step_number, nextSendDay(addBusinessDays(send.local_send_date, next.delay_business_days)), at, send.step_number]);
   } else {
     await tx.query(
       `UPDATE outreach_prospects SET status='completed', next_step=NULL, next_due_on=NULL, updated_at=$3
