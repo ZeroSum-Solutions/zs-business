@@ -498,6 +498,8 @@ describe("links that race (PL-17)", () => {
     const held = heldLink(first, shop);
     await held.ready;
     const racing = link(second, shop);
+    // Mark the rejection handled now; it can land before the assertion below is attached.
+    racing.catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 150));
     held.release();
     await held.done;
@@ -511,6 +513,8 @@ describe("links that race (PL-17)", () => {
     const held = heldLink(tenantId, newShop());
     await held.ready;
     const racing = session.createTopUp({ amount: 2_500 }, `topup-${randomUUID()}`);
+    // Mark the rejection handled now; it can land before the assertion below is attached.
+    racing.catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 150));
     held.release();
     await held.done;
@@ -523,6 +527,8 @@ describe("links that race (PL-17)", () => {
     const held = heldLink(tenantId.toUpperCase(), newShop());
     await held.ready;
     const racing = session.createTopUp({ amount: 2_500 }, `topup-${randomUUID()}`);
+    // Mark the rejection handled now; it can land before the assertion below is attached.
+    racing.catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 150));
     held.release();
     await held.done;
