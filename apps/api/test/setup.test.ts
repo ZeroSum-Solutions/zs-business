@@ -286,4 +286,16 @@ describe("POST /v1/setup/booking-pages/:id/published (IT-11, acceptance 5)", () 
     expect((await setPublished(owner, "not-a-page", true)).status).toBe(404);
     expect((await call(h.app, "GET", path)).status).toBe(404);
   });
+
+  it("answers a missing Idempotency-Key with a 400 that names the header and says what to send", async () => {
+    const { owner } = await freshTenant("Halden Keys");
+    const { bookingPageId } = applyTemplateResponseSchema.parse((await apply(owner, "fitness")).body).result;
+    const response = await call(h.app, "POST", `/v1/setup/booking-pages/${bookingPageId}/published`, { token: owner.token, body: { published: true } });
+    expect(response.status).toBe(400);
+    const error = errorOf(response.body);
+    expect(error.code).toBe("ValidationFailed");
+    expect(error.message).toBe("Invalid request");
+    expect(error.details).toEqual({ issues: [{ path: "", message: "Idempotency-Key header is required. Send a unique value, such as a UUID, with each write." }] });
+    expect(JSON.stringify(response.body)).not.toContain("received undefined");
+  });
 });

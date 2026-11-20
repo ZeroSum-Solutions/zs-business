@@ -24,7 +24,7 @@ import { useApi } from "@/lib/api/react";
 import { useIntentKey } from "@/lib/intent-key";
 import { useAgentActorId, useDisplayZone, useKeys, useResources, useThread, useThreads } from "@/lib/queries";
 import { resourceLabel } from "@/lib/resources";
-import { APPROVE_REPLIES, useCan } from "@/lib/session";
+import { APPROVE_REPLIES, useCan, useSession } from "@/lib/session";
 import { formatDay, formatTime, zonedDateKey } from "@/lib/time";
 import { cn, formatPhone, relativeTime } from "@/lib/utils";
 import { Avatar } from "@/components/ui/avatar";
@@ -45,8 +45,13 @@ export const REPLY_STATUS: Record<Exclude<ReplyStatus, "discarded">, { label: st
 /** The follow-up agent's drafts carry its actor ID and no email (agents.md G-1, G-6). */
 export const AGENT_AUTHOR = "the follow-up agent";
 
-/** Who drafted or approved a reply: a member's email, the follow-up agent, or someone no longer on the team. */
-export function actorName(actor: ReplyRecord["draftedBy"] | null, agentId: string | null = null): string {
+/**
+ * Who drafted or approved a reply: "you" for the signed-in member, another member's email, the
+ * follow-up agent, or someone no longer on the team. A person's own email is never shown back to
+ * them as an author name.
+ */
+export function actorName(actor: ReplyRecord["draftedBy"] | null, agentId: string | null = null, viewerId: string | null = null): string {
+  if (actor && viewerId !== null && actor.userId === viewerId) return "you";
   if (actor?.email) return actor.email;
   if (actor && agentId !== null && actor.userId === agentId) return AGENT_AUTHOR;
   return "a former team member";
@@ -181,7 +186,7 @@ function RequestBubble({ entry, zone, resources, now }: { entry: RequestEntry; z
   );
 }
 
-export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: ReplyRecord; zone: string; agentId?: string | null; children?: ReactNode }) {
+export function ReplyBubble({ reply, zone, agentId = null, viewerId = null, children }: { reply: ReplyRecord; zone: string; agentId?: string | null; viewerId?: string | null; children?: ReactNode }) {
   const status = reply.status === "discarded" ? null : REPLY_STATUS[reply.status];
   const byAgent = agentId !== null && reply.draftedBy.userId === agentId;
   return (
@@ -198,8 +203,8 @@ export function ReplyBubble({ reply, zone, agentId = null, children }: { reply: 
         <p className="break-words whitespace-pre-wrap">{reply.body}</p>
       </div>
       <p className="mt-1.5 text-right text-xs font-semibold text-meta">
-        Drafted by {actorName(reply.draftedBy, agentId)}, <When instant={reply.createdAt} zone={zone} />
-        {reply.approvedAt ? <><br />Approved by {actorName(reply.approvedBy)}, <When instant={reply.approvedAt} zone={zone} /></> : null}
+        Drafted by {actorName(reply.draftedBy, agentId, viewerId)}, <When instant={reply.createdAt} zone={zone} />
+        {reply.approvedAt ? <><br />Approved by {actorName(reply.approvedBy, agentId, viewerId)}, <When instant={reply.approvedAt} zone={zone} /></> : null}
         {reply.settledAt ? <><br />{reply.status === "failed" ? "Delivery failed" : "Delivered"} <When instant={reply.settledAt} zone={zone} /></> : null}
       </p>
       {children}
@@ -218,7 +223,7 @@ const STEP_OUTCOME: Partial<Record<ReplyStatus, string>> = { approved: "It is qu
  * from the reload may be discarded or older than the latest 200 entries (I-3), so the
  * conflict's own `status` (I-6, I-7) says which.
  */
-export function stepNotice(error: unknown, thread: Pick<ThreadDetail, "entries"> | undefined, replyId: string, agentId: string | null): { tone: "info" | "danger"; message: string } {
+export function stepNotice(error: unknown, thread: Pick<ThreadDetail, "entries"> | undefined, replyId: string, agentId: string | null, viewerId: string | null = null): { tone: "info" | "danger"; message: string } {
   const message = isApiError(error) ? error.message : "Something went wrong. Try again.";
   if (!isApiError(error, "conflict")) return { tone: "danger", message };
   if (error.reason === "not_draft" && thread) {
@@ -229,7 +234,7 @@ export function stepNotice(error: unknown, thread: Pick<ThreadDetail, "entries">
       const outcome = typeof status === "string" ? STEP_OUTCOME[status as ReplyStatus] : undefined;
       if (outcome) return { tone: "info", message: `Someone already approved this draft. ${outcome}` };
     } else if (reply.type === "reply" && reply.reply.status !== "draft") {
-      const by = `Already approved by ${actorName(reply.reply.approvedBy, agentId)}`;
+      const by = `Already approved by ${actorName(reply.reply.approvedBy, agentId, viewerId)}`;
       return { tone: "info", message: `${by}. ${STEP_OUTCOME[reply.reply.status] ?? STEP_OUTCOME.approved}` };
     }
   }
@@ -263,6 +268,8 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
   const canApprove = useCan(APPROVE_REPLIES);
   const canDraft = useCan("inbox.drafts");
   const agentId = useAgentActorId();
+  const { session } = useSession();
+  const viewerId = session.status === "signed_in" ? session.userId : null;
   const intents = useIntentKey();
   const now = useNowMinute() ?? Date.now();
   const messages = useRef<HTMLOListElement>(null);
@@ -293,7 +300,7 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
     else messages.current?.querySelector<HTMLElement>(`[data-reply-id="${target.replyId}"]`)?.focus();
   }, [landing, thread.entries]);
 
-  const notice = step.isError ? stepNotice(step.error, thread, step.variables.replyId, agentId) : null;
+  const notice = step.isError ? stepNotice(step.error, thread, step.variables.replyId, agentId, viewerId) : null;
   const noEmailRecord = thread.email === null && thread.contactId ? `/customers/${thread.contactId}` : null;
   return (
     <>
@@ -314,7 +321,7 @@ function ThreadEntries({ thread, zone }: { thread: ThreadDetail; zone: string })
         {thread.entries.map((entry) => entry.type === "request" ? (
           <RequestBubble key={`r-${entry.id}`} entry={entry} zone={zone} resources={resources.data} now={now} />
         ) : (
-          <ReplyBubble key={`m-${entry.reply.id}`} reply={entry.reply} zone={zone} agentId={agentId}>
+          <ReplyBubble key={`m-${entry.reply.id}`} reply={entry.reply} zone={zone} agentId={agentId} viewerId={viewerId}>
             {entry.reply.status === "draft" ? (
               <DraftActions
                 reply={entry.reply}

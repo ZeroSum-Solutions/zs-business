@@ -317,7 +317,9 @@ A page is `{ items, limit, offset, nextOffset, nextCursor }`. Pass `nextCursor` 
 it while you page are neither repeated nor skipped, which `offset` cannot promise. A cursor
 belongs to one list and sort; it is not combined with `offset`.
 
-Every `POST` and `DELETE` needs an `Idempotency-Key` header (1-200 characters). Repeating a request with
+Every `POST` and `DELETE` needs an `Idempotency-Key` header (1-200 characters). Without one the answer is 400
+`ValidationFailed` and `details.issues[0].message` says "Idempotency-Key header is required. Send a unique value,
+such as a UUID, with each write." Repeating a request with
 the same key returns the stored result with the original status; reusing a key with a
 different body, or on another endpoint, is 409 `idempotency_key_reused`. Keys are per tenant.
 Target IDs derive from the tenant and the key.

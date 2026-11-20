@@ -25,7 +25,10 @@ const idSchema = z.uuid().toLowerCase();
  * member key with one of them could take the server's key first and turn its run into a conflict.
  */
 export const SERVER_IDEMPOTENCY_PREFIXES = Object.freeze(["approval:", "public:", "unsubscribe:", "sms-inbound:", "sms-status:", "email-feedback:", "inbox:", "activepieces:", "oauth-google:", "agent:", "transcript:", "image-job:", "enrichment:", "twilio-voice:", "document-intake:", "connect:", "template:", "outreach:", "manage:", "confirm:"] as const);
-export const idempotencyKeySchema = z.string().min(1).max(200)
+export const idempotencyKeySchema = z
+  .string({ error: "Idempotency-Key header is required. Send a unique value, such as a UUID, with each write." })
+  .min(1, "Idempotency-Key must not be empty.")
+  .max(200, "Idempotency-Key is at most 200 characters.")
   .refine(isPostgresText, "Text is not valid in Postgres")
   .refine((key) => !SERVER_IDEMPOTENCY_PREFIXES.some((prefix) => key.toLowerCase().startsWith(prefix)),
     "Idempotency-Key uses a prefix the server reserves");
