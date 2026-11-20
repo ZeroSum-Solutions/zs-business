@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { billingNotice, featureLines, grantSummary, PLAN_BADGE, planDateLine, PlanView, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
+import { billingNotice, featureLines, grantSummary, PLAN_BADGE, planDateLine, PlanView, planFeaturesFresh, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
 import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
 import { PLAN_CATALOG, PLAN_FEATURE_OFF_REASONS, planFeatures, type BillingPlan, type BusinessProfile } from "@zs/contracts";
@@ -104,6 +104,13 @@ describe("plan", () => {
     const cached = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, plan({ features: live })));
     expect(cached).not.toContain("Appointment reminders");
     expect(cached).not.toContain("Review requests");
+    // A read after a good one that fails or waits offline leaves an answer of unknown age: it names nothing either.
+    const read = { isFetchedAfterMount: true, fetchStatus: "idle" as const, isRefetchError: false };
+    expect(planFeaturesFresh(read)).toBe(true);
+    expect(planFeaturesFresh({ ...read, fetchStatus: "fetching" })).toBe(true);
+    expect(planFeaturesFresh({ ...read, fetchStatus: "paused" })).toBe(false);
+    expect(planFeaturesFresh({ ...read, isRefetchError: true })).toBe(false);
+    expect(planFeaturesFresh({ ...read, isFetchedAfterMount: false, fetchStatus: "fetching" })).toBe(false);
     // A current answer (read in this visit) names them.
     const current = { updatedAt: Date.now() + 60_000 };
     const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, plan({ features: live }), current));

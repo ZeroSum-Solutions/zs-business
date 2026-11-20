@@ -685,11 +685,13 @@ list of what is live:
   slot for the follow-up and templated runners, 30 minutes or more for delivery), so the page can still say
   "included" for that long. The tenant's own switches, support's pause, the budget, quiet hours and approval show at
   once; only a deploy-level off is bounded by the window.
-- The delivery window assumes the delivery cron runs at least every 15 minutes (the example is `*/5 * * * *`). A
-  slower cron reads `not_running` between runs.
+- The windows assume the crons run as often as their windows say. Delivery: at least every 15 minutes (the example is
+  `*/5 * * * *`). Follow-up and templated: at least once per slot (`FOLLOWUP_SLOT_MINUTES`, default 60, so the hourly
+  example is right for the default; with a 5-minute slot an hourly cron reads `not_running` between runs). The runner
+  does not see its own cron schedule, so a slower cron is a deploy mistake the page shows as `not_running`.
 - The `templated` beat comes from the same slot run as the follow-up agent, so it proves that the scheduled run
   finished, not that every due template was serviced in it.
 - The budget is read as "zero or used up". A positive balance too small for one model call still reads `included`
   until a run is refused for it.
-- `heartbeat` writes are single-flight per runner and capped at 2 s on the runner's side; a write that times out
-  can still land afterwards. Both cases only move a beat later, never earlier (`GREATEST`).
+- Heartbeat writes are single-flight per runner and capped at 2 s on the runner's side. A write that times out can
+  still land afterwards, so its claim holds for the minute. A late write only moves a beat later (`GREATEST`).

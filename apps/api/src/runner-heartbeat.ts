@@ -46,10 +46,12 @@ export function createRunnerHeartbeats(deps: {
       const due = beats.filter((entry) => now - (last.get(entry.runner) ?? Number.NEGATIVE_INFINITY) >= minGap);
       if (due.length === 0) return;
       // Claim the slot before the write starts: a second call for the same runner while this one is in flight finds
-      // it not due, so one runner never has two writes pending. A failed write gives the claim back.
+      // it not due, so one runner never has two writes pending. A write that fails gives the claim back; one that
+      // only outlasts the cap keeps it for the minute, since it may still land.
       const before = new Map(due.map((entry) => [entry.runner, last.get(entry.runner)] as const));
       for (const entry of due) last.set(entry.runner, now);
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
       try {
         await Promise.race([
           deps.service(async (tx: Transaction) => {
@@ -61,10 +63,10 @@ export function createRunnerHeartbeats(deps: {
                  beat_at = GREATEST(runner_heartbeats.beat_at, EXCLUDED.beat_at), fresh_for_seconds = EXCLUDED.fresh_for_seconds`,
               [due.map((entry) => entry.runner), due.map((entry) => entry.freshForSeconds)]);
           }),
-          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("heartbeat write timed out")), cap); }),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => { timedOut = true; reject(new Error("heartbeat write timed out")); }, cap); }),
         ]);
       } catch (error) {
-        for (const [runner, previous] of before) { if (previous === undefined) last.delete(runner); else last.set(runner, previous); }
+        if (!timedOut) for (const [runner, previous] of before) { if (previous === undefined) last.delete(runner); else last.set(runner, previous); }
         // The run itself finished; a missing beat only makes the plan page say "not running" until the next one.
         try { (deps.report ?? ((message, problem) => console.error(message, problem)))("Runner heartbeat not recorded", error); } catch { /* the log is the last resort */ }
       } finally {

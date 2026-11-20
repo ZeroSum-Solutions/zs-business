@@ -95,6 +95,16 @@ describe("createRunnerHeartbeats", () => {
     const beats = createRunnerHeartbeats({ service: hung, clock: time.clock, report, capMs: 20 });
     await expect(beats.beat(BEATS)).resolves.toBeUndefined();
     expect(report).toHaveBeenCalledTimes(1);
+    // The write may still land, so the claim holds for the minute: a second call starts no second write.
+    let calls = 0;
+    const counted = (() => { calls += 1; return new Promise(() => undefined); }) as unknown as typeof service;
+    const again = createRunnerHeartbeats({ service: counted, clock: time.clock, report, capMs: 20 });
+    await again.beat(BEATS);
+    await again.beat(BEATS);
+    expect(calls).toBe(1);
+    time.advance(60_000);
+    await again.beat(BEATS);
+    expect(calls).toBe(2);
   });
 
   it("sizes the follow-up window to two slots, or two loops of a slower worker", () => {

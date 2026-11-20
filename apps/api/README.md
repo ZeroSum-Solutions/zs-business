@@ -654,7 +654,8 @@ window the runner wrote. Windows: `followup` and `templated`, the larger of twic
 interval (the follow-up variables above); `delivery_email` and `delivery_sms`, the larger of 30 minutes and four times
 the delivery interval. `delivery_sms` beats only with Twilio set, `templated` only with the templated agent on. Apply
 `20261120100000_runner_heartbeats.sql` before deploying the API and the runners. Runners write one beat at a time per
-runner (a second call while one is pending is dropped). The delivery window assumes a cron at least every 15 minutes. `GET /v1/billing/plan` adds `features` only for
+runner (a second call while one is pending is dropped). The delivery window assumes a cron at least every 15 minutes; the follow-up and templated window assumes one run per slot
+(`FOLLOWUP_CRON_SCHEDULE` no slower than `FOLLOWUP_SLOT_MINUTES`). `GET /v1/billing/plan` adds `features` only for
 `?features=1`, which the dashboard sends, so deploy the dashboard before the API.
 
 `pnpm followup:global-switch off "reason"` stops new drafts for every tenant at once (G-3);

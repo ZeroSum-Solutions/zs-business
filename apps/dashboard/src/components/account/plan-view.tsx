@@ -139,6 +139,11 @@ function checkoutMessage(error: unknown): string | undefined {
   return undefined;
 }
 
+/** PL-26: whether the plan answer the page holds may name features (see `PlanView`). */
+export function planFeaturesFresh(read: { isFetchedAfterMount: boolean; fetchStatus: "fetching" | "paused" | "idle"; isRefetchError: boolean }): boolean {
+  return (read.isFetchedAfterMount || read.fetchStatus === "idle") && read.fetchStatus !== "paused" && !read.isRefetchError;
+}
+
 export function PlanView() {
   const api = useApi();
   const [returned, setReturned] = useState<"success" | "cancelled" | "shopify" | null>(null);
@@ -160,8 +165,10 @@ export function PlanView() {
   const plan = usePlan({ poll: returned === "success", watchUntil });
   const holds = plan.data ? HOLDS_PLAN.has(plan.data.status) : false;
   // PL-26: a switch can change on the Agents page after this answer was cached. While the page reads the plan
-  // again (or waits offline to), the cached answer names no feature: an old "included" never outlives its switch.
-  const featuresFresh = plan.isFetchedAfterMount || plan.fetchStatus === "idle";
+  // again the cached answer names no feature, and it names none once a later read fails or waits offline: an old
+  // "included" never outlives its switch. A read that is under way after a good one keeps the answer that is at most a
+  // refresh old.
+  const featuresFresh = planFeaturesFresh(plan);
   const shown = (features: readonly PlanFeature[] | undefined) => (featuresFresh ? features : undefined);
   // The Shopify note lasts while the page still reads the plan and nothing has changed yet.
   const [watching, setWatching] = useState(false);

@@ -74,6 +74,8 @@ describe("demo plan features", () => {
     const current = await settings(api, "appointment_reminder");
     await api.updateAgentKindSettings("appointment_reminder", { ...current, maxCostMicrosPerDay: 0 }, key());
     expect(await states(api)).toMatchObject({ inquiry_followup: "included", appointment_reminder: "included" });
+    // The demo runner agrees with the page: a run for the zero-budget kind is not stopped by the budget.
+    expect((await api.startKindRun("appointment_reminder", key())).stopReason).toBeNull();
   });
 
   it("keeps missed-call text back off: the demo has no voice number", async () => {

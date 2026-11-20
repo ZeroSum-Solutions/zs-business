@@ -188,7 +188,7 @@ export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi
     if (ctx.globalKilled()) return "global_killed";
     if (!state.settings.enabled) return "disabled";
     if (inQuietHours(state.settings, now)) return "quiet_hours";
-    if (costSpent(state, now) >= state.settings.maxCostMicrosPerDay) return "cost_cap";
+    // A message kind makes no model call, so its budget never stops a run (agents.md G-15, as `agentKindStatus`).
     return null;
   }
 
