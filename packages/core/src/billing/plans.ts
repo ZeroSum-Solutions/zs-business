@@ -239,6 +239,9 @@ const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Re
   features: planFeatures(entry.limits, switches),
 });
 
+/** The plan features that are agent kinds: their switch is the `agent_settings` row. */
+const AGENT_FEATURE_KINDS = PLAN_FEATURE_KINDS.filter((kind) => kind !== "missed_call_textback");
+
 /**
  * PL-26: where each plan-page feature's agent switch stands for the tenant. These are the rows and the
  * global switch the runners gate on (agents.md G-3), applied in the same order: support's pause, then the
@@ -247,21 +250,24 @@ const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Re
  * settings write and name a switch that was never on.
  */
 export async function planFeatureSwitches(tx: Transaction, tenantId: string): Promise<Record<PlanFeatureKind, PlanFeatureSwitch>> {
-  const rows = (await tx.query<{ killed: boolean; agent_kind: PlanFeatureKind | null; enabled: boolean | null; killed_at: Date | null }>(
-    `SELECT g.killed, s.agent_kind, s.enabled, s.killed_at
+  const rows = (await tx.query<{ killed: boolean; agent_kind: PlanFeatureKind | null; enabled: boolean | null; killed_at: Date | null; textback_enabled: boolean | null }>(
+    `SELECT g.killed, s.agent_kind, s.enabled, s.killed_at, v.textback_enabled
        FROM agent_global_switch g
        LEFT JOIN agent_settings s ON s.tenant_id=$1 AND s.agent_kind = ANY($2::text[])
+       LEFT JOIN voice_numbers v ON v.tenant_id=$1
       WHERE g.id`,
-    [tenantId, [...PLAN_FEATURE_KINDS]],
+    [tenantId, AGENT_FEATURE_KINDS],
   )).rows;
   // A missing global row reads as paused: the migration always writes it, so this fails closed (as readGlobalKilled does).
   const paused = rows[0]?.killed ?? true;
   const switches = {} as Record<PlanFeatureKind, PlanFeatureSwitch>;
-  for (const kind of PLAN_FEATURE_KINDS) {
+  for (const kind of AGENT_FEATURE_KINDS) {
     const row = rows.find((candidate) => candidate.agent_kind === kind);
     // No row is the default: not enabled, not killed (controlsFromRow).
     switches[kind] = planFeatureSwitch({ paused, enabled: row?.enabled ?? false, killed: row?.killed_at != null });
   }
+  // Missed-call text back is no agent kind: the voice webhook reads the number's own switch, and support's agent pause does not reach it.
+  switches.missed_call_textback = planFeatureSwitch({ paused: false, enabled: rows[0]?.textback_enabled ?? false, killed: false });
   return switches;
 }
 

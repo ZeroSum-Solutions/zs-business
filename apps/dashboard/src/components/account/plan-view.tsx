@@ -74,7 +74,7 @@ function limitLines(limits: NonNullable<BillingPlan["limits"]>): string[] {
 }
 
 /** Why a feature in the plan is not running, in words (plans.md PL-26). */
-const OFF_WORDS = { disabled: "off until you turn it on", stopped: "stopped", paused: "paused by support", read_only: "paused until the plan is paid", coming: "coming soon" } as const;
+const OFF_WORDS = { disabled: "off until you turn it on", stopped: "stopped", paused: "paused by support", read_only: "paused until the plan is paid" } as const;
 
 /**
  * PL-26: one line per feature the plan holds. The server derives them from the agent switches the runners
@@ -149,6 +149,10 @@ export function PlanView() {
   // keeps reading for a while instead of stopping at the first settled answer (PL-18).
   const plan = usePlan({ poll: returned === "success", watchUntil });
   const holds = plan.data ? HOLDS_PLAN.has(plan.data.status) : false;
+  // PL-26: a switch can change on the Agents page after this answer was cached. While the page reads the plan
+  // again (or waits offline to), the cached answer names no feature: an old "included" never outlives its switch.
+  const featuresFresh = plan.isFetchedAfterMount || plan.fetchStatus === "idle";
+  const shown = (features: readonly PlanFeature[] | undefined) => (featuresFresh ? features : undefined);
   // The Shopify note lasts while the page still reads the plan and nothing has changed yet.
   const [watching, setWatching] = useState(false);
   useEffect(() => {
@@ -225,7 +229,7 @@ export function PlanView() {
                       {granted.endLine ? <p className="mt-2 text-sm text-muted">{granted.endLine}</p> : null}
                     </div>
                   </CardHeader>
-                  {data.limits ? <PlanLines limits={data.limits} features={data.features} /> : null}
+                  {data.limits ? <PlanLines limits={data.limits} features={shown(data.features)} /> : null}
                 </Card>
               </div>
             ) : current && holds ? (
@@ -247,7 +251,7 @@ export function PlanView() {
                       {planDateLine(data, zone) ? <p className="text-sm text-muted">{planDateLine(data, zone)}</p> : null}
                     </div>
                   </CardHeader>
-                  <PlanLines limits={data.limits ?? current.limits} features={data.limits ? data.features : current.features} />
+                  <PlanLines limits={data.limits ?? current.limits} features={shown(data.limits ? data.features : current.features)} />
                   {data.extraConnections > 0 ? (
                     <p className="mt-4 text-sm text-muted">Includes {data.extraConnections} extra {data.extraConnections === 1 ? "connection" : "connections"} at {price(data.extraConnectionPrice)} a month each.</p>
                   ) : null}
@@ -306,7 +310,7 @@ export function PlanView() {
                             {offer.foundingPrices ? <p className="text-xs text-muted">List price {price(offer.prices[interval])}</p> : null}
                           </div>
                         </CardHeader>
-                        <PlanLines limits={offer.limits} features={offer.features} className="mb-4 space-y-2" />
+                        <PlanLines limits={offer.limits} features={shown(offer.features)} className="mb-4 space-y-2" />
                         {shopify ? null : (
                           <Button className="w-full" onClick={() => checkout.mutate(offer.plan)} disabled={!data.checkoutEnabled || checkout.isPending}
                             aria-busy={busy} aria-describedby={data.checkoutEnabled ? undefined : "checkout-off"}>

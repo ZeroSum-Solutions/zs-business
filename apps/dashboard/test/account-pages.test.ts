@@ -74,7 +74,7 @@ describe("plan", () => {
   // plans.md PL-26: the plan page never calls a switched-off agent feature included.
   it("shows an off feature as off and a switched-on one as included (PL-26)", () => {
     const features = (...states: ("on" | "disabled" | "stopped" | "paused")[]) =>
-      planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: states[0]!, review_request: states[1]!, inquiry_followup: states[2]!, voice_receptionist: "disabled" });
+      planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: states[0]!, review_request: states[1]!, inquiry_followup: states[2]!, missed_call_textback: "disabled" });
     const live = features("on", "disabled", "stopped");
     expect(featureLines(live)).toEqual([
       { text: "Appointment reminders", on: true },
@@ -85,7 +85,13 @@ describe("plan", () => {
     // An older API sends no features: the page names none rather than guess.
     expect(featureLines(undefined)).toEqual([]);
 
-    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, plan({ features: live })));
+    // An answer cached before this visit is read again on open: until it is, the page names no feature, so a stale "included" never shows.
+    const cached = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, plan({ features: live })));
+    expect(cached).not.toContain("Appointment reminders");
+    expect(cached).not.toContain("Review requests");
+    // A current answer (read in this visit) names them.
+    const current = { updatedAt: Date.now() + 60_000 };
+    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, plan({ features: live }), current));
     expect(html).toMatch(/data-feature-state="included"[^>]*>.*?Appointment reminders<\/li>/);
     expect(html).toContain("Review requests: off until you turn it on");
     expect(html).toContain("Agents that draft with AI: stopped");
@@ -93,11 +99,10 @@ describe("plan", () => {
     expect(html).not.toMatch(/Agents that draft with AI</);
     // The choose-a-plan cards read the same switches per offer.
     const picker = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, { ...plan({ status: "none", plan: null, limits: null }),
-      catalog: base.catalog.map((offer) => ({ ...offer, features: planFeatures(offer.limits, { appointment_reminder: "on", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "on" }) })) }));
-    // Voice has no runner yet: it reads as coming, never as included, even with its switch on.
-    expect(picker).toContain("Voice and missed-call text back: coming soon");
-    expect(picker).not.toMatch(/Voice and missed-call text back<\/li>/);
-    expect(featureLines(planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", voice_receptionist: "read_only" })).every((line) => !line.on)).toBe(true);
+      catalog: base.catalog.map((offer) => ({ ...offer, features: planFeatures(offer.limits, { appointment_reminder: "on", review_request: "disabled", inquiry_followup: "disabled", missed_call_textback: "on" }) })) }, current));
+    expect(picker).toMatch(/Missed-call text back<\/li>/);
+    expect(picker).not.toContain("Missed-call text back:");
+    expect(featureLines(planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", missed_call_textback: "read_only" })).every((line) => !line.on)).toBe(true);
     expect(picker).toContain("Agents that draft with AI: off until you turn it on");
     expect(picker).not.toContain("Rule-based agents");
   });
@@ -105,7 +110,7 @@ describe("plan", () => {
   it("demo mode reads its feature switches from the demo agents (PL-26)", async () => {
     const off = await createDemoBilling().getBillingPlan();
     expect(off.features!.map((feature) => feature.state)).toEqual(["off", "off", "off"]);
-    const allOn = await createDemoBilling({ switches: async () => ({ appointment_reminder: "on", review_request: "on", inquiry_followup: "on", voice_receptionist: "on" }) }).getBillingPlan();
+    const allOn = await createDemoBilling({ switches: async () => ({ appointment_reminder: "on", review_request: "on", inquiry_followup: "on", missed_call_textback: "on" }) }).getBillingPlan();
     expect(allOn.features!.map((feature) => feature.state)).toEqual(["included", "included", "included"]);
   });
 

@@ -81,8 +81,8 @@ describe("billingPlanSchema grant (plans.md PL-22)", () => {
 
 // plans.md PL-26: a plan names a feature as included only while its agent switch is on.
 describe("planFeatures (PL-26)", () => {
-  const allOn = { appointment_reminder: "on", review_request: "on", inquiry_followup: "on", voice_receptionist: "on" } as const;
-  const allOff = { appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "disabled" } as const;
+  const allOn = { appointment_reminder: "on", review_request: "on", inquiry_followup: "on", missed_call_textback: "on" } as const;
+  const allOff = { appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", missed_call_textback: "disabled" } as const;
 
   it("lists a switched-on feature as included and a switched-off one as off with its reason", () => {
     const features = planFeatures(PLAN_CATALOG.studio.limits, { ...allOn, review_request: "disabled", inquiry_followup: "stopped", appointment_reminder: "paused" });
@@ -95,10 +95,8 @@ describe("planFeatures (PL-26)", () => {
     expect(planFeatures(PLAN_CATALOG.studio.limits, allOff).some((feature) => feature.state === "included")).toBe(false);
   });
 
-  it("never lists a kind without a runner as included, and lets a read-only plan override the switches", () => {
-    const voice = planFeatures(PLAN_CATALOG.pro.limits, allOn).find((feature) => feature.kind === "voice_receptionist");
-    expect(voice).toEqual({ kind: "voice_receptionist", label: "Voice and missed-call text back", state: "off", offReason: "coming" });
-    const readOnly = planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", voice_receptionist: "read_only" });
+  it("lets a read-only plan override the switches", () => {
+    const readOnly = planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", missed_call_textback: "read_only" });
     expect(readOnly.every((feature) => feature.state === "off" && feature.offReason === "read_only")).toBe(true);
   });
 
@@ -106,11 +104,11 @@ describe("planFeatures (PL-26)", () => {
     const kinds = (plan: HubPlan) => planFeatures(PLAN_CATALOG[plan].limits, allOn).map((feature) => feature.kind);
     expect(kinds("solo")).toEqual(["appointment_reminder", "review_request"]);
     expect(kinds("studio")).toEqual(["appointment_reminder", "review_request", "inquiry_followup"]);
-    expect(kinds("pro")).toEqual(["appointment_reminder", "review_request", "inquiry_followup", "voice_receptionist"]);
+    expect(kinds("pro")).toEqual(["appointment_reminder", "review_request", "inquiry_followup", "missed_call_textback"]);
     // A comped tenant has no limits and holds every feature.
     expect(planFeatures(null, allOn)).toHaveLength(PLAN_FEATURES.length);
     // A change to the limits changes the copy: the AI line follows `modelAgents`, the voice line `voice`.
-    expect(planFeatures({ ...PLAN_CATALOG.pro.limits, voice: false }, allOn).map((feature) => feature.kind)).not.toContain("voice_receptionist");
+    expect(planFeatures({ ...PLAN_CATALOG.pro.limits, voice: false }, allOn).map((feature) => feature.kind)).not.toContain("missed_call_textback");
     expect(planFeatures({ ...PLAN_CATALOG.pro.limits, modelAgents: false }, allOn).map((feature) => feature.kind)).not.toContain("inquiry_followup");
   });
 
@@ -122,7 +120,7 @@ describe("planFeatures (PL-26)", () => {
   });
 
   it("accepts only the four feature kinds", () => {
-    expect(planFeatureSchema.safeParse({ kind: "voice_receptionist", label: "x", state: "off", offReason: "disabled" }).success).toBe(true);
+    expect(planFeatureSchema.safeParse({ kind: "missed_call_textback", label: "x", state: "off", offReason: "disabled" }).success).toBe(true);
     expect(planFeatureSchema.safeParse({ kind: "document_intake", label: "x", state: "included", offReason: null }).success).toBe(false);
   });
 });

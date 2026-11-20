@@ -488,7 +488,7 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
         agents.getFollowUpStatus(), templates.getAgentKindStatus("appointment_reminder"), templates.getAgentKindStatus("review_request")]);
       const of = (status: { globalKilled: boolean; settings: { enabled: boolean }; killed: unknown }) =>
         planFeatureSwitch({ paused: status.globalKilled, enabled: status.settings.enabled, killed: status.killed !== null });
-      return { appointment_reminder: of(reminder), review_request: of(review), inquiry_followup: of(followUp), voice_receptionist: "disabled" };
+      return { appointment_reminder: of(reminder), review_request: of(review), inquiry_followup: of(followUp), missed_call_textback: "disabled" };
     },
   });
 

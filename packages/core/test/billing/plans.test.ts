@@ -864,7 +864,7 @@ describe("plan features follow the agent switches (PL-26)", () => {
     expect(before.features!.every((feature) => feature.state === "off")).toBe(true);
     // Studio holds no voice, so voice is not named at all; Pro names it, still off.
     expect(featureStates({ features: before.catalog.find((offer) => offer.plan === "pro")!.features })).toEqual({
-      appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "coming" });
+      appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", missed_call_textback: "disabled" });
     expect(before.catalog.find((offer) => offer.plan === "solo")!.features!.map((feature) => feature.kind)).toEqual(["appointment_reminder", "review_request"]);
 
     await setAgent(tenantId, "appointment_reminder", { enabled: true });
@@ -886,15 +886,27 @@ describe("plan features follow the agent switches (PL-26)", () => {
     }
   });
 
-  it("never calls voice included while no runner reads its switch, even with the row enabled", async () => {
+  it("reads missed-call text back from the number's own switch, not from an agent row", async () => {
     const tenantId = await b.tenant();
     await subscribe(tenantId, { plan: "pro" });
     await b.settle();
     await worker().runOnce();
-    await setAgent(tenantId, "voice_receptionist", { enabled: true });
-    const view = await (await planSession(tenantId)).getBillingPlan();
-    expect(featureStates(view)).toMatchObject({ voice_receptionist: "coming" });
-    expect(featureStates({ features: view.catalog.find((offer) => offer.plan === "pro")!.features })).toMatchObject({ voice_receptionist: "coming" });
+    const state = async () => featureStates(await (await planSession(tenantId)).getBillingPlan()).missed_call_textback;
+    expect(await state()).toBe("disabled");
+    const at = b.h.clock.now();
+    const phone = `+1555${String(Math.floor(Math.random() * 9_000_000) + 1_000_000)}`;
+    await b.h.service(async (tx) => {
+      await tx.query("INSERT INTO sms_numbers (tenant_id, phone_number, created_at, updated_at) VALUES ($1,$2,$3,$3)", [tenantId, phone, at]);
+      await tx.query("INSERT INTO voice_textback_disclosures (tenant_id, version, text, created_at) VALUES ($1,'v1','We may text you a booking link.',$2)", [tenantId, at]);
+      await tx.query(`INSERT INTO voice_numbers (tenant_id, phone_number, forward_to_e164, textback_enabled, booking_url, disclosure_version, created_at, updated_at)
+                      VALUES ($1,$2,'+15550000001',false,'https://example.com/book','v1',$3,$3)`, [tenantId, phone, at]);
+    });
+    expect(await state()).toBe("disabled");
+    await b.h.service((tx) => tx.query("UPDATE voice_numbers SET textback_enabled=true WHERE tenant_id=$1", [tenantId]));
+    expect(await state()).toBe("included");
+
+    await b.h.service((tx) => tx.query("UPDATE voice_numbers SET textback_enabled=false WHERE tenant_id=$1", [tenantId]));
+    expect(await state()).toBe("disabled");
   });
 
   it("shows no feature as included once the plan is read-only, because the dispatcher refuses agent runs", async () => {

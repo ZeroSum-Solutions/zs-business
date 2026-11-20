@@ -24,7 +24,7 @@ export interface DemoBillingOptions {
 }
 
 const ALL_OFF: Record<PlanFeatureKind, PlanFeatureSwitch> = {
-  appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", voice_receptionist: "disabled",
+  appointment_reminder: "disabled", review_request: "disabled", inquiry_followup: "disabled", missed_call_textback: "disabled",
 };
 
 export function createDemoBilling(options: DemoBillingOptions = {}): BillingApi {
