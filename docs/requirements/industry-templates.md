@@ -201,7 +201,7 @@ data), and any vertical integration beyond the connections catalog (`connections
   owner check), and when the page already has the requested value, 200 with `changed: false` and
   no change. `replayed: true` is only for an Idempotency-Key replay of the same request.
   `/setup` after apply shows the toggle. The page's title and description are edited afterwards
-  with `booking.page.update` (`public-intake.md` P-17), which never touches `published`.
+  with `booking.page.update` (`public-intake.md` P-24), which never touches `published`.
 
 ## Acceptance
 

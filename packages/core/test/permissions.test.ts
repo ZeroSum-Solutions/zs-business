@@ -470,7 +470,7 @@ function operations(session: Session, actorId: string = randomUUID()): Record<st
     getSetup: { permission: null, run: () => session.getSetup() },
     applyTemplate: { permission: "business", run: () => session.applyTemplate({ templateId: "agency", timeZone: "UTC" }) },
     setBookingPagePublished: { permission: "business", run: () => session.setBookingPagePublished(tenant.pageId, { published: true }, randomUUID()) },
-    // public-intake.md P-17: the owner edits a page's title and description.
+    // public-intake.md P-24: the owner edits a page's title and description.
     updateBookingPage: { permission: "business", run: () => session.updateBookingPage(tenant.pageId, { changes: { description: randomUUID() } }, randomUUID()) },
     getFollowUpStatus: { permission: "inbox.drafts", run: () => session.getFollowUpStatus() },
     updateFollowUpSettings: { permission: "agents", run: async () => {

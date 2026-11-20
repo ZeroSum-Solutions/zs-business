@@ -6,7 +6,7 @@ export const bookingRoutes = new Hono<AppEnv>()
   .get("/slots", async (c) => c.json(await c.var.session.findSlots(c.req.query())))
   .get("/resources", async (c) => c.json({ items: await c.var.session.listResources() }))
   .get("/pages", async (c) => c.json({ items: await c.var.session.listBookingPages() }))
-  // public-intake.md P-17: an owner changes a page's title or description; only the fields named are set.
+  // public-intake.md P-24: an owner changes a page's title or description; only the fields named are set.
   .put("/pages/:id", async (c) =>
     c.json(await c.var.session.updateBookingPage(c.req.param("id"), await jsonBody(c), idempotencyKey(c))))
   .get("/bookings", async (c) => c.json(await c.var.session.listBookings(c.req.query())))

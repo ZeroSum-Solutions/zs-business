@@ -371,7 +371,7 @@ describe("booking.page.set_published (IT-11)", () => {
   });
 });
 
-describe("booking.page.update (P-17)", () => {
+describe("booking.page.update (P-24)", () => {
   const eventsFor = (tenantId: string, key: string) => fixture.service(async (tx) => (await tx.query<{ event_type: string }>(
     `SELECT o.event_type FROM outbox o JOIN actions a ON a.tenant_id=o.tenant_id AND a.id=o.action_id
       WHERE o.tenant_id=$1 AND a.idempotency_key=$2`, [tenantId, key])).rows);

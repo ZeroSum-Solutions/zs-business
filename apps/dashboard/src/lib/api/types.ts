@@ -789,7 +789,7 @@ export interface SetupApi {
   /** Owners only. `changed: false` when the page already had the value. Throws `not_found` for an unknown page. */
   setBookingPagePublished(pageId: string, published: boolean, options: WriteOptions): Promise<BookingPagePublished>;
   /**
-   * Owners only (public-intake.md P-17). Sets the title and/or description of a booking page; a
+   * Owners only (public-intake.md P-24). Sets the title and/or description of a booking page; a
    * description of null clears it. `changed: false` when the page already had every value. Throws
    * `not_found` for an unknown page and `validation` for an empty title or an over-long text.
    */

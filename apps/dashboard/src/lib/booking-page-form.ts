@@ -1,4 +1,4 @@
-// The booking page edit form (public-intake.md P-17): what an owner types becomes the `changes` a
+// The booking page edit form (public-intake.md P-24): what an owner types becomes the `changes` a
 // save sends. Pure, so the rules are tested without a screen.
 import type { BookingPageChanges, BookingPageSummary } from "@zs/contracts";
 

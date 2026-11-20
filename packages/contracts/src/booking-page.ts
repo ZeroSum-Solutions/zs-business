@@ -2,11 +2,11 @@ import { z } from "zod";
 import { actionCommandSchema, actionResultSchema, targetSchema, uuidSchema } from "./index.js";
 import { isPostgresText } from "./json.js";
 
-// Editing a booking page after it is created (docs/requirements/public-intake.md P-17). Root
+// Editing a booking page after it is created (docs/requirements/public-intake.md P-24). Root
 // re-exports this module, so shared root schemas are reached lazily, as in business.ts.
 const idSchema = z.lazy(() => uuidSchema);
 
-/** P-17: the owner action that changes a page's title or description. */
+/** P-24: the owner action that changes a page's title or description. */
 export const BOOKING_PAGE_UPDATE_ACTION = "booking.page.update";
 
 /** Postgres `char_length` counts code points, so the length rules do too. */
@@ -27,11 +27,11 @@ export const bookingPageChangesSchema = z.strictObject({
 }).partial().refine((changes) => Object.keys(changes).length > 0, "Name at least one field to change");
 export type BookingPageChanges = z.infer<typeof bookingPageChangesSchema>;
 
-/** P-17: PUT /v1/booking/pages/:id. */
+/** P-24: PUT /v1/booking/pages/:id. */
 export const updateBookingPageRequestSchema = z.strictObject({ changes: bookingPageChangesSchema });
 export type UpdateBookingPageRequest = z.infer<typeof updateBookingPageRequestSchema>;
 
-/** P-17: the page as it stands after the edit; `changed` is false when every named field already had its value. */
+/** P-24: the page as it stands after the edit; `changed` is false when every named field already had its value. */
 export const bookingPageUpdatedSchema = z.strictObject({
   pageId: idSchema,
   title: z.string(),

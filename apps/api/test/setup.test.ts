@@ -291,7 +291,7 @@ describe("POST /v1/setup/booking-pages/:id/published (IT-11, acceptance 5)", () 
   });
 });
 
-describe("PUT /v1/booking/pages/:id (P-17)", () => {
+describe("PUT /v1/booking/pages/:id (P-24)", () => {
   it("an owner edits title and description; the owner list and the public page show them; a repeat replays", async () => {
     const { tenantId, owner } = await freshTenant("Halden Studio");
     const { bookingPageId } = applyTemplateResponseSchema.parse((await apply(owner, "fitness")).body).result;

@@ -139,7 +139,7 @@ describe("demo adapter: setup", () => {
     expect(await failure(api.setBookingPagePublished(bookingPageId, true, key()))).toMatchObject({ kind: "forbidden" });
   });
 
-  it("edits a page's title and description (P-17): only the named fields, null clears, same values are no change", async () => {
+  it("edits a page's title and description (P-24): only the named fields, null clears, same values are no change", async () => {
     const api = adapter();
     const { bookingPageId } = api.applyTemplateElsewhere("jewelry");
     const title = (await api.listBookingPages()).find((page) => page.id === bookingPageId)!.title;

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createTestDatabase, createTwoTenantFixture, type TestDatabase, type TwoTenantFixture } from "../src/testing.js";
 
-// public-intake.md P-17 at the database, as the runtime role: an owner may change a booking page's
+// public-intake.md P-24 at the database, as the runtime role: an owner may change a booking page's
 // title and description and nothing else, only on the tenant's own pages.
 
 let database: TestDatabase;
@@ -25,7 +25,7 @@ afterAll(async () => { await database?.close(); });
 const pageOf = (tenantId: string) => fixture.service(async (tx) =>
   (await tx.query("SELECT title, description, published, disclosure_text, disclosure_version FROM booking_pages WHERE id=$1", [pages.get(tenantId)])).rows[0]);
 
-describe("booking page title and description (P-17)", () => {
+describe("booking page title and description (P-24)", () => {
   it("starts with no description", async () => {
     expect((await pageOf(fixture.a.tenantId)).description).toBeNull();
   });

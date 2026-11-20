@@ -108,7 +108,7 @@ function PageRow({ page }: { page: BookingPageSummary }) {
   );
 }
 
-/** P-17: the owner changes a page's title and description after it is created. */
+/** P-24: the owner changes a page's title and description after it is created. */
 function PageEditForm({ page, onDone }: { page: BookingPageSummary; onDone: () => void }) {
   const api = useApi();
   const queryClient = useQueryClient();

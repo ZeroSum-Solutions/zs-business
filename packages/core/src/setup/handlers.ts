@@ -1,5 +1,5 @@
 // Industry templates (docs/requirements/industry-templates.md IT-4, IT-5, IT-11): the apply action
-// and the booking page publish action, and the page edit action (public-intake.md P-17), through the shared dispatcher. Templates are code
+// and the booking page publish action, and the page edit action (public-intake.md P-24), through the shared dispatcher. Templates are code
 // (@zs/contracts), so the apply reads no catalog rows. Original code.
 import {
   actionCommandSchema,
@@ -197,7 +197,7 @@ export const setBookingPagePublishedHandler: ActionHandler = {
 };
 
 /**
- * P-17: sets the title and description an owner named on one page of the caller's tenant. A field
+ * P-24: sets the title and description an owner named on one page of the caller's tenant. A field
  * the page already holds is left alone, and when none differs the page is not written (`changed:
  * false`). The page row is locked first, so two edits at once apply one after the other.
  */

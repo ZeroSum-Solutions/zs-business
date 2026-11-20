@@ -1,4 +1,4 @@
--- Owner content editing (business-profile.md BP-13..BP-15, public-intake.md P-17): the owner writes what
+-- Owner content editing (business-profile.md BP-13..BP-15, public-intake.md P-24): the owner writes what
 -- the business says about itself. Two tenant tables change and no new table is added, so tenant_id, the
 -- forced RLS and the tenant_scope policies of 20261023100000 and 20261018200000 stay as they are.
 -- Writes come only from the business.profile.update and booking.page.update actions, through the dispatcher.
@@ -25,7 +25,7 @@ ALTER TABLE public.business_profiles
 -- other editable columns (the column grants add up).
 GRANT UPDATE (description, services) ON public.business_profiles TO authenticated;
 
--- P-17: an owner edits a page's title and description after it is created. Nothing else on the page is
+-- P-24: an owner edits a page's title and description after it is created. Nothing else on the page is
 -- editable here: the disclosure text and version keep their append-only history, `published` has its own
 -- grant (20261107100000), and the key, tenant and resources never change.
 GRANT UPDATE (title, description) ON public.booking_pages TO authenticated;

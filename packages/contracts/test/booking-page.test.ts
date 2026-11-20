@@ -7,7 +7,7 @@ import {
   updateBookingPageResponseSchema,
 } from "../src/index.js";
 
-// public-intake.md P-17 as contracts: the owner edit of a booking page's title and description.
+// public-intake.md P-24 as contracts: the owner edit of a booking page's title and description.
 
 const tenantId = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a70";
 const pageId = "6f1c2a9e-3b4d-4e8f-9a1b-2c3d4e5f6a71";
@@ -17,7 +17,7 @@ const issuePaths = (input: unknown) => {
 };
 const ok = (changes: unknown) => updateBookingPageRequestSchema.safeParse({ changes }).success;
 
-describe("the page edit request (P-17)", () => {
+describe("the page edit request (P-24)", () => {
   it("takes the title, the description or both, trimmed; null clears the description", () => {
     expect(updateBookingPageRequestSchema.parse({ changes: { title: "  Book a visit " } }).changes).toEqual({ title: "Book a visit" });
     expect(updateBookingPageRequestSchema.parse({ changes: { description: " Pick a time. " } }).changes).toEqual({ description: "Pick a time." });
@@ -56,7 +56,7 @@ describe("the page edit request (P-17)", () => {
   });
 });
 
-describe("the page edit command and answer (P-17)", () => {
+describe("the page edit command and answer (P-24)", () => {
   const command = {
     idempotencyKey: "k1", actionType: BOOKING_PAGE_UPDATE_ACTION, target: { tenantId, type: "booking_page", id: pageId },
     payload: { pageId, changes: { description: "Pick a time." } },

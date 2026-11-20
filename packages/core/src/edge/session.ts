@@ -370,7 +370,7 @@ export const ACTION_PERMISSIONS: Readonly<Record<string, Permission>> = Object.f
   // industry-templates.md IT-4, IT-11: only owners apply a template and take its page live.
   [TEMPLATE_APPLY_ACTION]: "business",
   [BOOKING_PAGE_SET_PUBLISHED_ACTION]: "business",
-  // public-intake.md P-17: only owners change what a booking page says.
+  // public-intake.md P-24: only owners change what a booking page says.
   [BOOKING_PAGE_UPDATE_ACTION]: "business",
   // document-intake.md DL-3, DL-13: owners upload and discard; apply is `required` in APPROVAL_POLICIES.
   "catalog.intake.upload": "publish",
@@ -1123,7 +1123,7 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
 
     /**
-     * public-intake.md P-17: an owner changes a page's title or description. Staff get 403 before any 404 or 422;
+     * public-intake.md P-24: an owner changes a page's title or description. Staff get 403 before any 404 or 422;
      * a page of another tenant, or none, is 404.
      */
     async updateBookingPage(pageId: unknown, body: unknown, key: unknown): Promise<UpdateBookingPageResponse> {

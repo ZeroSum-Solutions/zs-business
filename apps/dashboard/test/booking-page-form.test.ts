@@ -1,4 +1,4 @@
-// public-intake.md P-17: the booking page edit form turns what an owner types into the `changes` a
+// public-intake.md P-24: the booking page edit form turns what an owner types into the `changes` a
 // save sends: only what changed, an emptied description is null, a title is never empty.
 import { describe, expect, it } from "vitest";
 import { pageFieldFromIssuePath, readBookingPageForm, toBookingPageForm } from "../src/lib/booking-page-form";
