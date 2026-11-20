@@ -15,8 +15,6 @@ import {
   planCheckoutCommandSchema,
   planCheckoutSchema,
   planFeatures,
-  PLAN_FEATURE_KINDS,
-  planFeatureSwitch,
   planLookupKey,
   ValidationFailed,
   type ActionCommand,
@@ -37,6 +35,7 @@ import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
 import { parseOrFail } from "../crm/rows.js";
 import { activeGrant, isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
+import { planFeatureFacts, planFeatureSwitches } from "./plan-features.js";
 import type { StripePlansClient } from "./plan-stripe.js";
 
 /** PL-5: like top-ups, a session lives an hour and a first request may be retried for 25 minutes. */
@@ -232,44 +231,12 @@ export async function portalCustomer(tx: Transaction, tenantId: string): Promise
 }
 
 const iso = (value: Date | null) => (value ? value.toISOString() : null);
-const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>>) => ({
+const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>> | null) => ({
   plan: entry.plan, name: entry.name, prices: { ...entry.prices },
   foundingPrices: founding && entry.foundingPrices ? { ...entry.foundingPrices } : null,
   limits: { ...entry.limits },
-  features: planFeatures(entry.limits, switches),
+  ...(switches ? { features: planFeatures(entry.limits, switches) } : {}),
 });
-
-/** The plan features that are agent kinds: their switch is the `agent_settings` row. */
-const AGENT_FEATURE_KINDS = PLAN_FEATURE_KINDS.filter((kind) => kind !== "missed_call_textback");
-
-/**
- * PL-26: where each plan-page feature's agent switch stands for the tenant. These are the rows and the
- * global switch the runners gate on (agents.md G-3), applied in the same order: support's pause, then the
- * tenant's off setting, then its kill switch. Quiet hours and caps are not read: they end by themselves.
- * One statement reads all of them, so the answer is one snapshot: two reads could straddle a pause and a
- * settings write and name a switch that was never on.
- */
-export async function planFeatureSwitches(tx: Transaction, tenantId: string): Promise<Record<PlanFeatureKind, PlanFeatureSwitch>> {
-  const rows = (await tx.query<{ killed: boolean; agent_kind: PlanFeatureKind | null; enabled: boolean | null; killed_at: Date | null; textback_enabled: boolean | null }>(
-    `SELECT g.killed, s.agent_kind, s.enabled, s.killed_at, v.textback_enabled
-       FROM agent_global_switch g
-       LEFT JOIN agent_settings s ON s.tenant_id=$1 AND s.agent_kind = ANY($2::text[])
-       LEFT JOIN voice_numbers v ON v.tenant_id=$1
-      WHERE g.id`,
-    [tenantId, AGENT_FEATURE_KINDS],
-  )).rows;
-  // A missing global row reads as paused: the migration always writes it, so this fails closed (as readGlobalKilled does).
-  const paused = rows[0]?.killed ?? true;
-  const switches = {} as Record<PlanFeatureKind, PlanFeatureSwitch>;
-  for (const kind of AGENT_FEATURE_KINDS) {
-    const row = rows.find((candidate) => candidate.agent_kind === kind);
-    // No row is the default: not enabled, not killed (controlsFromRow).
-    switches[kind] = planFeatureSwitch({ paused, enabled: row?.enabled ?? false, killed: row?.killed_at != null });
-  }
-  // Missed-call text back is no agent kind: the voice webhook reads the number's own switch, and support's agent pause does not reach it.
-  switches.missed_call_textback = planFeatureSwitch({ paused: false, enabled: rows[0]?.textback_enabled ?? false, killed: false });
-  return switches;
-}
 
 /** PL-15, PL-19, connections.md C-29:Shopify's plan selection page for a store; null without a store or an app handle. `store` is the myshopify.com name or the full domain. */
 export function shopifyPricingUrl(store: string | null | undefined, appHandle: string | null | undefined): string | null {
@@ -287,6 +254,12 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   readonly checkoutEnabled: boolean;
   /** PL-19: the app handle in Shopify's plan selection URL, when configured. */
   readonly shopifyAppHandle?: string | null;
+  /**
+   * PL-26: add `features`, to the plan and to each offer. Off by default: the response schema is strict, so a
+   * dashboard built before the key existed would refuse an answer that carries it. The dashboard asks (`?features=1`);
+   * no other caller gets a key it does not know.
+   */
+  readonly features?: boolean;
 }): Promise<BillingPlan> {
   const row = await tenantPlan(tx, tenantId);
   // PL-11: a new founding offer follows the invite alone; a past founding subscription is no offer.
@@ -298,10 +271,13 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   // PL-22: the key is left out unless a grant is active, so a tenant without one gets the answer it always had.
   const granted = activeGrant(row, input.now);
   const limits = planLimits(row, input.now);
-  const switches = await planFeatureSwitches(tx, tenantId);
-  // A read-only plan is refused every agent run by the dispatcher (PL-8), so what it holds is not live for this business.
   const readOnly = isReadOnly(row, input.now);
-  const currentSwitches = readOnly ? (Object.fromEntries(PLAN_FEATURE_KINDS.map((kind) => [kind, "read_only"])) as Record<PlanFeatureKind, PlanFeatureSwitch>) : switches;
+  // PL-26: read in the caller's transaction, which the session opens as one snapshot with the plan row above. A read-only
+  // plan is refused every agent run by the dispatcher (PL-8), so what it holds is not live; the offers are other plans'
+  // lists for this business, so they do not take the current plan's read-only state.
+  const facts = input.features ? await planFeatureFacts(tx, tenantId, input.now) : null;
+  const currentSwitches = facts ? planFeatureSwitches(facts, readOnly) : null;
+  const offerSwitches = facts ? planFeatureSwitches(facts, false) : null;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -320,8 +296,8 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     readOnlyAfter: iso(row?.read_only_after ?? null),
     readOnly,
     limits,
-    features: planFeatures(limits, currentSwitches),
-    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, switches)),
+    ...(currentSwitches ? { features: planFeatures(limits, currentSwitches) } : {}),
+    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, offerSwitches)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",
     checkoutEnabled: input.checkoutEnabled && stripe,

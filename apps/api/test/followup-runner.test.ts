@@ -573,6 +573,10 @@ describe("the templated kinds in the production wiring (G-19, G-20)", () => {
     const runs = (await service((tx) => tx.query<{ tenant_id: string; agent: string; status: string }>(
       "SELECT tenant_id, agent, status FROM agent_runs"))).rows;
     expect(runs).toEqual([{ tenant_id: tenantId, agent: "appointment_reminder", status: "completed" }]);
+    // PL-26: a finished run leaves one beat for the follow-up runner and one for the templated runs, each good for two slots.
+    const window = Math.max(runnerEnv.slotMinutes * 120, Math.ceil(runnerEnv.intervalMs / 1000) * 2);
+    expect((await service((tx) => tx.query("SELECT runner, fresh_for_seconds FROM runner_heartbeats ORDER BY runner"))).rows)
+      .toEqual([{ runner: "followup", fresh_for_seconds: window }, { runner: "templated", fresh_for_seconds: window }]);
   });
 
   it("refuses to start with the templated kinds on but no booking key or base URL, before any run", async () => {
@@ -612,11 +616,14 @@ describe("the templated kinds in the production wiring (G-19, G-20)", () => {
   });
 
   it("runs no templated kind while they are off", async () => {
+    await database.pool.query("TRUNCATE runner_heartbeats");
     const { runner, close } = await startFollowUpRunner({ ...runnerEnv, templated: null }, { clock: testClock, generateId: randomUUID });
     try {
       expect((await runner.run()).templated).toEqual({});
     } finally {
       await close();
     }
+    // PL-26: with the templated kinds off the deploy beats for the follow-up runner only, so a reminder reads as not running.
+    expect((await service((tx) => tx.query<{ runner: string }>("SELECT runner FROM runner_heartbeats"))).rows.map((row) => row.runner)).toEqual(["followup"]);
   });
 });

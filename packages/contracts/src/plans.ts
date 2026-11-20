@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { actionCommandSchema, targetSchema, uuidSchema } from "./index.js";
+import type { FollowUpStopReason } from "./agents.js";
 
 // Hub plan subscriptions (docs/requirements/plans.md). Root re-exports this module, so shared
 // root schemas are reached lazily, as in billing.ts.
@@ -60,36 +61,97 @@ export const planFeatureKindSchema = z.enum(PLAN_FEATURE_KINDS);
 export type PlanFeatureKind = z.infer<typeof planFeatureKindSchema>;
 
 /**
- * PL-26: where one agent kind's switch stands for a tenant, in the order the runners check it (G-3):
- * `paused` is support's global switch, `disabled` the tenant's own off setting (the default), `stopped`
- * the tenant's kill switch. Quiet hours and daily caps pass by themselves and are not an off switch.
+ * PL-26: why a plan's feature is not live for a tenant, in the order the page decides it (the first that holds wins):
+ * `read_only` the plan is read-only (PL-8); `not_running` no live runner for the feature (see `PLAN_RUNNERS`);
+ * `paused` support's global switch; `disabled` the tenant's own off setting (the default); `stopped` the tenant's kill
+ * switch; `quiet_hours` the tenant's quiet window is open now (G-5); `no_budget` the kind's daily model budget is spent
+ * or zero (G-15); `not_approved` a message kind has no usable standing template approval (G-19). A daily draft cap
+ * (G-4) is a rate limit, not an off switch, and is left out.
  */
-export const PLAN_FEATURE_OFF_REASONS = ["paused", "disabled", "stopped", "read_only"] as const;
-/** `read_only`: the plan is read-only, so the dispatcher refuses agent runs and outbound texts (PL-8). */
-export type PlanFeatureSwitch = "on" | (typeof PLAN_FEATURE_OFF_REASONS)[number];
+export const PLAN_FEATURE_OFF_REASONS = [
+  "read_only", "not_running", "paused", "disabled", "stopped", "quiet_hours", "no_budget", "not_approved",
+] as const;
+export type PlanFeatureOffReason = (typeof PLAN_FEATURE_OFF_REASONS)[number];
+export type PlanFeatureSwitch = "on" | PlanFeatureOffReason;
 
-/** PL-26: one switch from its three inputs, in the runners' order (G-3): support's pause, the tenant's off setting, its kill switch. */
-export const planFeatureSwitch = (input: { readonly paused: boolean; readonly enabled: boolean; readonly killed: boolean }): PlanFeatureSwitch =>
-  input.paused ? "paused" : !input.enabled ? "disabled" : input.killed ? "stopped" : "on";
+/** The agent-control stop reasons (agents.md G-3, G-5, G-15) that turn a plan feature off, by the names the gate returns. */
+export const PLAN_FEATURE_BLOCKS = ["global_killed", "disabled", "tenant_killed", "quiet_hours", "cost_cap"] as const;
+export type PlanFeatureBlock = (typeof PLAN_FEATURE_BLOCKS)[number];
+/** The gate's first stop reason for a kind, as far as the plan page reads it: `daily_cap` and `stalled` are not off switches. */
+export const planFeatureBlock = (reason: FollowUpStopReason | null): PlanFeatureBlock | null =>
+  reason !== null && (PLAN_FEATURE_BLOCKS as readonly string[]).includes(reason) ? (reason as PlanFeatureBlock) : null;
 
+const BLOCK_REASONS: Readonly<Record<PlanFeatureBlock, PlanFeatureOffReason>> = Object.freeze({
+  global_killed: "paused", disabled: "disabled", tenant_killed: "stopped", quiet_hours: "quiet_hours", cost_cap: "no_budget",
+});
+
+/**
+ * PL-26: one feature's state from the four facts the runtime decides it by. The core read builds them from the
+ * database (the plan row, the runners' heartbeats, `agent_settings`, the template approval); the demo builds
+ * them from its demo agents. This function holds the order, so no caller keeps a second copy of it.
+ */
+export interface PlanFeatureInputs {
+  /** The plan is read-only (PL-8). */
+  readonly readOnly: boolean;
+  /** Every runner the feature needs has reported inside its window (`planFeatureRunners`). */
+  readonly running: boolean;
+  /** The first reason the agent may not act now (`planFeatureBlock` of the gate), or null. */
+  readonly blockedBy: PlanFeatureBlock | null;
+  /** A message kind has a current template with a usable standing approval; true for a kind with no template. */
+  readonly approved: boolean;
+}
+export const planFeatureSwitch = (input: PlanFeatureInputs): PlanFeatureSwitch =>
+  input.readOnly ? "read_only"
+    : !input.running ? "not_running"
+      : input.blockedBy !== null ? BLOCK_REASONS[input.blockedBy]
+        : !input.approved ? "not_approved"
+          : "on";
+
+/**
+ * PL-26: the runners whose heartbeat (`runner_heartbeats`) says a feature can run. A deploy whose flag is off
+ * writes none, so the feature is `not_running`: `followup` is the follow-up agent (`FOLLOWUP_AGENT`);
+ * `templated` the reminder and review runs (`AGENT_TEMPLATED`); `delivery_email` and `delivery_sms` the delivery
+ * worker (`DELIVERY_WORKER`) with its email provider or its SMS provider (`SMS_PROVIDER`).
+ */
+export const PLAN_RUNNERS = ["followup", "templated", "delivery_email", "delivery_sms"] as const;
+export const planRunnerSchema = z.enum(PLAN_RUNNERS);
+export type PlanRunner = z.infer<typeof planRunnerSchema>;
+/** A template's channel decides which delivery runner sends it; null when the kind has no current template yet. */
+export const planFeatureRunners = (kind: PlanFeatureKind, channel: "email" | "sms" | null): readonly PlanRunner[] => {
+  switch (kind) {
+    case "inquiry_followup": return ["followup"];
+    case "missed_call_textback": return ["delivery_sms"];
+    case "appointment_reminder":
+    case "review_request": return channel === null ? ["templated"] : ["templated", channel === "sms" ? "delivery_sms" : "delivery_email"];
+  }
+};
+
+/** The limits that are plain yes/no entitlements: the ones a feature may be tied to. */
+type FlagLimit = { [K in keyof PlanLimits]: PlanLimits[K] extends boolean ? K : never }[keyof PlanLimits];
 export interface PlanFeatureDefinition {
   readonly kind: PlanFeatureKind;
   /** The name the plan page shows. */
   readonly label: string;
-  /** Whether the plan's limits include the feature. A comped tenant (null limits) has every feature. */
-  readonly entitled: (limits: PlanLimits) => boolean;
+  /**
+   * The `PlanLimits` flag that decides whether a plan holds the feature, read from the same limits the plan response
+   * and the dispatcher use; null where PL-1 sets no limit, so every plan holds it. A comped tenant (null limits) holds all.
+   */
+  readonly limit: FlagLimit | null;
 }
 export const PLAN_FEATURES: readonly PlanFeatureDefinition[] = Object.freeze([
-  { kind: "appointment_reminder", label: "Appointment reminders", entitled: () => true },
-  { kind: "review_request", label: "Review requests", entitled: () => true },
-  { kind: "inquiry_followup", label: "Agents that draft with AI", entitled: (limits) => limits.modelAgents },
-  { kind: "missed_call_textback", label: "Missed-call text back", entitled: (limits) => limits.voice },
+  { kind: "appointment_reminder", label: "Appointment reminders", limit: null },
+  { kind: "review_request", label: "Review requests", limit: null },
+  { kind: "inquiry_followup", label: "Agents that draft with AI", limit: "modelAgents" },
+  { kind: "missed_call_textback", label: "Missed-call text back", limit: "voice" },
 ]);
+/** PL-26: whether a plan's limits hold the feature (null limits: a comped tenant, which holds all). */
+export const planHoldsFeature = (limits: PlanLimits | null, feature: PlanFeatureDefinition): boolean =>
+  limits === null || feature.limit === null || limits[feature.limit];
 
 export const planFeatureSchema = z.strictObject({
   kind: planFeatureKindSchema,
   label: z.string(),
-  /** `included`: in the plan and switched on. `off`: in the plan, but switched off, so the page must not call it live. */
+  /** `included`: in the plan and live for this business. `off`: in the plan, but not live, so the page must not call it live. */
   state: z.enum(["included", "off"]),
   /** Why it is off; null when included. */
   offReason: z.enum(PLAN_FEATURE_OFF_REASONS).nullable(),
@@ -97,11 +159,11 @@ export const planFeatureSchema = z.strictObject({
 export type PlanFeature = z.infer<typeof planFeatureSchema>;
 
 /**
- * PL-26: the features a plan names, each `included` only while its switch is on. A feature the plan does not
- * hold is left out. `switches` is read from the tenant's agent settings, never written by hand.
+ * PL-26: the features a plan names, each `included` only while it is live for the tenant. A feature the plan does
+ * not hold is left out. `switches` is built by `planFeatureSwitch` from what the runtime reads, never written by hand.
  */
 export function planFeatures(limits: PlanLimits | null, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>>): PlanFeature[] {
-  return PLAN_FEATURES.filter((feature) => limits === null || feature.entitled(limits)).map((feature) => {
+  return PLAN_FEATURES.filter((feature) => planHoldsFeature(limits, feature)).map((feature) => {
     const state = switches[feature.kind];
     return state === "on"
       ? { kind: feature.kind, label: feature.label, state: "included" as const, offReason: null }

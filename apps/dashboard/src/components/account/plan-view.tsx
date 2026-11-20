@@ -3,7 +3,7 @@
 import { Check, Info, Minus, WarningCircle } from "@phosphor-icons/react";
 import { useMutation } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import type { BillingPlan, HubPlan, PlanFeature, PlanInterval, PlanStatus } from "@zs/contracts";
+import type { BillingPlan, HubPlan, PlanFeature, PlanFeatureOffReason, PlanInterval, PlanStatus } from "@zs/contracts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
@@ -73,8 +73,17 @@ function limitLines(limits: NonNullable<BillingPlan["limits"]>): string[] {
   ];
 }
 
-/** Why a feature in the plan is not running, in words (plans.md PL-26). */
-const OFF_WORDS = { disabled: "off until you turn it on", stopped: "stopped", paused: "paused by support", read_only: "paused until the plan is paid" } as const;
+/** Why a feature in the plan is not running, in words (plans.md PL-26): every reason the server can give. */
+const OFF_WORDS: Record<PlanFeatureOffReason, string> = {
+  read_only: "paused until the plan is paid",
+  not_running: "not running right now",
+  paused: "paused by support",
+  disabled: "off until you turn it on",
+  stopped: "stopped",
+  quiet_hours: "waiting for quiet hours to end",
+  no_budget: "paused, its daily AI budget is used up or set to zero",
+  not_approved: "waiting for you to approve its message",
+};
 
 /**
  * PL-26: one line per feature the plan holds. The server derives them from the agent switches the runners

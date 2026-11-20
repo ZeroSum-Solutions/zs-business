@@ -9,7 +9,8 @@ export const billingRoutes = new Hono<AppEnv>()
   .post("/wallet/top-ups", async (c) =>
     c.json(await c.var.session.createTopUp(await jsonBody(c), idempotencyKey(c), c.var.signal), 201))
   // plans.md PL-4..PL-7: the Hub plan, its Checkout and the Stripe Billing Portal.
-  .get("/billing/plan", async (c) => c.json(await c.var.session.getBillingPlan()))
+  // PL-26: `?features=1` adds the plan page's feature lists; a caller that does not ask gets the answer it always had.
+  .get("/billing/plan", async (c) => c.json(await c.var.session.getBillingPlan({ features: c.req.query("features") === "1" })))
   .post("/billing/plan/checkout", async (c) =>
     c.json(await c.var.session.startPlanCheckout(await jsonBody(c), idempotencyKey(c), c.var.signal), 201))
   .post("/billing/portal", async (c) => c.json(await c.var.session.openBillingPortal(c.var.signal)));

@@ -1,6 +1,6 @@
 # Hub plans: paid subscriptions through Stripe Billing and Shopify App Pricing
 
-Status: draft contract, revision 7 (2026-11-20: PL-26, the plan page names an agent feature as included only while its switch is on). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
+Status: draft contract, revision 7 (2026-11-20: PL-26, the plan page names an agent feature as included only while the runtime would act on it: switches, runner heartbeats, approval, quiet hours and budget). Revision 6 (2026-11-12: PL-25, the free-tier marker and the daily site publish limit). Revision 5
 (2026-11-11: PL-21..PL-24, a plan an operator grants to one tenant, which wins over
 the provider subscription). Revision 4 (2026-11-10: PL-8 also lets a customer cancel their own booking, `booking.self_cancel`,
 booking-self-service.md BS-12). Revision 3 (2026-11-07: PL-15..PL-20, Shopify merchants pay through
@@ -608,41 +608,65 @@ the free one is the hosting decision's. They are tunable by a later revision. Th
 
 ## Plan copy follows the switches (revision 7)
 
-**PL-26. Features on the plan page.** The plan page lists an agent feature as included only while the
-switch the runners read is on for the tenant. `GET /v1/billing/plan` (PL-7) adds `features`, and each
-catalog offer adds `features`, from one rule in `packages/contracts` (`planFeatures`):
+**PL-26. Features on the plan page.** The plan page lists an agent feature as included only while the runtime
+would act on it for the tenant. `GET /v1/billing/plan?features=1` (PL-7) adds `features`, and each catalog offer adds
+`features`, from one rule in `packages/contracts` (`planFeatures`, `planFeatureSwitch`). Nothing on the page is a hand
+list of what is live:
 - The features are `appointment_reminder` ("Appointment reminders"), `review_request` ("Review requests"),
   `inquiry_followup` ("Agents that draft with AI") and `missed_call_textback` ("Missed-call text back", which
   was "Voice and missed-call text back": the voice receptionist has no runner yet, so the line names only what runs).
-  The first three are agent kinds with an `agent_settings` row; text back is read from `voice_numbers.textback_enabled`,
-  the switch the voice webhook reads, and support's agent pause does not reach it. A plan holds a feature by its
-  limits: reminders and review requests on every plan, the AI line when `modelAgents`, the text-back line when `voice`. A comped tenant (null limits)
-  holds all four. A feature the plan does not hold is left out.
-- Each feature is `included` or `off`. An agent feature is `included` only when the tenant's `agent_settings` row for the
-  kind is enabled, not killed, and support's global switch (`agent_global_switch`) is not on: the same inputs,
-  in the same order, as the runners' gate (agents.md G-3), read in one statement so the answer is one snapshot.
-  Otherwise it is `off` with the first reason: `paused` (support's switch), `disabled` (the tenant's setting,
-  which is the default), `stopped` (the tenant's kill switch). Quiet hours and caps pass by themselves and do not
-  turn a feature off. One more reason comes from outside the switch: `read_only` (the tenant's plan is read-only, so
-  the dispatcher refuses every agent run and outbound text, PL-8; the current plan's list only, not the offers').
-- The dashboard shows an `off` feature as "<name>: off until you turn it on", "stopped" or "paused by support",
-  with no check mark; `read_only` reads "paused until the plan is paid". The dashboard reads the plan
-  again each time the page opens and names no feature until that read answers, so a cached "included" never
-  outlives a switch changed on the Agents page. A response
-  without `features` names no feature. The key is optional in the schema so a dashboard deployed first accepts
-  either response; the response schema is strict, so the API must not send `features` before the dashboard reads
-  it (as PL-22 `grant`): the dashboard deploys first.
-- Prices, limits and the other plan lines are unchanged. Demo mode derives the switches from its demo agents.
+  Each entry in `PLAN_FEATURES` carries a `limit` key (`null`, `"modelAgents"` or `"voice"`) that names the
+  `PlanLimits` field the plan holds it by, read from the same limits the catalog shows: reminders and review requests
+  on every plan, the AI line when `modelAgents`, the text-back line when `voice`. A comped tenant (null limits) holds
+  all four. A feature the plan does not hold is left out.
+- Each feature is `included` or `off`. It is `included` only when every fact the runtime decides by allows a run.
+  Otherwise it is `off` with the first reason in this order (`planFeatureSwitch`):
+  1. `read_only`: the tenant's plan is read-only, so the dispatcher refuses every agent run and outbound text (PL-8);
+     the current plan's list only, not the offers'.
+  2. `not_running`: a runner the feature needs has no fresh heartbeat (below).
+  3. `paused`: support's global switch (`agent_global_switch`), agents.md G-3.
+  4. `disabled`: the tenant's setting is off, which is the default; for text back, `voice_numbers.textback_enabled`.
+  5. `stopped`: the tenant's kill switch.
+  6. `quiet_hours`: the tenant's quiet hours hold now (G-5).
+  7. `no_budget`: the follow-up's daily model budget is zero or used up (G-15). A templated kind makes no model call
+     and never reads the budget.
+  8. `not_approved`: a message kind has no current revision under a usable standing approval (G-19, A-15), so a
+     scheduled run would stop at `template_not_approved`.
+  The agent reasons come from `agentKindStatus`, the function the Agents page and the runners' gate share, and the
+  approval from `usableStandingApproval`. The daily draft cap and a `stalled` run end one run, not the feature, and are
+  not reasons.
+- Runner liveness is read from `runner_heartbeats`, not from a deploy flag. The API must not name the workers'
+  variables (`FOLLOWUP_AGENT`, `AGENT_TEMPLATED`, `DELIVERY_WORKER`, `SMS_PROVIDER`: the worker-split rule), so a
+  runner that finished a clean run writes one row (`runner`, `beat_at` from the database clock, `fresh_for_seconds`
+  stated by the runner), at most once a minute per runner, never throwing and capped at 2 s. A deploy whose flag is
+  off writes nothing, its row goes stale, and the feature reads `not_running`. A feature needs: `inquiry_followup`
+  the `followup` runner; `missed_call_textback` the `delivery_sms` runner; a templated kind the `templated` runner and
+  the delivery runner for its current revision's channel (`delivery_email` or `delivery_sms`; only `templated` while
+  it has no revision). Windows: the follow-up and templated runners beat for `max(2 * slotMinutes * 60,
+  2 * ceil(intervalMs / 1000))` seconds, the delivery runners for `max(1800, 4 * intervalSeconds)`. `delivery_sms` is
+  written only when Twilio is configured, `templated` only when the templated agent is.
+- One snapshot: the plan, the agent switches, the approvals, quiet hours, the budget and the heartbeats are read
+  inside one `REPEATABLE READ` transaction (`session.getBillingPlan`), so a change cannot land between two of them.
+- The dashboard shows an `off` feature as "<name>: <reason words>" with no check mark (for example "off until you turn
+  it on", "paused by support", "waiting for quiet hours to end", "waiting for you to approve its message", "not running
+  right now"); `read_only` reads "paused until the plan is paid". The dashboard reads the plan again each time the
+  page opens and names no feature until that read answers, so a cached "included" never outlives a switch.
+- Deploy order. The response schema is strict, so the API adds `features` only when the request carries
+  `?features=1`. The dashboard sends it; an older dashboard does not, and never receives the unknown key. Deploy
+  the dashboard first as for PL-22 `grant`; either order is safe, an API deployed first just sends no `features`
+  and the page names no feature. Apply `20261120100000_runner_heartbeats.sql` before the runners are deployed.
+- Prices, limits and the other plan lines are unchanged. Demo mode derives the switches from its demo agents and
+  has no runners, so none is `not_running`; text back is not named there (the demo has no voice number).
 
 ## Known limits (revision 7)
 
-- The switch is the tenant's setting. A deploy whose runner is off (`FOLLOWUP_AGENT`, `AGENT_TEMPLATED`, delivery
-  worker) is a separate project's environment that the API cannot read, so a feature a tenant switched on can still
-  send nothing there until the runner is on.
 - The voice receptionist (voice-receptionist.md, a draft) has no runner and is not named on the plan page.
-- The page shows the switch, not every runtime condition. A template whose approval was revoked, a zero daily
-  model budget, quiet hours and caps can each stop a run while the switch is on; the Agents page shows those.
-- The plan read and the switch read are two statements in one transaction. A change that lands between them can
-  show a feature for a moment against a state that already changed; the page is a point-in-time answer.
-- "Agents that draft with AI" follows the plan's `modelAgents` limit, the plan's advertised tier. The runtime does
-  not enforce that limit yet (see above), so a Solo tenant can switch follow-ups on and still sees no such line.
+- The runtime does not enforce the `modelAgents` and `voice` limits. A Solo tenant can switch follow-ups on, and
+  the follow-up agent then runs. The page follows the plan's advertised tier: the AI line is left out for a plan
+  without `modelAgents`, which never claims a feature that is off, and at worst omits a line that runs. Enforcing
+  those limits is a product decision and not part of this rule.
+- A heartbeat says a runner finished a clean run recently, not that it is healthy for every tenant. A runner that
+  runs but fails every job writes no beat, and the page says `not_running`; one tenant's failing run does not show
+  there (the Agents page shows it).
+- A feature reads `not_running` for up to its window after a runner starts for the first time, or after a deploy
+  turns it on, until the first clean run beats.

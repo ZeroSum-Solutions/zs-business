@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ALL_PLAN_PRICE_KEYS, billingPlanSchema, EXTRA_CONNECTION_PRICE, MAX_EXTRA_CONNECTIONS, PLAN_ADDON_LOOKUP_KEY, PLAN_CATALOG, PLAN_FEATURES, planFeatures, planFeatureSchema,
+  planFeatureBlock,
+  planFeatureRunners,
   planFeatureSwitch, planGrantSchema, type HubPlan,
 } from "../src/index.js";
 
@@ -112,11 +114,34 @@ describe("planFeatures (PL-26)", () => {
     expect(planFeatures({ ...PLAN_CATALOG.pro.limits, modelAgents: false }, allOn).map((feature) => feature.kind)).not.toContain("inquiry_followup");
   });
 
-  it("orders the switch like the runners do: support's pause, then the tenant's off setting, then its kill switch", () => {
-    expect(planFeatureSwitch({ paused: true, enabled: false, killed: true })).toBe("paused");
-    expect(planFeatureSwitch({ paused: false, enabled: false, killed: true })).toBe("disabled");
-    expect(planFeatureSwitch({ paused: false, enabled: true, killed: true })).toBe("stopped");
-    expect(planFeatureSwitch({ paused: false, enabled: true, killed: false })).toBe("on");
+  const base = { readOnly: false, running: true, blockedBy: null, approved: true } as const;
+
+  it("orders the switch by what stops a run first: read-only, no runner, support's pause, the off setting, the kill switch, quiet hours, budget, approval", () => {
+    expect(planFeatureSwitch(base)).toBe("on");
+    const worst = { readOnly: true, running: false, blockedBy: "global_killed", approved: false } as const;
+    expect(planFeatureSwitch(worst)).toBe("read_only");
+    expect(planFeatureSwitch({ ...worst, readOnly: false })).toBe("not_running");
+    expect(planFeatureSwitch({ ...worst, readOnly: false, running: true })).toBe("paused");
+    expect(planFeatureSwitch({ ...base, blockedBy: "disabled", approved: false })).toBe("disabled");
+    expect(planFeatureSwitch({ ...base, blockedBy: "tenant_killed" })).toBe("stopped");
+    expect(planFeatureSwitch({ ...base, blockedBy: "quiet_hours", approved: false })).toBe("quiet_hours");
+    expect(planFeatureSwitch({ ...base, blockedBy: "cost_cap", approved: false })).toBe("no_budget");
+    expect(planFeatureSwitch({ ...base, approved: false })).toBe("not_approved");
+  });
+
+  it("reads the gate's stop reasons: a daily draft cap or a stalled run is no off switch", () => {
+    expect(planFeatureBlock("daily_cap")).toBeNull();
+    expect(planFeatureBlock("stalled")).toBeNull();
+    expect(planFeatureBlock(null)).toBeNull();
+    for (const reason of ["global_killed", "disabled", "tenant_killed", "quiet_hours", "cost_cap"] as const) expect(planFeatureBlock(reason)).toBe(reason);
+  });
+
+  it("names the runners a feature needs: follow-up, SMS text back, and a message kind's runs plus its channel's delivery", () => {
+    expect(planFeatureRunners("inquiry_followup", null)).toEqual(["followup"]);
+    expect(planFeatureRunners("missed_call_textback", null)).toEqual(["delivery_sms"]);
+    expect(planFeatureRunners("appointment_reminder", "email")).toEqual(["templated", "delivery_email"]);
+    expect(planFeatureRunners("review_request", "sms")).toEqual(["templated", "delivery_sms"]);
+    expect(planFeatureRunners("review_request", null)).toEqual(["templated"]);
   });
 
   it("accepts only the four feature kinds", () => {

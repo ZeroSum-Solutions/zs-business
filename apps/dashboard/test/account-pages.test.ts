@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { billingNotice, featureLines, grantSummary, PLAN_BADGE, planDateLine, PlanView, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
 import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
-import { PLAN_CATALOG, planFeatures, type BillingPlan, type BusinessProfile } from "@zs/contracts";
+import { PLAN_CATALOG, PLAN_FEATURE_OFF_REASONS, planFeatures, type BillingPlan, type BusinessProfile } from "@zs/contracts";
 import { ApiError, createApi } from "../src/lib/api";
 import { DEMO_BUSINESS, DEMO_TENANT_ID } from "../src/lib/api/demo/seed";
 import { createDemoBilling } from "../src/lib/api/demo/billing";
@@ -82,6 +82,20 @@ describe("plan", () => {
       { text: "Agents that draft with AI: stopped", on: false },
     ]);
     expect(featureLines(features("paused", "on", "on"))[0]).toEqual({ text: "Appointment reminders: paused by support", on: false });
+    // Every reason the server can give has its own plain words, and none claims the feature is live.
+    const reasons = Object.fromEntries(PLAN_FEATURE_OFF_REASONS.map((reason) => [reason,
+      featureLines(planFeatures(PLAN_CATALOG.solo.limits, { appointment_reminder: reason, review_request: "on", inquiry_followup: "on", missed_call_textback: "on" }))[0]!]));
+    expect(Object.fromEntries(Object.entries(reasons).map(([reason, line]) => [reason, line.text]))).toEqual({
+      read_only: "Appointment reminders: paused until the plan is paid",
+      not_running: "Appointment reminders: not running right now",
+      paused: "Appointment reminders: paused by support",
+      disabled: "Appointment reminders: off until you turn it on",
+      stopped: "Appointment reminders: stopped",
+      quiet_hours: "Appointment reminders: waiting for quiet hours to end",
+      no_budget: "Appointment reminders: paused, its daily AI budget is used up or set to zero",
+      not_approved: "Appointment reminders: waiting for you to approve its message",
+    });
+    expect(Object.values(reasons).every((line) => !line.on)).toBe(true);
     // An older API sends no features: the page names none rather than guess.
     expect(featureLines(undefined)).toEqual([]);
 

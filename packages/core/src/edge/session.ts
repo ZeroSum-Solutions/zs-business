@@ -154,7 +154,7 @@ import {
   type WalletSummary,
   type SourceList,
 } from "@zs/contracts";
-import type { ScopedDatabase, Transaction } from "@zs/db";
+import type { ScopedDatabase, Transaction, TransactionOptions } from "@zs/db";
 import type { KeyObject } from "node:crypto";
 import { createDispatcher, type DispatchConfig, type DispatchContext } from "../actions/dispatch.js";
 import { BROWSER_MEMBER_PERMISSIONS, browserHandlers } from "../browser/handlers.js";
@@ -583,11 +583,11 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
       idempotencyKey,
     };
   };
-  const read = <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>) =>
+  const read = <T>(permission: Permission | null, work: (tx: Transaction) => Promise<T>, options?: TransactionOptions) =>
     deps.db.tenant(tenantId, async (tx) => {
       await requireMember(tx, tenantId, actorId, permission);
       return work(tx);
-    });
+    }, options);
   /** Dispatch, and tell whether the answer is a stored action (a replay) rather than this call's own. */
   const runTracked = async (command: ActionCommand): Promise<{ output: ActionResult; replayed: boolean }> => {
     const minted = new Set<string>();
@@ -1155,12 +1155,15 @@ export function createSession(deps: EdgeDependencies, principal: Principal) {
     },
 
     /** plans.md PL-7: the plan, its limits and what can be bought. */
-    getBillingPlan: (): Promise<BillingPlan> => {
+    getBillingPlan: (options: { readonly features?: boolean } = {}): Promise<BillingPlan> => {
       const plans = deps.billing?.plans;
+      // PL-26: the plan row, the runners' heartbeats, the agent switches and the template approval are read as one
+      // snapshot, so a change that lands between two statements cannot show a feature against a state that never was.
       return read("billing", (tx) => getBillingPlan(tx, tenantId, {
         now: new Date(readClock(deps.clock)), trialDays: plans?.config.trialDays ?? 0, checkoutEnabled: plans !== undefined,
         shopifyAppHandle: deps.shopifyBilling?.appHandle ?? null,
-      }));
+        features: options.features === true,
+      }), { isolation: "repeatable read" });
     },
     /** PL-4, PL-5: a pending plan checkout and its Stripe Checkout URL. */
     async startPlanCheckout(body: unknown, key: unknown, signal?: AbortSignal): Promise<StartPlanCheckoutResponse> {

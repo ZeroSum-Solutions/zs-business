@@ -17,6 +17,8 @@ import {
   linkIntakeItemRequestSchema,
   listIntakeItemsQuerySchema,
   listThreadsQuerySchema,
+  planFeatureBlock,
+  type FollowUpStopReason,
   planFeatureSwitch,
   uuidSchema,
   moveDealStageRequestSchema,
@@ -486,9 +488,16 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
     switches: async () => {
       const [followUp, reminder, review] = await Promise.all([
         agents.getFollowUpStatus(), templates.getAgentKindStatus("appointment_reminder"), templates.getAgentKindStatus("review_request")]);
-      const of = (status: { globalKilled: boolean; settings: { enabled: boolean }; killed: unknown }) =>
-        planFeatureSwitch({ paused: status.globalKilled, enabled: status.settings.enabled, killed: status.killed !== null });
-      return { appointment_reminder: of(reminder), review_request: of(review), inquiry_followup: of(followUp), missed_call_textback: "disabled" };
+      // The demo has no runners, so none can be stopped: its agents are as live as their own switches say. It reads the
+      // same facts the API does (the gate's first stop reason, the template approval) and `planFeatureSwitch` orders them.
+      const of = (status: { blockedBy: FollowUpStopReason | null }, approved: boolean) =>
+        planFeatureSwitch({ readOnly: false, running: true, blockedBy: planFeatureBlock(status.blockedBy), approved });
+      return {
+        appointment_reminder: of(reminder, templates.hasUsableApproval("appointment_reminder")),
+        review_request: of(review, templates.hasUsableApproval("review_request")),
+        inquiry_followup: of(followUp, true),
+        missed_call_textback: "disabled",
+      };
     },
   });
 

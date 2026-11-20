@@ -127,6 +127,8 @@ export interface DemoTemplateInternals {
    * IT-4). Answers the kind's template id, or null when the kind already had wording.
    */
   seedWording(kind: TemplatedKind, draft: { channel: DeliveryChannel; subject: string | null; body: string; timingHours: number }): string | null;
+  /** PL-26: whether the kind's current wording has a standing approval that is still in force, as a scheduled run checks it. */
+  hasUsableApproval(kind: TemplatedKind): boolean;
 }
 
 export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi & DemoTemplateControls & DemoTemplateInternals {
@@ -337,6 +339,10 @@ export function createDemoTemplates(ctx: DemoTemplateContext): TemplatedKindsApi
 
     setTemplateSuggestions(available) {
       suggestionsOn = available;
+    },
+
+    hasUsableApproval(kind) {
+      return view(kind).revisions.some((revision) => revision.current && revision.approved);
     },
 
     seedWording(kind, draft) {
