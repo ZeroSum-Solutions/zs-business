@@ -4,10 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { billingNotice, grantSummary, PLAN_BADGE, planDateLine, PlanView, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
+import { billingNotice, featureLines, grantSummary, PLAN_BADGE, planDateLine, PlanView, planFeaturesFresh, SHOPIFY_ADMIN_HINT } from "../src/components/account/plan-view";
 import { BUSINESS_DEMO_NOTE, BUSINESS_NOT_AVAILABLE, BUSINESS_OWNER_ONLY, SettingsView } from "../src/components/account/settings-view";
 import { ToastProvider } from "../src/components/ui/toast";
-import type { BillingPlan, BusinessProfile } from "@zs/contracts";
+import { PLAN_CATALOG, PLAN_FEATURE_OFF_REASONS, planFeatures, type BillingPlan, type BusinessProfile } from "@zs/contracts";
 import { ApiError, createApi } from "../src/lib/api";
 import { DEMO_BUSINESS, DEMO_TENANT_ID } from "../src/lib/api/demo/seed";
 import { createDemoBilling } from "../src/lib/api/demo/billing";
@@ -69,6 +69,71 @@ describe("plan", () => {
     expect(noBanner).not.toContain("Update your card");
     // Without a grant the page is as before.
     expect(render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, base))).not.toContain("Included plan");
+  });
+
+  // plans.md PL-26: the plan page never calls a switched-off agent feature included.
+  it("shows an off feature as off and a switched-on one as included (PL-26)", () => {
+    const features = (...states: ("on" | "disabled" | "stopped" | "paused")[]) =>
+      planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: states[0]!, review_request: states[1]!, inquiry_followup: states[2]!, missed_call_textback: "disabled" });
+    const live = features("on", "disabled", "stopped");
+    expect(featureLines(live)).toEqual([
+      { text: "Appointment reminders", on: true },
+      { text: "Review requests: off until you turn it on", on: false },
+      { text: "Agents that draft with AI: stopped", on: false },
+    ]);
+    expect(featureLines(features("paused", "on", "on"))[0]).toEqual({ text: "Appointment reminders: paused by support", on: false });
+    // Every reason the server can give has its own plain words, and none claims the feature is live.
+    const reasons = Object.fromEntries(PLAN_FEATURE_OFF_REASONS.map((reason) => [reason,
+      featureLines(planFeatures(PLAN_CATALOG.solo.limits, { appointment_reminder: reason, review_request: "on", inquiry_followup: "on", missed_call_textback: "on" }))[0]!]));
+    expect(Object.fromEntries(Object.entries(reasons).map(([reason, line]) => [reason, line.text]))).toEqual({
+      read_only: "Appointment reminders: paused until the plan is paid",
+      not_running: "Appointment reminders: not running right now",
+      paused: "Appointment reminders: paused by support",
+      disabled: "Appointment reminders: off until you turn it on",
+      stopped: "Appointment reminders: stopped",
+      quiet_hours: "Appointment reminders: waiting for quiet hours to end",
+      no_budget: "Appointment reminders: paused, its daily AI budget is used up or set to zero",
+      not_approved: "Appointment reminders: waiting for you to approve its message",
+      missing_setup: "Appointment reminders: waiting for a sending number or link its message needs",
+    });
+    expect(Object.values(reasons).every((line) => !line.on)).toBe(true);
+    // An older API sends no features: the page names none rather than guess.
+    expect(featureLines(undefined)).toEqual([]);
+
+    // An answer cached before this visit is read again on open: until it is, the page names no feature, so a stale "included" never shows.
+    const cached = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, plan({ features: live })));
+    expect(cached).not.toContain("Appointment reminders");
+    expect(cached).not.toContain("Review requests");
+    // A read after a good one that fails or waits offline leaves an answer of unknown age: it names nothing either.
+    const read = { isFetchedAfterMount: true, fetchStatus: "idle" as const, isRefetchError: false };
+    expect(planFeaturesFresh(read)).toBe(true);
+    expect(planFeaturesFresh({ ...read, fetchStatus: "fetching" })).toBe(true);
+    expect(planFeaturesFresh({ ...read, fetchStatus: "paused" })).toBe(false);
+    expect(planFeaturesFresh({ ...read, isRefetchError: true })).toBe(false);
+    expect(planFeaturesFresh({ ...read, isFetchedAfterMount: false, fetchStatus: "fetching" })).toBe(false);
+    // A current answer (read in this visit) names them.
+    const current = { updatedAt: Date.now() + 60_000 };
+    const html = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, plan({ features: live }), current));
+    expect(html).toMatch(/data-feature-state="included"[^>]*>.*?Appointment reminders<\/li>/);
+    expect(html).toContain("Review requests: off until you turn it on");
+    expect(html).toContain("Agents that draft with AI: stopped");
+    expect(html).not.toMatch(/Review requests</);
+    expect(html).not.toMatch(/Agents that draft with AI</);
+    // The choose-a-plan cards read the same switches per offer.
+    const picker = render(h(PlanView), "demo", (client) => client.setQueryData(scopeKeys(DEMO_TENANT_ID).plan, { ...plan({ status: "none", plan: null, limits: null }),
+      catalog: base.catalog.map((offer) => ({ ...offer, features: planFeatures(offer.limits, { appointment_reminder: "on", review_request: "disabled", inquiry_followup: "disabled", missed_call_textback: "on" }) })) }, current));
+    expect(picker).toMatch(/Missed-call text back<\/li>/);
+    expect(picker).not.toContain("Missed-call text back:");
+    expect(featureLines(planFeatures(PLAN_CATALOG.studio.limits, { appointment_reminder: "read_only", review_request: "read_only", inquiry_followup: "read_only", missed_call_textback: "read_only" })).every((line) => !line.on)).toBe(true);
+    expect(picker).toContain("Agents that draft with AI: off until you turn it on");
+    expect(picker).not.toContain("Rule-based agents");
+  });
+
+  it("demo mode reads its feature switches from the demo agents (PL-26)", async () => {
+    const off = await createDemoBilling().getBillingPlan();
+    expect(off.features!.map((feature) => feature.state)).toEqual(["off", "off", "off"]);
+    const allOn = await createDemoBilling({ switches: async () => ({ appointment_reminder: "on", review_request: "on", inquiry_followup: "on", missed_call_textback: "on" }) }).getBillingPlan();
+    expect(allOn.features!.map((feature) => feature.state)).toEqual(["included", "included", "included"]);
   });
 
   it("shows the demo plan and keeps Stripe off in demo mode", () => {

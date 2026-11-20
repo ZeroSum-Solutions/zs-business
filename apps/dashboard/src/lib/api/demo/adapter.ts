@@ -17,6 +17,9 @@ import {
   linkIntakeItemRequestSchema,
   listIntakeItemsQuerySchema,
   listThreadsQuerySchema,
+  planFeatureBlock,
+  type FollowUpStopReason,
+  planFeatureSwitch,
   uuidSchema,
   moveDealStageRequestSchema,
   resultsQuerySchema,
@@ -479,7 +482,25 @@ export function createDemoAdapter(options: DemoAdapterOptions = {}): DemoApi {
   });
   const managedConnections = createDemoManagedConnections({ now: () => clock.now(), newId, wait, idempotent, parse, actor: () => actor });
   // The plan and wallet share the adapter's wait and actor, so offline, an expired session and staff apply to them too.
-  const billing = createDemoBilling({ clock, wait, actor: () => actor });
+  // The plan page names a feature as included only while its demo agent is on (plans.md PL-26).
+  const billing = createDemoBilling({
+    clock, wait, actor: () => actor,
+    switches: async () => {
+      const [followUp, reminder, review] = await Promise.all([
+        agents.getFollowUpStatus(), templates.getAgentKindStatus("appointment_reminder"), templates.getAgentKindStatus("review_request")]);
+      // The demo has no runners, so none can be stopped: its agents are as live as their own switches say. It reads the
+      // same facts the API does (the gate's first stop reason, the template approval) and `planFeatureSwitch` orders them.
+      // A message kind makes no model call, so its demo gate never reports `cost_cap` either (agents.md G-15).
+      const of = (status: { blockedBy: FollowUpStopReason | null }, approved: boolean) =>
+        planFeatureSwitch({ readOnly: false, running: true, approved, equipped: true, blockedBy: planFeatureBlock(status.blockedBy) });
+      return {
+        appointment_reminder: of(reminder, templates.hasUsableApproval("appointment_reminder")),
+        review_request: of(review, templates.hasUsableApproval("review_request")),
+        inquiry_followup: of(followUp, true),
+        missed_call_textback: "disabled",
+      };
+    },
+  });
 
   /** B-12: the first instant too far ahead to book; none for a calendar without a horizon. */
   const horizonOf = (resource: DemoResource) =>

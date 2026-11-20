@@ -198,6 +198,11 @@ one runner:
   inquiry is skipped as `model_error` for this run.
 - A tenant whose run fails, or leaves an inquiry undecided (G-6), is reported, counted in
   `errors` and left due; the run goes on with the next tenant.
+- A call whose run finished with no failed job writes a heartbeat for the `followup` runner (and `templated`
+  when the templated agent is on) to `runner_heartbeats`, stating how long it counts: twice the slot, or twice the
+  worker's interval when that is longer. The plan page reads it to say whether a feature is running (plans.md
+  PL-26). The write is capped at 2 s, never throws and happens at most once a minute; a deploy with the agent off
+  writes none.
 - No real model provider is wired: `FOLLOWUP_MODEL` accepts only `fake`, and only against
   loopback databases. `pnpm followup:global-switch on|off` flips the global switch (G-3).
 

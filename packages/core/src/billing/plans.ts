@@ -14,6 +14,7 @@ import {
   PLAN_CHECKOUT_CREATE_ACTION,
   planCheckoutCommandSchema,
   planCheckoutSchema,
+  planFeatures,
   planLookupKey,
   ValidationFailed,
   type ActionCommand,
@@ -23,6 +24,8 @@ import {
   type HubPlan,
   type PlanCatalogEntry,
   type PlanCheckout,
+  type PlanFeatureKind,
+  type PlanFeatureSwitch,
   type PlanInterval,
   type PlanLimits,
   type PlanStatus,
@@ -32,6 +35,7 @@ import type { ActionHandler } from "../actions/dispatch.js";
 import { currentTenant } from "../booking/create.js";
 import { parseOrFail } from "../crm/rows.js";
 import { activeGrant, isReadOnly, lockTenantPlan, planLimits } from "./plan-gate.js";
+import { planFeatureFacts, planFeatureSwitches, type PlanFeatureDeploy } from "./plan-features.js";
 import type { StripePlansClient } from "./plan-stripe.js";
 
 /** PL-5: like top-ups, a session lives an hour and a first request may be retried for 25 minutes. */
@@ -227,10 +231,11 @@ export async function portalCustomer(tx: Transaction, tenantId: string): Promise
 }
 
 const iso = (value: Date | null) => (value ? value.toISOString() : null);
-const offer = (entry: PlanCatalogEntry, founding: boolean) => ({
+const offer = (entry: PlanCatalogEntry, founding: boolean, switches: Readonly<Record<PlanFeatureKind, PlanFeatureSwitch>> | null) => ({
   plan: entry.plan, name: entry.name, prices: { ...entry.prices },
   foundingPrices: founding && entry.foundingPrices ? { ...entry.foundingPrices } : null,
   limits: { ...entry.limits },
+  ...(switches ? { features: planFeatures(entry.limits, switches) } : {}),
 });
 
 /** PL-15, PL-19, connections.md C-29:Shopify's plan selection page for a store; null without a store or an app handle. `store` is the myshopify.com name or the full domain. */
@@ -249,6 +254,14 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   readonly checkoutEnabled: boolean;
   /** PL-19: the app handle in Shopify's plan selection URL, when configured. */
   readonly shopifyAppHandle?: string | null;
+  /**
+   * PL-26: add `features`, to the plan and to each offer. Off by default: the response schema is strict, so a
+   * dashboard built before the key existed would refuse an answer that carries it. The dashboard asks (`?features=1`);
+   * no other caller gets a key it does not know.
+   */
+  readonly features?: boolean;
+  /** PL-26: what only the API process knows about its own deploy; read only with `features`. */
+  readonly deploy?: PlanFeatureDeploy;
 }): Promise<BillingPlan> {
   const row = await tenantPlan(tx, tenantId);
   // PL-11: a new founding offer follows the invite alone; a past founding subscription is no offer.
@@ -259,6 +272,14 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
   const shopifyManageUrl = shopify ? shopifyPricingUrl(row?.shopify_shop_domain, input.shopifyAppHandle) : null;
   // PL-22: the key is left out unless a grant is active, so a tenant without one gets the answer it always had.
   const granted = activeGrant(row, input.now);
+  const limits = planLimits(row, input.now);
+  const readOnly = isReadOnly(row, input.now);
+  // PL-26: read in the caller's transaction, which the session opens as one snapshot with the plan row above. A read-only
+  // plan is refused every agent run by the dispatcher (PL-8), so what it holds is not live; the offers are other plans'
+  // lists for this business, so they do not take the current plan's read-only state.
+  const facts = input.features ? await planFeatureFacts(tx, tenantId, input.now, input.deploy ?? { voiceWebhook: false }) : null;
+  const currentSwitches = facts ? planFeatureSwitches(facts, readOnly) : null;
+  const offerSwitches = facts ? planFeatureSwitches(facts, false) : null;
   return billingPlanSchema.parse({
     billingProvider: row?.billing_provider ?? "stripe",
     status: row?.status ?? "none",
@@ -275,9 +296,10 @@ export async function getBillingPlan(tx: Transaction, tenantId: string, input: {
     trialDays: stripe && !(row?.trial_used ?? false) ? input.trialDays : 0,
     paymentFailedAt: iso(row?.payment_failed_at ?? null),
     readOnlyAfter: iso(row?.read_only_after ?? null),
-    readOnly: isReadOnly(row, input.now),
-    limits: planLimits(row, input.now),
-    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited)),
+    readOnly,
+    limits,
+    ...(currentSwitches ? { features: planFeatures(limits, currentSwitches) } : {}),
+    catalog: (Object.values(PLAN_CATALOG) as PlanCatalogEntry[]).map((entry) => offer(entry, invited, offerSwitches)),
     extraConnectionPrice: EXTRA_CONNECTION_PRICE,
     currency: "usd",
     checkoutEnabled: input.checkoutEnabled && stripe,
